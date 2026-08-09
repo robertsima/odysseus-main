@@ -86,6 +86,52 @@ def _chunk_header(filename: str) -> str:
     return f"Source: {filename}"
 
 
+# Words too common to mean the user is naming a document. Kept deliberately
+# short: this only has to stop an accidental full-credit match, and every entry
+# it misses still scores through the ordinary keyword path.
+_NAME_MATCH_STOPWORDS = {
+    "and", "are", "for", "from", "how", "not", "the", "was", "what", "when",
+    "where", "which", "who", "why", "with", "you", "your", "new", "old",
+    "doc", "docs", "file", "files", "note", "notes", "index", "readme",
+}
+
+
+def _query_names_document(query_words: set, meta: Any) -> bool:
+    """True when the query appears to name this chunk's source file.
+
+    Naming a document is a far stronger signal of intent than happening to
+    share a word with its prose, but the plain keyword score cannot express
+    that: it divides matches by the query length, so the one token that
+    uniquely identifies a file ("08-08-2026" in a thirteen-word question) is
+    worth 1/13 of the keyword weight — a rounding error next to the vector
+    gaps between candidates. Treating a name match as full keyword credit
+    lifts the named document without touching how anything else is scored.
+
+    Matching is on the stem and its parts, so "08-08-2026" resolves for a
+    query saying either the whole date or just the year. Parts shorter than
+    three characters are ignored, which drops the "08" fragments that would
+    otherwise match any month or day.
+    """
+    if not query_words or not isinstance(meta, dict):
+        return False
+    filename = meta.get("filename")
+    if not isinstance(filename, str) or not filename:
+        return False
+
+    stem = Path(filename).stem.lower()
+    if not stem:
+        return False
+    candidates = {stem}
+    candidates.update(part for part in re.split(r"[\s._\-]+", stem) if part)
+
+    for token in candidates:
+        if len(token) < 3 or token in _NAME_MATCH_STOPWORDS:
+            continue
+        if token in query_words:
+            return True
+    return False
+
+
 def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str, Any]]:
     """Compose the Chroma metadata filter for an owner + sensitivity scope.
 
@@ -500,6 +546,8 @@ class VectorRAG:
                     doc_words = set(doc_text.lower().split())
                     overlap = len(query_words & doc_words)
                     keyword_score = overlap / len(query_words) if query_words else 0.0
+                    if _query_names_document(query_words, meta):
+                        keyword_score = 1.0
                     hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
 
                     candidates.append({
