@@ -517,7 +517,15 @@ async function loadEndpoints() {
           : '<span class="admin-badge admin-badge-off">offline</span>';
       const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
       const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
-      const kindLabel = ep.endpoint_kind && ep.endpoint_kind !== 'auto' ? ep.endpoint_kind.toUpperCase() : '';
+      // Editable rather than a static badge: `local` is what lets a session
+      // retrieve documents labelled private (model_context.is_local_endpoint),
+      // and an endpoint added through the API form defaults to `api`, which
+      // silently withholds them even from a LAN address. Without this control
+      // the only fix was a hand-written PATCH.
+      const epKind = ep.endpoint_kind || 'auto';
+      const kindSelect = ['auto', 'local', 'api', 'proxy']
+        .map(k => `<option value="${k}"${epKind === k ? ' selected' : ''}>${k}</option>`)
+        .join('');
       const keyLabel = ep.has_key
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
         : '';
@@ -528,7 +536,7 @@ async function loadEndpoints() {
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
-              ${kindLabel ? `<span class="admin-badge">${esc(kindLabel)}</span>` : ''}
+              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind. 'local' lets sessions on this endpoint retrieve documents marked private; 'api' and 'proxy' never do, even on a LAN address. 'auto' decides from the host.">${kindSelect}</select>
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
@@ -580,6 +588,31 @@ async function loadEndpoints() {
         await fetch(`/api/model-endpoints/${btn.dataset.admToggleEp}`, { method: 'PATCH' });
         await _refreshAfterEndpointChange();
         loadEndpoints();
+      });
+    });
+    queryAll('[data-adm-ep-kind]').forEach(sel => {
+      const previous = sel.value;
+      // The row header toggles the models panel; a click on the select must
+      // not also expand/collapse it.
+      sel.addEventListener('click', (e) => e.stopPropagation());
+      sel.addEventListener('change', async (e) => {
+        e.stopPropagation();
+        const next = sel.value;
+        sel.disabled = true;
+        try {
+          const res = await fetch(`/api/model-endpoints/${sel.dataset.admEpKind}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({ endpoint_kind: next }),
+          });
+          if (!res.ok) throw new Error('save failed');
+          await _refreshAfterEndpointChange();
+          loadEndpoints();
+        } catch (err) {
+          sel.value = previous;
+          sel.disabled = false;
+        }
       });
     });
     queryAll('[data-adm-copy-url]').forEach(btn => {
@@ -2359,14 +2392,52 @@ function initMcpForm() {
 
 /* ── RAG ── */
 async function loadRag() {
+  if (!el('adm-ragDirList')) return;
   try {
     const res = await fetch('/api/personal');
     const data = await res.json();
     const dirList = el('adm-ragDirList');
-    const dirs = data.directories || [];
+    // Prefer the server-paired list: it resolves each directory's label the
+    // same way retrieval does. Fall back to the flat list for an older server.
+    const labels = data.directory_sensitivity || {};
+    const dirs = Array.isArray(data.directories_detail) && data.directories_detail.length
+      ? data.directories_detail.map(r => r.directory)
+      : (data.directories || []);
+    const labelFor = Array.isArray(data.directories_detail) && data.directories_detail.length
+      ? Object.fromEntries(data.directories_detail.map(r => [r.directory, r.sensitivity]))
+      : labels;
     if (dirs.length === 0) { dirList.innerHTML = '<div class="admin-empty">No directories indexed</div>'; }
     else {
-      dirList.innerHTML = dirs.map(d => `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`).join('');
+      dirList.innerHTML = dirs.map(d => {
+        const label = labelFor[d] === 'private' ? 'private' : 'public';
+        const sel = ['public', 'private']
+          .map(v => `<option value="${v}"${label === v ? ' selected' : ''}>${v}</option>`)
+          .join('');
+        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is withheld from any session served by a non-local endpoint.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
+      }).join('');
+      dirList.querySelectorAll('[data-adm-rag-sens]').forEach(sel => {
+        const previous = sel.value;
+        sel.addEventListener('change', async () => {
+          const next = sel.value;
+          sel.disabled = true;
+          try {
+            const res = await fetch('/api/personal/directory_sensitivity', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'same-origin',
+              body: JSON.stringify({ directory: sel.dataset.admRagSens, sensitivity: next }),
+            });
+            const d = await res.json();
+            if (!res.ok) throw new Error(d.detail || 'Failed');
+            ragMsg(d.message || `Marked ${next}`);
+            loadRag();
+          } catch (e) {
+            sel.value = previous;
+            sel.disabled = false;
+            ragMsg('Could not change label: ' + e.message, true);
+          }
+        });
+      });
       dirList.querySelectorAll('[data-adm-rag-dir]').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!await uiModule.styledConfirm(`Remove directory "${btn.dataset.admRagDir}" from RAG?`, { confirmText: 'Remove', danger: true })) return;
@@ -2385,7 +2456,13 @@ async function loadRag() {
     else {
       fileList.innerHTML = files.map(f => {
         const size = f.size ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : '';
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(f.path || f.name)}">${esc(f.name)}</span><span class="admin-rag-item-meta">${size}</span><button class="admin-btn-delete" data-adm-rag-file="${esc(f.path || f.name)}">Delete</button></div>`;
+        // Per-file label is inherited from its directory and read-only here —
+        // shown so a misfiled private note is visible without opening the
+        // folder it came from.
+        const priv = f.sensitivity === 'private'
+          ? '<span class="admin-badge" title="Withheld from hosted models">private</span>'
+          : '';
+        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(f.path || f.name)}">${esc(f.name)}</span>${priv}<span class="admin-rag-item-meta">${size}</span><button class="admin-btn-delete" data-adm-rag-file="${esc(f.path || f.name)}">Delete</button></div>`;
       }).join('');
       fileList.querySelectorAll('[data-adm-rag-file]').forEach(btn => {
         btn.addEventListener('click', async () => {
@@ -2400,8 +2477,10 @@ async function loadRag() {
       });
     }
   } catch (e) {
-    el('adm-ragDirList').innerHTML = '<div class="admin-error">Failed to load</div>';
-    el('adm-ragFileList').innerHTML = '';
+    const dl = el('adm-ragDirList');
+    const fl = el('adm-ragFileList');
+    if (dl) dl.innerHTML = '<div class="admin-error">Failed to load</div>';
+    if (fl) fl.innerHTML = '';
   }
 }
 
@@ -2429,6 +2508,14 @@ async function ragUpload(files) {
 function initRag() {
   const dropZone = el('adm-ragDropZone');
   const fileInput = el('adm-ragFileInput');
+  // This panel's handlers shipped in v1.0 without any matching markup, so
+  // initRag was never wired up and loadRag never ran. Guard the lookup so the
+  // same drift fails visibly at one line instead of silently taking out the
+  // whole init.
+  if (!dropZone || !fileInput) {
+    console.warn('RAG panel markup missing; personal-document controls disabled');
+    return;
+  }
   dropZone.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', () => ragUpload(fileInput.files));
   dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover'); });
@@ -2440,9 +2527,16 @@ function initRag() {
     const btn = el('adm-ragAddDirBtn');
     btn.disabled = true; btn.textContent = 'Indexing...';
     try {
-      const res = await fetch('/api/personal/add_directory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ directory: dir }) });
+      const sensEl = el('adm-ragDirSensitivity');
+      const sensitivity = sensEl ? sensEl.value : 'public';
+      const res = await fetch('/api/personal/add_directory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        body: JSON.stringify({ directory: dir, sensitivity }),
+      });
       const data = await res.json();
-      if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory`); el('adm-ragDirInput').value = ''; loadRag(); }
+      if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory (${data.sensitivity || sensitivity})`); el('adm-ragDirInput').value = ''; loadRag(); }
       else ragMsg(data.detail || data.message || 'Failed', true);
     } catch (e) { ragMsg('Error: ' + e.message, true); }
     btn.disabled = false; btn.textContent = 'Add Directory';
@@ -3103,7 +3197,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRag,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
@@ -3118,6 +3212,7 @@ function refreshAll() {
   loadEndpoints();
   loadBuiltinTools();
   loadMcpServers();
+  loadRag();
   loadTokens();
   loadLogs(false);
 }

@@ -53,6 +53,14 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     session_manager.upload_handler = upload_handler
     set_upload_handler(upload_handler)
     personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, rag_manager)
+    # Apply ODYSSEUS_PERSONAL_DIRS before anything can retrieve: a declared
+    # private tree must carry its label from the first request, not from
+    # whenever an operator remembers to set it.
+    try:
+        from src.personal_dirs_config import reconcile as reconcile_personal_dirs
+        reconcile_personal_dirs(personal_docs_manager)
+    except Exception as e:  # never let declarative config block startup
+        logger.error(f"Personal directory reconciliation failed: {e}")
     api_key_manager = APIKeyManager(DATA_DIR)
     preset_manager = PresetManager(DATA_DIR)
 

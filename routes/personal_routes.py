@@ -179,9 +179,27 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         ]
         directories = personal_docs_manager.get_indexed_directories() if hasattr(personal_docs_manager, "get_indexed_directories") else []
         directory_sensitivity = dict(getattr(personal_docs_manager, "directory_sensitivity", {}) or {})
+        # Paired list so a client never has to re-derive the label by looking a
+        # directory string up in the map: the map is keyed by abspath while a
+        # legacy indexed_directories.json may hold unnormalised entries, and a
+        # miss there would silently render a private folder as public.
+        pair_labels = getattr(personal_docs_manager, "get_indexed_directories_with_sensitivity", None)
+        if callable(pair_labels):
+            directories_detail = pair_labels(allow_private=True)
+        else:
+            directories_detail = [
+                {
+                    "directory": d,
+                    "sensitivity": directory_sensitivity.get(
+                        os.path.abspath(d), SENSITIVITY_PUBLIC
+                    ),
+                }
+                for d in directories
+            ]
         return {
             "files": files,
             "directories": directories,
+            "directories_detail": directories_detail,
             "directory_sensitivity": directory_sensitivity,
         }
     

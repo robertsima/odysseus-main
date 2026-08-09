@@ -2337,6 +2337,37 @@
             <div class="admin-toggle-sub" style="margin-bottom:8px">Enable or disable tools available to the AI agent.</div>
             <div id="adm-builtin-tools-list" class="admin-user-list"></div>
           </div>
+          <div class="admin-card" style="margin-bottom:12px;">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Personal Documents</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Folders indexed for retrieval. <strong>Private</strong> content is only ever retrieved for sessions on an endpoint marked <em>local</em> — everything else is sent to whichever model the session uses.</div>
+
+            <div class="admin-rag-upload-zone" id="adm-ragDropZone">
+              <div class="admin-rag-icon">📄</div>
+              <p>Drop files here or click to upload</p>
+            </div>
+            <input type="file" id="adm-ragFileInput" multiple hidden>
+
+            <div class="admin-rag-dir-row">
+              <input id="adm-ragDirInput" type="text" placeholder="Folder name inside personal_docs, e.g. Journal">
+              <select id="adm-ragDirSensitivity" class="settings-select" style="width:auto;flex:0 0 auto;" title="Private folders are withheld from hosted models.">
+                <option value="public">public</option>
+                <option value="private">private</option>
+              </select>
+              <button id="adm-ragAddDirBtn" type="button">Add Directory</button>
+            </div>
+
+            <div class="admin-rag-toolbar">
+              <button id="adm-ragReloadBtn" class="admin-btn-sm" type="button">Reload Index</button>
+            </div>
+
+            <div class="admin-rag-section-label">Directories</div>
+            <div id="adm-ragDirList"><div class="admin-empty">Loading...</div></div>
+
+            <div class="admin-rag-section-label">Files</div>
+            <div id="adm-ragFileList"><div class="admin-empty">Loading...</div></div>
+
+            <div id="adm-ragStatus" class="admin-rag-status"></div>
+          </div>
         </div>
 
         <!-- ═══ SYSTEM TAB ═══ -->

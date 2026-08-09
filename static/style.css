@@ -15557,6 +15557,25 @@ span[id$="-logo"] svg:not([width]) {
   cursor: pointer;
   font-size: 11px;
 }
+/* Inline dropdown sized to sit among the badges in a list row. */
+.admin-select-sm {
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.admin-select-sm:hover {
+  border-color: var(--red);
+}
+.admin-select-sm:disabled {
+  opacity: 0.5;
+  cursor: wait;
+}
 .admin-btn-sm:hover {
   background: var(--border);
   border-color: var(--red);
