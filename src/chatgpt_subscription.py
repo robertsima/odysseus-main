@@ -299,17 +299,114 @@ def to_http_exception(exc: Exception) -> HTTPException:
     return HTTPException(502, str(exc))
 
 
+def _arguments_to_str(arguments) -> str:
+    """Responses wants function-call arguments as a JSON string.
+
+    Callers may hand us either the raw string the model streamed or a decoded
+    dict (``_normalize_messages_for_provider`` converts them for some
+    providers), so accept both.
+    """
+    if isinstance(arguments, str):
+        return arguments or "{}"
+    if arguments is None:
+        return "{}"
+    try:
+        return json.dumps(arguments)
+    except (TypeError, ValueError):
+        return "{}"
+
+
+def _message_text(content) -> str:
+    if isinstance(content, list):
+        return "\n".join(
+            str(part.get("text") or part.get("content") or "")
+            for part in content
+            if isinstance(part, dict)
+        )
+    return "" if content is None else str(content)
+
+
 def build_responses_input(messages: list[dict]) -> list[dict]:
+    """Convert OpenAI chat messages to Responses API input items.
+
+    Tool calls and their results are first-class item types here, not messages:
+    an assistant turn that called a tool becomes ``function_call`` items, and
+    the matching result becomes a ``function_call_output`` keyed by the same
+    ``call_id``. Flattening those into plain text (as this did originally) makes
+    the model see its own tool call as prose with no result attached, so it
+    re-plans the same call forever instead of continuing.
+    """
     input_items: list[dict] = []
     for msg in messages or []:
         role = msg.get("role") or "user"
-        if role == "tool":
-            role = "user"
         content = msg.get("content")
-        if isinstance(content, list):
-            text = "\n".join(str(part.get("text") or part.get("content") or "") for part in content if isinstance(part, dict))
-        else:
-            text = "" if content is None else str(content)
-        input_type = "output_text" if role == "assistant" else "input_text"
-        input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+
+        if role == "tool":
+            call_id = msg.get("tool_call_id")
+            if call_id:
+                input_items.append({
+                    "type": "function_call_output",
+                    "call_id": str(call_id),
+                    "output": _message_text(content),
+                })
+            else:
+                # No id to correlate with — fall back to plain text rather than
+                # emitting an item the API will reject.
+                input_items.append({
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": _message_text(content)}],
+                })
+            continue
+
+        tool_calls = msg.get("tool_calls") if role == "assistant" else None
+
+        text = _message_text(content)
+        if text:
+            input_type = "output_text" if role == "assistant" else "input_text"
+            input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+
+        for call in tool_calls or []:
+            if not isinstance(call, dict):
+                continue
+            fn = call.get("function") or {}
+            name = fn.get("name") or call.get("name")
+            if not name:
+                continue
+            call_id = call.get("id") or call.get("call_id")
+            if not call_id:
+                continue
+            input_items.append({
+                "type": "function_call",
+                "call_id": str(call_id),
+                "name": str(name),
+                "arguments": _arguments_to_str(fn.get("arguments", call.get("arguments"))),
+            })
+
     return input_items
+
+
+def build_responses_tools(tools: list[dict] | None) -> list[dict]:
+    """Convert OpenAI chat tool schemas to the Responses API shape.
+
+    Chat Completions nests the definition under a ``function`` key; Responses
+    flattens it onto the item. Sending the nested form is rejected, which is why
+    this endpoint shipped with tools disabled entirely.
+    """
+    converted: list[dict] = []
+    for tool in tools or []:
+        if not isinstance(tool, dict):
+            continue
+        fn = tool.get("function") if isinstance(tool.get("function"), dict) else None
+        name = (fn or tool).get("name")
+        if not name:
+            continue
+        entry = {
+            "type": "function",
+            "name": str(name),
+            "parameters": (fn or tool).get("parameters") or {"type": "object", "properties": {}},
+        }
+        description = (fn or tool).get("description")
+        if description:
+            entry["description"] = str(description)
+        converted.append(entry)
+    return converted

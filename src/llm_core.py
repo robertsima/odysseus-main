@@ -1110,8 +1110,10 @@ def _build_chatgpt_responses_payload(
     max_tokens: int,
     *,
     stream: bool = False,
+    tools: Optional[List[Dict]] = None,
+    tool_choice_none: bool = False,
 ) -> Dict:
-    from src.chatgpt_subscription import build_responses_input
+    from src.chatgpt_subscription import build_responses_input, build_responses_tools
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
     payload: Dict = {
@@ -1121,6 +1123,11 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
+    converted_tools = build_responses_tools(tools)
+    if converted_tools:
+        payload["tools"] = converted_tools
+    elif tool_choice_none:
+        payload["tool_choice"] = "none"
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
     # ChatGPT Subscription Codex API does not support max_output_tokens —
@@ -2209,7 +2216,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
         h = _provider_headers(provider, headers)
-        payload = _build_chatgpt_responses_payload(model, messages_copy, temperature, max_tokens, stream=True)
+        payload = _build_chatgpt_responses_payload(
+            model, messages_copy, temperature, max_tokens,
+            stream=True, tools=tools, tool_choice_none=tool_choice_none,
+        )
     else:
         target_url = _normalize_openai_chat_url(url)
         payload = {
@@ -2266,6 +2276,30 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         event_name = ""
         input_tokens = 0
         output_tokens = 0
+        # Responses delivers a tool call as its own output item, streamed as
+        # argument deltas — not as an OpenAI-style `delta.tool_calls`. Slot them
+        # by output_index so parallel calls stay separate, then emit the same
+        # {"type": "tool_calls", "calls": [...]} event the chat-completions path
+        # emits, which is the shape agent_loop consumes.
+        _resp_calls: Dict[int, Dict[str, str]] = {}
+
+        def _resp_slot(index) -> Dict[str, str]:
+            try:
+                key = int(index)
+            except (TypeError, ValueError):
+                key = max(_resp_calls, default=-1) + 1
+            if key not in _resp_calls:
+                _resp_calls[key] = {"id": "", "name": "", "arguments": ""}
+            return _resp_calls[key]
+
+        def _emit_resp_tool_calls():
+            if not _resp_calls:
+                return None
+            calls = [_resp_calls[i] for i in sorted(_resp_calls) if _resp_calls[i].get("name")]
+            if not calls:
+                return None
+            return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+
         try:
             client = _get_http_client()
             async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
@@ -2299,12 +2333,41 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 yield _degenerate
                                 return
                             yield f'data: {json.dumps({"delta": delta})}\n\n'
+                    elif evt == "response.output_item.added":
+                        item = data.get("item") or {}
+                        if item.get("type") == "function_call":
+                            slot = _resp_slot(data.get("output_index"))
+                            if item.get("call_id"):
+                                slot["id"] = str(item["call_id"])
+                            if item.get("name"):
+                                slot["name"] = str(item["name"])
+                    elif evt == "response.function_call_arguments.delta":
+                        slot = _resp_slot(data.get("output_index"))
+                        slot["arguments"] += data.get("delta") or ""
+                    elif evt == "response.function_call_arguments.done":
+                        # Authoritative full string — replace rather than append
+                        # so a missed delta cannot corrupt the JSON.
+                        if data.get("arguments") is not None:
+                            _resp_slot(data.get("output_index"))["arguments"] = data["arguments"]
+                    elif evt == "response.output_item.done":
+                        item = data.get("item") or {}
+                        if item.get("type") == "function_call":
+                            slot = _resp_slot(data.get("output_index"))
+                            if item.get("call_id"):
+                                slot["id"] = str(item["call_id"])
+                            if item.get("name"):
+                                slot["name"] = str(item["name"])
+                            if item.get("arguments") is not None:
+                                slot["arguments"] = item["arguments"]
                     elif evt == "response.completed":
                         usage = (data.get("response") or {}).get("usage") or data.get("usage") or {}
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
                         if input_tokens or output_tokens:
                             yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                        _tc_event = _emit_resp_tool_calls()
+                        if _tc_event:
+                            yield _tc_event
                         yield "data: [DONE]\n\n"
                         return
                     elif evt in ("response.failed", "error"):
@@ -2312,6 +2375,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         text = err.get("message") if isinstance(err, dict) else str(err or "ChatGPT Subscription request failed")
                         yield f'event: error\ndata: {json.dumps({"status": 502, "text": text})}\n\n'
                         return
+                # Stream ended without response.completed — still surface any
+                # calls accumulated, or the round silently drops the tool use.
+                _tc_event = _emit_resp_tool_calls()
+                if _tc_event:
+                    yield _tc_event
                 yield "data: [DONE]\n\n"
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)

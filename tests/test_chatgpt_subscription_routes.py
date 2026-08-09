@@ -47,7 +47,10 @@ def test_provision_creates_owner_scoped_auth_session_and_endpoint(monkeypatch):
         assert ep.provider_auth_id == auth.id
         assert ep.endpoint_kind == "api"
         assert ep.model_refresh_mode == "manual"
-        assert ep.supports_tools is False
+        # Native tool calling over the Responses API is supported now that
+        # llm_core converts the schemas and parses function-call stream events.
+        # It was False while the payload carried no `tools` key at all.
+        assert ep.supports_tools is True
         assert json.loads(ep.cached_models) == ["gpt-5.5", "o4-mini"]
     finally:
         db.close()

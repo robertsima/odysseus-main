@@ -885,6 +885,11 @@ _API_HOSTS = frozenset([
     "api.perplexity.ai", "api.x.ai",
     "ollama.com", "api.venice.ai", "api.kimi.com",
     "api.githubcopilot.com",
+    # ChatGPT Subscription / Codex. Its Responses endpoint supports native tool
+    # calls (see llm_core's chatgpt-subscription branch), so it must classify as
+    # an API model or the agent falls back to prose tool blocks that these
+    # models do not emit.
+    "chatgpt.com",
 ])
 _MCP_KEYWORDS = frozenset(["mcp", "browse", "browser", "website", "calendar", "event", "email",
                            "gmail", "screenshot", "navigate", "click", "miniflux", "rss", "feed"])
@@ -1333,6 +1338,24 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
+        domains.add("files")
+    # A request that names concrete files ("add X to models.md and
+    # architecture.md in my vault") is file work even when it never says the
+    # word "file". Without this it matched no domain, so tool selection fell
+    # through to pure embedding retrieval — which then collided with the
+    # query's own nouns: "token" retrieved manage_tokens, "models.md" retrieved
+    # list_models/serve_model/chat_with_model, and not one file tool was
+    # offered. Same failure shape as #3794 (api_call), fixed the same way: seed
+    # the domain deterministically instead of trusting retrieval. Matching on a
+    # known extension keeps this high-precision — naming `models.md` is at
+    # least as strong a file signal as typing "edit file", which already
+    # triggers this domain above.
+    if has(
+        r"\b[\w][\w.\-]*\.(?:md|markdown|txt|rst|py|js|mjs|ts|tsx|jsx|json|ya?ml|"
+        r"toml|ini|cfg|conf|csv|tsv|html?|css|scss|sh|bash|zsh|sql|xml|log)\b",
+        r"\bvaults?\b",
+        r"(?:^|\s)[~.]?/[\w.\-]+/",
+    ):
         domains.add("files")
     if has(
         r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
@@ -3314,12 +3337,21 @@ async def stream_agent_loop(
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and _low_signal_turn:
         from src.tool_index import ALWAYS_AVAILABLE
-        if workspace:
+        if workspace and not _existing_conversation:
             # An active workspace IS the file-work signal: a vague "look at the
             # project" means explore this folder. Surface only the READ-ONLY file
             # tools (intersection with the plan-mode read-only allowlist) so the
             # agent can investigate; write/shell tools stay out until the request
             # actually calls for them (RAG retrieval adds those on a real ask).
+            #
+            # Restricted to the FIRST turn. Mid-conversation, a short reply
+            # ("models.md and architecture.md", or an answer to the agent's own
+            # question) is not a vague opening request — the intent was
+            # established earlier — but this branch short-circuits retrieval, so
+            # it silently withdrew the write tools the previous turn had, and the
+            # agent reported it could no longer edit. The contextual path two
+            # blocks up already treats a low-signal turn in an existing
+            # conversation as continuing; this now agrees with it.
             _relevant_tools = set(ALWAYS_AVAILABLE)
             from src.tool_security import PLAN_MODE_READONLY_TOOLS
             _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
