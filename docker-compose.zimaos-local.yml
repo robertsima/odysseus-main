@@ -1,0 +1,146 @@
+# Local dry-run of the ZimaOS deployment.
+#
+# Mirrors the ZimaOS/CasaOS stack shape — bind mounts instead of named volumes,
+# the same service set, the same /app/data/personal_docs vault layout — but
+# builds the image from this checkout instead of pulling from GHCR, so you can
+# test changes before publishing.
+#
+#   docker compose -f docker-compose.zimaos-local.yml up --build
+#
+# Host paths default to ./zima-local/... so the whole thing is self-contained
+# and disposable. Point them at real directories via .env:
+#   ODY_APPDATA=./zima-local/AppData/odysseus
+#   ODY_VAULT=D:/Obsidian
+#
+# The ZimaOS file uses /DATA/AppData/odysseus and /DATA/Vault for these.
+
+name: odysseus-local
+
+services:
+  odysseus:
+    # ZimaOS pulls ghcr.io/robertsima/odysseus-main:<tag>; here we build.
+    build: .
+    depends_on:
+      chromadb:
+        condition: service_started
+      searxng:
+        condition: service_healthy
+    environment:
+      ALLOWED_ORIGINS: http://localhost,http://127.0.0.1
+      AUTH_ENABLED: "true"
+      CHROMADB_HOST: chromadb
+      CHROMADB_PORT: "8000"
+      DATABASE_URL: sqlite:///./data/app.db
+      FASTEMBED_CACHE_PATH: /app/data/fastembed_cache
+      FASTEMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      LOCALHOST_BYPASS: "false"
+      ODYSSEUS_ADMIN_USER: admin
+      ODYSSEUS_ADMIN_PASSWORD: ${ODYSSEUS_ADMIN_PASSWORD:-}
+      ODYSSEUS_INPROCESS_POLLERS: "1"
+      ODYSSEUS_INPROCESS_TASKS: "1"
+      ODYSSEUS_SCRIPT_HOST: localhost
+      ODYSSEUS_STARTUP_WARMUPS: "1"
+      PGID: "1000"
+      PUID: "1000"
+      # Honoured natively as of the chat_processor change; it was previously
+      # a hardcoded 0.35 and this variable did nothing.
+      RAG_SIMILARITY_THRESHOLD: "0.20"
+      SEARXNG_INSTANCE: http://searxng:8080
+      SECURE_COOKIES: "false"
+    extra_hosts:
+      # Reach a model served on the Docker host, e.g. Ollama at
+      # http://host.docker.internal:11434. Classified local by
+      # model_context.is_local_endpoint, so private docs ARE retrievable.
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
+    restart: unless-stopped
+    volumes:
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data:/app/data
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/logs:/app/logs
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/ssh:/app/.ssh
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/huggingface:/app/.cache/huggingface
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/local:/app/.local
+
+      # Vaults nested inside /app/data so the personal-docs API's PERSONAL_DIR
+      # confinement accepts them. A bind mount is a mount point, not a symlink,
+      # so realpath() resolves it to itself and it passes the check.
+      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind:ro
+      - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/data/personal_docs/AI Mind:ro
+      # On ZimaOS this was /app/journal via vault_watch.py into a separate,
+      # ungated collection. Native indexing puts it under the sensitivity filter.
+      - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal:ro
+
+      # Agent file tools. Writability is a separate axis from the RAG
+      # public/private label:
+      #   Vault Mind — readable only, so :ro here as well as above.
+      #   AI Mind    — the AI's own notes; readable AND updatable, so rw.
+      #   Journal    — deliberately absent. Its only exposure is the read-only
+      #                personal_docs mount above; giving it a workspace mount
+      #                would let any model read it via read_file, which the RAG
+      #                sensitivity filter does not cover.
+      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/workspace/Vault Mind:ro
+      - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/workspace/AI Mind
+
+  chromadb:
+    image: docker.io/chromadb/chroma:latest
+    environment:
+      ANONYMIZED_TELEMETRY: "FALSE"
+    ports:
+      - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
+    restart: unless-stopped
+    volumes:
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/chromadb:/chroma/chroma
+
+  searxng:
+    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    entrypoint:
+      - /bin/sh
+      - -c
+      # NOTE the $$ escaping. Compose turns $$ into a literal $ for the shell.
+      # The ZimaOS copy of this block lost it, so its sed substituted an EMPTY
+      # secret and SearXNG ran with secret_key: "". Keep the $$ intact, or
+      # pre-render settings.yml on the host and drop this templating entirely.
+      - |
+        set -eu
+        if [ ! -s /etc/searxng/settings.yml ] || grep -q 'odysseus-local-searxng-json-2026-05-30\|__SEARXNG_SECRET__' /etc/searxng/settings.yml; then
+          secret="$${SEARXNG_SECRET:-}"
+          if [ -z "$$secret" ]; then
+            secret="$$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          fi
+          sed "s|__SEARXNG_SECRET__|$$secret|g" /tmp/searxng-settings.yml.template > /etc/searxng/settings.yml
+        fi
+        exec /usr/local/searxng/entrypoint.sh
+    environment:
+      SEARXNG_BASE_URL: http://localhost:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:-}
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8080/', timeout=5).read(1)\""]
+      interval: 5s
+      timeout: 6s
+      retries: 20
+      start_period: 10s
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+    volumes:
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/searxng:/etc/searxng
+      - ./config/searxng/settings.yml:/tmp/searxng-settings.yml.template:ro
+
+  ntfy:
+    image: docker.io/binwiederhier/ntfy
+    command: serve
+    environment:
+      NTFY_BASE_URL: ${NTFY_BASE_URL:-http://localhost:8091}
+    ports:
+      - "${NTFY_BIND:-127.0.0.1}:8091:80"
+    restart: unless-stopped
+    volumes:
+      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/ntfy:/var/cache/ntfy

@@ -32,27 +32,39 @@ class RAGManager:
         logger.info("RAGManager initialized as wrapper for VectorRAG")
     
     # Delegate all methods to VectorRAG
-    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        allow_private: bool = True,
+    ) -> List[Dict[str, Any]]:
         """Search for documents - delegates to VectorRAG."""
-        return self.vector_rag.search(query, k, owner=owner)
-    
+        return self.vector_rag.search(query, k, owner=owner, allow_private=allow_private)
+
     def index_personal_documents(
         self,
         directory: str,
         file_extensions: Optional[set] = None,
         owner: Optional[str] = None,
+        sensitivity: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Index documents - delegates to VectorRAG."""
         return self.vector_rag.index_personal_documents(
             directory,
             file_extensions=file_extensions,
             owner=owner,
+            sensitivity=sensitivity,
         )
     
     def retrieve(self, query: str, k: int = 5) -> List[str]:
         """Retrieve relevant chunks - delegates to VectorRAG."""
         return self.vector_rag.retrieve(query, k)
     
+    def set_directory_sensitivity(self, directory: str, sensitivity: str) -> Dict[str, Any]:
+        """Relabel a directory's chunks - delegates to VectorRAG."""
+        return self.vector_rag.set_directory_sensitivity(directory, sensitivity)
+
     def rebuild_index(self) -> bool:
         """Rebuild index - delegates to VectorRAG."""
         return self.vector_rag.rebuild_index()

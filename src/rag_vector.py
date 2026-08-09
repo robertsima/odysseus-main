@@ -11,10 +11,18 @@ import hashlib
 import re
 import logging
 import numpy as np
-from typing import List, Dict, Any, Optional, Set
+from typing import List, Dict, Any, Optional, Set, Tuple
 
 from src.constants import CHROMA_DIR
 from src.index_walk import prune_index_dirs, is_indexable_file
+from src.rag_sensitivity import (
+    SENSITIVITY_KEY,
+    SENSITIVITY_PRIVATE,
+    SENSITIVITY_PUBLIC,
+    apply_sensitivity,
+    metadata_is_private,
+    normalize_sensitivity,
+)
 from pathlib import Path
 
 from src.embedding_lanes import (
@@ -53,6 +61,28 @@ def _generate_doc_id(text: str, owner: str = "") -> str:
     # index keeps its existing ids and isn't re-churned.
     key = f"{owner}\x00{text}" if owner else text
     return f"doc_{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str, Any]]:
+    """Compose the Chroma metadata filter for an owner + sensitivity scope.
+
+    ``allow_private=False`` matches ``sensitivity == "public"`` by equality
+    rather than excluding ``"private"``. That relies on every chunk carrying the
+    key, which ``apply_sensitivity`` guarantees on write and
+    ``backfill_sensitivity`` guarantees for chunks written before the label
+    existed — no dependence on how a given Chroma version treats documents that
+    are missing a filtered field.
+    """
+    clauses = []
+    if owner:
+        clauses.append({"owner": owner})
+    if not allow_private:
+        clauses.append({SENSITIVITY_KEY: SENSITIVITY_PUBLIC})
+    if not clauses:
+        return None
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
 
 
 def _rewrite_owner_path(value: str, path_map: Dict[str, str], path_prefixes: List[tuple]) -> str:
@@ -100,6 +130,13 @@ class VectorRAG:
             )
             self._model = self._lanes[0].client
             migrate_legacy_collection(COLLECTION_NAME, self._lanes)
+            try:
+                self.backfill_sensitivity()
+            except Exception as e:
+                # Never fail init over the backfill: an unlabeled index still
+                # works for local sessions, and the label is re-attempted next
+                # start.
+                logger.warning("sensitivity backfill skipped: %s", e)
             logger.info(
                 "VectorRAG ready (lanes=%s docs=%s)",
                 [lane.name for lane in self._lanes],
@@ -179,6 +216,29 @@ class VectorRAG:
     # Document operations
     # ------------------------------------------------------------------
 
+    def _promote_to_private(self, lane, doc_id: str, existing: Dict[str, Any]) -> bool:
+        """Relabel an already-stored chunk private, leaving its other metadata.
+
+        Used when re-indexing the same content under a stricter label. Keeps the
+        original ``source``/``owner`` so provenance still points at the first
+        copy indexed; only the sensitivity changes.
+        """
+        stored = (existing.get("metadatas") or [None])
+        stored = stored[0] if stored else None
+        if not isinstance(stored, dict):
+            stored = {}
+        if metadata_is_private(stored):
+            return False
+        try:
+            lane.collection.update(
+                ids=[doc_id],
+                metadatas=[apply_sensitivity(stored, SENSITIVITY_PRIVATE)],
+            )
+            return True
+        except Exception as e:
+            logger.warning("failed to promote %s to private in %s lane: %s", doc_id, lane.name, e)
+            return False
+
     def add_document(self, text: str, metadata: Dict[str, Any]) -> bool:
         if not self.healthy:
             logger.error("Collection not initialized")
@@ -188,12 +248,25 @@ class VectorRAG:
         if not metadata or not isinstance(metadata, dict):
             return False
 
+        # Normalize here rather than at each call site so every chunk reaching
+        # the store carries a sensitivity label, whatever wrote it (directory
+        # indexing, direct uploads, attachment capture).
+        metadata = apply_sensitivity(metadata)
         doc_id = _generate_doc_id(text, metadata.get("owner") or "")
         wrote = False
         for lane in self._lanes:
             try:
                 existing = lane.collection.get(ids=[doc_id])
                 if existing["ids"]:
+                    # Ids are content-derived, so the same text indexed twice —
+                    # e.g. a vault indexed as public, then its Private/ subfolder
+                    # indexed as private — lands here and the original write's
+                    # label would stand. Private has to win, or the more
+                    # restrictive pass is silently discarded and the content
+                    # stays reachable from hosted models. Restricting further is
+                    # always the safe direction; public never overwrites private.
+                    if metadata_is_private(metadata):
+                        self._promote_to_private(lane, doc_id, existing)
                     wrote = True
                     continue
                 lane.collection.add(
@@ -214,7 +287,7 @@ class VectorRAG:
             return {"success": False, "message": "Empty document list"}
 
         valid = [
-            (t, m) for t, m in docs
+            (t, apply_sensitivity(m)) for t, m in docs
             if t and isinstance(t, str) and m and isinstance(m, dict)
         ]
         if not valid:
@@ -228,8 +301,20 @@ class VectorRAG:
             try:
                 existing = lane.collection.get(ids=all_ids)
                 existing_ids = set(existing.get("ids") or [])
+                existing_metas = dict(
+                    zip(existing.get("ids") or [], existing.get("metadatas") or [])
+                )
             except Exception:
                 existing_ids = set()
+                existing_metas = {}
+
+            # Same private-wins rule as add_document: a skipped duplicate must
+            # still be able to tighten an existing chunk's label.
+            for (text, meta), doc_id in zip(valid, all_ids):
+                if doc_id in existing_ids and metadata_is_private(meta):
+                    self._promote_to_private(
+                        lane, doc_id, {"metadatas": [existing_metas.get(doc_id)]}
+                    )
 
             new_texts = []
             new_metas = []
@@ -345,7 +430,19 @@ class VectorRAG:
     # Search — hybrid: vector similarity + keyword overlap
     # ------------------------------------------------------------------
 
-    def search(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        allow_private: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Hybrid search, optionally scoped to owner and to public-only chunks.
+
+        ``allow_private=False`` is what keeps notes marked private from being
+        pasted into a prompt bound for a hosted API — callers derive it from
+        the session's endpoint (see ``model_context.is_local_endpoint``).
+        """
         if not self.healthy:
             return []
         if not query or not isinstance(query, str):
@@ -354,7 +451,7 @@ class VectorRAG:
             return []
 
         try:
-            where_filter = {"owner": owner} if owner else None
+            where_filter = _build_where(owner, allow_private)
             query_words = set(query.lower().split())
             candidates = []
 
@@ -362,7 +459,7 @@ class VectorRAG:
                 self._lanes,
                 query,
                 n_results=lambda lane: min(
-                    (k * 6 if owner else k * 3),
+                    (k * 6 if (owner or not allow_private) else k * 3),
                     max(k, 20),
                     lane.count(),
                 ),
@@ -400,9 +497,21 @@ class VectorRAG:
 
         except Exception as e:
             logger.error(f"search failed: {e}")
-            return self._keyword_search_fallback(query, k, owner=owner)
+            return self._keyword_search_fallback(query, k, owner=owner, allow_private=allow_private)
 
-    def _keyword_search_fallback(self, query: str, k: int = 5, owner: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _keyword_search_fallback(
+        self,
+        query: str,
+        k: int = 5,
+        owner: Optional[str] = None,
+        allow_private: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Python-side scan used when every lane's vector query fails.
+
+        It re-implements the owner and sensitivity scoping of ``search`` because
+        it bypasses Chroma's ``where`` filter entirely — without that, a lane
+        outage would turn into a private-content leak.
+        """
         try:
             if not self._active_collections():
                 return []
@@ -418,6 +527,8 @@ class VectorRAG:
                 for i, doc in enumerate(all_docs["documents"]):
                     meta = all_docs["metadatas"][i]
                     if owner and meta.get("owner") != owner:
+                        continue
+                    if not allow_private and metadata_is_private(meta):
                         continue
                     doc_lower = doc.lower()
                     score = sum(1 for w in query_words if w in doc_lower)
@@ -441,6 +552,44 @@ class VectorRAG:
     # ------------------------------------------------------------------
     # Index management
     # ------------------------------------------------------------------
+
+    def backfill_sensitivity(self) -> Dict[str, Any]:
+        """Label chunks written before the sensitivity field existed as public.
+
+        Public-only search filters by equality on the label, so an unlabeled
+        chunk would otherwise disappear from every hosted-API session — a
+        silent regression for indexes that predate this feature. Runs at init;
+        a second run finds nothing and costs one metadata-only read per lane.
+        """
+        updated = 0
+        for lane_name, collection in self._active_collections():
+            try:
+                if collection.count() == 0:
+                    continue
+                existing = collection.get(include=["metadatas"])
+                ids = existing.get("ids") or []
+                metas = existing.get("metadatas") or []
+
+                pending_ids = []
+                pending_metas = []
+                for doc_id, meta in zip(ids, metas):
+                    if isinstance(meta, dict) and SENSITIVITY_KEY in meta:
+                        continue
+                    pending_ids.append(doc_id)
+                    pending_metas.append(apply_sensitivity(meta if isinstance(meta, dict) else {}))
+
+                for i in range(0, len(pending_ids), 200):
+                    collection.update(
+                        ids=pending_ids[i:i + 200],
+                        metadatas=pending_metas[i:i + 200],
+                    )
+                    updated += len(pending_ids[i:i + 200])
+            except Exception as e:
+                logger.warning("sensitivity backfill failed in %s lane: %s", lane_name, e)
+
+        if updated:
+            logger.info("Labelled %s pre-existing RAG chunk(s) as %s", updated, SENSITIVITY_PUBLIC)
+        return {"updated_count": updated}
 
     def rebuild_index(self) -> bool:
         try:
@@ -493,8 +642,14 @@ class VectorRAG:
     # ------------------------------------------------------------------
 
     def index_personal_documents(
-        self, directory: str, file_extensions: Optional[set] = None, owner: Optional[str] = None
+        self,
+        directory: str,
+        file_extensions: Optional[set] = None,
+        owner: Optional[str] = None,
+        sensitivity: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """Index a directory tree. ``sensitivity`` labels every chunk it writes;
+        omitted means ``public`` (see ``rag_sensitivity``)."""
         if file_extensions is None:
             file_extensions = DEFAULT_FILE_EXTENSIONS
 
@@ -516,34 +671,9 @@ class VectorRAG:
                     if ext not in file_extensions:
                         continue
 
-                    try:
-                        if ext == '.pdf':
-                            from src.personal_docs import extract_pdf_text
-                            content = extract_pdf_text(fpath)
-                        else:
-                            with open(fpath, 'r', encoding='utf-8') as f:
-                                content = f.read()
-
-                        if not content or not content.strip():
-                            continue
-
-                        meta = {
-                            'source': fpath,
-                            'filename': fname,
-                            'directory': root,
-                            'type': ext,
-                        }
-                        if owner:
-                            meta['owner'] = owner
-
-                        for i, chunk in enumerate(self._split_into_chunks(content)):
-                            if self.add_document(chunk, {**meta, 'chunk_id': i}):
-                                indexed += 1
-                            else:
-                                failed += 1
-                    except Exception as e:
-                        logger.error(f"index {fpath}: {e}")
-                        failed += 1
+                    ok, bad = self.index_file(fpath, owner=owner, sensitivity=sensitivity)
+                    indexed += ok
+                    failed += bad
 
             return {
                 'success': True,
@@ -554,6 +684,130 @@ class VectorRAG:
         except Exception as e:
             logger.error(f"index_personal_documents {directory}: {e}")
             return {'success': False, 'indexed_count': indexed, 'failed_count': failed, 'message': str(e)}
+
+    def index_file(
+        self,
+        path: str,
+        owner: Optional[str] = None,
+        sensitivity: Optional[str] = None,
+    ) -> Tuple[int, int]:
+        """Index a single file's chunks. Returns ``(indexed, failed)``.
+
+        Split out of ``index_personal_documents`` so the incremental vault scan
+        can re-index one changed file without walking (and re-embedding) the
+        whole tree.
+        """
+        try:
+            fname = os.path.basename(path)
+            ext = Path(fname).suffix.lower()
+            if ext == '.pdf':
+                from src.personal_docs import extract_pdf_text
+                content = extract_pdf_text(path)
+            else:
+                with open(path, 'r', encoding='utf-8') as handle:
+                    content = handle.read()
+
+            if not content or not content.strip():
+                return (0, 0)
+
+            meta = apply_sensitivity({
+                'source': path,
+                'filename': fname,
+                'directory': os.path.dirname(path),
+                'type': ext,
+            }, sensitivity)
+            if owner:
+                meta['owner'] = owner
+
+            indexed = 0
+            failed = 0
+            for i, chunk in enumerate(self._split_into_chunks(content)):
+                if self.add_document(chunk, {**meta, 'chunk_id': i}):
+                    indexed += 1
+                else:
+                    failed += 1
+            return (indexed, failed)
+        except Exception as e:
+            logger.error(f"index {path}: {e}")
+            return (0, 1)
+
+    def owner_for_directory(self, directory: str) -> Optional[str]:
+        """Owner recorded on chunks already indexed from ``directory``.
+
+        Re-indexing has to preserve the owner or the new chunks fall outside the
+        owner-filtered search and become unretrievable. Reading it back from the
+        existing chunks avoids a second persisted mapping and works for
+        directories added before the incremental scan existed.
+        """
+        if not self.healthy:
+            return None
+        directory = os.path.abspath(directory)
+        try:
+            for _lane_name, collection in self._active_collections():
+                if collection.count() == 0:
+                    continue
+                got = collection.get(include=["metadatas"])
+                for meta in got.get("metadatas") or []:
+                    if not isinstance(meta, dict):
+                        continue
+                    source = meta.get("source")
+                    owner = meta.get("owner")
+                    if not owner or not isinstance(source, str):
+                        continue
+                    if source == directory or source.startswith(directory + os.sep):
+                        return owner
+        except Exception as e:
+            logger.warning("owner_for_directory(%s) failed: %s", directory, e)
+        return None
+
+    def set_directory_sensitivity(self, directory: str, sensitivity: str) -> Dict[str, Any]:
+        """Relabel every chunk indexed from ``directory`` (recursively).
+
+        Selection uses the same Python-side path-boundary match on the stored
+        ``source`` as ``remove_directory``, and for the same reason: no Chroma
+        metadata operator selects a scalar string by path prefix, and a plain
+        substring would catch ``/docs2`` when relabelling ``/docs``.
+        """
+        if not self.healthy:
+            return {"success": False, "updated_count": 0, "message": "Collection not initialized"}
+
+        directory = os.path.abspath(directory)
+        label = normalize_sensitivity(sensitivity)
+        updated = 0
+        failed = 0
+
+        for lane_name, collection in self._collections_for_delete():
+            try:
+                results = collection.get(include=["metadatas"])
+                selected_ids = []
+                selected_metas = []
+                for i, meta in enumerate(results["metadatas"]):
+                    if not isinstance(meta, dict) or not isinstance(meta.get("source"), str):
+                        continue
+                    source = meta["source"]
+                    if source != directory and not source.startswith(directory + os.sep):
+                        continue
+                    if meta.get(SENSITIVITY_KEY) == label:
+                        continue
+                    selected_ids.append(results["ids"][i])
+                    selected_metas.append(apply_sensitivity(meta, label))
+
+                for i in range(0, len(selected_ids), 200):
+                    collection.update(
+                        ids=selected_ids[i:i + 200],
+                        metadatas=selected_metas[i:i + 200],
+                    )
+                    updated += len(selected_ids[i:i + 200])
+            except Exception as e:
+                logger.warning("set_directory_sensitivity failed in %s lane: %s", lane_name, e)
+                failed += 1
+
+        return {
+            "success": failed == 0,
+            "updated_count": updated,
+            "sensitivity": label,
+            "message": f"Relabelled {updated} chunk(s) under {directory} as {label}",
+        }
 
     def remove_directory(self, directory: str) -> Dict[str, Any]:
         """Remove all chunks under ``directory`` (recursively), and nothing else.

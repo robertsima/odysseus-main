@@ -58,6 +58,15 @@ async def list_tools() -> list[Tool]:
                         "description": "The action to perform",
                     },
                     "directory": {"type": "string", "description": "Directory path (for add/remove)"},
+                    "sensitivity": {
+                        "type": "string",
+                        "enum": ["public", "private"],
+                        "description": (
+                            "For add_directory. 'private' keeps the content local-only: it is "
+                            "never retrieved for a session served by a hosted API endpoint, and "
+                            "is not listed here. Defaults to 'public'."
+                        ),
+                    },
                 },
                 "required": ["action"],
             },
@@ -77,9 +86,23 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not _personal_docs_manager:
             return [TextContent(type="text", text="Personal docs manager not available. RAG may not be configured.")]
         try:
-            files = getattr(_personal_docs_manager, 'index', None) or []
+            # This server is reached over MCP with no session, so there is no
+            # endpoint to classify as local. Fail closed and never list private
+            # documents here — a filename is disclosure on its own.
+            if hasattr(_personal_docs_manager, 'get_file_list'):
+                files = _personal_docs_manager.get_file_list(allow_private=False) or []
+            else:
+                files = getattr(_personal_docs_manager, 'index', None) or []
+
             dirs = []
-            if hasattr(_personal_docs_manager, 'get_indexed_directories'):
+            if hasattr(_personal_docs_manager, 'get_indexed_directories_with_sensitivity'):
+                dirs = [
+                    d["directory"]
+                    for d in _personal_docs_manager.get_indexed_directories_with_sensitivity(
+                        allow_private=False
+                    )
+                ]
+            elif hasattr(_personal_docs_manager, 'get_indexed_directories'):
                 dirs = _personal_docs_manager.get_indexed_directories()
 
             lines = []
@@ -96,6 +119,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     lines.append(f"  ... and {len(files) - 50} more")
             if not lines:
                 return [TextContent(type="text", text="No files or directories indexed in RAG.")]
+            lines.append("\n_(Private documents are not listed over MCP.)_")
             return [TextContent(type="text", text="\n".join(lines))]
         except Exception as e:
             return [TextContent(type="text", text=f"Error: {e}")]
@@ -113,7 +137,10 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         if not _rag_manager:
             return [TextContent(type="text", text="Error: RAG manager not available")]
         try:
-            result = _rag_manager.index_personal_documents(directory)
+            from src.rag_sensitivity import normalize_sensitivity
+
+            sensitivity = normalize_sensitivity(arguments.get("sensitivity"))
+            result = _rag_manager.index_personal_documents(directory, sensitivity=sensitivity)
             indexed = result.get("indexed_count", 0) if isinstance(result, dict) else 0
             # Record the directory so `list` and `remove_directory` can see it.
             # Indexing was just done above, so pass index=False to avoid a second
@@ -121,10 +148,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # tracked in indexed_directories, so it was invisible/unremovable.
             if _personal_docs_manager and hasattr(_personal_docs_manager, "add_directory"):
                 try:
-                    _personal_docs_manager.add_directory(directory, index=False)
+                    _personal_docs_manager.add_directory(
+                        directory, index=False, sensitivity=sensitivity
+                    )
                 except Exception:
                     pass
-            return [TextContent(type="text", text=f"Directory '{directory}' added to RAG index ({indexed} chunks indexed)")]
+            return [TextContent(type="text", text=f"Directory '{directory}' added to RAG index as {sensitivity} ({indexed} chunks indexed)")]
         except Exception as e:
             return [TextContent(type="text", text=f"Error: Failed to index directory: {e}")]
 

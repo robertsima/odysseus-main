@@ -30,6 +30,26 @@ def prune_index_dirs(dirs: List[str]) -> None:
     ]
 
 
+# Files PersonalDocsManager writes into PERSONAL_DIR to persist its own state.
+# These live alongside the user's documents and match DEFAULT_EXTENSIONS, so
+# without an explicit skip the indexers sweep them in as ordinary content.
+# directory_sensitivity.json is the dangerous one: it maps private directory
+# paths to their labels, so indexing it publishes exactly what the label is
+# meant to protect — the existence, paths, and privacy of those trees — to any
+# model allowed to read public documents.
+STATE_FILENAMES: Set[str] = {
+    'indexed_directories.json',
+    'excluded_files.json',
+    'directory_sensitivity.json',
+}
+
+
 def is_indexable_file(name: str) -> bool:
-    """A file is indexable only if it is not hidden (dot-prefixed)."""
-    return not name.startswith('.')
+    """A file is indexable only if it is neither hidden nor tracker state.
+
+    The state-file check is on the bare name rather than the full path: the
+    indexers only ever have the basename here, and these names are specific
+    enough that skipping them anywhere in a tree is a better trade than
+    letting a nested copy leak private directory paths.
+    """
+    return not name.startswith('.') and name not in STATE_FILENAMES

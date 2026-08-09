@@ -2755,8 +2755,14 @@ function initializeEventListeners() {
     'rail-new-chat':       '#rail-new-session',
   };
 
-  // Keys hidden by default on first run (no localStorage yet)
-	  const UI_VIS_DEFAULT_OFF = new Set(['rag-toggle-btn', 'text-emojis', 'chat-fullwidth']);
+  // Keys hidden by default on first run (no localStorage yet).
+  // 'rag-toggle-btn' used to be here, which made personal-document RAG
+  // unreachable: the #rag-toggle checkbox is display:none and unchecked, its
+  // only control is #overflow-rag-btn, and the visibility panel had no row for
+  // this key — so the button was hidden with no way to unhide it, and
+  // chat.js sent use_rag=false on every request. It now ships visible and has
+  // a "RAG" row in the Chat Bar visibility section like every other toggle.
+	  const UI_VIS_DEFAULT_OFF = new Set(['text-emojis', 'chat-fullwidth']);
 
   // Keys that need admin to toggle off (reserved for future use)
   const UI_VIS_ADMIN_ONLY = new Set([]);

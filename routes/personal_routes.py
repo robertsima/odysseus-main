@@ -13,6 +13,7 @@ from src.auth_helpers import require_privilege, require_user
 from core.middleware import require_admin
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
+from src.rag_sensitivity import SENSITIVITY_PUBLIC, normalize_sensitivity
 
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
@@ -167,9 +168,22 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     @router.get("")
     def api_personal_list(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Enhanced version that includes directories"""
-        files = [{"name": f["name"], "size": f["size"], "path": f.get("path", "")} for f in personal_docs_manager.index]
+        files = [
+            {
+                "name": f["name"],
+                "size": f["size"],
+                "path": f.get("path", ""),
+                "sensitivity": f.get("sensitivity", SENSITIVITY_PUBLIC),
+            }
+            for f in personal_docs_manager.index
+        ]
         directories = personal_docs_manager.get_indexed_directories() if hasattr(personal_docs_manager, "get_indexed_directories") else []
-        return {"files": files, "directories": directories}
+        directory_sensitivity = dict(getattr(personal_docs_manager, "directory_sensitivity", {}) or {})
+        return {
+            "files": files,
+            "directories": directories,
+            "directory_sensitivity": directory_sensitivity,
+        }
     
     @router.post("/reload")
     def api_personal_reload(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
@@ -192,6 +206,7 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             JSON response with indexing results
         """
         directory = directory_request.directory
+        sensitivity = normalize_sensitivity(directory_request.sensitivity)
         try:
             directory = _resolve_allowed_personal_dir(directory)
             
@@ -207,18 +222,23 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             # Use the RAGManager to index the directory
             rag = _rag()
             if rag:
-                result = rag.index_personal_documents(directory, owner=owner)
-                
+                result = rag.index_personal_documents(directory, owner=owner, sensitivity=sensitivity)
+
                 if result["success"]:
-                    # Also update the personal_docs_manager to track this directory
-                    personal_docs_manager.add_directory(directory, index=False)
-                    
+                    # Also update the personal_docs_manager to track this directory.
+                    # Pass the label so the tracker agrees with the chunks just
+                    # written above; indexing already happened, hence index=False.
+                    personal_docs_manager.add_directory(
+                        directory, index=False, sensitivity=sensitivity
+                    )
+
                     return {
                         "success": True,
                         "message": f"Successfully indexed {result['indexed_count']} chunks from {directory}",
                         "indexed_count": result["indexed_count"],
                         "failed_count": result.get("failed_count", 0),
-                        "directory": directory
+                        "directory": directory,
+                        "sensitivity": sensitivity,
                     }
                 else:
                     raise HTTPException(500, result.get("message", "Failed to index directory"))
@@ -231,6 +251,66 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             logger.error(f"Error adding directory to RAG: {e}")
             raise HTTPException(500, f"Failed to add directory: {str(e)}")
     
+    @router.post("/scan")
+    async def scan_indexed_directories(
+        owner: str = Depends(require_user), _admin: None = Depends(require_admin),
+    ):
+        """Re-index files changed since the last scan.
+
+        The same incremental pass the background scanner runs; exposed so a save
+        can be picked up immediately instead of waiting for the next tick.
+        """
+        rag = _rag()
+        if not rag:
+            raise HTTPException(503, "RAG system is not available")
+
+        from src.vault_scan import VaultScanner
+
+        try:
+            scanner = VaultScanner(personal_docs_manager, rag)
+            result = scanner.scan()
+        except Exception as e:
+            logger.error(f"Vault scan failed: {e}")
+            raise HTTPException(500, f"Scan failed: {str(e)}")
+
+        return {"success": True, **result}
+
+    @router.post("/directory_sensitivity")
+    async def set_directory_sensitivity(
+        directory_request: DirectoryRequest,
+        owner: str = Depends(require_user), _admin: None = Depends(require_admin),
+    ):
+        """Relabel a tracked directory as public or private.
+
+        Also rewrites the label on chunks already in the vector store, so
+        marking a directory private takes effect for content indexed earlier.
+        """
+        if directory_request.sensitivity is None:
+            raise HTTPException(400, "sensitivity is required ('public' or 'private')")
+
+        directory = _resolve_allowed_personal_dir(directory_request.directory)
+        sensitivity = normalize_sensitivity(directory_request.sensitivity)
+
+        if not hasattr(personal_docs_manager, "set_directory_sensitivity"):
+            raise HTTPException(503, "Sensitivity labelling is not available")
+
+        try:
+            result = personal_docs_manager.set_directory_sensitivity(directory, sensitivity)
+        except Exception as e:
+            logger.error(f"Error relabelling directory {directory}: {e}")
+            raise HTTPException(500, f"Failed to set sensitivity: {str(e)}")
+
+        return {
+            "success": True,
+            "directory": directory,
+            "sensitivity": result.get("sensitivity", sensitivity),
+            "updated_count": result.get("updated_count", 0),
+            "message": (
+                f"{directory} is now {result.get('sensitivity', sensitivity)}; "
+                f"{result.get('updated_count', 0)} indexed chunk(s) relabelled"
+            ),
+        }
+
     @router.delete("/remove_directory")
     async def remove_directory_from_rag(directory: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """

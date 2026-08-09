@@ -22,6 +22,12 @@ secrets.env~
 !secrets.env.example
 /data/
 /logs/
+# Local ZimaOS dry-run state (docker-compose.zimaos-local.yml binds it). The
+# running stack writes here continuously — Chroma, the sqlite db, the FastEmbed
+# model cache — so leaving it in the build context both bloats the transfer and
+# makes builds fail outright ("invalid file request") when a file changes
+# mid-read.
+/zima-local/
 .git/
 .claude/
 .playwright-mcp/

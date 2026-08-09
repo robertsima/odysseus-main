@@ -98,6 +98,21 @@ def _is_sensitive_path(resolved: str) -> bool:
         if part in _SENSITIVE_BASENAMES_CF:
             return True
 
+    # Documents the user labelled private. These live under PERSONAL_DIR, which
+    # sits inside DATA_DIR — an allowed tool root — so without this check any
+    # model could read a private note by absolute path and walk straight around
+    # the RAG sensitivity filter. Blocking here covers the file tools only:
+    # indexing and retrieval read from disk directly and never consult this
+    # function, so local models still search and cite private documents
+    # normally; they just cannot open them as files.
+    try:
+        from src.rag_sensitivity import path_is_under_private_directory
+
+        if path_is_under_private_directory(resolved):
+            return True
+    except Exception as e:  # never let a label lookup break file tools
+        logger.warning("private-path check failed for %s: %s", resolved, e)
+
     # Check filename against known sensitive files.
     return filename in _SENSITIVE_FILE_PATTERNS_CF
 

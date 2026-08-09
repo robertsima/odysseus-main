@@ -1039,6 +1039,16 @@ async def _startup_event():
         _startup_tasks.append(start_bg_monitor())
     except Exception as _e:
         logger.warning("Failed to start background-job monitor: %s", _e)
+    # Incremental re-index of tracked vault directories. Without it, anything
+    # that writes to an indexed tree — the AI updating its own notes, or a save
+    # made outside the app — leaves RAG serving stale chunks indefinitely.
+    try:
+        from src.vault_scan import start_vault_scanner
+        _vault_task = start_vault_scanner(personal_docs_mgr, get_rag_manager())
+        if _vault_task is not None:
+            _startup_tasks.append(_vault_task)
+    except Exception as _e:
+        logger.warning("Failed to start vault scanner: %s", _e)
     # MCP servers can be slow or blocked by local tooling. Connect them after
     # the web server is accepting traffic instead of delaying the whole UI.
     async def _startup_mcp_connections():

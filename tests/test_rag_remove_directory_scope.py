@@ -53,15 +53,21 @@ def _make_vectorrag(rows):
 
 
 def test_vectorrag_remove_is_path_bounded():
+    # Build paths with os.path.join/abspath rather than POSIX literals: the
+    # stored `source` is always absolute and platform-native, and
+    # remove_directory abspaths its argument, so hardcoded "/a/docs" can never
+    # match on Windows (it resolves to "<drive>:\a\docs").
+    root = os.path.abspath(os.sep + "a")
+    docs = os.path.join(root, "docs")
     rows = [
-        ("a", {"source": "/a/docs/f1.md"}),
-        ("b", {"source": "/a/docs/sub/f2.md"}),   # nested -> must be removed
-        ("c", {"source": "/a/docs2/f3.md"}),       # sibling prefix -> must survive
-        ("d", {"source": "/a/docs_personal/f4.md"}),  # sibling prefix -> must survive
+        ("a", {"source": os.path.join(docs, "f1.md")}),
+        ("b", {"source": os.path.join(docs, "sub", "f2.md")}),   # nested -> must be removed
+        ("c", {"source": os.path.join(root, "docs2", "f3.md")}),  # sibling prefix -> must survive
+        ("d", {"source": os.path.join(root, "docs_personal", "f4.md")}),  # sibling prefix -> must survive
         ("e", {"filename": "no-source.md"}),       # sourceless dict -> must not crash/survive
     ]
     rag = _make_vectorrag(rows)
-    res = rag.remove_directory("/a/docs")
+    res = rag.remove_directory(docs)
     assert res["success"] is True
     assert res["removed_count"] == 2
     remaining = set(rag._collection.get()["ids"])
@@ -69,8 +75,8 @@ def test_vectorrag_remove_is_path_bounded():
 
 
 def test_vectorrag_remove_no_match_is_noop():
-    rag = _make_vectorrag([("a", {"source": "/a/docs/f1.md"})])
-    res = rag.remove_directory("/nowhere")
+    rag = _make_vectorrag([("a", {"source": os.path.abspath(os.path.join(os.sep, "a", "docs", "f1.md"))})])
+    res = rag.remove_directory(os.path.abspath(os.sep + "nowhere"))
     assert res["success"] is True
     assert res["removed_count"] == 0
     assert set(rag._collection.get()["ids"]) == {"a"}

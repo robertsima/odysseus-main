@@ -7,6 +7,11 @@ from typing import List, Dict, Set, Any, Tuple
 from dataclasses import dataclass
 
 from src.index_walk import prune_index_dirs, is_indexable_file
+from src.rag_sensitivity import (
+    SENSITIVITY_PRIVATE,
+    SENSITIVITY_PUBLIC,
+    normalize_sensitivity,
+)
 
 from src.markitdown_runtime import MARKITDOWN_EXTS
 
@@ -130,7 +135,9 @@ def load_personal_index(
             files.append({"name": display, "path": p, "size": size, "chunks": chunks})
     return files
 
-def retrieve_personal_keyword(personal_index: List[Dict], query: str, k: int = 5) -> List[str]:
+def retrieve_personal_keyword(
+    personal_index: List[Dict], query: str, k: int = 5, allow_private: bool = True
+) -> List[str]:
     """
     Retrieve relevant documents using keyword search.
 
@@ -138,6 +145,7 @@ def retrieve_personal_keyword(personal_index: List[Dict], query: str, k: int = 5
         personal_index: The loaded document index
         query: Search query
         k: Number of results to return
+        allow_private: When False, documents labelled private are skipped
 
     Returns:
         List of formatted search results
@@ -149,6 +157,8 @@ def retrieve_personal_keyword(personal_index: List[Dict], query: str, k: int = 5
     scored = []
     for f in personal_index:
         if not isinstance(f, dict):
+            continue
+        if not allow_private and f.get("sensitivity") == SENSITIVITY_PRIVATE:
             continue
         for idx, ch in enumerate(f.get("chunks") or []):
             score = len(q & tokenize(ch))
@@ -162,7 +172,7 @@ def retrieve_personal_keyword(personal_index: List[Dict], query: str, k: int = 5
     return out
 
 def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
-                     rag_manager=None) -> List[str]:
+                     rag_manager=None, allow_private: bool = True) -> List[str]:
     """
     Retrieve relevant personal documents using vector search first, falling back to keyword search.
 
@@ -171,6 +181,7 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
         query: The search query
         k: Number of results to return
         rag_manager: Optional RAGManager instance for vector search
+        allow_private: When False, only publicly-labelled documents are returned
 
     Returns:
         List of formatted search results
@@ -181,7 +192,7 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
     # First try vector search if RAGManager is available
     if rag_manager:
         try:
-            vector_results = rag_manager.search(query, k)
+            vector_results = rag_manager.search(query, k, allow_private=allow_private)
             if vector_results:
                 # Format vector results
                 out = []
@@ -198,7 +209,7 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
             logger.warning(f"Vector search failed, falling back to keyword search: {e}")
 
     # Fall back to keyword search
-    return retrieve_personal_keyword(personal_index, query, k)
+    return retrieve_personal_keyword(personal_index, query, k, allow_private=allow_private)
 
 
 def _string_list(values) -> list[str]:
@@ -214,10 +225,16 @@ class PersonalDocsManager:
         self.index = []
         self.indexed_directories = []  # Track additional directories
         self.excluded_files: Set[str] = set()  # Files removed from RAG listing
+        # abspath -> "public" | "private". Kept in its own file so
+        # indexed_directories.json stays the plain list every existing caller
+        # (and on-disk state) expects.
+        self.directory_sensitivity: Dict[str, str] = {}
         self.directories_file = os.path.join(personal_dir, "indexed_directories.json")
         self._excluded_file = os.path.join(personal_dir, "excluded_files.json")
+        self._sensitivity_file = os.path.join(personal_dir, "directory_sensitivity.json")
         self.load_directories()
         self._load_excluded()
+        self._load_sensitivity()
         self.refresh_index()
 
     def load_directories(self):
@@ -267,16 +284,96 @@ class PersonalDocsManager:
         except Exception as e:
             logger.error(f"Error saving excluded files: {e}")
 
+    def _load_sensitivity(self):
+        """Load the directory -> sensitivity map from persistent storage."""
+        try:
+            if os.path.exists(self._sensitivity_file):
+                with open(self._sensitivity_file, 'r', encoding="utf-8") as f:
+                    stored = json.load(f)
+                if not isinstance(stored, dict):
+                    raise ValueError("directory sensitivity must be an object")
+                self.directory_sensitivity = {
+                    os.path.abspath(k): normalize_sensitivity(v)
+                    for k, v in stored.items()
+                    if isinstance(k, str)
+                }
+            else:
+                self.directory_sensitivity = {}
+        except Exception as e:
+            logger.error(f"Error loading directory sensitivity: {e}")
+            self.directory_sensitivity = {}
+
+    def _save_sensitivity(self):
+        try:
+            with open(self._sensitivity_file, 'w', encoding="utf-8") as f:
+                json.dump(self.directory_sensitivity, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving directory sensitivity: {e}")
+
+    def sensitivity_for(self, path: str) -> str:
+        """Resolve the sensitivity label that applies to ``path``.
+
+        Longest matching tracked directory wins, so a private vault nested
+        inside a public tree keeps its own label no matter which walk reached
+        the file. Untracked paths are public — the label is only ever set
+        explicitly (see ``rag_sensitivity``).
+        """
+        abs_path = os.path.abspath(path)
+        best_label = SENSITIVITY_PUBLIC
+        best_len = -1
+        for directory, label in self.directory_sensitivity.items():
+            if abs_path == directory or abs_path.startswith(directory + os.sep):
+                if len(directory) > best_len:
+                    best_len = len(directory)
+                    best_label = label
+        return best_label
+
+    def set_directory_sensitivity(self, directory: str, sensitivity: str) -> Dict[str, Any]:
+        """Relabel a tracked directory and the chunks already indexed from it.
+
+        Relabelling has to reach the vector store too: chunks keep whatever
+        label they were written with, so updating only this map would leave
+        content the user just marked private still labelled public in Chroma
+        and still reachable from a hosted API.
+        """
+        directory = os.path.abspath(directory)
+        label = normalize_sensitivity(sensitivity)
+        self.directory_sensitivity[directory] = label
+        self._save_sensitivity()
+
+        updated = 0
+        if self.rag_manager and hasattr(self.rag_manager, "set_directory_sensitivity"):
+            try:
+                result = self.rag_manager.set_directory_sensitivity(directory, label)
+                updated = (result or {}).get("updated_count", 0)
+            except Exception as e:
+                logger.error(f"Failed to relabel RAG chunks for {directory}: {e}")
+
+        self.refresh_index()
+        return {"directory": directory, "sensitivity": label, "updated_count": updated}
+
     def exclude_file(self, filepath: str):
         """Exclude a file from the listing. Persists across restarts."""
         self.excluded_files.add(os.path.abspath(filepath))
         self._save_excluded()
         self.index = [f for f in self.index if os.path.abspath(f.get("path", "")) != os.path.abspath(filepath)]
 
-    def add_directory(self, directory: str, *, index: bool = True, owner: str = None):
-        """Add a directory to the tracking list and optionally index it."""
+    def add_directory(self, directory: str, *, index: bool = True, owner: str = None,
+                      sensitivity: str = None):
+        """Add a directory to the tracking list and optionally index it.
+
+        ``sensitivity`` marks whether the directory's content may leave the
+        machine; omitting it keeps the existing label, or ``public`` for a
+        directory being tracked for the first time.
+        """
         # Normalize the path
         directory = os.path.abspath(directory)
+
+        # Record the label before indexing so the chunks written below carry it.
+        if sensitivity is not None:
+            self.directory_sensitivity[directory] = normalize_sensitivity(sensitivity)
+            self._save_sensitivity()
+        label = self.directory_sensitivity.get(directory, SENSITIVITY_PUBLIC)
 
         # Clear any exclusions for files in this directory. Match on a path
         # boundary (the directory itself or paths under it) rather than a raw
@@ -299,7 +396,9 @@ class PersonalDocsManager:
             # index=False so we do not create a second ownerless copy.
             if index and self.rag_manager:
                 try:
-                    result = self.rag_manager.index_personal_documents(directory, owner=owner)
+                    result = self.rag_manager.index_personal_documents(
+                        directory, owner=owner, sensitivity=label
+                    )
                     logger.info(f"Indexed {result.get('indexed_count', 0)} chunks from {directory}")
                 except Exception as e:
                     logger.error(f"Failed to index directory {directory}: {e}")
@@ -307,6 +406,11 @@ class PersonalDocsManager:
             # Refresh the local index to include the new directory
             self.refresh_index()
         else:
+            # Already tracked: re-adding with an explicit label is how a caller
+            # corrects a mislabelled directory, so push the change down to the
+            # chunks that were already indexed under the old label.
+            if sensitivity is not None:
+                self.set_directory_sensitivity(directory, label)
             logger.info(f"Directory already indexed: {directory}")
 
     def remove_directory(self, directory: str):
@@ -317,6 +421,8 @@ class PersonalDocsManager:
         if directory in self.indexed_directories:
             self.indexed_directories.remove(directory)
             self.save_directories()
+            if self.directory_sensitivity.pop(directory, None) is not None:
+                self._save_sensitivity()
             logger.info(f"Removed directory from tracking: {directory}")
             
             # Refresh the index to exclude the removed directory
@@ -374,7 +480,19 @@ class PersonalDocsManager:
             self.excluded_files = rewritten_excluded
             self._save_excluded()
 
-        if changed_dirs or changed_excluded:
+        # Rewrite the sensitivity map too, or a renamed directory silently
+        # reverts to public: sensitivity_for() would stop matching its keys.
+        changed_labels = False
+        rewritten_labels = {}
+        for path, label in self.directory_sensitivity.items():
+            rewritten = rewrite(path)
+            changed_labels = changed_labels or rewritten != os.path.abspath(path)
+            rewritten_labels[rewritten] = label
+        if changed_labels:
+            self.directory_sensitivity = rewritten_labels
+            self._save_sensitivity()
+
+        if changed_dirs or changed_excluded or changed_labels:
             self.refresh_index()
 
     def get_indexed_directories(self):
@@ -391,6 +509,7 @@ class PersonalDocsManager:
             if os.path.abspath(f.get("path", "")) in self.excluded_files:
                 continue
             f['source_dir'] = self.personal_dir
+            f['sensitivity'] = self.sensitivity_for(f.get("path", ""))
             self.index.append(f)
 
         # Index additional directories
@@ -410,18 +529,44 @@ class PersonalDocsManager:
                     continue
                 # Update the name to include the directory for clarity
                 f['source_dir'] = directory
+                f['sensitivity'] = self.sensitivity_for(f.get("path", ""))
                 f['name'] = f"{os.path.basename(directory)}/{f['name']}"
                 self.index.append(f)
 
         logger.info(f"Refreshed index: {len(self.index)} documents from {len(self.indexed_directories) + 1} directories")
 
-    def retrieve(self, query: str, k: int = 5) -> List[str]:
+    def retrieve(self, query: str, k: int = 5, allow_private: bool = True) -> List[str]:
         """Retrieve relevant documents for a query."""
-        return retrieve_personal(self.index, query, k, self.rag_manager)
+        return retrieve_personal(
+            self.index, query, k, self.rag_manager, allow_private=allow_private
+        )
 
-    def get_file_list(self) -> List[Dict[str, Any]]:
-        """Get list of indexed files with metadata."""
-        return [{"name": f["name"], "size": f["size"]} for f in self.index]
+    def get_file_list(self, allow_private: bool = True) -> List[Dict[str, Any]]:
+        """Get list of indexed files with metadata.
+
+        ``allow_private=False`` drops privately-labelled files entirely — a
+        filename is itself disclosure, so a caller that may not read the
+        content may not see the names either.
+        """
+        return [
+            {
+                "name": f["name"],
+                "size": f["size"],
+                "sensitivity": f.get("sensitivity", SENSITIVITY_PUBLIC),
+            }
+            for f in self.index
+            if allow_private or f.get("sensitivity", SENSITIVITY_PUBLIC) != SENSITIVITY_PRIVATE
+        ]
+
+    def get_indexed_directories_with_sensitivity(self, allow_private: bool = True) -> List[Dict[str, str]]:
+        """Tracked directories plus their labels, optionally public-only."""
+        out = []
+        for directory in self.indexed_directories:
+            label = self.directory_sensitivity.get(os.path.abspath(directory), SENSITIVITY_PUBLIC)
+            if not allow_private and label == SENSITIVITY_PRIVATE:
+                continue
+            out.append({"directory": directory, "sensitivity": label})
+        return out
 
     def get_stats(self) -> Dict[str, Any]:
         """Get statistics about indexed documents."""
@@ -454,9 +599,17 @@ class PersonalDocsManager:
         success_count = 0
         failure_count = 0
         
-        # Index the base personal directory
+        # Index the base personal directory. Tracked subdirectories are walked
+        # again below with their own labels; the private-wins rule in
+        # VectorRAG.add_document means a private subtree ends up private
+        # regardless of which pass reaches a given chunk first.
         try:
-            result = self.rag_manager.index_personal_documents(self.personal_dir)
+            result = self.rag_manager.index_personal_documents(
+                self.personal_dir,
+                sensitivity=self.directory_sensitivity.get(
+                    os.path.abspath(self.personal_dir), SENSITIVITY_PUBLIC
+                ),
+            )
             if result.get('success'):
                 success_count += 1
                 logger.info(f"Indexed base directory: {self.personal_dir}")
@@ -472,7 +625,12 @@ class PersonalDocsManager:
                 continue
             
             try:
-                result = self.rag_manager.index_personal_documents(directory)
+                result = self.rag_manager.index_personal_documents(
+                    directory,
+                    sensitivity=self.directory_sensitivity.get(
+                        os.path.abspath(directory), SENSITIVITY_PUBLIC
+                    ),
+                )
                 if result.get('success'):
                     success_count += 1
                     logger.info(f"Indexed directory: {directory}")

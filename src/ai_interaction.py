@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
 
 from src.constants import GENERATED_IMAGES_DIR
 from src.memory import MemoryStoreUnreadable
+from src.rag_sensitivity import normalize_sensitivity
 
 logger = logging.getLogger(__name__)
 
@@ -519,12 +520,34 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 # RAG management tool
 # ---------------------------------------------------------------------------
 
+def _session_allows_private_docs(session_id: Optional[str]) -> bool:
+    """Whether a tool call made in this session may see private documents.
+
+    A filename is disclosure on its own, so the RAG listing is filtered by the
+    same rule as retrieval: private content is visible only when the session is
+    being served by a local endpoint. Fails closed — if the session cannot be
+    resolved, we cannot show that the endpoint is local, so we assume it is not.
+    """
+    if not session_id or not _session_manager:
+        return False
+    try:
+        from src.model_context import is_local_endpoint
+
+        session = _session_manager.get_session(session_id)
+        if not session:
+            return False
+        return is_local_endpoint(getattr(session, "endpoint_url", "") or "")
+    except Exception:
+        return False
+
+
 async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
     """Manage RAG indexed documents: list, add_directory, remove_directory.
 
     Content format:
       Line 1: action (list|add_directory|remove_directory)
       Line 2: directory path (for add/remove)
+      Line 3: sensitivity, public|private (optional, for add_directory)
     """
     lines = content.strip().split("\n")
     if not lines:
@@ -535,11 +558,23 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
         if not _personal_docs_manager:
             return {"results": "Personal docs manager not available. RAG may not be configured."}
         try:
+            allow_private = _session_allows_private_docs(session_id)
+
             files = []
-            if hasattr(_personal_docs_manager, 'index'):
+            if hasattr(_personal_docs_manager, 'get_file_list'):
+                files = _personal_docs_manager.get_file_list(allow_private=allow_private) or []
+            elif hasattr(_personal_docs_manager, 'index'):
                 files = _personal_docs_manager.index or []
+
             dirs = []
-            if hasattr(_personal_docs_manager, 'get_indexed_directories'):
+            if hasattr(_personal_docs_manager, 'get_indexed_directories_with_sensitivity'):
+                dirs = [
+                    d["directory"]
+                    for d in _personal_docs_manager.get_indexed_directories_with_sensitivity(
+                        allow_private=allow_private
+                    )
+                ]
+            elif hasattr(_personal_docs_manager, 'get_indexed_directories'):
                 dirs = _personal_docs_manager.get_indexed_directories()
 
             result_lines = []
@@ -554,6 +589,11 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
                     result_lines.append(f"  - {name}")
                 if len(files) > 50:
                     result_lines.append(f"  ... and {len(files) - 50} more")
+            if not allow_private:
+                result_lines.append(
+                    "\n_(Private documents are hidden: this session is served by a "
+                    "non-local endpoint.)_"
+                )
 
             if not result_lines:
                 return {"results": "No files or directories indexed in RAG."}
@@ -565,6 +605,7 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
         if len(lines) < 2:
             return {"error": "add_directory needs line 2: directory path"}
         directory = lines[1].strip()
+        sensitivity = normalize_sensitivity(lines[2].strip() if len(lines) > 2 else None)
 
         import os
         directory = os.path.expanduser(directory)
@@ -575,10 +616,18 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
             return {"error": "RAG manager not available"}
 
         try:
-            result = _rag_manager.index_personal_documents(directory)
+            result = _rag_manager.index_personal_documents(directory, sensitivity=sensitivity)
             indexed = result.get("indexed", 0) if isinstance(result, dict) else 0
+            if _personal_docs_manager and hasattr(_personal_docs_manager, "add_directory"):
+                try:
+                    _personal_docs_manager.add_directory(
+                        directory, index=False, sensitivity=sensitivity
+                    )
+                except Exception as e:
+                    logger.warning("Failed to track directory %s: %s", directory, e)
             return {"action": "add_directory", "directory": directory,
-                    "results": f"Directory '{directory}' added to RAG index ({indexed} files indexed)"}
+                    "sensitivity": sensitivity,
+                    "results": f"Directory '{directory}' added to RAG index as {sensitivity} ({indexed} files indexed)"}
         except Exception as e:
             return {"error": f"Failed to index directory: {e}"}
 

@@ -100,6 +100,14 @@ class DirectoryRequest(BaseModel):
         max_length=500,
         description="Path to the directory"
     )
+    sensitivity: Optional[str] = Field(
+        None,
+        description=(
+            "'private' keeps this directory's content local-only — it is never "
+            "retrieved for a session served by a hosted API endpoint. "
+            "'public' (the default) allows any model to retrieve it."
+        )
+    )
 
 
 # Response Models

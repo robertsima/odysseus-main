@@ -1,6 +1,7 @@
 # src/chat_processor.py
 import logging
 import math
+import os
 import re
 import time
 from collections import Counter
@@ -9,8 +10,39 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
+from src.model_context import is_local_endpoint
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_RAG_SIMILARITY_THRESHOLD = 0.35
+
+
+def _env_rag_threshold() -> float:
+    """Read RAG_SIMILARITY_THRESHOLD from the environment.
+
+    Deployments tune this per corpus — a large personal vault of short notes
+    scores lower than the default assumes, so self-hosters set it well below
+    0.35. Out-of-range or unparseable values fall back to the default rather
+    than silently disabling retrieval (0) or blocking it entirely (>1).
+    """
+    raw = os.environ.get("RAG_SIMILARITY_THRESHOLD")
+    if raw is None or not str(raw).strip():
+        return DEFAULT_RAG_SIMILARITY_THRESHOLD
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "Ignoring non-numeric RAG_SIMILARITY_THRESHOLD=%r; using %s",
+            raw, DEFAULT_RAG_SIMILARITY_THRESHOLD,
+        )
+        return DEFAULT_RAG_SIMILARITY_THRESHOLD
+    if not 0.0 <= value <= 1.0:
+        logger.warning(
+            "Ignoring out-of-range RAG_SIMILARITY_THRESHOLD=%r; using %s",
+            raw, DEFAULT_RAG_SIMILARITY_THRESHOLD,
+        )
+        return DEFAULT_RAG_SIMILARITY_THRESHOLD
+    return value
 
 
 def _clean_search_query(query: str, max_len: int = 200) -> str:
@@ -87,8 +119,12 @@ class ChatProcessor:
         self.memory_vector = memory_vector
         self.skills_manager = skills_manager
 
-    # Minimum similarity score for RAG results to be injected
-    RAG_SIMILARITY_THRESHOLD = 0.35
+    # Minimum similarity score for RAG results to be injected. Overridable via
+    # RAG_SIMILARITY_THRESHOLD so a deployment can tune it to its own corpus
+    # without a code change; read at import so it stays a plain class attribute
+    # for the existing `self.RAG_SIMILARITY_THRESHOLD` reads and for tests that
+    # patch it directly.
+    RAG_SIMILARITY_THRESHOLD = _env_rag_threshold()
     MEMORY_CONTEXT_LIMIT = 5
     PINNED_MEMORY_LIMIT = MEMORY_CONTEXT_LIMIT
 
@@ -363,7 +399,15 @@ class ChatProcessor:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
                 if rag_manager:
-                    results = rag_manager.search(message, k=5, owner=owner)
+                    # Documents marked private are only retrieved when the turn
+                    # is being served by a local endpoint. On a hosted API the
+                    # retrieved text is pasted straight into the outbound
+                    # prompt, so the filter has to happen here, before
+                    # retrieval, not at render time.
+                    allow_private = is_local_endpoint(getattr(session, "endpoint_url", "") or "")
+                    if not allow_private:
+                        logger.debug("RAG: non-local endpoint — restricting retrieval to public documents")
+                    results = rag_manager.search(message, k=5, owner=owner, allow_private=allow_private)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:
