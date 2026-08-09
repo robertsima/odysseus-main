@@ -156,3 +156,23 @@ volumes:
   searxng-data:
   chromadb-data:
   ntfy-cache:
+
+x-casaos:
+    architectures:
+        - amd64
+    author: robertsima
+    category: AI
+    description:
+        en_us: Self-hosted AI workspace running on ZimaOS.
+    developer: Odysseus
+    hostname: odysseus.nas
+    icon: https://raw.githubusercontent.com/odysseus-dev/odysseus/main/static/icons/icon-512.png
+    index: /
+    is_uncontrolled: false
+    main: odysseus
+    port_map: "7000"
+    scheme: http
+    store_app_id: odysseus
+    title:
+        custom: Odysseus
+        en_us: Odysseus
