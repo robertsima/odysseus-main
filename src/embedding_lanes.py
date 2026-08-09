@@ -360,6 +360,7 @@ def query_lanes(
     n_results: Callable[[EmbeddingLane], int],
     include: Sequence[str],
     where: Optional[Dict[str, Any]] = None,
+    where_document: Optional[Dict[str, Any]] = None,
     raise_if_all_failed: bool = False,
 ) -> List[tuple[EmbeddingLane, Dict[str, Any]]]:
     out: List[tuple[EmbeddingLane, Dict[str, Any]]] = []
@@ -374,12 +375,19 @@ def query_lanes(
             n = min(n_results(lane), count)
             if n <= 0:
                 continue
-            results = lane.collection.query(
-                query_embeddings=lane.encode([query]),
-                n_results=n,
-                where=where,
-                include=list(include),
-            )
+            query_kwargs = {
+                "query_embeddings": lane.encode([query]),
+                "n_results": n,
+                "where": where,
+                "include": list(include),
+            }
+            # Only forward the document filter when one is asked for: passing
+            # where_document=None is accepted by current Chroma but has been a
+            # source of breakage across versions, and every existing caller
+            # relies on the plain metadata-filtered query.
+            if where_document is not None:
+                query_kwargs["where_document"] = where_document
+            results = lane.collection.query(**query_kwargs)
             out.append((lane, results))
         except Exception as e:
             failures.append(f"{lane.name}: {e}")

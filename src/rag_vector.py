@@ -50,6 +50,11 @@ DEFAULT_FILE_EXTENSIONS: Set[str] = {
 VECTOR_WEIGHT = 0.7
 KEYWORD_WEIGHT = 0.3
 
+# Score floor for a chunk whose file the query names outright. Above anything
+# the weighted blend realistically produces for a document nobody asked for,
+# while leaving headroom so named chunks stay ordered by vector similarity.
+NAME_MATCH_FLOOR = 0.9
+
 COLLECTION_NAME = "odysseus_rag"
 
 
@@ -94,6 +99,33 @@ _NAME_MATCH_STOPWORDS = {
     "where", "which", "who", "why", "with", "you", "your", "new", "old",
     "doc", "docs", "file", "files", "note", "notes", "index", "readme",
 }
+
+
+# How many name lookups one search may spend. Each is an extra round trip, and
+# a query naming more than a couple of documents is not a real pattern.
+_MAX_NAMED_DOCUMENT_TOKENS = 2
+
+
+def _distinctive_query_tokens(query_words: set) -> list:
+    """Query tokens that look like they *name* something rather than describe it.
+
+    Restricted to tokens carrying a digit — "08-08-2026", "v2.1", "ticket-442".
+    Those are precisely the tokens embeddings handle worst: an opaque
+    identifier carries almost no semantic signal, so the document it names sits
+    far from the query in vector space no matter how relevant it is. An
+    ordinary word like "architecture" needs no special handling, because it is
+    already near its document and arrives through the normal pass.
+
+    Longest first, so the full date beats the bare year when both appear.
+    """
+    named = [
+        token for token in query_words
+        if len(token) >= 4
+        and token not in _NAME_MATCH_STOPWORDS
+        and any(char.isdigit() for char in token)
+    ]
+    named.sort(key=lambda token: (-len(token), token))
+    return named[:_MAX_NAMED_DOCUMENT_TOKENS]
 
 
 def _query_names_document(query_words: set, meta: Any) -> bool:
@@ -524,6 +556,49 @@ class VectorRAG:
             query_words = set(query.lower().split())
             candidates = []
 
+            seen_ids = set()
+
+            def collect(lane, results):
+                for idx in range(len(results["ids"][0])):
+                    doc_id = results["ids"][0][idx]
+                    if doc_id in seen_ids:
+                        continue
+                    seen_ids.add(doc_id)
+                    distance = results["distances"][0][idx]
+                    doc_text = results["documents"][0][idx]
+                    meta = results["metadatas"][0][idx]
+
+                    vector_sim = 1.0 - distance
+                    doc_words = set(doc_text.lower().split())
+                    overlap = len(query_words & doc_words)
+                    keyword_score = overlap / len(query_words) if query_words else 0.0
+                    named = _query_names_document(query_words, meta)
+                    if named:
+                        keyword_score = 1.0
+                    hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
+                    if named:
+                        # Full keyword credit alone tops out at +0.3, which a
+                        # weak vector match still loses to — and the documents
+                        # that most need naming are exactly the ones embeddings
+                        # place badly. Naming a file is an explicit request for
+                        # it, so float it above everything unnamed and let
+                        # vector similarity order the named ones among
+                        # themselves.
+                        hybrid_score = max(
+                            hybrid_score, NAME_MATCH_FLOOR + (1.0 - NAME_MATCH_FLOOR) * vector_sim
+                        )
+
+                    candidates.append({
+                        "id": doc_id,
+                        "document": doc_text,
+                        "metadata": meta,
+                        "distance": round(distance, 4),
+                        "similarity": round(hybrid_score, 4),
+                        "vector_similarity": round(vector_sim, 4),
+                        "keyword_score": round(keyword_score, 4),
+                        "embedding_lane": lane.name,
+                    })
+
             for lane, results in query_lanes(
                 self._lanes,
                 query,
@@ -536,30 +611,33 @@ class VectorRAG:
                 include=["documents", "metadatas", "distances"],
                 raise_if_all_failed=True,
             ):
-                for idx in range(len(results["ids"][0])):
-                    doc_id = results["ids"][0][idx]
-                    distance = results["distances"][0][idx]
-                    doc_text = results["documents"][0][idx]
-                    meta = results["metadatas"][0][idx]
+                collect(lane, results)
 
-                    vector_sim = 1.0 - distance
-                    doc_words = set(doc_text.lower().split())
-                    overlap = len(query_words & doc_words)
-                    keyword_score = overlap / len(query_words) if query_words else 0.0
-                    if _query_names_document(query_words, meta):
-                        keyword_score = 1.0
-                    hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
-
-                    candidates.append({
-                        "id": doc_id,
-                        "document": doc_text,
-                        "metadata": meta,
-                        "distance": round(distance, 4),
-                        "similarity": round(hybrid_score, 4),
-                        "vector_similarity": round(vector_sim, 4),
-                        "keyword_score": round(keyword_score, 4),
-                        "embedding_lane": lane.name,
-                    })
+            # The pass above only ever sees the ~20 nearest chunks by embedding.
+            # That is fatal for the case this whole feature exists to serve: a
+            # journal entry named for its date is, in prose, about whatever
+            # happened that day, so "what did I write on 08-08-2026" lands
+            # nowhere near it in vector space and the file never enters the
+            # pool at all. Re-ranking cannot rescue a document that was never
+            # retrieved, so fetch it directly: the header written by
+            # _chunk_header guarantees the file name appears in the chunk text,
+            # which makes a substring filter an exact way to find it.
+            for token in _distinctive_query_tokens(query_words):
+                try:
+                    for lane, results in query_lanes(
+                        self._lanes,
+                        query,
+                        n_results=lambda lane: min(k, lane.count()),
+                        where=where_filter,
+                        where_document={"$contains": token},
+                        include=["documents", "metadatas", "distances"],
+                    ):
+                        collect(lane, results)
+                except Exception as e:
+                    # A backend without document filtering must not take the
+                    # ordinary search down with it.
+                    logger.debug("named-document pass for %r failed: %s", token, e)
+                    break
 
             candidates.sort(key=lambda c: c["similarity"], reverse=True)
             top = dedupe_results(candidates, limit=k)
