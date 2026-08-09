@@ -63,6 +63,29 @@ def _generate_doc_id(text: str, owner: str = "") -> str:
     return f"doc_{hashlib.sha256(key.encode('utf-8')).hexdigest()[:16]}"
 
 
+def _chunk_header(filename: str) -> str:
+    """Provenance line prepended to every chunk before it is embedded.
+
+    The filename is the only place a lot of vaults record what a document is
+    *about* — a journal entry named ``08-08-2026.md`` typically never repeats
+    its own date in the prose. Kept in metadata alone it is unreachable: the
+    embedding is computed from chunk text, and the keyword half of the hybrid
+    score in ``search`` matches against chunk text too. So the name has to be
+    *in* the text, on every chunk rather than just the first, or a query naming
+    the file only ever hits whichever chunk happens to mention it.
+
+    Both the full name and its extensionless stem are emitted because
+    ``search`` tokenises by bare ``str.split()``: ``08-08-2026.md`` is a single
+    token that a query saying "08-08-2026" does not match. The stem supplies
+    that token. For names that already read as prose ("Odysseus Reference.md")
+    the two overlap almost entirely, which costs a few tokens and no accuracy.
+    """
+    stem = Path(filename).stem
+    if stem and stem != filename:
+        return f"Source: {filename} {stem}"
+    return f"Source: {filename}"
+
+
 def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str, Any]]:
     """Compose the Chroma metadata filter for an owner + sensitivity scope.
 
@@ -719,10 +742,11 @@ class VectorRAG:
             if owner:
                 meta['owner'] = owner
 
+            header = _chunk_header(fname)
             indexed = 0
             failed = 0
             for i, chunk in enumerate(self._split_into_chunks(content)):
-                if self.add_document(chunk, {**meta, 'chunk_id': i}):
+                if self.add_document(f"{header}\n{chunk}", {**meta, 'chunk_id': i}):
                     indexed += 1
                 else:
                     failed += 1

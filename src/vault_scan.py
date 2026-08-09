@@ -29,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 STATE_FILENAME = ".vault_scan_state.json"
 
+# Bump whenever the *text* written per chunk changes (not the metadata). The
+# scanner only re-indexes files whose (mtime, size) moved, so a formatting
+# change would otherwise apply to newly-saved files only and leave the vault
+# split between two chunk formats indefinitely — with no signal, because every
+# file still looks up-to-date. A version mismatch discards the state, which
+# makes the next scan treat every file as changed and rewrite it once.
+STATE_VERSION = 2
+
 # Default gap between automatic scans. Short enough that a save shows up in
 # retrieval while you are still working, long enough that a large vault is not
 # being stat-walked constantly.
@@ -51,14 +59,29 @@ class VaultScanner:
 
     def _load_state(self) -> None:
         try:
-            if os.path.exists(self._state_path):
-                with open(self._state_path, "r", encoding="utf-8") as handle:
-                    stored = json.load(handle)
-                if isinstance(stored, dict):
-                    self._state = {
-                        k: list(v) for k, v in stored.items()
-                        if isinstance(k, str) and isinstance(v, (list, tuple)) and len(v) == 2
-                    }
+            if not os.path.exists(self._state_path):
+                return
+            with open(self._state_path, "r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if not isinstance(stored, dict):
+                return
+            # A state file written before versioning existed is a bare
+            # path -> [mtime, size] mapping, i.e. version 1.
+            version = stored.get("version") if "files" in stored else 1
+            if version != STATE_VERSION:
+                logger.info(
+                    "Vault scan state is format v%s, expected v%s — re-indexing "
+                    "every tracked file once to apply the current chunk format",
+                    version, STATE_VERSION,
+                )
+                self._state = {}
+                return
+            files = stored.get("files", {})
+            if isinstance(files, dict):
+                self._state = {
+                    k: list(v) for k, v in files.items()
+                    if isinstance(k, str) and isinstance(v, (list, tuple)) and len(v) == 2
+                }
         except Exception as e:
             logger.warning("Could not load vault scan state (%s); treating as first run", e)
             self._state = {}
@@ -66,7 +89,7 @@ class VaultScanner:
     def _save_state(self) -> None:
         try:
             with open(self._state_path, "w", encoding="utf-8") as handle:
-                json.dump(self._state, handle)
+                json.dump({"version": STATE_VERSION, "files": self._state}, handle)
         except Exception as e:
             logger.warning("Could not save vault scan state: %s", e)
 
