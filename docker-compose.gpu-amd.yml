@@ -199,8 +199,6 @@ services:
       - RADICALE_CONFIG_AUTH_TYPE=none
       - RADICALE_CONFIG_STORAGE_FILESYSTEM_FOLDER=/data/collections
       - TAKE_FILE_OWNERSHIP=${RADICALE_TAKE_FILE_OWNERSHIP:-true}
-      - UID=${RADICALE_UID:-1000}
-      - GID=${RADICALE_GID:-1000}
     restart: unless-stopped
 
 volumes:
