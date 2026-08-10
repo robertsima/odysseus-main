@@ -44,6 +44,9 @@ bcrypt
 mcp<2
 # Bundled Lotus MCP policy and import mapping configuration.
 PyYAML>=6.0,<7
+# Private speech-to-text. PyAV (installed transitively) bundles its decoding
+# libraries, so Odysseus does not need a system FFmpeg service or HTTPS.
+faster-whisper==1.2.1
 pyotp
 qrcode[pil]
 croniter

@@ -1,6 +1,9 @@
 import os
 import tempfile
-from services.stt.stt_service import STTService
+
+import pytest
+
+from services.stt.stt_service import STTError, STTService
 
 
 def test_stt_local_transcribe_leak_on_error():
@@ -16,14 +19,14 @@ def test_stt_local_transcribe_leak_on_error():
     temp_dir = tempfile.gettempdir()
     webm_before = {f for f in os.listdir(temp_dir) if f.endswith(".webm")}
 
-    # Run transcription, which will raise ValueError internally
-    result = service._transcribe_local(b"dummy_audio_data")
+    # User-safe errors are raised while the underlying exception stays private.
+    with pytest.raises(STTError) as exc_info:
+        service._transcribe_local(b"dummy_audio_data")
 
     # Track WebM files in the temp directory after running transcription
     webm_after = {f for f in os.listdir(temp_dir) if f.endswith(".webm")}
 
-    # Assert that it returned None (failure)
-    assert result is None
+    assert exc_info.value.code == "transcription_failed"
 
     # Assert that no new temp files were leaked
     leaked = webm_after - webm_before

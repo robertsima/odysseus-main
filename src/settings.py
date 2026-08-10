@@ -52,8 +52,8 @@ DEFAULT_SETTINGS = {
     "tts_model": "tts-1",
     "tts_voice": "alloy",
     "tts_speed": "1",
-    "stt_enabled": False,
-    "stt_provider": "disabled",
+    "stt_enabled": True,
+    "stt_provider": "local",
     "stt_model": "base",
     "stt_language": "",
     "search_provider": "searxng",
@@ -273,6 +273,7 @@ _PER_USER_KEYS = {
     "default_endpoint_id", "default_model", "default_model_fallbacks",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
     "research_endpoint_id", "research_model",
+    "stt_enabled", "stt_provider", "stt_model", "stt_language",
 }
 
 

@@ -2316,6 +2316,122 @@ function initAccount() {
   }
 }
 
+async function initSttSettingsV2() {
+  var provSel = el('set-sttProviderSelect');
+  if (!provSel) return;
+  var modelSelect = el('set-sttModelSelect');
+  var modelInput = el('set-sttModelInput');
+  var modelRow = el('set-sttModelRow');
+  var langRow = el('set-sttLangRow');
+  var langInput = el('set-sttLangInput');
+  var message = el('set-sttSettingsMsg');
+  var enabledToggle = el('set-sttEnabledToggle');
+  var configWrap = el('set-sttConfigWrap');
+  var privacyHint = el('set-sttPrivacyHint');
+  var httpHint = el('set-sttHttpHint');
+  var providers = [];
+
+  function isEndpoint() { return provSel.value.startsWith('endpoint:'); }
+  function selectedModel() { return isEndpoint() ? modelInput.value : modelSelect.value; }
+  function effectiveProvider() { return enabledToggle.checked ? provSel.value : 'disabled'; }
+
+  function updateVisibility() {
+    var provider = provSel.value;
+    modelRow.style.display = provider === 'local' || isEndpoint() ? 'flex' : 'none';
+    langRow.style.display = provider === 'disabled' ? 'none' : 'flex';
+    modelSelect.style.display = isEndpoint() ? 'none' : '';
+    modelInput.style.display = isEndpoint() ? '' : 'none';
+    var selected = providers.find(function(item) { return item.id === provider; });
+    var privacy = selected ? selected.privacy : (provider === 'local' ? 'local' : 'browser-service');
+    privacyHint.textContent = privacy === 'local'
+      ? 'Private: audio stays on this Odysseus instance.'
+      : privacy === 'hosted'
+        ? 'Hosted: recorded audio will be sent to the selected provider.'
+        : 'Browser recognition may use your browser vendor\'s remote speech service.';
+    privacyHint.style.color = privacy === 'local' ? 'var(--green, #6bce8a)' : 'var(--warn, #d9a441)';
+  }
+
+  function updateEnabled() {
+    var off = !enabledToggle.checked;
+    configWrap.style.opacity = off ? '0.45' : '';
+    configWrap.style.pointerEvents = off ? 'none' : '';
+  }
+
+  var host = window.location.hostname;
+  var loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (window.isSecureContext || loopback) {
+    httpHint.textContent = 'No HTTPS change required: browsers permit microphone capture on localhost.';
+  } else {
+    httpHint.textContent = 'Remote HTTP detected. Odysseus can remain HTTP, but this browser may require localhost or a browser-side trusted-origin exception for microphone access.';
+    httpHint.style.color = 'var(--warn, #d9a441)';
+  }
+
+  try {
+    var providerResponse = await fetch('/api/stt/providers', { credentials: 'same-origin' });
+    if (!providerResponse.ok) throw new Error('Provider list failed');
+    providers = (await providerResponse.json()).providers || [];
+    providers.filter(function(item) { return item.id.startsWith('endpoint:'); }).forEach(function(item) {
+      var option = document.createElement('option');
+      option.value = item.id;
+      option.textContent = item.name + (item.privacy === 'local' ? ' (Local/LAN)' : ' (Hosted)');
+      provSel.appendChild(option);
+    });
+  } catch (error) {
+    console.warn('Failed to load STT providers', error);
+  }
+
+  try {
+    var prefsResponse = await fetch('/api/stt/preferences', { credentials: 'same-origin' });
+    if (!prefsResponse.ok) throw new Error('Preferences failed');
+    var prefs = await prefsResponse.json();
+    if (prefs.provider) provSel.value = prefs.provider;
+    if (prefs.model) {
+      if ([...modelSelect.options].some(function(option) { return option.value === prefs.model; })) modelSelect.value = prefs.model;
+      modelInput.value = prefs.model;
+    }
+    langInput.value = prefs.language || '';
+    enabledToggle.checked = prefs.enabled !== false;
+  } catch (error) {
+    message.textContent = 'Unable to load voice preferences';
+    message.style.color = 'var(--red, #e55)';
+  }
+
+  updateEnabled();
+  updateVisibility();
+
+  async function save() {
+    try {
+      var response = await fetch('/api/stt/preferences', {
+        method: 'PUT', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: enabledToggle.checked,
+          provider: provSel.value,
+          model: selectedModel() || 'base',
+          language: langInput.value.trim(),
+        }),
+      });
+      if (!response.ok) throw new Error('Save failed');
+      message.textContent = 'Saved';
+      message.style.color = 'var(--fg)';
+      window.dispatchEvent(new CustomEvent('stt-preferences-changed', {
+        detail: { provider: effectiveProvider(), language: langInput.value.trim() },
+      }));
+      if (window._updateSendBtnIcon) window._updateSendBtnIcon();
+      setTimeout(function() { message.textContent = ''; }, 2000);
+    } catch (error) {
+      message.textContent = 'Failed to save';
+      message.style.color = 'var(--red, #e55)';
+    }
+  }
+
+  provSel.addEventListener('change', function() { updateVisibility(); save(); });
+  modelSelect.addEventListener('change', save);
+  modelInput.addEventListener('change', save);
+  langInput.addEventListener('change', save);
+  enabledToggle.addEventListener('change', function() { updateEnabled(); save(); });
+}
+
 function initAll() {
   modalEl = el('settings-modal');
   initTabs();
@@ -2330,7 +2446,7 @@ function initAll() {
   initImageSettings();
   initVisionSettings();
   initTtsSettings();
-  initSttSettings();
+  initSttSettingsV2();
   initSearchSettings();
   initResearchSettings();
   initResearchSearchSettings();

@@ -1,273 +1,215 @@
-// static/js/voiceRecorder.js
-
-/**
- * Voice recording with optional Speech-to-Text transcription.
- *
- * STT providers:
- *   "disabled"       — record audio as file attachment (original behavior)
- *   "browser"        — use Web Speech API for real-time transcription
- *   "local"          — send recording to server /api/stt/transcribe (Whisper)
- *   "endpoint:<id>"  — send recording to server /api/stt/transcribe (API)
- */
+/** Portable browser recording plus owner-scoped speech-to-text. */
 
 let mediaRecorder = null;
+let activeStream = null;
 let audioChunks = [];
 let isRecording = false;
-let recordingStartTime = null;
 let recordingInterval = null;
-
-// Browser STT state
+let autoStopTimer = null;
 let _recognition = null;
 let _browserTranscript = '';
-
-// Cached STT provider — refreshed on settings change
 let _sttProvider = 'disabled';
+let _sttLanguage = '';
 
-/**
- * Fetch current STT provider from server settings
- */
+const MAX_RECORDING_SECONDS = 300;
+const RECORDING_FORMATS = [
+  { mime: 'audio/webm;codecs=opus', blob: 'audio/webm', ext: 'webm' },
+  { mime: 'audio/ogg;codecs=opus', blob: 'audio/ogg', ext: 'ogg' },
+  { mime: 'audio/mp4', blob: 'audio/mp4', ext: 'mp4' },
+  { mime: '', blob: 'audio/webm', ext: 'webm' },
+];
+
+function recordingFormat() {
+  if (!window.MediaRecorder) return null;
+  return RECORDING_FORMATS.find((item) => !item.mime || MediaRecorder.isTypeSupported(item.mime)) || null;
+}
+
 async function refreshSttProvider() {
   try {
-    const res = await fetch('/api/stt/stats', { credentials: 'same-origin' });
-    if (res.ok) {
-      const stats = await res.json();
-      _sttProvider = stats.provider || 'disabled';
-      // Notify the send button to update its icon
-      if (window._updateSendBtnIcon) window._updateSendBtnIcon();
-    }
-  } catch (e) {
-    console.warn('Failed to fetch STT stats:', e);
+    const response = await fetch('/api/stt/preferences', { credentials: 'same-origin' });
+    if (!response.ok) return;
+    const prefs = await response.json();
+    _sttProvider = prefs.enabled === false ? 'disabled' : (prefs.provider || 'disabled');
+    _sttLanguage = prefs.language || '';
+    if (window._updateSendBtnIcon) window._updateSendBtnIcon();
+  } catch (error) {
+    console.warn('Failed to fetch STT preferences:', error);
   }
 }
 
-/**
- * Format seconds as MM:SS
- */
-function formatTime(seconds) {
-  const mins = Math.floor(seconds / 60).toString().padStart(2, '0');
-  const secs = (seconds % 60).toString().padStart(2, '0');
-  return `${mins}:${secs}`;
-}
-
-/**
- * Reset UI state after recording ends
- */
-function _resetRecordingUI() {
+function resetRecordingUI() {
   isRecording = false;
-  if (recordingInterval) {
-    clearInterval(recordingInterval);
-    recordingInterval = null;
+  if (recordingInterval) clearInterval(recordingInterval);
+  if (autoStopTimer) clearTimeout(autoStopTimer);
+  recordingInterval = null;
+  autoStopTimer = null;
+  if (activeStream) activeStream.getTracks().forEach((track) => track.stop());
+  activeStream = null;
+  const sendButton = document.querySelector('.send-btn');
+  if (sendButton) {
+    sendButton.classList.remove('recording');
+    sendButton.dataset.mode = '';
   }
-  // Reset send button via global callback
-  const sendBtn = document.querySelector('.send-btn');
-  if (sendBtn) {
-    sendBtn.classList.remove('recording');
-    sendBtn.dataset.mode = '';
-  }
-  if (window._updateSendBtnIcon) {
-    setTimeout(window._updateSendBtnIcon, 50);
-  }
+  setTimeout(() => window._updateSendBtnIcon?.(), 50);
 }
 
-/**
- * Start browser speech recognition alongside recording
- */
-function startBrowserSTT() {
+function startBrowserRecognition() {
   const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRecognition) return;
-
+  if (!SpeechRecognition) return false;
   _browserTranscript = '';
   _recognition = new SpeechRecognition();
   _recognition.continuous = true;
   _recognition.interimResults = false;
-  _recognition.lang = '';
-
+  if (_sttLanguage) _recognition.lang = _sttLanguage;
   _recognition.onresult = (event) => {
-    for (let i = event.resultIndex; i < event.results.length; i++) {
-      if (event.results[i].isFinal) {
-        _browserTranscript += event.results[i][0].transcript + ' ';
-      }
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      if (event.results[index].isFinal) _browserTranscript += `${event.results[index][0].transcript} `;
     }
   };
-
-  _recognition.onerror = (e) => {
-    console.warn('Browser STT error:', e.error);
-  };
-
-  _recognition.start();
+  _recognition.onerror = (event) => console.warn('Browser STT error:', event.error);
+  try {
+    _recognition.start();
+    return true;
+  } catch (error) {
+    _recognition = null;
+    return false;
+  }
 }
 
-function stopBrowserSTT() {
+function stopBrowserRecognition() {
   if (_recognition) {
-    try { _recognition.stop(); } catch (e) { /* ignore */ }
+    try { _recognition.stop(); } catch (_) { /* already stopped */ }
     _recognition = null;
   }
   return _browserTranscript.trim();
 }
 
-/**
- * Send audio to server for transcription
- */
-async function transcribeOnServer(audioBlob) {
+async function transcribeOnServer(audioBlob, format) {
   const formData = new FormData();
-  formData.append('file', audioBlob, 'audio.webm');
-
-  const res = await fetch('/api/stt/transcribe', {
-    method: 'POST',
-    credentials: 'same-origin',
-    body: formData,
+  formData.append('file', audioBlob, `voice-message.${format.ext}`);
+  const response = await fetch('/api/stt/transcribe', {
+    method: 'POST', credentials: 'same-origin', body: formData,
   });
-
-  if (!res.ok) {
-    const err = await res.json().catch(() => ({}));
-    throw new Error(err.detail?.message || 'Transcription failed');
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = payload.detail || {};
+    throw new Error(detail.message || 'Transcription failed');
   }
-
-  const data = await res.json();
-  return data.text || '';
+  return payload.text || '';
 }
 
-/**
- * Insert transcribed text into the chat input
- */
 function insertTranscription(text, showToast) {
-  if (!text) return;
+  if (!text) return false;
   const input = document.getElementById('message');
-  if (!input) return;
-
-  const existing = input.value.trim();
-  input.value = existing ? existing + ' ' + text : text;
-
-  // Trigger auto-resize and icon update
+  if (!input) return false;
+  input.value = input.value.trim() ? `${input.value.trim()} ${text}` : text;
   input.dispatchEvent(new Event('input', { bubbles: true }));
   input.focus();
-
-  if (showToast) showToast('Transcribed');
+  showToast?.('Transcribed');
+  return true;
 }
 
-/**
- * Start voice recording
- */
+function attachRecording(blob, format, onFileCreated) {
+  if (!onFileCreated) return;
+  onFileCreated(new File(
+    [blob], `voice-message-${Date.now()}.${format.ext}`, { type: format.blob },
+  ));
+}
+
 export function startRecording(onFileCreated, showToast, showError) {
-  // Check for secure context (getUserMedia requires HTTPS or localhost)
-  if (!window.isSecureContext) {
-    if (showError) showError('Microphone requires HTTPS. Use a reverse proxy with SSL or access via localhost.');
-    _resetRecordingUI();
+  const host = window.location.hostname;
+  const loopback = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (!window.isSecureContext && !loopback) {
+    showError?.('Your browser blocks microphones on remote HTTP pages. Odysseus can stay HTTP; open it through localhost or trust this origin in your browser.');
+    resetRecordingUI();
     return;
   }
-
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    if (showError) showError('Microphone not supported in this browser.');
-    _resetRecordingUI();
+  const format = recordingFormat();
+  if (!navigator.mediaDevices?.getUserMedia || !format) {
+    showError?.('Microphone recording is not supported in this browser.');
+    resetRecordingUI();
     return;
   }
 
   audioChunks = [];
+  navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    activeStream = stream;
+    const options = format.mime ? { mimeType: format.mime } : undefined;
+    mediaRecorder = new MediaRecorder(stream, options);
+    const actualType = (mediaRecorder.mimeType || format.blob).split(';', 1)[0];
+    const detectedFormat = RECORDING_FORMATS.find((item) => item.blob === actualType);
+    const actualFormat = { ...(detectedFormat || format), blob: actualType };
 
-  navigator.mediaDevices.getUserMedia({ audio: true })
-    .then(stream => {
-      mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
-
-      mediaRecorder.ondataavailable = event => {
-        if (event.data.size > 0) {
-          audioChunks.push(event.data);
-        }
-      };
-
-      mediaRecorder.onstop = async () => {
-        stream.getTracks().forEach(track => track.stop());
-
-        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-        const provider = _sttProvider;
-
-        if (provider === 'browser') {
-          const transcript = stopBrowserSTT();
-          if (transcript) {
-            insertTranscription(transcript, showToast);
-          } else {
-            if (showToast) showToast('No speech detected');
-            const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-            if (onFileCreated) onFileCreated(audioFile);
+    mediaRecorder.ondataavailable = (event) => {
+      if (event.data.size) audioChunks.push(event.data);
+    };
+    mediaRecorder.onerror = () => {
+      showError?.('Recording failed.');
+      resetRecordingUI();
+    };
+    mediaRecorder.onstop = async () => {
+      stopBrowserRecognition();
+      const blob = new Blob(audioChunks, { type: actualFormat.blob });
+      try {
+        if (_sttProvider === 'browser') {
+          if (!insertTranscription(_browserTranscript.trim(), showToast)) {
+            showToast?.('No speech detected; recording attached.');
+            attachRecording(blob, actualFormat, onFileCreated);
           }
-        } else if (provider === 'local' || provider.startsWith('endpoint:')) {
-          // Show "Transcribing..." feedback
-          if (showToast) showToast('Transcribing...', 5000);
+        } else if (_sttProvider === 'local' || _sttProvider.startsWith('endpoint:')) {
+          showToast?.(_sttProvider === 'local' ? 'Transcribing locally…' : 'Sending audio for transcription…', 10000);
           try {
-            const transcript = await transcribeOnServer(audioBlob);
-            if (transcript) {
-              insertTranscription(transcript, showToast);
-            } else {
-              if (showToast) showToast('No speech detected');
-            }
-          } catch (e) {
-            console.error('STT transcription error:', e);
-            if (showError) showError('Transcription failed: ' + e.message);
-            // Fallback: attach as file
-            const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-            if (onFileCreated) onFileCreated(audioFile);
+            const transcript = await transcribeOnServer(blob, actualFormat);
+            if (!insertTranscription(transcript, showToast)) showToast?.('No speech detected');
+          } catch (error) {
+            showError?.(`Transcription failed: ${error.message}. Recording attached instead.`);
+            attachRecording(blob, actualFormat, onFileCreated);
           }
         } else {
-          // STT disabled — attach audio file
-          const audioFile = new File([audioBlob], `voice-message-${Date.now()}.webm`, { type: 'audio/webm' });
-          if (onFileCreated) onFileCreated(audioFile);
+          attachRecording(blob, actualFormat, onFileCreated);
         }
-
-        _resetRecordingUI();
-      };
-
-      mediaRecorder.start();
-      isRecording = true;
-      recordingStartTime = new Date();
-
-      // Start browser STT if that's the provider
-      if (_sttProvider === 'browser') {
-        startBrowserSTT();
+      } finally {
+        resetRecordingUI();
       }
+    };
 
-      if (showToast) {
-        showToast('Recording...');
-      }
-    })
-    .catch(error => {
-      console.error('Microphone access error:', error);
-      if (showError) {
-        if (error.name === 'NotAllowedError') {
-          showError('Microphone access denied. Check browser permissions.');
-        } else if (error.name === 'NotFoundError') {
-          showError('No microphone found.');
-        } else {
-          showError('Microphone error: ' + error.message);
-        }
-      }
-      _resetRecordingUI();
-    });
+    mediaRecorder.start(1000);
+    isRecording = true;
+    if (_sttProvider === 'browser' && !startBrowserRecognition()) {
+      showError?.('Browser speech recognition is unavailable; recording will be attached.');
+      _sttProvider = 'disabled';
+    }
+    const started = Date.now();
+    recordingInterval = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - started) / 1000);
+      const sendButton = document.querySelector('.send-btn');
+      if (sendButton) sendButton.title = `Stop recording (${elapsed}s)`;
+    }, 1000);
+    autoStopTimer = setTimeout(() => stopRecording(), MAX_RECORDING_SECONDS * 1000);
+    showToast?.('Recording… click stop when finished');
+  }).catch((error) => {
+    if (error.name === 'NotAllowedError') showError?.('Microphone access denied. Check this site’s browser permissions.');
+    else if (error.name === 'NotFoundError') showError?.('No microphone found.');
+    else showError?.(`Microphone error: ${error.message}`);
+    resetRecordingUI();
+  });
 }
 
-/**
- * Stop voice recording
- */
 export function stopRecording() {
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    // isRecording will be set to false in _resetRecordingUI called from onstop
-  } else {
-    _resetRecordingUI();
-  }
+  if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
+  else resetRecordingUI();
 }
 
-/**
- * Check if currently recording
- */
-export function getIsRecording() {
-  return isRecording;
-}
+export function getIsRecording() { return isRecording; }
 
-/**
- * Initialize recording state
- */
 export function init() {
   isRecording = false;
   refreshSttProvider();
+  window.addEventListener('stt-preferences-changed', (event) => {
+    _sttProvider = event.detail?.provider || 'disabled';
+    _sttLanguage = event.detail?.language || '';
+    window._updateSendBtnIcon?.();
+  });
 }
 
 const voiceRecorderModule = {
@@ -277,7 +219,7 @@ const voiceRecorderModule = {
   init,
   refreshSttProvider,
   get _sttProvider() { return _sttProvider; },
-  set _sttProvider(v) { _sttProvider = v; },
+  set _sttProvider(value) { _sttProvider = value; },
 };
 
 export default voiceRecorderModule;
