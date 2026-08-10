@@ -1,0 +1,4 @@
+interface:
+  display_name: "Todoist Planning"
+  short_description: "Plan Todoist work by values and leverage"
+  default_prompt: "Use $todoist-planning to plan my week with Eisenhower and Pareto leverage, then turn it into realistic Todoist actions."

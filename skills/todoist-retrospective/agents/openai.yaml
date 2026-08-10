@@ -1,0 +1,4 @@
+interface:
+  display_name: "Todoist Retrospective"
+  short_description: "Review Todoist work and recover momentum"
+  default_prompt: "Use $todoist-retrospective to review my week in Todoist, find the high-leverage pattern, and choose one humane improvement."
