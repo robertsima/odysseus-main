@@ -58,6 +58,66 @@ class FakeMoveConn:
         self.calls.append(("logout",))
 
 
+class FakeGmailListConn:
+    """Gmail-style LIST response: Sent lives under [Gmail]/Sent Mail."""
+
+    FOLDERS = [
+        b'(\\HasNoChildren) "/" "INBOX"',
+        b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"',
+        b'(\\HasNoChildren \\Trash) "/" "[Gmail]/Trash"',
+        b'(\\HasNoChildren \\All) "/" "[Gmail]/All Mail"',
+        b'(\\HasNoChildren \\Junk) "/" "[Gmail]/Spam"',
+        b'(\\HasNoChildren \\Drafts) "/" "[Gmail]/Drafts"',
+    ]
+
+    def list(self):
+        return "OK", list(self.FOLDERS)
+
+
+def test_mcp_resolve_folder_maps_sent_to_gmail(monkeypatch):
+    conn = FakeGmailListConn()
+    assert es._resolve_folder(conn, "Sent", "sent") == "[Gmail]/Sent Mail"
+    assert es._resolve_folder(conn, "Archive", "archive") == "[Gmail]/All Mail"
+    assert es._resolve_folder(conn, "Trash", "trash") == "[Gmail]/Trash"
+    assert es._resolve_folder(conn, "Spam", "junk") == "[Gmail]/Spam"
+    assert es._resolve_folder(conn, "Drafts", "drafts") == "[Gmail]/Drafts"
+
+
+def test_mcp_resolve_folder_role_from_name():
+    assert es._folder_role_from_name("Sent") == "sent"
+    assert es._folder_role_from_name("[Gmail]/Sent Mail") == "sent"
+    assert es._folder_role_from_name("[Gmail]/Drafts") == "drafts"
+
+
+def test_mcp_list_emails_resolves_gmail_sent_before_select(monkeypatch):
+    list_conn = FakeGmailListConn()
+    select_conn = FakeListConn()
+
+    def _connect(account=None):
+        # _list_emails calls _resolve_folder (list) then select on same conn
+        class Combo(FakeGmailListConn, FakeListConn):
+            def list(self):
+                return FakeGmailListConn.list(self)
+
+            def select(self, folder, readonly=False):
+                return FakeListConn.select(self, folder, readonly)
+
+            def uid(self, command, *args):
+                return FakeListConn.uid(self, command, *args)
+
+            def logout(self):
+                FakeListConn.logout(self)
+
+        return Combo()
+
+    monkeypatch.setattr(es, "_imap_connect", _connect)
+    assert es._list_emails(folder="Sent", max_results=5) == []
+    combo = _connect()
+    monkeypatch.setattr(es, "_imap_connect", lambda account=None: combo)
+    es._list_emails(folder="Sent", max_results=5)
+    assert combo.calls[0] == ("select", '"[Gmail]/Sent Mail"', True)
+
+
 def test_mcp_list_emails_quotes_spaced_folder_on_select(monkeypatch):
     conn = FakeListConn()
     monkeypatch.setattr(es, "_imap_connect", lambda account=None: conn)

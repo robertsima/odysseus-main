@@ -45,6 +45,30 @@ def test_prompt_descriptions_surface_param_names_and_required():
     assert "required" in text                   # required-ness is surfaced
 
 
+def test_todoist_builtin_surfaces_through_mcp_discovery():
+    mgr = McpManager()
+    mgr._tools = {
+        "todoist": [
+            {
+                "name": "todoist",
+                "description": "Run Todoist CLI.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"args": {"type": "array"}},
+                    "required": ["args"],
+                },
+            }
+        ]
+    }
+    mgr._connections = {"todoist": {"status": "connected", "name": "Built-in: Todoist", "identity": ""}}
+
+    text = mgr.get_tool_descriptions_for_prompt()
+    schemas = mgr.get_all_openai_schemas()
+
+    assert "mcp__todoist__todoist" in text
+    assert schemas[0]["function"]["name"] == "mcp__todoist__todoist"
+
+
 def test_format_mcp_params_handles_no_params():
     from src.mcp_manager import _format_mcp_params
 

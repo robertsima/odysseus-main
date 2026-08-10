@@ -3253,11 +3253,17 @@ async function _loadFolders({ resetMissing = false, live = false } = {}) {
   const seq = ++_libFolderSeq;
   const accountAtStart = state._libAccountId || '';
   try {
-    const res = await fetch(emailApiUrl('/api/email/folders', {
+    let res = await fetch(emailApiUrl('/api/email/folders', {
       account_id: accountAtStart || undefined,
       cached_only: live ? undefined : 1,
     }));
     let data = await res.json();
+    if (!live && (!data.folders?.length || data.sync?.source === 'folder_cache_miss')) {
+      res = await fetch(emailApiUrl('/api/email/folders', {
+        account_id: accountAtStart || undefined,
+      }));
+      data = await res.json();
+    }
     if (seq !== _libFolderSeq || accountAtStart !== (state._libAccountId || '')) return;
     const sel = document.getElementById('email-lib-folder');
     if (!sel || !data.folders) return;

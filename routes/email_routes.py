@@ -406,6 +406,8 @@ def _resolve_mail_folder(conn, preferred: str, role: str = "") -> str:
         "trash": ("\\Trash",),
         "archive": ("\\Archive", "\\All"),
         "junk": ("\\Junk",),
+        "sent": ("\\Sent",),
+        "drafts": ("\\Drafts",),
     }.get(role, ())
     for f in folders:
         decoded = f.decode() if isinstance(f, bytes) else str(f)
@@ -417,6 +419,8 @@ def _resolve_mail_folder(conn, preferred: str, role: str = "") -> str:
         "trash": ("Trash", "[Gmail]/Trash", "[Google Mail]/Trash", "Bin", "[Gmail]/Bin", "Deleted Messages", "Deleted Items"),
         "archive": ("Archive", "Archives", "[Gmail]/All Mail", "[Google Mail]/All Mail", "All Mail"),
         "junk": ("Junk", "Spam", "[Gmail]/Spam", "[Google Mail]/Spam"),
+        "sent": ("Sent", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "Sent Mail", "Sent Items", "INBOX.Sent"),
+        "drafts": ("Drafts", "[Gmail]/Drafts", "[Google Mail]/Drafts", "Draft", "INBOX.Drafts"),
     }.get(role, ())
     lower_map = {n.lower(): n for n in names}
     for candidate in candidates:
@@ -434,6 +438,16 @@ def _folder_role_from_name(name: str) -> str:
         return "junk"
     if "archive" in lower or "all mail" in lower:
         return "archive"
+    # Anchored "sent" check: a bare `"sent" in lower` also matches folder
+    # names like "Presentations", "Consent Forms", or "Resent Items",
+    # silently misrouting them to the Sent role. Match only on whole
+    # words so "Sent" / "Sent Items" / "[Gmail]/Sent Mail" still hit but
+    # those false positives don't.
+    words = "".join(ch if ch.isalnum() else " " for ch in lower).split()
+    if "sent" in words:
+        return "sent"
+    if "draft" in lower:
+        return "drafts"
     return ""
 
 
@@ -1799,6 +1813,7 @@ def setup_email_routes():
         try:
             conn, _reused_conn = _pooled_connect(account_id, owner=owner)
             conn_ok = True
+            folder = _resolve_mail_folder(conn, folder, _folder_role_from_name(folder))
             select_status, _ = conn.select(_q(folder), readonly=True)
             if select_status != "OK":
                 return {"emails": [], "total": 0, "folder": folder, "error": f"Folder not found: {folder}"}
@@ -3821,8 +3836,8 @@ def setup_email_routes():
                 payload["sync"] = sync_meta
                 return payload
             return {
-                "folders": ["INBOX", "Sent", "Archive"],
-                "sync": {"source": "folder_cached_only_fallback"},
+                "folders": [],
+                "sync": {"source": "folder_cache_miss"},
             }
 
         def _list_folders_sync():

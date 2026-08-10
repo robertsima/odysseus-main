@@ -470,6 +470,8 @@ def _resolve_folder(conn, preferred: str, role: str) -> str:
         "trash": ("\\Trash",),
         "archive": ("\\Archive", "\\All"),
         "junk": ("\\Junk",),
+        "sent": ("\\Sent",),
+        "drafts": ("\\Drafts",),
     }.get(role, ())
     for f in folders:
         decoded = f.decode() if isinstance(f, bytes) else str(f)
@@ -482,6 +484,8 @@ def _resolve_folder(conn, preferred: str, role: str) -> str:
         "trash": ("Trash", "[Gmail]/Trash", "[Google Mail]/Trash", "Bin", "Deleted Messages", "Deleted Items"),
         "archive": ("Archive", "Archives", "[Gmail]/All Mail", "[Google Mail]/All Mail"),
         "junk": ("Junk", "Spam", "[Gmail]/Spam", "[Google Mail]/Spam"),
+        "sent": ("Sent", "[Gmail]/Sent Mail", "[Google Mail]/Sent Mail", "Sent Mail", "Sent Items", "INBOX.Sent"),
+        "drafts": ("Drafts", "[Gmail]/Drafts", "[Google Mail]/Drafts", "Draft", "INBOX.Drafts"),
     }.get(role, ())
     lower_map = {n.lower(): n for n in names}
     for candidate in candidates:
@@ -498,6 +502,16 @@ def _folder_role_from_name(name: str) -> str:
         return "junk"
     if "archive" in lower or "all mail" in lower:
         return "archive"
+    # Anchored "sent" check: a bare `"sent" in lower` also matches folder
+    # names like "Presentations", "Consent Forms", or "Resent Items",
+    # silently misrouting them to the Sent role. Match only on whole
+    # words so "Sent" / "Sent Items" / "[Gmail]/Sent Mail" still hit but
+    # those false positives don't.
+    words = "".join(ch if ch.isalnum() else " " for ch in lower).split()
+    if "sent" in words:
+        return "sent"
+    if "draft" in lower:
+        return "drafts"
     return ""
 
 
@@ -979,6 +993,7 @@ def _list_emails(folder="INBOX", max_results=20, unresponded_only=False,
     conn = None
     try:
         conn = _imap_connect(account)
+        folder = _resolve_folder(conn, folder, _folder_role_from_name(folder))
         select_status, _ = conn.select(_q(folder), readonly=True)
         if select_status != "OK":
             raise ValueError(f"IMAP folder not found: {folder}")
@@ -1100,16 +1115,21 @@ def _search_emails(query, folders=None, max_results=20, account=None):
     # Mail clients commonly use OR FROM/SUBJECT/TEXT to match either field.
     # IMAP SEARCH OR is binary, so we nest it.
     search_cmd = f'(OR OR FROM "{q}" SUBJECT "{q}" TEXT "{q}")'
+    conn = _imap_connect(account)
     if folders is None:
-        folders = ["INBOX", "Sent", "Archive"]
+        folders = [
+            "INBOX",
+            _resolve_folder(conn, "Sent", "sent"),
+            _resolve_folder(conn, "Archive", "archive"),
+        ]
     cache = _get_cached_summaries()
     out = []
-    conn = _imap_connect(account)
     touched = []
     try:
         for folder in folders:
             try:
-                status, _ = conn.select(_q(folder), readonly=True)
+                resolved = _resolve_folder(conn, folder, _folder_role_from_name(folder))
+                status, _ = conn.select(_q(resolved), readonly=True)
                 if status != "OK":
                     continue
                 status, data = conn.uid("SEARCH", None, search_cmd)
@@ -1141,7 +1161,7 @@ def _search_emails(query, folders=None, max_results=20, account=None):
                             "to": to_str,
                             "cc": cc_str,
                             "date": date_str,
-                            "_folder": folder,
+                            "_folder": resolved,
                             "summary": cached.get("summary", ""),
                         })
                     except Exception:
