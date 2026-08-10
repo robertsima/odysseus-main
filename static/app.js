@@ -25,6 +25,7 @@ import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
+import lotusModule from './js/lotus.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
 import settingsModule from './js/settings.js?v=20260722emailfastindex1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
@@ -1073,6 +1074,18 @@ function initializeEventListeners() {
       if (!Modals.toggle('calendar-modal')) {
         if (calendarModule.isCalendarOpen()) calendarModule.closeCalendar();
         else calendarModule.openCalendar();
+      }
+    });
+  }
+
+  // Lotus daily check-ins
+  const toolLotusBtn = el('tool-lotus-btn');
+  if (toolLotusBtn) {
+    toolLotusBtn.addEventListener('click', async () => {
+      const Modals = await import('./js/modalManager.js');
+      if (!Modals.toggle('lotus-modal')) {
+        if (lotusModule.isLotusOpen()) lotusModule.closeLotus();
+        else lotusModule.openLotus();
       }
     });
   }

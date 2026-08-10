@@ -1,0 +1,31 @@
+# Keep user data and local state out of build layers entirely.
+data/
+logs/
+secrets/
+imports/incoming/*
+imports/processed/*
+imports/failed/*
+deploy/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite*
+.env
+config/config.yaml
+config/import_mapping.yaml
+
+# Build/test noise
+tests/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.git/
+.gitignore
+compose.yaml
+Dockerfile

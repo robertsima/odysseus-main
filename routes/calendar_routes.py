@@ -546,6 +546,8 @@ def _event_to_dict(ev: CalendarEvent) -> dict:
         "recurrence_exdates": _recurrence_exdates(ev),
         "calendar": ev.calendar.name if ev.calendar else "",
         "calendar_href": ev.calendar_id,
+        "source": ev.calendar.source if ev.calendar else "",
+        "origin": getattr(ev, "origin", None),
         "color": ev.color or (ev.calendar.color if ev.calendar else ""),
         "event_type": getattr(ev, "event_type", None),
         "importance": getattr(ev, "importance", None) or "normal",
@@ -981,12 +983,43 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
 
     @router.post("/sync")
     async def sync_caldav_endpoint(request: Request, direction: str = "pull"):
-        """Sync events with the configured CalDAV server.
+        """Sync events with configured external calendar sources.
         Returns counts + any per-calendar errors. Called by the frontend
         on calendar open and by the periodic scheduler loop."""
         owner = _require_user(request)
         from src.caldav_sync import sync_caldav_direction
-        return await sync_caldav_direction(owner, direction)
+        from src.todoist_calendar_sync import sync_todoist_calendar
+
+        direction_l = (direction or "pull").strip().lower()
+        caldav_result = await sync_caldav_direction(owner, direction)
+        todoist_result = (
+            await sync_todoist_calendar(owner)
+            if direction_l in {"pull", "both"}
+            else {"calendars": 0, "events": 0, "deleted": 0, "errors": [], "skipped": True}
+        )
+        caldav_errors = list(caldav_result.get("errors", []))
+        todoist_errors = [f"Todoist: {err}" for err in todoist_result.get("errors", [])]
+        if todoist_result.get("calendars") or todoist_result.get("events") or todoist_result.get("skipped"):
+            caldav_errors = [err for err in caldav_errors if err != "CalDAV is not configured"]
+        return {
+            "calendars": caldav_result.get("calendars", 0) + todoist_result.get("calendars", 0),
+            "events": caldav_result.get("events", 0) + todoist_result.get("events", 0),
+            "deleted": caldav_result.get("deleted", 0) + todoist_result.get("deleted", 0),
+            "errors": [*caldav_errors, *todoist_errors],
+            "sources": {"caldav": caldav_result, "todoist": todoist_result},
+        }
+
+    @router.get("/todoist/status")
+    async def todoist_calendar_status(request: Request):
+        _require_user(request)
+        from src.todoist_calendar_sync import todoist_status
+        return await todoist_status()
+
+    @router.post("/todoist/sync")
+    async def sync_todoist_calendar_endpoint(request: Request):
+        owner = _require_user(request)
+        from src.todoist_calendar_sync import sync_todoist_calendar
+        return await sync_todoist_calendar(owner)
 
 
     @router.delete("/calendars/{cal_id}")

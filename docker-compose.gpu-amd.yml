@@ -37,6 +37,11 @@ services:
       - LLM_HOSTS=${LLM_HOSTS:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - TODOIST_API_TOKEN=${TODOIST_API_TOKEN:-}
+      - LOTUS_LOG_LEVEL=${LOTUS_LOG_LEVEL:-INFO}
+      - LOTUS_CONFIG=/app/data/lotus/config.yaml
+      - LOTUS_DATA_DIR=/app/data/lotus/data
+      - LOTUS_IMPORT_ROOT=/app/data/lotus/imports
+      - LOTUS_TOOL_NAME_STYLE=underscore
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
       - RESEARCH_LLM_ENDPOINT=${RESEARCH_LLM_ENDPOINT:-}
       - HF_TOKEN=${HF_TOKEN:-}

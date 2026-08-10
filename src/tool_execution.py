@@ -354,6 +354,7 @@ _MCP_TOOL_MAP = {
     "generate_image": ("image_gen",  "generate_image"),
 }
 _EMAIL_MCP_OWNER_ARG = "_odysseus_owner"
+_LOTUS_MCP_OWNER_ARG = "_odysseus_owner"
 
 
 def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[str]]:
@@ -363,12 +364,12 @@ def _parse_qualified_mcp_args(tool: str, content: str) -> tuple[Dict, Optional[s
     try:
         parsed = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        if tool.startswith("mcp__email__"):
-            return {}, "Email MCP tool arguments must be a JSON object."
+        if tool.startswith(("mcp__email__", "mcp__lotus__")):
+            return {}, "Owner-scoped MCP tool arguments must be a JSON object."
         return {}, None
     if not isinstance(parsed, dict):
-        if tool.startswith("mcp__email__"):
-            return {}, "Email MCP tool arguments must be a JSON object."
+        if tool.startswith(("mcp__email__", "mcp__lotus__")):
+            return {}, "Owner-scoped MCP tool arguments must be a JSON object."
         return {}, None
     return parsed, None
 
@@ -955,6 +956,9 @@ async def _execute_tool_block_impl(
                 if tool.startswith("mcp__email__") and owner:
                     args = dict(args)
                     args[_EMAIL_MCP_OWNER_ARG] = owner
+                elif tool.startswith("mcp__lotus__"):
+                    args = dict(args)
+                    args[_LOTUS_MCP_OWNER_ARG] = owner or "__single_user__"
                 result = await mcp.call_tool(tool, args)
         else:
             desc = f"mcp: {tool}"

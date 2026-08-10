@@ -29,6 +29,20 @@ def test_generic_mcp_connection_error_preserves_original_error():
     assert msg == "boom"
 
 
+def test_todoist_connection_error_explains_cli_wrapper():
+    msg = _format_mcp_connection_error(
+        "Todoist",
+        "td",
+        ["today", "--json"],
+        RuntimeError("Connection closed"),
+    )
+
+    assert "Connection closed" in msg
+    assert "td" in msg
+    assert "not an MCP server" in msg
+    assert "mcp_servers/todoist_server.py" in msg
+
+
 def test_http_transport_routes_to_start_http_connect():
     mgr = McpManager()
 

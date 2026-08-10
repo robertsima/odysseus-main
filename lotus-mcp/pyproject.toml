@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lotus-mcp"
+version = "0.1.0"
+description = "Local-first, read-only MCP adapter over user-owned mood exports."
+readme = "README.md"
+# The host Odysseus repo still builds on 3.11 in CI; the shipped container is
+# 3.12. Keep the floor at 3.11 so the package installs in both.
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = [
+    # Built-in servers in the host repo use the v1 low-level Server decorator
+    # API. MCP SDK v2 is a breaking rewrite — stay on the maintained v1 line.
+    "mcp>=1.10,<2",
+    "pydantic>=2.9,<3",
+    "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+lotus-mcp = "lotus_mcp.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Run the suite straight from the source tree without an editable install.
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S", "C4", "RUF"]
+ignore = [
+    # Import-time asserts are not used; pytest asserts are excluded below.
+    "S101",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests intentionally build hostile inputs (traversal strings, fake secrets)
+# and use asserts.
+"tests/*" = ["S101", "S105", "S106", "S108"]

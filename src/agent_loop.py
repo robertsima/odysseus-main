@@ -20,7 +20,7 @@ from src.llm_core import (
     stream_llm_with_fallback,
     _is_ollama_native_url,
 )
-from src.model_context import estimate_tokens
+from src.model_context import estimate_tokens, is_local_endpoint
 from src.settings import get_setting
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
@@ -43,6 +43,25 @@ from src.agent_tools import (
 logger = logging.getLogger(__name__)
 
 _BROWSER_MCP_PREFIX = "mcp__builtin_browser__"
+_LOTUS_MCP_TOOL_NAMES = {
+    "mood_get_import_status",
+    "mood_import_file",
+    "mood_search_entries",
+    "mood_summarize_period",
+    "mood_detect_low_energy_patterns",
+}
+
+
+def _apply_private_mcp_filter(
+    endpoint_url: str,
+    disabled_map: Dict[str, set],
+    disabled_tools: Set[str],
+) -> None:
+    """Expose private Lotus data only to endpoints classified as local."""
+    if is_local_endpoint(endpoint_url or ""):
+        return
+    disabled_map.setdefault("lotus", set()).update(_LOTUS_MCP_TOOL_NAMES)
+    disabled_tools.update(f"mcp__lotus__{name}" for name in _LOTUS_MCP_TOOL_NAMES)
 
 
 def _expand_browser_mcp_tools(tool_names: Set[str], mcp_mgr) -> Set[str]:
@@ -3237,6 +3256,8 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
+    if mcp_mgr:
+        _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools)
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
         direct_messages = (

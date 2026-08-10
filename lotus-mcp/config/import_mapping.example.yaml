@@ -1,0 +1,62 @@
+# Example field mappings.
+#
+# IMPORTANT: none of these describe an official How We Feel export. No How We
+# Feel export format has been verified. These are adapter conventions for files
+# the user prepared themselves. Paste the `mappings:` block into config.yaml.
+
+mappings:
+  # A mapping for a hand-made spreadsheet whose columns are already in this
+  # adapter's canonical units (valence -1..1, energy/intensity 0..1).
+  my_spreadsheet:
+    description: "My own mood spreadsheet, exported as CSV."
+    # Value stored in MoodEntry.source and shown in import status.
+    source_label: manual_csv
+    # A column is only read when it matches an alias here. Matching ignores
+    # case, spaces, hyphens, dots and underscores: "Date / Time" matches
+    # "date_time". First alias listed wins if a file has several.
+    aliases:
+      occurred_at: [timestamp, datetime, date_time, occurred_at, when]
+      timezone: [timezone, tz]
+      emotion_label: [emotion, feeling, mood, emotion_label]
+      emotion_family: [emotion_family, family, quadrant]
+      valence: [valence, pleasantness]
+      energy: [energy, arousal]
+      intensity: [intensity, strength]
+      note: [note, journal, comment]
+      tags: [tags, tag, context]
+      source_record_id: [id, record_id]
+    retain_unknown_fields: false
+
+  # A source that splits date and time across two columns and uses 1-5 scales.
+  five_point_scales:
+    description: "Split date/time columns with 1-5 pleasantness and energy."
+    source_label: manual_csv
+    aliases:
+      date: [date]
+      time: [time]
+      emotion_label: [mood]
+      valence: [pleasantness]
+      energy: [energy]
+    # Linear rescale from the source range onto the canonical range:
+    # valence -> [-1, 1]; energy and intensity -> [0, 1].
+    scales:
+      valence: { in_min: 1, in_max: 5 }
+      energy: { in_min: 1, in_max: 5 }
+    # Formats tried before the built-in fallbacks (Python strptime syntax).
+    date_formats: ["%d/%m/%Y"]
+    time_formats: ["%H:%M"]
+    # A naive timestamp is REJECTED unless a zone is declared here. This is an
+    # explicit operator statement about the data, not a guess by the adapter.
+    # Timestamps that fall in a DST gap or repeat are still rejected, because
+    # they have no single correct answer.
+    assume_timezone: America/New_York
+
+  # Keeps columns the mapping does not recognise, as bounded flat strings in
+  # MoodEntry.context. Off by default: unknown columns may hold anything.
+  keep_extra_columns:
+    description: "Generic mapping that also retains unmatched columns."
+    source_label: manual_csv
+    aliases:
+      occurred_at: [timestamp]
+      emotion_label: [emotion]
+    retain_unknown_fields: true

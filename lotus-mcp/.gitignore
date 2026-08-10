@@ -1,0 +1,41 @@
+# Never commit real mood data, journals, databases, secrets or imported files.
+#
+# These use `dir/*` rather than `dir/`: git does not descend into an excluded
+# directory, so a `!dir/.gitkeep` negation under `dir/` can never take effect
+# and the layout would not survive a clone.
+# The parent Odysseus .gitignore excludes `data/` everywhere. Git will not
+# descend into an excluded directory, so the directory itself has to be
+# re-included before its contents can be filtered.
+!data/
+data/*
+!data/.gitkeep
+secrets/*
+!secrets/.gitkeep
+imports/incoming/*
+imports/processed/*
+imports/failed/*
+!imports/**/.gitkeep
+logs/
+
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+config/config.yaml
+config/import_mapping.yaml
+.env
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# Default host directory used by compose.yaml when LOTUS_HOST_DIR is unset.
+deploy/

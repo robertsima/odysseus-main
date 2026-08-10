@@ -1,0 +1,76 @@
+# lotus-mcp example configuration.
+#
+# Copy to config/config.yaml (or mount at /app/config/config.yaml) and edit.
+# Every setting below is already the built-in default — the file exists so the
+# consent boundary is visible and reviewable rather than implicit.
+#
+# There are NO tokens, credentials or real mood records in this file, and none
+# belong here. Secrets, if a future version needs any, are read from mounted
+# files under secrets/.
+
+privacy:
+  # Aggregate statistics (counts, averages per bucket). Safe by design.
+  expose_aggregate_summaries: true
+  # Emotion labels in summaries, e.g. {"overwhelmed": 4}.
+  expose_emotion_labels: true
+
+  # Individual mood records. OFF: a model asking for raw entries gets a policy
+  # error and is pointed at summarize_period instead.
+  expose_raw_entries: false
+  # Journal note text in any response. OFF.
+  expose_notes: false
+  # Themes derived from note text. OFF, and additionally requires expose_notes.
+  include_note_themes: false
+  # Read the note column off disk during import at all. OFF: with this false,
+  # note text never enters the database, so it cannot leak later.
+  import_notes: false
+
+  # Joining mood data to calendar / sleep / email / location / activity.
+  # OFF, and unimplemented — this flag is the gate for any future connector.
+  allow_cross_domain_correlation: false
+  # Writing anything back to How We Feel or another source. OFF and
+  # unimplemented; no verified write interface exists.
+  allow_writeback_to_source: false
+  # Any outbound network call. OFF, and mechanically enforced at runtime by a
+  # socket guard that permits only loopback.
+  allow_external_network_calls: false
+
+  # A query wider than this many days must set confirm_extended_range: true.
+  max_query_days_without_confirmation: 90
+  # Absolute ceiling on rows any single search can return.
+  maximum_entry_result_limit: 500
+
+limits:
+  max_file_bytes: 26214400        # 25 MiB
+  max_records_per_file: 100000
+  max_note_chars: 8000
+  max_field_chars: 2000
+  max_json_depth: 12
+  max_columns: 200
+  # reject | truncate — what to do with a note longer than max_note_chars.
+  oversize_note_policy: reject
+
+paths:
+  # Client-supplied import paths are resolved relative to import_root and are
+  # rejected if they escape it, including via symlink.
+  import_root: imports/incoming
+  processed_dir: imports/processed
+  failed_dir: imports/failed
+  database_path: data/mood.db
+  state_dir: data
+
+# Which mapping is used when a caller does not name one. An unknown mapping
+# name is an error — sensitive fields are never inferred from a mapping the
+# operator did not choose.
+default_mapping: generic
+
+# Extra mappings merge with the built-ins ("generic", "how_we_feel_generic").
+# See import_mapping.example.yaml for the full shape.
+mappings: {}
+
+log_level: INFO
+
+# dotted   -> mood.search_entries (documented default)
+# underscore -> mood_search_entries, for clients that restrict tool names to
+#               [A-Za-z0-9_-]
+tool_name_style: dotted

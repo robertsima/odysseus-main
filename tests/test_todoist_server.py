@@ -91,9 +91,11 @@ def test_timeout_is_handled(monkeypatch):
 
     with patch("mcp_servers.todoist_server.shutil.which", return_value="/usr/local/bin/td"), \
          patch("mcp_servers.todoist_server.asyncio.create_subprocess_exec", return_value=proc):
-        result = asyncio.run(srv.call_tool("todoist", {"args": ["today"]}))
+        returncode, stdout, stderr = asyncio.run(srv._run_td(["today"], timeout=0.01))
 
-    assert "timed out" in _text(result)
+    assert returncode == 1
+    assert stdout == ""
+    assert "timed out" in stderr
     proc.kill.assert_called_once()
     proc.wait.assert_called_once()
 

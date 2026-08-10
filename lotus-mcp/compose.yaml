@@ -1,0 +1,80 @@
+# Lotus MCP adapter — NAS / ZimaOS deployment.
+#
+# There is no `ports:` section and that is deliberate. Lotus speaks MCP over
+# stdio; it has no listening socket, so there is nothing to expose and nothing
+# to reach from the network. This service is not publicly accessible by
+# default and cannot be made so by accident.
+#
+# Usage:
+#   cp .env.example .env      # then edit LOTUS_HOST_DIR / UID / GID
+#   docker compose up -d      # idle maintenance container, holds the volumes
+#   docker compose exec lotus-mcp lotus-mcp files
+#   docker compose exec lotus-mcp lotus-mcp validate moods.csv --source-type manual_csv
+#   docker compose exec lotus-mcp lotus-mcp import   moods.csv --source-type manual_csv
+#
+# To run the MCP server itself (this is what an MCP client spawns):
+#   docker compose run --rm -T lotus-mcp lotus-mcp serve
+
+name: lotus-mcp
+
+services:
+  lotus-mcp:
+    build: .
+    image: lotus-mcp:0.1.0
+    container_name: lotus-mcp
+
+    # Must match the owner of the host directories below, or the container
+    # cannot write the database. `id -u` / `id -g` on the NAS.
+    user: "${LOTUS_UID:-1000}:${LOTUS_GID:-1000}"
+
+    # Nothing outside the mounted volumes is ever written.
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    environment:
+      LOTUS_CONFIG: /app/config/config.yaml
+      LOTUS_DATA_DIR: /app/data
+      LOTUS_IMPORT_ROOT: /app/imports
+      LOTUS_LOG_LEVEL: ${LOTUS_LOG_LEVEL:-INFO}
+
+    volumes:
+      # Config and secrets are read-only to the container: consent settings
+      # cannot be rewritten by the process that they constrain.
+      - ${LOTUS_HOST_DIR:-./deploy}/config:/app/config:ro
+      - ${LOTUS_HOST_DIR:-./deploy}/secrets:/app/secrets:ro
+      # Writable: the SQLite database and operational state.
+      - ${LOTUS_HOST_DIR:-./deploy}/data:/app/data
+      # Writable: incoming/ processed/ failed/. Files move between them.
+      - ${LOTUS_HOST_DIR:-./deploy}/imports:/app/imports
+      - ${LOTUS_HOST_DIR:-./deploy}/logs:/app/logs
+
+    healthcheck:
+      test: ["CMD", "lotus-mcp", "health"]
+      interval: 60s
+      timeout: 10s
+      start_period: 10s
+      retries: 3
+
+    restart: unless-stopped
+    stop_grace_period: 10s
+
+    # Honoured by Compose V2 outside swarm. A parser working through a large
+    # import should not be able to starve the rest of the NAS.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          memory: 128M
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

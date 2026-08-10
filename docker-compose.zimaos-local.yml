@@ -41,6 +41,11 @@ services:
       ODYSSEUS_SCRIPT_HOST: localhost
       ODYSSEUS_STARTUP_WARMUPS: "1"
       TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
+      LOTUS_LOG_LEVEL: ${LOTUS_LOG_LEVEL:-INFO}
+      LOTUS_CONFIG: /app/data/lotus/config.yaml
+      LOTUS_DATA_DIR: /app/data/lotus/data
+      LOTUS_IMPORT_ROOT: /app/data/lotus/imports
+      LOTUS_TOOL_NAME_STYLE: underscore
       PGID: "1000"
       PUID: "1000"
       # Honoured natively as of the chat_processor change; it was previously

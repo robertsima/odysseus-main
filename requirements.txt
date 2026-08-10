@@ -42,6 +42,8 @@ bcrypt
 # breaking rewrite, so keep fresh installs on the maintained v1 line until the
 # servers are migrated together.
 mcp<2
+# Bundled Lotus MCP policy and import mapping configuration.
+PyYAML>=6.0,<7
 pyotp
 qrcode[pil]
 croniter

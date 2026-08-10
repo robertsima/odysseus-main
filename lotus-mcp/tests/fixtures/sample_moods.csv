@@ -1,0 +1,6 @@
+id,timestamp,emotion,emotion_family,pleasantness,energy,intensity,tags,note
+sample-001,2026-08-03T09:15:00-04:00,overwhelmed,anxious,-0.6,0.7,0.8,"work,planning",Synthetic sample note.
+sample-002,2026-08-03T13:40:00-04:00,content,pleasant,0.5,0.4,0.3,lunch,
+sample-003,2026-08-04T08:05:00-04:00,drained,low energy,-0.4,0.15,0.6,"work,monday",Synthetic multi-line note.
+sample-004,2026-08-04T21:30:00-04:00,calm,pleasant,0.6,0.2,0.4,evening,
+sample-005,2026-08-05T07:50:00-04:00,tired 😴,low energy,-0.35,0.1,0.5,"monday,commute",Emoji label sample.

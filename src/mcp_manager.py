@@ -17,7 +17,26 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
-_BUILTIN_FUNCTION_CALLING_SERVERS = {"builtin_browser", "todoist"}
+# Lotus is filtered per request in agent_loop: local/private model endpoints may
+# use it, while remote endpoints have every Lotus tool hidden and runtime-blocked.
+_BUILTIN_FUNCTION_CALLING_SERVERS = {"builtin_browser", "todoist", "lotus"}
+
+
+def _model_visible_schema(schema: Any) -> Dict:
+    """Remove dispatcher-injected arguments from a model-facing MCP schema."""
+    if not isinstance(schema, dict):
+        return {"type": "object", "properties": {}}
+    visible = dict(schema)
+    properties = dict(visible.get("properties") or {})
+    hidden = {name for name in properties if name.startswith("_odysseus_")}
+    for name in hidden:
+        properties.pop(name, None)
+    visible["properties"] = properties
+    if isinstance(visible.get("required"), list):
+        visible["required"] = [
+            name for name in visible["required"] if name not in hidden
+        ]
+    return visible
 
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
@@ -32,6 +51,15 @@ def _format_mcp_connection_error(name: str, command: str = "", args: Optional[Li
             "Browser MCP could not start. On fresh installs, cache the Playwright MCP package once before connecting:\n\n"
             "npx -y @playwright/mcp@latest --version\n\n"
             "Then restart Odysseus and reconnect the Browser MCP server."
+        )
+
+    if name.lower() == "todoist" or lower_command.startswith("td "):
+        return (
+            f"{raw_error}\n\n"
+            "Todoist MCP could not start. The `td` binary is the Todoist CLI, not an MCP server, "
+            "so adding `td` directly as a custom MCP server will close the connection during handshake.\n\n"
+            "Use the built-in Todoist MCP server, or run the wrapper as a stdio server:\n\n"
+            "python /app/mcp_servers/todoist_server.py"
         )
 
     return raw_error
@@ -595,7 +623,7 @@ class McpManager:
                     "function": {
                         "name": qualified,
                         "description": f"[MCP:{label}] {tool['description']}",
-                        "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                        "parameters": _model_visible_schema(tool.get("input_schema")),
                     },
                 }
                 schemas.append(schema)
@@ -615,7 +643,7 @@ class McpManager:
                     "name": tool["name"],
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
-                    "input_schema": tool.get("input_schema") or {},
+                    "input_schema": _model_visible_schema(tool.get("input_schema")),
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
@@ -646,6 +674,7 @@ class McpManager:
             "rag",
             "email",
             "todoist",
+            "lotus",
         }
 
     def get_server_status(self, server_id: str) -> Dict:

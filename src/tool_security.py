@@ -231,6 +231,10 @@ def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
         return False
     if not isinstance(tool_name, str):
         return True
+    # Lotus is safe for non-admin users because the dispatcher injects the
+    # authenticated owner and its MCP shim opens only that owner's database.
+    if tool_name.startswith("mcp__lotus__"):
+        return False
     return tool_name in NON_ADMIN_BLOCKED_TOOLS or tool_name.startswith("mcp__")
 
 

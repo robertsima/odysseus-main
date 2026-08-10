@@ -2582,6 +2582,17 @@ async function _showCalSettings() {
           </div>
           <div style="font-size:10px;opacity:0.4;margin-top:4px;">Pulls events from your CalDAV server. To connect or change CalDAV credentials, open <a href="#" id="cal-settings-open-caldav" style="color:var(--accent, var(--red));text-decoration:none;font-weight:600;">Settings → Integrations</a>.</div>
         </div>
+        <div style="border-top:1px solid var(--border);padding-top:12px;">
+          <div style="font-size:11px;opacity:0.5;margin-bottom:6px;">Todoist</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <button class="memory-toolbar-btn" id="cal-settings-todoist-sync" style="cursor:pointer;">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:relative;top:2px;margin-right:3px;"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+              <span style="position:relative;top:1px;">Sync Todoist</span>
+            </button>
+            <span id="cal-settings-todoist-status" style="font-size:11px;opacity:0.65;">Checking...</span>
+          </div>
+          <div style="font-size:10px;opacity:0.4;margin-top:4px;">Shows Todoist tasks with due dates on this calendar. Configure the container with TODOIST_API_TOKEN, then restart Odysseus.</div>
+        </div>
       </div>
     </div>
   `;
@@ -2754,6 +2765,64 @@ async function _showCalSettings() {
   });
 
   // Integrations link — close this overlay and open Settings → Integrations.
+  const todoistStatus = overlay.querySelector('#cal-settings-todoist-status');
+  const todoistBtn = overlay.querySelector('#cal-settings-todoist-sync');
+  const refreshTodoistStatus = async () => {
+    if (!todoistStatus) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/todoist/status`, { credentials: 'same-origin' });
+      const data = await res.json().catch(() => ({}));
+      if (data.ok) {
+        todoistStatus.textContent = 'Connected';
+        todoistStatus.style.color = 'var(--green)';
+        if (todoistBtn) todoistBtn.disabled = false;
+      } else {
+        todoistStatus.textContent = data.configured ? `Unavailable: ${data.error || 'check logs'}` : 'Set TODOIST_API_TOKEN';
+        todoistStatus.style.color = data.configured ? 'var(--red)' : '';
+        if (todoistBtn) todoistBtn.disabled = !data.configured;
+      }
+    } catch (err) {
+      todoistStatus.textContent = 'Status unavailable';
+      todoistStatus.style.color = 'var(--red)';
+    }
+  };
+  refreshTodoistStatus();
+
+  todoistBtn?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    if (todoistStatus) {
+      todoistStatus.textContent = 'Syncing...';
+      todoistStatus.style.color = '';
+    }
+    try {
+      const res = await fetch(`${API_BASE}/api/calendar/todoist/sync`, {
+        method: 'POST', credentials: 'same-origin',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || (data.errors && data.errors.length)) {
+        throw new Error((data.errors && data.errors[0]) || data.detail || `HTTP ${res.status}`);
+      }
+      if (todoistStatus) {
+        const parts = [];
+        if (data.events) parts.push(`${data.events} tasks`);
+        if (data.deleted) parts.push(`${data.deleted} removed`);
+        todoistStatus.textContent = parts.length ? `Synced - ${parts.join(', ')}` : 'Synced - no dated tasks';
+        todoistStatus.style.color = 'var(--green)';
+      }
+      _allEvents = {}; _fetchedRanges = [];
+      try { localStorage.removeItem(LS_KEY); } catch (_) {}
+      await _fetchCalendars();
+      _render();
+    } catch (err) {
+      if (todoistStatus) {
+        todoistStatus.textContent = `Sync failed: ${err.message || err}`;
+        todoistStatus.style.color = 'var(--red)';
+      }
+    }
+    btn.disabled = false;
+  });
+
   overlay.querySelector('#cal-settings-open-caldav')?.addEventListener('click', (e) => {
     e.preventDefault();
     cleanup();

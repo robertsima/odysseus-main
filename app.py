@@ -771,6 +771,10 @@ from routes.calendar_routes import setup_calendar_routes
 calendar_router = setup_calendar_routes(upload_handler=upload_handler)
 app.include_router(calendar_router)
 
+# Lotus daily check-ins (owner-isolated through Odysseus authentication)
+from routes.lotus_routes import setup_lotus_routes
+app.include_router(setup_lotus_routes())
+
 # Shell (user-facing command execution)
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())

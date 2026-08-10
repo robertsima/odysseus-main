@@ -75,6 +75,7 @@ _BUILTIN_SERVERS = {
     "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
     "todoist":    ("mcp_servers/todoist_server.py",    "Built-in: Todoist"),
+    "lotus":      ("mcp_servers/lotus_server.py",      "Built-in: Lotus"),
 }
 
 # NPX-based built-in servers (run via npx, not Python)
