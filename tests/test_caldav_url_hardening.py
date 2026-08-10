@@ -17,7 +17,7 @@ def test_validate_caldav_url_normalizes_safe_url(monkeypatch):
     )
     assert (
         caldav_sync.validate_caldav_url(" https://calendar.example.com/dav/ ")
-        == "https://calendar.example.com/dav"
+        == "https://calendar.example.com/dav/"
     )
 
 
@@ -45,7 +45,7 @@ def test_validate_caldav_url_blocks_private_ips_unless_explicitly_allowed(monkey
         caldav_sync.validate_caldav_url("http://10.0.0.5:5232/dav")
 
     monkeypatch.setenv("ODYSSEUS_ALLOW_PRIVATE_CALDAV", "1")
-    assert caldav_sync.validate_caldav_url("http://10.0.0.5:5232/dav") == "http://10.0.0.5:5232/dav"
+    assert caldav_sync.validate_caldav_url("http://10.0.0.5:5232/dav/") == "http://10.0.0.5:5232/dav/"
 
 
 def test_validate_caldav_url_blocks_dns_to_private(monkeypatch):
@@ -80,6 +80,16 @@ def test_validate_caldav_url_fails_closed_when_hostname_does_not_resolve(monkeyp
 
     with pytest.raises(ValueError, match="host does not resolve"):
         caldav_sync.validate_caldav_url("https://calendar.example.com/dav")
+
+
+def test_validate_caldav_url_explains_unresolved_bundled_radicale(monkeypatch):
+    def _no_dns(host):
+        raise OSError("no such host")
+
+    monkeypatch.setattr(caldav_sync, "_resolve_caldav_host_ips", _no_dns)
+
+    with pytest.raises(ValueError, match="Recreate the Odysseus stack"):
+        caldav_sync.validate_caldav_url("http://radicale:5232/odysseus/personal/")
 
 
 def test_validate_caldav_url_fails_closed_when_host_resolves_to_no_usable_records(monkeypatch):
@@ -161,7 +171,7 @@ def test_sync_caldav_decrypts_stored_password_and_validates_url(monkeypatch):
     assert result["calendars"] == 1
     assert captured == {
         "owner": "alice",
-        "url": "https://calendar.example.com/dav",
+        "url": "https://calendar.example.com/dav/",
         "username": "alice",
         "password": "decrypted-password",
     }

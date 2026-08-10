@@ -4109,7 +4109,7 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Server URL</label><input id="uf-caldav-url" class="settings-input" placeholder="http://localhost:5232/user/calendar/"></div>
           <div class="settings-row"><label class="settings-label">Username</label><input id="uf-caldav-user" class="settings-input" placeholder="you@example.com"></div>
           <div class="settings-row"><label class="settings-label">Password</label><input id="uf-caldav-pass" class="settings-input" type="password" placeholder="${isNew ? '' : 'Leave blank to keep existing'}"></div>
-          <div style="font-size:11px;opacity:.68;line-height:1.4;margin-top:-2px;">Google Calendar needs OAuth and cannot use this password-based CalDAV form. Use Radicale, Nextcloud, iCloud, Fastmail, or a local bridge like vdirsyncer into Radicale here.</div>
+          <div style="font-size:11px;opacity:.68;line-height:1.4;margin-top:-2px;">Bundled Radicale after compose redeploy: http://radicale:5232/odysseus/personal/. Google Calendar needs OAuth and cannot use this password-based CalDAV form.</div>
           <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
             <span id="uf-caldav-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-caldav-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Test</button>

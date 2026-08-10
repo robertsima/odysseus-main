@@ -101,6 +101,13 @@ def _validate_caldav_hostname(host: str) -> None:
     try:
         addrs = _resolve_caldav_host_ips(host)
     except OSError:
+        if host == "radicale":
+            raise ValueError(
+                "CalDAV host 'radicale' only resolves inside the Docker Compose "
+                "stack after the Radicale service is deployed. Recreate the "
+                "Odysseus stack with the updated compose file, or use a host/LAN "
+                "address that this Odysseus server can resolve."
+            )
         raise ValueError("CalDAV URL host does not resolve")
     if not addrs:
         raise ValueError("CalDAV URL host does not resolve")
@@ -131,7 +138,7 @@ def validate_caldav_url(raw_url: str) -> str:
         raise ValueError("CalDAV URL host is not allowed")
     _validate_caldav_ip(host)
     _validate_caldav_hostname(host)
-    return urlunparse(parsed._replace(fragment="")).rstrip("/")
+    return urlunparse(parsed._replace(fragment=""))
 
 
 def is_google_caldav_url(raw_url: str) -> bool:
