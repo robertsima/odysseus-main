@@ -1,0 +1,4 @@
+interface:
+  display_name: "Learning Coach"
+  short_description: "Coach deeper learning through structure"
+  default_prompt: "Use $learning-coach to help me learn this topic deeply without just explaining it to me."
