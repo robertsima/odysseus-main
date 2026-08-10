@@ -147,6 +147,22 @@ def _resolve_base_uid(uid: str) -> str:
     return base
 
 
+def _google_caldav_basic_auth_error(url: str) -> str | None:
+    """Return the Google OAuth-required message for Google CalDAV URLs."""
+    try:
+        from src import caldav_sync
+        detector = getattr(caldav_sync, "is_google_caldav_url", None)
+        if callable(detector) and detector(url) is True:
+            return getattr(
+                caldav_sync,
+                "GOOGLE_CALDAV_OAUTH_REQUIRED",
+                "Google Calendar CalDAV requires OAuth 2.0.",
+            )
+    except Exception:
+        return None
+    return None
+
+
 async def _push_caldav_event_after_commit(owner: str, uid: str, action: str):
     """Best-effort CalDAV write-through. Local writes stay authoritative if
     the remote server is unreachable; pending flags let /sync retry later."""
@@ -768,6 +784,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             validated_url = validate_caldav_url(body.get("url", ""))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        google_error = _google_caldav_basic_auth_error(validated_url)
+        if google_error:
+            raise HTTPException(400, google_error)
         if accounts:
             acc = dict(accounts[0])
         else:
@@ -822,6 +841,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             url = validate_caldav_url(body.get("url", ""))
         except ValueError as e:
             raise HTTPException(400, str(e))
+        google_error = _google_caldav_basic_auth_error(url)
+        if google_error:
+            raise HTTPException(400, google_error)
         if not body.get("password"):
             raise HTTPException(400, "Password is required")
         from src.secret_storage import encrypt
@@ -856,6 +878,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
                 acc["url"] = validate_caldav_url(body["url"])
             except ValueError as e:
                 raise HTTPException(400, str(e))
+            google_error = _google_caldav_basic_auth_error(acc["url"])
+            if google_error:
+                raise HTTPException(400, google_error)
         if body.get("label") is not None:
             acc["label"] = (body.get("label") or "").strip() or "CalDAV"
         if body.get("username") is not None:
@@ -918,6 +943,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             url = validate_caldav_url(url)
         except ValueError as e:
             return {"ok": False, "error": str(e)}
+        google_error = _google_caldav_basic_auth_error(url)
+        if google_error:
+            return {"ok": False, "error": google_error}
         import httpx
         propfind_body = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'

@@ -290,12 +290,14 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
         pw = decrypt(acc.get("password") or "")
         if not (url and user and pw):
             return {"skipped": "caldav account credentials incomplete"}
-        from src.caldav_sync import validate_caldav_url
+        from src.caldav_sync import GOOGLE_CALDAV_OAUTH_REQUIRED, is_google_caldav_url, validate_caldav_url
         try:
             url = validate_caldav_url(url)
         except ValueError as e:
             logger.warning("CalDAV write-back URL rejected: %s", e)
             return {"ok": False, "error": str(e)[:200]}
+        if is_google_caldav_url(url):
+            return {"ok": False, "error": GOOGLE_CALDAV_OAUTH_REQUIRED}
         acc_id = acc.get("id") or ""
         result = await asyncio.to_thread(
             _writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id

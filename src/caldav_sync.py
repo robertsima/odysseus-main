@@ -46,6 +46,11 @@ _BLOCKED_HOSTS = {
     "ip6-localhost",
     "metadata.google.internal",
 }
+GOOGLE_CALDAV_OAUTH_REQUIRED = (
+    "Google Calendar CalDAV requires OAuth 2.0. The generic CalDAV "
+    "username/password form only supports Basic Auth providers such as "
+    "Radicale, Nextcloud, iCloud, and Fastmail."
+)
 
 
 def _private_caldav_allowed() -> bool:
@@ -129,6 +134,23 @@ def validate_caldav_url(raw_url: str) -> str:
     return urlunparse(parsed._replace(fragment="")).rstrip("/")
 
 
+def is_google_caldav_url(raw_url: str) -> bool:
+    """Return True for Google's CalDAV endpoints.
+
+    Google CalDAV no longer accepts Basic Auth, so these URLs need a dedicated
+    OAuth provider instead of the generic username/password CalDAV path.
+    """
+    url = (raw_url if isinstance(raw_url, str) else "").strip()
+    if not url:
+        return False
+    parts = urlparse(url)
+    host = (parts.hostname or "").lower()
+    path = parts.path.rstrip("/")
+    if host.endswith("googleusercontent.com") and path.startswith("/caldav/v2/"):
+        return True
+    return host in {"www.google.com", "google.com"} and path.startswith("/calendar/dav/")
+
+
 def _event_etag(obj) -> str:
     """Best-effort ETag extraction from python-caldav resources."""
     try:
@@ -207,11 +229,7 @@ def _google_caldav_events_url(url: str) -> str | None:
     path = parts.path.rstrip("/")
     if not path.endswith("/user"):
         return None
-    is_google = (
-        host.endswith("googleusercontent.com")                       # newer /caldav/v2 form
-        or (host in ("www.google.com", "google.com") and "/calendar/dav/" in path)  # legacy form
-    )
-    if not is_google:
+    if not is_google_caldav_url(url):
         return None
     new_path = path[: -len("/user")] + "/events"
     return urlunparse(parts._replace(path=new_path))
@@ -642,6 +660,15 @@ async def sync_caldav(owner: str) -> dict:
             continue
         try:
             url = validate_caldav_url(url)
+            if is_google_caldav_url(url):
+                result = {
+                    "calendars": 0,
+                    "events": 0,
+                    "deleted": 0,
+                    "errors": [GOOGLE_CALDAV_OAUTH_REQUIRED],
+                }
+                totals["errors"].append(f"{label}: {GOOGLE_CALDAV_OAUTH_REQUIRED}")
+                continue
             result = await asyncio.to_thread(_sync_blocking, owner, url, user, pw, account_id)
         except ValueError as e:
             result = {"calendars": 0, "events": 0, "deleted": 0, "errors": [str(e)]}
