@@ -82,16 +82,6 @@ def test_validate_caldav_url_fails_closed_when_hostname_does_not_resolve(monkeyp
         caldav_sync.validate_caldav_url("https://calendar.example.com/dav")
 
 
-def test_validate_caldav_url_explains_unresolved_bundled_radicale(monkeypatch):
-    def _no_dns(host):
-        raise OSError("no such host")
-
-    monkeypatch.setattr(caldav_sync, "_resolve_caldav_host_ips", _no_dns)
-
-    with pytest.raises(ValueError, match="Recreate the Odysseus stack"):
-        caldav_sync.validate_caldav_url("http://radicale:5232/odysseus/personal/")
-
-
 def test_validate_caldav_url_fails_closed_when_host_resolves_to_no_usable_records(monkeypatch):
     # Distinct from the OSError path above: here resolution *succeeds* but yields
     # no usable A/AAAA records (the `if not addrs` branch). Fail closed there too

@@ -187,11 +187,11 @@ def _discover_calendars(client):
 
 
 def _writeback_blocking(local_cal_id, ev, delete, url, username, password,
-                        owner="", account_id="") -> dict:
+                        owner="", account_id="", token="") -> dict:
     from src.caldav_sync import _build_dav_client
     # Redirects disabled here too: the write-back path opens its own DAVClient,
     # so it needs the same SSRF-via-redirect protection as the pull path.
-    client = _build_dav_client(url, username, password)
+    client = _build_dav_client(url, username, password, token=token)
     try:
         calendars = _discover_calendars(client)
         if not calendars:
@@ -286,21 +286,30 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
             acc = accounts[0]
 
         url = (acc.get("url") or "").strip()
-        user = (acc.get("username") or "").strip()
-        pw = decrypt(acc.get("password") or "")
-        if not (url and user and pw):
-            return {"skipped": "caldav account credentials incomplete"}
+        acc_id = acc.get("id") or ""
+        token = ""
+        if acc.get("oauth_provider") == "google":
+            from src.caldav_sync import _get_valid_google_caldav_token
+            token = _get_valid_google_caldav_token(owner, acc)
+            if not token:
+                return {"ok": False, "error": "Google Calendar needs reconnecting — sign in again from Settings"}
+            user = ""
+            pw = ""
+        else:
+            user = (acc.get("username") or "").strip()
+            pw = decrypt(acc.get("password") or "")
+            if not (url and user and pw):
+                return {"skipped": "caldav account credentials incomplete"}
         from src.caldav_sync import GOOGLE_CALDAV_OAUTH_REQUIRED, is_google_caldav_url, validate_caldav_url
         try:
             url = validate_caldav_url(url)
         except ValueError as e:
             logger.warning("CalDAV write-back URL rejected: %s", e)
             return {"ok": False, "error": str(e)[:200]}
-        if is_google_caldav_url(url):
+        if not token and is_google_caldav_url(url):
             return {"ok": False, "error": GOOGLE_CALDAV_OAUTH_REQUIRED}
-        acc_id = acc.get("id") or ""
         result = await asyncio.to_thread(
-            _writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id
+            _writeback_blocking, calendar_id, ev, delete, url, user, pw, owner, acc_id, token
         )
         _persist_writeback_result(owner, calendar_id, (ev or {}).get("uid", ""), result, delete=delete)
         if not result.get("ok"):

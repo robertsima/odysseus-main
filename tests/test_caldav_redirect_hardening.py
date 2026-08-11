@@ -95,8 +95,16 @@ def test_sync_and_writeback_construct_clients_through_the_helper():
     with open(wb_src, encoding="utf-8") as f:
         wb_text = f.read()
 
-    # In caldav_sync the only raw construction lives inside the helper itself.
-    assert sync_text.count("caldav.DAVClient(") == 1
+    # In caldav_sync the only raw constructions live inside the helper itself
+    # — one for Basic Auth (username/password), one for Google's Bearer-token
+    # path. Assert both live inside _build_dav_client's body, not just that
+    # the file-wide count matches, so a raw DAVClient() added anywhere else
+    # (bypassing the redirect-disable) still fails this test.
+    helper_start = sync_text.index("def _build_dav_client(")
+    helper_end = sync_text.index("\ndef ", helper_start + 1)
+    helper_body = sync_text[helper_start:helper_end]
+    assert helper_body.count("caldav.DAVClient(") == 2
+    assert sync_text.count("caldav.DAVClient(") == 2
     assert "max_redirects = 0" in sync_text
     assert "_build_dav_client(" in sync_text
 

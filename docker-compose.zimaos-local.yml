@@ -23,8 +23,6 @@ services:
     depends_on:
       chromadb:
         condition: service_started
-      radicale:
-        condition: service_started
       searxng:
         condition: service_healthy
     environment:
@@ -41,7 +39,6 @@ services:
       ODYSSEUS_INPROCESS_POLLERS: "1"
       ODYSSEUS_INPROCESS_TASKS: "1"
       ODYSSEUS_SCRIPT_HOST: localhost
-      ODYSSEUS_ALLOW_PRIVATE_CALDAV: ${ODYSSEUS_ALLOW_PRIVATE_CALDAV:-1}
       ODYSSEUS_STARTUP_WARMUPS: "1"
       TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
       LOTUS_LOG_LEVEL: ${LOTUS_LOG_LEVEL:-INFO}
@@ -161,16 +158,3 @@ services:
     restart: unless-stopped
     volumes:
       - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/ntfy:/var/cache/ntfy
-
-  radicale:
-    image: docker.io/tomsquest/docker-radicale:latest
-    environment:
-      RADICALE_CONFIG_SERVER_HOSTS: 0.0.0.0:5232
-      RADICALE_CONFIG_AUTH_TYPE: none
-      RADICALE_CONFIG_STORAGE_FILESYSTEM_FOLDER: /data/collections
-      TAKE_FILE_OWNERSHIP: ${RADICALE_TAKE_FILE_OWNERSHIP:-true}
-    ports:
-      - "${RADICALE_BIND:-127.0.0.1}:${RADICALE_PORT:-5232}:5232"
-    restart: unless-stopped
-    volumes:
-      - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/radicale:/data
