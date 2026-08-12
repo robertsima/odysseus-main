@@ -1439,15 +1439,37 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     text = str(last_user or "").strip().lower()
     if not text:
         return False
-    if is_email_doc and re.search(
-        r"\b("
-        r"email|mail|reply|respond|response|draft|compose|send|"
-        r"tell them|tell her|tell him|say|write|make it say|"
-        r"japanese|japan|polite|formal|tone|style"
-        r")\b",
-        text,
-    ):
-        return True
+    if is_email_doc:
+        # A turn that asks Odysseus to browse/search the mailbox ("go through
+        # my emails", "look for interview emails", "check my inbox for
+        # replies") is about the inbox, not the open compose draft -- even
+        # though it necessarily mentions "email(s)"/"mail". Without this
+        # guard the generic email|mail match below fires on every such
+        # request, marks the stale/leftover draft as the turn's target, and
+        # a downstream step prunes list_emails/read_email/list_email_accounts
+        # because "the draft is already the source of truth" -- leaving the
+        # agent unable to read or list any mail at all.
+        if re.search(
+            r"\b(go\s*through|look\s*(?:for|through)|search|scan|check|"
+            r"find|list|list\s*out|summarize|catch\s*me\s*up\s*(?:on)?|"
+            r"review|any\s*new|unread)\b"
+            r"(?:\s+\w+){0,4}\s+"
+            r"\b(emails?|mails?|inbox|messages?|correspondences?)\b",
+            text,
+        ) and not re.search(
+            r"\b(this\s+email|this\s+draft|the\s+draft|this\s+reply|the\s+reply)\b",
+            text,
+        ):
+            return False
+        if re.search(
+            r"\b("
+            r"email|mail|reply|respond|response|draft|compose|send|"
+            r"tell them|tell her|tell him|say|write|make it say|"
+            r"japanese|japan|polite|formal|tone|style"
+            r")\b",
+            text,
+        ):
+            return True
     if re.search(
         r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
         r".{0,80}\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"

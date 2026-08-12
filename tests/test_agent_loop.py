@@ -40,6 +40,7 @@ try:
         _compute_final_metrics,
         _append_tool_results,
         _insert_before_latest_user,
+        _turn_targets_active_document,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -62,6 +63,57 @@ def test_import_stubs_do_not_leak_into_later_tests():
 
 def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
+
+
+class _FakeEmailDraft:
+    """Minimal stand-in for the DB Document model used by _turn_targets_active_document."""
+
+    def __init__(self, title="New Email", language="email",
+                 content="To: a@b.com\nSubject: x\n---\nhi"):
+        self.title = title
+        self.language = language
+        self.current_content = content
+
+
+def test_mailbox_browse_request_does_not_target_stale_email_draft():
+    # Regression: a leftover/empty "New Email" draft attached via the
+    # session-fallback path used to make any message merely containing the
+    # word "email" look like it targeted the open draft, which then pruned
+    # list_emails/read_email/list_email_accounts for the turn -- leaving the
+    # agent unable to read or list mail when asked to go through the inbox.
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    text = (
+        "Using my integrated email access, go through my emails and look "
+        "for email confirmations for job applications, look for follow up "
+        "interview requests, new interview requests, rejections, "
+        "correspondences"
+    )
+
+    assert _turn_targets_active_document(intent, text, doc) is False
+
+
+def test_mailbox_browse_phrasing_variants_do_not_target_draft():
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    for text in (
+        "check my inbox for anything new",
+        "list my emails from today",
+        "search my emails for interview",
+        "any new emails?",
+    ):
+        assert _turn_targets_active_document(intent, text, doc) is False, text
+
+
+def test_compose_reply_request_still_targets_open_email_draft():
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    for text in (
+        "reply to this email and tell them I will be there",
+        "make it sound more formal",
+        "write the email in a polite tone",
+    ):
+        assert _turn_targets_active_document(intent, text, doc) is True, text
 
 
 def test_polish_internet_search_request_classifies_as_web():
