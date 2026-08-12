@@ -40,6 +40,8 @@ try:
         _compute_final_metrics,
         _append_tool_results,
         _insert_before_latest_user,
+        _turn_targets_active_document,
+        _is_explicit_continuation,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -62,6 +64,132 @@ def test_import_stubs_do_not_leak_into_later_tests():
 
 def test_mcp_keyword_gate_matches_literal_mcp_requests():
     assert "mcp" in _MCP_KEYWORDS
+
+
+class _FakeEmailDraft:
+    """Minimal stand-in for the DB Document model used by _turn_targets_active_document."""
+
+    def __init__(self, title="New Email", language="email",
+                 content="To: a@b.com\nSubject: x\n---\nhi"):
+        self.title = title
+        self.language = language
+        self.current_content = content
+
+
+def test_mailbox_browse_request_does_not_target_stale_email_draft():
+    # Regression: a leftover/empty "New Email" draft attached via the
+    # session-fallback path used to make any message merely containing the
+    # word "email" look like it targeted the open draft, which then pruned
+    # list_emails/read_email/list_email_accounts for the turn -- leaving the
+    # agent unable to read or list mail when asked to go through the inbox.
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    text = (
+        "Using my integrated email access, go through my emails and look "
+        "for email confirmations for job applications, look for follow up "
+        "interview requests, new interview requests, rejections, "
+        "correspondences"
+    )
+
+    assert _turn_targets_active_document(intent, text, doc) is False
+
+
+def test_mailbox_browse_phrasing_variants_do_not_target_draft():
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    for text in (
+        "check my inbox for anything new",
+        "list my emails from today",
+        "search my emails for interview",
+        "any new emails?",
+    ):
+        assert _turn_targets_active_document(intent, text, doc) is False, text
+
+
+def test_compose_reply_request_still_targets_open_email_draft():
+    doc = _FakeEmailDraft()
+    intent = {"domains": set()}
+    for text in (
+        "reply to this email and tell them I will be there",
+        "make it sound more formal",
+        "write the email in a polite tone",
+    ):
+        assert _turn_targets_active_document(intent, text, doc) is True, text
+
+
+def test_continue_previous_task_phrasing_is_an_explicit_continuation():
+    # Regression: after a dropped/errored turn, "Continue the previous task
+    # please" is a completely ordinary retry phrase, but it wasn't recognized
+    # as a continuation (only bare "continue" was). That sent tool retrieval
+    # down the literal-text path, "task" spuriously matched the notes/
+    # calendar/tasks domain, and the email/document tools the conversation
+    # was actually about disappeared for the rest of the turn.
+    assert _is_explicit_continuation("Continue the previous task please") is True
+    assert _is_explicit_continuation("please continue") is True
+    assert _is_explicit_continuation("continue with the previous task") is True
+
+
+def test_continuation_phrasing_does_not_swallow_new_requests():
+    # The bounded "continue the previous X" tail must not turn "continue"
+    # into a wildcard that inherits stale context for a genuinely new ask.
+    assert _is_explicit_continuation("continue writing about dogs") is False
+    assert _is_explicit_continuation("continue the report about dogs") is False
+
+
+def test_continue_previous_task_inherits_email_domain_from_recent_context():
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Using my integrated email access, go through my emails and "
+                "look for email confirmations for job applications"
+            ),
+        },
+        {"role": "assistant", "content": "working on it..."},
+    ]
+
+    intent = _classify_agent_request(messages, "Continue the previous task please")
+
+    assert intent["continuation"] is True
+    assert "email" in intent["domains"]
+
+
+def test_retry_phrase_inherits_context_for_any_domain_not_just_cookbook():
+    # Regression: _is_contextual_retry_continuation used to only fire when
+    # the recent context looked Cookbook-flavored (serve/vllm/gpu box/...).
+    # A retry after a failed ntfy MCP send ("try again, use topic X") lost
+    # the prior turn's tool selection entirely -- domain classification saw
+    # no keywords, ran pure embedding retrieval on the retry phrase alone,
+    # and the needed MCP tool didn't rank back in.
+    messages = [
+        {"role": "user", "content": "try sending a test ntfy"},
+        {"role": "assistant", "content": "The ntfy send failed."},
+        {"role": "user", "content": 'try again, use topic "odysseus"'},
+    ]
+
+    intent = _classify_agent_request(messages, 'try again, use topic "odysseus"')
+
+    assert intent["continuation"] is True
+    assert "try sending a test ntfy" in intent["retrieval_query"]
+
+
+def test_retry_phrase_still_works_for_cookbook_context():
+    messages = [
+        {"role": "user", "content": "launch qwen3 8b on the workstation with vllm"},
+        {"role": "assistant", "content": "Launch failed: OOM."},
+        {"role": "user", "content": "try again"},
+    ]
+
+    intent = _classify_agent_request(messages, "try again")
+
+    assert intent["continuation"] is True
+
+
+def test_retry_phrase_as_first_message_is_not_a_continuation():
+    # Nothing to retry yet -- must not misfire on a fresh conversation.
+    intent = _classify_agent_request([{"role": "user", "content": "try again"}], "try again")
+
+    assert intent["continuation"] is False
 
 
 def test_polish_internet_search_request_classifies_as_web():

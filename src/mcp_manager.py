@@ -38,10 +38,56 @@ def _model_visible_schema(schema: Any) -> Dict:
         ]
     return visible
 
+def _describe_exception(error: Optional[BaseException]) -> str:
+    """Render an exception for logs/error payloads, never as an empty string.
+
+    Several MCP-adjacent exceptions (anyio's ClosedResourceError/
+    BrokenResourceError when a stdio subprocess's pipe closes underneath it,
+    among others) carry no message -- str(e) is "". `str(error) if error
+    else "Unknown error"` only catches error being None/falsy, not an
+    Exception instance whose str() is empty (Exception instances are always
+    truthy), so that fallback silently produced e.g. "MCP tool call failed:
+    mcp__xyz__tool: " with nothing after the colon -- undiagnosable from
+    logs alone. Fall back to the exception's type name so there's always
+    something to search for/report.
+    """
+    if error is None:
+        return "Unknown error"
+    text = str(error).strip()
+    return text if text else f"{type(error).__name__} (no error message — check the MCP server's own logs/stderr)"
+
+
+# Exceptions that mean "the pipe to the MCP server is gone", as opposed to "the
+# tool ran and failed". A stdio server whose subprocess has exited fails the very
+# next call in ~1ms, before any bytes are written, so such a call provably had no
+# side effects and is safe to replay on a fresh connection.
+_DEAD_TRANSPORT_ERRORS = {
+    "ClosedResourceError",   # anyio: stream closed underneath us
+    "BrokenResourceError",   # anyio: peer went away mid-write
+    "EndOfStream",           # anyio: reader hit EOF (subprocess exited)
+    "BrokenPipeError",
+    "ConnectionResetError",
+    "ProcessLookupError",
+}
+
+
+def _is_dead_transport_error(error: Optional[BaseException]) -> bool:
+    """True when an exception means the transport died, not that the tool failed."""
+    if error is None:
+        return False
+    if isinstance(error, (BrokenPipeError, ConnectionResetError, ProcessLookupError)):
+        return True
+    return type(error).__name__ in _DEAD_TRANSPORT_ERRORS
+
+
+# How much of a dead server's stderr to quote back to the agent/logs.
+_STDERR_TAIL_BYTES = 2000
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
-    raw_error = str(error) if error else "Unknown error"
+    raw_error = _describe_exception(error)
     command_line = " ".join([command or "", *args]).strip()
     lower_command = command_line.lower()
 
@@ -176,6 +222,11 @@ class McpManager:
         self._stacks: Dict[str, Any] = {}
         # server_id -> background connect task (HTTP transport / OAuth)
         self._connect_tasks: Dict[str, Any] = {}
+        # server_id -> connect_server() kwargs, so a crashed server can be
+        # restarted on demand without a DB round-trip (see _reconnect_server).
+        self._configs: Dict[str, Dict[str, Any]] = {}
+        # server_id -> open stderr capture file {"path": str, "handle": file}
+        self._stderr_logs: Dict[str, Dict[str, Any]] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
 
@@ -190,6 +241,15 @@ class McpManager:
         url: Optional[str] = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
+        self._configs[server_id] = {
+            "server_id": server_id,
+            "name": name,
+            "transport": transport,
+            "command": command,
+            "args": list(args or []),
+            "env": dict(env or {}),
+            "url": url,
+        }
         try:
             if transport == "stdio":
                 res = await self._connect_stdio(server_id, name, command, args or [], env or {})
@@ -204,8 +264,13 @@ class McpManager:
                 self._generation += 1
             return res
         except Exception as e:
-            logger.error(f"Failed to connect MCP server {name} ({server_id}): {e}")
+            logger.error(f"Failed to connect MCP server {name} ({server_id}): {_describe_exception(e)}")
             error_message = _format_mcp_connection_error(name, command or "", args or [], e)
+            # A server that dies during the handshake usually explains itself on
+            # stderr while the client-side exception says nothing useful.
+            tail = self._read_stderr_tail(server_id)
+            if tail:
+                error_message = f"{error_message}\n\nLast output from the server:\n{tail}"
             self._connections[server_id] = {"status": "error", "error": error_message, "name": name}
             self._generation += 1
             return False
@@ -227,7 +292,15 @@ class McpManager:
             registered = False
 
             try:
-                transport = await stack.enter_async_context(stdio_client(server_params))
+                # Capture the subprocess's stderr to a file instead of letting it
+                # vanish into the app's own stderr. When the process dies, the
+                # client-side exception is often anyio's ClosedResourceError with
+                # no message at all; this tail is the only thing that says *why*.
+                errlog = self._open_stderr_log(server_id)
+                if errlog is not None:
+                    transport = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
+                else:
+                    transport = await stack.enter_async_context(stdio_client(server_params))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
 
@@ -417,8 +490,9 @@ class McpManager:
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
         except Exception as e:
-            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
-            self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
+            desc = _describe_exception(e)
+            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {desc}")
+            self._connections[server_id] = {"status": "error", "error": desc, "name": name}
             return False
 
     async def disconnect_server(self, server_id: str):
@@ -444,6 +518,8 @@ class McpManager:
         self._sessions.pop(server_id, None)
         self._tools.pop(server_id, None)
         self._connections.pop(server_id, None)
+        self._configs.pop(server_id, None)
+        self._close_stderr_log(server_id)
         self._generation += 1
         logger.info(f"MCP server disconnected: {server_id}")
 
@@ -513,26 +589,40 @@ class McpManager:
         try:
             result = await self._do_call(session, tool_name, arguments)
         except Exception as e:
-            # Auto-reconnect for builtin servers whose subprocess may have died
-            if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
-                reconnected = await self._reconnect_builtin(server_id)
+            # Describe the failure *before* reconnecting: restarting the server
+            # deletes the dead subprocess's stderr capture, which is usually the
+            # only record of why it died.
+            detail = self._describe_call_failure(server_id, e)
+            # Auto-reconnect servers whose subprocess may have died. Builtins keep
+            # their historical blanket retry; user-added servers retry only when
+            # the transport is provably gone. Such a call fails in ~1ms before any
+            # bytes are written, so replaying it cannot duplicate a side effect.
+            # Without this, a user-added stdio server stayed dead until Odysseus
+            # restarted -- every call returning exit_code=1 with a messageless
+            # anyio error (the ntfy-me-mcp "empty error" symptom).
+            if self.is_builtin(server_id) or _is_dead_transport_error(e):
+                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {detail}")
+                reconnected = await self._reconnect_server(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
                     if session:
                         try:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
+                            desc2 = self._describe_call_failure(server_id, e2)
+                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {desc2}")
+                            return {"error": desc2, "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
                 else:
-                    logger.error(f"MCP reconnect failed for {server_id}")
-                    return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
+                    logger.error(f"MCP reconnect failed for {server_id}: {detail}")
+                    return {
+                        "error": f"MCP server crashed and could not be restarted: {server_id}\n\n{detail}",
+                        "exit_code": 1,
+                    }
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                logger.error(f"MCP tool call failed: {qualified_name}: {detail}")
+                return {"error": detail, "exit_code": 1}
 
         return result
 
@@ -564,6 +654,125 @@ class McpManager:
             result_dict["images"] = images
         return result_dict
 
+    def _open_stderr_log(self, server_id: str):
+        """Open a fresh stderr capture file for a stdio server's subprocess.
+
+        `stdio_client(errlog=...)` is handed to the child process as its stderr
+        file descriptor, so this must be a real file, not an in-memory buffer.
+        Returns None (and falls back to inherited stderr) if the file can't be
+        created -- capturing diagnostics must never block a connection.
+
+        Builtin servers are deliberately excluded: some of them (e.g. lotus)
+        stream INFO logs to stderr so they show up in the app's own container
+        logs, and redirecting that into a temp file would hide it. Their code is
+        ours to debug, whereas a third-party npx server's dying words are often
+        the only clue available.
+        """
+        import tempfile
+
+        self._close_stderr_log(server_id)
+        if self.is_builtin(server_id):
+            return None
+        try:
+            handle = tempfile.NamedTemporaryFile(
+                mode="w+", prefix=f"mcp-{server_id}-", suffix=".stderr.log", delete=False
+            )
+            self._stderr_logs[server_id] = {"path": handle.name, "handle": handle}
+            return handle
+        except Exception as e:
+            logger.debug(f"Could not capture stderr for MCP server {server_id}: {e}")
+            return None
+
+    def _read_stderr_tail(self, server_id: str) -> str:
+        """Return the tail of a stdio server's captured stderr, or ""."""
+        entry = self._stderr_logs.get(server_id)
+        if not entry:
+            return ""
+        try:
+            size = os.path.getsize(entry["path"])
+            with open(entry["path"], "r", encoding="utf-8", errors="replace") as fh:
+                if size > _STDERR_TAIL_BYTES:
+                    fh.seek(size - _STDERR_TAIL_BYTES)
+                return fh.read().strip()
+        except Exception:
+            return ""
+
+    def _close_stderr_log(self, server_id: str):
+        """Close and remove a stdio server's stderr capture file."""
+        entry = self._stderr_logs.pop(server_id, None)
+        if not entry:
+            return
+        try:
+            entry["handle"].close()
+        except Exception:
+            pass
+        try:
+            os.unlink(entry["path"])
+        except Exception:
+            pass
+
+    def _describe_call_failure(self, server_id: str, error: BaseException) -> str:
+        """Turn a tool-call exception into something a user can act on.
+
+        The bare exception is frequently useless -- anyio raises a messageless
+        ClosedResourceError when the server's pipe is gone -- so name the server,
+        say the subprocess exited, and quote whatever it printed on the way out.
+        """
+        desc = _describe_exception(error)
+        if not _is_dead_transport_error(error):
+            return desc
+
+        config = self._configs.get(server_id, {})
+        conn = self._connections.get(server_id, {})
+        name = config.get("name") or conn.get("name") or server_id
+        command_line = " ".join(
+            [config.get("command") or "", *(config.get("args") or [])]
+        ).strip()
+
+        lines = [
+            f"MCP server '{name}' ({server_id}) is not running — its connection is closed, "
+            f"so the tool call never reached it ({desc})."
+        ]
+        if command_line:
+            lines.append(f"Command: {command_line}")
+        tail = self._read_stderr_tail(server_id)
+        if tail:
+            lines.append(f"Last output from the server:\n{tail}")
+        else:
+            lines.append(
+                "The server produced no output before exiting — check its configuration "
+                "(command, args, and env such as URL/token/topic values)."
+            )
+        return "\n\n".join(lines)
+
+    async def _reconnect_server(self, server_id: str) -> bool:
+        """Restart a crashed MCP server using the config it was connected with.
+
+        Builtins keep their dedicated path (their command is derived, not stored).
+        Only stdio servers are restarted automatically: HTTP/SSE reconnects can
+        re-enter the OAuth browser flow, which must not happen inside a tool call.
+        """
+        if self.is_builtin(server_id):
+            return await self._reconnect_builtin(server_id)
+
+        # Snapshot before disconnect_server() clears it.
+        config = dict(self._configs.get(server_id) or {})
+        if not config:
+            logger.warning(f"No stored config to reconnect MCP server: {server_id}")
+            return False
+        if config.get("transport") != "stdio":
+            return False
+
+        await self.disconnect_server(server_id)
+        try:
+            ok = await self.connect_server(**config)
+            if ok:
+                logger.info(f"Reconnected MCP server: {config.get('name', server_id)} ({server_id})")
+            return ok
+        except Exception as e:
+            logger.error(f"Failed to reconnect MCP server {server_id}: {_describe_exception(e)}")
+            return False
+
     async def _reconnect_builtin(self, server_id: str) -> bool:
         """Tear down and reconnect a crashed builtin MCP server."""
         import sys
@@ -592,7 +801,7 @@ class McpManager:
                 logger.info(f"Reconnected builtin MCP server: {name}")
             return ok
         except Exception as e:
-            logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+            logger.error(f"Failed to reconnect builtin MCP server {name}: {_describe_exception(e)}")
             return False
 
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:

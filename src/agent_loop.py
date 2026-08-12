@@ -519,7 +519,7 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -708,7 +708,12 @@ CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `
 {"folder": "INBOX", "max_results": 20, "unread_only": false, "account": "gmail"}
 ```
 List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`.""",
-    "read_email": "- ```read_email``` — Read a specific email by UID. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox.",
+    "read_email": "- ```read_email``` — Read ONE specific email by UID (full body). Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox. For going through/auditing/categorizing MANY emails (job confirmations, interview requests, rejections, weekly summaries, etc.), use `audit_emails` instead of calling read_email in a loop — each read_email pulls a full body into the conversation and repeated calls will blow up context after a few dozen messages.",
+    "audit_emails": """\
+```audit_emails
+{"folder": "INBOX", "keywords": ["interview", "application", "unfortunately"], "limit": 30, "max_scan": 80}
+```
+Bulk-scan a mailbox and get back a compact digest (subject, sender, date, UID, short snippet) for many messages in ONE call, instead of calling read_email per message. Use this for any "go through my emails and find/categorize X" style request across more than a handful of messages — job application confirmations, interview requests, rejections, catching up on a week of mail, etc. `keywords` (optional) pre-filters by subject/snippet substring match; omit it to just get a digest of the most recent messages and classify from the snippets yourself. Read-only. Once you've found the specific message(s) you need full content for (e.g. to reply), use read_email on that UID.""",
     "reply_to_email": """\
 ```reply_to_email
 {"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
@@ -777,7 +782,7 @@ GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the u
 - Settings: `/api/settings`, `/api/prefs/{key}`
 - Research: `/api/research/start`, `/api/research/tasks` (note: `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint)
 - Compare: `/api/compare/sessions`, `/api/compare/start`
-- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
+- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `audit_emails`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
 - Endpoints (model providers): `/api/endpoints`, `/api/endpoints/{id}`
 - Shell: do NOT use `app_api` for `/api/shell/*`; use named command tooling instead.
 
@@ -1204,28 +1209,43 @@ _CASUAL_BLOCKLIST_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_CONTINUATION_RE = re.compile(
-    r"^\s*(?:"
-    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|"
+    r"^\s*(?:please\s+)?(?:"
+    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|keep going|"
+    r"keep on|proceed|pick up where you left off|"
     r"run it|launch it|start it|use that|that one|same|the same|"
     r"first|second|third|the first one|the second one|the third one|"
     r"[123]|[abc]"
+    r")"
+    # Bounded "continue the previous X" tail. Without this, "Continue the
+    # previous task please" (a completely ordinary retry after a dropped
+    # turn) missed this regex entirely -- it isn't a bare "continue", so
+    # continuation detection failed, tool retrieval ran on the literal text
+    # instead of inheriting the prior turn's topic, "task" spuriously matched
+    # the notes/calendar/tasks domain, and email/document tools vanished for
+    # the rest of the turn even though the conversation was plainly a
+    # continuation. Kept narrow (fixed noun list, fully anchored) so it does
+    # not swallow genuinely new requests like "continue writing about dogs".
+    # Whitespace runs here are capped at 20 (real phrases use one space) --
+    # an uncapped \s+/\s* here sits right next to the trailing \s* below, and
+    # two adjacent unbounded whitespace quantifiers that both ultimately fail
+    # (e.g. "y" + 40k tabs + "x", no `$`) backtrack O(n^2)/polynomial-redos.
+    r"(?:\s{1,20}(?:with|on)?\s{0,20}(?:the\s{1,20})?(?:previous|last|prior|same|that|this)\s{1,20}"
+    r"(?:task|thing|one|request|conversation|chat|topic))?"
     # `\s*[.!?]*\s*$` put two \s-matching quantifiers around `[.!?]*`, which
     # backtracks O(n^2) on a terse reply + whitespace flood (py/polynomial-redos).
-    # `\s*(?:[.!?]+\s*)?$` accepts the same "trailing space/punctuation" tails
-    # (the inner \s* only engages after `[.!?]+`, so no two \s* are adjacent) and
-    # is linear.
-    r")\s*(?:[.!?]+\s*)?$",
+    # `\s*(?:please\s*)?(?:[.!?]+\s*)?$` accepts the same "trailing
+    # space/punctuation/please" tails with exactly one bare, unconditional
+    # \s* -- the \s* bundled inside each optional group only "engages" once
+    # that group's own literal ("please", or `[.!?]+`) has actually matched,
+    # so there is never a second bare \s* free to backtrack against the
+    # first one. A standalone `(?:please)?` between two bare `\s*` (as an
+    # earlier version of this had) recreates the O(n^2) flood case.
+    r"\s*(?:please\s*)?(?:[.!?]+\s*)?$",
     re.IGNORECASE,
 )
 _RETRY_CONTINUATION_RE = re.compile(
     r"\b(?:try again|retry|again|rerun|re-run|run it again|launch it again|"
     r"start it again|failed|fails?|died|crashed|broke|insta|instantly)\b",
-    re.IGNORECASE,
-)
-_COOKBOOK_CONTEXT_RE = re.compile(
-    r"\b(?:cookbook|serve|serving|served|launch|start|preset|vllm|sglang|"
-    r"llama\.?cpp|ollama|download|cached models?|model servers?|running models?|"
-    r"gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b",
     re.IGNORECASE,
 )
 def _is_explicit_continuation(text: str) -> bool:
@@ -1250,18 +1270,29 @@ def _is_casual_low_signal(text: str) -> bool:
 
 
 def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
-    """Treat "try again / it failed" as a continuation only for active tool work.
+    """Treat "try again / it failed" as a continuation whenever there's a
+    real prior turn to inherit from.
 
-    These follow-ups are common after Cookbook launches: the latest user turn
-    says only "try again it failed", while the actionable model/host/command
-    details live one or two turns back. Keep this intentionally narrow so
-    ordinary chat does not inherit stale Cookbook context.
+    These follow-ups are common after any tool-driven task, not just
+    Cookbook launches: the latest user turn says only "try again it failed"
+    or "try again, use topic X", while the actionable details (which tool,
+    which server, which topic) live one or two turns back. This was
+    originally scoped to fire only when the recent context looked
+    Cookbook-flavored, which missed the identical shape of follow-up for
+    other domains -- e.g. "try again, use topic odysseus" after a failed
+    ntfy MCP send lost the prior turn's tool selection entirely (domain
+    classification saw no keywords, ran pure embedding retrieval on "try
+    again, use topic odysseus" alone, and the ntfy tool didn't rank back in)
+    and the agent had to guess at an unrelated tool instead. Broadened to
+    fire whenever there's at least one earlier user turn to inherit from --
+    a first message can never match this (nothing to retry), so the
+    downside is bounded to occasionally also surfacing a stale tool
+    alongside the right one, not silently losing the right one.
     """
     latest = str(text or "").strip()
     if not latest or not _RETRY_CONTINUATION_RE.search(latest):
         return False
-    recent = _recent_context_for_retrieval(messages, max_user=5, max_chars=1200)
-    return bool(_COOKBOOK_CONTEXT_RE.search(recent))
+    return _user_turn_count(messages) > 1
 
 
 def _assistant_requested_followup(messages: List[Dict]) -> bool:
@@ -1439,15 +1470,37 @@ def _turn_targets_active_document(intent: Dict[str, object], last_user: str, act
     text = str(last_user or "").strip().lower()
     if not text:
         return False
-    if is_email_doc and re.search(
-        r"\b("
-        r"email|mail|reply|respond|response|draft|compose|send|"
-        r"tell them|tell her|tell him|say|write|make it say|"
-        r"japanese|japan|polite|formal|tone|style"
-        r")\b",
-        text,
-    ):
-        return True
+    if is_email_doc:
+        # A turn that asks Odysseus to browse/search the mailbox ("go through
+        # my emails", "look for interview emails", "check my inbox for
+        # replies") is about the inbox, not the open compose draft -- even
+        # though it necessarily mentions "email(s)"/"mail". Without this
+        # guard the generic email|mail match below fires on every such
+        # request, marks the stale/leftover draft as the turn's target, and
+        # a downstream step prunes list_emails/read_email/list_email_accounts
+        # because "the draft is already the source of truth" -- leaving the
+        # agent unable to read or list any mail at all.
+        if re.search(
+            r"\b(go\s*through|look\s*(?:for|through)|search|scan|check|"
+            r"find|list|list\s*out|summarize|catch\s*me\s*up\s*(?:on)?|"
+            r"review|any\s*new|unread)\b"
+            r"(?:\s+\w+){0,4}\s+"
+            r"\b(emails?|mails?|inbox|messages?|correspondences?)\b",
+            text,
+        ) and not re.search(
+            r"\b(this\s+email|this\s+draft|the\s+draft|this\s+reply|the\s+reply)\b",
+            text,
+        ):
+            return False
+        if re.search(
+            r"\b("
+            r"email|mail|reply|respond|response|draft|compose|send|"
+            r"tell them|tell her|tell him|say|write|make it say|"
+            r"japanese|japan|polite|formal|tone|style"
+            r")\b",
+            text,
+        ):
+            return True
     if re.search(
         r"\b(?:make|change|update|fix|edit|rewrite|rework|revise|replace|remove|delete|add|append|insert|set|turn)\b"
         r".{0,80}\b(?:day\s*\d+|row|rows|column|columns|table|section|chapter|part|paragraph|line|lines|"
@@ -2370,12 +2423,12 @@ def _build_system_prompt(
     _inject_style = False
     _EMAIL_TOOL_HINTS = {
         "list_email_accounts", "send_email", "reply_to_email", "list_emails", "read_email",
-        "bulk_email", "archive_email", "delete_email", "mark_email_read",
+        "audit_emails", "bulk_email", "archive_email", "delete_email", "mark_email_read",
         "scan_email_unsubscribes", "unsubscribe_email",
         "resolve_contact", "ui_control",
         "mcp__email__list_email_accounts",
         "mcp__email__send_email", "mcp__email__reply_to_email",
-        "mcp__email__list_emails", "mcp__email__read_email",
+        "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
         "mcp__email__bulk_email", "mcp__email__archive_email",
         "mcp__email__delete_email", "mcp__email__mark_email_read",
         "mcp__email__scan_email_unsubscribes", "mcp__email__unsubscribe_email",
@@ -3201,8 +3254,9 @@ async def stream_agent_loop(
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
     if _active_email_draft_relevant:
         disabled_tools.update({
-            "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes",
-            "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
+            "list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes",
+            "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
+            "mcp__email__scan_email_unsubscribes",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
     _direct_low_signal = (
@@ -3498,8 +3552,9 @@ async def stream_agent_loop(
             # the same email again through IMAP/MCP is slow, token-heavy, and
             # can hang. Keep draft editing tools, drop email fetch tools.
             _email_fetch_tools = {
-                "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes",
-                "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
+                "list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes",
+                "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
+                "mcp__email__scan_email_unsubscribes",
             }
             removed = sorted(_relevant_tools & _email_fetch_tools)
             if removed:

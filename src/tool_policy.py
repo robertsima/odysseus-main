@@ -56,6 +56,7 @@ _COMMON_TOOL_NAMES = {
     "archive_email",
     "ask_teacher",
     "ask_user",
+    "audit_emails",
     "bash",
     "bulk_email",
     "builtin_browser",
