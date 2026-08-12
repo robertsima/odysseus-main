@@ -19,6 +19,7 @@ BUILTIN_EMAIL_TOOLS = frozenset({
     "list_emails",
     "read_email",
     "search_emails",
+    "audit_emails",
     "scan_email_unsubscribes",
     "unsubscribe_email",
     "send_email",
@@ -113,6 +114,7 @@ PLAN_MODE_READONLY_TOOLS = {
     # classified — see the plan-mode partition test in
     # tests/test_email_registry_sync.py.
     "search_emails",
+    "audit_emails",
     "scan_email_unsubscribes",
     "list_served_models",
     "list_downloads",

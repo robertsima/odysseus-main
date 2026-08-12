@@ -726,6 +726,102 @@ def _scan_unsubscribe_candidates(folder="INBOX", account=None, limit=25, max_sca
     }
 
 
+def _audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
+                   max_scan=80, snippet_chars=300) -> dict:
+    """Bulk-scan a mailbox and return a compact per-email digest (subject,
+    sender, date, UID, short body snippet) instead of full bodies.
+
+    Built for "go through my emails and find/categorize X" style tasks that
+    need to look at the content of many messages -- reading each one
+    individually via read_email pulls a full raw body into the conversation
+    per call, and a broad audit over a few dozen messages balloons context
+    to hundreds of thousands of tokens within a handful of rounds. This does
+    the bulk IMAP fetch here, server-side, and only ever returns a bounded
+    snippet per message so the caller can classify/report from compact
+    context instead of full bodies. Optional `keywords` pre-filters on
+    subject/snippet; omit it to just get a compact digest of the most
+    recent messages.
+    """
+    # Clamp before the fixture check too -- both paths take the same
+    # untrusted tool-call args, and the fixture path is also reachable via a
+    # real (if sandboxed/demo) tool call, not just tests.
+    limit = max(1, min(int(limit or 30), 100))
+    max_scan = max(limit, min(int(max_scan or 80), 250))
+    snippet_chars = max(40, min(int(snippet_chars or 300), 1000))
+    folder = folder or "INBOX"
+    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
+
+    fixture = _fixture_audit_emails(folder, account, keywords, limit, max_scan, snippet_chars)
+    if fixture is not None:
+        return fixture
+
+    conn = _imap_connect(account)
+    try:
+        resolved = _resolve_folder(conn, folder, _folder_role_from_name(folder))
+        status, _ = conn.select(_q(resolved), readonly=True)
+        if status != "OK":
+            return {"success": False, "error": f"Folder not found: {folder}", "digest": []}
+        status, data = conn.uid("SEARCH", None, "ALL")
+        if status != "OK" or not data or not data[0]:
+            return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": resolved, "account": account or ""}
+        uids = []
+        for raw_uid in data[0].split():
+            try:
+                uids.append(int(raw_uid))
+            except Exception:
+                continue
+        uids = sorted(uids, reverse=True)[:max_scan]
+        if not uids:
+            return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": resolved, "account": account or ""}
+        status, msg_data = conn.uid("FETCH", _b(",".join(str(u) for u in uids)), "(UID RFC822)")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+    if status != "OK":
+        return {"success": False, "error": "Failed to fetch emails", "digest": []}
+
+    rows = []
+    for item in msg_data or []:
+        if not isinstance(item, tuple) or len(item) < 2:
+            continue
+        meta_b = item[0] if isinstance(item[0], bytes) else str(item[0]).encode()
+        uid = _uid_from_fetch_meta(meta_b)
+        if not uid:
+            continue
+        try:
+            msg = email.message_from_bytes(item[1] or b"")
+        except Exception:
+            continue
+        subject = _decode_header(msg.get("Subject", "(no subject)"))
+        sender = _decode_header(msg.get("From", "unknown"))
+        date_str = msg.get("Date", "")
+        sender_name, sender_addr = email.utils.parseaddr(sender)
+        body = _extract_text(msg) or ""
+        snippet = " ".join(body.split())[:snippet_chars]
+        if kw and not any(k in (subject + " " + snippet).lower() for k in kw):
+            continue
+        rows.append({
+            "uid": uid,
+            "subject": subject,
+            "from": sender_name or sender_addr or sender,
+            "from_address": sender_addr,
+            "date": date_str,
+            "folder": resolved,
+            "snippet": snippet,
+        })
+    rows.sort(key=_result_sort_time, reverse=True)
+    return {
+        "success": True,
+        "digest": rows[:limit],
+        "scanned": len(uids),
+        "matched": len(rows),
+        "folder": resolved,
+        "account": account or "",
+    }
+
+
 def _unsubscribe_email(uid, folder="INBOX", account=None, method_index=0, allow_web=False) -> dict:
     uid = str(uid or "").strip()
     if not uid:
@@ -975,6 +1071,40 @@ def _fixture_read_email(uid=None, message_id=None, folder="INBOX", account=None)
         if message_id and str(item.get("message_id")) == str(message_id):
             return item
     return {"error": f"Email not found with UID/Message-ID: {uid or message_id}"}
+
+
+def _fixture_audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
+                          max_scan=80, snippet_chars=300) -> dict | None:
+    if not _fixture_email_enabled():
+        return None
+    if (folder or "INBOX").upper() not in {"INBOX", "ALL", "ALL MAIL"}:
+        return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": folder, "account": account or ""}
+    rows = _fixture_list_emails(folder, max_results=int(max_scan or 80), account=account) or []
+    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
+    matched = [
+        row for row in rows
+        if not kw or any(k in (str(row.get("subject", "")) + " " + str(row.get("body", ""))).lower() for k in kw)
+    ]
+    digest = [
+        {
+            "uid": row.get("uid"),
+            "subject": row.get("subject"),
+            "from": row.get("from"),
+            "from_address": row.get("from_address", ""),
+            "date": row.get("date"),
+            "folder": folder,
+            "snippet": " ".join(str(row.get("body", "")).split())[: int(snippet_chars or 300)],
+        }
+        for row in matched[: int(limit or 30)]
+    ]
+    return {
+        "success": True,
+        "digest": digest,
+        "scanned": len(rows),
+        "matched": len(matched),
+        "folder": folder,
+        "account": account or "",
+    }
 
 
 # ── Tool implementations ──
@@ -2192,6 +2322,38 @@ async def list_tools() -> list[Tool]:
             },
         ),
         Tool(
+            name="audit_emails",
+            description=(
+                "Bulk-scan a mailbox and return a compact digest (subject, sender, date, UID, "
+                "and a short body snippet) for many messages at once. Use this instead of "
+                "calling read_email over and over when the task is to go through/audit/report "
+                "on a broad set of emails (e.g. 'find job application confirmations and "
+                "interview requests', 'summarize what came in this week') -- reading each "
+                "message individually pulls a full body into the conversation per call and "
+                "will blow up context after a few dozen messages, while this returns bounded "
+                "snippets for all of them in one call. Optional `keywords` pre-filters by "
+                "subject/snippet substring match; omit it to just get a digest of the most "
+                "recent messages. This is read-only and does not replace read_email when you "
+                "need one message's full content (e.g. to reply to it)."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "IMAP folder to scan", "default": "INBOX"},
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional: only include messages whose subject or body snippet contains at least one of these terms (case-insensitive).",
+                    },
+                    "limit": {"type": "integer", "description": "Maximum digest entries to return", "default": 30},
+                    "max_scan": {"type": "integer", "description": "How many newest messages to inspect before filtering", "default": 80},
+                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per message", "default": 300},
+                    **ACCOUNT_PROP,
+                },
+                "required": [],
+            },
+        ),
+        Tool(
             name="unsubscribe_email",
             description=(
                 "Execute one approved unsubscribe action for an email UID. Supports safe mailto "
@@ -2615,6 +2777,39 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                         lines.append(f"   Method {j}: mailto {method.get('target')} (executable via unsubscribe_email)")
                     elif method.get("kind") == "url":
                         lines.append(f"   Method {j}: web URL {method.get('target')} (use browser/web tools after approval)")
+            return [TextContent(type="text", text="\n".join(lines))]
+
+        elif name == "audit_emails":
+            try:
+                result = _audit_emails(
+                    folder=arguments.get("folder", "INBOX"),
+                    account=acct,
+                    keywords=arguments.get("keywords"),
+                    limit=arguments.get("limit", 30),
+                    max_scan=arguments.get("max_scan", 80),
+                    snippet_chars=arguments.get("snippet_chars", 300),
+                )
+            except Exception as e:
+                return [TextContent(type="text", text=f"Email audit failed: {e}")]
+            if not result.get("success"):
+                return [TextContent(type="text", text=f"Email audit failed: {result.get('error', 'unknown error')}")]
+            digest = result.get("digest") or []
+            if not digest:
+                return [TextContent(
+                    type="text",
+                    text=f"No matching emails found in {result.get('scanned', 0)} scanned message(s) in {result.get('folder', 'INBOX')}.",
+                )]
+            lines = [
+                f"{result.get('matched', len(digest))} matching email(s) from {result.get('scanned', 0)} scanned "
+                f"in {result.get('folder', 'INBOX')} (showing {len(digest)}):\n",
+            ]
+            for i, item in enumerate(digest, 1):
+                lines.append(
+                    f"{i}. **{item.get('subject') or '(no subject)'}**\n"
+                    f"   From: {item.get('from') or ''} ({item.get('from_address') or ''})\n"
+                    f"   Date: {item.get('date')}  UID: {item.get('uid')}  Folder: {item.get('folder')}\n"
+                    f"   Snippet: {item.get('snippet') or ''}"
+                )
             return [TextContent(type="text", text="\n".join(lines))]
 
         elif name == "unsubscribe_email":

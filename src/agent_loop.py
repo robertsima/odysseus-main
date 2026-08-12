@@ -519,7 +519,7 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -708,7 +708,12 @@ CRITICAL — signatures: DO NOT invent a sign-off name. End the body with just `
 {"folder": "INBOX", "max_results": 20, "unread_only": false, "account": "gmail"}
 ```
 List recent emails from a folder, newest first, including read messages by default. Use `list_email_accounts` first when the user names a mailbox/account, then pass `account`. For "last/latest/newest email", call with `max_results: 1` and `unread_only: false`.""",
-    "read_email": "- ```read_email``` — Read a specific email by UID. Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox.",
+    "read_email": "- ```read_email``` — Read ONE specific email by UID (full body). Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox. For going through/auditing/categorizing MANY emails (job confirmations, interview requests, rejections, weekly summaries, etc.), use `audit_emails` instead of calling read_email in a loop — each read_email pulls a full body into the conversation and repeated calls will blow up context after a few dozen messages.",
+    "audit_emails": """\
+```audit_emails
+{"folder": "INBOX", "keywords": ["interview", "application", "unfortunately"], "limit": 30, "max_scan": 80}
+```
+Bulk-scan a mailbox and get back a compact digest (subject, sender, date, UID, short snippet) for many messages in ONE call, instead of calling read_email per message. Use this for any "go through my emails and find/categorize X" style request across more than a handful of messages — job application confirmations, interview requests, rejections, catching up on a week of mail, etc. `keywords` (optional) pre-filters by subject/snippet substring match; omit it to just get a digest of the most recent messages and classify from the snippets yourself. Read-only. Once you've found the specific message(s) you need full content for (e.g. to reply), use read_email on that UID.""",
     "reply_to_email": """\
 ```reply_to_email
 {"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
@@ -777,7 +782,7 @@ GENERIC LOOPBACK to allowed Odysseus internal endpoints. Use this whenever the u
 - Settings: `/api/settings`, `/api/prefs/{key}`
 - Research: `/api/research/start`, `/api/research/tasks` (note: `/api/research/report/{id}` renders HTML — to READ a report's text use the `manage_research` tool with `action:read`, not this endpoint)
 - Compare: `/api/compare/sessions`, `/api/compare/start`
-- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
+- Email: use named email tools (`list_email_accounts`, `list_emails`, `read_email`, `audit_emails`, `scan_email_unsubscribes`, `unsubscribe_email`, `send_email`, `reply_to_email`). Do NOT use `/api/email/accounts`; it is owner-filtered in tool context and may falsely return empty.
 - Endpoints (model providers): `/api/endpoints`, `/api/endpoints/{id}`
 - Shell: do NOT use `app_api` for `/api/shell/*`; use named command tooling instead.
 
@@ -2413,12 +2418,12 @@ def _build_system_prompt(
     _inject_style = False
     _EMAIL_TOOL_HINTS = {
         "list_email_accounts", "send_email", "reply_to_email", "list_emails", "read_email",
-        "bulk_email", "archive_email", "delete_email", "mark_email_read",
+        "audit_emails", "bulk_email", "archive_email", "delete_email", "mark_email_read",
         "scan_email_unsubscribes", "unsubscribe_email",
         "resolve_contact", "ui_control",
         "mcp__email__list_email_accounts",
         "mcp__email__send_email", "mcp__email__reply_to_email",
-        "mcp__email__list_emails", "mcp__email__read_email",
+        "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
         "mcp__email__bulk_email", "mcp__email__archive_email",
         "mcp__email__delete_email", "mcp__email__mark_email_read",
         "mcp__email__scan_email_unsubscribes", "mcp__email__unsubscribe_email",
@@ -3244,8 +3249,9 @@ async def stream_agent_loop(
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
     if _active_email_draft_relevant:
         disabled_tools.update({
-            "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes",
-            "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
+            "list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes",
+            "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
+            "mcp__email__scan_email_unsubscribes",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
     _direct_low_signal = (
@@ -3541,8 +3547,9 @@ async def stream_agent_loop(
             # the same email again through IMAP/MCP is slow, token-heavy, and
             # can hang. Keep draft editing tools, drop email fetch tools.
             _email_fetch_tools = {
-                "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes",
-                "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
+                "list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes",
+                "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
+                "mcp__email__scan_email_unsubscribes",
             }
             removed = sorted(_relevant_tools & _email_fetch_tools)
             if removed:

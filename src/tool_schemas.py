@@ -1177,6 +1177,24 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "audit_emails",
+            "description": "Bulk-scan a mailbox and return a compact digest (subject, sender, date, UID, short body snippet) for many messages at once. Use this instead of calling read_email repeatedly when the task is to go through/audit/report on a broad set of emails (job application confirmations, interview requests, rejections, weekly summaries, etc.) -- reading each message individually pulls a full body into the conversation per call and will blow up context after a few dozen messages, while this returns bounded snippets for all of them in one call. Optional keywords pre-filter by subject/snippet substring match. Read-only; does not replace read_email when you need one message's full content (e.g. to reply to it).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "folder": {"type": "string", "description": "IMAP folder to scan (default: INBOX)"},
+                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "Optional: only include messages whose subject or body snippet contains at least one of these terms (case-insensitive)"},
+                    "limit": {"type": "integer", "description": "Maximum digest entries to return (default: 30)"},
+                    "max_scan": {"type": "integer", "description": "How many newest messages to inspect before filtering (default: 80)"},
+                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per message (default: 300)"},
+                    "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
+                },
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "unsubscribe_email",
             "description": "Execute one approved unsubscribe action for an email UID. Safe mailto List-Unsubscribe methods are sent/staged. Web URL methods return a requires-browser instruction and exact URL; use browser/web tools only after user approval.",
             "parameters": {
