@@ -41,6 +41,7 @@ try:
         _append_tool_results,
         _insert_before_latest_user,
         _turn_targets_active_document,
+        _is_explicit_continuation,
         _MCP_KEYWORDS,
     )
     _IMPORTED_AGENT_LOOP = sys.modules.get("src.agent_loop")
@@ -114,6 +115,43 @@ def test_compose_reply_request_still_targets_open_email_draft():
         "write the email in a polite tone",
     ):
         assert _turn_targets_active_document(intent, text, doc) is True, text
+
+
+def test_continue_previous_task_phrasing_is_an_explicit_continuation():
+    # Regression: after a dropped/errored turn, "Continue the previous task
+    # please" is a completely ordinary retry phrase, but it wasn't recognized
+    # as a continuation (only bare "continue" was). That sent tool retrieval
+    # down the literal-text path, "task" spuriously matched the notes/
+    # calendar/tasks domain, and the email/document tools the conversation
+    # was actually about disappeared for the rest of the turn.
+    assert _is_explicit_continuation("Continue the previous task please") is True
+    assert _is_explicit_continuation("please continue") is True
+    assert _is_explicit_continuation("continue with the previous task") is True
+
+
+def test_continuation_phrasing_does_not_swallow_new_requests():
+    # The bounded "continue the previous X" tail must not turn "continue"
+    # into a wildcard that inherits stale context for a genuinely new ask.
+    assert _is_explicit_continuation("continue writing about dogs") is False
+    assert _is_explicit_continuation("continue the report about dogs") is False
+
+
+def test_continue_previous_task_inherits_email_domain_from_recent_context():
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Using my integrated email access, go through my emails and "
+                "look for email confirmations for job applications"
+            ),
+        },
+        {"role": "assistant", "content": "working on it..."},
+    ]
+
+    intent = _classify_agent_request(messages, "Continue the previous task please")
+
+    assert intent["continuation"] is True
+    assert "email" in intent["domains"]
 
 
 def test_polish_internet_search_request_classifies_as_web():

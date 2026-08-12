@@ -1204,17 +1204,38 @@ _CASUAL_BLOCKLIST_RE = re.compile(
     re.IGNORECASE,
 )
 _EXPLICIT_CONTINUATION_RE = re.compile(
-    r"^\s*(?:"
-    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|"
+    r"^\s*(?:please\s+)?(?:"
+    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|keep going|"
+    r"keep on|proceed|pick up where you left off|"
     r"run it|launch it|start it|use that|that one|same|the same|"
     r"first|second|third|the first one|the second one|the third one|"
     r"[123]|[abc]"
+    r")"
+    # Bounded "continue the previous X" tail. Without this, "Continue the
+    # previous task please" (a completely ordinary retry after a dropped
+    # turn) missed this regex entirely -- it isn't a bare "continue", so
+    # continuation detection failed, tool retrieval ran on the literal text
+    # instead of inheriting the prior turn's topic, "task" spuriously matched
+    # the notes/calendar/tasks domain, and email/document tools vanished for
+    # the rest of the turn even though the conversation was plainly a
+    # continuation. Kept narrow (fixed noun list, fully anchored) so it does
+    # not swallow genuinely new requests like "continue writing about dogs".
+    # Whitespace runs here are capped at 20 (real phrases use one space) --
+    # an uncapped \s+/\s* here sits right next to the trailing \s* below, and
+    # two adjacent unbounded whitespace quantifiers that both ultimately fail
+    # (e.g. "y" + 40k tabs + "x", no `$`) backtrack O(n^2)/polynomial-redos.
+    r"(?:\s{1,20}(?:with|on)?\s{0,20}(?:the\s{1,20})?(?:previous|last|prior|same|that|this)\s{1,20}"
+    r"(?:task|thing|one|request|conversation|chat|topic))?"
     # `\s*[.!?]*\s*$` put two \s-matching quantifiers around `[.!?]*`, which
     # backtracks O(n^2) on a terse reply + whitespace flood (py/polynomial-redos).
-    # `\s*(?:[.!?]+\s*)?$` accepts the same "trailing space/punctuation" tails
-    # (the inner \s* only engages after `[.!?]+`, so no two \s* are adjacent) and
-    # is linear.
-    r")\s*(?:[.!?]+\s*)?$",
+    # `\s*(?:please\s*)?(?:[.!?]+\s*)?$` accepts the same "trailing
+    # space/punctuation/please" tails with exactly one bare, unconditional
+    # \s* -- the \s* bundled inside each optional group only "engages" once
+    # that group's own literal ("please", or `[.!?]+`) has actually matched,
+    # so there is never a second bare \s* free to backtrack against the
+    # first one. A standalone `(?:please)?` between two bare `\s*` (as an
+    # earlier version of this had) recreates the O(n^2) flood case.
+    r"\s*(?:please\s*)?(?:[.!?]+\s*)?$",
     re.IGNORECASE,
 )
 _RETRY_CONTINUATION_RE = re.compile(
