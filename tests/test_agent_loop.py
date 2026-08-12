@@ -154,6 +154,44 @@ def test_continue_previous_task_inherits_email_domain_from_recent_context():
     assert "email" in intent["domains"]
 
 
+def test_retry_phrase_inherits_context_for_any_domain_not_just_cookbook():
+    # Regression: _is_contextual_retry_continuation used to only fire when
+    # the recent context looked Cookbook-flavored (serve/vllm/gpu box/...).
+    # A retry after a failed ntfy MCP send ("try again, use topic X") lost
+    # the prior turn's tool selection entirely -- domain classification saw
+    # no keywords, ran pure embedding retrieval on the retry phrase alone,
+    # and the needed MCP tool didn't rank back in.
+    messages = [
+        {"role": "user", "content": "try sending a test ntfy"},
+        {"role": "assistant", "content": "The ntfy send failed."},
+        {"role": "user", "content": 'try again, use topic "odysseus"'},
+    ]
+
+    intent = _classify_agent_request(messages, 'try again, use topic "odysseus"')
+
+    assert intent["continuation"] is True
+    assert "try sending a test ntfy" in intent["retrieval_query"]
+
+
+def test_retry_phrase_still_works_for_cookbook_context():
+    messages = [
+        {"role": "user", "content": "launch qwen3 8b on the workstation with vllm"},
+        {"role": "assistant", "content": "Launch failed: OOM."},
+        {"role": "user", "content": "try again"},
+    ]
+
+    intent = _classify_agent_request(messages, "try again")
+
+    assert intent["continuation"] is True
+
+
+def test_retry_phrase_as_first_message_is_not_a_continuation():
+    # Nothing to retry yet -- must not misfire on a fresh conversation.
+    intent = _classify_agent_request([{"role": "user", "content": "try again"}], "try again")
+
+    assert intent["continuation"] is False
+
+
 def test_polish_internet_search_request_classifies_as_web():
     intent = _classify_agent_request(
         [],

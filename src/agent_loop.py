@@ -1248,12 +1248,6 @@ _RETRY_CONTINUATION_RE = re.compile(
     r"start it again|failed|fails?|died|crashed|broke|insta|instantly)\b",
     re.IGNORECASE,
 )
-_COOKBOOK_CONTEXT_RE = re.compile(
-    r"\b(?:cookbook|serve|serving|served|launch|start|preset|vllm|sglang|"
-    r"llama\.?cpp|ollama|download|cached models?|model servers?|running models?|"
-    r"gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b",
-    re.IGNORECASE,
-)
 def _is_explicit_continuation(text: str) -> bool:
     """Only these terse replies may inherit older user turns for tool retrieval."""
     return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
@@ -1276,18 +1270,29 @@ def _is_casual_low_signal(text: str) -> bool:
 
 
 def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
-    """Treat "try again / it failed" as a continuation only for active tool work.
+    """Treat "try again / it failed" as a continuation whenever there's a
+    real prior turn to inherit from.
 
-    These follow-ups are common after Cookbook launches: the latest user turn
-    says only "try again it failed", while the actionable model/host/command
-    details live one or two turns back. Keep this intentionally narrow so
-    ordinary chat does not inherit stale Cookbook context.
+    These follow-ups are common after any tool-driven task, not just
+    Cookbook launches: the latest user turn says only "try again it failed"
+    or "try again, use topic X", while the actionable details (which tool,
+    which server, which topic) live one or two turns back. This was
+    originally scoped to fire only when the recent context looked
+    Cookbook-flavored, which missed the identical shape of follow-up for
+    other domains -- e.g. "try again, use topic odysseus" after a failed
+    ntfy MCP send lost the prior turn's tool selection entirely (domain
+    classification saw no keywords, ran pure embedding retrieval on "try
+    again, use topic odysseus" alone, and the ntfy tool didn't rank back in)
+    and the agent had to guess at an unrelated tool instead. Broadened to
+    fire whenever there's at least one earlier user turn to inherit from --
+    a first message can never match this (nothing to retry), so the
+    downside is bounded to occasionally also surfacing a stale tool
+    alongside the right one, not silently losing the right one.
     """
     latest = str(text or "").strip()
     if not latest or not _RETRY_CONTINUATION_RE.search(latest):
         return False
-    recent = _recent_context_for_retrieval(messages, max_user=5, max_chars=1200)
-    return bool(_COOKBOOK_CONTEXT_RE.search(recent))
+    return _user_turn_count(messages) > 1
 
 
 def _assistant_requested_followup(messages: List[Dict]) -> bool:

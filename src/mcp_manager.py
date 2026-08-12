@@ -38,10 +38,29 @@ def _model_visible_schema(schema: Any) -> Dict:
         ]
     return visible
 
+def _describe_exception(error: Optional[BaseException]) -> str:
+    """Render an exception for logs/error payloads, never as an empty string.
+
+    Several MCP-adjacent exceptions (anyio's ClosedResourceError/
+    BrokenResourceError when a stdio subprocess's pipe closes underneath it,
+    among others) carry no message -- str(e) is "". `str(error) if error
+    else "Unknown error"` only catches error being None/falsy, not an
+    Exception instance whose str() is empty (Exception instances are always
+    truthy), so that fallback silently produced e.g. "MCP tool call failed:
+    mcp__xyz__tool: " with nothing after the colon -- undiagnosable from
+    logs alone. Fall back to the exception's type name so there's always
+    something to search for/report.
+    """
+    if error is None:
+        return "Unknown error"
+    text = str(error).strip()
+    return text if text else f"{type(error).__name__} (no error message — check the MCP server's own logs/stderr)"
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
-    raw_error = str(error) if error else "Unknown error"
+    raw_error = _describe_exception(error)
     command_line = " ".join([command or "", *args]).strip()
     lower_command = command_line.lower()
 
@@ -204,7 +223,7 @@ class McpManager:
                 self._generation += 1
             return res
         except Exception as e:
-            logger.error(f"Failed to connect MCP server {name} ({server_id}): {e}")
+            logger.error(f"Failed to connect MCP server {name} ({server_id}): {_describe_exception(e)}")
             error_message = _format_mcp_connection_error(name, command or "", args or [], e)
             self._connections[server_id] = {"status": "error", "error": error_message, "name": name}
             self._generation += 1
@@ -417,8 +436,9 @@ class McpManager:
             self._connections[server_id] = {"status": "error", "error": "mcp package not installed", "name": name}
             return False
         except Exception as e:
-            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {e}")
-            self._connections[server_id] = {"status": "error", "error": str(e), "name": name}
+            desc = _describe_exception(e)
+            logger.error(f"Failed to connect HTTP MCP server {name} ({server_id}): {desc}")
+            self._connections[server_id] = {"status": "error", "error": desc, "name": name}
             return False
 
     async def disconnect_server(self, server_id: str):
@@ -515,7 +535,7 @@ class McpManager:
         except Exception as e:
             # Auto-reconnect for builtin servers whose subprocess may have died
             if self.is_builtin(server_id):
-                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {e}")
+                logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {_describe_exception(e)}")
                 reconnected = await self._reconnect_builtin(server_id)
                 if reconnected:
                     session = self._sessions.get(server_id)
@@ -523,16 +543,18 @@ class McpManager:
                         try:
                             result = await self._do_call(session, tool_name, arguments)
                         except Exception as e2:
-                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {e2}")
-                            return {"error": str(e2), "exit_code": 1}
+                            desc2 = _describe_exception(e2)
+                            logger.error(f"MCP tool call failed after reconnect: {qualified_name}: {desc2}")
+                            return {"error": desc2, "exit_code": 1}
                     else:
                         return {"error": f"Reconnected but no session for {server_id}", "exit_code": 1}
                 else:
                     logger.error(f"MCP reconnect failed for {server_id}")
                     return {"error": f"MCP server crashed and reconnect failed: {server_id}", "exit_code": 1}
             else:
-                logger.error(f"MCP tool call failed: {qualified_name}: {e}")
-                return {"error": str(e), "exit_code": 1}
+                desc = _describe_exception(e)
+                logger.error(f"MCP tool call failed: {qualified_name}: {desc}")
+                return {"error": desc, "exit_code": 1}
 
         return result
 
@@ -592,7 +614,7 @@ class McpManager:
                 logger.info(f"Reconnected builtin MCP server: {name}")
             return ok
         except Exception as e:
-            logger.error(f"Failed to reconnect builtin MCP server {name}: {e}")
+            logger.error(f"Failed to reconnect builtin MCP server {name}: {_describe_exception(e)}")
             return False
 
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:

@@ -1,7 +1,40 @@
 import asyncio
 from unittest.mock import patch
 
-from src.mcp_manager import _format_mcp_connection_error, McpManager
+from src.mcp_manager import _describe_exception, _format_mcp_connection_error, McpManager
+
+
+def test_describe_exception_falls_back_to_type_name_when_message_is_empty():
+    # Regression: several MCP-adjacent exceptions (anyio's
+    # ClosedResourceError/BrokenResourceError when a stdio subprocess's pipe
+    # closes underneath it, among others) carry no message -- str(e) is "".
+    # `str(error) if error else "Unknown error"` only catches error being
+    # None/falsy; an Exception instance is always truthy even with an empty
+    # str(), so that produced e.g. "MCP tool call failed: mcp__x__y: " with
+    # nothing after the colon -- undiagnosable from logs alone.
+    class _NoMessageError(Exception):
+        pass
+
+    desc = _describe_exception(_NoMessageError())
+    assert desc != ""
+    assert "_NoMessageError" in desc
+
+
+def test_describe_exception_preserves_real_message():
+    assert _describe_exception(RuntimeError("boom")) == "boom"
+
+
+def test_describe_exception_handles_none():
+    assert _describe_exception(None) == "Unknown error"
+
+
+def test_connection_error_with_empty_exception_message_is_not_blank():
+    msg = _format_mcp_connection_error(
+        "Custom MCP", "python", ["server.py"], ConnectionError(),
+    )
+
+    assert msg.strip() != ""
+    assert "ConnectionError" in msg
 
 
 def test_playwright_mcp_connection_error_includes_install_hint():
