@@ -3666,8 +3666,26 @@ async def stream_agent_loop(
                     sorted(_other_domains),
                 )
             else:
-                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-                logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+                # `_other_domains` can only ever name a BUILT-IN domain, so a
+                # user-added MCP server can never protect itself through it:
+                # the intent classifier has no keywords for tools it has never
+                # heard of. "send a test notification" resolved to domains=[],
+                # retrieval correctly surfaced the ntfy MCP tools, and this
+                # branch then replaced the selection wholesale and dropped
+                # them -- the agent reported the notification tool wasn't
+                # callable, which was literally true, on a healthy server.
+                # Tools that retrieval matched for THIS query are evidence of
+                # intent in their own right, so carry them across the swap.
+                _mcp_tools = {
+                    tool for tool in (_relevant_tools or set())
+                    if tool.startswith("mcp__")
+                }
+                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS) | _mcp_tools
+                logger.info(
+                    "[tool-rag] Workspace file/terminal request; using Odysseus "
+                    "Terminus toolset while preserving MCP tools=%s",
+                    sorted(_mcp_tools),
+                )
 
     # A follow-up turn must not lose a tool this conversation has already been
     # calling just because its literal text doesn't name that domain.

@@ -82,7 +82,35 @@ def _apply_terminus_clamp(selected, domains):
     }
     if other:
         return set(selected) | set(_WORKSPACE_TERMINUS_TOOLS)
-    return set(_WORKSPACE_TERMINUS_TOOLS)
+    mcp_tools = {t for t in (selected or set()) if t.startswith("mcp__")}
+    return set(_WORKSPACE_TERMINUS_TOOLS) | mcp_tools
+
+
+def test_mcp_tools_survive_the_terminus_swap_with_no_domain():
+    """A user-added MCP server has no domain, so it needs its own guard.
+
+    "send a test notification" classifies as domains=[] -- the intent
+    classifier has no keywords for a server the user installed five minutes
+    ago -- but tool-RAG retrieved the ntfy tools correctly. The swap used to
+    discard them and the agent reported the tool wasn't callable.
+    """
+    text = "send a test notification"
+    domains = _domains(text)
+    assert not (domains & {
+        "email", "documents", "notes_calendar_tasks",
+        "contacts", "sessions", "cookbook", "integrations",
+    }), "precondition: no built-in domain protects this request"
+
+    selected = {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch", "list_emails"}
+    result = _apply_terminus_clamp(selected, domains)
+
+    assert {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch"} <= result, (
+        "retrieval matched the MCP tools for this query and the swap dropped them"
+    )
+    assert _WORKSPACE_TERMINUS_TOOLS <= result, "file/shell tools must still arrive"
+    assert "list_emails" not in result, (
+        "only MCP tools get the carve-out; built-in tools still swap out"
+    )
 
 
 def test_mixed_request_keeps_email_tools_after_terminus_clamp():
