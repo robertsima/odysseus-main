@@ -19,11 +19,12 @@ import src.rag_vector as rag_vector
 def _make_rag(recorded_sources):
     rag = rag_vector.VectorRAG.__new__(rag_vector.VectorRAG)  # skip Chroma connect
 
-    def _record(text, metadata):
-        recorded_sources.add(metadata["source"])
-        return True
+    def _record(docs):
+        for _text, metadata in docs:
+            recorded_sources.add(metadata["source"])
+        return {"success": True, "added_count": len(docs), "failed_count": 0}
 
-    rag.add_document = _record
+    rag.add_documents_batch = _record
     return rag
 
 

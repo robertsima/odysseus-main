@@ -869,14 +869,28 @@ class VectorRAG:
                 meta['owner'] = owner
 
             header = _chunk_header(fname)
-            indexed = 0
-            failed = 0
-            for i, chunk in enumerate(self._split_into_chunks(content)):
-                if self.add_document(f"{header}\n{chunk}", {**meta, 'chunk_id': i}):
-                    indexed += 1
-                else:
-                    failed += 1
-            return (indexed, failed)
+            chunks = [
+                (f"{header}\n{chunk}", {**meta, 'chunk_id': i})
+                for i, chunk in enumerate(self._split_into_chunks(content))
+            ]
+            if not chunks:
+                return (0, 0)
+
+            # One batched write instead of a get+add round-trip per chunk.
+            # The incremental vault scan re-indexes a whole file on every save,
+            # so a medium note was costing ~26 sequential HTTP calls to Chroma
+            # each time it was edited -- which dominated the cost of saving a
+            # rolling report that gets rewritten on every update.
+            result = self.add_documents_batch(chunks)
+            if not result.get('success'):
+                return (0, len(chunks))
+            # add_documents_batch counts only NEW ids in added_count, but a
+            # chunk that was already present is not a failure: add_document
+            # returned True for that case, and index_personal_documents
+            # re-walks already-indexed trees where every chunk is a duplicate.
+            # Only genuinely malformed chunks count as failed.
+            failed = int(result.get('failed_count') or 0)
+            return (len(chunks) - failed, failed)
         except Exception as e:
             logger.error(f"index {path}: {e}")
             return (0, 1)

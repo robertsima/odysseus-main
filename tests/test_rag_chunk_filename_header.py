@@ -26,15 +26,15 @@ class _RecordingRag(VectorRAG):
     """VectorRAG with the Chroma-backed write replaced by a recorder.
 
     Built with ``__new__`` so no collection, embedding lane, or network client
-    is required — ``index_file`` only needs ``add_document`` and the chunker.
+    is required — ``index_file`` only needs the batch write and the chunker.
     """
 
     def __init__(self):
         self.written = []
 
-    def add_document(self, text, metadata):
-        self.written.append((text, metadata))
-        return True
+    def add_documents_batch(self, docs):
+        self.written.extend(docs)
+        return {"success": True, "added_count": len(docs), "failed_count": 0}
 
 
 def _rag():
