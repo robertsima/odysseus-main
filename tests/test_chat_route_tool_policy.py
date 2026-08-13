@@ -119,6 +119,29 @@ def test_disabled_tools_respects_missing_vs_explicit_toggles():
     )
 
 
+def test_conversation_tool_retention_still_defers_to_route_policy():
+    """Tools kept from earlier rounds must not outrank the route's disabled set.
+
+    agent_loop re-adds tools the conversation has already called, so a
+    follow-up turn whose literal text names no domain ("Continue searching
+    there should be at least a hundred applications total") doesn't lose the
+    email tools mid-audit. That retention must subtract `disabled_tools`, or it
+    would quietly hand back a tool the chat route deliberately switched off
+    (bash without the privilege, web without the per-turn opt-in), and it must
+    run before the deliberate prunes so those still win.
+    """
+    source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
+
+    assert "def _tools_used_in_conversation" in source
+    retention = source.index("_tools_used_in_conversation(messages, _known_names)")
+    assert "if t not in disabled_tools" in source[retention:retention + 400], (
+        "retention must exclude route-disabled tools"
+    )
+    assert retention < source.index("active email draft pruned fetch tools"), (
+        "retention has to run before the deliberate prunes so they still win"
+    )
+
+
 def test_workspace_auto_escalation_keeps_shell_tools():
     """Workspace/shell auto-routing must not use the light typed-tool clamp."""
     source = _CHAT_ROUTES.read_text(encoding="utf-8")

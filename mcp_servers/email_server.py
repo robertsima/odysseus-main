@@ -20,6 +20,7 @@ import sqlite3
 import sys
 import os
 import os.path
+from collections import Counter
 from pathlib import Path
 from datetime import datetime, timedelta
 import uuid
@@ -726,64 +727,214 @@ def _scan_unsubscribe_candidates(folder="INBOX", account=None, limit=25, max_sca
     }
 
 
-def _audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
-                   max_scan=80, snippet_chars=300) -> dict:
-    """Bulk-scan a mailbox and return a compact per-email digest (subject,
-    sender, date, UID, short body snippet) instead of full bodies.
+# ── audit_emails: server-side search, bounded fetch, aggregation ──
 
-    Built for "go through my emails and find/categorize X" style tasks that
-    need to look at the content of many messages -- reading each one
-    individually via read_email pulls a full raw body into the conversation
-    per call, and a broad audit over a few dozen messages balloons context
-    to hundreds of thousands of tokens within a handful of rounds. This does
-    the bulk IMAP fetch here, server-side, and only ever returns a bounded
-    snippet per message so the caller can classify/report from compact
-    context instead of full bodies. Optional `keywords` pre-filters on
-    subject/snippet; omit it to just get a compact digest of the most
-    recent messages.
-    """
-    # Clamp before the fixture check too -- both paths take the same
-    # untrusted tool-call args, and the fixture path is also reachable via a
-    # real (if sandboxed/demo) tool call, not just tests.
-    limit = max(1, min(int(limit or 30), 100))
-    max_scan = max(limit, min(int(max_scan or 80), 250))
-    snippet_chars = max(40, min(int(snippet_chars or 300), 1000))
-    folder = folder or "INBOX"
-    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
+# A bare "SEARCH ALL" scan pays for every message it walks: the server hands
+# back the whole folder and we fetch each of the newest N. Keep the old
+# ceiling there. A UID set the SERVER already narrowed is a different animal
+# -- 400 UIDs that matched `subject:application` cost one SEARCH plus 400
+# header fetches, and the alternative is the caller paging list_emails ten at
+# a time across an 11k-message inbox and still never reaching last spring.
+_AUDIT_MAX_SCAN_UNFILTERED = 250
+_AUDIT_MAX_SCAN_SEARCHED = 2000
+# IMAP servers cap command line length (commonly 8-16KB). 400 UIDs of up to
+# 9 digits plus separators stays well inside that on any of them.
+_AUDIT_FETCH_CHUNK = 400
+# Header-only pass. BODY.PEEK never sets \Seen, which keeps audit_emails
+# read-only in the way the user actually cares about -- a plain BODY[] fetch
+# would silently mark hundreds of messages read.
+_AUDIT_HEADER_SPEC = "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
 
-    fixture = _fixture_audit_emails(folder, account, keywords, limit, max_scan, snippet_chars)
-    if fixture is not None:
-        return fixture
 
-    conn = _imap_connect(account)
+def _audit_int(value, default: int, low: int, high: int) -> int:
+    """Coerce+clamp one untrusted numeric tool argument into [low, high]."""
     try:
-        resolved = _resolve_folder(conn, folder, _folder_role_from_name(folder))
-        status, _ = conn.select(_q(resolved), readonly=True)
+        n = int(value)
+    except (TypeError, ValueError):
+        n = int(default)
+    return max(low, min(n, high))
+
+
+def _imap_quotable(text, max_len: int) -> str:
+    """Sanitize caller text for use inside an IMAP quoted string.
+
+    These strings come straight from model-authored tool arguments and
+    imaplib appends command arguments verbatim (it does no quoting of its
+    own), so a bare CR/LF would terminate the command line and run whatever
+    followed as a new IMAP command. Strip those outright, escape the two
+    characters that would otherwise break out of the quoted string, and drop
+    non-ASCII: without a CHARSET argument a quoted string must be ASCII, and
+    imaplib encodes command args as ASCII and would raise. Non-ASCII terms
+    still work -- they fall through to the client-side keyword post-filter.
+    """
+    raw = str(text or "")
+    if not raw.isascii():
+        return ""
+    cleaned = re.sub(r"[\r\n\t]+", " ", raw)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()[:max_len]
+    return cleaned.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _imap_or_chain(exprs: list[str]) -> str:
+    """Fold N search keys into IMAP's binary-prefix OR: `OR a OR b c`."""
+    if not exprs:
+        return ""
+    out = exprs[-1]
+    for expr in reversed(exprs[:-1]):
+        out = f"OR {expr} {out}"
+    return out
+
+
+def _parse_audit_date(value):
+    """Parse a caller-supplied audit date bound; None when unusable.
+
+    Only unambiguous forms are accepted -- ISO (2026-08-01) and IMAP's own
+    dd-Mon-yyyy. `03/04/2026` is deliberately rejected rather than guessed at,
+    because silently reading it as April 3rd would quietly return the wrong
+    month's mail in a report the user then trusts.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%b-%Y"):
+        try:
+            return datetime.strptime(raw[:11] if fmt == "%d-%b-%Y" else raw[:10], fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _is_gmail_account(conn, account=None) -> bool:
+    """True when this connection is Gmail/Google Workspace (X-GM-* search)."""
+    try:
+        caps = getattr(conn, "capabilities", ()) or ()
+        if any("X-GM-EXT-1" in str(c).upper() for c in caps):
+            return True
+    except Exception:
+        pass
+    # Capability is authoritative, but a stub/proxy connection may not expose
+    # it; fall back to the configured host.
+    try:
+        host = str((_load_config(account) or {}).get("imap_host") or "").lower()
+    except Exception:
+        return False
+    return "gmail" in host or "googlemail" in host or host.endswith("google.com")
+
+
+def _build_audit_search(gmail: bool, terms: list[str], query, since_dt, before_dt) -> dict:
+    """Build the server-side SEARCH for an audit, plus a dates-only fallback.
+
+    Returns {"args", "terms_applied", "describe", "fallback_args"}. `args` is
+    the tuple handed to conn.uid("SEARCH", ...); empty means "nothing to
+    narrow on, use ALL".
+    """
+    safe_terms = [_imap_quotable(t, 100) for t in terms]
+    # All-or-nothing on the term set: if even one keyword can't be expressed
+    # server-side, sending the rest would silently under-match (the server
+    # would return only the expressible subset and the caller would read that
+    # as the complete answer). Drop the whole term clause instead and let the
+    # client-side post-filter do the keyword work.
+    usable_terms = safe_terms if all(safe_terms) else []
+    raw_query = _imap_quotable(query, 500)
+
+    if gmail:
+        parts = []
+        if raw_query:
+            parts.append(f"({raw_query})")
+        if usable_terms:
+            # Gmail's {a b c} braces mean OR; quoting each term keeps a
+            # multi-word keyword ("thanks for applying") a phrase instead of
+            # an implicit AND of its words.
+            parts.append("{" + " ".join(f'\\"{t}\\"' for t in usable_terms) + "}")
+        if since_dt:
+            parts.append(f"after:{since_dt.strftime('%Y/%m/%d')}")
+        if before_dt:
+            parts.append(f"before:{before_dt.strftime('%Y/%m/%d')}")
+        if parts:
+            gm = " ".join(parts)
+            date_only = " ".join(p for p in parts if p.startswith(("after:", "before:")))
+            return {
+                "args": ("X-GM-RAW", f'"{gm}"'),
+                "terms_applied": bool(usable_terms or raw_query),
+                "describe": f"X-GM-RAW {gm}",
+                "fallback_args": ("X-GM-RAW", f'"{date_only}"') if date_only else (),
+            }
+        return {"args": (), "terms_applied": False, "describe": "ALL", "fallback_args": ()}
+
+    parts = []
+    if since_dt:
+        parts.append(f"SINCE {since_dt.strftime('%d-%b-%Y')}")
+    if before_dt:
+        parts.append(f"BEFORE {before_dt.strftime('%d-%b-%Y')}")
+    date_only = " ".join(parts)
+    if usable_terms:
+        parts.append("(" + _imap_or_chain(
+            [f'(OR SUBJECT "{t}" BODY "{t}")' for t in usable_terms]
+        ) + ")")
+    criteria = " ".join(parts)
+    if not criteria:
+        return {"args": (), "terms_applied": False, "describe": "ALL", "fallback_args": ()}
+    return {
+        "args": (None, criteria),
+        "terms_applied": bool(usable_terms),
+        "describe": criteria,
+        # Some IMAP servers reject or mis-handle BODY/OR chains. Dates alone
+        # are the widely-supported subset, and email_pollers.py already
+        # documents SINCE itself being flaky on some accounts -- so a failed
+        # dates-only retry falls all the way back to ALL below.
+        "fallback_args": (None, date_only) if date_only and usable_terms else (),
+    }
+
+
+def _audit_search_uids(conn, plan: dict) -> tuple[list[int], dict]:
+    """Run the planned SEARCH, degrading to dates-only and then ALL."""
+    info = {"mode": "all", "criteria": "ALL", "terms_applied": False, "fallback_reason": ""}
+    attempts = []
+    if plan.get("args"):
+        attempts.append((plan["args"], plan.get("describe") or "", bool(plan.get("terms_applied"))))
+    if plan.get("fallback_args"):
+        attempts.append((plan["fallback_args"], "date range only", False))
+    attempts.append(((None, "ALL"), "ALL", False))
+
+    for args, describe, terms_applied in attempts:
+        try:
+            status, data = conn.uid("SEARCH", *args)
+        except Exception as exc:
+            info["fallback_reason"] = f"search rejected: {exc}"
+            continue
         if status != "OK":
-            return {"success": False, "error": f"Folder not found: {folder}", "digest": []}
-        status, data = conn.uid("SEARCH", None, "ALL")
-        if status != "OK" or not data or not data[0]:
-            return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": resolved, "account": account or ""}
+            info["fallback_reason"] = f"search returned {status}"
+            continue
         uids = []
-        for raw_uid in data[0].split():
+        for raw_uid in (data[0].split() if data and data[0] else []):
             try:
                 uids.append(int(raw_uid))
             except Exception:
                 continue
-        uids = sorted(uids, reverse=True)[:max_scan]
-        if not uids:
-            return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": resolved, "account": account or ""}
-        status, msg_data = conn.uid("FETCH", _b(",".join(str(u) for u in uids)), "(UID RFC822)")
-    finally:
-        try:
-            conn.logout()
-        except Exception:
-            pass
-    if status != "OK":
-        return {"success": False, "error": "Failed to fetch emails", "digest": []}
+        info["mode"] = "all" if describe == "ALL" else ("gmail_raw" if "X-GM-RAW" in describe else "imap_criteria")
+        info["criteria"] = describe
+        info["terms_applied"] = terms_applied
+        return uids, info
+    return [], info
 
-    rows = []
-    for item in msg_data or []:
+
+def _audit_fetch(conn, uids: list[int], spec: str) -> list:
+    """UID FETCH `uids` in bounded chunks; returns the raw fetch items."""
+    items = []
+    for start in range(0, len(uids), _AUDIT_FETCH_CHUNK):
+        chunk = uids[start:start + _AUDIT_FETCH_CHUNK]
+        try:
+            status, data = conn.uid("FETCH", _b(",".join(str(u) for u in chunk)), spec)
+        except Exception:
+            continue
+        if status == "OK":
+            items.extend(data or [])
+    return items
+
+
+def _audit_iter_messages(items):
+    """Yield (uid, parsed message) for each usable UID FETCH response item."""
+    for item in items or []:
         if not isinstance(item, tuple) or len(item) < 2:
             continue
         meta_b = item[0] if isinstance(item[0], bytes) else str(item[0]).encode()
@@ -791,32 +942,216 @@ def _audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
         if not uid:
             continue
         try:
-            msg = email.message_from_bytes(item[1] or b"")
+            yield uid, email.message_from_bytes(item[1] or b"")
         except Exception:
             continue
-        subject = _decode_header(msg.get("Subject", "(no subject)"))
-        sender = _decode_header(msg.get("From", "unknown"))
-        date_str = msg.get("Date", "")
-        sender_name, sender_addr = email.utils.parseaddr(sender)
-        body = _extract_text(msg) or ""
-        snippet = " ".join(body.split())[:snippet_chars]
-        if kw and not any(k in (subject + " " + snippet).lower() for k in kw):
-            continue
-        rows.append({
-            "uid": uid,
-            "subject": subject,
-            "from": sender_name or sender_addr or sender,
-            "from_address": sender_addr,
-            "date": date_str,
-            "folder": resolved,
-            "snippet": snippet,
-        })
-    rows.sort(key=_result_sort_time, reverse=True)
+
+
+def _audit_row_from_msg(msg, uid, folder, snippet="") -> dict:
+    sender = _decode_header(msg.get("From", "unknown"))
+    sender_name, sender_addr = email.utils.parseaddr(sender)
+    return {
+        "uid": uid,
+        "subject": _decode_header(msg.get("Subject", "(no subject)")),
+        "from": sender_name or sender_addr or sender,
+        "from_address": sender_addr,
+        "date": msg.get("Date", ""),
+        "folder": folder,
+        "snippet": snippet,
+    }
+
+
+def _audit_row_time(row: dict):
+    """Timestamp for one audit row, or None when the date is unparseable.
+
+    Real IMAP rows carry an RFC 2822 Date header, which _result_sort_time
+    handles; fixture rows carry ISO, which it does not (it returns
+    datetime.min). Without this every fixture message would aggregate into a
+    single "(unknown)" month bucket.
+    """
+    when = _result_sort_time(row)
+    if when != datetime.min:
+        return when
+    try:
+        parsed = datetime.fromisoformat(str(row.get("date") or "").replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _audit_summary(rows: list[dict], kw: list[str], top: int = 15) -> dict:
+    """Aggregate matched rows so the caller can count without reading rows.
+
+    The report failure this exists for was a model asked to tally "at least a
+    hundred" job applications: enumerating 100+ digest rows into the context
+    just to count them is the expensive way to answer, and it is exactly the
+    thing the model is worst at. Counting happens here; the model writes prose
+    over these totals and cites a handful of sample rows.
+    """
+    by_domain: Counter = Counter()
+    by_month: Counter = Counter()
+    by_keyword: Counter = Counter()
+    senders = set()
+    times = []
+    for row in rows:
+        addr = str(row.get("from_address") or "").strip().lower()
+        if addr:
+            senders.add(addr)
+            by_domain[addr.rpartition("@")[2] or "(unknown)"] += 1
+        else:
+            by_domain["(unknown)"] += 1
+        when = _audit_row_time(row)
+        if when is not None:
+            by_month[when.strftime("%Y-%m")] += 1
+            times.append(when)
+        else:
+            by_month["(unknown)"] += 1
+        if kw:
+            # Subject plus whatever snippet this row carries. Rows outside the
+            # returned digest are header-only, so a keyword that appears only
+            # in a body is credited from the server-side match, not counted
+            # again here -- these buckets are for shape, not forensics.
+            hay = (str(row.get("subject") or "") + " " + str(row.get("snippet") or "")).lower()
+            for k in kw:
+                if k in hay:
+                    by_keyword[k] += 1
+    return {
+        "total_matched": len(rows),
+        "unique_senders": len(senders),
+        "by_sender_domain": [{"domain": d, "count": c} for d, c in by_domain.most_common(top)],
+        "by_month": [{"month": m, "count": by_month[m]} for m in sorted(by_month, reverse=True)],
+        "by_keyword": [{"keyword": k, "count": c} for k, c in by_keyword.most_common()],
+        "earliest": min(times).strftime("%Y-%m-%d") if times else "",
+        "latest": max(times).strftime("%Y-%m-%d") if times else "",
+    }
+
+
+def _audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
+                   max_scan=80, snippet_chars=300, query=None, since=None,
+                   before=None, summarize=False) -> dict:
+    """Bulk-scan a mailbox and return aggregate counts plus a compact
+    per-email digest (subject, sender, date, UID, short body snippet).
+
+    Built for "go through my emails and find/categorize/report on X" style
+    tasks that need to look at many messages -- reading each one individually
+    via read_email pulls a full raw body into the conversation per call, and
+    a broad audit over a few dozen messages balloons context to hundreds of
+    thousands of tokens within a handful of rounds.
+
+    Two things keep this usable over a real mailbox rather than only its most
+    recent page:
+
+    * The search runs on the IMAP SERVER. `query` (Gmail syntax on Gmail
+      accounts), `keywords`, and `since`/`before` narrow the UID set before
+      anything is fetched, so a scan can reach mail from a year ago instead of
+      being confined to the newest few hundred messages. A narrowed set is
+      cheap, so it gets a much higher scan ceiling than an unfiltered one.
+    * Bodies are only fetched for messages that survive filtering and land in
+      the returned digest; everything else is a header-only BODY.PEEK pass.
+
+    `summary` in the result carries counts by sender domain, by month, and by
+    keyword over ALL matched messages, so the caller can report totals without
+    the digest having to enumerate them. Pass summarize=True to shrink the
+    digest to a small sample and lean on those aggregates.
+    """
+    # Clamp before the fixture check too -- both paths take the same
+    # untrusted tool-call args, and the fixture path is also reachable via a
+    # real (if sandboxed/demo) tool call, not just tests.
+    limit = _audit_int(limit, 30, 1, 100)
+    max_scan = _audit_int(max_scan, 80, limit, _AUDIT_MAX_SCAN_SEARCHED)
+    # 0 is meaningful here -- "don't fetch bodies at all", for a pure counting
+    # pass over a large match set. Any other value clamps into the old range.
+    _snip = _audit_int(snippet_chars, 300, 0, 1000)
+    snippet_chars = 0 if _snip == 0 else max(40, _snip)
+    folder = folder or "INBOX"
+    summarize = bool(summarize)
+    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()][:12]
+    since_dt = _parse_audit_date(since)
+    before_dt = _parse_audit_date(before)
+    digest_cap = min(limit, 10) if summarize else limit
+
+    fixture = _fixture_audit_emails(
+        folder, account, keywords, limit, max_scan, snippet_chars,
+        query=query, since=since, before=before, summarize=summarize,
+    )
+    if fixture is not None:
+        return fixture
+
+    def _empty(resolved, info):
+        return {
+            "success": True, "digest": [], "summary": _audit_summary([], kw),
+            "scanned": 0, "matched": 0, "truncated": False,
+            "search": info, "folder": resolved, "account": account or "",
+        }
+
+    conn = _imap_connect(account)
+    try:
+        resolved = _resolve_folder(conn, folder, _folder_role_from_name(folder))
+        status, _ = conn.select(_q(resolved), readonly=True)
+        if status != "OK":
+            return {"success": False, "error": f"Folder not found: {folder}", "digest": []}
+
+        plan = _build_audit_search(
+            _is_gmail_account(conn, account), kw, query, since_dt, before_dt,
+        )
+        uids, info = _audit_search_uids(conn, plan)
+        if not uids:
+            return _empty(resolved, info)
+
+        # The server matched keywords itself only when the term clause
+        # actually made it into the criteria; otherwise the old client-side
+        # substring filter has to run, and that needs bodies for every
+        # candidate -- which is why the body-scan path keeps the low ceiling.
+        needs_body_filter = bool(kw) and not info.get("terms_applied")
+        narrowed = info.get("mode") != "all"
+        ceiling = _AUDIT_MAX_SCAN_SEARCHED if (narrowed and not needs_body_filter) else _AUDIT_MAX_SCAN_UNFILTERED
+        uids = sorted(uids, reverse=True)[:max(limit, min(max_scan, ceiling))]
+        info["scan_ceiling"] = ceiling
+
+        rows = []
+        if needs_body_filter:
+            # Fallback path only: the server didn't apply the keywords, so
+            # every candidate body has to come down to filter on it.
+            for uid, msg in _audit_iter_messages(_audit_fetch(conn, uids, "(UID RFC822)")):
+                body = " ".join((_extract_text(msg) or "").split())
+                subject = _decode_header(msg.get("Subject", "(no subject)"))
+                if not any(k in (subject + " " + body).lower() for k in kw):
+                    continue
+                rows.append(_audit_row_from_msg(msg, uid, resolved, body[:snippet_chars]))
+            rows.sort(key=_result_sort_time, reverse=True)
+            digest = rows[:digest_cap]
+        else:
+            for uid, msg in _audit_iter_messages(_audit_fetch(conn, uids, _AUDIT_HEADER_SPEC)):
+                rows.append(_audit_row_from_msg(msg, uid, resolved))
+            rows.sort(key=_result_sort_time, reverse=True)
+            digest = rows[:digest_cap]
+            # Only the rows the caller will actually see pay for a body. The
+            # old implementation pulled RFC822 for every scanned message just
+            # to cut a 300-char snippet off most of them and throw it away.
+            if digest and snippet_chars:
+                body_uids = [int(r["uid"]) for r in digest if str(r["uid"]).isdigit()]
+                bodies = {
+                    uid: " ".join((_extract_text(msg) or "").split())[:snippet_chars]
+                    for uid, msg in _audit_iter_messages(_audit_fetch(conn, body_uids, "(UID RFC822)"))
+                }
+                for row in digest:
+                    row["snippet"] = bodies.get(str(row["uid"]), "")
+    finally:
+        try:
+            conn.logout()
+        except Exception:
+            pass
+
     return {
         "success": True,
-        "digest": rows[:limit],
+        "digest": digest,
+        "summary": _audit_summary(rows, kw),
         "scanned": len(uids),
         "matched": len(rows),
+        "truncated": len(rows) > len(digest),
+        "search": info,
         "folder": resolved,
         "account": account or "",
     }
@@ -1074,17 +1409,51 @@ def _fixture_read_email(uid=None, message_id=None, folder="INBOX", account=None)
 
 
 def _fixture_audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
-                          max_scan=80, snippet_chars=300) -> dict | None:
+                          max_scan=80, snippet_chars=300, query=None,
+                          since=None, before=None, summarize=False) -> dict | None:
+    # Re-clamp here rather than trusting the caller: _audit_emails clamps
+    # before dispatching, but this helper is also called directly.
+    limit = _audit_int(limit, 30, 1, 100)
+    max_scan = _audit_int(max_scan, 80, limit, _AUDIT_MAX_SCAN_SEARCHED)
+    _snip = _audit_int(snippet_chars, 300, 0, 1000)
+    snippet_chars = 0 if _snip == 0 else max(40, _snip)
+    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()][:12]
+    digest_cap = min(limit, 10) if summarize else limit
     if not _fixture_email_enabled():
         return None
+    search_info = {
+        "mode": "fixture", "criteria": str(query or "") or "ALL",
+        "terms_applied": bool(kw), "fallback_reason": "",
+        "scan_ceiling": _AUDIT_MAX_SCAN_SEARCHED,
+    }
     if (folder or "INBOX").upper() not in {"INBOX", "ALL", "ALL MAIL"}:
-        return {"success": True, "digest": [], "scanned": 0, "matched": 0, "folder": folder, "account": account or ""}
-    rows = _fixture_list_emails(folder, max_results=int(max_scan or 80), account=account) or []
-    kw = [str(k).strip().lower() for k in (keywords or []) if str(k).strip()]
-    matched = [
-        row for row in rows
-        if not kw or any(k in (str(row.get("subject", "")) + " " + str(row.get("body", ""))).lower() for k in kw)
-    ]
+        return {
+            "success": True, "digest": [], "summary": _audit_summary([], kw),
+            "scanned": 0, "matched": 0, "truncated": False,
+            "search": search_info, "folder": folder, "account": account or "",
+        }
+    rows = _fixture_list_emails(folder, max_results=max_scan, account=account) or []
+    since_dt = _parse_audit_date(since)
+    before_dt = _parse_audit_date(before)
+
+    def _keep(row) -> bool:
+        hay = (str(row.get("subject", "")) + " " + str(row.get("body", ""))).lower()
+        if kw and not any(k in hay for k in kw):
+            return False
+        # The fixture has no IMAP server to run SINCE/BEFORE, so apply the same
+        # bounds locally; otherwise a date-scoped audit would look like it
+        # worked while quietly ignoring the range.
+        if since_dt or before_dt:
+            when = _audit_row_time(row)
+            if when is None:
+                return False
+            if since_dt and when < since_dt:
+                return False
+            if before_dt and when >= before_dt:
+                return False
+        return True
+
+    matched = [row for row in rows if _keep(row)]
     digest = [
         {
             "uid": row.get("uid"),
@@ -1093,15 +1462,29 @@ def _fixture_audit_emails(folder="INBOX", account=None, keywords=None, limit=30,
             "from_address": row.get("from_address", ""),
             "date": row.get("date"),
             "folder": folder,
-            "snippet": " ".join(str(row.get("body", "")).split())[: int(snippet_chars or 300)],
+            "snippet": " ".join(str(row.get("body", "")).split())[:snippet_chars] if snippet_chars else "",
         }
-        for row in matched[: int(limit or 30)]
+        for row in matched[:digest_cap]
+    ]
+    # Aggregate over every matched message, not just the returned digest --
+    # that is the point of the summary block.
+    summary_rows = [
+        {
+            "subject": row.get("subject"),
+            "from_address": row.get("from_address", ""),
+            "date": row.get("date"),
+            "snippet": " ".join(str(row.get("body", "")).split())[:300],
+        }
+        for row in matched
     ]
     return {
         "success": True,
         "digest": digest,
+        "summary": _audit_summary(summary_rows, kw),
         "scanned": len(rows),
         "matched": len(matched),
+        "truncated": len(matched) > len(digest),
+        "search": search_info,
         "folder": folder,
         "account": account or "",
     }
@@ -2324,30 +2707,48 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="audit_emails",
             description=(
-                "Bulk-scan a mailbox and return a compact digest (subject, sender, date, UID, "
-                "and a short body snippet) for many messages at once. Use this instead of "
-                "calling read_email over and over when the task is to go through/audit/report "
-                "on a broad set of emails (e.g. 'find job application confirmations and "
-                "interview requests', 'summarize what came in this week') -- reading each "
-                "message individually pulls a full body into the conversation per call and "
-                "will blow up context after a few dozen messages, while this returns bounded "
-                "snippets for all of them in one call. Optional `keywords` pre-filters by "
-                "subject/snippet substring match; omit it to just get a digest of the most "
-                "recent messages. This is read-only and does not replace read_email when you "
-                "need one message's full content (e.g. to reply to it)."
+                "Search and summarize a whole mailbox in ONE call. This is the right tool for "
+                "any 'go through my inbox and report on X' task -- job application "
+                "confirmations, interview requests, rejections, 'what came in this month' -- "
+                "and it replaces paging list_emails a few messages at a time, which cannot "
+                "reach older mail and burns a round per page.\n"
+                "The search runs ON THE IMAP SERVER, so it reaches the entire mailbox, not "
+                "just the newest few hundred messages: pass `query` (Gmail search syntax, e.g. "
+                "'subject:(application OR applying) OR from:linkedin.com', supports from:, "
+                "subject:, OR, newer_than:, has:) and/or `since`/`before` dates. On non-Gmail "
+                "accounts the same `keywords` and dates are translated to standard IMAP "
+                "criteria. `max_scan` may go far above the unfiltered default once a search "
+                "narrows the set.\n"
+                "The result leads with a `summary` block -- counts by sender domain, by month, "
+                "by keyword, total matched, unique senders, date range -- computed over EVERY "
+                "matched message. Report totals from that block; do NOT count digest rows, "
+                "which are a capped sample. Pass summarize=true for a large sweep where you "
+                "only need the numbers plus a few examples.\n"
+                "Read-only. Still use read_email when you need one message's full content."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "folder": {"type": "string", "description": "IMAP folder to scan", "default": "INBOX"},
+                    "query": {
+                        "type": "string",
+                        "description": "Server-side search. On Gmail accounts this is raw Gmail query syntax (from:, subject:, OR, newer_than:, has:) run via X-GM-RAW over the whole mailbox. Ignored on non-Gmail accounts, which use keywords/since/before instead.",
+                    },
                     "keywords": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Optional: only include messages whose subject or body snippet contains at least one of these terms (case-insensitive).",
+                        "description": "Terms to match in subject or body. Used to build the server-side search where possible, and applied as a client-side filter otherwise. Max 12.",
                     },
-                    "limit": {"type": "integer", "description": "Maximum digest entries to return", "default": 30},
-                    "max_scan": {"type": "integer", "description": "How many newest messages to inspect before filtering", "default": 80},
-                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per message", "default": 300},
+                    "since": {"type": "string", "description": "Only messages on/after this date, ISO YYYY-MM-DD. Runs server-side."},
+                    "before": {"type": "string", "description": "Only messages before this date, ISO YYYY-MM-DD. Runs server-side."},
+                    "summarize": {
+                        "type": "boolean",
+                        "description": "Return the aggregate summary plus a small sample digest instead of a full digest. Use for broad report/counting sweeps.",
+                        "default": False,
+                    },
+                    "limit": {"type": "integer", "description": "Maximum digest entries to return (max 100)", "default": 30},
+                    "max_scan": {"type": "integer", "description": "How many matched messages to inspect. Up to 2000 when query/keywords/dates narrowed the set server-side, 250 for an unfiltered scan.", "default": 80},
+                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per returned message; 0 skips body fetching entirely for a counts-only pass", "default": 300},
                     **ACCOUNT_PROP,
                 },
                 "required": [],
@@ -2788,21 +3189,61 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                     limit=arguments.get("limit", 30),
                     max_scan=arguments.get("max_scan", 80),
                     snippet_chars=arguments.get("snippet_chars", 300),
+                    query=arguments.get("query"),
+                    since=arguments.get("since"),
+                    before=arguments.get("before"),
+                    summarize=arguments.get("summarize", False),
                 )
             except Exception as e:
                 return [TextContent(type="text", text=f"Email audit failed: {e}")]
             if not result.get("success"):
                 return [TextContent(type="text", text=f"Email audit failed: {result.get('error', 'unknown error')}")]
             digest = result.get("digest") or []
+            search = result.get("search") or {}
+            search_line = f"Search: {search.get('criteria') or 'ALL'} (mode {search.get('mode') or 'all'})"
+            if search.get("fallback_reason"):
+                search_line += f"; fell back after {search['fallback_reason']}"
             if not digest:
                 return [TextContent(
                     type="text",
-                    text=f"No matching emails found in {result.get('scanned', 0)} scanned message(s) in {result.get('folder', 'INBOX')}.",
+                    text=(
+                        f"No matching emails found in {result.get('scanned', 0)} scanned message(s) "
+                        f"in {result.get('folder', 'INBOX')}.\n{search_line}"
+                    ),
                 )]
+            summary = result.get("summary") or {}
             lines = [
                 f"{result.get('matched', len(digest))} matching email(s) from {result.get('scanned', 0)} scanned "
-                f"in {result.get('folder', 'INBOX')} (showing {len(digest)}):\n",
+                f"in {result.get('folder', 'INBOX')} (showing {len(digest)}):",
+                search_line,
             ]
+            # Totals first, and computed here rather than left for the model to
+            # tally off the digest rows -- the digest is a capped sample and
+            # counting it would understate every aggregate.
+            if summary:
+                lines.append(
+                    f"\nTOTALS — {summary.get('total_matched', 0)} matched, "
+                    f"{summary.get('unique_senders', 0)} unique sender(s), "
+                    f"{summary.get('earliest') or '?'} to {summary.get('latest') or '?'}"
+                )
+                if summary.get("by_month"):
+                    lines.append("By month: " + ", ".join(
+                        f"{b['month']}={b['count']}" for b in summary["by_month"]
+                    ))
+                if summary.get("by_sender_domain"):
+                    lines.append("By sender domain: " + ", ".join(
+                        f"{b['domain']}={b['count']}" for b in summary["by_sender_domain"]
+                    ))
+                if summary.get("by_keyword"):
+                    lines.append("By keyword: " + ", ".join(
+                        f"{b['keyword']}={b['count']}" for b in summary["by_keyword"]
+                    ))
+            if result.get("truncated"):
+                lines.append(
+                    f"\n(Digest below is a sample of {len(digest)}; use the TOTALS above for counts, "
+                    "and narrow with query/keywords/since/before to see different messages.)"
+                )
+            lines.append("")
             for i, item in enumerate(digest, 1):
                 lines.append(
                     f"{i}. **{item.get('subject') or '(no subject)'}**\n"

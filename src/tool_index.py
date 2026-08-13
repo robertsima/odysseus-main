@@ -111,7 +111,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "list_email_accounts": "List configured email accounts and default status. Use before reading or sending mail when the user mentions Gmail, work mail, custom domain mail, another mailbox, or asks to compare/check multiple inboxes.",
     "list_emails": "List emails for a folder/account, newest first, including read messages by default. Shows subject, sender, date, UID, account, and AI summary. Check inbox, find emails needing replies. Supports account from list_email_accounts for Gmail/work/custom mailboxes. For last/latest/newest email, use max_results=1 and unread_only=false.",
     "read_email": "Read the full content of a specific email by UID or Message-ID. View email body, check details. Supports account from list_email_accounts when the UID belongs to a non-default mailbox.",
-    "audit_emails": "Bulk-scan a mailbox and return a compact digest (subject, sender, date, UID, short body snippet) for many messages at once. Use instead of calling read_email repeatedly for 'go through my emails and find/categorize X' style tasks (job application confirmations, interview requests, rejections, weekly summaries) — reading each message individually balloons context after a few dozen messages, while this returns bounded snippets for all of them in one call. Optional keywords pre-filter by subject/snippet substring match. Read-only.",
+    "audit_emails": "Search and summarize a whole mailbox in one call: generate a report over my inbox, audit my email, count/tally/categorize messages, roll up job application confirmations, interview requests, rejections, monthly or weekly mail summaries. The search runs on the IMAP server (Gmail query syntax via query, or keywords plus since/before dates) so it reaches the entire mailbox instead of only the newest page — use it instead of paging list_emails or calling read_email repeatedly. Returns aggregate counts by sender domain, by month, and by keyword over every matched message, plus a capped digest of subject/sender/date/UID/snippet. Read-only.",
     "scan_email_unsubscribes": "Scan recent email headers for spam/newsletter unsubscribe candidates. Review-only; returns UIDs, reasons, and mailto/web unsubscribe methods.",
     "unsubscribe_email": "Execute an approved unsubscribe action by UID. Mailto methods are sent/staged; web URL methods return exact browser/web instructions.",
     "send_email": "Send a new email via SMTP. Provide recipient, subject, body, and optional account from list_email_accounts. For replying to a thread use reply_to_email instead.",
@@ -351,7 +351,7 @@ class ToolIndex:
         # request (e.g. "visit <url> and tell me the title"), force-including the
         # whole email toolset and crowding out the relevant tools — the model then
         # believed it had only email tools and refused web/other tasks (#1707).
-        frozenset({"email", "emails", "mail", "mails", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
+        frozenset({"email", "emails", "mail", "mails", "mailbox", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
             {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
