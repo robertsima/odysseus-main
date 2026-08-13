@@ -16,7 +16,7 @@ from pydantic import ValidationError
 from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
-from src.agent_loop import stream_agent_loop
+from src.agent_loop import _classify_agent_request, stream_agent_loop
 from src import agent_runs
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
@@ -1095,12 +1095,35 @@ def setup_chat_routes(
         if allow_bash is not None and str(allow_bash).lower() != "true":
             disabled_tools.add("bash")
         _explicit_web_intent = _explicit_web_intent or bool(_tool_intent and _tool_intent.category == "web")
+        # Does the same message also name one of the user's own data domains?
+        # Reuses the agent loop's domain classifier so there is one vocabulary
+        # for "this is personal-data work", not a second copy that drifts.
+        _personal_domain_intent = False
+        if isinstance(message, str) and message.strip():
+            try:
+                _personal_domain_intent = bool(
+                    (_classify_agent_request([{"role": "user", "content": message}], message)
+                     .get("domains") or set())
+                    & {"email", "documents", "notes_calendar_tasks",
+                       "contacts", "sessions", "files"}
+                )
+            except Exception:
+                _personal_domain_intent = False
         if is_web_search_explicitly_denied(allow_web_search) or not _search_enabled:
             disabled_tools.update(WEB_TOOL_NAMES)
-        if _explicit_web_intent:
+        if _explicit_web_intent and not _personal_domain_intent:
             # A direct lookup/search request should not drift into personal
             # tools or shell fallbacks. It can only use web_search/web_fetch
             # when the request's explicit web setting enabled them.
+            #
+            # Gated on there being no personal domain in the same sentence:
+            # `_explicit_web_intent` fires on the bare word "search"/"look
+            # up"/"current"/"today", so "search my inbox for job applications
+            # and update the report in my vault" was read as a web lookup and
+            # this stripped the email, document, notes, and file tools the
+            # request actually needed. The agent then reported it had no tools
+            # for the job. Searching your own inbox/notes/vault is a personal
+            # request that happens to contain the word "search".
             disabled_tools.update({
                 "bash", "python",
                 "search_chats", "manage_skills", "manage_memory",

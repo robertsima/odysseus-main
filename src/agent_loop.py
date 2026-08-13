@@ -535,6 +535,22 @@ _WORKSPACE_TERMINUS_TOOLS = (
     | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
 )
 
+# Human-readable names for the tool-availability note, so the model tells the
+# user "email tools" rather than echoing an internal domain key.
+_STARVED_DOMAIN_LABELS = {
+    "web": "web search/fetch",
+    "documents": "documents",
+    "email": "email",
+    "cookbook": "model serving (Cookbook)",
+    "notes_calendar_tasks": "notes, calendar, and tasks",
+    "ui": "UI control",
+    "sessions": "chat sessions",
+    "files": "files and shell",
+    "settings": "settings",
+    "contacts": "contacts",
+    "integrations": "service integrations",
+}
+
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
     rules = []
@@ -1096,7 +1112,16 @@ _EXPLICIT_WORKSPACE_REFERENCE_RE = re.compile(
 _LOCAL_COMPUTER_REFERENCE_RE = re.compile(
     r"\b(?:on|from|in|using|with)\s+(?:this|my|the)\s+(?:computer|machine|pc|laptop|device|system)\b"
     r"|\b(?:local|host)\s+(?:computer|machine|files?|system)\b"
-    r"|\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)(?:[a-z][a-z0-9_.-]{1,31})\b",
+    # A named target machine ("on gpu-box", "from pi4", "on 10.0.0.7"). The
+    # token after on/from must LOOK like a host — it has to carry a digit, dot,
+    # hyphen, or underscore, or be a known machine word. Matching any bare word
+    # here meant "job applications from LinkedIn" and "rejections from Amazon"
+    # read as machine-targeted work, which switched the turn into the shell/
+    # file toolset and dropped the tools the request actually needed.
+    r"|\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)"
+    r"(?=[a-z][a-z0-9_.-]*[0-9_.\-])[a-z][a-z0-9_.-]{1,31}\b"
+    r"|\b(?:on|from)\s+(?:localhost|gpubox|workstation|homelab|nas|zimaos)\b"
+    r"|\b(?:on|from)\s+\d{1,3}(?:\.\d{1,3}){3}\b",
     re.IGNORECASE,
 )
 
@@ -1119,6 +1144,43 @@ def _looks_like_workspace_coding_request(text: str) -> bool:
 def _looks_like_local_computer_request(text: str) -> bool:
     text = str(text or "")
     return bool(text.strip() and _LOCAL_COMPUTER_REFERENCE_RE.search(text))
+
+
+# The agent ending a turn with "I don't have the tools for that" is almost
+# never true — every tool still exists; retrieval or a domain clamp just didn't
+# put it in this round's schema list. Detect the claim so the loop can re-arm
+# the full toolset and let the model actually do the work (see the
+# missing-tool self-unblock in the round loop).
+#
+# Deliberately narrow: it must be a claim about TOOLS or ACCESS specifically.
+# A round that reports a real upstream failure ("Gmail returned Too many
+# simultaneous connections") is not self-blocking and must not re-arm — the
+# tools were there and they ran.
+_MISSING_TOOL_RE = re.compile(
+    r"\b(?:"
+    r"do(?:n'?t|es\s+not|\s+not)\s+(?:currently\s+|actually\s+)?have\s+"
+    r"(?:the\s+|any\s+|a\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
+    r"|do(?:n'?t|es\s+not|\s+not)\s+(?:currently\s+)?have\s+access\s+to\b"
+    r"|(?:have|there\s+(?:are|is))\s+no\s+(?:\w+[\s\-/]+){0,4}?tools?\b"
+    r"|no\s+(?:\w+[\s\-/]+){0,4}?tools?\s+(?:are\s+|were\s+)?"
+    r"(?:available|callable|offered|enabled|exposed|provided|in\s+this\s+turn)\b"
+    r"|tools?\s+(?:are|is|were|was)\s+(?:not|n'?t)\s+"
+    r"(?:available|callable|offered|enabled|exposed|provided)\b"
+    r"|tools?\s+(?:aren'?t|isn'?t|weren'?t|wasn'?t)\s+"
+    r"(?:available|callable|offered|enabled|exposed|provided)\b"
+    r"|(?:wasn'?t|was\s+not|weren'?t|were\s+not)\s+given\s+"
+    r"(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
+    r"|lack(?:ing)?\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
+    r"|(?:tool|toolset)\s+(?:isn'?t|is\s+not|wasn'?t|was\s+not)\s+available\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _claims_missing_tools(text: str) -> bool:
+    """True when a finished round blames a missing/unavailable tool."""
+    text = str(text or "")
+    return bool(text.strip() and _MISSING_TOOL_RE.search(text))
 
 
 def _explicitly_references_missing_workspace(text: str, workspace: Optional[str]) -> bool:
@@ -1358,7 +1420,11 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
-    if has(r"\b(notes?|todos?|to-dos?|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
+    # `todoist` is a distinct token from `todos?` (no word boundary after
+    # "todo"), so "add milk to my todoist" matched no domain at all, went down
+    # the low-signal path, and depended entirely on embedding retrieval to
+    # surface the Todoist MCP tools.
+    if has(r"\b(notes?|todos?|to-dos?|todoist|checklists?|tasks?|task list|remind me|reminders?|buy|pickup|pick up)\b"):
         domains.add("notes_calendar_tasks")
     if has(r"\b(every day|every morning|every evening|recurring|automatically|cron|scheduled task|background task)\b"):
         domains.add("notes_calendar_tasks")
@@ -1385,7 +1451,12 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         domains.add("web")
     if has(r"\b(open|show|toggle|turn on|turn off|disable|enable|switch model|change model|settings|theme|panel)\b"):
         domains.add("ui")
-    if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
+    # "search my chats" / "what did we say in an earlier chat" is the
+    # search_chats tool, but it matched no domain — so the turn read as a plain
+    # web search ("search") and the chat-history tool was never offered.
+    if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b",
+           r"\b(?:search|find|look\s*up|check)\s+(?:my\s+|our\s+|the\s+)?(?:previous\s+|past\s+|earlier\s+|old\s+)?chats?\b",
+           r"\b(?:previous|past|earlier|old|another)\s+(?:chat|conversation)s?\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
         domains.add("files")
@@ -3537,8 +3608,29 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-            logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+            # Terminus mode used to REPLACE the selection outright. That is
+            # right for a pure "fix the failing test" turn, but a single
+            # request can name file work AND an assistant domain at once —
+            # "audit my inbox for job applications ... and update the Rolling
+            # Report in my vault" detects email + documents + files. Replacing
+            # threw away every email and document tool, and the agent then
+            # truthfully reported it had no inbox tools and did nothing. When
+            # another domain was detected from the user's own words, ADD the
+            # terminus tools instead of swapping to them.
+            _other_domains = (_intent.get("domains") or set()) & {
+                "email", "documents", "notes_calendar_tasks",
+                "contacts", "sessions", "cookbook", "integrations",
+            }
+            if _other_domains:
+                _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
+                logger.info(
+                    "[tool-rag] Workspace file/terminal request alongside %s; "
+                    "adding Terminus toolset instead of replacing",
+                    sorted(_other_domains),
+                )
+            else:
+                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
+                logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
@@ -3705,6 +3797,29 @@ async def stream_agent_loop(
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
+    # A domain the user's own words named, whose tools then all got dropped —
+    # by a clamp above or by `disabled_tools` — is exactly how a turn ends with
+    # the agent telling the user it "doesn't have the tools" for the thing it
+    # was just asked to do. Name the cause in the log so it's diagnosable from
+    # the server side instead of only from the model's excuse, and tell the
+    # model plainly so it reports the real reason (or asks) rather than
+    # improvising with the wrong tool.
+    # "web" is excluded: it's the most over-triggered domain (the bare words
+    # "search"/"current"/"today" match it) and web tools are a deliberate
+    # per-turn user toggle already logged above — not accidental starvation.
+    _starved_domains: list[str] = []
+    if _relevant_tools is not None and not guide_only:
+        for _d in sorted(_intent_domains - {"web"}):
+            _domain_tools = _DOMAIN_TOOL_MAP.get(_d) or set()
+            if _domain_tools and not (_domain_tools & (_relevant_tools - disabled_tools)):
+                _starved_domains.append(_d)
+        if _starved_domains:
+            logger.warning(
+                "[agent-intent] domains %s detected but no usable tools remain "
+                "(selection or disabled_tools removed them all)",
+                _starved_domains,
+            )
+
     prep_timings["tool_selection"] = time.time() - _t1
 
     _t2 = time.time()
@@ -3847,6 +3962,22 @@ async def stream_agent_loop(
             messages[0]["content"] = GUIDE_ONLY_DIRECTIVE + "\n\n" + (messages[0].get("content") or "")
         else:
             messages.insert(0, {"role": "system", "content": GUIDE_ONLY_DIRECTIVE})
+    if _starved_domains and not guide_only:
+        # The user asked for something in these domains and there is no tool
+        # left to do it with. Say which, so the model reports the actual gap
+        # (or asks a targeted question) instead of the useless generic "I don't
+        # have the tools for that in this turn".
+        _starved_labels = ", ".join(_STARVED_DOMAIN_LABELS.get(d, d) for d in _starved_domains)
+        messages.append({
+            "role": "system",
+            "content": (
+                f"Tool availability note: this turn has no usable tools for {_starved_labels}, "
+                "even though the request appears to involve that. Do everything you CAN do with "
+                "the tools you were given. For the part you cannot do, say specifically which "
+                "capability is unavailable and suggest enabling it in Settings, or use `ask_user` "
+                "to confirm what the user wants instead. Do not silently substitute an unrelated tool."
+            ),
+        })
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
@@ -3953,6 +4084,11 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    # Missing-tool self-unblock: how many times we've re-armed the toolset
+    # after the model ended a turn claiming it had no tool for the job. Once
+    # is enough — after a full re-arm there is nothing left to widen to.
+    _toolset_rearm_count = 0
+    _MAX_TOOLSET_REARMS = 1
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
@@ -4523,6 +4659,74 @@ async def stream_agent_loop(
                     # never re-verify an unchanged state in a loop.
                     _effectful_used = False
                     continue
+            # ── Missing-tool self-unblock ─────────────────────────────
+            # The model just ended the turn saying it can't act because it
+            # wasn't given the tool it needs. That is our bug, not a dead end:
+            # tool RAG plus the domain clamps hand each round a narrow schema
+            # list, and when they guess wrong (a mixed "audit my inbox AND
+            # update the report in my vault" request is the classic case) the
+            # agent blocks itself on work it is perfectly able to do. Re-arm
+            # every tool policy still allows and let it try again, once.
+            _blocked_text = _strip_think_blocks(cleaned_round).strip()
+            if (
+                not guide_only
+                and not _force_answer
+                and not _ody_qwen_finetune_model
+                # Only the native-schema path re-reads `_relevant_tools` each
+                # round. A text-fence model gets its tool prose from the system
+                # prompt built once during prep, so widening the set there
+                # would buy it nothing and cost a round.
+                and _is_api_model
+                and _relevant_tools is not None
+                and _toolset_rearm_count < _MAX_TOOLSET_REARMS
+                and _claims_missing_tools(_blocked_text)
+            ):
+                try:
+                    from src.tool_policy import known_tool_names
+                    _rearm_pool = set(known_tool_names())
+                except Exception:
+                    _rearm_pool = {
+                        s.get("function", {}).get("name")
+                        for s in FUNCTION_TOOL_SCHEMAS if s.get("function")
+                    }
+                _rearm_pool |= {
+                    s.get("function", {}).get("name")
+                    for s in (mcp_schemas or []) if s.get("function")
+                }
+                if not _needs_admin:
+                    _rearm_pool -= _ADMIN_TOOLS
+                _rearm_pool = {t for t in _rearm_pool if t and t not in disabled_tools}
+                _rearm_new = _rearm_pool - _relevant_tools
+                if _rearm_new:
+                    _toolset_rearm_count += 1
+                    _relevant_tools |= _rearm_new
+                    logger.warning(
+                        "[agent] missing-tool self-unblock on round %d: re-armed %d tool(s) %s",
+                        round_num, len(_rearm_new), sorted(_rearm_new)[:25],
+                    )
+                    _note = "\n\n_That toolset was too narrow — retrying with the full set._\n\n"
+                    yield f'data: {json.dumps({"delta": _note})}\n\n'
+                    full_response += _note
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "Correction: the tool list you were shown was filtered too "
+                            "narrowly, which is why the tool you wanted was missing. It has "
+                            "been widened — every tool you are permitted to use this turn is "
+                            "now in your schema list. Re-read it, then DO the user's request "
+                            "with real tool calls. Do not tell the user you lack tools again. "
+                            "If something is still genuinely unavailable after checking, name "
+                            "the exact tool and say why, or call `ask_user`."
+                        ),
+                    })
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
+                logger.info(
+                    "[agent] round %d claimed missing tools but nothing left to re-arm "
+                    "(%d already selected); treating the claim as real",
+                    round_num, len(_relevant_tools),
+                )
+
             # ── Intent-without-action supervisor ─────────────────────
             # Catch "Let me tail the output" / "I'll check the logs" /
             # "Let me investigate" patterns where the model announces an
