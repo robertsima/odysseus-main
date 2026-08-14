@@ -149,6 +149,8 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
     "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
     "manage_calendar", "api_call", "app_api", "ui_control",
+    # manage_wellbeing is read-mostly, but log_checkin writes a check-in.
+    "manage_wellbeing",
     "send_email", "reply_to_email", "bulk_email", "delete_email",
     "archive_email", "mark_email_read", "unsubscribe_email",
     # The draft tools create documents and download_attachment writes to

@@ -1844,6 +1844,37 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         return str(e), False
 
 
+async def action_lotus_reminders(owner: str, **kwargs) -> Tuple[str, bool]:
+    """Background Lotus scanner — fires check-in nudges and periodic insights.
+
+    Deliberately absent from BUILTIN_ACTIONS (same reasoning as
+    `action_ping_notes`): it is infrastructure driven by its own scheduler
+    loop, not a task a user schedules. All scheduling rules live in the pure
+    `due_notifications` function; this wrapper only supplies I/O.
+
+    Owners with no Lotus database are skipped without touching the store —
+    `LotusCheckinStore.__init__` creates a database as a side effect, so
+    constructing one per user per tick would fabricate empty mood databases
+    for every account on the system.
+    """
+    try:
+        from src.lotus_checkins import owner_has_lotus_data
+        from src.lotus_notifications import run_owner_tick
+
+        if not owner_has_lotus_data(owner or ""):
+            raise TaskNoop("no lotus data for this owner")
+        sent = await run_owner_tick(owner or "")
+        if not sent:
+            raise TaskNoop("no lotus notification due")
+        kinds = ", ".join(sorted({n.kind for n in sent}))
+        return f"Sent {len(sent)} Lotus notification(s): {kinds}", True
+    except TaskNoop:
+        raise
+    except Exception as e:
+        logger.exception("lotus_reminders action failed")
+        return str(e), False
+
+
 async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
     """Scan unread emails across all accounts, LLM-triage new ones, cache
     per-UID verdicts, tag the inbox, and fire a reminder when a previously

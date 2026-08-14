@@ -50,18 +50,30 @@ _LOTUS_MCP_TOOL_NAMES = {
     "mood_summarize_period",
     "mood_detect_low_energy_patterns",
 }
+#: Native tools that read the same private wellbeing data as the Lotus MCP
+#: server and must therefore live behind the same gate.
+_LOTUS_NATIVE_TOOL_NAMES = {"manage_wellbeing"}
 
 
 def _apply_private_mcp_filter(
     endpoint_url: str,
     disabled_map: Dict[str, set],
     disabled_tools: Set[str],
+    owner: str | None = None,
 ) -> None:
-    """Expose private Lotus data only to endpoints classified as local."""
-    if is_local_endpoint(endpoint_url or ""):
+    """Expose private Lotus data only to owner-approved endpoint scopes.
+
+    Covers both the vendored MCP tools and the native `manage_wellbeing`
+    wrapper — one gate, so a new surface onto the same data cannot be added
+    without passing through here. `tool_execution` re-checks at call time.
+    """
+    from src.lotus_access import lotus_endpoint_allowed
+
+    if lotus_endpoint_allowed(owner, endpoint_url or ""):
         return
     disabled_map.setdefault("lotus", set()).update(_LOTUS_MCP_TOOL_NAMES)
     disabled_tools.update(f"mcp__lotus__{name}" for name in _LOTUS_MCP_TOOL_NAMES)
+    disabled_tools.update(_LOTUS_NATIVE_TOOL_NAMES)
 
 
 def _expand_browser_mcp_tools(tool_names: Set[str], mcp_mgr) -> Set[str]:
@@ -514,6 +526,14 @@ _DOMAIN_RULES = {
 ## Integration/API rules
 - To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
+    "wellbeing": """\
+## Wellbeing rules
+- `manage_wellbeing` reads the user's own private mood/energy check-ins. It returns aggregates only.
+- When planning a day or week, call `manage_wellbeing` with `action=patterns` first and place demanding work in the user's high-energy time-of-day/weekday windows, lighter work in the low ones.
+- Report every figure as an observation of what they logged, together with its sample size ("across 12 check-ins"). A bucket below the reported minimum is too thin to plan against — say so instead of treating it as a pattern.
+- Never diagnose, never give clinical or psychological advice, and never speculate about causes. If the data suggests something worrying, describe the numbers and let the user draw the conclusion.
+- Private check-in notes are never available to you; do not ask for them and do not invent them.
+- Only use `action=log_checkin` when the user explicitly asks you to record how they feel.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -528,6 +548,7 @@ _DOMAIN_TOOL_MAP = {
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
+    "wellbeing": {"manage_wellbeing"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -549,6 +570,7 @@ _STARVED_DOMAIN_LABELS = {
     "settings": "settings",
     "contacts": "contacts",
     "integrations": "service integrations",
+    "wellbeing": "wellbeing check-ins",
 }
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -711,6 +733,12 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
 {"action": "add", "title": "<short todo>", "due_date": "<natural language or ISO datetime>"}
 ```
 Notes, checklists, AND user reminders. Use this for "create/add/write a note", todos, checklists, and "remind me to X at <time>" — never use memory for note content. For reminders, pair a short `title` (what to do) with a `due_date` (when). `due_date` accepts natural language ("tomorrow at 1pm", "in 2 hours", "next monday 9am") or ISO ("2026-05-12T13:00:00"). Actions: `list`, `add` (title, content OR items:[{text,done}], note_type, color, label, due_date), `update`, `delete`, `toggle_item`.""",
+    "manage_wellbeing": """\
+```manage_wellbeing
+{"action": "patterns", "days": 30}
+```
+The user's private Lotus wellbeing data — their own daily mood/energy check-ins. Actions: `summary` (counts, averages, trend, most-logged words over `days`), `patterns` (average energy by time-of-day and weekday — use this when planning a day or week so demanding work lands in a high-energy window), `latest`, `preferences`, `log_checkin` (only on an explicit request to record a feeling; needs `emotion_label` + `emotion_family`).
+Summary and pattern actions return aggregates with the sample size behind them; `latest` omits the private note. Private check-in notes are never returned. Report what you get as observations with their sample size, never as a diagnosis or clinical advice, and treat a bucket below `minimum_bucket_entries` as too thin to plan against.""",
     "list_email_accounts": "- ```list_email_accounts``` — List configured email accounts. Use this before reading/sending when the user says Gmail, work mail, custom domain mail, or any non-default mailbox; pass the returned account name/email/id as `account` to email tools.",
     "send_email": """\
 ```send_email
@@ -1508,6 +1536,17 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
            r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
         domains.add("integrations")
+    # Wellbeing / Lotus check-ins. Day- and week-planning is included on
+    # purpose: energy patterns are what turns a list of tasks into a plan the
+    # user can actually execute, and without a deterministic seed here the
+    # request reads as plain notes/calendar work and never reaches the data.
+    if has(r"\b(mood|moods|wellbeing|well-being|burn(?:ing|ed|t)?\s?out|burnout|"
+           r"check-?ins?|energy levels?|my energy|lotus)\b",
+           r"\bhow (?:have|has|am|are|was) (?:i|my \w+)\b",
+           r"\bhow(?:'ve| have)? i(?:'ve)? been\b",
+           r"\bplan (?:out )?my (?:day|week|schedule)\b",
+           r"\b(?:feeling|felt|feelings)\b.{0,20}\b(?:lately|recently|this week|this month)\b"):
+        domains.add("wellbeing")
 
     low_signal = not continuation and not domains
     return {
@@ -3381,8 +3420,9 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
-    if mcp_mgr:
-        _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools)
+    # Runs unconditionally: the native wellbeing tool needs the same gate as
+    # the Lotus MCP tools, and it exists whether or not an MCP manager does.
+    _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools, owner=owner)
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
         direct_messages = (

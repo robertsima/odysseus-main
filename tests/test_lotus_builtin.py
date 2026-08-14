@@ -108,8 +108,13 @@ def test_builtin_lotus_completes_mcp_handshake_with_safe_defaults(tmp_path):
     ).is_file()
 
 
-def test_lotus_private_filter_allows_local_and_blocks_remote_models():
-    from src.agent_loop import _LOTUS_MCP_TOOL_NAMES, _apply_private_mcp_filter
+def test_lotus_private_filter_follows_owner_access_policy(monkeypatch, tmp_path):
+    monkeypatch.setenv("LOTUS_DATA_DIR", str(tmp_path / "lotus"))
+    from src.agent_loop import (
+        _LOTUS_MCP_TOOL_NAMES,
+        _LOTUS_NATIVE_TOOL_NAMES,
+        _apply_private_mcp_filter,
+    )
 
     local_map: dict[str, set] = {}
     local_disabled: set[str] = set()
@@ -117,6 +122,7 @@ def test_lotus_private_filter_allows_local_and_blocks_remote_models():
         "http://127.0.0.1:11434/v1/chat/completions",
         local_map,
         local_disabled,
+        owner="alice",
     )
     assert local_map == {}
     assert local_disabled == set()
@@ -127,13 +133,39 @@ def test_lotus_private_filter_allows_local_and_blocks_remote_models():
         "https://api.openai.com/v1/chat/completions",
         remote_map,
         remote_disabled,
+        owner="alice",
     )
     assert remote_map == {"lotus": _LOTUS_MCP_TOOL_NAMES}
-    assert remote_disabled == {f"mcp__lotus__{name}" for name in _LOTUS_MCP_TOOL_NAMES}
+    assert remote_disabled == {
+        f"mcp__lotus__{name}" for name in _LOTUS_MCP_TOOL_NAMES
+    } | _LOTUS_NATIVE_TOOL_NAMES
+
+    LotusCheckinStore("alice").save_preferences({"access_api": True, "access_local": False})
+    api_map: dict[str, set] = {}
+    api_disabled: set[str] = set()
+    _apply_private_mcp_filter(
+        "https://api.openai.com/v1/chat/completions",
+        api_map,
+        api_disabled,
+        owner="alice",
+    )
+    assert api_map == {}
+    assert api_disabled == set()
+
+    denied_local_map: dict[str, set] = {}
+    denied_local_tools: set[str] = set()
+    _apply_private_mcp_filter(
+        "http://localhost:11434/v1/chat/completions",
+        denied_local_map,
+        denied_local_tools,
+        owner="alice",
+    )
+    assert denied_local_map == {"lotus": _LOTUS_MCP_TOOL_NAMES}
+    assert "manage_wellbeing" in denied_local_tools
 
 
 def test_lotus_tool_execution_injects_authenticated_owner(monkeypatch):
-    from src import tool_execution
+    from src import tool_execution, tool_implementations
 
     class FakeMcp:
         def __init__(self):
@@ -145,6 +177,7 @@ def test_lotus_tool_execution_injects_authenticated_owner(monkeypatch):
 
     fake = FakeMcp()
     monkeypatch.setattr(tool_execution, "get_mcp_manager", lambda: fake)
+    monkeypatch.setattr(tool_implementations, "is_local_session", lambda *args, **kwargs: True)
     result = asyncio.run(
         tool_execution.execute_tool_block(
             SimpleNamespace(

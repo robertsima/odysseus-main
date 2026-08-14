@@ -2458,6 +2458,7 @@ function initAll() {
   initEmailSettings();
   initEmailAccountsSettings();
   initReminderSettings();
+  initLotusAccessSettings();
   initUnifiedIntegrations();
 }
 
@@ -2465,6 +2466,67 @@ function notifyIntegrationsChanged() {
   try {
     window.dispatchEvent(new CustomEvent('odysseus-integrations-changed'));
   } catch (_) {}
+}
+
+async function initLotusAccessSettings() {
+  const localToggle = el('set-lotus-access-local');
+  const lanToggle = el('set-lotus-access-lan');
+  const apiToggle = el('set-lotus-access-api');
+  const saveButton = el('set-lotus-access-save');
+  const message = el('set-lotus-access-msg');
+  if (!localToggle || !lanToggle || !apiToggle || !saveButton) return;
+
+  const setStatus = (text, error = false) => {
+    if (!message) return;
+    message.textContent = text;
+    message.style.color = error ? 'var(--red, #e55)' : 'var(--green, #50fa7b)';
+  };
+
+  try {
+    const response = await fetch('/api/lotus/access-policy', { credentials: 'same-origin' });
+    if (!response.ok) throw new Error('Could not load Lotus access settings');
+    const policy = await response.json();
+    localToggle.checked = policy.local !== false;
+    lanToggle.checked = policy.lan !== false;
+    apiToggle.checked = !!policy.api;
+  } catch (error) {
+    setStatus(error.message || 'Could not load Lotus access settings', true);
+  }
+
+  saveButton.addEventListener('click', async () => {
+    if (apiToggle.checked) {
+      const confirmed = window.confirm(
+        'Allow public API models to use Lotus data and tools?\n\n' +
+        'Wellbeing results may be sent to the third-party provider serving the model.'
+      );
+      if (!confirmed) return;
+    }
+    saveButton.disabled = true;
+    setStatus('Saving…');
+    try {
+      const response = await fetch('/api/lotus/access-policy', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          local: localToggle.checked,
+          lan: lanToggle.checked,
+          api: apiToggle.checked,
+        }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.detail || 'Could not save Lotus access settings');
+      localToggle.checked = !!result.local;
+      lanToggle.checked = !!result.lan;
+      apiToggle.checked = !!result.api;
+      setStatus('Saved');
+      setTimeout(() => { if (message) message.textContent = ''; }, 2000);
+    } catch (error) {
+      setStatus(error.message || 'Could not save Lotus access settings', true);
+    } finally {
+      saveButton.disabled = false;
+    }
+  });
 }
 
 async function initReminderSettings() {

@@ -659,6 +659,34 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_wellbeing",
+            "description": "Consult the user's private Lotus wellbeing data (their own daily mood/energy check-ins) for planning and observations. Summary and patterns return aggregate counts, averages, trends, and time-of-day/weekday energy buckets with sample sizes. Private check-in notes are never returned. Use `patterns` when planning a day or week, `summary` for 'how have I been lately', `latest` for the newest check-in fields except its note, and `preferences` for reminder setup. Use `log_checkin` ONLY when the user explicitly asks to record how they feel. Report figures as observations with their sample size; never diagnose or give clinical advice. Available only on endpoint scopes the user enables under Settings > Privacy.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string",
+                               "enum": ["summary", "patterns", "latest", "preferences", "log_checkin"],
+                               "description": "The action to perform"},
+                    "days": {"type": "integer", "description": "Window in days for summary/patterns (default 30, max 365)"},
+                    "emotion_label": {"type": "string", "description": "For log_checkin: the word the user used, e.g. 'tired', 'calm'"},
+                    "emotion_family": {"type": "string",
+                                       "enum": ["pleasant_high", "pleasant_low", "unpleasant_high", "unpleasant_low"],
+                                       "description": "For log_checkin: pleasantness x energy quadrant"},
+                    "valence": {"type": "number", "description": "For log_checkin: pleasantness from -1 to 1 (optional; defaults from the family)"},
+                    "energy": {"type": "number", "description": "For log_checkin: energy from 0 to 1 (optional; defaults from the family)"},
+                    "intensity": {"type": "number", "description": "For log_checkin: strength from 0 to 1 (optional, default 0.5)"},
+                    "note": {"type": "string", "description": "For log_checkin: the user's own words, stored privately. Never echoed back by any read action."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "For log_checkin: short context tags such as 'work', 'sleep'"},
+                    "occurred_at": {"type": "string", "description": "For log_checkin: ISO timestamp with offset. Defaults to now."},
+                    "timezone": {"type": "string", "description": "For log_checkin: IANA timezone name of the check-in"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "api_call",
             "description": "Call a registered API integration (RSS reader, git forge, bookmark manager, smart home, etc.). Check the system context for available integrations and their endpoints.",
             "parameters": {

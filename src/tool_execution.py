@@ -630,7 +630,7 @@ async def _execute_tool_block_impl(
     from src.tool_implementations import (
         do_search_chats, do_manage_tasks,
         do_manage_skills, do_api_call, do_manage_notes,
-        do_manage_calendar,
+        do_manage_calendar, do_manage_wellbeing, is_local_session,
         do_download_model, do_serve_model, do_list_served_models, do_stop_served_model,
         do_tail_serve_output,
         do_list_downloads, do_cancel_download, do_search_hf_models, do_list_cached_models,
@@ -827,6 +827,20 @@ async def _execute_tool_block_impl(
     elif tool == "manage_notes":
         desc = "manage_notes"
         result = await do_manage_notes(content, owner=owner)
+    elif tool == "manage_wellbeing":
+        # Defense in depth. The agent loop already strips this tool from the
+        # prompt and schema set for an endpoint scope the owner has denied (see
+        # `_apply_private_mcp_filter`), but a model can still emit the fence
+        # tag from memory or a stale transcript, so the endpoint is re-checked
+        # here and the call is refused rather than answered.
+        from src.tools.wellbeing import REMOTE_ENDPOINT_REFUSAL
+
+        desc = "manage_wellbeing"
+        if not is_local_session(session_id, owner=owner):
+            result = {"error": REMOTE_ENDPOINT_REFUSAL, "exit_code": 1}
+            logger.info("manage_wellbeing refused by the owner's Lotus endpoint policy")
+        else:
+            result = await do_manage_wellbeing(content, owner=owner, session_id=session_id)
     elif tool == "manage_calendar":
         desc = "manage_calendar"
         result = await do_manage_calendar(content, owner=owner)
@@ -952,6 +966,13 @@ async def _execute_tool_block_impl(
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:
                 result = {"error": parse_error, "exit_code": 1}
+            elif tool.startswith("mcp__lotus__") and not is_local_session(
+                session_id, owner=owner
+            ):
+                from src.tools.wellbeing import REMOTE_ENDPOINT_REFUSAL
+
+                result = {"error": REMOTE_ENDPOINT_REFUSAL, "exit_code": 1}
+                logger.info("Lotus MCP tool refused by the owner's endpoint policy")
             else:
                 if tool.startswith("mcp__email__") and owner:
                     args = dict(args)

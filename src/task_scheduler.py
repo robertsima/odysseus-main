@@ -545,6 +545,7 @@ class TaskScheduler:
         # old event scanner too caused duplicate emails/notifications for the
         # same calendar event.
         self._note_pings_task = asyncio.create_task(self._note_pings_loop())
+        self._lotus_pings_task = asyncio.create_task(self._lotus_pings_loop())
         logger.info(f"Task scheduler started (concurrency cap: {self._concurrency_cap})")
         # Audit clusters: show any minute-of-day where >1 active scheduled
         # tasks land. Helps spot "all my tasks fire at 9am" patterns the user
@@ -581,7 +582,7 @@ class TaskScheduler:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        for attr in ("_note_pings_task", "_event_pings_task"):
+        for attr in ("_note_pings_task", "_event_pings_task", "_lotus_pings_task"):
             t = getattr(self, attr, None)
             if t:
                 t.cancel()
@@ -607,6 +608,28 @@ class TaskScheduler:
                     pass
                 except Exception as e:
                     logger.warning(f"ping_notes background scanner errored for owner={ow!r}: {e}")
+            await asyncio.sleep(60)  # 1 min
+
+    async def _lotus_pings_loop(self):
+        """Built-in Lotus check-in/insight scanner — same recipe as note pings.
+
+        Owners come from the account list rather than from disk: Lotus stores
+        each user's data under a hash of their name, so an owner can never be
+        recovered from the directory layout and has to be hashed forward.
+        The initial sleep is offset from the notes scanner so the two do not
+        wake in the same second on a small box.
+        """
+        await asyncio.sleep(45)
+        from src.builtin_actions import action_lotus_reminders, TaskNoop
+        from src.lotus_notifications import known_owners
+        while self._running:
+            for ow in known_owners():
+                try:
+                    await action_lotus_reminders(owner=ow)
+                except TaskNoop:
+                    pass
+                except Exception as e:
+                    logger.warning(f"lotus background scanner errored for owner={ow!r}: {e}")
             await asyncio.sleep(60)  # 1 min
 
     async def _event_pings_loop(self):

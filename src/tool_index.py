@@ -123,6 +123,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "resolve_contact": "Look up a contact's email address by name. Searches CardDAV address book and sent email history. Use when the user says 'message [name]', 'email [name]', or 'send to [name]' without an email address.",
     "manage_contact": "Save / update / delete / list address-book contacts (CardDAV). Use for info about ANOTHER person — name, email, phone, postal address. Args: action=list|add|update|delete, name, email, phones, address, uid (from list). For 'save this for <person>' / address pastes / phone numbers next to a name, this is the right tool — NOT manage_memory. Do NOT use for facts about the USER ('my name is X'); those are manage_memory.",
     "manage_notes": "Create and manage notes and checklists (Google Keep-style). ALWAYS use this for note/todo/checklist/reminder creation — NEVER hit /api/notes via app_api. Accepts natural-language `due_date` like 'tomorrow at 9am' or '11pm today' (parsed in the USER'S timezone). The due_date IS the reminder — it fires a notification at that time, so do NOT also create a calendar event for the same reminder. Set colors, labels, pin, archive. Do NOT use manage_memory for note content.",
+    "manage_wellbeing": "Wellbeing/mood data (Lotus): the user's own private daily check-ins. Summary and pattern actions return aggregate observations — check-in counts and streak, average valence/energy/intensity with trend, most-logged emotion words, and energy by time-of-day and weekday, all with sample sizes. Use for 'how have I been', 'am I burning out', 'how's my mood/energy been', and — importantly — for PLANNING a day or week: consult action='patterns' and put demanding work in the user's high-energy windows. action='latest' returns the newest check-in fields except its note, action='preferences' returns reminder setup, and action='log_checkin' is only for an explicit request to record how the user feels. Never returns private check-in notes; available only on endpoint scopes enabled under Settings > Privacy.",
     "manage_calendar": "Calendar event management: list, create, update, delete. Each event can carry a tag/category (event_type — work/personal/health/travel/meal/social/admin/other) and importance (low/normal/high/critical). Resolve today/tomorrow using the Current date and time context, then use ISO datetimes in the user's local wall time; supports all-day events. Use rrule only for explicit recurrence; for update_event pass rrule='' to remove repeats. For event reminders/alarms, pass reminder_minutes; this creates the Notes reminder, so do not also call manage_notes for the same reminder.",
     "download_model": "Download a HuggingFace model to a local or remote server. Specify repo_id (e.g. 'Qwen/Qwen3-8B'), optional server host, and optional include filter for specific files.",
     "serve_model": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, or Diffusers. cmd MUST start with the binary directly — e.g. `vllm serve /mnt/HADES/models/Qwen3.5-397B-A17B-AWQ --port 8003 --tensor-parallel-size 8 …`. NEVER prefix with `cd …`, `source …`, or chain with `&&`/`||` — those get rejected by the validator. The venv activation (env_prefix) and CUDA env are added automatically from the target host's saved settings. For image/inpainting/diffusion use python3 scripts/diffusion_server.py --model <repo> --port 8100. After launch, call list_served_models for readiness/errors and retry suggestions. If serve_model fails with 'Invalid characters in cmd', simplify to the bare binary + args.",
@@ -363,6 +364,16 @@ class ToolIndex:
             {"manage_bg_jobs"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
+        # Wellbeing / mood check-ins (Lotus). "plan my day/week" is here on
+        # purpose: energy patterns are what makes a plan realistic.
+        frozenset({"mood", "moods", "wellbeing", "well-being", "burnout",
+                   "burnt out", "burned out", "burning out",
+                   "check-in", "check in", "checkin",
+                   "check-ins", "energy levels", "my energy", "lotus",
+                   "how have i been", "how i've been", "how am i doing",
+                   "plan my day", "plan my week", "plan out my day",
+                   "when should i", "am i overworking"}):
+            {"manage_wellbeing"},
         # Chat/session management. "rename" alone maps to documents below, so a
         # request like "rename the last 12 sessions/chats" needs these session
         # keywords to surface the right tools (NOT app_api — /api/sessions is

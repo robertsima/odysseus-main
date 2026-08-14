@@ -3,6 +3,21 @@ import { makeWindowDraggable } from './windowDrag.js';
 
 let _open = false;
 let _selected = null;
+let _pausedUntil = null;
+
+// Server caps reminder_times at 8 (ReminderPreferences.max_length).
+const MAX_REMINDER_TIMES = 8;
+// Index order matches Python's datetime.weekday(): Monday is 0.
+const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+// Values mirror src/reminder_personas.py; 'plain' means no LLM rewriting.
+const MESSAGE_STYLES = [
+  ['plain', 'Plain (no AI phrasing)'],
+  ['spark', 'Spark — bright and playful'],
+  ['razor', 'Razor — blunt and minimal'],
+  ['odysseus', 'Odysseus — composed and noble'],
+  ['socrates', 'Socrates — only questions'],
+  ['nietzsche', 'Nietzsche — aphoristic'],
+];
 
 const EMOTIONS = {
   pleasant_high: [
@@ -199,36 +214,182 @@ async function loadHistory() {
   }
 }
 
+function _renderReminderTimes(times) {
+  const wrap = document.getElementById('lotus-times');
+  if (!wrap) return;
+  const values = (times && times.length ? times : ['20:00']).slice(0, MAX_REMINDER_TIMES);
+  wrap.innerHTML = values.map((value, index) => `
+    <div class="lotus-time-row">
+      <input type="time" class="lotus-time" value="${esc(value)}">
+      <button type="button" class="lotus-mini" data-remove-time="${index}" aria-label="Remove reminder time"${values.length === 1 ? ' disabled' : ''}>&times;</button>
+    </div>`).join('');
+  wrap.querySelectorAll('[data-remove-time]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const current = _collectTimes();
+      current.splice(Number(button.dataset.removeTime), 1);
+      _renderReminderTimes(current);
+    });
+  });
+  const add = document.getElementById('lotus-add-time');
+  if (add) add.disabled = values.length >= MAX_REMINDER_TIMES;
+}
+
+function _collectTimes() {
+  return Array.from(document.querySelectorAll('#lotus-times .lotus-time'))
+    .map((input) => input.value)
+    .filter(Boolean);
+}
+
+function _renderWeekdays(selected) {
+  const wrap = document.getElementById('lotus-weekdays');
+  if (!wrap) return;
+  const chosen = new Set((selected || [0, 1, 2, 3, 4, 5, 6]).map(Number));
+  wrap.innerHTML = WEEKDAYS.map((label, index) =>
+    `<label class="lotus-weekday"><input type="checkbox" value="${index}"${chosen.has(index) ? ' checked' : ''}><span>${label}</span></label>`
+  ).join('');
+}
+
+function _prefsFromForm() {
+  const enabled = document.getElementById('lotus-reminder-enabled').checked;
+  const weekdays = Array.from(document.querySelectorAll('#lotus-weekdays input:checked'))
+    .map((input) => Number(input.value));
+  const times = _collectTimes();
+  return {
+    timezone: document.getElementById('lotus-timezone').value.trim() || 'UTC',
+    reminder_enabled: enabled,
+    reminder_times: times,
+    reminder_weekdays: weekdays.length ? weekdays : [0, 1, 2, 3, 4, 5, 6],
+    quiet_start: document.getElementById('lotus-quiet-start').value || null,
+    quiet_end: document.getElementById('lotus-quiet-end').value || null,
+    snooze_minutes: Number(document.getElementById('lotus-snooze-minutes').value) || 30,
+    channel: document.getElementById('lotus-channel').value,
+    min_hours_between: Number(document.getElementById('lotus-min-hours').value) || 0,
+    skip_if_checked_in: document.getElementById('lotus-skip-checked-in').checked,
+    message_style: document.getElementById('lotus-message-style').value,
+    paused_until: _pausedUntil,
+    insights_enabled: document.getElementById('lotus-insights-enabled').checked,
+    insights_frequency: document.getElementById('lotus-insights-frequency').value,
+    insights_weekday: Number(document.getElementById('lotus-insights-weekday').value),
+    insights_time: document.getElementById('lotus-insights-time').value || '09:00',
+  };
+}
+
+function _renderPauseState() {
+  const node = document.getElementById('lotus-pause-state');
+  if (!node) return;
+  if (!_pausedUntil) {
+    node.textContent = 'Not snoozed.';
+  } else {
+    node.textContent = `Snoozed until ${new Date(_pausedUntil).toLocaleString()}.`;
+  }
+  const clear = document.getElementById('lotus-clear-snooze');
+  if (clear) clear.hidden = !_pausedUntil;
+}
+
 async function loadPreferences() {
   try {
     const prefs = await api('/preferences');
-    document.getElementById('lotus-reminder-enabled').checked = prefs.reminder_enabled;
-    document.getElementById('lotus-reminder-time').value = prefs.reminder_times?.[0] || '20:00';
-    document.getElementById('lotus-timezone').value = prefs.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    _pausedUntil = prefs.paused_until || null;
+    document.getElementById('lotus-reminder-enabled').checked = !!prefs.reminder_enabled;
+    document.getElementById('lotus-timezone').value = prefs.timezone
+      || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    _renderReminderTimes(prefs.reminder_times);
+    _renderWeekdays(prefs.reminder_weekdays);
+    document.getElementById('lotus-quiet-start').value = prefs.quiet_start || '';
+    document.getElementById('lotus-quiet-end').value = prefs.quiet_end || '';
+    document.getElementById('lotus-min-hours').value = prefs.min_hours_between ?? 0;
+    document.getElementById('lotus-skip-checked-in').checked = prefs.skip_if_checked_in !== false;
+    document.getElementById('lotus-channel').value = prefs.channel || 'inherit';
+    document.getElementById('lotus-message-style').value = prefs.message_style || 'plain';
+    document.getElementById('lotus-snooze-minutes').value = prefs.snooze_minutes ?? 30;
+    document.getElementById('lotus-insights-enabled').checked = !!prefs.insights_enabled;
+    document.getElementById('lotus-insights-frequency').value = prefs.insights_frequency || 'weekly';
+    document.getElementById('lotus-insights-weekday').value = String(prefs.insights_weekday ?? 6);
+    document.getElementById('lotus-insights-time').value = prefs.insights_time || '09:00';
+    _renderPauseState();
   } catch (error) {
     _setMessage(error.message, true);
   }
 }
 
+async function loadNotifications() {
+  const list = document.getElementById('lotus-notification-list');
+  if (!list) return;
+  list.innerHTML = '<div class="lotus-empty">Loading…</div>';
+  try {
+    const data = await api('/notifications?limit=25');
+    if (!data.notifications.length) {
+      list.innerHTML = '<div class="lotus-empty">Nothing has been sent yet.</div>';
+      return;
+    }
+    list.innerHTML = data.notifications.map((entry) => `
+      <div class="lotus-notification${entry.delivered ? '' : ' is-failed'}">
+        <div><strong>${esc(entry.title)}</strong> <span class="lotus-pill">${esc(entry.kind)}</span> <span class="lotus-pill">${esc(entry.channel)}</span></div>
+        <time>${esc(new Date(entry.created_at).toLocaleString())}${entry.delivered ? '' : ' · not delivered'}</time>
+        <p>${esc(entry.body)}</p>
+      </div>`).join('');
+  } catch (error) {
+    list.innerHTML = `<div class="lotus-empty is-error">${esc(error.message)}</div>`;
+  }
+}
+
 function _wirePreferences() {
+  document.getElementById('lotus-add-time')?.addEventListener('click', () => {
+    const times = _collectTimes();
+    if (times.length >= MAX_REMINDER_TIMES) return;
+    times.push('09:00');
+    _renderReminderTimes(times);
+  });
+
   document.getElementById('lotus-reminder-form')?.addEventListener('submit', async (event) => {
     event.preventDefault();
-    const enabled = document.getElementById('lotus-reminder-enabled').checked;
-    const time = document.getElementById('lotus-reminder-time').value;
     try {
-      await api('/preferences', {
-        method: 'PUT',
-        body: JSON.stringify({
-          timezone: document.getElementById('lotus-timezone').value || 'UTC',
-          reminder_enabled: enabled,
-          reminder_times: enabled && time ? [time] : [],
-          reminder_weekdays: [0, 1, 2, 3, 4, 5, 6],
-          quiet_start: null,
-          quiet_end: null,
-          snooze_minutes: 30,
-        }),
-      });
-      _setMessage('Reminder preference saved. Notification delivery will be enabled in a later milestone.');
+      await api('/preferences', { method: 'PUT', body: JSON.stringify(_prefsFromForm()) });
+      _setMessage('Reminder settings saved.');
+      await loadPreferences();
+    } catch (error) {
+      _setMessage(error.message, true);
+    }
+  });
+
+  document.getElementById('lotus-test-notification')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    const button = event.currentTarget;
+    button.disabled = true;
+    _setMessage('Sending a test notification…');
+    try {
+      const result = await api('/preferences/test', { method: 'POST' });
+      _setMessage(result.delivered
+        ? `Test notification sent via ${result.channel}.`
+        : `Could not deliver via ${result.channel}. Check that channel's settings.`, !result.delivered);
+      await loadNotifications();
+    } catch (error) {
+      _setMessage(error.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  });
+
+  document.getElementById('lotus-snooze')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    try {
+      const minutes = Number(document.getElementById('lotus-snooze-minutes').value) || 30;
+      const result = await api('/snooze', { method: 'POST', body: JSON.stringify({ minutes }) });
+      _pausedUntil = result.paused_until;
+      _renderPauseState();
+      _setMessage(`Snoozed for ${minutes} minutes.`);
+    } catch (error) {
+      _setMessage(error.message, true);
+    }
+  });
+
+  document.getElementById('lotus-clear-snooze')?.addEventListener('click', async (event) => {
+    event.preventDefault();
+    try {
+      await api('/snooze', { method: 'DELETE' });
+      _pausedUntil = null;
+      _renderPauseState();
+      _setMessage('Snooze cleared.');
     } catch (error) {
       _setMessage(error.message, true);
     }
@@ -243,7 +404,10 @@ function _wireTabs(modal) {
         panel.hidden = panel.dataset.lotusPanel !== button.dataset.lotusTab;
       });
       if (button.dataset.lotusTab === 'history') loadHistory();
-      if (button.dataset.lotusTab === 'reminders') loadPreferences();
+      if (button.dataset.lotusTab === 'reminders') {
+        loadPreferences();
+        loadNotifications();
+      }
     });
   });
 }
@@ -308,15 +472,100 @@ export function openLotus() {
         </section>
         <section data-lotus-panel="reminders" hidden>
           <form id="lotus-reminder-form" class="lotus-reminder-form">
-            <h2>Daily reminder</h2>
-            <p class="lotus-hint">Your schedule is saved now. In-app, ntfy, and phone delivery will be connected in a later milestone.</p>
+            <h2>Reminders</h2>
+            <p class="lotus-hint">Nudges are delivered in-app or through the email / ntfy / webhook channel you pick. External channels receive the notification text, but never your private check-in notes.</p>
             <label class="lotus-toggle"><input id="lotus-reminder-enabled" type="checkbox"><span>Remind me to check in</span></label>
-            <label for="lotus-reminder-time">Reminder time</label>
-            <input id="lotus-reminder-time" type="time" value="20:00">
+
+            <label>Reminder times <span>(up to ${MAX_REMINDER_TIMES})</span></label>
+            <div id="lotus-times" class="lotus-times"></div>
+            <button id="lotus-add-time" type="button" class="lotus-mini lotus-add">+ Add a time</button>
+
+            <label>Days</label>
+            <div id="lotus-weekdays" class="lotus-weekdays"></div>
+
+            <div class="lotus-grid-2">
+              <div>
+                <label for="lotus-quiet-start">Quiet hours from</label>
+                <input id="lotus-quiet-start" type="time">
+              </div>
+              <div>
+                <label for="lotus-quiet-end">until</label>
+                <input id="lotus-quiet-end" type="time">
+              </div>
+            </div>
+            <p class="lotus-hint">A quiet window may cross midnight (22:00 → 07:00).</p>
+
+            <div class="lotus-grid-2">
+              <div>
+                <label for="lotus-min-hours">Minimum hours between nudges</label>
+                <input id="lotus-min-hours" type="number" min="0" max="168" step="1" value="0">
+              </div>
+              <div>
+                <label for="lotus-channel">Deliver via</label>
+                <select id="lotus-channel">
+                  <option value="inherit">App default</option>
+                  <option value="browser">In-app / browser</option>
+                  <option value="email">Email</option>
+                  <option value="ntfy">ntfy</option>
+                  <option value="webhook">Webhook</option>
+                </select>
+              </div>
+            </div>
+
+            <label class="lotus-toggle"><input id="lotus-skip-checked-in" type="checkbox"><span>Skip the nudge if I already checked in that day</span></label>
+
+            <label for="lotus-message-style">Message style</label>
+            <select id="lotus-message-style">
+              ${MESSAGE_STYLES.map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}
+            </select>
+            <p class="lotus-hint">AI phrasing follows your Lotus model-access policy in Settings &gt; Privacy; otherwise the plain wording is used.</p>
+
+            <h2 class="lotus-section-title">Observations</h2>
+            <p class="lotus-hint">A periodic summary of what your check-ins contain — counts, averages, and energy by time of day, always with the sample size behind them.</p>
+            <label class="lotus-toggle"><input id="lotus-insights-enabled" type="checkbox"><span>Send me periodic observations</span></label>
+            <div class="lotus-grid-3">
+              <div>
+                <label for="lotus-insights-frequency">How often</label>
+                <select id="lotus-insights-frequency">
+                  <option value="weekly">Weekly</option>
+                  <option value="biweekly">Every 2 weeks</option>
+                  <option value="monthly">Monthly</option>
+                </select>
+              </div>
+              <div>
+                <label for="lotus-insights-weekday">On</label>
+                <select id="lotus-insights-weekday">
+                  ${WEEKDAYS.map((label, index) => `<option value="${index}">${label}</option>`).join('')}
+                </select>
+              </div>
+              <div>
+                <label for="lotus-insights-time">At</label>
+                <input id="lotus-insights-time" type="time" value="09:00">
+              </div>
+            </div>
+
             <label for="lotus-timezone">Timezone</label>
-            <input id="lotus-timezone" maxlength="64">
-            <button class="lotus-primary" type="submit">Save reminder preference</button>
+            <input id="lotus-timezone" maxlength="64" placeholder="Europe/Warsaw">
+
+            <div class="lotus-actions">
+              <button class="lotus-primary" type="submit">Save reminder settings</button>
+              <button id="lotus-test-notification" type="button" class="lotus-secondary">Send test notification</button>
+            </div>
           </form>
+
+          <div class="lotus-snooze-card">
+            <label for="lotus-snooze-minutes">Pause reminders for</label>
+            <div class="lotus-snooze-row">
+              <input id="lotus-snooze-minutes" type="number" min="5" max="10080" step="5" value="30">
+              <span>minutes</span>
+              <button id="lotus-snooze" type="button" class="lotus-secondary">Snooze</button>
+              <button id="lotus-clear-snooze" type="button" class="lotus-mini" hidden>Resume now</button>
+            </div>
+            <p id="lotus-pause-state" class="lotus-hint">Not snoozed.</p>
+          </div>
+
+          <h2 class="lotus-section-title">Recently sent</h2>
+          <div id="lotus-notification-list" class="lotus-notification-list"></div>
         </section>
       </div>
       <div id="lotus-message" role="status" aria-live="polite"></div>

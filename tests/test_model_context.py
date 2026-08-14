@@ -6,7 +6,7 @@ import types
 import pytest
 
 import src.model_context as model_context
-from src.model_context import is_local_endpoint, estimate_tokens, _lookup_known
+from src.model_context import classify_endpoint_scope, is_local_endpoint, estimate_tokens, _lookup_known
 
 
 class _Column:
@@ -102,6 +102,19 @@ class TestIsLocalEndpoint:
 
     def test_malformed_url(self):
         assert is_local_endpoint("not-a-url") is False
+
+    @pytest.mark.parametrize(
+        ("url", "scope"),
+        [
+            ("http://127.0.0.1:11434/v1", "local"),
+            ("http://host.docker.internal:11434/v1", "local"),
+            ("http://192.168.1.10:8000/v1", "lan"),
+            ("http://100.64.0.10:8000/v1", "lan"),
+            ("https://api.openai.com/v1", "api"),
+        ],
+    )
+    def test_endpoint_scope(self, url, scope):
+        assert classify_endpoint_scope(url) == scope
 
 
 class TestEstimateTokens:

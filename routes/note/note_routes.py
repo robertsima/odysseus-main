@@ -144,6 +144,7 @@ async def dispatch_reminder(
     owner: str = "",
     queue_browser: bool = True,
     settings_override: dict | None = None,
+    persist_dedupe: bool = True,
 ) -> dict:
     """Fire a reminder via the configured channel (browser/email/ntfy/webhook).
 
@@ -153,6 +154,9 @@ async def dispatch_reminder(
         note_id: stable id (used as tag/dedupe in browser notifications)
         owner: the user this reminder belongs to — scopes SMTP config to
                their account so we don't cross-leak credentials
+
+    ``persist_dedupe=False`` lets a caller retain ``note_id`` as the browser
+    tag while keeping delivery state in its own durable store.
 
     Returns: {synthesis, email_sent, ntfy_sent}. Browser channel is wired via
     the in-memory notification queue picked up by the frontend poller, so
@@ -164,7 +168,10 @@ async def dispatch_reminder(
     llm_on = bool(settings.get("reminder_llm_synthesis", False))
     title = (title or "").strip()
     note_body = (note_body or "").strip()
-    cache_key = str(note_id) if note_id else ""
+    # Some callers keep delivery state in their own private store. They still
+    # pass note_id for browser notification tagging, but must not create the
+    # Notes subsystem's owner-derived JSON cache file.
+    cache_key = str(note_id) if note_id and persist_dedupe else ""
     cache = {}
     cache_path = None
     if cache_key:
@@ -533,7 +540,11 @@ async def dispatch_reminder(
     # second send for the same note within 25 min. Without this, a note
     # whose due_date fires while the user has the app open got TWO emails
     # (frontend-fired here + background-fired by ping_notes 0–5 min later).
-    if (email_sent or ntfy_sent or webhook_sent or browser_sent or local_browser_sent) and note_id:
+    if (
+        persist_dedupe
+        and (email_sent or ntfy_sent or webhook_sent or browser_sent or local_browser_sent)
+        and note_id
+    ):
         try:
             import json as _json
             from datetime import datetime as _dt, timezone as _tz

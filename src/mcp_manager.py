@@ -17,8 +17,9 @@ from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
-# Lotus is filtered per request in agent_loop: local/private model endpoints may
-# use it, while remote endpoints have every Lotus tool hidden and runtime-blocked.
+# Lotus is filtered per request in agent_loop according to the owner's
+# local/LAN/API access policy. Approved endpoints may use it; denied endpoints
+# have every Lotus tool hidden and runtime-blocked.
 _BUILTIN_FUNCTION_CALLING_SERVERS = {"builtin_browser", "todoist", "lotus"}
 
 

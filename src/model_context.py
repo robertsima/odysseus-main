@@ -88,17 +88,35 @@ def _configured_endpoint_kind(url: str) -> Optional[str]:
 
 
 def is_local_endpoint(url: str) -> bool:
-    """Check if URL points to a local/private/tailscale address."""
+    """Check if URL points to this machine or a trusted private network."""
+    return classify_endpoint_scope(url) in ("local", "lan")
+
+
+def classify_endpoint_scope(url: str) -> str:
+    """Classify a model endpoint as ``local``, ``lan``, or ``api``.
+
+    ``local`` is loopback (including the Docker host bridge), ``lan`` is a
+    private/Tailscale address or an explicitly local self-hosted endpoint, and
+    ``api`` is a configured API/proxy or any other public address. The older
+    :func:`is_local_endpoint` contract intentionally treats local + LAN as
+    local so existing privacy gates outside Lotus keep their behavior.
+    """
     kind = _configured_endpoint_kind(url)
     if kind in ("api", "proxy"):
-        return False
-    if kind == "local":
-        return True
+        return "api"
     try:
-        host = urlparse(url).hostname or ""
-        return host in _LOCAL_HOSTS or _is_private_ip_literal(host) or _in_tailscale_range(host)
+        host = (urlparse(url).hostname or "").lower()
+        if host in _LOCAL_HOSTS:
+            return "local"
+        if _is_private_ip_literal(host) or _in_tailscale_range(host):
+            return "lan"
+        # A registered endpoint explicitly marked local may use an mDNS name
+        # or a reverse-proxied hostname that cannot be classified from the URL.
+        if kind == "local":
+            return "lan"
+        return "api"
     except Exception:
-        return False
+        return "api"
 
 # ---------------------------------------------------------------------------
 # Constants
