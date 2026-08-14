@@ -115,10 +115,44 @@ All optional. See `.env.example` for the same list with defaults inline.
 | `ODYSSEUS_RAG_RECENCY_HALFLIFE_DAYS` | `180` | How fast rank decays with age |
 | `ODYSSEUS_RAG_TEMPORAL_WEIGHT` | `0.05` | Recency weight on an ordinary query; `0` disables |
 | `ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT` | `0.30` | Recency weight when the query is about the present |
+| `ODYSSEUS_RAG_TAG_CREDIT` | `1.0` | Scales tag/alias credit; `0` disables |
 | `ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC` | `2` | Per-file cap; `0` disables |
 | `ODYSSEUS_RAG_LINK_EXPANSION` | `1` | Follow `[[wikilinks]]`; `0` disables |
 | `ODYSSEUS_VAULT_DATE_ORDER` | `day` | Reading of an ambiguous filename date (`03-04-2026`) |
 | `ODYSSEUS_VAULT_SCAN_SECONDS` | `30` | Re-scan interval; `0` disables |
+
+## Measuring it on a live index
+
+Every ranking signal is applied at query time and has an off-switch, so both
+configurations can be run against the same index with no re-index between them.
+`scripts/rag_ab_compare.py` does exactly that. Run it where ChromaDB is
+reachable — inside the app container, not on the host:
+
+```sh
+# What signals do your notes actually carry?
+docker compose exec odysseus python scripts/rag_ab_compare.py --coverage
+
+# Does the new ranking change these queries?
+docker compose exec odysseus python scripts/rag_ab_compare.py \
+    "what is my current approach to X" "#project notes" "what changed recently"
+```
+
+`--coverage` is the one to run first. It reads the metadata off every stored
+chunk and reports how many notes have dates (and whether those come from
+frontmatter, filenames or mtime), tags, aliases, wikilinks and heading paths.
+A signal with no metadata behind it cannot change anything, so this is what
+separates "the feature isn't working" from "your vault doesn't express that."
+
+It also confirms the one-time re-index ran: a chunk written by the old indexer
+has no `note_key`.
+
+The query mode runs each query twice — new signals off, then on — and diffs
+the two result lists. Identical output is a legitimate result: on a query where
+relevance alone was already right, nothing *should* move.
+
+The one thing it cannot A/B is the chunk format (heading-aware splitting, the
+provenance header), because that is fixed at index time. `--coverage` is the
+proxy for that half.
 
 ## Backwards compatibility
 

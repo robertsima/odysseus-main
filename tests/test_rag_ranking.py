@@ -23,6 +23,7 @@ from src.rag_ranking import (
     recency_factor,
     result_note_keys,
     tag_alias_score,
+    tag_credit_scale,
     temporal_factor,
     temporal_multiplier,
 )
@@ -180,6 +181,24 @@ def test_a_multi_word_alias_matches_against_the_raw_query():
     # Token-set matching alone would never fire for "ai mind".
     meta = {"aliases": encode_list(["ai mind"])}
     assert tag_alias_score("what is in my ai mind setup", {"ai", "mind", "setup"}, meta) > 0
+
+
+def test_tag_credit_can_be_switched_off(monkeypatch):
+    # Every signal layered on the base hybrid score needs an off-switch, or
+    # "retrieval with the new ranking disabled" (scripts/rag_ab_compare.py)
+    # would still be running one of the new rankers and the A/B would lie.
+    meta = {"tags": encode_list(["project"])}
+    assert tag_alias_score("#project notes", {"notes"}, meta) > 0
+    monkeypatch.setenv("ODYSSEUS_RAG_TAG_CREDIT", "0")
+    assert tag_credit_scale() == 0.0
+    assert tag_alias_score("#project notes", {"notes"}, meta) == 0.0
+
+
+def test_tag_credit_scales_proportionally(monkeypatch):
+    meta = {"tags": encode_list(["project"])}
+    full = tag_alias_score("#project", set(), meta)
+    monkeypatch.setenv("ODYSSEUS_RAG_TAG_CREDIT", "0.5")
+    assert tag_alias_score("#project", set(), meta) == pytest.approx(full * 0.5)
 
 
 def test_a_chunk_with_no_tags_scores_nothing():

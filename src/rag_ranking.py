@@ -123,6 +123,17 @@ def max_chunks_per_document() -> int:
     return _env_int("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", DEFAULT_MAX_CHUNKS_PER_DOC, 0, 50)
 
 
+def tag_credit_scale() -> float:
+    """Scales tag/alias credit. 0 disables it, restoring pure prose overlap.
+
+    Exists so every signal added on top of the base hybrid score has an
+    off-switch — which is what makes an honest A/B possible (see
+    scripts/rag_ab_compare.py). Without it, "retrieval with the new ranking
+    turned off" would still be running one of the new rankers.
+    """
+    return _env_float("ODYSSEUS_RAG_TAG_CREDIT", 1.0, 0.0, 1.0)
+
+
 def link_expansion_enabled() -> bool:
     raw = os.environ.get("ODYSSEUS_RAG_LINK_EXPANSION")
     if raw is None or not str(raw).strip():
@@ -217,6 +228,9 @@ def tag_alias_score(query: str, query_words: Iterable[str], meta: Any) -> float:
     """
     if not isinstance(meta, dict):
         return 0.0
+    scale = tag_credit_scale()
+    if scale <= 0:
+        return 0.0
     tags = decode_list(meta.get("tags"))
     aliases = decode_list(meta.get("aliases"))
     if not tags and not aliases:
@@ -229,7 +243,7 @@ def tag_alias_score(query: str, query_words: Iterable[str], meta: Any) -> float:
 
     explicit = query_tag_tokens(query)
     if explicit & segments:
-        return _EXPLICIT_TAG_CREDIT
+        return _EXPLICIT_TAG_CREDIT * scale
 
     words = {str(w).strip().lower() for w in query_words if str(w).strip()}
     if not words:
@@ -241,9 +255,9 @@ def tag_alias_score(query: str, query_words: Iterable[str], meta: Any) -> float:
         if not alias:
             continue
         if alias in words or (" " in alias and alias in lowered):
-            return _BARE_TAG_CREDIT
+            return _BARE_TAG_CREDIT * scale
     if words & segments:
-        return _BARE_TAG_CREDIT
+        return _BARE_TAG_CREDIT * scale
     return 0.0
 
 
