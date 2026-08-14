@@ -214,6 +214,192 @@ def test_http_server_is_not_auto_reconnected_mid_call():
     connect.assert_not_called()
 
 
+class _FakeStack:
+    """Stand-in for the AsyncExitStack that owns a server's transport."""
+
+    def __init__(self, closed, delay=0.0):
+        self._closed = closed
+        self._delay = delay
+        self.is_closed = False
+
+    async def aclose(self):
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        self.is_closed = True
+        self._closed.append(self)
+
+
+def _stub_stdio_connect(mgr, created, closed, connect_delay=0.01, close_delay=0.0):
+    """A _connect_stdio replacement that publishes state like the real one."""
+
+    async def fake_connect_stdio(server_id, name, command, args, env):
+        await asyncio.sleep(connect_delay)  # subprocess spawn + MCP handshake
+        stack = _FakeStack(closed, close_delay)
+        created.append(stack)
+        mgr._sessions[server_id] = object()
+        mgr._stacks[server_id] = stack
+        mgr._tools[server_id] = [
+            {"name": "notify_me", "description": "send a push", "input_schema": {}}
+        ]
+        mgr._connections[server_id] = {
+            "status": "connected",
+            "name": name,
+            "transport": "stdio",
+            "tool_count": 1,
+        }
+        return True
+
+    return fake_connect_stdio
+
+
+def _restart_kwargs(server_id="ntfy1"):
+    return {
+        "server_id": server_id,
+        "name": "ntfy",
+        "transport": "stdio",
+        "command": "npx",
+        "args": ["-y", "ntfy-me-mcp"],
+        "env": {},
+        "url": None,
+    }
+
+
+async def test_concurrent_reconnects_do_not_corrupt_server_state():
+    # Regression: the Reconnect button fanned out into several overlapping
+    # POST /api/mcp/servers/{id}/reconnect calls, and each ran its own
+    # unsynchronized disconnect+connect. A disconnect that resumed after a
+    # newer connect had published state popped _sessions/_tools/_connections
+    # for a live connection, so the UI showed the server as disconnected with
+    # 0 tools while the agent could still call its tools.
+    mgr = _connected_stdio_manager()
+    created, closed = [], []
+    original = _FakeStack(closed, delay=0.01)
+    mgr._stacks["ntfy1"] = original
+
+    with patch.object(
+        McpManager, "_connect_stdio", side_effect=_stub_stdio_connect(mgr, created, closed)
+    ):
+        results = await asyncio.gather(
+            *[mgr.restart_server(**_restart_kwargs()) for _ in range(4)]
+        )
+
+    assert results == [True, True, True, True]
+    conn = mgr._connections.get("ntfy1", {})
+    assert conn.get("status") == "connected"
+    assert conn.get("tool_count") == 1
+    assert "ntfy1" in mgr._sessions
+    assert mgr._tools.get("ntfy1")
+    assert mgr._configs.get("ntfy1")
+
+    # Concurrent requests join the in-flight restart instead of each spawning
+    # its own subprocess and orphaning the previous one's exit stack (the
+    # orphans were what produced the detached "Attempted to exit cancel scope
+    # in a different task" errors).
+    assert len(created) == 1
+    assert original.is_closed
+    assert mgr._stacks["ntfy1"] is created[0]
+    assert not created[0].is_closed
+
+
+async def test_slow_disconnect_cannot_wipe_a_newer_connects_state():
+    # disconnect_server() awaits stack.aclose() *between* popping _stacks and
+    # popping _sessions/_tools/_connections. That await is a suspension point,
+    # so without the per-server lock a connect completing during it had its
+    # state wiped by the disconnect on the way out.
+    mgr = _connected_stdio_manager()
+    created, closed = [], []
+    release = asyncio.Event()
+
+    class _BlockingStack:
+        async def aclose(self):
+            await release.wait()
+
+    mgr._stacks["ntfy1"] = _BlockingStack()
+
+    with patch.object(
+        McpManager,
+        "_connect_stdio",
+        side_effect=_stub_stdio_connect(mgr, created, closed, connect_delay=0),
+    ):
+        disconnecting = asyncio.create_task(mgr.disconnect_server("ntfy1"))
+        await asyncio.sleep(0)  # park it inside stack.aclose()
+        connecting = asyncio.create_task(
+            mgr.connect_server(
+                server_id="ntfy1",
+                name="ntfy",
+                transport="stdio",
+                command="npx",
+                args=["-y", "ntfy-me-mcp"],
+                env={},
+            )
+        )
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.gather(disconnecting, connecting)
+
+    assert mgr._connections.get("ntfy1", {}).get("status") == "connected"
+    assert "ntfy1" in mgr._sessions
+    assert mgr._tools.get("ntfy1")
+
+
+async def test_connect_closes_a_previous_transport_instead_of_orphaning_it():
+    # Overwriting _stacks[server_id] left the old stdio subprocess running with
+    # nothing referencing its exit stack, so the GC closed it later from an
+    # unrelated task -> anyio "different task" RuntimeError.
+    mgr = _connected_stdio_manager()
+    created, closed = [], []
+    original = _FakeStack(closed)
+    mgr._stacks["ntfy1"] = original
+
+    with patch.object(
+        McpManager,
+        "_connect_stdio",
+        side_effect=_stub_stdio_connect(mgr, created, closed, connect_delay=0),
+    ):
+        assert await mgr.connect_server(**_restart_kwargs()) is True
+
+    assert original.is_closed
+    assert mgr._stacks["ntfy1"] is created[-1]
+
+
+async def test_internal_reconnect_does_not_deadlock_on_the_server_lock():
+    # _reconnect_server() holds the server's lock and then calls the public
+    # disconnect_server()/connect_server(), which take it again. The lock has
+    # to be re-entrant for the owning task or crash recovery would hang.
+    mgr = _connected_stdio_manager()
+    created, closed = [], []
+
+    with patch.object(
+        McpManager,
+        "_connect_stdio",
+        side_effect=_stub_stdio_connect(mgr, created, closed, connect_delay=0),
+    ):
+        ok = await asyncio.wait_for(mgr._reconnect_server("ntfy1"), timeout=5)
+
+    assert ok is True
+    assert mgr._connections["ntfy1"]["status"] == "connected"
+
+
+async def test_a_cancelled_reconnect_request_does_not_abort_the_restart():
+    # A browser navigating away cancels its request task; the restart other
+    # callers are waiting on must survive it.
+    mgr = _connected_stdio_manager()
+    created, closed = [], []
+
+    with patch.object(
+        McpManager, "_connect_stdio", side_effect=_stub_stdio_connect(mgr, created, closed)
+    ):
+        first = asyncio.create_task(mgr.restart_server(**_restart_kwargs()))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(mgr.restart_server(**_restart_kwargs()))
+        await asyncio.sleep(0)
+        first.cancel()
+        assert await second is True
+
+    assert mgr._connections["ntfy1"]["status"] == "connected"
+    assert len(created) == 1
+
+
 def test_http_transport_routes_to_start_http_connect():
     mgr = McpManager()
 

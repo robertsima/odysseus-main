@@ -314,7 +314,6 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
         if not mcp:
             return {"error": "MCP manager not available", "exit_code": 1}
         try:
-            await mcp.disconnect_server(sid)
             from core.database import SessionLocal, McpServer
             db2 = SessionLocal()
             try:
@@ -322,7 +321,11 @@ async def do_manage_mcp(content: str, owner: Optional[str] = None) -> Dict:
                 if srv:
                     _args = json.loads(srv.args) if srv.args else []
                     _env = json.loads(srv.env) if srv.env else {}
-                    await mcp.connect_server(
+                    # restart_server() keeps the teardown and the rebuild under
+                    # one per-server lock. A separate disconnect_server() +
+                    # connect_server() pair leaves a window in which a reconnect
+                    # from the Settings UI can interleave with this one.
+                    await mcp.restart_server(
                         server_id=sid,
                         name=srv.name,
                         transport=srv.transport,

@@ -286,7 +286,15 @@ def setup_mcp_routes(mcp_manager: McpManager):
 
     @router.post("/servers/{server_id}/reconnect")
     async def reconnect_server(server_id: str, request: Request):
-        """Reconnect to an MCP server."""
+        """Reconnect to an MCP server.
+
+        Goes through restart_server() rather than doing its own
+        disconnect+connect: a reconnect takes seconds and both the Settings
+        and Admin panels offer the button, so concurrent POSTs for the same
+        server are entirely normal. restart_server serializes them per
+        server_id and lets late arrivals join the in-flight restart, instead
+        of each request tearing down a connection another request just built.
+        """
         require_admin(request)
         db = SessionLocal()
         try:
@@ -294,11 +302,9 @@ def setup_mcp_routes(mcp_manager: McpManager):
             if not srv:
                 raise HTTPException(404, "Server not found")
 
-            await mcp_manager.disconnect_server(server_id)
-
             args = json.loads(srv.args) if srv.args else []
             env = json.loads(srv.env) if srv.env else {}
-            connected = await mcp_manager.connect_server(
+            connected = await mcp_manager.restart_server(
                 server_id=server_id,
                 name=srv.name,
                 transport=srv.transport,

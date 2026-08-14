@@ -209,6 +209,45 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
     return name.startswith(_MCP_READONLY_VERBS)
 
 
+class _ServerLock:
+    """A per-server mutex that a single task may re-enter.
+
+    Every mutation of McpManager's state dicts for one server_id runs under
+    this lock so overlapping connect/disconnect cycles serialize instead of
+    interleaving (see McpManager.restart_server for the bug this fixes).
+
+    It has to be re-entrant *within one task* because the public entry points
+    nest: _reconnect_server() takes the lock and then calls the public
+    disconnect_server()/connect_server(), which take it again. A plain
+    asyncio.Lock would self-deadlock there. Re-entry is keyed on the owning
+    asyncio.Task, so a *different* task still blocks — which is exactly the
+    serialization we need between concurrent HTTP requests.
+    """
+
+    def __init__(self):
+        self._lock = asyncio.Lock()
+        self._owner = None
+        self._depth = 0
+
+    async def __aenter__(self):
+        task = asyncio.current_task()
+        if task is not None and self._owner is task:
+            self._depth += 1
+            return self
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        self._depth -= 1
+        if self._depth <= 0:
+            self._owner = None
+            self._depth = 0
+            self._lock.release()
+        return False
+
+
 class McpManager:
     """Manages MCP server connections and tool routing."""
 
@@ -228,8 +267,33 @@ class McpManager:
         self._configs: Dict[str, Dict[str, Any]] = {}
         # server_id -> open stderr capture file {"path": str, "handle": file}
         self._stderr_logs: Dict[str, Dict[str, Any]] = {}
+        # server_id -> (event loop, _ServerLock) serializing every mutation of
+        # the dicts above for that server. Created lazily so McpManager can be
+        # constructed at import time, before any loop exists.
+        self._locks: Dict[str, Tuple[Any, Any]] = {}
+        # server_id -> in-flight restart_server() task, so concurrent reconnect
+        # requests for one server join the running restart instead of stacking
+        # up another disconnect/connect cycle each.
+        self._restart_tasks: Dict[str, Any] = {}
         # Tracking updates to tools/connections for RAG indexing / prompt cache
         self._generation = 0
+
+    def _get_lock(self, server_id: str) -> "_ServerLock":
+        """Return this server's mutex, creating it on first use.
+
+        Must be called from inside a running loop. The loop is remembered
+        because asyncio primitives bind to the loop that first awaits them:
+        tests (and anything else) that drive the same manager through several
+        asyncio.run() calls would otherwise hit "bound to a different event
+        loop". A loop change means the previous loop is gone, so the old lock
+        cannot still be held and is safe to replace.
+        """
+        loop = asyncio.get_running_loop()
+        entry = self._locks.get(server_id)
+        if entry is None or entry[0] is not loop:
+            entry = (loop, _ServerLock())
+            self._locks[server_id] = entry
+        return entry[1]
 
     async def connect_server(
         self,
@@ -242,6 +306,37 @@ class McpManager:
         url: Optional[str] = None,
     ) -> bool:
         """Connect to an MCP server via stdio, SSE, or Streamable HTTP transport."""
+        async with self._get_lock(server_id):
+            return await self._connect_server_unlocked(
+                server_id=server_id,
+                name=name,
+                transport=transport,
+                command=command,
+                args=args,
+                env=env,
+                url=url,
+            )
+
+    async def _connect_server_unlocked(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        command: Optional[str] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        url: Optional[str] = None,
+    ) -> bool:
+        """connect_server() body. Callers must hold this server's lock."""
+        # Never let a second connect orphan a live transport: overwriting
+        # self._stacks[server_id] used to leave the previous stdio subprocess
+        # running with nothing referencing its AsyncExitStack, so it was torn
+        # down later by the garbage collector from an unrelated task -- the
+        # "Attempted to exit cancel scope in a different task" RuntimeError
+        # that showed up as an unretrieved task exception in the logs.
+        if server_id in self._stacks or server_id in self._sessions:
+            await self._disconnect_server_unlocked(server_id, log=False)
+
         self._configs[server_id] = {
             "server_id": server_id,
             "name": name,
@@ -277,7 +372,22 @@ class McpManager:
             return False
 
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
-        """Connect to an MCP server via stdio transport."""
+        """Connect to an MCP server via stdio transport.
+
+        Known limitation: stdio_client() opens an anyio task group, and anyio
+        cancel scopes may only be exited by the task that entered them. The
+        AsyncExitStack built here therefore belongs to whichever task ran the
+        connect (a FastAPI request task, or restart_server's own task), while
+        disconnect_server() closes it from whatever task asks for the
+        disconnect later -- so `await stack.aclose()` can raise "Attempted to
+        exit cancel scope in a different task than it was entered in". That
+        warning is logged and swallowed; the subprocess still dies with its
+        pipes. Removing it entirely means owning each stdio server's stack in
+        one long-lived supervisor task per server and driving connect/
+        disconnect through a queue, which is a much larger change. Serializing
+        the callers (see restart_server) removes the state corruption and the
+        orphaned-subprocess storm that made the warning fire repeatedly.
+        """
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
@@ -418,6 +528,10 @@ class McpManager:
         `wait` seconds: True if it connected (cached-token path), otherwise the
         flow is awaiting browser authorization and status becomes 'needs_auth'."""
         import asyncio
+        # The background connect deliberately runs outside this server's lock:
+        # an OAuth browser flow can take minutes, and holding the lock for that
+        # long would block disconnects. disconnect_server() cancels the task
+        # instead (see self._connect_tasks).
         self._connections[server_id] = {"status": "connecting", "name": name, "transport": "http"}
         task = asyncio.create_task(self._connect_http(server_id, name, url))
         self._connect_tasks[server_id] = task
@@ -498,6 +612,19 @@ class McpManager:
 
     async def disconnect_server(self, server_id: str):
         """Disconnect from an MCP server."""
+        async with self._get_lock(server_id):
+            await self._disconnect_server_unlocked(server_id)
+
+    async def _disconnect_server_unlocked(self, server_id: str, log: bool = True):
+        """disconnect_server() body. Callers must hold this server's lock.
+
+        The lock matters here specifically because `await stack.aclose()`
+        below is a suspension point that sits *between* popping _stacks and
+        popping _sessions/_tools/_connections. Unlocked, a connect that
+        completed during that await would publish a fresh "connected" entry
+        which this call then wiped on the way out, leaving the UI showing a
+        disconnected server with 0 tools.
+        """
         # Cancel any in-flight HTTP/OAuth background connect so it stops
         # publishing status for a server that may be getting deleted.
         task = self._connect_tasks.pop(server_id, None)
@@ -522,13 +649,81 @@ class McpManager:
         self._configs.pop(server_id, None)
         self._close_stderr_log(server_id)
         self._generation += 1
-        logger.info(f"MCP server disconnected: {server_id}")
+        if log:
+            logger.info(f"MCP server disconnected: {server_id}")
 
     async def disconnect_all(self):
         """Disconnect from all MCP servers."""
         ids = list(self._sessions.keys())
         for sid in ids:
             await self.disconnect_server(sid)
+
+    async def restart_server(
+        self,
+        server_id: str,
+        name: str,
+        transport: str,
+        command: Optional[str] = None,
+        args: Optional[List[str]] = None,
+        env: Optional[Dict[str, str]] = None,
+        url: Optional[str] = None,
+    ) -> bool:
+        """Disconnect then reconnect one server, coalescing concurrent calls.
+
+        Both the Settings and Admin MCP panels expose a Reconnect button, and
+        a reconnect takes a couple of seconds, so a single user could easily
+        have several overlapping POSTs to
+        /api/mcp/servers/{id}/reconnect in flight for the same server. Each
+        one used to run its own unsynchronized disconnect+connect pair, which
+        went wrong two ways:
+
+          * every attempt spawned its own stdio subprocess, and all but the
+            last had its AsyncExitStack dropped on the floor when the next
+            connect overwrote _stacks[server_id]; the orphans were closed
+            later by the GC from an unrelated task, raising anyio's
+            "Attempted to exit cancel scope in a different task" RuntimeError.
+          * a disconnect that resumed after a *newer* connect had published
+            state popped _sessions/_tools/_connections for a connection that
+            was actually live, so /api/mcp/servers reported the server as
+            disconnected with 0 tools while the agent could still call its
+            tools through the session it had already been handed.
+
+        A caller arriving while a restart is running joins that restart and
+        gets its result, instead of queueing another teardown of a server
+        that is being rebuilt right now.
+        """
+        loop = asyncio.get_running_loop()
+        task = self._restart_tasks.get(server_id)
+        if task is None or task.done() or task.get_loop() is not loop:
+            task = loop.create_task(
+                self._restart_once(
+                    server_id=server_id,
+                    name=name,
+                    transport=transport,
+                    command=command,
+                    args=args,
+                    env=env,
+                    url=url,
+                )
+            )
+            self._restart_tasks[server_id] = task
+            task.add_done_callback(
+                lambda finished, sid=server_id: self._restart_tasks.pop(sid, None)
+                if self._restart_tasks.get(sid) is finished
+                else None
+            )
+        # Shielded: a browser that navigates away mid-reconnect cancels its
+        # request task, and that must not cancel a restart other callers (or
+        # the server's own connection state) depend on.
+        return await asyncio.shield(task)
+
+    async def _restart_once(self, server_id: str, **config) -> bool:
+        # Runs in its own task, so it must NOT be called from a caller that
+        # already holds this server's lock: the lock is re-entrant per task,
+        # and this task is not that task.
+        async with self._get_lock(server_id):
+            await self._disconnect_server_unlocked(server_id)
+            return await self._connect_server_unlocked(server_id=server_id, **config)
 
 
     async def connect_all_enabled(self):
@@ -752,27 +947,34 @@ class McpManager:
         Builtins keep their dedicated path (their command is derived, not stored).
         Only stdio servers are restarted automatically: HTTP/SSE reconnects can
         re-enter the OAuth browser flow, which must not happen inside a tool call.
+
+        Holds the server's lock across the whole teardown+rebuild so a
+        crash-recovery restart and a user-triggered reconnect cannot run at
+        the same time. The lock is re-entrant within this task, which is why
+        the public disconnect_server()/connect_server() can still be used
+        below.
         """
-        if self.is_builtin(server_id):
-            return await self._reconnect_builtin(server_id)
+        async with self._get_lock(server_id):
+            if self.is_builtin(server_id):
+                return await self._reconnect_builtin(server_id)
 
-        # Snapshot before disconnect_server() clears it.
-        config = dict(self._configs.get(server_id) or {})
-        if not config:
-            logger.warning(f"No stored config to reconnect MCP server: {server_id}")
-            return False
-        if config.get("transport") != "stdio":
-            return False
+            # Snapshot before disconnect_server() clears it.
+            config = dict(self._configs.get(server_id) or {})
+            if not config:
+                logger.warning(f"No stored config to reconnect MCP server: {server_id}")
+                return False
+            if config.get("transport") != "stdio":
+                return False
 
-        await self.disconnect_server(server_id)
-        try:
-            ok = await self.connect_server(**config)
-            if ok:
-                logger.info(f"Reconnected MCP server: {config.get('name', server_id)} ({server_id})")
-            return ok
-        except Exception as e:
-            logger.error(f"Failed to reconnect MCP server {server_id}: {_describe_exception(e)}")
-            return False
+            await self.disconnect_server(server_id)
+            try:
+                ok = await self.connect_server(**config)
+                if ok:
+                    logger.info(f"Reconnected MCP server: {config.get('name', server_id)} ({server_id})")
+                return ok
+            except Exception as e:
+                logger.error(f"Failed to reconnect MCP server {server_id}: {_describe_exception(e)}")
+                return False
 
     async def _reconnect_builtin(self, server_id: str) -> bool:
         """Tear down and reconnect a crashed builtin MCP server."""
@@ -786,24 +988,25 @@ class McpManager:
         base_dir = get_app_root()
         script_path = os.path.join(base_dir, script_rel)
 
-        # Clean up old connection
-        await self.disconnect_server(server_id)
+        async with self._get_lock(server_id):
+            # Clean up old connection
+            await self.disconnect_server(server_id)
 
-        try:
-            ok = await self.connect_server(
-                server_id=server_id,
-                name=name,
-                transport="stdio",
-                command=sys.executable,
-                args=[script_path],
-                env=builtin_python_env(base_dir),
-            )
-            if ok:
-                logger.info(f"Reconnected builtin MCP server: {name}")
-            return ok
-        except Exception as e:
-            logger.error(f"Failed to reconnect builtin MCP server {name}: {_describe_exception(e)}")
-            return False
+            try:
+                ok = await self.connect_server(
+                    server_id=server_id,
+                    name=name,
+                    transport="stdio",
+                    command=sys.executable,
+                    args=[script_path],
+                    env=builtin_python_env(base_dir),
+                )
+                if ok:
+                    logger.info(f"Reconnected builtin MCP server: {name}")
+                return ok
+            except Exception as e:
+                logger.error(f"Failed to reconnect builtin MCP server {name}: {_describe_exception(e)}")
+                return False
 
     def get_all_openai_schemas(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return all MCP tools in OpenAI function-calling format.

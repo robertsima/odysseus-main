@@ -13,6 +13,10 @@ def test_reconnect_passes_full_server_config():
     fake_mcp = MagicMock()
     fake_mcp.disconnect_server = AsyncMock()
     fake_mcp.connect_server = AsyncMock(return_value=True)
+    # Reconnect goes through restart_server() so the teardown and the rebuild
+    # happen under one per-server lock (a bare disconnect+connect pair can
+    # interleave with a reconnect triggered from the Settings UI).
+    fake_mcp.restart_server = AsyncMock(return_value=True)
     fake_mcp.get_server_status = MagicMock(return_value={"tool_count": 3})
 
     fake_srv = SimpleNamespace(
@@ -35,7 +39,8 @@ def test_reconnect_passes_full_server_config():
         ))
 
     assert result["exit_code"] == 0
-    fake_mcp.connect_server.assert_called_once_with(
+    fake_mcp.connect_server.assert_not_called()
+    fake_mcp.restart_server.assert_called_once_with(
         server_id="srv-123",
         name="test-server",
         transport="stdio",

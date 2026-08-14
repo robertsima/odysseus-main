@@ -2078,8 +2078,14 @@ async function loadMcpServers() {
         ${hasTools ? `<div class="mcp-tools-panel hidden" data-adm-mcp-tools-panel="${s.id}"></div>` : ''}
       </div>`;
     }).join('');
+    // Reconnecting a stdio server takes a couple of seconds. Without an
+    // in-flight guard an impatient second/third click fired another
+    // POST .../reconnect each, and those overlapping restarts used to corrupt
+    // the server's connection state on the backend.
     list.querySelectorAll('[data-adm-mcp-reconnect]').forEach(btn => {
       btn.addEventListener('click', async () => {
+        if (btn.disabled) return;
+        btn.disabled = true;
         const msg = el('adm-mcpMsg'); msg.textContent = 'Reconnecting...'; msg.className = '';
         try {
           const res = await fetch(`/api/mcp/servers/${btn.dataset.admMcpReconnect}/reconnect`, { method: 'POST', credentials: 'same-origin' });
@@ -2088,6 +2094,7 @@ async function loadMcpServers() {
           msg.className = data.connected ? 'admin-success' : 'admin-error';
           loadMcpServers();
         } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
+        finally { btn.disabled = false; }
       });
     });
     list.querySelectorAll('[data-adm-mcp-toggle]').forEach(btn => {

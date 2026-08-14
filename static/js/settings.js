@@ -5340,7 +5340,14 @@ async function initUnifiedIntegrations() {
             <div id="uf-mcp-tools-panel"></div>
           </div>`;
         // Reconnect
-        el('uf-mcp-reconnect').addEventListener('click', async () => {
+        // Reconnecting a stdio server takes a couple of seconds. Without an
+        // in-flight guard an impatient second/third click fired another
+        // POST .../reconnect each, and those overlapping restarts used to
+        // corrupt the server's connection state on the backend.
+        el('uf-mcp-reconnect').addEventListener('click', async (ev) => {
+          const btn = ev.currentTarget;
+          if (btn.disabled) return;
+          btn.disabled = true;
           const msg = el('uf-mcp-msg'); msg.textContent = 'Reconnecting...';
           try {
             const r = await fetch(`/api/mcp/servers/${srv.id}/reconnect`, { method: 'POST', credentials: 'same-origin' });
@@ -5349,6 +5356,7 @@ async function initUnifiedIntegrations() {
             await renderList();
             showMcpForm(editId); // refresh this view
           } catch (e) { msg.textContent = 'Failed'; }
+          finally { btn.disabled = false; }
         });
         // Toggle enable/disable
         el('uf-mcp-toggle').addEventListener('click', async () => {
