@@ -40,7 +40,12 @@ STATE_FILENAME = ".vault_scan_state.json"
 # already-indexed vault keeps its old flat chunks forever — every file still
 # looks up-to-date by (mtime, size) — so none of the new signals would exist
 # for the notes that matter most.
-STATE_VERSION = 3
+# v4: a leading BOM (written routinely by editors on Windows) sat before the
+# opening `---` and defeated the anchored frontmatter match, so every affected
+# note was indexed with none of its declared tags, aliases or dates — and with
+# its first heading invisible. Notes indexed under v3 keep that damage until
+# they are rewritten, and they cannot be spotted by looking at them.
+STATE_VERSION = 4
 
 # Default gap between automatic scans. Short enough that a save shows up in
 # retrieval while you are still working, long enough that a large vault is not

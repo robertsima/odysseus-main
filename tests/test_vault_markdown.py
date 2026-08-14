@@ -85,6 +85,29 @@ def test_aliases_are_captured_and_lowercased():
     assert doc.aliases == ["ai mind", "vault mind"]
 
 
+def test_a_leading_byte_order_mark_does_not_hide_the_frontmatter():
+    """Found in a real vault: Obsidian on Windows writes a BOM.
+
+    It sits before the opening ``---``, so the anchored frontmatter pattern
+    misses and the note loses every tag, alias and date it declared — while
+    looking completely normal in any editor.
+    """
+    doc = parse_markdown(
+        "﻿---\ntags: [zimaos]\nupdated: 2026-08-14\n---\n# Real\n\nbody\n",
+        "n.md",
+    )
+    assert doc.tags == ["zimaos"]
+    assert doc.doc_date_source == "frontmatter"
+    assert doc.title == "Real"
+
+
+def test_a_byte_order_mark_does_not_hide_a_first_line_heading():
+    doc = parse_markdown("﻿# Model notes\n\nSome prose.\n", "models.md")
+    assert doc.title == "Model notes"
+    chunks = chunk_markdown(doc, _split, chunk_size=1000)
+    assert chunks[0].heading_path == "Model notes"
+
+
 # -- inline tags -----------------------------------------------------------
 
 

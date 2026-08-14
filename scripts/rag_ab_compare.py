@@ -22,10 +22,12 @@ What this cannot A/B is the chunk *format* (heading-aware splitting and the
 provenance header). Those are baked in at index time, so the only comparison
 would be a full re-index in both formats. ``--coverage`` is the proxy.
 
-Run it where ChromaDB is reachable — inside the app container, not on the host:
+Run it where ChromaDB is reachable — inside the app container, not on the host.
+Compose is not required; find the container with ``docker ps --format
+'{{.Names}}'``:
 
-    docker compose exec odysseus python scripts/rag_ab_compare.py --coverage
-    docker compose exec odysseus python scripts/rag_ab_compare.py \\
+    docker exec <container> python scripts/rag_ab_compare.py --coverage
+    docker exec <container> python scripts/rag_ab_compare.py \\
         "what is my current approach to X" "#project notes" "..."
 """
 from __future__ import annotations
@@ -114,7 +116,7 @@ def report_coverage(rag) -> None:
         print(
             f"  ! {stale:,} Markdown chunk(s) predate vault-aware indexing.\n"
             f"    The one-time re-index has not covered them. Check the app log for\n"
-            f"    'Vault scan state is format v2, expected v3', or that the directory\n"
+            f"    'Vault scan state is format vN, expected vM', or that the directory\n"
             f"    is in the tracked list (Settings -> Personal documents)."
         )
 
@@ -153,18 +155,33 @@ def report_coverage(rag) -> None:
         print(f"  Date range: {format_date(stamps[0])} .. {format_date(stamps[-1])}")
 
     print("\n-- Reading this ----------------------------------------------")
+    advised = False
+    if len(dated) >= scoped * 0.5 and tags and any(m.get("links") for m in scope):
+        # Silence used to mean "every check passed", which reads as a broken
+        # report rather than a clean bill of health.
+        print("  Your vault carries every signal the ranking can use. If retrieval")
+        print("  still looks unchanged, the queries are ones where relevance alone")
+        print("  was already right — which is the intended behaviour, not a failure.")
+        print("  Use the query mode to find the ones where it is not.")
+        advised = True
     if len(dated) < scoped * 0.5:
         print("  Most notes have no date, so recency ranking is mostly inert.")
         print("  Adding `updated:` to the frontmatter of notes you revise is the")
         print("  single highest-value change you can make to your vault.")
+        advised = True
     if sources.get("mtime", 0) > scoped * 0.5:
         print("  Dates come mainly from file mtime, which is deliberately discounted")
         print("  (a re-sync moves it without the content changing). Frontmatter dates")
         print("  would carry twice the weight.")
+        advised = True
     if not tags:
         print("  No tags anywhere — tag/alias scoring can never fire.")
+        advised = True
     if not any(m.get("links") for m in scope):
         print("  No [[wikilinks]] — multi-source link expansion can never fire.")
+        advised = True
+    if not advised:
+        print("  Nothing stands out; see the per-signal percentages above.")
 
 
 # ---------------------------------------------------------------------------

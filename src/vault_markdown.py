@@ -137,9 +137,17 @@ def split_frontmatter(text: str) -> Tuple[Dict[str, Any], str]:
 
     A file without frontmatter, or with frontmatter that does not parse, yields
     ``({}, text)`` — an unreadable header must never cost us the note's prose.
+
+    A leading BOM is stripped first. Editors on Windows write one routinely,
+    and it is invisible in every tool that displays the file — but it sits
+    before the opening ``---``, so the frontmatter pattern (anchored with
+    ``\\A``) does not match and the note silently loses every tag, alias and
+    date it declared. The same byte hides a first-line ``# Heading`` from the
+    heading pattern. Both failures are undetectable by reading the note.
     """
     if not text:
         return {}, ""
+    text = text.lstrip("﻿")
     match = _FRONTMATTER_RE.match(text)
     if not match:
         return {}, text
