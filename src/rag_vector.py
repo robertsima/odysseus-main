@@ -35,11 +35,28 @@ from src.embedding_lanes import (
     migrate_legacy_collection,
     query_lanes,
 )
+from src.rag_ranking import (
+    cap_per_document,
+    collect_link_targets,
+    link_expansion_enabled,
+    query_has_temporal_intent,
+    result_note_keys,
+    tag_alias_score,
+    temporal_factor,
+)
+from src.vault_markdown import (
+    MARKDOWN_EXTENSIONS,
+    build_chunk_header,
+    chunk_markdown,
+    encode_list,
+    note_key as _note_key,
+    parse_markdown,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_FILE_EXTENSIONS: Set[str] = {
-    '.txt', '.md', '.py', '.json', '.yaml', '.yml',
+    '.txt', '.md', '.markdown', '.py', '.json', '.yaml', '.yml',
     '.csv', '.html', '.css', '.js', '.pdf'
 }
 
@@ -54,6 +71,16 @@ KEYWORD_WEIGHT = 0.3
 # the weighted blend realistically produces for a document nobody asked for,
 # while leaving headroom so named chunks stay ordered by vector similarity.
 NAME_MATCH_FLOOR = 0.9
+
+# How many top-ranked chunks get their vault links followed, and how many notes
+# that may pull in. Both deliberately small: link expansion is a second round
+# trip per lane, and a note's neighbours are supporting context, not the answer.
+LINK_SEED_RESULTS = 3
+MAX_LINK_TARGETS = 8
+# Chunks reached only by a link are relevant *by association*. The discount
+# keeps them below anything the query matched directly while still letting a
+# strongly-similar linked note outrank a weak direct hit.
+LINK_EXPANSION_DISCOUNT = 0.85
 
 COLLECTION_NAME = "odysseus_rag"
 
@@ -184,6 +211,22 @@ def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str
     if len(clauses) == 1:
         return clauses[0]
     return {"$and": clauses}
+
+
+def _with_clause(
+    where: Optional[Dict[str, Any]], clause: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Add a clause to a ``_build_where`` filter without losing its scoping.
+
+    Link expansion narrows to a set of notes, but it must stay inside the same
+    owner and sensitivity scope as the primary pass — a second query that
+    dropped those would reach private notes from a hosted-API turn.
+    """
+    if not where:
+        return clause
+    if "$and" in where and isinstance(where["$and"], list):
+        return {"$and": list(where["$and"]) + [clause]}
+    return {"$and": [where, clause]}
 
 
 def _rewrite_owner_path(value: str, path_map: Dict[str, str], path_prefixes: List[tuple]) -> str:
@@ -554,11 +597,12 @@ class VectorRAG:
         try:
             where_filter = _build_where(owner, allow_private)
             query_words = set(query.lower().split())
+            temporal_intent = query_has_temporal_intent(query)
             candidates = []
 
             seen_ids = set()
 
-            def collect(lane, results):
+            def collect(lane, results, *, path: str = "direct", discount: float = 1.0):
                 for idx in range(len(results["ids"][0])):
                     doc_id = results["ids"][0][idx]
                     if doc_id in seen_ids:
@@ -572,20 +616,38 @@ class VectorRAG:
                     doc_words = set(doc_text.lower().split())
                     overlap = len(query_words & doc_words)
                     keyword_score = overlap / len(query_words) if query_words else 0.0
+                    # A query naming a tag or alias is naming a *set* of notes
+                    # deliberately. Prose overlap barely registers that — the
+                    # tag may appear once in a frontmatter block — so take
+                    # whichever signal is stronger rather than averaging them.
+                    keyword_score = max(keyword_score, tag_alias_score(query, query_words, meta))
                     named = _query_names_document(query_words, meta)
                     if named:
                         keyword_score = 1.0
                     hybrid_score = (VECTOR_WEIGHT * vector_sim) + (KEYWORD_WEIGHT * keyword_score)
+                    # Recency multiplies the blend, and — below — the name
+                    # floor's tie-break term as well. It has to reach both:
+                    # "Deploy.md" and "Deploy 2022.md" are *both* named by a
+                    # query saying "deploy", so the floor puts them level and
+                    # the date is the only thing left that says which one is
+                    # still true.
+                    temporal = temporal_factor(meta, temporal_intent)
+                    hybrid_score *= temporal
+                    if discount != 1.0:
+                        hybrid_score *= discount
                     if named:
                         # Full keyword credit alone tops out at +0.3, which a
                         # weak vector match still loses to — and the documents
                         # that most need naming are exactly the ones embeddings
                         # place badly. Naming a file is an explicit request for
                         # it, so float it above everything unnamed and let
-                        # vector similarity order the named ones among
-                        # themselves.
+                        # vector similarity, discounted by age, order the named
+                        # ones among themselves. The floor itself is untouched
+                        # by recency, so an old note the user named by name is
+                        # still returned ahead of every note they did not.
                         hybrid_score = max(
-                            hybrid_score, NAME_MATCH_FLOOR + (1.0 - NAME_MATCH_FLOOR) * vector_sim
+                            hybrid_score,
+                            NAME_MATCH_FLOOR + (1.0 - NAME_MATCH_FLOOR) * vector_sim * temporal,
                         )
 
                     candidates.append({
@@ -597,6 +659,7 @@ class VectorRAG:
                         "vector_similarity": round(vector_sim, 4),
                         "keyword_score": round(keyword_score, 4),
                         "embedding_lane": lane.name,
+                        "retrieval_path": path,
                     })
 
             for lane, results in query_lanes(
@@ -619,9 +682,10 @@ class VectorRAG:
             # happened that day, so "what did I write on 08-08-2026" lands
             # nowhere near it in vector space and the file never enters the
             # pool at all. Re-ranking cannot rescue a document that was never
-            # retrieved, so fetch it directly: the header written by
-            # _chunk_header guarantees the file name appears in the chunk text,
-            # which makes a substring filter an exact way to find it.
+            # retrieved, so fetch it directly: the provenance header written by
+            # _chunk_header / build_chunk_header guarantees the file name
+            # appears in the chunk text, which makes a substring filter an
+            # exact way to find it.
             for token in _distinctive_query_tokens(query_words):
                 try:
                     for lane, results in query_lanes(
@@ -640,13 +704,62 @@ class VectorRAG:
                     break
 
             candidates.sort(key=lambda c: c["similarity"], reverse=True)
-            top = dedupe_results(candidates, limit=k)
+
+            # Multi-source pass. The two passes above can only return notes the
+            # query itself resembles, which is exactly wrong for a vault: the
+            # constraint that makes an answer correct is routinely recorded in a
+            # *neighbouring* note ("see [[Retention Policy]]") that shares no
+            # vocabulary with the question. The wikilinks are the user's own
+            # statement that those notes belong together, so follow them.
+            self._expand_by_links(
+                candidates, query, k, where_filter, collect
+            )
+
+            candidates.sort(key=lambda c: c["similarity"], reverse=True)
+            # Breadth before depth: at most a couple of chunks from any one
+            # file, so a long note cannot spend the whole context budget and
+            # hide the second source that would have shown a conflict.
+            top = cap_per_document(dedupe_results(candidates), limit=k)
             logger.info(f"Hybrid search for '{query[:60]}': {len(top)} results")
             return top
 
         except Exception as e:
             logger.error(f"search failed: {e}")
             return self._keyword_search_fallback(query, k, owner=owner, allow_private=allow_private)
+
+    def _expand_by_links(
+        self,
+        candidates: List[Dict[str, Any]],
+        query: str,
+        k: int,
+        where_filter: Optional[Dict[str, Any]],
+        collect,
+    ) -> None:
+        """Pull in chunks from notes the top results link to, at a discount.
+
+        No-ops on an index without link metadata (nothing was written before
+        markdown-aware indexing existed), and on any backend that rejects the
+        ``$in`` filter — a missing supporting note is a worse answer, but a
+        failed primary search is no answer at all.
+        """
+        if not link_expansion_enabled() or not candidates:
+            return
+        targets = collect_link_targets(
+            candidates, LINK_SEED_RESULTS, exclude=result_note_keys(candidates)
+        )[:MAX_LINK_TARGETS]
+        if not targets:
+            return
+        try:
+            for lane, results in query_lanes(
+                self._lanes,
+                query,
+                n_results=lambda lane: min(k, lane.count()),
+                where=_with_clause(where_filter, {"note_key": {"$in": targets}}),
+                include=["documents", "metadatas", "distances"],
+            ):
+                collect(lane, results, path="link", discount=LINK_EXPANSION_DISCOUNT)
+        except Exception as e:
+            logger.debug("link expansion pass failed: %s", e)
 
     def _keyword_search_fallback(
         self,
@@ -868,11 +981,14 @@ class VectorRAG:
             if owner:
                 meta['owner'] = owner
 
-            header = _chunk_header(fname)
-            chunks = [
-                (f"{header}\n{chunk}", {**meta, 'chunk_id': i})
-                for i, chunk in enumerate(self._split_into_chunks(content))
-            ]
+            if ext in MARKDOWN_EXTENSIONS:
+                chunks = self._markdown_chunks(path, fname, content, meta)
+            else:
+                header = _chunk_header(fname)
+                chunks = [
+                    (f"{header}\n{chunk}", {**meta, 'chunk_id': i})
+                    for i, chunk in enumerate(self._split_into_chunks(content))
+                ]
             if not chunks:
                 return (0, 0)
 
@@ -894,6 +1010,58 @@ class VectorRAG:
         except Exception as e:
             logger.error(f"index {path}: {e}")
             return (0, 1)
+
+    def _markdown_chunks(
+        self, path: str, fname: str, content: str, meta: Dict[str, Any]
+    ) -> List[tuple]:
+        """Chunk a note along its headings, carrying its vault metadata.
+
+        Falls back to the plain sentence splitter if anything in the Markdown
+        layer raises: a note that cannot be parsed as Obsidian is still a note,
+        and losing it from the index entirely would be a far worse outcome than
+        indexing it without tags.
+        """
+        try:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = None
+            doc = parse_markdown(content, fname, mtime=mtime)
+            pieces = chunk_markdown(doc, self._split_into_chunks)
+            if not pieces:
+                return []
+
+            doc_meta = {
+                **meta,
+                'title': doc.title,
+                'note_key': doc.key,
+                'tags': encode_list(doc.tags),
+                'aliases': encode_list(doc.aliases),
+                'links': encode_list(doc.links),
+                'doc_date': float(doc.doc_date) if doc.doc_date else 0.0,
+                'doc_date_source': doc.doc_date_source,
+            }
+            out = []
+            for i, piece in enumerate(pieces):
+                header = build_chunk_header(
+                    fname,
+                    heading_path=piece.heading_path,
+                    tags=doc.tags,
+                    aliases=doc.aliases,
+                    doc_date=doc.doc_date,
+                )
+                out.append((
+                    f"{header}\n{piece.text}",
+                    {**doc_meta, 'chunk_id': i, 'heading_path': piece.heading_path},
+                ))
+            return out
+        except Exception as e:
+            logger.warning("markdown parse failed for %s (%s); indexing as plain text", path, e)
+            header = _chunk_header(fname)
+            return [
+                (f"{header}\n{chunk}", {**meta, 'chunk_id': i, 'note_key': _note_key(fname)})
+                for i, chunk in enumerate(self._split_into_chunks(content))
+            ]
 
     def owner_for_directory(self, directory: str) -> Optional[str]:
         """Owner recorded on chunks already indexed from ``directory``.

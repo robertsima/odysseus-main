@@ -2366,6 +2366,11 @@ body.bg-pattern-sparkles {
       font-size: 10px;
       margin-left: 6px;
     }
+    .rag-source-meta {
+      color: color-mix(in srgb, var(--fg) 45%, transparent);
+      font-size: 10px;
+      margin-left: 6px;
+    }
     .rag-snippet {
       color: color-mix(in srgb, var(--fg) 65%, transparent);
       font-size: 11px;

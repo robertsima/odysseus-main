@@ -524,6 +524,11 @@ Key settings:
 
 All upload-limit vars are validated (must be a positive integer) and optional; an invalid value fails fast at startup.
 
+Pointing Odysseus at an Obsidian-style Markdown vault needs no configuration —
+frontmatter, headings, tags and `[[wikilinks]]` are used automatically. See
+[Markdown vault retrieval](vault-retrieval.md) for how that works and the
+optional ranking knobs (recency weighting, per-file diversity, link expansion).
+
 ### Built-in MCP servers (optional setup)
 
 Odysseus auto-registers a few built-in MCP servers at startup. The npx-based ones (currently the browser server, `@playwright/mcp`) only start when their npm package is already in the local npx cache. If a package isn't cached, that server is skipped with a startup log message explaining what to do, so a fresh install does not block on a multi-minute npm download or hang if Playwright system deps are missing.

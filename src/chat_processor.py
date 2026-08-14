@@ -45,6 +45,108 @@ def _env_rag_threshold() -> float:
     return value
 
 
+# Character budget for the whole retrieved-documents block. Unchanged in size
+# from the previous hard truncation, but now spent evenly across sources rather
+# than consumed front-to-back — a single long note used to be able to eat the
+# entire budget and push every other source out of the block silently.
+RAG_CONTEXT_CHAR_BUDGET = 10000
+
+_TRUNCATION_MARKER = "\n[…truncated]"
+
+RAG_CONFLICT_POLICY = (
+    "Each document below is labelled with the date it was last updated. When "
+    "two documents disagree, treat the one with the more recent date as "
+    "current and say which you used. A document with no date is of unknown "
+    "age — do not assume it is current."
+)
+
+
+def _rag_source_entry(result: Dict[str, Any]) -> Dict[str, Any]:
+    from src.vault_markdown import format_date, strip_chunk_header
+
+    meta = result.get("metadata") or {}
+    entry = {
+        "filename": meta.get("filename", meta.get("source", "unknown")),
+        "snippet": strip_chunk_header(result.get("document") or "")[:200],
+        "similarity": round(result.get("similarity", 0), 3),
+    }
+    stamp = format_date(meta.get("doc_date"))
+    if stamp:
+        entry["updated"] = stamp
+    if meta.get("heading_path"):
+        entry["section"] = meta["heading_path"]
+    if result.get("retrieval_path") == "link":
+        # Surfaced to the UI so a linked-in note is visibly supporting context
+        # rather than something the query matched directly.
+        entry["via"] = "link"
+    return entry
+
+
+def render_retrieved_documents(
+    results: List[Dict[str, Any]], budget: int = RAG_CONTEXT_CHAR_BUDGET
+) -> str:
+    """Format retrieved chunks into one context block, within *budget*.
+
+    The embedded provenance header (``Source:``/``Section:``/``Tags:``) is
+    stripped from each chunk and re-rendered as a single label line. It has to
+    be in the indexed text for retrieval to score against it, but repeating it
+    verbatim in the prompt pays for the same facts twice.
+
+    The budget is shared equally: each source gets ``budget // n`` characters,
+    and whatever the short ones do not use is redistributed to the rest. So a
+    2,000-character note and a 40,000-character note both make it into the
+    block, instead of the second one truncating the first out of existence.
+    """
+    from src.vault_markdown import describe_chunk, strip_chunk_header
+
+    if not results:
+        return ""
+
+    bodies = [strip_chunk_header(r.get("document") or "").strip() for r in results]
+    labels = [describe_chunk(r.get("metadata") or {}) for r in results]
+
+    prefix = "Relevant documents:\n" + RAG_CONFLICT_POLICY + "\n\n"
+    separator = "\n\n---\n\n"
+    # Reserve the framing before dividing what is left. Assumes every block
+    # will need a truncation marker, which costs a few characters of headroom
+    # and guarantees the finished string fits.
+    overhead = (
+        len(prefix)
+        + len(separator) * max(len(results) - 1, 0)
+        + sum(len(f"[{label}]\n") + len(_TRUNCATION_MARKER) for label in labels)
+    )
+    remaining = max(budget - overhead, len(results) * 200)
+
+    shares = [0] * len(bodies)
+    pending = list(range(len(bodies)))
+    while pending and remaining > 0:
+        share = max(remaining // len(pending), 1)
+        still_pending = []
+        for i in pending:
+            need = len(bodies[i]) - shares[i]
+            if need <= share:
+                shares[i] += need
+                remaining -= need
+            else:
+                still_pending.append(i)
+        if len(still_pending) == len(pending):
+            # Everyone left wants more than their share; give it out and stop.
+            for i in still_pending:
+                shares[i] += share
+                remaining -= share
+            break
+        pending = still_pending
+
+    blocks = []
+    for label, body, share in zip(labels, bodies, shares):
+        text = body[:share]
+        if len(body) > share:
+            text = text.rstrip() + _TRUNCATION_MARKER
+        blocks.append(f"[{label}]\n{text}")
+
+    return prefix + separator.join(blocks)
+
+
 def _clean_search_query(query: str, max_len: int = 200) -> str:
     """Strip fenced code blocks from a search query while preserving inline
     code text.
@@ -412,19 +514,8 @@ class ChatProcessor:
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:
                         logger.info(f"RAG: {len(relevant)}/{len(results)} results above threshold {self.RAG_SIMILARITY_THRESHOLD}")
-                        rag_sources = [
-                            {
-                                "filename": r["metadata"].get("filename", r["metadata"].get("source", "unknown")),
-                                "snippet": r["document"][:200],
-                                "similarity": round(r.get("similarity", 0), 3)
-                            }
-                            for r in relevant
-                        ]
-                        rag_content = "Relevant documents:\n\n" + "\n\n---\n\n".join(
-                            f"[{s['filename']}]\n{r['document']}" for s, r in zip(rag_sources, relevant)
-                        )
-                        if len(rag_content) > 10000:
-                            rag_content = rag_content[:10000] + "\n[Truncated]"
+                        rag_sources = [_rag_source_entry(r) for r in relevant]
+                        rag_content = render_retrieved_documents(relevant)
                         preface.append(untrusted_context_message("retrieved documents", rag_content))
             except Exception as e:
                 logger.warning(f"RAG retrieval failed: {e}")

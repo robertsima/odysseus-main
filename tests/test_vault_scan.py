@@ -211,3 +211,50 @@ def test_interval_parsing(monkeypatch, raw, expected):
     else:
         monkeypatch.setenv("ODYSSEUS_VAULT_SCAN_SECONDS", raw)
     assert vault_scan._interval_seconds() == expected
+
+
+def test_owner_lookup_is_cached_per_directory_within_a_scan(tmp_path, monkeypatch):
+    """A migration scan must not re-scan the whole vector store per file.
+
+    owner_for_directory reads every chunk's metadata to find one owner. On an
+    ordinary tick a couple of files changed and the cost is invisible; after a
+    STATE_VERSION bump every tracked file is changed at once, and an uncached
+    lookup turns the one-time re-index into O(files x collection size).
+    """
+    import src.vault_scan as vault_scan
+
+    vault = tmp_path / "vault"
+    (vault / "sub").mkdir(parents=True)
+    for name in ("a.md", "b.md", "c.md"):
+        (vault / name).write_text("# " + name, encoding="utf-8")
+    (vault / "sub" / "d.md").write_text("# d", encoding="utf-8")
+
+    lookups = []
+
+    class _Rag:
+        def owner_for_directory(self, directory):
+            lookups.append(directory)
+            return "rob"
+
+        def delete_by_source(self, path):
+            return 0
+
+        def index_file(self, path, owner=None, sensitivity=None):
+            return (1, 0)
+
+    class _Manager:
+        personal_dir = str(vault)
+
+        def get_indexed_directories(self):
+            return []
+
+        def refresh_index(self):
+            pass
+
+    scanner = vault_scan.VaultScanner(_Manager(), _Rag())
+    result = scanner.scan(extensions={".md"})
+
+    assert result["reindexed"] == 4
+    # Two directories, two lookups — not one per file.
+    assert len(lookups) == 2
+    assert len(set(lookups)) == 2

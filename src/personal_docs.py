@@ -194,16 +194,21 @@ def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
         try:
             vector_results = rag_manager.search(query, k, allow_private=allow_private)
             if vector_results:
-                # Format vector results
+                from src.vault_markdown import describe_chunk, strip_chunk_header
+
                 out = []
                 for result in vector_results:
-                    # Extract filename from path
-                    source = result["metadata"].get("source", "")
-                    filename = os.path.basename(source)
-
-                    # Format the result
-                    formatted = f"[{filename} :: vector search]\n{result['document']}"
-                    out.append(formatted)
+                    meta = result.get("metadata") or {}
+                    # describe_chunk carries the note's date and section, so the
+                    # agent can tell a superseded note from a current one. Its
+                    # facts also appear in the chunk's own embedded header —
+                    # needed there for retrieval to score against them, wasted
+                    # tokens here — so that header is stripped.
+                    if not meta.get("filename") and meta.get("source"):
+                        meta = {**meta, "filename": os.path.basename(meta["source"])}
+                    label = describe_chunk(meta)
+                    body = strip_chunk_header(result.get("document") or "")
+                    out.append(f"[{label} :: vector search]\n{body}")
                 return out
         except Exception as e:
             logger.warning(f"Vector search failed, falling back to keyword search: {e}")

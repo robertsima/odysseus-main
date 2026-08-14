@@ -35,7 +35,12 @@ STATE_FILENAME = ".vault_scan_state.json"
 # split between two chunk formats indefinitely — with no signal, because every
 # file still looks up-to-date. A version mismatch discards the state, which
 # makes the next scan treat every file as changed and rewrite it once.
-STATE_VERSION = 2
+# v3: Markdown notes gained heading-aware chunking and a provenance header
+# carrying section, tags and date (src.vault_markdown). Without a bump an
+# already-indexed vault keeps its old flat chunks forever — every file still
+# looks up-to-date by (mtime, size) — so none of the new signals would exist
+# for the notes that matter most.
+STATE_VERSION = 3
 
 # Default gap between automatic scans. Short enough that a save shows up in
 # retrieval while you are still working, long enough that a large vault is not
@@ -140,11 +145,21 @@ class VaultScanner:
         changed = [p for p, sig in current.items() if list(sig) != previous.get(p)]
         removed = [p for p in previous if p not in current]
 
+        # owner_for_directory reads every chunk's metadata out of the vector
+        # store to find one owner, so it must be asked at most once per
+        # directory per scan. On an ordinary tick a handful of files changed
+        # and it barely matters; on the first scan after a STATE_VERSION bump
+        # *every* tracked file is changed, and an uncached lookup would make
+        # the migration O(files x collection size) — hours on a large vault.
+        owner_cache: Dict[str, Optional[str]] = {}
+
         reindexed = 0
         for path in changed:
             directory = os.path.dirname(path)
             sensitivity = self._sensitivity_for(path)
-            owner = self._owner_for(directory)
+            if directory not in owner_cache:
+                owner_cache[directory] = self._owner_for(directory)
+            owner = owner_cache[directory]
             try:
                 # Delete first: chunk ids are content-derived, so an edited file
                 # would otherwise leave its previous chunks behind as orphans

@@ -991,8 +991,17 @@ export function buildRagSourcesBox(sources) {
   for (var i = 0; i < sources.length; i++) {
     var s = sources[i] || {};
     var pct = (typeof s.similarity === 'number') ? (s.similarity * 100).toFixed(1) + '%' : '';
+    // Provenance the model was also given: the note's date (so a superseded
+    // answer is visible as such), its section, and whether it was reached by
+    // following a [[wikilink]] rather than matched directly. All optional —
+    // chunks indexed before vault-aware indexing carry none of them.
+    var meta = [];
+    if (s.updated) meta.push(esc(s.updated));
+    if (s.section) meta.push(esc(s.section));
+    if (s.via === 'link') meta.push('via link');
     items += '<div class="rag-source-item"><strong>' + esc(s.filename || '') + '</strong>'
       + (pct ? ' <span class="rag-similarity">' + pct + '</span>' : '')
+      + (meta.length ? ' <span class="rag-source-meta">' + meta.join(' · ') + '</span>' : '')
       + '<div class="rag-snippet">' + esc(s.snippet || '') + '</div></div>';
   }
   return '<details class="rag-sources"><summary>Sources (' + sources.length + ' documents)</summary>' + items + '</details>';
