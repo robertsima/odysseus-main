@@ -38,7 +38,9 @@ from src.agent_loop import (
     _WORKSPACE_TERMINUS_TOOLS,
     _claims_missing_tools,
     _classify_agent_request,
+    _is_explicit_continuation,
     _looks_like_local_computer_request,
+    _tools_used_in_conversation,
 )
 
 
@@ -80,7 +82,35 @@ def _apply_terminus_clamp(selected, domains):
     }
     if other:
         return set(selected) | set(_WORKSPACE_TERMINUS_TOOLS)
-    return set(_WORKSPACE_TERMINUS_TOOLS)
+    mcp_tools = {t for t in (selected or set()) if t.startswith("mcp__")}
+    return set(_WORKSPACE_TERMINUS_TOOLS) | mcp_tools
+
+
+def test_mcp_tools_survive_the_terminus_swap_with_no_domain():
+    """A user-added MCP server has no domain, so it needs its own guard.
+
+    "send a test notification" classifies as domains=[] -- the intent
+    classifier has no keywords for a server the user installed five minutes
+    ago -- but tool-RAG retrieved the ntfy tools correctly. The swap used to
+    discard them and the agent reported the tool wasn't callable.
+    """
+    text = "send a test notification"
+    domains = _domains(text)
+    assert not (domains & {
+        "email", "documents", "notes_calendar_tasks",
+        "contacts", "sessions", "cookbook", "integrations",
+    }), "precondition: no built-in domain protects this request"
+
+    selected = {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch", "list_emails"}
+    result = _apply_terminus_clamp(selected, domains)
+
+    assert {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch"} <= result, (
+        "retrieval matched the MCP tools for this query and the swap dropped them"
+    )
+    assert _WORKSPACE_TERMINUS_TOOLS <= result, "file/shell tools must still arrive"
+    assert "list_emails" not in result, (
+        "only MCP tools get the carve-out; built-in tools still swap out"
+    )
 
 
 def test_mixed_request_keeps_email_tools_after_terminus_clamp():
@@ -147,6 +177,119 @@ def test_real_web_lookups_still_get_locked_down(text):
 ])
 def test_missing_tool_excuses_are_detected(text):
     assert _claims_missing_tools(text), text
+
+
+# ── 5. a follow-up turn must not lose the tools the turn before it used ──────
+#
+# Second half of the same session: mid-audit, the user typed
+#
+#     "Continue searching there should be at least a hundred applications total"
+#
+# It isn't a bare "continue", so _EXPLICIT_CONTINUATION_RE (fully anchored)
+# missed it; it names no email word, so no domain matched; low_signal fired,
+# retrieval ran on that literal text, and every email tool the previous rounds
+# had just been calling vanished. The agent then told the user it had no Gmail
+# access. Widening the continuation regex with another phrase is a treadmill --
+# what generalizes is that a tool this conversation already called stays
+# eligible.
+
+FOLLOWUP = "Continue searching there should be at least a hundred applications total"
+
+
+def _apply_tool_retention(selected, messages, disabled=frozenset(), known=frozenset()):
+    """Mirror of the retention step in stream_agent_loop.
+
+    Same rationale as _apply_terminus_clamp above: the decision is a few lines
+    buried inside a 700-line async generator that needs a live endpoint to
+    reach, and it is worth pinning on its own.
+    """
+    prior = {t for t in _tools_used_in_conversation(messages, known) if t not in disabled}
+    return set(selected) | prior
+
+
+def _audit_conversation(latest=FOLLOWUP):
+    return [
+        {"role": "user", "content": "audit my inbox for job applications"},
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "audit_emails", "arguments": "{}"}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "list_emails", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "content": "42 matching email(s)"},
+        {"role": "user", "content": latest},
+    ]
+
+
+def test_the_followup_really_does_look_like_a_new_low_signal_turn():
+    """Pin the precondition: nothing about this text names email or continues."""
+    assert not _is_explicit_continuation(FOLLOWUP)
+    intent = _classify_agent_request(_audit_conversation(), FOLLOWUP)
+    assert "email" not in intent["domains"], (
+        "if this ever starts matching, the retention fix is still the general one"
+    )
+
+
+def test_followup_turn_keeps_the_email_tools_the_conversation_was_using():
+    messages = _audit_conversation()
+    # What retrieval on the literal text produced: no email tool in sight.
+    selected = {"ask_user", "update_plan", "manage_memory", "web_search"}
+
+    result = _apply_tool_retention(selected, messages)
+
+    assert {"audit_emails", "list_emails"} <= result, (
+        "the agent lost the tools it had been calling and claimed no Gmail access"
+    )
+    assert selected <= result, "retention must add, never replace"
+
+
+def test_fenced_tool_calls_are_retained_too():
+    """Models without function calling call tools as ```<name>``` fences."""
+    messages = [
+        {"role": "user", "content": "audit my inbox"},
+        {"role": "assistant", "content": "Scanning.\n```audit_emails\n{\"folder\": \"INBOX\"}\n```"},
+        {"role": "user", "content": FOLLOWUP},
+    ]
+
+    result = _apply_tool_retention(set(), messages, known={"audit_emails", "bash"})
+
+    assert "audit_emails" in result
+
+
+def test_ordinary_code_fences_are_not_mistaken_for_tool_calls():
+    messages = [
+        {"role": "user", "content": "explain this"},
+        {"role": "assistant", "content": "Here is the shape:\n```json\n{\"a\": 1}\n```"},
+        {"role": "user", "content": "and now?"},
+    ]
+
+    assert _tools_used_in_conversation(messages, known={"audit_emails"}) == []
+
+
+def test_retention_never_resurrects_a_disabled_tool():
+    """An intentional restriction still wins over retention."""
+    messages = _audit_conversation()
+
+    result = _apply_tool_retention(set(), messages, disabled={"list_emails"})
+
+    assert "audit_emails" in result
+    assert "list_emails" not in result
+
+
+def test_retained_set_is_capped_for_very_long_conversations():
+    """A 60-round session must not accumulate an unbounded schema list."""
+    messages = [{"role": "user", "content": "go"}]
+    for i in range(60):
+        messages.append({"role": "assistant", "content": None, "tool_calls": [
+            {"id": f"c{i}", "type": "function",
+             "function": {"name": f"tool_{i}", "arguments": "{}"}},
+        ]})
+    messages.append({"role": "user", "content": FOLLOWUP})
+
+    used = _tools_used_in_conversation(messages, known=frozenset())
+
+    assert len(used) <= 24
+    assert used[0] == "tool_59", "the most recently used tools are the ones kept"
 
 
 @pytest.mark.parametrize("text", [

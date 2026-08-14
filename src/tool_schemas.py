@@ -1206,15 +1206,19 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "audit_emails",
-            "description": "Bulk-scan a mailbox and return a compact digest (subject, sender, date, UID, short body snippet) for many messages at once. Use this instead of calling read_email repeatedly when the task is to go through/audit/report on a broad set of emails (job application confirmations, interview requests, rejections, weekly summaries, etc.) -- reading each message individually pulls a full body into the conversation per call and will blow up context after a few dozen messages, while this returns bounded snippets for all of them in one call. Optional keywords pre-filter by subject/snippet substring match. Read-only; does not replace read_email when you need one message's full content (e.g. to reply to it).",
+            "description": "Search and summarize a whole mailbox in ONE call. This is the right tool for any 'go through my inbox and report on X' task (job application confirmations, interview requests, rejections, 'what came in this month') -- it replaces paging list_emails a few messages at a time, which cannot reach older mail and burns an agent round per page. The search runs ON THE IMAP SERVER so it reaches the entire mailbox rather than only the newest few hundred messages: pass `query` (Gmail search syntax on Gmail accounts, e.g. 'subject:(application OR applying) OR from:linkedin.com'; supports from:, subject:, OR, newer_than:, has:) and/or `since`/`before` dates; on non-Gmail accounts `keywords` and the dates are translated to standard IMAP criteria. The result leads with a `summary` block -- counts by sender domain, by month, by keyword, total matched, unique senders, date range -- computed over EVERY matched message; report totals from that block and do NOT count digest rows, which are a capped sample. Pass summarize=true for a broad sweep where you only need the numbers plus a few examples. Read-only; does not replace read_email when you need one message's full content (e.g. to reply to it).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "folder": {"type": "string", "description": "IMAP folder to scan (default: INBOX)"},
-                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "Optional: only include messages whose subject or body snippet contains at least one of these terms (case-insensitive)"},
-                    "limit": {"type": "integer", "description": "Maximum digest entries to return (default: 30)"},
-                    "max_scan": {"type": "integer", "description": "How many newest messages to inspect before filtering (default: 80)"},
-                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per message (default: 300)"},
+                    "query": {"type": "string", "description": "Server-side search. On Gmail accounts this is raw Gmail query syntax (from:, subject:, OR, newer_than:, has:) run via X-GM-RAW over the whole mailbox. Ignored on non-Gmail accounts, which use keywords/since/before instead."},
+                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "Terms to match in subject or body. Used to build the server-side search where possible, applied as a client-side filter otherwise. Max 12."},
+                    "since": {"type": "string", "description": "Only messages on/after this date, ISO YYYY-MM-DD. Runs server-side."},
+                    "before": {"type": "string", "description": "Only messages before this date, ISO YYYY-MM-DD. Runs server-side."},
+                    "summarize": {"type": "boolean", "description": "Return the aggregate summary plus a small sample digest instead of a full digest. Use for broad report/counting sweeps."},
+                    "limit": {"type": "integer", "description": "Maximum digest entries to return (default: 30, max 100)"},
+                    "max_scan": {"type": "integer", "description": "How many matched messages to inspect (default: 80). Up to 2000 when query/keywords/dates narrowed the set server-side, 250 for an unfiltered scan."},
+                    "snippet_chars": {"type": "integer", "description": "Max characters of body snippet per returned message (default: 300); 0 skips body fetching entirely for a counts-only pass"},
                     "account": {"type": "string", "description": "Optional account name/email/id from list_email_accounts"},
                 },
             }

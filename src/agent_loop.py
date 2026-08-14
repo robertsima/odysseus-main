@@ -755,9 +755,15 @@ List recent emails from a folder, newest first, including read messages by defau
     "read_email": "- ```read_email``` — Read ONE specific email by UID (full body). Args (JSON): {\"uid\": \"...\", \"folder\": \"INBOX\", \"account\": \"gmail\"}. Include `account` when the UID came from a named/non-default mailbox. For going through/auditing/categorizing MANY emails (job confirmations, interview requests, rejections, weekly summaries, etc.), use `audit_emails` instead of calling read_email in a loop — each read_email pulls a full body into the conversation and repeated calls will blow up context after a few dozen messages.",
     "audit_emails": """\
 ```audit_emails
-{"folder": "INBOX", "keywords": ["interview", "application", "unfortunately"], "limit": 30, "max_scan": 80}
+{"query": "subject:(application OR applying OR interview) OR from:linkedin.com", "since": "2026-01-01", "max_scan": 1000, "summarize": true}
 ```
-Bulk-scan a mailbox and get back a compact digest (subject, sender, date, UID, short snippet) for many messages in ONE call, instead of calling read_email per message. Use this for any "go through my emails and find/categorize X" style request across more than a handful of messages — job application confirmations, interview requests, rejections, catching up on a week of mail, etc. `keywords` (optional) pre-filters by subject/snippet substring match; omit it to just get a digest of the most recent messages and classify from the snippets yourself. Read-only. Once you've found the specific message(s) you need full content for (e.g. to reply), use read_email on that UID.""",
+Search and summarize a whole mailbox in ONE call. Use this — not repeated `list_emails` pages, and not `read_email` per message — for any "go through my inbox and find/categorize/report on X" request: job application confirmations, interview requests, rejections, "what came in this month".
+
+The search runs ON THE IMAP SERVER, so it reaches the entire mailbox instead of only the newest page. `query` is Gmail search syntax on Gmail accounts (`from:`, `subject:`, `OR`, `newer_than:`, `has:`); `since`/`before` are ISO dates; on non-Gmail accounts `keywords` + dates become standard IMAP criteria. Raise `max_scan` (up to 2000) once a search has narrowed the set.
+
+The result LEADS with a `summary` block: counts by sender domain, by month, by keyword, total matched, unique senders, date range — computed over every matched message. Report totals from that block. Do NOT count the digest rows; they are a capped sample. `summarize: true` shrinks the digest to a few examples for broad counting sweeps.
+
+Read-only. Once you've found the specific message you need full content for (e.g. to reply), use read_email on that UID.""",
     "reply_to_email": """\
 ```reply_to_email
 {"uid": "1234", "body": "Sounds good — talk Friday.", "account": "gmail"}
@@ -1076,6 +1082,37 @@ def _user_turn_count(messages: List[Dict]) -> int:
         if msg.get("role") == "user":
             count += 1
     return count
+
+
+# A fenced tool call is an assistant message whose fence tag IS the tool name
+# (```audit_emails\n{...}\n```). Matched against the known-tool list so an
+# ordinary ```json / ```text fence isn't mistaken for a call.
+_FENCED_TOOL_TAG_RE = re.compile(r"^[ \t]*`{3,}[ \t]*([A-Za-z][A-Za-z0-9_]{1,60})[ \t]*$", re.MULTILINE)
+
+
+def _tools_used_in_conversation(messages: List[Dict], known: set, cap: int = 24) -> list:
+    """Tool names this conversation has already called, most recent first.
+
+    Covers both call styles: native `tool_calls` on the assistant message, and
+    the fenced form this loop also accepts for models without function calling.
+    Capped so a very long session doesn't accumulate an unbounded schema list.
+    """
+    seen: list = []
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        for tc in (msg.get("tool_calls") or []):
+            name = str(((tc or {}).get("function") or {}).get("name") or "").strip()
+            if name and name not in seen:
+                seen.append(name)
+        content = msg.get("content")
+        if isinstance(content, str) and "```" in content:
+            for tag in _FENCED_TOOL_TAG_RE.findall(content):
+                if tag in known and tag not in seen:
+                    seen.append(tag)
+        if len(seen) >= cap:
+            break
+    return seen[:cap]
 
 
 def _insert_before_latest_user(messages: List[Dict], context_msg: Dict) -> List[Dict]:
@@ -3669,8 +3706,57 @@ async def stream_agent_loop(
                     sorted(_other_domains),
                 )
             else:
-                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
-                logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
+                # `_other_domains` can only ever name a BUILT-IN domain, so a
+                # user-added MCP server can never protect itself through it:
+                # the intent classifier has no keywords for tools it has never
+                # heard of. "send a test notification" resolved to domains=[],
+                # retrieval correctly surfaced the ntfy MCP tools, and this
+                # branch then replaced the selection wholesale and dropped
+                # them -- the agent reported the notification tool wasn't
+                # callable, which was literally true, on a healthy server.
+                # Tools that retrieval matched for THIS query are evidence of
+                # intent in their own right, so carry them across the swap.
+                _mcp_tools = {
+                    tool for tool in (_relevant_tools or set())
+                    if tool.startswith("mcp__")
+                }
+                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS) | _mcp_tools
+                logger.info(
+                    "[tool-rag] Workspace file/terminal request; using Odysseus "
+                    "Terminus toolset while preserving MCP tools=%s",
+                    sorted(_mcp_tools),
+                )
+
+    # A follow-up turn must not lose a tool this conversation has already been
+    # calling just because its literal text doesn't name that domain.
+    # "Continue searching, there should be at least a hundred applications
+    # total" contains no email word, so no domain matched, the turn read as
+    # low-signal, retrieval ran on that literal text, and every email tool the
+    # previous rounds had just used disappeared -- the agent then told the user
+    # it had no Gmail access mid-audit. Widening _EXPLICIT_CONTINUATION_RE with
+    # another special-case phrase is a treadmill; what actually generalizes is
+    # that a tool already used in this conversation stays eligible.
+    #
+    # This runs BEFORE the deliberate prunes below (active email draft, doc
+    # finetune clamps, doc-turn file-tool removal) and before disabled_tools is
+    # applied, so an intentional restriction still wins over retention.
+    if not guide_only and _relevant_tools is not None and _existing_conversation:
+        try:
+            from src.tool_policy import known_tool_names
+            _known_names = known_tool_names()
+        except Exception:
+            _known_names = set()
+        _prior_tools = {
+            t for t in _tools_used_in_conversation(messages, _known_names)
+            if t not in disabled_tools
+        }
+        _retained = sorted(_prior_tools - _relevant_tools)
+        if _retained:
+            _relevant_tools |= _prior_tools
+            logger.info(
+                "[agent-intent] retaining tools already used in this conversation=%s",
+                _retained,
+            )
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
