@@ -49,6 +49,9 @@ DEFAULT_TEMPORAL_WEIGHT = 0.05
 # relevant older one.
 DEFAULT_TEMPORAL_INTENT_WEIGHT = 0.30
 DEFAULT_MAX_CHUNKS_PER_DOC = 2
+# How much more of one file a query may take when it named that file or its
+# tag. Kept as a multiplier of the base so a deployment tunes one number.
+DEFAULT_FOCUSED_CAP_MULTIPLIER = 2
 
 # How much to trust each date provenance. A filesystem mtime moves on re-sync,
 # restore-from-backup and whitespace fixes, none of which mean the content
@@ -118,9 +121,35 @@ def temporal_weight(intent: bool = False) -> float:
     return _env_float("ODYSSEUS_RAG_TEMPORAL_WEIGHT", DEFAULT_TEMPORAL_WEIGHT, 0.0, 0.9)
 
 
-def max_chunks_per_document() -> int:
-    """0 disables the cap."""
-    return _env_int("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", DEFAULT_MAX_CHUNKS_PER_DOC, 0, 50)
+def max_chunks_per_document(focused: bool = False) -> int:
+    """Per-file chunk cap. 0 disables it.
+
+    ``focused`` means the query named a tag or a document outright, and it
+    doubles the allowance. A flat cap is the wrong shape for both cases at
+    once: on an open question ("what did I decide about storage") breadth is
+    what surfaces the reference note sitting behind a pile of journal entries,
+    but on "#homelab" the user has already told us which notes they want and
+    trading their best passages for weaker ones from elsewhere is a downgrade.
+    Measured on a real vault, a cap of 2 dropped three 0.59-scoring chunks of
+    the named note for three scoring 0.37-0.40; doubling it cost one swap
+    instead of three, while leaving open questions on the tighter cap.
+    """
+    base = _env_int("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", DEFAULT_MAX_CHUNKS_PER_DOC, 0, 50)
+    if base <= 0:
+        return 0
+    return base * focused_cap_multiplier() if focused else base
+
+
+def focused_cap_multiplier() -> int:
+    """How far the per-file cap relaxes for a query that named its target.
+
+    ``1`` switches the relaxation off while leaving the cap itself in place,
+    which is the only way to measure this signal on its own — setting the cap
+    to ``0`` would remove both at once.
+    """
+    return _env_int(
+        "ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER", DEFAULT_FOCUSED_CAP_MULTIPLIER, 1, 10
+    )
 
 
 def tag_credit_scale() -> float:
@@ -323,6 +352,7 @@ def cap_per_document(
     results: Sequence[Dict[str, Any]],
     limit: int,
     max_per_doc: Optional[int] = None,
+    focused: bool = False,
 ) -> List[Dict[str, Any]]:
     """Take the top *limit* results, at most *max_per_doc* from any one file.
 
@@ -332,7 +362,7 @@ def cap_per_document(
     nothing else to say, and buys source diversity whenever there is.
     """
     if max_per_doc is None:
-        max_per_doc = max_chunks_per_document()
+        max_per_doc = max_chunks_per_document(focused)
     ordered = list(results)
     if max_per_doc <= 0 or limit <= 0:
         return ordered[:limit] if limit > 0 else []

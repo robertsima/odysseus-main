@@ -81,6 +81,14 @@ else to return. Five chunks of one note is five copies of one source; it
 crowds out the second opinion that would have revealed a conflict, and it is
 the largest avoidable cost in a retrieval block.
 
+The cap doubles when the query named what it wants — a `#tag`, or a file by
+name. A flat cap is the wrong shape for both cases at once. On an open question
+("what did I decide about storage") breadth is what surfaces the reference note
+sitting behind a pile of journal entries. On `#homelab` the user has already
+said which notes they mean, and trading their best passages for weaker ones
+from notes nobody asked about is a downgrade. It stays a cap either way, so the
+conflicting second source still gets in.
+
 ## What the model receives
 
 Each snippet is labelled with its file, date, section and tags, and the block
@@ -116,7 +124,8 @@ All optional. See `.env.example` for the same list with defaults inline.
 | `ODYSSEUS_RAG_TEMPORAL_WEIGHT` | `0.05` | Recency weight on an ordinary query; `0` disables |
 | `ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT` | `0.30` | Recency weight when the query is about the present |
 | `ODYSSEUS_RAG_TAG_CREDIT` | `1.0` | Scales tag/alias credit; `0` disables |
-| `ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC` | `2` | Per-file cap; `0` disables |
+| `ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC` | `2` | Per-file cap, doubled when the query names a tag or file; `0` disables |
+| `ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER` | `2` | How far that cap relaxes for such a query; `1` disables the relaxation only |
 | `ODYSSEUS_RAG_LINK_EXPANSION` | `1` | Follow `[[wikilinks]]`; `0` disables |
 | `ODYSSEUS_VAULT_DATE_ORDER` | `day` | Reading of an ambiguous filename date (`03-04-2026`) |
 | `ODYSSEUS_VAULT_SCAN_SECONDS` | `30` | Re-scan interval; `0` disables |
