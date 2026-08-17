@@ -9,8 +9,32 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+import contextvars
 import os
 import time
+
+
+# Set for work the user explicitly asked for right now ("Run now" on a task).
+# Such work is foreground intent, so every quiet-window wait below has to let it
+# through: the browser tab the user clicked in keeps sending activity
+# heartbeats, so waiting for idle first would never finish.
+#
+# A ContextVar rather than a parameter because the waits live deep inside
+# actions and the LLM layer; asyncio copies the context into child tasks, so
+# marking the run once covers everything it spawns without threading a flag
+# through every call site.
+_MANUAL_FOREGROUND_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "odysseus_manual_foreground_run", default=False
+)
+
+
+def mark_manual_foreground_run() -> None:
+    """Mark the current asyncio task (and its children) as user-triggered."""
+    _MANUAL_FOREGROUND_RUN.set(True)
+
+
+def is_manual_foreground_run() -> bool:
+    return _MANUAL_FOREGROUND_RUN.get()
 
 
 _ACTIVE_REQUESTS = 0
@@ -171,8 +195,10 @@ async def wait_for_interactive_quiet(label: str = "") -> bool:
 
     Returns True if the caller had to wait at all. The label is intentionally
     only for future logging/debugging so callers can keep their code simple.
+
+    A user-triggered run never waits — see mark_manual_foreground_run.
     """
-    if not _enabled():
+    if not _enabled() or is_manual_foreground_run():
         return False
 
     quiet = _quiet_seconds()

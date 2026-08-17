@@ -59,11 +59,17 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
     else:
         # Background work should not jump in while the browser/chat is active
         # or while a foreground request is waiting to acquire the local model.
+        # A user-triggered "Run now" is exempt from the browser-activity half:
+        # the user is by definition active in the tab they clicked in, so this
+        # loop would never exit. It still queues behind the lock below, so a
+        # real foreground chat keeps its priority.
         try:
-            from src.interactive_gate import has_foreground_activity
+            from src.interactive_gate import has_foreground_activity, is_manual_foreground_run
         except Exception:
             has_foreground_activity = lambda: False  # type: ignore
-        while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or has_foreground_activity():
+            is_manual_foreground_run = lambda: False  # type: ignore
+        manual = is_manual_foreground_run()
+        while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or (not manual and has_foreground_activity()):
             await asyncio.sleep(0.25)
 
     acquired = False

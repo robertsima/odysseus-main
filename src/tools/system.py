@@ -472,7 +472,9 @@ async def do_manage_tasks(content: str, owner: Optional[str] = None) -> Dict:
             from src.event_bus import get_task_scheduler
             scheduler = get_task_scheduler()
             if scheduler:
-                started = await scheduler.run_task_now(task_id)
+                # The user asked for this in chat, so it must not wait for the
+                # app to go idle — the chat itself keeps it busy.
+                started = await scheduler.run_task_now(task_id, manual=True)
                 if started:
                     return {"response": f"Task '{task.name}' triggered", "exit_code": 0}
                 else:

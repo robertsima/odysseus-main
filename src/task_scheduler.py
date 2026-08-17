@@ -330,6 +330,38 @@ def _normalize_chat_endpoint(url: str) -> str:
         return url
 
 
+def _parse_stream_error(chunk: str) -> str:
+    """Pull a human-readable message out of an SSE ``event: error`` frame.
+
+    Frames look like ``event: error\\ndata: {"status": 401, "text": "..."}``.
+    Returns "" when the frame carries nothing useful, so the caller can fall
+    back to a generic message.
+    """
+    for line in (chunk or "").splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[5:].strip()
+        try:
+            data = json.loads(payload)
+        except Exception:
+            return payload[:500]
+        if not isinstance(data, dict):
+            return str(data)[:500]
+        text = data.get("text") or data.get("error") or data.get("detail") or data.get("message") or ""
+        if isinstance(text, dict):
+            text = text.get("message") or json.dumps(text)
+        status = data.get("status")
+        text = str(text).strip()
+        if text and status:
+            return f"{text} (HTTP {status})"[:500]
+        if text:
+            return text[:500]
+        if status:
+            return f"Model stream failed with HTTP {status}"
+    return ""
+
+
 class TaskScheduler:
     def __init__(self, session_manager):
         self._session_manager = session_manager
@@ -350,6 +382,21 @@ class TaskScheduler:
         self._run_semaphore = asyncio.Semaphore(1)
         self._concurrency_cap = 1
         self._task_handles = {}
+        # Task IDs the user explicitly triggered with "Run now" (refcounted so a
+        # parallel force-run can overlap a queued normal run of the same task).
+        # Manual runs are foreground work by definition: they skip the idle gate
+        # and survive the foreground-activity sweeps that cancel background jobs.
+        self._manual_runs = {}
+
+    def _manual_run_begin(self, task_id: str):
+        self._manual_runs[task_id] = self._manual_runs.get(task_id, 0) + 1
+
+    def _manual_run_end(self, task_id: str):
+        left = self._manual_runs.get(task_id, 0) - 1
+        if left > 0:
+            self._manual_runs[task_id] = left
+        else:
+            self._manual_runs.pop(task_id, None)
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -745,7 +792,14 @@ class TaskScheduler:
         finally:
             db.close()
 
-    async def _execute_task(self, task_id: str, *, bypass_model_slot: bool = False, release_executing: bool = True):
+    async def _execute_task(
+        self,
+        task_id: str,
+        *,
+        bypass_model_slot: bool = False,
+        release_executing: bool = True,
+        manual: bool = False,
+    ):
         # Create the run record with status="queued" BEFORE waiting on the
         # semaphore so the UI can show that a manually-triggered task is in
         # line behind another. Once we acquire the slot, flip to "running"
@@ -771,28 +825,50 @@ class TaskScheduler:
         finally:
             _q_db.close()
 
+        # "Run now" is the user asking for this task *now*. Waiting for the app
+        # to go idle — while the user sits in the very tab whose heartbeat keeps
+        # it non-idle — is a deadlock, so manual runs skip the foreground gate
+        # exactly like force-runs do. The context mark carries the same
+        # exemption into the quiet-window waits inside actions and the LLM layer.
+        gate_foreground = not (bypass_model_slot or manual)
+        if manual:
+            from src.interactive_gate import mark_manual_foreground_run
+            mark_manual_foreground_run()
         try:
             if bypass_model_slot or not self._task_needs_model_slot(task_id):
                 await self._execute_task_locked(
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=not bypass_model_slot,
+                    gate_foreground=gate_foreground,
+                    manual=manual,
                 )
                 return
 
+            # Wait for the app to go quiet BEFORE taking the one run slot.
+            # Waiting inside it parks a background task on the gate while it
+            # holds the slot, and every other task — a manual "Run now"
+            # included — then queues behind a run that cannot start until the
+            # user walks away.
+            if gate_foreground:
+                await self._wait_for_idle_before_slot(task_id, run_id)
             async with self._run_semaphore:
                 await self._execute_task_locked(
                     task_id,
                     run_id,
                     release_executing=release_executing,
-                    gate_foreground=True,
+                    gate_foreground=gate_foreground,
+                    idle_wait_done=gate_foreground,
+                    manual=manual,
                 )
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
             self._mark_run_aborted(task_id, run_id)
-            self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
+            # Only automatic dispatch gets deferred: stopping a manual run means
+            # the user stopped that one run, not the task's timetable.
+            if not manual:
+                self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
             raise
         finally:
             handle = self._task_handles.get(task_id)
@@ -801,6 +877,23 @@ class TaskScheduler:
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
+
+    async def _wait_for_idle_before_slot(self, task_id: str, run_id: str):
+        """Hold a background run outside the model slot until the UI is quiet."""
+        from core.database import SessionLocal, TaskRun
+
+        db = SessionLocal()
+        try:
+            waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+            if waiting and waiting.status == "queued":
+                waiting.result = "Queued — waiting for Odysseus to be idle…"
+                db.commit()
+        except Exception:
+            logger.debug("Failed to mark run %s as waiting for idle", run_id, exc_info=True)
+        finally:
+            db.close()
+        from src.interactive_gate import wait_for_interactive_quiet
+        await wait_for_interactive_quiet(f"scheduled task {task_id}")
 
     def _defer_immediately_due_task(self, task_id: str, *, delay: timedelta):
         """A queued task can be cancelled before _execute_task_locked gets a DB
@@ -831,6 +924,8 @@ class TaskScheduler:
         *,
         release_executing: bool = True,
         gate_foreground: bool = True,
+        idle_wait_done: bool = False,
+        manual: bool = False,
     ):
         from core.database import SessionLocal, ScheduledTask, TaskRun
 
@@ -870,7 +965,9 @@ class TaskScheduler:
                 db.commit()
                 return
 
-            if gate_foreground:
+            # `idle_wait_done` means the caller already waited for quiet outside
+            # the model slot, so don't take the slot hostage doing it again.
+            if gate_foreground and not idle_wait_done:
                 waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if waiting and waiting.status == "queued":
                     waiting.result = "Queued — waiting for Odysseus to be idle…"
@@ -931,7 +1028,7 @@ class TaskScheduler:
                 foreground_monitor = asyncio.create_task(_cancel_if_foreground_active())
             try:
                 if task_type == "action":
-                    result, success = await self._execute_action(task, run_id=run_id)
+                    result, success = await self._execute_action(task, run_id=run_id, manual=manual)
                     run.status = "success" if success else "error"
                     run.result = result
                     if not success:
@@ -951,6 +1048,18 @@ class TaskScheduler:
                 if run.status == "success":
                     await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
             except TaskDeferred as defer:
+                if manual:
+                    # The user asked for this run explicitly — don't silently
+                    # drop the Activity row and slide the schedule. Show why it
+                    # didn't do the work and leave next_run alone.
+                    logger.info("Manual run of '%s' deferred by the action: %s", task.name, defer)
+                    run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                    if run_obj:
+                        run_obj.status = "skipped"
+                        run_obj.result = str(defer)
+                        run_obj.finished_at = _utcnow()
+                    db.commit()
+                    return
                 count = self._task_defer_counts.get(task_id, 0) + 1
                 self._task_defer_counts[task_id] = count
                 delay_seconds = int(getattr(defer, "delay_seconds", 20 * 60) or (20 * 60))
@@ -1250,7 +1359,7 @@ class TaskScheduler:
             category=(task.name or "Task"),
         )
 
-    async def _execute_action(self, task, run_id: str | None = None) -> tuple:
+    async def _execute_action(self, task, run_id: str | None = None, *, manual: bool = False) -> tuple:
         """Execute a built-in action (no LLM needed)."""
         from src.builtin_actions import BUILTIN_ACTIONS
 
@@ -1264,7 +1373,14 @@ class TaskScheduler:
             def _progress(message: str):
                 self._set_run_progress(run_id, message)
 
-            kwargs = {"owner": task.owner, "task_name": task.name, "progress_cb": _progress}
+            # `manual` lets an action skip its own "wait for a quiet window"
+            # logic when the user pressed Run now.
+            kwargs = {
+                "owner": task.owner,
+                "task_name": task.name,
+                "progress_cb": _progress,
+                "manual": manual,
+            }
             if task.prompt:
                 kwargs["prompt"] = task.prompt
             if task.action in ("run_script", "run_local", "ssh_command") and task.prompt:
@@ -1684,6 +1800,11 @@ class TaskScheduler:
         except Exception:
             pass
 
+        if not (result or "").strip():
+            # Reaching here means the agent loop AND the simple fallback both
+            # came back empty. That is a failed run, not a successful one with
+            # nothing in it — see _run_agent_loop for the same guard upstream.
+            raise RuntimeError(f"Model {model} returned no output for this task")
         return result
 
     async def _deliver_task_result(self, task, result: str, db, model: str = None):
@@ -1906,6 +2027,7 @@ class TaskScheduler:
             pass
         full_text = ""
         tool_results = []
+        stream_error = ""
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -1938,6 +2060,13 @@ class TaskScheduler:
             fallbacks=_task_fallbacks,
             workload="background",
         ):
+            # stream_agent_loop forwards upstream failures as SSE error frames
+            # ("event: error\ndata: {...}"). They do NOT start with "data: ", so
+            # the branch below never saw them and a hard 401/5xx from the model
+            # provider ended up as an empty, *successful* run. Capture them.
+            if event_str.startswith("event: error"):
+                stream_error = _parse_stream_error(event_str) or stream_error or "model stream error"
+                continue
             if event_str.startswith("data: ") and not event_str.startswith("data: [DONE]"):
                 try:
                     data = json.loads(event_str[6:])
@@ -1954,6 +2083,13 @@ class TaskScheduler:
                             tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
                 except (json.JSONDecodeError, KeyError):
                     pass
+
+        # An upstream error with nothing to show for the run is a failure, not a
+        # success with empty text. Surfacing it here puts the provider's own
+        # message ("credentials expired or were rejected") on the Activity row
+        # instead of silently delivering "(no output)".
+        if stream_error and not full_text.strip() and not tool_results:
+            raise RuntimeError(stream_error)
 
         # Grace summarization — if the model exhausted rounds on tool calls
         # without producing a final text response, do one last LLM call
@@ -1984,7 +2120,14 @@ class TaskScheduler:
                 if tool_results:
                     full_text = "\n".join(tool_results[-5:])
 
-        return full_text or "(no output)"
+        if not full_text.strip():
+            # Nothing was produced and nothing was done. Reporting that as a
+            # completed run is what made a broken task look like a working one.
+            raise RuntimeError(
+                stream_error
+                or f"Model {model} returned no output for this task"
+            )
+        return full_text
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""
@@ -2236,16 +2379,41 @@ class TaskScheduler:
         except Exception as e:
             logger.error(f"Task {task.id} MCP delivery failed: {e}")
 
-    async def run_task_now(self, task_id: str, *, force: bool = False):
-        """Manually trigger a task execution."""
+    async def run_task_now(self, task_id: str, *, force: bool = False, manual: bool = False):
+        """Trigger a task execution off-schedule.
+
+        `manual=True` means a person asked for this run right now ("Run now" in
+        the UI, the assistant's manage_tasks tool). Those runs skip the
+        wait-for-idle gate and survive foreground-activity cancellation —
+        without that they wait on the user going idle, which never happens while
+        the user is in the tab they clicked in.
+
+        Automation that merely triggers off-schedule (the event bus, webhooks)
+        leaves it False and stays background work that yields to the user.
+        """
+        async def _run(**kwargs):
+            try:
+                await self._execute_task(task_id, manual=manual, **kwargs)
+            finally:
+                if manual:
+                    self._manual_run_end(task_id)
+
         if force:
-            asyncio.create_task(self._execute_task(task_id, bypass_model_slot=True, release_executing=False))
+            if manual:
+                self._manual_run_begin(task_id)
+            asyncio.create_task(_run(bypass_model_slot=True, release_executing=False))
             return True
         async with self._executing_lock:
             if task_id in self._executing:
                 return False
             self._executing.add(task_id)
-        asyncio.create_task(self._execute_task(task_id))
+            # Marked under the same lock that publishes the task into
+            # _executing, and before the coroutine actually starts, so a
+            # foreground sweep — including the one fired by the very request
+            # that got us here — can never see this as a background job.
+            if manual:
+                self._manual_run_begin(task_id)
+        asyncio.create_task(_run())
         return True
 
     async def stop_task(self, task_id: str) -> bool:
@@ -2268,11 +2436,13 @@ class TaskScheduler:
 
         This is intentionally blunt for scheduled/background work: when the
         user opens or uses Odysseus, foreground interaction wins immediately.
-        Manual force-runs can be restarted by the user; automatic jobs will be
-        deferred by their cancellation path instead of stealing the app.
+        Runs the user asked for with "Run now" are exempt — they *are* the
+        foreground intent, and cancelling them was why Run now appeared to do
+        nothing. Automatic jobs are deferred by their cancellation path
+        instead of stealing the app.
         """
         async with self._executing_lock:
-            task_ids = list(self._executing)
+            task_ids = [t for t in self._executing if t not in self._manual_runs]
         stopped = 0
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)

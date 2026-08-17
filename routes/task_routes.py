@@ -867,7 +867,8 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             _require_admin_for_task_action(user, task.task_type, task.action)
         finally:
             db.close()
-        started = await task_scheduler.run_task_now(task_id, force=force)
+        # A person is pressing Run now — see TaskScheduler.run_task_now.
+        started = await task_scheduler.run_task_now(task_id, force=force, manual=True)
         if not started:
             raise HTTPException(409, "Task is already running")
         return {"ok": True, "message": "Task triggered" + (" in parallel" if force else "")}

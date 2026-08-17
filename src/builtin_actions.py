@@ -1665,7 +1665,10 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             recent = seconds_since_model_activity(url, model)
         except Exception:
             recent = None
-        if recent is not None and recent < (20 * 60):
+        # The quiet-window wait exists so the scheduled audit doesn't fight the
+        # user for the local model. When the user pressed Run now, they've made
+        # that call themselves — run it.
+        if not kwargs.get("manual") and recent is not None and recent < (20 * 60):
             raise TaskDeferred(
                 f"audit model {model} was used {int(recent)}s ago; waiting for quiet window",
                 delay_seconds=20 * 60,

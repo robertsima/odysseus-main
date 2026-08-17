@@ -15,6 +15,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 
 def _make_task(prompt="run the digest"):
     return SimpleNamespace(
@@ -56,7 +58,11 @@ async def test_scheduler_agent_loop_path(monkeypatch):
     monkeypatch.setattr("src.task_endpoint.resolve_task_candidates", lambda **kw: [])
 
     from src.task_scheduler import TaskScheduler
-    await TaskScheduler(session_manager=None)._execute_llm_task(_make_task(), db=None)
+    # The stub yields nothing at all, which _execute_llm_task now reports as a
+    # failed run rather than a success with "(no output)" — this test only cares
+    # about the messages the agent loop was handed on the way in.
+    with pytest.raises(RuntimeError):
+        await TaskScheduler(session_manager=None)._execute_llm_task(_make_task(), db=None)
 
     msgs = captured.get("messages", [])
     assert len(msgs) == 3, f"expected 3 messages, got {len(msgs)}"
