@@ -265,6 +265,45 @@ def test_one_long_note_cannot_fill_the_whole_result_set(monkeypatch):
     assert "Other.md" in sources and "Third.md" in sources
 
 
+def test_naming_a_tag_relaxes_the_diversity_cap(monkeypatch):
+    # Same shape as the test above, but the query points at the notes by tag.
+    # Breadth is no longer a service to the user here: they have already said
+    # which notes they mean, so their best passages should not be traded for
+    # weaker ones from notes nobody asked about.
+    monkeypatch.setenv("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", "2")
+    rows = [
+        _note(f"long{i}", distance=0.20 + i * 0.01, filename="Long.md",
+              heading=f"S{i}", tags=["homelab"])
+        for i in range(4)
+    ]
+    rows += [
+        _note("other1", distance=0.40, filename="Other.md"),
+        _note("other2", distance=0.41, filename="Third.md"),
+    ]
+    rag, _ = _install(monkeypatch, rows)
+
+    results = rag.search("#homelab deploy process details", k=4)
+
+    assert [r["metadata"]["filename"] for r in results].count("Long.md") == 4
+
+
+def test_naming_a_file_relaxes_the_diversity_cap(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", "2")
+    rows = [
+        _note(f"long{i}", distance=0.20 + i * 0.01, filename="Runbook.md", heading=f"S{i}")
+        for i in range(4)
+    ]
+    rows += [
+        _note("other1", distance=0.40, filename="Other.md"),
+        _note("other2", distance=0.41, filename="Third.md"),
+    ]
+    rag, _ = _install(monkeypatch, rows)
+
+    results = rag.search("what does runbook say about deploys", k=4)
+
+    assert [r["metadata"]["filename"] for r in results].count("Runbook.md") == 4
+
+
 # -- indexing --------------------------------------------------------------
 
 

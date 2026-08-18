@@ -40,6 +40,7 @@ from src.rag_ranking import (
     collect_link_targets,
     link_expansion_enabled,
     query_has_temporal_intent,
+    query_tag_tokens,
     result_note_keys,
     tag_alias_score,
     temporal_factor,
@@ -719,7 +720,18 @@ class VectorRAG:
             # Breadth before depth: at most a couple of chunks from any one
             # file, so a long note cannot spend the whole context budget and
             # hide the second source that would have shown a conflict.
-            top = cap_per_document(dedupe_results(candidates), limit=k)
+            #
+            # Unless the query named what it wants. "#homelab" or a filename is
+            # the user pointing at specific notes, and forcing breadth there
+            # trades their best passages for weaker ones from notes nobody
+            # asked about. Deciding it here rather than inside collect() keeps
+            # the per-candidate loop untouched; re-checking the name match over
+            # the final shortlist is a few dozen string comparisons.
+            focused = bool(query_tag_tokens(query)) or any(
+                _query_names_document(query_words, c.get("metadata"))
+                for c in candidates
+            )
+            top = cap_per_document(dedupe_results(candidates), limit=k, focused=focused)
             logger.info(f"Hybrid search for '{query[:60]}': {len(top)} results")
             return top
 

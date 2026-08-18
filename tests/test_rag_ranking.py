@@ -310,3 +310,63 @@ def test_chunks_without_a_source_are_never_capped_out():
 
 def test_an_empty_result_set_is_handled():
     assert cap_per_document([], limit=5) == []
+
+
+# -- diversity cap, relaxed when the query named what it wants --------------
+
+
+def test_naming_a_source_buys_more_of_it():
+    # "#homelab" is the user saying which notes they want. Holding the cap at 2
+    # would spend half the slots on notes they did not ask for.
+    rows = [_chunk("/v/homelab.md", 0.9 - i * 0.01) for i in range(5)]
+    rows += [_chunk(f"/v/other{i}.md", 0.4) for i in range(3)]
+
+    broad = cap_per_document(rows, limit=5, max_per_doc=2)
+    focused = cap_per_document(rows, limit=5, focused=True)
+
+    assert [r["metadata"]["source"] for r in broad].count("/v/homelab.md") == 2
+    assert [r["metadata"]["source"] for r in focused].count("/v/homelab.md") == 4
+
+
+def test_a_focused_query_still_leaves_room_for_a_second_source():
+    # Doubling the cap is not disabling it: the note that would have shown a
+    # conflict still gets in.
+    rows = [_chunk("/v/homelab.md", 0.9 - i * 0.01) for i in range(6)]
+    rows.append(_chunk("/v/other.md", 0.4))
+
+    kept = cap_per_document(rows, limit=5, focused=True)
+
+    assert "/v/other.md" in [r["metadata"]["source"] for r in kept]
+
+
+def test_the_focused_cap_is_a_multiple_of_the_configured_one(monkeypatch):
+    monkeypatch.setenv("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", "3")
+    assert max_chunks_per_document() == 3
+    assert max_chunks_per_document(focused=True) == 6
+
+
+def test_the_relaxation_can_be_switched_off_without_losing_the_cap(monkeypatch):
+    # The off-switch the A/B harness needs: cap still 2, relaxation gone.
+    monkeypatch.setenv("ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER", "1")
+    assert max_chunks_per_document(focused=True) == max_chunks_per_document() == 2
+    rows = [_chunk("/v/homelab.md", 0.9 - i * 0.01) for i in range(5)]
+    rows += [_chunk(f"/v/other{i}.md", 0.4) for i in range(3)]
+    kept = cap_per_document(rows, limit=5, focused=True)
+    assert [r["metadata"]["source"] for r in kept].count("/v/homelab.md") == 2
+
+
+def test_disabling_the_cap_disables_it_for_focused_queries_too(monkeypatch):
+    # 0 means "no cap"; doubling it must not turn that back into one.
+    monkeypatch.setenv("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", "0")
+    assert max_chunks_per_document(focused=True) == 0
+    rows = [_chunk("/v/long.md", 0.9) for _ in range(6)]
+    assert len(cap_per_document(rows, limit=6, focused=True)) == 6
+
+
+def test_an_explicit_max_per_doc_overrides_focus():
+    # A caller that passed a number meant that number. Enough other sources to
+    # fill the slots, so the cap binds rather than backfilling.
+    rows = [_chunk("/v/homelab.md", 0.9 - i * 0.01) for i in range(4)]
+    rows += [_chunk(f"/v/other{i}.md", 0.4) for i in range(5)]
+    kept = cap_per_document(rows, limit=5, max_per_doc=1, focused=True)
+    assert [r["metadata"]["source"] for r in kept].count("/v/homelab.md") == 1
