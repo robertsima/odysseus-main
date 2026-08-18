@@ -703,14 +703,14 @@ def setup_research_routes(research_handler, session_manager=None) -> APIRouter:
         if not ep_url or not ep_model:
             # Last resort: this user's enabled endpoint, plus legacy shared rows.
             from src.database import SessionLocal
-            from src.endpoint_resolver import normalize_base, build_chat_url, build_headers
+            from src.endpoint_resolver import normalize_base, build_chat_url, endpoint_runtime_headers
             db = SessionLocal()
             try:
                 ep = _owned_enabled_endpoint(db, user)
                 if ep:
                     base = normalize_base(ep.base_url)
                     fallback_url = build_chat_url(base)
-                    fallback_headers = build_headers(ep.api_key, base)
+                    fallback_headers = endpoint_runtime_headers(ep, owner=user)
                     fallback_model = ""
                     if ep.cached_models:
                         try:

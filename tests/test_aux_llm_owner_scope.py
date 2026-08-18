@@ -50,7 +50,14 @@ def test_scheduler_fallbacks_and_research_headers_are_owner_scoped():
     assert "headers_from_resolver = False" in src
     assert "headers_from_resolver = True" in src
     assert "from src.auth_helpers import owner_filter" in src
-    assert "owner_filter(ep_q, ModelEndpoint, task.owner or None)" in src
+    # Endpoint lookup for header resolution moved into
+    # _resolve_endpoint_headers(endpoint_url, owner), which every caller feeds
+    # task.owner. The owner scoping it must keep is the owner_filter on the
+    # ModelEndpoint query plus the owner reaching resolve_endpoint_runtime.
+    assert "owner_filter(ep_q, ModelEndpoint, owner or None)" in src
+    assert "def _resolve_endpoint_headers(self, endpoint_url: str, owner: str | None" in src
+    assert "endpoint_runtime_headers(ep, owner=owner or None)" in src
+    assert "self._resolve_endpoint_headers(endpoint_url, task.owner)" in src
 
 
 def test_research_routes_fallbacks_are_owner_scoped():

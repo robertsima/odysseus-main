@@ -674,7 +674,32 @@ class SessionManager:
         if session_id in self.sessions:
             return self.sessions[session_id]
 
-        session = self.create_session(session_id, name, endpoint_url, model, owner=owner)
+        # The scheduler writes the sessions row itself before calling here, so
+        # going straight to create_session hit "UNIQUE constraint failed:
+        # sessions.id" and re-raised — leaving the task with no in-memory
+        # session to deliver its output into, once per run, forever. Adopt an
+        # existing row instead of trying to insert a second one.
+        db = SessionLocal()
+        try:
+            row = db.query(DbSession).filter(DbSession.id == session_id).first()
+        except Exception:
+            row = None
+        finally:
+            db.close()
+
+        if row is not None:
+            session = Session(
+                id=session_id,
+                name=row.name or name,
+                endpoint_url=row.endpoint_url or endpoint_url,
+                model=row.model or model,
+                rag=bool(row.rag),
+                headers=row.headers or {},
+                owner=row.owner if row.owner is not None else owner,
+            )
+            self.sessions[session_id] = session
+        else:
+            session = self.create_session(session_id, name, endpoint_url, model, owner=owner)
         if task is not None:
             task.session_id = session_id
         return session

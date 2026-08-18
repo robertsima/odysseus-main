@@ -124,6 +124,29 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
     return base, api_key
 
 
+def endpoint_runtime_headers(ep, owner: Optional[str] = None) -> Dict[str, str]:
+    """Auth headers for a ModelEndpoint row, with refreshable creds resolved.
+
+    Use this instead of ``build_headers(ep.api_key, ep.base_url)``. Session-backed
+    providers (ChatGPT subscription, GitHub Copilot) keep their credential in
+    ProviderAuthSession and mint a short-lived access token per call, leaving
+    ``ep.api_key`` empty or long expired — reading it directly sends a dead
+    bearer (or none) and the request 401s even though the account is connected.
+
+    Falls back to the stored key if the runtime resolve fails, so a provider
+    with a broken refresh degrades to the old behaviour rather than to no auth.
+    """
+    base = normalize_base(getattr(ep, "base_url", "") or "")
+    api_key = getattr(ep, "api_key", None)
+    try:
+        resolved_base, resolved_key = resolve_endpoint_runtime(ep, owner=owner)
+        base = normalize_base(resolved_base or base) or base
+        api_key = resolved_key
+    except Exception as e:
+        logger.warning("Could not resolve runtime credentials for %s: %s", base, e)
+    return build_headers(api_key, base)
+
+
 # Cache for Tailscale hostname → IP resolution
 _tailscale_cache: Dict[str, Optional[str]] = {}
 

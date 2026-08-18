@@ -500,7 +500,7 @@ def _reconcile_selected_route_from_request(
     if selected_endpoint_id or selected_endpoint_url:
         try:
             from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_headers, normalize_base
+            from src.endpoint_resolver import endpoint_runtime_headers, normalize_base
             db = SessionLocal()
             try:
                 q = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
@@ -519,7 +519,10 @@ def _reconcile_selected_route_from_request(
                 if not ep:
                     return False
                 endpoint_url = build_chat_url(normalize_base(ep.base_url or ""))
-                headers = build_headers(ep.api_key or "", ep.base_url or "") if ep.api_key else {}
+                # Not ep.api_key: session-backed providers (ChatGPT
+                # subscription, Copilot) keep a refreshable token elsewhere
+                # and leave that column empty, which produced no auth at all.
+                headers = endpoint_runtime_headers(ep, owner=owner)
             finally:
                 db.close()
         except Exception as e:

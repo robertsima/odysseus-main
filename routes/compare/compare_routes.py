@@ -115,7 +115,7 @@ def setup_compare_routes(session_manager: SessionManager):
         # session behind with that header attached. Doing all the owner-scope
         # resolution + raw-URL rejection up front means a 403 on either endpoint
         # aborts the whole request with nothing created and no header copied.
-        from src.endpoint_resolver import build_chat_url, build_headers, normalize_base
+        from src.endpoint_resolver import build_chat_url, endpoint_runtime_headers, normalize_base
         resolved = []
         db = SessionLocal()
         try:
@@ -175,7 +175,7 @@ def setup_compare_routes(session_manager: SessionManager):
                 # Headers come only from a matched endpoint's key; None when
                 # `ep` is None (raw admin URL or no match), so a comparison can
                 # never inherit another user's key/headers.
-                headers = build_headers(ep.api_key, ep.base_url) if (ep and ep.api_key) else None
+                headers = endpoint_runtime_headers(ep, owner=user) if ep else None
                 resolved.append((sid, model, session_endpoint_url, headers))
         finally:
             db.close()

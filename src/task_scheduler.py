@@ -1359,6 +1359,36 @@ class TaskScheduler:
             category=(task.name or "Task"),
         )
 
+    def _resolve_endpoint_headers(self, endpoint_url: str, owner: str | None, db=None) -> dict:
+        """Auth headers for `endpoint_url`, with refreshable credentials resolved.
+
+        Session-backed providers (ChatGPT subscription, Copilot) keep a
+        short-lived access token in ProviderAuthSession and mint a fresh one per
+        call; `ModelEndpoint.api_key` is empty or long stale for them. Building
+        headers straight off `ep.api_key` — which this used to do — therefore
+        sent an expired bearer and every scheduled run 401'd while interactive
+        chat, which goes through resolve_endpoint_runtime, kept working.
+        """
+        from core.database import SessionLocal, ModelEndpoint
+        from src.endpoint_resolver import endpoint_runtime_headers, normalize_base
+        from src.auth_helpers import owner_filter
+
+        own_db = db is None
+        db2 = SessionLocal() if own_db else db
+        try:
+            ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+            ep_q = owner_filter(ep_q, ModelEndpoint, owner or None)
+            for ep in ep_q.all():
+                ep_base = normalize_base(ep.base_url)
+                if ep_base and (ep_base in endpoint_url or endpoint_url in ep_base):
+                    return endpoint_runtime_headers(ep, owner=owner or None)
+        except Exception:
+            logger.debug("Header resolution failed for %r", endpoint_url, exc_info=True)
+        finally:
+            if own_db:
+                db2.close()
+        return {}
+
     async def _execute_action(self, task, run_id: str | None = None, *, manual: bool = False) -> tuple:
         """Execute a built-in action (no LLM needed)."""
         from src.builtin_actions import BUILTIN_ACTIONS
@@ -2006,25 +2036,8 @@ class TaskScheduler:
             messages.append(datetime_context_msg)
         messages.append({"role": "user", "content": user_content})
 
-        # Resolve headers from the endpoint's API key
-        headers = {}
-        try:
-            from core.database import SessionLocal, ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
-            from src.auth_helpers import owner_filter
-            db2 = SessionLocal()
-            try:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
-            finally:
-                db2.close()
-        except Exception:
-            pass
+        # Resolve headers for the endpoint, refreshing session-backed tokens.
+        headers = self._resolve_endpoint_headers(endpoint_url, task.owner)
         full_text = ""
         tool_results = []
         stream_error = ""
@@ -2169,22 +2182,9 @@ class TaskScheduler:
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
 
-        # Resolve headers
-        try:
-            from core.database import ModelEndpoint
-            from src.endpoint_resolver import normalize_base, build_headers
-            from src.auth_helpers import owner_filter
-            db2 = db
-            if not headers_from_resolver:
-                ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)
-                ep_q = owner_filter(ep_q, ModelEndpoint, task.owner or None)
-                eps = ep_q.all()
-                for ep in eps:
-                    if normalize_base(ep.base_url) in endpoint_url or endpoint_url in normalize_base(ep.base_url):
-                        headers = build_headers(ep.api_key, normalize_base(ep.base_url))
-                        break
-        except Exception:
-            pass
+        # Resolve headers, refreshing session-backed tokens.
+        if not headers_from_resolver:
+            headers = self._resolve_endpoint_headers(endpoint_url, task.owner, db=db) or headers
 
         max_tokens = int(get_setting("research_max_tokens", 8192))
         extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)

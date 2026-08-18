@@ -340,13 +340,18 @@ def setup_session_routes(
     ):
         skip_val = str(skip_validation).lower() == "true"
         user = effective_user(request)
-        endpoint_api_key = ""
         endpoint_base_url = ""
+        # Headers built from the endpoint row with refreshable credentials
+        # resolved. Session-backed providers (ChatGPT subscription, Copilot)
+        # leave api_key empty, so reading that column alone yields no auth.
+        endpoint_headers = None
         _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
         if endpoint_id and endpoint_id.strip():
             from core.database import ModelEndpoint
             from src.auth_helpers import owner_filter
-            from src.endpoint_resolver import build_chat_url, normalize_base
+            from src.endpoint_resolver import (
+                build_chat_url, endpoint_runtime_headers, normalize_base,
+            )
             _db = SessionLocal()
             try:
                 q = _db.query(ModelEndpoint).filter(
@@ -359,7 +364,7 @@ def setup_session_routes(
                 if not endpoint_row:
                     raise HTTPException(400, "Model endpoint no longer exists")
                 endpoint_base_url = endpoint_row.base_url or ""
-                endpoint_api_key = endpoint_row.api_key or ""
+                endpoint_headers = endpoint_runtime_headers(endpoint_row, owner=user)
                 endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
             finally:
                 _db.close()
@@ -369,11 +374,12 @@ def setup_session_routes(
 
         model_to_use = model
         request_api_key = api_key.strip() if api_key else ""
-        effective_api_key = request_api_key or endpoint_api_key
         validation_headers = None
-        if effective_api_key:
+        if request_api_key:
             from src.endpoint_resolver import build_headers
-            validation_headers = build_headers(effective_api_key, endpoint_base_url or endpoint_url)
+            validation_headers = build_headers(request_api_key, endpoint_base_url or endpoint_url)
+        elif endpoint_headers:
+            validation_headers = endpoint_headers
 
         if skip_val:
             # skip_validation = trust the caller and do NOT probe /v1/models.
@@ -434,14 +440,12 @@ def setup_session_routes(
             owner=user,
         )
         # Set auth headers for custom API-key endpoints
-        resolved_key = request_api_key
-        resolved_base = endpoint_url
-        if not resolved_key and endpoint_api_key:
-            resolved_key = endpoint_api_key
-            resolved_base = endpoint_base_url
-        if resolved_key:
+        if request_api_key:
             from src.endpoint_resolver import build_headers
-            session.headers = build_headers(resolved_key, resolved_base)
+            session.headers = build_headers(request_api_key, endpoint_url)
+            _persist_session_headers(sid, session.headers)
+        elif endpoint_headers:
+            session.headers = endpoint_headers
             _persist_session_headers(sid, session.headers)
         # Fire webhook (sync-safe)
         if webhook_manager:
@@ -490,12 +494,14 @@ def setup_session_routes(
         if model is not None and endpoint_url is not None:
             user = effective_user(request)
             _reject_raw_endpoint_url_for_non_admin(request, user, endpoint_id, endpoint_url)
-            endpoint_api_key = ""
             endpoint_base_url = ""
+            endpoint_headers = None
             if endpoint_id:
                 from core.database import ModelEndpoint
                 from src.auth_helpers import owner_filter
-                from src.endpoint_resolver import build_chat_url, normalize_base
+                from src.endpoint_resolver import (
+                    build_chat_url, endpoint_runtime_headers, normalize_base,
+                )
                 _db = SessionLocal()
                 try:
                     q = _db.query(ModelEndpoint).filter(
@@ -508,18 +514,15 @@ def setup_session_routes(
                     if not ep:
                         raise HTTPException(400, "Model endpoint no longer exists")
                     endpoint_base_url = ep.base_url or ""
-                    endpoint_api_key = ep.api_key or ""
+                    endpoint_headers = endpoint_runtime_headers(ep, owner=user)
                     endpoint_url = build_chat_url(normalize_base(endpoint_base_url))
                 finally:
                     _db.close()
             session.model = model
             session.endpoint_url = endpoint_url
-            # Update auth headers from the endpoint's stored API key
-            if endpoint_api_key:
-                from src.endpoint_resolver import build_headers
-                session.headers = build_headers(endpoint_api_key, endpoint_base_url)
-            else:
-                session.headers = {}
+            # Update auth headers from the endpoint, refreshing any
+            # session-backed token rather than trusting the stored key.
+            session.headers = endpoint_headers or {}
             # Persist to DB
             db = SessionLocal()
             try:

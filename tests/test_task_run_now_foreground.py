@@ -17,6 +17,7 @@ Three regressions are covered here:
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, Text, create_engine
@@ -385,3 +386,50 @@ def test_parse_stream_error_reads_sse_error_frame():
         "Model stream failed with HTTP 503"
     )
     assert _parse_stream_error("event: error\n\n") == ""
+
+
+def test_ensure_task_session_adopts_an_existing_row(tmp_path, monkeypatch):
+    """The scheduler writes the sessions row before calling ensure_task_session.
+
+    Inserting a second one raised "UNIQUE constraint failed: sessions.id" and
+    left the task without an in-memory session to deliver its output into.
+    """
+    import core.session_manager as sm
+
+    row = SimpleNamespace(
+        id="s1", name="[Task] Report", endpoint_url="http://ep/v1", model="m",
+        rag=False, headers={}, owner="alice",
+    )
+
+    class _Query:
+        def filter(self, *a, **kw):
+            return self
+
+        def first(self):
+            return row
+
+    class _Db:
+        def query(self, *a, **kw):
+            return _Query()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(sm, "SessionLocal", lambda: _Db())
+
+    manager = sm.SessionManager.__new__(sm.SessionManager)
+    manager.sessions = {}
+
+    def _must_not_insert(*a, **kw):
+        raise AssertionError("create_session must not run for an existing row")
+
+    monkeypatch.setattr(manager, "create_session", _must_not_insert, raising=False)
+
+    task = SimpleNamespace(session_id=None)
+    session = manager.ensure_task_session("s1", "[Task] Report", "http://ep/v1", "m",
+                                          owner="alice", task=task)
+
+    assert manager.sessions["s1"] is session
+    assert session.owner == "alice"
+    assert session.name == "[Task] Report"
+    assert task.session_id == "s1"

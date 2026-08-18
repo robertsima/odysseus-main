@@ -948,6 +948,23 @@ def _probe_google_models(base_url: str, api_key: str = None, timeout: int = 5, p
     return models
 
 
+def _endpoint_runtime_key(ep, owner=None):
+    """The API key to actually send for this endpoint row.
+
+    Session-backed providers (ChatGPT subscription, GitHub Copilot) keep a
+    refreshable credential in ProviderAuthSession and leave ``ep.api_key``
+    empty, so probing/pinging with the raw column reports a connected account
+    as offline and never refreshes its model list.
+    """
+    try:
+        from src.endpoint_resolver import resolve_endpoint_runtime
+        _base, key = resolve_endpoint_runtime(ep, owner=owner)
+        return key
+    except Exception:
+        logger.debug("Runtime key resolution failed for endpoint %s", getattr(ep, "id", "?"), exc_info=True)
+        return getattr(ep, "api_key", None)
+
+
 def _probe_endpoint(base_url: str, api_key: str = None, timeout: int = 5) -> List[str]:
     """Probe a base URL's /models endpoint and return list of model IDs.
     For Anthropic, queries their /v1/models API, falling back to hardcoded list."""
@@ -1422,7 +1439,7 @@ def setup_model_routes(model_discovery):
         info = {
             "id": getattr(ep, "id", ""),
             "base": base,
-            "api_key": getattr(ep, "api_key", None),
+            "api_key": _endpoint_runtime_key(ep),
             "kind": kind,
             "category": category,
             "mode": mode,
@@ -1772,7 +1789,7 @@ def setup_model_routes(model_discovery):
             }
             try:
                 t0 = _time.time()
-                ping = _ping_endpoint(base, ep.api_key, timeout=1.5)
+                ping = _ping_endpoint(base, _endpoint_runtime_key(ep), timeout=1.5)
                 entry["latency_ms"] = round((_time.time() - t0) * 1000)
                 entry["status"] = "loading" if ping.get("loading") else ("online" if ping.get("reachable") or cached_count else "offline")
                 entry["error"] = ping.get("error")
@@ -1848,7 +1865,7 @@ def setup_model_routes(model_discovery):
                     "id": ep.id,
                     "name": ep.name,
                     "base_url": ep.base_url,
-                    "api_key": ep.api_key,
+                    "api_key": _endpoint_runtime_key(ep),
                 })
         finally:
             db.close()
@@ -2256,7 +2273,8 @@ def setup_model_routes(model_discovery):
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
-            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url, "api_key": ep.api_key}
+            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url,
+                       "api_key": _endpoint_runtime_key(ep)}
         finally:
             db.close()
 
@@ -2321,7 +2339,7 @@ def setup_model_routes(model_discovery):
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
                 try:
-                    probed = _probe_endpoint(base, ep.api_key, timeout=timeout)
+                    probed = _probe_endpoint(base, _endpoint_runtime_key(ep), timeout=timeout)
                 except Exception as exc:
                     logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
                     probed = []
