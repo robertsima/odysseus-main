@@ -94,3 +94,58 @@ def test_scheduler_resolves_runtime_headers_for_tasks(monkeypatch, owner):
     assert "fresh-token" in repr(headers)
     # The stale column must not be what gets sent.
     assert "None" not in repr(headers.get("Authorization", ""))
+
+
+def test_agent_loop_fallback_forwards_resolved_headers(monkeypatch):
+    """The simple-call fallback must carry auth, not dispatch bare.
+
+    When the agent loop dies mid-run (a 502 from an overloaded provider is the
+    common case), _execute_llm_task retries through task_llm_call_async. With no
+    task/utility endpoint configured, resolve_endpoint hands the caller's
+    (url, model, headers) straight back — so omitting headers there sent the
+    retry with no Authorization at all and the run died on a 401 that looked
+    like an expired subscription.
+    """
+    import asyncio
+
+    import src.task_endpoint as te
+    from src.task_scheduler import TaskScheduler
+
+    scheduler = TaskScheduler.__new__(TaskScheduler)
+    scheduler._session_manager = None
+    scheduler._last_run_model = None
+
+    async def _boom(*a, **kw):
+        raise RuntimeError("Our servers are currently overloaded. (HTTP 502)")
+
+    monkeypatch.setattr(TaskScheduler, "_run_agent_loop", _boom, raising=False)
+    monkeypatch.setattr(
+        TaskScheduler, "_resolve_endpoint_headers",
+        lambda self, url, owner, db=None: {"Authorization": "Bearer fresh-token"},
+        raising=False,
+    )
+
+    seen = {}
+
+    class _Stop(Exception):
+        pass
+
+    async def _fake_call(messages, **kwargs):
+        seen.update(kwargs)
+        raise _Stop()
+
+    monkeypatch.setattr(te, "task_llm_call_async", _fake_call)
+
+    task = SimpleNamespace(
+        id="t1", name="Daily Planning Forecast", prompt="plan the day",
+        endpoint_url="https://chatgpt.com/backend-api/codex/responses",
+        model="gpt-5.5", owner="admin", session_id="sess-1",
+        crew_member_id=None, character_id=None,
+    )
+
+    with pytest.raises(_Stop):
+        asyncio.run(scheduler._execute_llm_task(task, db=None))
+
+    assert seen.get("fallback_headers") == {"Authorization": "Bearer fresh-token"}, (
+        "the fallback call dispatched without the endpoint's auth headers"
+    )

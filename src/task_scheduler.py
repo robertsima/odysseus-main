@@ -1816,6 +1816,12 @@ class TaskScheduler:
                 messages,
                 fallback_url=endpoint_url,
                 fallback_model=model,
+                # Without headers this fallback dispatches to the same
+                # endpoint unauthenticated: resolve_endpoint returns the
+                # caller's (url, model, headers) verbatim when no task/utility
+                # endpoint is configured, so a 502 in the agent loop turned
+                # into a 401 here on a perfectly connected account.
+                fallback_headers=self._resolve_endpoint_headers(endpoint_url, task.owner, db=db),
                 owner=task.owner,
                 timeout=120,
             )
@@ -2140,6 +2146,14 @@ class TaskScheduler:
                 full_text = (full_text or "").strip()
             except Exception as e:
                 logger.warning(f"Grace summarization failed: {e}")
+                # Raw tool output can stand in for a result only when the model
+                # actually ran to the end of its rounds. If the stream itself
+                # died upstream (502/401), nothing captured here is an answer to
+                # the task — handing back a workspace listing is how a provider
+                # outage got recorded as a completed run. Fail instead, and let
+                # _execute_llm_task retry through its fallback endpoints.
+                if stream_error:
+                    raise RuntimeError(stream_error) from e
                 if tool_results:
                     full_text = "\n".join(tool_results[-5:])
 

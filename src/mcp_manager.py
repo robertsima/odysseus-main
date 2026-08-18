@@ -20,7 +20,14 @@ logger = logging.getLogger(__name__)
 # Lotus is filtered per request in agent_loop according to the owner's
 # local/LAN/API access policy. Approved endpoints may use it; denied endpoints
 # have every Lotus tool hidden and runtime-blocked.
-_BUILTIN_FUNCTION_CALLING_SERVERS = {"builtin_browser", "todoist", "lotus"}
+_BUILTIN_FUNCTION_CALLING_SERVERS = {
+    "builtin_browser",
+    "todoist",
+    "lotus",
+    "pi_worker",
+    "github_read",
+    "github_write",
+}
 
 
 def _model_visible_schema(schema: Any) -> Dict:
@@ -1088,6 +1095,9 @@ class McpManager:
             "email",
             "todoist",
             "lotus",
+            "pi_worker",
+            "github_read",
+            "github_write",
         }
 
     def get_server_status(self, server_id: str) -> Dict:

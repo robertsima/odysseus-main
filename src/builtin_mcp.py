@@ -76,6 +76,11 @@ _BUILTIN_SERVERS = {
     "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
     "todoist":    ("mcp_servers/todoist_server.py",    "Built-in: Todoist"),
     "lotus":      ("mcp_servers/lotus_server.py",      "Built-in: Lotus"),
+    "pi_worker":  ("mcp_servers/pi_worker_server.py",  "Built-in: Windows Pi Worker"),
+}
+
+_OPTIONAL_BUILTIN_ENV = {
+    "pi_worker": "ODYSSEUS_PI_WORKER_HOST",
 }
 
 # NPX-based built-in servers (run via npx, not Python)
@@ -86,6 +91,131 @@ _BUILTIN_NPX_SERVERS = {
         "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision"],
     }
 }
+
+# Native-binary built-in servers.
+#
+# The official GitHub MCP server ships as a single Go executable, baked into
+# the image by the Dockerfile. It runs as a stdio child process of this
+# container rather than as a sibling container: starting GitHub's published
+# image would mean mounting the host's Docker socket into Odysseus, which
+# hands the whole Docker host to whatever the model can reach. One small child
+# process is the cheaper trade.
+#
+# Read/write separation. "GitHub Read" carries a fixed, read-only tool list and
+# comes up whenever a token is configured. Writes live in a second, opt-in
+# server (ODYSSEUS_GITHUB_MCP_WRITE=1) scoped to the collaboration layer.
+# Neither exposes repository-mutating tools -- no push_files,
+# create_or_update_file, delete_repository, and no open-ended --toolsets. The
+# working tree belongs to the Pi worker (it edits, runs tests, and drives git);
+# GitHub MCP picks up afterwards for issues, PRs, reviews and Actions. The
+# split also keeps a dozen schemas in front of the local model instead of a
+# hundred.
+GITHUB_MCP_TOKEN_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
+
+GITHUB_MCP_READ_TOOLS = (
+    "get_file_contents",
+    "get_commit",
+    "list_branches",
+    "list_commits",
+    "search_code",
+    "issue_read",
+    "search_issues",
+    "list_pull_requests",
+    "pull_request_read",
+    "actions_list",
+    "actions_get",
+    "get_job_logs",
+)
+
+# add_comment_to_pending_review is the other half of pull_request_review_write:
+# without it a review can be created and submitted but can carry no line
+# comments, which is most of the point of reviewing from here.
+GITHUB_MCP_WRITE_TOOLS = (
+    "create_pull_request",
+    "add_issue_comment",
+    "pull_request_review_write",
+    "add_comment_to_pending_review",
+)
+
+GITHUB_MCP_WRITE_ENV = "ODYSSEUS_GITHUB_MCP_WRITE"
+
+
+def find_github_mcp_binary() -> str:
+    """Locate the github-mcp-server executable, or "" when it isn't installed.
+
+    The Docker image installs it at /usr/local/bin; native installs may have it
+    anywhere on PATH (which_tool picks up github-mcp-server.exe on Windows), so
+    no launcher script is needed on either platform.
+    """
+    configured = os.environ.get("ODYSSEUS_GITHUB_MCP_BINARY", "").strip()
+    if configured:
+        return configured
+    found = which_tool("github-mcp-server")
+    if found:
+        return found
+    # PATH is minimal in some launches (systemd, entrypoint drops privileges),
+    # so fall back to the image's install path directly.
+    if os.path.isfile("/usr/local/bin/github-mcp-server"):
+        return "/usr/local/bin/github-mcp-server"
+    return ""
+
+
+def github_mcp_env() -> dict[str, str]:
+    """Environment handed to the github-mcp-server subprocesses.
+
+    This has to be explicit. Passing env=None does *not* inherit the container
+    environment: the MCP SDK falls back to get_default_environment(), which
+    forwards only PATH/HOME/SHELL/TERM/USER, and the server would come up
+    unauthenticated. McpManager merges os.environ in only when env is non-empty.
+
+    The token is held in memory and passed to the child process; built-in
+    servers are never written to the mcp_servers table, so it stays out of the
+    database. Key names are chosen to avoid McpManager's identity-hint scan
+    (keys containing user/account/email), which would echo values into tool
+    descriptions.
+    """
+    env: dict[str, str] = {}
+    token = os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip()
+    if token:
+        env[GITHUB_MCP_TOKEN_ENV] = token
+    # GitHub Enterprise Server / ghe.com installs.
+    host = os.environ.get("GITHUB_HOST", "").strip()
+    if host:
+        env["GITHUB_HOST"] = host
+    return env
+
+
+def github_mcp_servers() -> dict[str, dict]:
+    """Built-in GitHub server definitions for the current configuration.
+
+    Empty when no token is configured or the binary isn't installed -- the
+    server exits immediately without credentials, and a built-in that fails on
+    every startup is just noise in the logs.
+    """
+    if not os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip():
+        return {}
+    binary = find_github_mcp_binary()
+    if not binary:
+        return {}
+
+    servers = {
+        "github_read": {
+            "name": "Built-in: GitHub Read",
+            "command": binary,
+            "args": ["stdio", "--read-only", "--tools=" + ",".join(GITHUB_MCP_READ_TOOLS)],
+        }
+    }
+    if os.environ.get(GITHUB_MCP_WRITE_ENV, "").lower() in ("1", "true", "yes"):
+        servers["github_write"] = {
+            "name": "Built-in: GitHub Write",
+            "command": binary,
+            # No --read-only here (it would drop every tool in the list), and
+            # still no --toolsets: the explicit --tools list is the whole
+            # surface this server can reach.
+            "args": ["stdio", "--tools=" + ",".join(GITHUB_MCP_WRITE_TOOLS)],
+        }
+    return servers
+
 
 # Global flag to disable MCP if there are compatibility issues
 MCP_DISABLED = os.environ.get("ODYSSEUS_DISABLE_MCP", "").lower() in ("1", "true", "yes")
@@ -192,11 +322,50 @@ async def register_builtin_servers(mcp_manager):
             logger.warning(f"Built-in MCP server {name} error: {type(e).__name__}: {e}")
 
     for server_id, (script, name) in _BUILTIN_SERVERS.items():
+        required_env = _OPTIONAL_BUILTIN_ENV.get(server_id)
+        if required_env and not os.environ.get(required_env, "").strip():
+            logger.info("Optional built-in MCP server %s disabled: %s is not configured", name, required_env)
+            continue
         script_path = os.path.join(base_dir, script)
         if not os.path.exists(script_path):
             logger.warning(f"Built-in MCP server script not found: {script_path}")
             continue
         _spawn_bg(_connect_python_server(server_id, script_path, name))
+
+    async def _connect_binary_server(server_id: str, cfg: dict):
+        """Connect a built-in server that is a native executable, not a script."""
+        try:
+            ok = await mcp_manager.connect_server(
+                server_id=server_id,
+                name=cfg["name"],
+                transport="stdio",
+                command=cfg["command"],
+                args=list(cfg["args"]),
+                env=cfg.get("env") or None,
+            )
+            if ok:
+                logger.info(f"Built-in MCP server registered: {cfg['name']}")
+            else:
+                logger.warning(f"Built-in MCP server failed to connect: {cfg['name']}")
+        except asyncio.CancelledError:
+            logger.warning(f"Built-in MCP server {cfg['name']} cancelled")
+            raise
+        except BaseException as e:
+            logger.warning(f"Built-in MCP server {cfg['name']} error: {type(e).__name__}: {e}")
+
+    github_servers = github_mcp_servers()
+    if not github_servers:
+        if not os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip():
+            logger.info(
+                "Built-in GitHub MCP servers disabled: %s is not configured", GITHUB_MCP_TOKEN_ENV
+            )
+        else:
+            logger.warning(
+                "Built-in GitHub MCP servers unavailable: the github-mcp-server binary was not "
+                "found on PATH or at /usr/local/bin (set ODYSSEUS_GITHUB_MCP_BINARY to override)"
+            )
+    for server_id, cfg in github_servers.items():
+        _spawn_bg(_connect_binary_server(server_id, {**cfg, "env": github_mcp_env()}))
 
     # Register NPX-based servers in the background (they take longer to start)
     npx_path = _find_npx()

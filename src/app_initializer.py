@@ -23,6 +23,7 @@ from src.research_handler import ResearchHandler
 from src.upload_handler import UploadHandler
 from src.tool_utils import set_upload_handler
 from src.search import update_search_config
+from src.builtin_skills import seed_bundled_skills
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     # Initialize core managers
     memory_manager = MemoryManager(DATA_DIR)
     skills_manager = SkillsManager(DATA_DIR)
+    try:
+        seed_bundled_skills(skills_manager)
+    except Exception as e:  # never let a bundled skill block startup
+        logger.warning(f"Bundled skill installation failed: {e}")
     session_manager = SessionManager(SESSIONS_FILE)
     set_session_manager(session_manager)  # Enable Session.add_message() persistence
     upload_handler = UploadHandler(base_dir, UPLOAD_DIR)

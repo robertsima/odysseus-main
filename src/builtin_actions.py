@@ -570,13 +570,30 @@ def _result_has_work(result: str | None) -> bool:
 
 
 def _result_is_config_error(result: str | None) -> bool:
+    """Did the email pass report a failure rather than a unit of work?
+
+    `_auto_summarize_pass` catches everything and returns the message as a
+    plain string — "Error: IMAP is not configured for account 'work'", a
+    connection reset, an auth rejection. Those strings pass `_result_has_work`
+    (they carry no "processed 0"/"no new" marker), so without this check a
+    mailbox the task cannot even open was recorded as a *successful* run whose
+    result text was the error. Treat the leading "Error:" as the failure it is,
+    alongside the model/account misconfigurations named below.
+    """
     if not isinstance(result, str):
         return False
-    low = result.lower()
+    low = result.strip().lower()
     return (
-        "no model configured" in low
+        low.startswith("error:")
+        or "no model configured" in low
         or "no model endpoint configured" in low
         or "no llm endpoint available" in low
+        # Not a bare "not configured": summaries embed email subjects, and a
+        # subject line can say anything.
+        or "imap is not configured" in low
+        or "smtp is not configured" in low
+        or "imap not configured" in low
+        or "smtp not configured" in low
     )
 
 

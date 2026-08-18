@@ -499,3 +499,63 @@ async def test_placeholder_alone_fails_the_run(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no output"):
         await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
+
+
+async def test_dead_stream_tool_output_is_not_delivered_as_a_result(monkeypatch):
+    """A run whose stream died upstream must fail, even if tools ran first.
+
+    Production shape: the model calls a couple of tools, then the provider
+    starts 502'ing. Grace summarization also fails (same outage), and the
+    scheduler fell back to pasting the captured tool output in as the result —
+    so an outage was logged as a completed run whose "output" was a workspace
+    listing the task never asked for.
+    """
+    import json as _json
+
+    task = _stub_llm_task_deps(monkeypatch)
+
+    async def _stub_stream(**kwargs):
+        yield 'data: ' + _json.dumps({"type": "tool_output", "tool": "ls",
+                                      "stdout": "workspace/  notes/"}) + '\n\n'
+        yield _OVERLOAD_FRAME
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
+
+    import src.task_endpoint as _te
+
+    async def _dead(messages=None, **kw):
+        raise RuntimeError("Our servers are currently overloaded. (HTTP 502)")
+
+    monkeypatch.setattr(_te, "task_llm_call_async", _dead)
+
+    from src.task_scheduler import TaskScheduler
+
+    with pytest.raises(RuntimeError, match="overloaded"):
+        await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
+
+
+async def test_exhausted_rounds_still_report_tool_output(monkeypatch):
+    """The other half of the same branch: no upstream error, the model simply
+    ran out of steps. Its tool output is the best record of the work and must
+    still come back as the result."""
+    import json as _json
+
+    task = _stub_llm_task_deps(monkeypatch)
+
+    async def _stub_stream(**kwargs):
+        yield 'data: ' + _json.dumps({"type": "tool_output", "tool": "write_file",
+                                      "stdout": "wrote Report.md"}) + '\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
+
+    import src.task_endpoint as _te
+
+    async def _grace_unavailable(messages=None, **kw):
+        raise RuntimeError("no grace endpoint")
+
+    monkeypatch.setattr(_te, "task_llm_call_async", _grace_unavailable)
+
+    from src.task_scheduler import TaskScheduler
+
+    result = await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
+    assert "wrote Report.md" in result

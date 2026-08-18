@@ -37,6 +37,9 @@ secrets.env~
 dev-docs/
 docs/
 *.md
+# Bundled skill instructions and references are runtime application assets.
+!skills/
+!skills/**
 *.db
 *.sqlite
 *.sqlite3

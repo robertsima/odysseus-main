@@ -69,6 +69,29 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && install -m 0755 /tmp/docker/docker /usr/local/bin/docker \
     && rm -rf /tmp/docker /tmp/docker.tgz
 
+# Official GitHub MCP server (native Go binary, run as a stdio child process by
+# src/builtin_mcp.py). Odysseus itself runs in a container and must not be
+# handed the host's Docker socket just to start GitHub's published image, so we
+# bake the binary in instead: one process inside this container, no
+# Docker-in-Docker, no extra Compose service. Pinned + checksum-verified so a
+# rebuild can't silently pull a different binary.
+ARG GITHUB_MCP_SERVER_VERSION=1.9.0
+RUN ARCH="$(dpkg --print-architecture)" \
+    && case "$ARCH" in \
+         amd64) GARCH=x86_64 ;; \
+         arm64) GARCH=arm64 ;; \
+         *) echo "unsupported arch $ARCH"; exit 1 ;; \
+       esac \
+    && BASE="https://github.com/github/github-mcp-server/releases/download/v${GITHUB_MCP_SERVER_VERSION}" \
+    && TARBALL="github-mcp-server_Linux_${GARCH}.tar.gz" \
+    && SUMS="github-mcp-server_${GITHUB_MCP_SERVER_VERSION}_checksums.txt" \
+    && curl -fsSL "${BASE}/${TARBALL}" -o "/tmp/${TARBALL}" \
+    && curl -fsSL "${BASE}/${SUMS}" -o "/tmp/${SUMS}" \
+    && (cd /tmp && grep " ${TARBALL}$" "${SUMS}" | sha256sum -c -) \
+    && tar -xzf "/tmp/${TARBALL}" -C /tmp github-mcp-server \
+    && install -m 0755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
+    && rm -f "/tmp/${TARBALL}" "/tmp/${SUMS}" /tmp/github-mcp-server
+
 # Official Todoist CLI used by the built-in Todoist MCP wrapper.
 RUN npm install -g @doist/todoist-cli
 
