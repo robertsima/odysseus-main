@@ -38,6 +38,7 @@ from src.agent_loop import (
     _WORKSPACE_TERMINUS_TOOLS,
     _claims_missing_tools,
     _classify_agent_request,
+    _explicitly_named_skills,
     _is_explicit_continuation,
     _looks_like_local_computer_request,
     _tools_used_in_conversation,
@@ -177,6 +178,24 @@ def test_real_web_lookups_still_get_locked_down(text):
 ])
 def test_missing_tool_excuses_are_detected(text):
     assert _claims_missing_tools(text), text
+
+
+def test_curly_apostrophe_missing_tool_excuse_is_detected():
+    text = "I don\u2019t have a local-pi-delegation or repo-editing tool available in this turn."
+    assert _claims_missing_tools(text)
+
+
+def test_exact_registered_skill_slug_is_detected_in_low_signal_request():
+    skills = [
+        {"name": "local-pi-delegation", "requires_toolsets": ["mcp__pi_worker__run_pi_task"]},
+        {"name": "email-triage", "requires_toolsets": []},
+    ]
+
+    matched = _explicitly_named_skills(
+        "Use $local-pi-delegation to do some work on my portfolio project.", skills
+    )
+
+    assert [skill["name"] for skill in matched] == ["local-pi-delegation"]
 
 
 # ── 5. a follow-up turn must not lose the tools the turn before it used ──────

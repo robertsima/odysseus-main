@@ -1223,6 +1223,9 @@ def _looks_like_local_computer_request(text: str) -> bool:
 # tools were there and they ran.
 _MISSING_TOOL_RE = re.compile(
     r"\b(?:"
+    r"do(?:n'?t|\s+not)\s+have\b[^.\n]{0,160}\btools?\s+"
+    r"(?:available|callable|offered|enabled|exposed|provided|in\s+this\s+turn)\b"
+    r"|"
     r"do(?:n'?t|es\s+not|\s+not)\s+(?:currently\s+|actually\s+)?have\s+"
     r"(?:the\s+|any\s+|a\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
     r"|do(?:n'?t|es\s+not|\s+not)\s+(?:currently\s+)?have\s+access\s+to\b"
@@ -1244,8 +1247,24 @@ _MISSING_TOOL_RE = re.compile(
 
 def _claims_missing_tools(text: str) -> bool:
     """True when a finished round blames a missing/unavailable tool."""
-    text = str(text or "")
+    text = str(text or "").replace("\u2019", "'").replace("\u2018", "'")
     return bool(text.strip() and _MISSING_TOOL_RE.search(text))
+
+
+def _explicitly_named_skills(text: str, skills: List[Dict]) -> List[Dict]:
+    """Return registered skills whose exact slug the user explicitly named."""
+    text = str(text or "")
+    if not text.strip():
+        return []
+    matches = []
+    for skill in skills or []:
+        name = str(skill.get("name") or "").strip().casefold()
+        if not name:
+            continue
+        pattern = rf"(?<![a-z0-9-])\$?{re.escape(name)}(?![a-z0-9-])"
+        if re.search(pattern, text.casefold()):
+            matches.append(skill)
+    return matches
 
 
 def _explicitly_references_missing_workspace(text: str, workspace: Optional[str]) -> bool:
@@ -3403,7 +3422,20 @@ async def stream_agent_loop(
             temperature = 0.2
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
-    _low_signal_turn = bool(_intent.get("low_signal"))
+    _explicit_skills: List[Dict] = []
+    try:
+        from services.memory.skills import SkillsManager
+        from src.constants import DATA_DIR
+        from routes.prefs_routes import _load_for_user as _load_prefs
+        if (_load_prefs(owner) or {}).get("skills_enabled", True):
+            _explicit_skills = _explicitly_named_skills(
+                _last_user, SkillsManager(DATA_DIR).load(owner=owner)
+            )
+    except Exception as _skill_err:
+        logger.debug("Explicit skill lookup skipped: %s", _skill_err)
+    # A registered skill slug is a deterministic action signal. Never route it
+    # through the casual/low-signal path or suppress the skill catalogue.
+    _low_signal_turn = bool(_intent.get("low_signal")) and not _explicit_skills
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
     _existing_conversation = _user_turn_count(messages) > 1
     _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
@@ -3807,6 +3839,30 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(forced_set)
 
+    # Exact skill invocation outranks semantic retrieval. Make the registry
+    # viewer and every declared dependency callable even when the surrounding
+    # request is vague ("use X to do some work"). The model may still ask what
+    # work to do, but it must not claim the named skill or its tools are absent.
+    if not guide_only and _explicit_skills:
+        if _relevant_tools is None:
+            from src.tool_index import ALWAYS_AVAILABLE
+            _relevant_tools = set(ALWAYS_AVAILABLE)
+        if "manage_skills" not in disabled_tools:
+            _relevant_tools.add("manage_skills")
+        for _skill in _explicit_skills:
+            _relevant_tools.update(
+                tool for tool in (_skill.get("requires_toolsets") or [])
+                if tool not in disabled_tools
+            )
+        logger.info(
+            "[agent-intent] explicit skills=%s dependencies=%s",
+            [skill.get("name") for skill in _explicit_skills],
+            sorted({
+                tool for skill in _explicit_skills
+                for tool in (skill.get("requires_toolsets") or [])
+            }),
+        )
+
     if not guide_only and _relevant_tools is not None:
         _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
 
@@ -4040,6 +4096,22 @@ async def stream_agent_loop(
         active_email=active_email,
         workspace=workspace,
     )
+    if _explicit_skills and not guide_only:
+        _explicit_names = ", ".join(
+            f"`{skill.get('name')}`" for skill in _explicit_skills
+        )
+        messages.append({
+            "role": "system",
+            "content": (
+                f"The user explicitly invoked registered skill(s): {_explicit_names}. "
+                "The `manage_skills` tool and the skill's declared tool dependencies "
+                "are available in this turn. Load each named skill with "
+                "`manage_skills` action='view' before proceeding, then follow it. "
+                "If the requested work itself is underspecified, ask only for the "
+                "missing objective after loading the skill. Never claim the named "
+                "skill or its provided tools are unavailable."
+            ),
+        })
     if _ody_doc_finetune_mode and not plan_mode and not approved_plan and not guide_only:
         messages = _minimal_odysseus_doc_messages(
             messages,
