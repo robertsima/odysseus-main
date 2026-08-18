@@ -217,6 +217,41 @@ def test_read_skill_md_and_references_are_owner_scoped(tmp_path):
     assert sm.read_skill_reference("login-flow", "references/notes.txt", owner="alice") is None
 
 
+def test_bundled_skill_is_shared_read_only_and_not_owner_backfilled(tmp_path):
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir(parents=True, exist_ok=True)
+    bundled_path = _write_skill_md(
+        skills_root, category="dev", name="local-pi-delegation",
+        owner="", description="shared delegation procedure",
+    )
+    bundled_text = bundled_path.read_text(encoding="utf-8").replace(
+        "source: learned", "source: bundled"
+    )
+    bundled_path.write_text(bundled_text, encoding="utf-8")
+    refs = bundled_path.parent / "references"
+    refs.mkdir()
+    (refs / "profile.md").write_text("shared profile", encoding="utf-8")
+
+    sm = SkillsManager(str(tmp_path))
+
+    assert sm.backfill_owner("alice", {"alice", "bob"}) == 0
+    assert [s["name"] for s in sm.load(owner="alice")] == ["local-pi-delegation"]
+    assert [s["name"] for s in sm.load(owner="bob")] == ["local-pi-delegation"]
+    assert "shared delegation procedure" in sm.read_skill_md(
+        "local-pi-delegation", owner="alice"
+    )
+    assert sm.read_skill_reference(
+        "local-pi-delegation", "references/profile.md", owner="bob"
+    ) == "shared profile"
+
+    assert not sm.update_skill(
+        "local-pi-delegation", {"description": "mutated"}, owner=None
+    )
+    assert not sm.delete_skill("local-pi-delegation", owner=None)
+    assert bundled_path.exists()
+    assert "shared delegation procedure" in bundled_path.read_text(encoding="utf-8")
+
+
 def test_update_skill_positive_scoping(tmp_path):
     """Alice CAN update her own skill. Two users with the same slug;
     update_skill(owner='alice') modifies only Alice's file."""

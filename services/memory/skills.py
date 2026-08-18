@@ -197,6 +197,11 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk:
                 continue
+            # Bundled procedures are application resources, not abandoned
+            # user data. They intentionally stay ownerless so every signed-in
+            # user can read the same installed copy.
+            if sk.source == "bundled":
+                continue
             owner = (sk.owner or "").strip()
             if owner == primary_owner:
                 continue
@@ -284,7 +289,10 @@ class SkillsManager:
         # leaked legacy / un-stamped skills to every authenticated user.
         # Hide them now; the owner needs to be backfilled on disk if those
         # skills should be visible to a specific user.
-        return [s for s in entries if s.get("owner") == owner]
+        return [
+            s for s in entries
+            if s.get("owner") == owner or s.get("source") == "bundled"
+        ]
 
     # ----------------------------------------------------------------------
     # CRUD — disk-backed
@@ -448,6 +456,11 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
+            # Bundled skills are shared read-only application resources. They
+            # are updated only by the startup reconciler, never through
+            # tenant-scoped CRUD (including an owner=None internal caller).
+            if sk.source == "bundled":
+                continue
             if (sk.owner or "") != (owner or ""):
                 continue
 
@@ -507,6 +520,8 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != skill_id:
                 continue
+            if sk.source == "bundled":
+                continue
             if (sk.owner or "") != (owner or ""):
                 continue
             skill_dir = os.path.dirname(path)
@@ -546,7 +561,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if sk.source != "bundled" and (sk.owner or "") != (owner or ""):
                 continue
             try:
                 with open(path, encoding="utf-8") as f:
@@ -562,7 +577,7 @@ class SkillsManager:
             sk = self._read_skill(path)
             if not sk or sk.name != name:
                 continue
-            if (sk.owner or "") != (owner or ""):
+            if sk.source != "bundled" and (sk.owner or "") != (owner or ""):
                 continue
             base = os.path.realpath(os.path.dirname(path))
             target = os.path.realpath(os.path.join(base, ref_path))

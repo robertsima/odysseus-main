@@ -198,6 +198,29 @@ def test_exact_registered_skill_slug_is_detected_in_low_signal_request():
     assert [skill["name"] for skill in matched] == ["local-pi-delegation"]
 
 
+def test_proceed_anyway_inherits_the_pi_delegation_request():
+    messages = [
+        {
+            "role": "user",
+            "content": (
+                "Use $local-pi-delegation in D:/Development/portfolio to inspect "
+                "the repository and make the requested small change."
+            ),
+        },
+        {
+            "role": "assistant",
+            "content": "The skill is not installed. Proceed anyway?",
+        },
+        {"role": "user", "content": "Proceed anyway"},
+    ]
+
+    assert _is_explicit_continuation("Proceed anyway")
+    intent = _classify_agent_request(messages, "Proceed anyway")
+    assert intent["continuation"]
+    assert "local-pi-delegation" in intent["retrieval_query"]
+    assert "D:/Development/portfolio" in intent["retrieval_query"]
+
+
 # ── 5. a follow-up turn must not lose the tools the turn before it used ──────
 #
 # Second half of the same session: mid-audit, the user typed

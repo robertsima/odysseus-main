@@ -1356,8 +1356,9 @@ _CASUAL_BLOCKLIST_RE = re.compile(
 )
 _EXPLICIT_CONTINUATION_RE = re.compile(
     r"^\s*(?:please\s+)?(?:"
-    r"yes|y|yeah|yep|ok|okay|sure|do it|go ahead|continue|carry on|keep going|"
-    r"keep on|proceed|pick up where you left off|"
+    r"yes|y|yeah|yep|ok|okay|sure|do it(?: anyway)?|go ahead|"
+    r"continue(?: anyway)?|carry on|keep going|keep on|proceed(?: anyway)?|"
+    r"pick up where you left off|"
     r"run it|launch it|start it|use that|that one|same|the same|"
     r"first|second|third|the first one|the second one|the third one|"
     r"[123]|[abc]"

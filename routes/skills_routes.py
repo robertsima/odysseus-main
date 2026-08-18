@@ -1091,8 +1091,10 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     def _owner(request: Request) -> Optional[str]:
         return get_current_user(request)
 
-    def _verify_owner(skill: dict, user: Optional[str]):
+    def _verify_owner(skill: dict, user: Optional[str], *, allow_bundled: bool = False):
         if user is None:
+            return
+        if allow_bundled and skill.get("source") == "bundled":
             return
         # SECURITY: strict check — previously `sk_owner and sk_owner != user`
         # let any user mutate/read a skill that happened to have no owner
@@ -1374,7 +1376,7 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         match = next((s for s in skills if s.get("name") == skill_id or s.get("id") == skill_id), None)
         if not match:
             raise HTTPException(404, "Skill not found")
-        _verify_owner(match, user)
+        _verify_owner(match, user, allow_bundled=True)
         md = skills_manager.read_skill_md(match.get("name"), owner=user)
         if md is None:
             raise HTTPException(404, "Skill source unavailable (legacy entry?)")

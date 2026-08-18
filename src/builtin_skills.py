@@ -18,33 +18,45 @@ _BUNDLED_SKILLS = (
 
 
 def seed_bundled_skills(skills_manager) -> list[str]:
-    """Copy missing bundled skills without overwriting operator edits."""
+    """Install and reconcile bundled skills without replacing their body."""
     installed: list[str] = []
     app_root = get_app_root()
     for category, name in _BUNDLED_SKILLS:
         source = os.path.join(app_root, "skills", name)
         destination = os.path.join(skills_manager.skills_root, category, name)
-        if os.path.exists(destination):
-            continue
         if not os.path.isfile(os.path.join(source, "SKILL.md")):
             logger.warning("Bundled skill source is missing: %s", source)
             continue
-        os.makedirs(os.path.dirname(destination), exist_ok=True)
-        shutil.copytree(source, destination)
+        if not os.path.exists(destination):
+            os.makedirs(os.path.dirname(destination), exist_ok=True)
+            shutil.copytree(source, destination)
         skill_path = os.path.join(destination, "SKILL.md")
-        with open(skill_path, encoding="utf-8") as handle:
-            skill = Skill.from_markdown(handle.read(), path=skill_path)
+        try:
+            with open(skill_path, encoding="utf-8") as handle:
+                skill = Skill.from_markdown(handle.read(), path=skill_path)
+        except Exception:
+            # An operator may have deliberately replaced the installed file.
+            # Do not overwrite content we can no longer identify safely.
+            logger.warning("Existing bundled skill is not parseable; leaving it unchanged: %s", skill_path)
+            continue
+        if skill.name != name:
+            logger.warning("Existing bundled skill has unexpected name %r; leaving it unchanged", skill.name)
+            continue
         # Odysseus supports richer skill-index metadata than the portable
-        # SKILL.md schema. Enrich only the persistent installed copy.
+        # SKILL.md schema. Reconcile metadata on every startup so copies made
+        # by older releases (which were incorrectly stamped source=user and
+        # assigned to one account) become globally readable. Preserve the
+        # operator-editable instruction body and reference files.
         skill.category = category
         skill.tags = ["delegation", "local-model", "pi", "qwen", "coding", "context-efficiency"]
         skill.platforms = ["linux", "windows"]
         skill.requires_toolsets = ["mcp__pi_worker__run_pi_task"]
         skill.status = "published"
         skill.confidence = 0.9
-        skill.source = "user"
+        skill.source = "bundled"
+        skill.owner = None
         with open(skill_path, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(skill.to_markdown())
         installed.append(name)
-        logger.info("Installed bundled skill: %s", name)
+        logger.info("Installed/reconciled bundled skill: %s", name)
     return installed
