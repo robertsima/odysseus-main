@@ -3235,6 +3235,15 @@ async def _run_verifier_subagent(
     return [r.strip() for r in reasons.split(";") if r.strip()]
 
 
+# Placeholder emitted when a round produced no content at all. Consumers that
+# need to tell "the model said nothing" apart from a real answer (the task
+# scheduler, which must fail the run rather than deliver this as a result)
+# compare against this constant.
+EMPTY_RESPONSE_MESSAGE = (
+    "The model returned an empty response. Please try again or switch to a different model."
+)
+
+
 def _empty_response_fallback(
     full_response: str,
     round_reasoning: str,
@@ -3255,7 +3264,7 @@ def _empty_response_fallback(
         return full_response, None
     if round_reasoning.strip():
         return round_reasoning, None
-    _error_msg = "The model returned an empty response. Please try again or switch to a different model."
+    _error_msg = EMPTY_RESPONSE_MESSAGE
     return _error_msg, f'data: {json.dumps({"delta": _error_msg})}\n\n'
 
 

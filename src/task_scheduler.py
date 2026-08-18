@@ -2097,10 +2097,20 @@ class TaskScheduler:
                 except (json.JSONDecodeError, KeyError):
                     pass
 
+        # When a round produces nothing, stream_agent_loop synthesizes a
+        # placeholder delta ("The model returned an empty response...") for the
+        # chat UI. For a task that is not a result — delivering it as one is how
+        # a 401/502 kept getting recorded as a completed run — so drop it and
+        # let the guards below treat the round as the failure it was.
+        from src.agent_loop import EMPTY_RESPONSE_MESSAGE
+        if full_text.strip() == EMPTY_RESPONSE_MESSAGE:
+            full_text = ""
+
         # An upstream error with nothing to show for the run is a failure, not a
         # success with empty text. Surfacing it here puts the provider's own
-        # message ("credentials expired or were rejected") on the Activity row
-        # instead of silently delivering "(no output)".
+        # message ("credentials expired or were rejected", "servers are
+        # currently overloaded") on the Activity row, and lets _execute_llm_task
+        # try its fallback endpoints instead of silently "completing".
         if stream_error and not full_text.strip() and not tool_results:
             raise RuntimeError(stream_error)
 

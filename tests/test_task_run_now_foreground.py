@@ -433,3 +433,69 @@ def test_ensure_task_session_adopts_an_existing_row(tmp_path, monkeypatch):
     assert session.owner == "alice"
     assert session.name == "[Task] Report"
     assert task.session_id == "s1"
+
+
+_OVERLOAD_FRAME = (
+    'event: error\n'
+    'data: {"status": 502, "text": "Our servers are currently overloaded. Please try again later."}\n\n'
+)
+
+
+async def test_placeholder_delta_does_not_mask_a_stream_error(monkeypatch):
+    """The production shape: HTTP 200, then a 502 error event, then the
+    synthesized "model returned an empty response" delta.
+
+    That placeholder made full_text non-empty, so the run was recorded as a
+    success carrying a message the user could do nothing with, and the fallback
+    endpoints were never tried.
+    """
+    import json as _json
+
+    from src.agent_loop import EMPTY_RESPONSE_MESSAGE
+
+    task = _stub_llm_task_deps(monkeypatch)
+
+    async def _stub_stream(**kwargs):
+        yield _OVERLOAD_FRAME
+        yield 'data: ' + _json.dumps({"delta": EMPTY_RESPONSE_MESSAGE}) + '\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
+
+    import src.task_endpoint as _te
+
+    async def _fallback(messages, **kw):
+        return "recovered on the fallback endpoint"
+
+    monkeypatch.setattr(_te, "task_llm_call_async", _fallback)
+
+    from src.task_scheduler import TaskScheduler
+
+    result = await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
+    assert result == "recovered on the fallback endpoint"
+    assert EMPTY_RESPONSE_MESSAGE not in result
+
+
+async def test_placeholder_alone_fails_the_run(monkeypatch):
+    """No upstream error, but the model said nothing — still not a result."""
+    import json as _json
+
+    from src.agent_loop import EMPTY_RESPONSE_MESSAGE
+
+    task = _stub_llm_task_deps(monkeypatch)
+
+    async def _stub_stream(**kwargs):
+        yield 'data: ' + _json.dumps({"delta": EMPTY_RESPONSE_MESSAGE}) + '\n\n'
+
+    monkeypatch.setattr("src.agent_loop.stream_agent_loop", _stub_stream)
+
+    import src.task_endpoint as _te
+
+    async def _fallback(messages, **kw):
+        return ""
+
+    monkeypatch.setattr(_te, "task_llm_call_async", _fallback)
+
+    from src.task_scheduler import TaskScheduler
+
+    with pytest.raises(RuntimeError, match="no output"):
+        await TaskScheduler(session_manager=None)._execute_llm_task(task, db=None)
