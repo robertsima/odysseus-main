@@ -51,6 +51,11 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
     "bulk_email", "archive_email", "delete_email", "mark_email_read",
     "manage_calendar", "manage_notes", "manage_tasks",
     "manage_memory", "web_search", "read_file",
+    # Paired with read_file on purpose. The assistant answers questions about
+    # the user's own notes constantly, and read_file being unconditionally
+    # present while document search was not biased it toward pulling whole
+    # vault notes into context on precisely those tasks.
+    "search_documents",
     "create_document", "update_document",
     "resolve_contact", "search_chats",
     "api_call",  # For Miniflux/Gitea/Linkding/etc. integrations
