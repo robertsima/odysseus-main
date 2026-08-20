@@ -911,6 +911,11 @@ def _is_self_hosted_openai_compatible(url: str) -> bool:
     return is_local_endpoint(url)
 
 
+# Hosts we've already reported as ineligible for the KV-cache hint, so the
+# diagnostic below stays a one-liner per host instead of per request.
+_cache_affinity_warned: set = set()
+
+
 def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[str]) -> None:
     """Add llama.cpp-server slot-affinity hints to an outgoing payload, in place.
 
@@ -927,12 +932,37 @@ def _apply_local_cache_affinity(payload: Dict, url: str, session_id: Optional[st
     api.openai.com or other cloud providers, which reject unrecognized
     top-level request fields).
     """
-    if not session_id:
-        return
     if not _is_self_hosted_openai_compatible(url):
+        # Logged once per host at INFO: a private-IP endpoint landing here is
+        # almost always a misconfiguration (endpoint_kind set to api/proxy, or
+        # inferred as a proxy because it carries an api_key and a /v1 base),
+        # and the symptom — full prompt re-prefill every agent round — is
+        # otherwise invisible from this side.
+        _key = _host_key(url)
+        if _key not in _cache_affinity_warned:
+            _cache_affinity_warned.add(_key)
+            logger.info(
+                "[cache-affinity] disabled for %s — endpoint does not classify as "
+                "self-hosted/local, so no cache_prompt/session_id hint is sent. "
+                "If this is a local llama.cpp/LM Studio server, set its "
+                "endpoint_kind to 'local' to restore KV-cache reuse.",
+                _key,
+            )
+        return
+    # cache_prompt does not depend on slot affinity — a self-hosted server can
+    # reuse the prefix it already holds even when we have no stable session to
+    # pin with, so set it before the session_id check rather than after. Losing
+    # the whole hint because the caller passed no session_id meant every round
+    # of a tool-calling run re-prefilled the entire conversation.
+    payload.setdefault("cache_prompt", True)
+    if not session_id:
+        logger.debug(
+            "[cache-affinity] %s: cache_prompt set but no session_id — slot "
+            "affinity unavailable for this call",
+            _host_key(url),
+        )
         return
     payload.setdefault("session_id", str(session_id))
-    payload.setdefault("cache_prompt", True)
 
 
 def _is_local_minimax_mlx_request(url: str, model: str) -> bool:

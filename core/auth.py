@@ -685,3 +685,64 @@ class AuthManager:
         if authenticated:
             result["privileges"] = self.get_privileges(username)
         return result
+
+
+# ---------------------------------------------------------------------------
+# Shared instance for hot read paths
+# ---------------------------------------------------------------------------
+# Every tool execution runs through src.tool_security.owner_is_admin_or_single_user,
+# which used to build a throwaway AuthManager per call — two JSON reads plus the
+# four migration passes in __init__, on every bash/read_file/grep the agent fires.
+# This accessor keeps one instance per auth path and reloads it only when the
+# backing files actually change on disk, so a permission edit (which always goes
+# through atomic_write_json, bumping mtime) is still picked up immediately.
+_shared_managers: Dict[str, "AuthManager"] = {}
+_shared_stamps: Dict[str, tuple] = {}
+_shared_lock = threading.Lock()
+
+
+def _auth_file_stamp(mgr: "AuthManager") -> tuple:
+    """(mtime, size) for both backing files; (0, 0) for a file that isn't there."""
+    stamp = []
+    for path in (mgr.auth_path, mgr._sessions_path):
+        try:
+            st = os.stat(path)
+            stamp.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            stamp.append((0, 0))
+    return tuple(stamp)
+
+
+def get_auth_manager(auth_path: str = DEFAULT_AUTH_PATH) -> "AuthManager":
+    """Process-wide AuthManager for read-heavy callers.
+
+    Returns a cached instance, transparently reloading it when auth.json or
+    sessions.json changed since the last call. Callers that mutate auth state
+    may use this too — writes go through the same instance, and an out-of-band
+    write by another process is caught by the stamp check.
+
+    Tests that want an isolated manager should keep constructing ``AuthManager``
+    directly; this accessor is opt-in.
+    """
+    with _shared_lock:
+        mgr = _shared_managers.get(auth_path)
+        if mgr is None:
+            mgr = AuthManager(auth_path)
+            _shared_managers[auth_path] = mgr
+            _shared_stamps[auth_path] = _auth_file_stamp(mgr)
+            return mgr
+        stamp = _auth_file_stamp(mgr)
+        if stamp != _shared_stamps.get(auth_path):
+            # Backing files moved under us — rebuild so migrations rerun against
+            # the new content rather than patching a half-stale in-memory config.
+            mgr = AuthManager(auth_path)
+            _shared_managers[auth_path] = mgr
+            _shared_stamps[auth_path] = _auth_file_stamp(mgr)
+        return mgr
+
+
+def reset_shared_auth_managers() -> None:
+    """Drop every cached instance. For tests that repoint the auth path."""
+    with _shared_lock:
+        _shared_managers.clear()
+        _shared_stamps.clear()
