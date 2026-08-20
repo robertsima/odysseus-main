@@ -320,6 +320,38 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "search_documents",
+            "description": (
+                "Semantic search over the user's indexed personal documents "
+                "(vault, notes, journal, uploaded files) using the ChromaDB "
+                "embedding index. THIS IS THE DEFAULT WAY TO ANSWER A QUESTION "
+                "ABOUT THE USER'S DOCUMENTS. Returns the relevant excerpts plus "
+                "the file path each came from. Do not read, cat, or loop over "
+                "files in the personal documents directory to answer a question "
+                "— a single note can be tens of thousands of characters and "
+                "stays in context for the rest of the conversation. Use "
+                "read_file with offset/limit on a returned path only when an "
+                "excerpt is genuinely insufficient."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to look for, in natural language. Matched semantically, so phrase it as the question or topic rather than a filename.",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "How many excerpts to return (default 5, max 12). Raise it only when the answer is likely spread across several notes.",
+                    },
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_chats",
             "description": "Search the user's past session transcripts by keyword. Use when the user asks about previous chats, past conversations, or when direct transcript evidence is better than persistent memory. Returns matching sessions with clickable links and nearby context.",
             "parameters": {

@@ -130,6 +130,36 @@ class EditFileTool:
             result["diff"] = diff
         return result
 
+# The per-file MAX_READ_CHARS cap does not bound a ROUND: the agent batches
+# parallel read_file calls, and seven 7k-char reads of one vault folder cost
+# ~12k tokens in a single turn — which then rides along in every later turn.
+# The prompt rules and the search_documents schema both say to search first;
+# this repeats it at the one moment the model is demonstrably not listening,
+# and costs nothing on the reads that are legitimate.
+_PERSONAL_HINT_MIN_CHARS = 2000
+
+
+def _personal_docs_hint(path: str, size: int) -> str:
+    """One-line nudge toward semantic search when reading the personal vault."""
+    if size < _PERSONAL_HINT_MIN_CHARS:
+        return ""
+    try:
+        from src.constants import PERSONAL_DIR
+
+        resolved = os.path.abspath(path)
+        root = os.path.abspath(PERSONAL_DIR)
+        if resolved != root and not resolved.startswith(root + os.sep):
+            return ""
+    except Exception:
+        return ""
+    return (
+        "[note] This file is in the user's indexed personal documents. To answer "
+        "questions about the vault, prefer `search_documents` — it returns only "
+        "the relevant excerpts. Reading whole notes keeps them in context for the "
+        "rest of the conversation."
+    )
+
+
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -178,6 +208,9 @@ class ReadFileTool:
             return {"error": f"read_file: {path}: {e}", "exit_code": 1}
         if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
             data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
+        hint = _personal_docs_hint(path, len(data))
+        if hint:
+            data = data + "\n\n" + hint
         return {"output": data, "exit_code": 0}
 
 class WriteFileTool:

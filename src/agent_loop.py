@@ -478,7 +478,9 @@ _DOMAIN_RULES = {
 - For long code/content (>15 lines), use `create_document` instead of pasting into chat.
 - If an active document is open, "fix this", "add X", "change Y", etc. usually refers to that document.
 - Use `edit_document` for targeted changes. Use `update_document` only for genuine full rewrites.
-- For feedback/review/suggestions on an open document, use `suggest_document`.""",
+- For feedback/review/suggestions on an open document, use `suggest_document`.
+- To find something in the user's personal documents/vault/notes, use `search_documents` — it is semantic search over the indexed corpus and returns only the relevant excerpts plus their file paths.
+- Do NOT `read_file`, `cat`, or loop over the personal documents directory to answer a question. A single vault note can be 40k+ characters, it stays in context for every later turn, and the index already exists. Search first; read one specific file with `read_file` offset/limit only when an excerpt is genuinely insufficient.""",
     "email": """\
 ## Email rules
 - Email UIDs are the values after `UID:` in tool output, never list row numbers.
@@ -538,7 +540,7 @@ _DOMAIN_RULES = {
 
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
-    "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
+    "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents", "search_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
@@ -3347,6 +3349,14 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+# Cumulative tool calls allowed in one agent run before we force a convergence
+# round. Deliberately generous — a legitimate heavy turn (a batch of calendar
+# events, a build→test→fix cycle) lands well under it — but low enough that an
+# unbounded breadth-first sweep stops before it fills the context window.
+# Override with the `agent_max_tool_calls` setting; <= 0 disables the guard.
+DEFAULT_MAX_TOOL_CALLS_PER_RUN = 60
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -4189,6 +4199,11 @@ async def stream_agent_loop(
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
+    # Budget resolved once here and reused by the per-round re-trim inside the
+    # agent loop (tool results accumulate every round, so a single pre-loop
+    # trim cannot keep a long run inside the window).
+    _soft_trim_budget = 0
+    _soft_trim_reserve = 0
     try:
         from src.context_compactor import trim_for_context
         from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
@@ -4221,6 +4236,8 @@ async def stream_agent_loop(
                 budget_is_explicit,
                 hard_max=hard_max,
             )
+            _soft_trim_budget = effective_budget
+            _soft_trim_reserve = reserve_tokens
             trimmed_messages = trim_for_context(
                 messages,
                 effective_budget,
@@ -4287,6 +4304,13 @@ async def stream_agent_loop(
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
+    # Breadth budget (companion to the repeat-based loop-breaker below). The
+    # stall detector only trips on REPEATED calls, so a model that explores
+    # forever with DISTINCT calls — e.g. `cat`-ing a whole vault one file per
+    # call — never trips it and rides to MAX_AGENT_ROUNDS while the prompt
+    # grows every round. This counts cumulative calls and forces the same
+    # tool-free convergence round once the run is clearly no longer bounded.
+    _total_tool_calls = 0
     # Supervisor: how many times we've nudged the model after it announced
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
@@ -4342,6 +4366,28 @@ async def stream_agent_loop(
         # fenced block closes we advance this so the next iteration can
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
+
+        # ── Per-round context re-trim ────────────────────────────────
+        # Every round appends this round's tool results, so a run that keeps
+        # calling tools grows past the window the pre-loop trim fit it into.
+        # trim_for_context is a no-op while we're under budget, so this only
+        # bites on genuinely long runs — and it repairs tool_call/tool pairing
+        # (_sanitize_tool_messages) so front-trimming can't orphan a batch.
+        if _soft_trim_budget > 0 and round_num > 1:
+            try:
+                from src.context_compactor import trim_for_context as _trim
+                _before = estimate_tokens(messages)
+                _retrimmed = _trim(messages, _soft_trim_budget, reserve_tokens=_soft_trim_reserve)
+                if _retrimmed is not messages:
+                    _after = estimate_tokens(_retrimmed)
+                    if _after < _before:
+                        logger.info(
+                            "[agent] round %s re-trimmed context: %s -> %s tokens (budget=%s)",
+                            round_num, _before, _after, _soft_trim_budget,
+                        )
+                        messages = _retrimmed
+            except Exception as _e:
+                logger.warning("[agent] round %s context re-trim skipped: %s", round_num, _e)
 
         # Merge native tool schemas with MCP tool schemas, filtering out
         # Only send function schemas for API models (OpenAI, Anthropic, etc.).
@@ -5023,6 +5069,7 @@ async def stream_agent_loop(
         # runaway backstop). On bail we don't give up — we force one
         # tool-free round so the model declares done or declares blocked,
         # mirroring Terminus's explicit-completion handshake.
+        _total_tool_calls += len(tool_blocks)
         _sig = "|".join(sorted(f"{b.tool_type}:{(b.content or '').strip()[:120]}" for b in tool_blocks))
         _is_repeat = _sig in _recent_call_sigs
         _recent_call_sigs.append(_sig)
@@ -5042,17 +5089,32 @@ async def stream_agent_loop(
         # Distinct calls to one tool (a real batch) are legitimate work, so we
         # count identical call signatures, not raw per-tool-type totals.
         _runaway = _detect_runaway_call(_call_freq)
-        if _stuck_rounds >= 4 or _runaway:
+        # Breadth backstop: distinct-but-endless exploration. Never trips on a
+        # normal turn; catches the sweep that the repeat detectors cannot see.
+        try:
+            _max_calls = int(get_setting("agent_max_tool_calls", DEFAULT_MAX_TOOL_CALLS_PER_RUN)
+                             or DEFAULT_MAX_TOOL_CALLS_PER_RUN)
+        except (TypeError, ValueError):
+            _max_calls = DEFAULT_MAX_TOOL_CALLS_PER_RUN
+        _over_budget = _max_calls > 0 and _total_tool_calls >= _max_calls
+        if _stuck_rounds >= 4 or _runaway or _over_budget:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
+                      else f"used {_total_tool_calls} tool calls without converging (budget {_max_calls})"
+                      if _over_budget
                       else "repeating the same tool calls without new progress")
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
             yield (
                 "data: "
                     + json.dumps({
                     "type": "loop_breaker_triggered",
-                    "reason": "loop_breaker_stall",
+                    "reason": "loop_breaker_call_budget" if (_over_budget and not _runaway and _stuck_rounds < 4)
+                              else "loop_breaker_stall",
                     "message": (
-                        "The loop-breaker detected repeated tool calls without "
+                        "The agent used its whole tool-call budget without "
+                        "converging, so it is being forced to stop using tools "
+                        "and give its best answer from what it has gathered."
+                        if (_over_budget and not _runaway and _stuck_rounds < 4)
+                        else "The loop-breaker detected repeated tool calls without "
                         "new progress, so the agent is being forced to stop "
                         "using tools and give its best final answer."
                     ),
@@ -5074,7 +5136,10 @@ async def stream_agent_loop(
             messages.append({
                 "role": "system",
                 "content": (
-                    "You're repeating tool calls without converging. STOP calling "
+                    ("You've used your whole tool-call budget for this turn."
+                     if (_over_budget and not _runaway and _stuck_rounds < 4)
+                     else "You're repeating tool calls without converging.")
+                    + " STOP calling "
                     "tools and end the turn one of two ways: (a) write your best "
                     "final answer NOW from the information already gathered, or "
                     "(b) if you're genuinely blocked, say plainly what's blocking "
