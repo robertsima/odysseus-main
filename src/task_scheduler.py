@@ -375,6 +375,11 @@ class TaskScheduler:
         self._executing_lock = asyncio.Lock()
         self._pending_notifications = []  # completed task notifications
         self._task_defer_counts = {}
+        # task_id -> consecutive failures that looked like a transient upstream
+        # outage (DNS blip, endpoint briefly unreachable). Those get a short
+        # retry instead of the usual "advance to the next occurrence", so a
+        # daily task doesn't lose its whole day to a few unreachable seconds.
+        self._task_transient_retries = {}
         # Strict serial execution — exactly one task runs at a time. Anything
         # else (manual trigger, scheduled dispatch, task chain) waits behind
         # the semaphore as "queued" and starts when the current run finishes.
@@ -917,6 +922,48 @@ class TaskScheduler:
         except Exception:
             logger.debug("Failed to defer cancelled queued task %s", task_id, exc_info=True)
 
+    #: Backoff for re-running a task whose failure looked like a transient
+    #: upstream outage. Capped: once these are used up the run takes the normal
+    #: failure path, so a permanently broken endpoint stops costing retries.
+    _TRANSIENT_RETRY_DELAYS = (5 * 60, 15 * 60, 30 * 60)
+
+    def _transient_retry_counts(self) -> dict:
+        """The per-task transient-failure counter, created on first use.
+
+        Lazy because plenty of callers build a scheduler with ``__new__`` and
+        set only the attributes they need; this one is read from inside the
+        error handler, which must never be the thing that raises.
+        """
+        counts = getattr(self, "_task_transient_retries", None)
+        if counts is None:
+            counts = {}
+            self._task_transient_retries = counts
+        return counts
+
+    def _transient_retry_delay(self, task_id: str, exc: BaseException, *, manual: bool = False):
+        """Seconds to wait before retrying this run, or None to fail normally.
+
+        Manual runs never retry — the user triggered it and is waiting on the
+        answer, so surface the error rather than silently deferring.
+        """
+        if manual:
+            return None
+        try:
+            from src.llm_core import is_transient_upstream_error
+            transient = is_transient_upstream_error(exc)
+        except Exception:
+            return None
+        counts = self._transient_retry_counts()
+        if not transient:
+            counts.pop(task_id, None)
+            return None
+        used = counts.get(task_id, 0)
+        if used >= len(self._TRANSIENT_RETRY_DELAYS):
+            counts.pop(task_id, None)
+            return None
+        counts[task_id] = used + 1
+        return self._TRANSIENT_RETRY_DELAYS[used]
+
     async def _execute_task_locked(
         self,
         task_id: str,
@@ -1141,6 +1188,7 @@ class TaskScheduler:
             task.last_run = _utcnow()
             task.run_count = (task.run_count or 0) + 1
             self._task_defer_counts.pop(task_id, None)
+            self._transient_retry_counts().pop(task_id, None)
 
             # Compute next run only for schedule-triggered tasks
             if (task.trigger_type or "schedule") == "schedule":
@@ -1207,7 +1255,17 @@ class TaskScheduler:
                     logger.warning(f"Skipping chain from '{task.name}': cycle detected")
 
         except Exception as exec_exc:
-            logger.exception(f"Task {task_id} execution error")
+            # A momentary upstream outage is not a broken task. Retry it in a
+            # few minutes instead of writing the run off and sliding to the
+            # next occurrence, which for a daily task means losing the day.
+            _retry_delay = self._transient_retry_delay(task_id, exec_exc, manual=manual)
+            if _retry_delay is not None:
+                logger.warning(
+                    "Task %s hit a transient upstream failure (%s: %s) — retrying in %d min",
+                    task_id, type(exec_exc).__name__, exec_exc, _retry_delay // 60,
+                )
+            else:
+                logger.exception(f"Task {task_id} execution error")
             # Fetch the task's owner so the error notification reaches
             # the same user the success notification would have.
             _owner = None
@@ -1223,6 +1281,9 @@ class TaskScheduler:
                     bool(_t_for_notify)
                     and (_t_for_notify.task_type or "llm") in {"llm", "research"}
                     and getattr(_t_for_notify, "notifications_enabled", True)
+                    # Don't page the user about a blip we are about to retry;
+                    # if the retries run out they get the notification then.
+                    and _retry_delay is None
                 )
             except Exception:
                 _should_notify_error = False
@@ -1231,6 +1292,8 @@ class TaskScheduler:
             try:
                 # Persist the actual exception message so the UI can show it
                 err_text = f"{type(exec_exc).__name__}: {exec_exc}"
+                if _retry_delay is not None:
+                    err_text = f"{err_text} — retrying in {_retry_delay // 60} min"
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if run_obj and run_obj.status in ("running", "success"):
                     run_obj.status = "error"
@@ -1251,6 +1314,14 @@ class TaskScheduler:
                         )
                     except Exception:
                         pass
+                    if _retry_delay is not None:
+                        # Never push the retry past the task's own next slot —
+                        # if the schedule comes round sooner, that wins.
+                        retry_at = _utcnow() + timedelta(seconds=_retry_delay)
+                        task_obj.next_run = (
+                            min(retry_at, task_obj.next_run)
+                            if task_obj.next_run else retry_at
+                        )
                 try:
                     db.commit()
                 except Exception as commit_err:

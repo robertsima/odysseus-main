@@ -395,9 +395,9 @@ def known_owners() -> Iterable[str]:
     """
     owners: list[str] = []
     try:
-        from core.auth import AuthManager
+        from core.auth import get_auth_manager
 
-        owners = [str(user.get("username") or "") for user in AuthManager().list_users()]
+        owners = [str(user.get("username") or "") for user in get_auth_manager().list_users()]
         owners = [name for name in owners if name]
     except Exception as error:
         logger.debug("Lotus: user enumeration failed: %s", error)

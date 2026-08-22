@@ -1,6 +1,7 @@
 # src/llm_core.py
 import httpx
 import asyncio
+import socket
 import time
 import json
 import logging
@@ -112,6 +113,16 @@ class LLMConfig:
     # genuinely dead upstream stays bounded by the dead-host cooldown. Override
     # with env LLM_CONNECT_TIMEOUT (seconds).
     CONNECT_TIMEOUT = float(os.getenv('LLM_CONNECT_TIMEOUT', '10') or '10')
+    # Replays of a streaming call whose connect never landed. Safe because no
+    # response byte reached the caller yet, and needed because the streaming
+    # handlers used to log "transient, will retry" and then never retry: a
+    # momentary DNS/connect blip killed the round outright *and* burned one of
+    # the two strikes the dead-host cooldown allows, so the non-streaming
+    # fallback behind it raised on its own first failure. Retrying stops once
+    # the host is actually cooled, which keeps a genuinely dead upstream fast
+    # to fail.
+    STREAM_CONNECT_RETRIES = 2
+    STREAM_CONNECT_RETRY_DELAY = 0.5
 
 
 def _call_timeout(read_timeout) -> httpx.Timeout:
@@ -403,6 +414,70 @@ def _clear_host_dead(url: str) -> None:
     with _host_health_lock:
         _dead_hosts.pop(key, None)
         _host_fails.pop(key, None)
+
+
+def _connect_error_chunk(target_url: str) -> str:
+    """SSE error chunk for a connect failure on a streaming call.
+
+    `retryable` marks it replay-safe: the connect never completed, so not one
+    byte of the response reached the caller and re-attempting cannot duplicate
+    streamed output. `stream_llm` keys its retry off this flag.
+    """
+    payload = {
+        "error": f"Cannot reach {_host_key(target_url)}",
+        "status": 503,
+        "retryable": True,
+    }
+    return f'event: error\ndata: {json.dumps(payload)}\n\n'
+
+
+def _is_retryable_connect_chunk(chunk: str) -> bool:
+    """True only for the pre-content connect failure above."""
+    if not chunk.startswith("event: error"):
+        return False
+    for line in chunk.split("\n"):
+        if line.startswith("data: "):
+            try:
+                return bool(json.loads(line[6:]).get("retryable"))
+            except Exception:
+                return False
+    return False
+
+
+# Failure shapes that mean "the upstream was momentarily out of reach", as
+# opposed to "the request was wrong". Deliberately conservative — an auth
+# failure, a bad payload or a model-side error must NOT match, or a genuinely
+# broken caller would retry forever.
+_TRANSIENT_UPSTREAM_MARKERS = (
+    "cannot reach",
+    "unreachable",
+    "cooldown active",
+    "name resolution",
+    "temporary failure",
+    "connection refused",
+    "connection reset",
+    "network error",
+    "read timeout",
+    "timed out",
+)
+
+
+def is_transient_upstream_error(err: BaseException) -> bool:
+    """Whether `err` is worth trying again later rather than giving up on.
+
+    Callers that own a schedule (the task scheduler) use this to reschedule a
+    short retry instead of burning the run's slot: a DNS blip inside the
+    container must not cost a daily task its whole day.
+    """
+    if isinstance(err, (httpx.NetworkError, httpx.TimeoutException)):
+        return True
+    if isinstance(err, socket.gaierror):
+        return True
+    status = getattr(err, "status_code", None)
+    if isinstance(status, int) and status in (502, 503, 504):
+        return True
+    text = str(getattr(err, "detail", "") or err).lower()
+    return any(marker in text for marker in _TRANSIENT_UPSTREAM_MARKERS)
 
 
 # Shared async HTTP client. Reusing one client keeps connections warm:
@@ -2190,20 +2265,46 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      tool_choice_none: bool = False, workload: str = "foreground"):
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
-        async for chunk in _stream_llm_inner(
-            url,
-            model,
-            messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            headers=headers,
-            timeout=timeout,
-            prompt_type=prompt_type,
-            tools=tools,
-            session_id=session_id,
-            tool_choice_none=tool_choice_none,
-        ):
-            yield chunk
+        attempt = 0
+        while True:
+            emitted = False
+            retry_delay = None
+            inner = _stream_llm_inner(
+                url,
+                model,
+                messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                headers=headers,
+                timeout=timeout,
+                prompt_type=prompt_type,
+                tools=tools,
+                session_id=session_id,
+                tool_choice_none=tool_choice_none,
+            )
+            async for chunk in inner:
+                # Only the very first chunk can be replayed: once anything has
+                # gone out, a second attempt would duplicate streamed tokens.
+                if (
+                    not emitted
+                    and attempt < LLMConfig.STREAM_CONNECT_RETRIES
+                    and _is_retryable_connect_chunk(chunk)
+                    and not _is_host_dead(target_url)
+                ):
+                    retry_delay = LLMConfig.STREAM_CONNECT_RETRY_DELAY * (attempt + 1)
+                    await inner.aclose()
+                    break
+                emitted = True
+                yield chunk
+            if retry_delay is None:
+                return
+            attempt += 1
+            logger.info(
+                "Retrying stream connect to %s (attempt %d/%d) in %.1fs",
+                _host_key(target_url), attempt + 1,
+                LLMConfig.STREAM_CONNECT_RETRIES + 1, retry_delay,
+            )
+            await asyncio.sleep(retry_delay)
 
 
 async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperature: float = LLMConfig.DEFAULT_TEMPERATURE,
@@ -2421,7 +2522,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.NetworkError:
@@ -2483,7 +2584,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.NetworkError:
@@ -2590,7 +2691,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
-            yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+            yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.NetworkError:
@@ -2879,7 +2980,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
         logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
-        yield f'event: error\ndata: {json.dumps({"error": f"Cannot reach {_host_key(target_url)}", "status": 503})}\n\n'
+        yield _connect_error_chunk(target_url)
     except httpx.ReadTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
     except httpx.NetworkError:
