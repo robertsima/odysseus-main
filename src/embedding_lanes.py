@@ -12,12 +12,40 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import os
+import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 LANE_FASTEMBED = "fastembed"
 LANE_CUSTOM = "custom"
+
+
+# `count()` is a network round-trip to ChromaDB, and the retrieval paths ask
+# for it several times per search: once to decide whether the lane is empty,
+# again inside query_lanes to clamp n_results, per lane, per store. One chat
+# turn was observed making fifteen HTTP calls to Chroma, eleven of them counts,
+# to return zero results. A short TTL collapses that burst without letting a
+# stale count outlive the request that caused it.
+#
+# Cached PER LANE INSTANCE, not per collection name. Two lanes can carry the
+# same collection name while pointing at different collection objects (a
+# rebuilt index, a second client, a test fixture) — a shared cache hands one
+# the other's count, which is a wrong answer, not just a stale one.
+_COUNT_TTL_SECONDS = 2.0
+_count_generation = 0
+
+
+def invalidate_count_cache(collection_name: Optional[str] = None) -> None:
+    """Drop cached counts after a write, so a fresh add is searchable at once.
+
+    `collection_name` is accepted for callers that know what they changed, but
+    the counter is global: invalidation is rare and a lane holds no index of
+    its peers, so bumping a generation everyone compares against is both
+    cheaper and impossible to get subtly wrong.
+    """
+    global _count_generation
+    _count_generation += 1
 
 
 @dataclass
@@ -40,10 +68,26 @@ class EmbeddingLane:
         return vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
 
     def count(self) -> int:
+        cached = getattr(self, "_count_cached", None)
+        now = time.monotonic()
+        if (
+            cached is not None
+            and cached[0] == _count_generation
+            and now - cached[1] < _COUNT_TTL_SECONDS
+        ):
+            return cached[2]
         try:
-            return int(self.collection.count())
+            value = int(self.collection.count())
         except Exception:
             return 0
+        # Only a NON-EMPTY count is cached. Callers treat 0 as "skip this lane",
+        # so a cached zero would hide a document for up to the TTL right after
+        # it was added — and writes go through `lane.collection` directly, not
+        # through this class, so there is no reliable hook to invalidate on.
+        # An empty collection is also the cheap case to re-ask about.
+        if value > 0:
+            object.__setattr__(self, "_count_cached", (_count_generation, now, value))
+        return value
 
     def stats(self) -> Dict[str, Any]:
         return {

@@ -73,18 +73,44 @@ def _env_int(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
-def inline_limit(tool: str = "") -> int:
+def _profile_int(profile, name: str, env_key: str, default: int) -> int:
+    """A knob from the active context profile, falling back to env then default.
+
+    The profile already folded env in during resolution, so this only reaches
+    for the environment when no profile was resolved at all (a caller with no
+    endpoint context, e.g. a background job).
+    """
+    if isinstance(profile, dict) and profile.get(name) is not None:
+        try:
+            value = int(profile[name])
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+    return _env_int(env_key, default)
+
+
+def inline_limit(tool: str = "", profile=None) -> int:
     """How much of this tool's result may stay inline before it is offloaded."""
-    base = _env_int("ODYSSEUS_TOOL_OUTPUT_INLINE_LIMIT", DEFAULT_INLINE_LIMIT)
+    base = _profile_int(
+        profile, "tool_output_inline_limit",
+        "ODYSSEUS_TOOL_OUTPUT_INLINE_LIMIT", DEFAULT_INLINE_LIMIT,
+    )
     return max(base, _TOOL_INLINE_LIMITS.get(str(tool or ""), 0))
 
 
-def head_chars() -> int:
-    return _env_int("ODYSSEUS_TOOL_OUTPUT_HEAD_CHARS", DEFAULT_HEAD_CHARS)
+def head_chars(profile=None) -> int:
+    return _profile_int(
+        profile, "tool_output_head_chars",
+        "ODYSSEUS_TOOL_OUTPUT_HEAD_CHARS", DEFAULT_HEAD_CHARS,
+    )
 
 
-def tail_chars() -> int:
-    return _env_int("ODYSSEUS_TOOL_OUTPUT_TAIL_CHARS", DEFAULT_TAIL_CHARS)
+def tail_chars(profile=None) -> int:
+    return _profile_int(
+        profile, "tool_output_tail_chars",
+        "ODYSSEUS_TOOL_OUTPUT_TAIL_CHARS", DEFAULT_TAIL_CHARS,
+    )
 
 
 def _store_dir() -> str:
@@ -232,6 +258,13 @@ def _index(ref: str, text: str, meta: Dict[str, Any]) -> int:
             indexed = len(chunks)
         except Exception as exc:
             logger.warning("tool output %s add failed in %s lane: %s", ref, lane.name, exc)
+    if indexed:
+        try:
+            from src.embedding_lanes import invalidate_count_cache
+
+            invalidate_count_cache()
+        except Exception:
+            pass
     return indexed
 
 
@@ -444,10 +477,11 @@ def excerpt_with_pointer(
     *,
     head: Optional[int] = None,
     tail: Optional[int] = None,
+    profile=None,
 ) -> str:
     """The inline stand-in for an offloaded result: head + tail + how to get more."""
-    head = head if head is not None else head_chars()
-    tail = tail if tail is not None else tail_chars()
+    head = head if head is not None else head_chars(profile)
+    tail = tail if tail is not None else tail_chars(profile)
     ref = record.get("ref", "")
     hidden = max(len(text) - head - tail, 0)
     parts = [
@@ -476,6 +510,7 @@ def maybe_offload(
     session_id: Optional[str] = None,
     round_num: Optional[int] = None,
     limit: Optional[int] = None,
+    profile=None,
 ) -> tuple:
     """Return (text_for_the_model, record_or_None).
 
@@ -485,7 +520,7 @@ def maybe_offload(
     """
     if not isinstance(formatted, str):
         return formatted, None
-    limit = limit if limit is not None else inline_limit(tool)
+    limit = limit if limit is not None else inline_limit(tool, profile)
     if len(formatted) <= limit:
         return formatted, None
     try:
@@ -501,4 +536,4 @@ def maybe_offload(
         return formatted, None
     if not record:
         return formatted, None
-    return excerpt_with_pointer(formatted, record), record
+    return excerpt_with_pointer(formatted, record, profile=profile), record

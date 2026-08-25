@@ -660,6 +660,14 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key not in body:
                 continue
             val = body[key]
+            if key == "context_profiles":
+                # A preferences blob, not a scalar: clamp what is out of range
+                # and drop what is unknown rather than 400ing the whole save
+                # and costing the user every other field on the form.
+                from src.context_profiles import sanitize as _sanitize_profiles
+
+                current[key] = _sanitize_profiles(val)
+                continue
             if key in _INT_RANGES:
                 lo, hi = _INT_RANGES[key]
                 try:
@@ -670,6 +678,60 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             current[key] = val
         _save_settings(current)
         return current
+
+    # ---- Context profiles (per endpoint/model window tuning) ----
+
+    @router.get("/settings/context-profile")
+    async def get_context_profile(request: Request):
+        """Everything the Context settings tab needs for one endpoint/model.
+
+        Returns the presets, the knob metadata (ranges + what each one does),
+        what is currently saved, and the EFFECTIVE values with the source that
+        won — a profile that silently does nothing is worse than no profile.
+        """
+        from src.context_profiles import describe
+        from src.model_context import get_context_length
+
+        endpoint_url = (request.query_params.get("endpoint_url") or "").strip()
+        model = (request.query_params.get("model") or "").strip()
+        if not model:
+            model = str(_load_settings().get("default_model") or "")
+        context_length = 0
+        if model:
+            try:
+                context_length = int(get_context_length(endpoint_url, model) or 0)
+            except Exception:
+                context_length = 0
+        return describe(endpoint_url, model, context_length)
+
+    @router.post("/settings/context-profile")
+    async def set_context_profile(request: Request):
+        """Save (or clear) the profile for one endpoint/model. Admin only."""
+        user = _get_current_user(request)
+        if not user or not auth_manager.is_admin(user):
+            raise HTTPException(403, "Admin only")
+        from src.context_profiles import GLOBAL_KEY, profile_key, sanitize
+
+        body = await request.json()
+        endpoint_url = (body.get("endpoint_url") or "").strip()
+        model = (body.get("model") or "").strip()
+        key = GLOBAL_KEY if body.get("scope") == "global" else profile_key(endpoint_url, model)
+
+        settings = _load_settings()
+        profiles = dict(settings.get("context_profiles") or {})
+        preset = (body.get("preset") or "").strip()
+        if not preset:
+            # Clearing is a first-class action: it returns this endpoint/model
+            # to the preset recommended for its window.
+            profiles.pop(key, None)
+        else:
+            profiles.update(sanitize({key: {
+                "preset": preset,
+                "values": body.get("values") or {},
+            }}))
+        settings["context_profiles"] = profiles
+        _save_settings(settings)
+        return {"saved": key, "context_profiles": profiles}
 
     # ---- Integrations CRUD ----
 

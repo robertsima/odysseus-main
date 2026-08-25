@@ -341,6 +341,17 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
         role = msg.get("role") or "user"
         content = msg.get("content")
 
+        # A reasoning model's own thinking is a first-class output item here,
+        # and it is the thread between one tool call and the next. Dropped, the
+        # model re-derives its whole plan from the transcript every round --
+        # which is what an agent loop that "goes flat" after a couple of rounds
+        # actually looks like. Replay the items verbatim, ahead of the text and
+        # calls they produced, so the order matches the `output` array they
+        # arrived in.
+        for item in (msg.get("reasoning_items") or []):
+            if isinstance(item, dict) and item.get("type") == "reasoning":
+                input_items.append(item)
+
         if role == "tool":
             call_id = msg.get("tool_call_id")
             if call_id:

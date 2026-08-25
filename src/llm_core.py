@@ -11,7 +11,7 @@ import re
 import os
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
-from typing import Optional, Dict, List, Tuple
+from typing import Optional, Dict, List, Sequence, Tuple
 from src.model_context import get_context_length, DEFAULT_CONTEXT, is_local_endpoint
 from urllib.parse import urlparse
 
@@ -1214,6 +1214,46 @@ def _chatgpt_subscription_instructions(messages: List[Dict]) -> str:
     return "You are a helpful AI assistant."
 
 
+# Hosts that rejected `include: ["reasoning.encrypted_content"]`. The Codex
+# backend accepts it, but a self-hosted or proxied Responses endpoint may not,
+# and a 400 on every request would be a hard outage. One rejection disables the
+# field for that host for the life of the process; the reasoning replay then
+# simply stops, which is the behaviour we had before.
+_RESPONSES_NO_ENCRYPTED_REASONING: set = set()
+
+
+def _mentions_encrypted_reasoning(body: str) -> bool:
+    """True when a 400 body blames the `include` field we just added."""
+    lowered = (body or "").lower()
+    return "encrypted_content" in lowered or (
+        "include" in lowered and "reasoning" in lowered
+    )
+
+
+def _responses_encrypted_reasoning_ok(url: str) -> bool:
+    return _host_key(url or "") not in _RESPONSES_NO_ENCRYPTED_REASONING
+
+
+def _reasoning_replay_enabled(url: str, model: str) -> bool:
+    """Whether the active context profile wants reasoning carried across rounds."""
+    try:
+        from src.context_profiles import resolve
+
+        return bool(resolve(url, model, get_context_length(url, model)).get("reasoning_replay", True))
+    except Exception:
+        return True
+
+
+def _disable_encrypted_reasoning(url: str) -> None:
+    host = _host_key(url or "")
+    if host not in _RESPONSES_NO_ENCRYPTED_REASONING:
+        _RESPONSES_NO_ENCRYPTED_REASONING.add(host)
+        logger.warning(
+            "%s rejected reasoning.encrypted_content; disabling reasoning replay "
+            "for this host (agent rounds lose thinking continuity)", host,
+        )
+
+
 def _build_chatgpt_responses_payload(
     model: str,
     messages: List[Dict],
@@ -1223,6 +1263,7 @@ def _build_chatgpt_responses_payload(
     stream: bool = False,
     tools: Optional[List[Dict]] = None,
     tool_choice_none: bool = False,
+    target_url_hint: str = "",
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input, build_responses_tools
 
@@ -1234,6 +1275,15 @@ def _build_chatgpt_responses_payload(
         "stream": stream,
         "store": False,
     }
+    # `store: false` means the server keeps nothing between requests, so the
+    # only way a reasoning model can carry its thinking from one round into the
+    # next is for us to hold the items and send them back. They arrive encrypted
+    # and opaque, and ONLY if we ask for them here. Without this the agent loop
+    # re-plans from scratch on every tool result.
+    if _responses_encrypted_reasoning_ok(target_url_hint) and _reasoning_replay_enabled(
+        target_url_hint, model
+    ):
+        payload["include"] = ["reasoning.encrypted_content"]
     converted_tools = build_responses_tools(tools)
     if converted_tools:
         payload["tools"] = converted_tools
@@ -1618,7 +1668,7 @@ def _is_untrusted_context_content(content) -> bool:
 _REFERENCE_CONTEXT_BOUNDARY = "Reference context received."
 
 
-def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
+def _sanitize_llm_messages(messages: List[Dict], keep_keys: Sequence[str] = ()) -> List[Dict]:
     """Strip Odysseus-only metadata before sending messages to providers.
 
     Per the OpenAI chat format: user/system messages must have content; a tool
@@ -1628,8 +1678,13 @@ def _sanitize_llm_messages(messages: List[Dict]) -> List[Dict]:
     follow-up message _append_tool_results builds for a no-prose native tool call
     (content=None, since Gemini/Ollama reject tool_calls alongside ""). Dropping
     it leaves the tool result dangling and breaks the next round.
+
+    `keep_keys` opts one provider into a field the others must not see —
+    `reasoning_items` is meaningful only to the Responses API, and a chat
+    completions endpoint 400s on an unknown message key.
     """
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
+    allowed |= set(keep_keys or ())
     cleaned = []
     for msg in messages or []:
         if not isinstance(msg, dict):
@@ -2321,7 +2376,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
       - data: [DONE]                       — end of stream
     """
     provider = _detect_provider(url)
-    messages_copy = _sanitize_llm_messages(messages)
+    messages_copy = _sanitize_llm_messages(
+        messages,
+        keep_keys=("reasoning_items",) if provider == "chatgpt-subscription" else (),
+    )
 
     # Consolidate multiple system messages into one at the start.
     # Some models (e.g. Qwen3.5) reject system messages that aren't first.
@@ -2356,6 +2414,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, tool_choice_none=tool_choice_none,
+            target_url_hint=target_url,
         )
     else:
         target_url = _normalize_openai_chat_url(url)
@@ -2419,6 +2478,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # {"type": "tool_calls", "calls": [...]} event the chat-completions path
         # emits, which is the shape agent_loop consumes.
         _resp_calls: Dict[int, Dict[str, str]] = {}
+        # Reasoning items, in arrival order. These are opaque to us: we hand
+        # them straight back on the next round so the model keeps its own train
+        # of thought across tool calls instead of re-planning from the
+        # transcript every time.
+        _resp_reasoning: List[Dict] = []
 
         def _resp_slot(index) -> Dict[str, str]:
             try:
@@ -2428,6 +2492,11 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             if key not in _resp_calls:
                 _resp_calls[key] = {"id": "", "name": "", "arguments": ""}
             return _resp_calls[key]
+
+        def _emit_resp_reasoning():
+            if not _resp_reasoning:
+                return None
+            return f'data: {json.dumps({"type": "reasoning_items", "items": _resp_reasoning})}\n\n'
 
         def _emit_resp_tool_calls():
             if not _resp_calls:
@@ -2443,6 +2512,22 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
+                    if (
+                        r.status_code == 400
+                        and "include" in payload
+                        and _mentions_encrypted_reasoning(raw)
+                    ):
+                        # The endpoint doesn't support asking for encrypted
+                        # reasoning. Remember that and let the wrapper replay
+                        # the request without it — nothing has been streamed
+                        # yet, so the retry cannot duplicate output.
+                        _disable_encrypted_reasoning(target_url)
+                        yield ('event: error\ndata: ' + json.dumps({
+                            "retryable": True,
+                            "status": 400,
+                            "text": "Retrying without reasoning replay",
+                        }) + '\n\n')
+                        return
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                     return
@@ -2488,6 +2573,13 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             _resp_slot(data.get("output_index"))["arguments"] = data["arguments"]
                     elif evt == "response.output_item.done":
                         item = data.get("item") or {}
+                        if item.get("type") == "reasoning":
+                            # Only useful when it carries encrypted_content:
+                            # with store=false a bare reasoning id refers to
+                            # nothing the server still holds, and replaying it
+                            # is rejected.
+                            if item.get("encrypted_content"):
+                                _resp_reasoning.append(item)
                         if item.get("type") == "function_call":
                             slot = _resp_slot(data.get("output_index"))
                             if item.get("call_id"):
@@ -2502,6 +2594,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
                         if input_tokens or output_tokens:
                             yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                        _rs_event = _emit_resp_reasoning()
+                        if _rs_event:
+                            yield _rs_event
                         _tc_event = _emit_resp_tool_calls()
                         if _tc_event:
                             yield _tc_event
@@ -2514,6 +2609,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         return
                 # Stream ended without response.completed — still surface any
                 # calls accumulated, or the round silently drops the tool use.
+                _rs_event = _emit_resp_reasoning()
+                if _rs_event:
+                    yield _rs_event
                 _tc_event = _emit_resp_tool_calls()
                 if _tc_event:
                     yield _tc_event

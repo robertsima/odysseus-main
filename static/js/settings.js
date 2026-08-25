@@ -40,7 +40,7 @@ function initTabs() {
       // they flip toggles instead of having to close + reopen the modal.
       document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
       syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'ai') refreshAiModelEndpoints();
+      if (tab === 'ai' || tab === 'context') refreshAiModelEndpoints();
     });
   });
 }
@@ -2432,6 +2432,237 @@ async function initSttSettingsV2() {
   enabledToggle.addEventListener('change', function() { updateEnabled(); save(); });
 }
 
+/* ── Context & window tuning ────────────────────────────────────────────
+ * One profile per endpoint/model: how much of a tool result stays inline,
+ * how deep a trim cuts, whether a reasoning model gets its thinking back.
+ * The server owns the presets, the ranges and the help text (see
+ * src/context_profiles.py) so this stays a renderer — a knob added there
+ * shows up here without touching this file.
+ */
+function initContextProfiles() {
+  const epSel = el('set-ctxEpSelect');
+  const modelSel = el('set-ctxModelSelect');
+  const presetsBox = el('set-ctxPresets');
+  const knobsBox = el('set-ctxKnobs');
+  const customCard = el('set-ctxCustomCard');
+  const effectiveBox = el('set-ctxEffective');
+  const windowLine = el('set-ctxWindow');
+  const saveBtn = el('set-ctxSave');
+  const resetBtn = el('set-ctxReset');
+  const msg = el('set-ctxMsg');
+  if (!epSel || !presetsBox) return;
+
+  let endpoints = [];
+  let state = null;          // last /settings/context-profile payload
+  let selectedPreset = '';   // '' = recommended (nothing saved)
+
+  function say(text, isError) {
+    if (!msg) return;
+    msg.textContent = text || '';
+    msg.style.color = isError
+      ? 'var(--danger, #d66)'
+      : 'color-mix(in srgb, var(--fg) 45%, transparent)';
+  }
+
+  function currentEndpointUrl() {
+    const ep = endpoints.find(e => String(e.id) === epSel.value);
+    return ep ? (ep.base_url || '') : '';
+  }
+
+  function fmt(name, value) {
+    if (typeof value === 'boolean') return value ? 'on' : 'off';
+    if (name === 'input_token_budget' && !value) return 'auto (scales to the window)';
+    if (typeof value === 'number' && Number.isInteger(value)) return value.toLocaleString();
+    return String(value);
+  }
+
+  function renderPresets() {
+    presetsBox.innerHTML = '';
+    const presets = (state && state.presets) || {};
+    const recommended = (state && state.recommended) || '';
+    const options = [['', 'Recommended', 'Follows the model\u2019s context window. Currently: '
+      + ((presets[recommended] || {}).label || recommended)]];
+    Object.keys(presets).forEach(function(name) {
+      options.push([name, presets[name].label, presets[name].hint]);
+    });
+    options.push(['custom', 'Custom', 'Set the individual values yourself.']);
+
+    options.forEach(function(opt) {
+      const id = 'ctx-preset-' + (opt[0] || 'auto');
+      const row = document.createElement('label');
+      row.className = 'settings-row';
+      row.style.cssText = 'align-items:flex-start;gap:8px;cursor:pointer;';
+      row.innerHTML =
+        '<input type="radio" name="ctx-preset" id="' + id + '" style="margin-top:3px;">' +
+        '<span style="flex:1;">' +
+          '<span style="font-weight:600;">' + esc(opt[1]) + '</span>' +
+          (opt[0] === recommended && opt[0]
+            ? '<span style="opacity:0.6;font-size:0.85em;"> \u2022 recommended here</span>' : '') +
+          '<div class="admin-toggle-sub" style="margin-top:2px;">' + esc(opt[2]) + '</div>' +
+        '</span>';
+      const radio = row.querySelector('input');
+      radio.checked = (selectedPreset || '') === opt[0];
+      radio.addEventListener('change', function() {
+        selectedPreset = opt[0];
+        customCard.style.display = selectedPreset === 'custom' ? '' : 'none';
+        say('');
+      });
+      presetsBox.appendChild(row);
+    });
+    customCard.style.display = selectedPreset === 'custom' ? '' : 'none';
+  }
+
+  function renderKnobs() {
+    knobsBox.innerHTML = '';
+    const knobs = (state && state.knobs) || {};
+    const saved = (state && state.custom_values) || {};
+    const effective = (state && state.effective) || {};
+    Object.keys(knobs).forEach(function(name) {
+      const spec = knobs[name];
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      row.style.cssText = 'align-items:flex-start;gap:8px;';
+      const value = saved[name] !== undefined ? saved[name] : '';
+      const placeholder = effective[name];
+      let control;
+      if (typeof spec.default === 'boolean') {
+        control = '<select class="settings-select" data-knob="' + name + '">' +
+          '<option value="">Recommended (' + fmt(name, placeholder) + ')</option>' +
+          '<option value="true"' + (value === true ? ' selected' : '') + '>on</option>' +
+          '<option value="false"' + (value === false ? ' selected' : '') + '>off</option>' +
+          '</select>';
+      } else {
+        control = '<input type="number" class="settings-select" data-knob="' + name + '"' +
+          ' step="' + (String(spec.default).indexOf('.') >= 0 ? '0.05' : '1') + '"' +
+          ' min="' + spec.min + '" max="' + spec.max + '"' +
+          ' value="' + (value === '' ? '' : esc(String(value))) + '"' +
+          ' placeholder="' + esc(String(placeholder)) + '">';
+      }
+      row.innerHTML =
+        '<span style="flex:1;min-width:0;">' +
+          '<span style="font-weight:600;">' + esc(spec.label) + '</span>' +
+          (spec.unit ? '<span style="opacity:0.6;font-size:0.85em;"> \u2014 ' + esc(spec.unit) + '</span>' : '') +
+          '<div class="admin-toggle-sub" style="margin-top:2px;">' + esc(spec.help) + '</div>' +
+        '</span>' +
+        '<span style="width:190px;flex-shrink:0;">' + control + '</span>';
+      knobsBox.appendChild(row);
+    });
+  }
+
+  function renderEffective() {
+    effectiveBox.innerHTML = '';
+    const effective = (state && state.effective) || {};
+    const knobs = (state && state.knobs) || {};
+    const SOURCE_LABEL = {
+      model: 'this endpoint + model',
+      endpoint: 'this endpoint',
+      global: 'the global profile',
+      auto: 'the preset recommended for this window',
+    };
+    const source = SOURCE_LABEL[effective._source] || effective._source || '';
+    Object.keys(knobs).forEach(function(name) {
+      const row = document.createElement('div');
+      row.className = 'settings-row';
+      row.innerHTML =
+        '<span class="settings-label" style="flex:1;">' + esc(knobs[name].label) + '</span>' +
+        '<span style="font-variant-numeric:tabular-nums;">' + esc(fmt(name, effective[name])) + '</span>';
+      effectiveBox.appendChild(row);
+    });
+    const note = document.createElement('div');
+    note.className = 'admin-toggle-sub';
+    note.style.marginTop = '6px';
+    note.textContent = 'Resolved from ' + source + '.';
+    effectiveBox.appendChild(note);
+  }
+
+  function renderWindow() {
+    if (!windowLine) return;
+    const ctx = (state && state.context_length) || 0;
+    windowLine.textContent = ctx
+      ? 'Detected context window: ' + ctx.toLocaleString() + ' tokens.'
+      : 'Context window unknown for this model — the Balanced preset is assumed.';
+  }
+
+  async function load() {
+    try {
+      const params = new URLSearchParams({
+        endpoint_url: currentEndpointUrl(),
+        model: modelSel ? modelSel.value : '',
+      });
+      const res = await fetch('/api/settings/context-profile?' + params.toString(),
+                              { credentials: 'same-origin' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      state = await res.json();
+      selectedPreset = state.selected || '';
+      renderWindow();
+      renderPresets();
+      renderKnobs();
+      renderEffective();
+      say('');
+    } catch (e) {
+      console.warn('[settings] context profile load failed', e);
+      say('Could not load context profiles.', true);
+    }
+  }
+
+  async function persist(preset) {
+    const values = {};
+    if (preset === 'custom') {
+      knobsBox.querySelectorAll('[data-knob]').forEach(function(input) {
+        const raw = String(input.value || '').trim();
+        if (!raw) return;                       // blank = fall back
+        values[input.dataset.knob] = raw === 'true' ? true : raw === 'false' ? false : Number(raw);
+      });
+      if (!Object.keys(values).length) {
+        say('Set at least one value, or pick a preset.', true);
+        return;
+      }
+    }
+    try {
+      const res = await fetch('/api/settings/context-profile', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint_url: currentEndpointUrl(),
+          model: modelSel ? modelSel.value : '',
+          preset: preset,
+          values: values,
+        }),
+      });
+      if (res.status === 403) { say('Admin only.', true); return; }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      await load();
+      say(preset ? 'Saved.' : 'Reset to recommended.');
+    } catch (e) {
+      console.warn('[settings] context profile save failed', e);
+      say('Save failed.', true);
+    }
+  }
+
+  _registerAiEndpointRefresh(function(list) {
+    endpoints = list || [];
+    _fillEndpointSelect(epSel, endpoints, epSel.value, true);
+    const ep = endpoints.find(e => String(e.id) === epSel.value);
+    _fillModelSelect(modelSel, ep ? ep.models : [], modelSel.value, true);
+    load();
+  });
+
+  epSel.addEventListener('change', function() {
+    const ep = endpoints.find(e => String(e.id) === epSel.value);
+    _fillModelSelect(modelSel, ep ? ep.models : [], '', true);
+    load();
+  });
+  if (modelSel) modelSel.addEventListener('change', load);
+  if (saveBtn) saveBtn.addEventListener('click', function() { persist(selectedPreset); });
+  if (resetBtn) resetBtn.addEventListener('click', function() {
+    selectedPreset = '';
+    persist('');
+  });
+
+  load();
+}
+
 function initAll() {
   modalEl = el('settings-modal');
   initTabs();
@@ -2451,6 +2682,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initContextProfiles();
   initAppearance();
   initShortcuts();
   initAccount();

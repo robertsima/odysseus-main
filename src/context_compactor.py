@@ -38,6 +38,9 @@ def _content_as_text(content: Any) -> str:
 
 
 COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
+# When a trim is unavoidable, cut to this fraction of the budget rather than to
+# the budget itself. See the anchor/hysteresis note in trim_for_context.
+TRIM_TARGET_RATIO = 0.8
 SUMMARY_MAX_TOKENS = 1024
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
@@ -221,7 +224,8 @@ def _truncate_message_to_token_budget(msg: Dict[str, Any], token_budget: int) ->
     return _truncate_tool_call_args(out, token_budget)
 
 
-def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512) -> List[Dict]:
+def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512,
+                     target_ratio: Optional[float] = None) -> List[Dict]:
     """Trim system messages to fit within context_length.
 
     For small-context models, progressively strips:
@@ -288,24 +292,65 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
                 return _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
 
     # Still too big — drop older conversation turns BUT always keep the current
-    # user turn. If a pasted message alone exceeds the model context, truncate
-    # that message with a visible notice instead of dropping it; otherwise the
-    # model appears to "ignore" large pastes because it never receives them.
-    # Hermes-style: recent context matters more than old context.
+    # turn AND the request that started the conversation. If a pasted message
+    # alone exceeds the model context, truncate that message with a visible
+    # notice instead of dropping it; otherwise the model appears to "ignore"
+    # large pastes because it never receives them.
+    #
+    # Recency alone is the wrong rule inside an agent run. "Keep the current
+    # turn" protects convo_msgs[-1], but mid-run that is a TOOL RESULT — the
+    # user's actual request is further back, and front-trimming reaches it
+    # first. So a long run kept the last log dump and dropped what it was
+    # supposed to be doing with it. That is what "the agent goes flat after a
+    # few rounds" looks like from the inside.
+    #
+    # The anchor is the LAST user message, not the first: in a long chat the
+    # first one is a stale topic from 200 turns ago, while the last one is the
+    # request the current work actually serves.
     PROTECT_RECENT = 10
     current_msg = convo_msgs[-1:] if convo_msgs else []
     prior_convo = convo_msgs[:-1] if convo_msgs else []
+
+    anchor = []
+    for i in range(len(prior_convo) - 1, -1, -1):
+        if prior_convo[i].get("role") == "user":
+            anchor = [prior_convo.pop(i)]
+            break
+
+    # Trim to a target BELOW the budget, not just to the edge of it. Trimming
+    # rewrites the front of the prompt, which invalidates the provider's prefix
+    # cache from that point on; stopping exactly at the budget means the next
+    # round is over again and re-trims, paying a full re-prefill every single
+    # round. One deeper cut buys many cheap rounds.
+    trim_target = int(budget * (target_ratio or TRIM_TARGET_RATIO))
+
+    def _fits(msgs, limit):
+        return estimate_tokens(essential_system + anchor + msgs) <= limit
+
     if len(prior_convo) >= PROTECT_RECENT:
         old_msgs = prior_convo[:-(PROTECT_RECENT - 1)]
         recent_msgs = prior_convo[-(PROTECT_RECENT - 1):] + current_msg
-        while old_msgs and estimate_tokens(essential_system + old_msgs + recent_msgs) > budget:
+        while old_msgs and not _fits(old_msgs + recent_msgs, trim_target):
             old_msgs.pop(0)
-        convo_msgs = old_msgs + recent_msgs
+        convo_msgs = anchor + old_msgs + recent_msgs
     else:
-        convo_msgs = prior_convo + current_msg
-        while prior_convo and estimate_tokens(essential_system + prior_convo + current_msg) > budget:
+        while prior_convo and not _fits(prior_convo + current_msg, trim_target):
             prior_convo.pop(0)
-        convo_msgs = prior_convo + current_msg
+        convo_msgs = anchor + prior_convo + current_msg
+
+    # The anchor is re-inserted ahead of what survived, so a batch of tool
+    # messages can no longer be separated from the assistant turn that called
+    # them — _sanitize_tool_messages at the end repairs any pairing this broke.
+
+    # The anchor is protected from being DROPPED, not from being shortened. A
+    # 50k-character paste as the opening message would otherwise consume the
+    # whole window and starve the work that followed it.
+    if anchor and estimate_tokens(essential_system + protected_msgs + convo_msgs) > budget:
+        rest = [m for m in convo_msgs if m is not anchor[0]]
+        room = max(256, budget - estimate_tokens(essential_system + protected_msgs + rest))
+        if estimate_tokens(anchor) > room:
+            trimmed_anchor = _truncate_message_to_token_budget(anchor[0], room)
+            convo_msgs = [trimmed_anchor] + rest
 
     # If the current message itself is too large, shrink only that message.
     if current_msg and estimate_tokens(essential_system + protected_msgs + convo_msgs) > budget:

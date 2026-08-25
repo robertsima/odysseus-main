@@ -116,6 +116,11 @@ DEFAULT_SETTINGS = {
     # defaults, so a persisted 6000 can't be told apart from a deliberate 6000 —
     # to pin a budget near the default, use a nearby value (e.g. 5999).
     "agent_input_token_budget": 6000,
+    # Per-endpoint/model context tuning (see src/context_profiles.py).
+    # Keyed "<endpoint_url>|<model>", "<endpoint_url>|" for a whole
+    # endpoint, or "*" for everything. Empty = use the preset recommended
+    # for each model's context window.
+    "context_profiles": {},
     # Ceiling on the *auto-derived* input budget; a configurable setting since #1273
     # (the merged #1230 left it a module constant). No effect on an explicit budget
     # — a deliberate value is honoured (#1230). Default matches

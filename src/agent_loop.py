@@ -1091,6 +1091,18 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "ask_teacher", "list_models", "search_chats",
 ])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+# Reindexing MCP tools is generation-guarded, so it runs once after servers
+# connect -- but it lands on whichever user turn happens to be first, and it
+# embeds every tool. One observed run took 1.34s of the 1.5s retrieval budget.
+# Crossing that budget means the turn retrieves against a STALE index, which is
+# how MCP tools silently vanish from a round. Give indexing its own, larger
+# budget, and if it still overruns let it finish in the background so the next
+# turn is warm instead of racing the same deadline again.
+_MCP_INDEX_TIMEOUT_SECONDS = 5.0
+# How many recent assistant rounds keep their encrypted reasoning items.
+# Enough to carry a plan across a few tool calls without letting opaque
+# payload accumulate for a 30-round run.
+_MAX_REASONING_REPLAY_ROUNDS = 3
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -3160,6 +3172,8 @@ def _append_tool_results(
     used_native: bool,
     round_num: int,
     round_reasoning: str = "",
+    round_reasoning_items: Optional[list] = None,
+    reasoning_replay_rounds: int = 0,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -3180,6 +3194,7 @@ def _append_tool_results(
     for _m in messages:
         if _m.get("role") == "assistant":
             _m.pop("reasoning_content", None)
+
     if used_native and native_tool_calls:
         assistant_msg = {"role": "assistant"}
         # When the model emitted ONLY tool calls (no prose), content must be
@@ -3192,6 +3207,8 @@ def _append_tool_results(
         assistant_msg["content"] = round_response if round_response.strip() else None
         if round_reasoning:
             assistant_msg["reasoning_content"] = round_reasoning
+        if round_reasoning_items:
+            assistant_msg["reasoning_items"] = list(round_reasoning_items)
         assistant_msg["tool_calls"] = [
             {
                 "id": tc.get("id", f"call_{round_num}_{j}"),
@@ -3221,6 +3238,8 @@ def _append_tool_results(
         msg = {"role": "assistant", "content": round_response}
         if round_reasoning:
             msg["reasoning_content"] = round_reasoning
+        if round_reasoning_items:
+            msg["reasoning_items"] = list(round_reasoning_items)
         messages.append(msg)
         # Tool output (shell/python stdout, file reads, fetched pages, email
         # bodies, MCP results) is sourced from outside the server. Wrap it as
@@ -3231,6 +3250,19 @@ def _append_tool_results(
         messages.append(
             untrusted_context_message("tool execution results", tool_output_text)
         )
+
+    # Encrypted Responses reasoning is the opposite case to reasoning_content
+    # above: it is the thread that keeps a multi-round turn coherent, so it must
+    # survive ACROSS rounds rather than only on the newest one. It is still
+    # opaque payload, so keep a sliding window of the most recent rounds instead
+    # of letting it grow for a 30-round run. Runs after the append so the round
+    # just added counts toward the window.
+    _reasoning_turns = [
+        _m for _m in messages
+        if _m.get("role") == "assistant" and _m.get("reasoning_items")
+    ]
+    for _m in _reasoning_turns[:-max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))]:
+        _m.pop("reasoning_items", None)
 
 
 def _compute_final_metrics(
@@ -3791,15 +3823,23 @@ async def stream_agent_loop(
                 _relevant_tools = set(ALWAYS_AVAILABLE)
             if tool_idx:
                 if mcp_mgr:
+                    _index_task = asyncio.ensure_future(
+                        asyncio.to_thread(tool_idx.index_mcp_tools, mcp_mgr, _mcp_disabled_map)
+                    )
                     try:
                         await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.index_mcp_tools, mcp_mgr, _mcp_disabled_map),
-                            timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
+                            asyncio.shield(_index_task),
+                            timeout=_MCP_INDEX_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
+                        # Shielded, so the work continues and the NEXT turn sees
+                        # a fresh index. This turn retrieves against the stale
+                        # one, which is the same trade as before -- just no
+                        # longer the common case.
                         logger.warning(
-                            "[tool-rag] MCP tool indexing exceeded %.1fs; continuing without reindex",
-                            _TOOL_SELECTION_TIMEOUT_SECONDS,
+                            "[tool-rag] MCP tool indexing exceeded %.1fs; finishing in "
+                            "the background, this turn uses the previous index",
+                            _MCP_INDEX_TIMEOUT_SECONDS,
                         )
                 if _retrieval_query:
                     try:
@@ -4323,17 +4363,47 @@ async def stream_agent_loop(
     prep_timings["prompt_build"] = time.time() - _t2
 
     _t3 = time.time()
+    # How much context this turn is allowed to spend, and how it spends it.
+    # Resolved once per turn from the endpoint/model's context profile (Settings
+    # → Context), so a 400k hosted model and an 8k local one get opposite
+    # answers instead of one global compromise.
+    try:
+        from src.context_profiles import resolve as _resolve_context_profile
+
+        _context_profile = _resolve_context_profile(endpoint_url, model, context_length)
+        logger.info(
+            "[context-profile] source=%s auto=%s inline_limit=%s trim_target=%s reasoning_replay=%s",
+            _context_profile.get("_source"), _context_profile.get("_auto_preset"),
+            _context_profile.get("tool_output_inline_limit"),
+            _context_profile.get("trim_target_ratio"),
+            _context_profile.get("reasoning_replay"),
+        )
+    except Exception as _cp_exc:
+        logger.warning("[context-profile] resolution failed, using defaults: %s", _cp_exc)
+        _context_profile = {}
+
     # Budget resolved once here and reused by the per-round re-trim inside the
     # agent loop (tool results accumulate every round, so a single pre-loop
     # trim cannot keep a long run inside the window).
     _soft_trim_budget = 0
     _soft_trim_reserve = 0
+    _trim_target_ratio = _context_profile.get("trim_target_ratio") or None
     try:
         from src.context_compactor import trim_for_context
         from src.context_budget import compute_input_token_budget, DEFAULT_HARD_MAX, DEFAULT_BUDGET, budget_is_explicit as _budget_is_explicit
         from src.model_context import budget_context_for_model
 
         soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
+        # A per-model budget in the context profile is a deliberate, more
+        # specific choice than the one global setting, so it wins. 0 keeps the
+        # auto behaviour (scale to the window).
+        _profile_budget = 0
+        try:
+            _profile_budget = int(_context_profile.get("input_token_budget") or 0)
+        except (TypeError, ValueError):
+            _profile_budget = 0
+        if _profile_budget > 0:
+            soft_budget = _profile_budget
         if soft_budget > 0:
             before_trim_tokens = estimate_tokens(messages)
             reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
@@ -4349,7 +4419,7 @@ async def stream_agent_loop(
             # Default value = auto sentinel (scale to the window); any other value =
             # explicit cap. Value-based, not presence-based, because the save path
             # materializes defaults so a persisted default must still read as auto (#4121).
-            budget_is_explicit = _budget_is_explicit(soft_budget)
+            budget_is_explicit = bool(_profile_budget) or _budget_is_explicit(soft_budget)
             # Scale only off a window we actually discovered, bound to the value it
             # proves (else 0) — not the passed-in context_length, which can be stale
             # or unset for some callers (#4122 review).
@@ -4366,6 +4436,7 @@ async def stream_agent_loop(
                 messages,
                 effective_budget,
                 reserve_tokens=reserve_tokens,
+                target_ratio=_trim_target_ratio,
             )
             after_trim_tokens = estimate_tokens(trimmed_messages)
             if after_trim_tokens < before_trim_tokens:
@@ -4480,6 +4551,7 @@ async def stream_agent_loop(
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        round_reasoning_items = []  # opaque Responses reasoning items, replayed next round
         native_tool_calls = []  # populated if model uses function calling
         # Reset doc streaming state per round
         _doc_acc = ""
@@ -4501,7 +4573,11 @@ async def stream_agent_loop(
             try:
                 from src.context_compactor import trim_for_context as _trim
                 _before = estimate_tokens(messages)
-                _retrimmed = _trim(messages, _soft_trim_budget, reserve_tokens=_soft_trim_reserve)
+                _retrimmed = _trim(
+                    messages, _soft_trim_budget,
+                    reserve_tokens=_soft_trim_reserve,
+                    target_ratio=_trim_target_ratio,
+                )
                 if _retrimmed is not messages:
                     _after = estimate_tokens(_retrimmed)
                     if _after < _before:
@@ -4567,7 +4643,22 @@ async def stream_agent_loop(
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
-        logger.info(f"[agent-debug] round={round_num} model={model} _is_api_model={_is_api_model} tools_sent={len(_tool_names_sent)} tool_names={_tool_names_sent[:15]} relevant_tools={sorted(_relevant_tools)[:15] if _relevant_tools else 'ALL'}")
+        # Log the DIFFERENCE, not the first 15 names. This is the line you read
+        # to answer "was that tool actually sent?", and a truncated list answered
+        # it wrong: `trigger_research` was missing from a real round and the log
+        # looked identical to the healthy case because the list was cut at 15.
+        _sent_set = {n for n in _tool_names_sent if n}
+        _selected_set = set(_relevant_tools or ())
+        _selected_not_sent = sorted(_selected_set - _sent_set) if _relevant_tools else []
+        _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
+        logger.info(
+            "[agent-debug] round=%s model=%s _is_api_model=%s tools_sent=%s "
+            "selected=%s selected_without_schema=%s schema_without_selection=%s",
+            round_num, model, _is_api_model, len(_sent_set),
+            len(_selected_set) if _relevant_tools else "ALL",
+            _selected_not_sent or "-", _sent_not_selected or "-",
+        )
+        logger.debug("[agent-debug] round=%s tool_names=%s", round_num, sorted(_sent_set))
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
@@ -4675,6 +4766,11 @@ async def stream_agent_loop(
                     elif data.get("type") == "tool_calls":
                         native_tool_calls = data.get("calls", [])
                         logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
+                    elif data.get("type") == "reasoning_items":
+                        # Opaque encrypted thinking from the Responses API.
+                        # Carried on the assistant turn so the next round can
+                        # hand it back — see _append_tool_results.
+                        round_reasoning_items = data.get("items") or []
                     elif data.get("type") == "usage":
                         u = data.get("data", {})
                         actual_model = u.get("model") or actual_model
@@ -5795,6 +5891,7 @@ async def stream_agent_loop(
                         command=cmd_display,
                         session_id=session_id,
                         round_num=round_num,
+                        profile=_context_profile,
                     )
                     if _offload_record is not None and _relevant_tools is not None:
                         # The excerpt just told the model to call this tool; make
@@ -5855,7 +5952,12 @@ async def stream_agent_loop(
         # (and left the real call answered empty).
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
-                             round_reasoning=round_reasoning)
+                             round_reasoning=round_reasoning,
+                             round_reasoning_items=round_reasoning_items,
+                             reasoning_replay_rounds=int(
+                                 _context_profile.get("reasoning_replay_rounds")
+                                 or _MAX_REASONING_REPLAY_ROUNDS
+                             ))
 
         # Emit agent_step event
         yield (
