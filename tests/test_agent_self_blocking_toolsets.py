@@ -41,7 +41,10 @@ from src.agent_loop import (
     _explicitly_named_skills,
     _is_explicit_continuation,
     _looks_like_local_computer_request,
+    _looks_like_research_request,
     _tools_used_in_conversation,
+    apply_terminus_toolset,
+    repair_starved_domains,
 )
 
 
@@ -70,21 +73,24 @@ def test_repro_detects_both_email_and_file_domains():
 
 # ── 2. Terminus must merge, not replace, on a mixed request ──────────────────
 
-def _apply_terminus_clamp(selected, domains):
-    """Mirror of the clamp in stream_agent_loop, exercised directly.
+def _apply_terminus_clamp(selected, domains, query_matched=None):
+    """Call the real clamp.
 
-    The clamp lives inside a 700-line async generator that needs a live
-    endpoint, a session, and an MCP manager to reach; the decision it makes is
-    this one line and is worth pinning on its own.
+    It used to be mirrored here, because the decision lived inside a 700-line
+    async generator that needs a live endpoint, a session and an MCP manager to
+    reach. It is now `apply_terminus_toolset`, so these tests pin the shipping
+    code instead of a copy of it that could drift.
+
+    `query_matched` defaults to everything selected: in the loop it is what
+    retrieval returned for this query, and the callers below are modelling
+    exactly that.
     """
-    other = set(domains) & {
-        "email", "documents", "notes_calendar_tasks",
-        "contacts", "sessions", "cookbook", "integrations",
-    }
-    if other:
-        return set(selected) | set(_WORKSPACE_TERMINUS_TOOLS)
-    mcp_tools = {t for t in (selected or set()) if t.startswith("mcp__")}
-    return set(_WORKSPACE_TERMINUS_TOOLS) | mcp_tools
+    selected = set(selected or set())
+    return apply_terminus_toolset(
+        selected,
+        query_matched=selected if query_matched is None else query_matched,
+        domains=domains,
+    )
 
 
 def test_mcp_tools_survive_the_terminus_swap_with_no_domain():
@@ -103,14 +109,19 @@ def test_mcp_tools_survive_the_terminus_swap_with_no_domain():
     }), "precondition: no built-in domain protects this request"
 
     selected = {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch", "list_emails"}
-    result = _apply_terminus_clamp(selected, domains)
+    # Only the MCP tools were matched for this query; list_emails came from a
+    # domain seed, so it is not evidence of what the user asked for.
+    result = _apply_terminus_clamp(
+        selected, domains,
+        query_matched={"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch"},
+    )
 
     assert {"mcp__51452cf0__ntfy_me", "mcp__51452cf0__ntfy_me_fetch"} <= result, (
         "retrieval matched the MCP tools for this query and the swap dropped them"
     )
     assert _WORKSPACE_TERMINUS_TOOLS <= result, "file/shell tools must still arrive"
     assert "list_emails" not in result, (
-        "only MCP tools get the carve-out; built-in tools still swap out"
+        "a tool nothing about this query matched still swaps out"
     )
 
 
@@ -132,7 +143,9 @@ def test_pure_coding_request_still_swaps_to_terminus_only():
     text = "fix the failing test in the api route on this machine"
     domains = _domains(text)
     assert not (domains & {"email", "documents", "notes_calendar_tasks"})
-    result = _apply_terminus_clamp(_DOMAIN_TOOL_MAP["files"], domains)
+    result = _apply_terminus_clamp(
+        _DOMAIN_TOOL_MAP["files"], domains, query_matched=set(),
+    )
     assert result == set(_WORKSPACE_TERMINUS_TOOLS)
 
 
@@ -402,3 +415,113 @@ def test_every_domain_has_a_human_readable_label():
     unlabelled domain would surface a raw internal key like
     'notes_calendar_tasks'."""
     assert set(_DOMAIN_TOOL_MAP) <= set(_STARVED_DOMAIN_LABELS)
+
+
+# ── 5. the deep-research repro (2026-08-25) ──────────────────────────────────
+#
+#     "Do deep research. I need you to figure out why IOS devices could be
+#      potentially disconnecting and reconnecting from my internet - Pi hole
+#      has been configured to only using IPv4 as well as the router"
+#
+# Tool RAG retrieved `trigger_research` correctly. The turn also tripped the
+# local-machine heuristic, so Terminus mode replaced the selection with the
+# file/shell toolset and `trigger_research` was gone. The round opened with
+# "Deep-research tooling is unavailable", made zero tool calls -- and the
+# self-unblock never fired, because the missing-tool detector only knew the
+# phrase "not available", never the single word "unavailable".
+
+RESEARCH_REPRO = (
+    "Do deep research. I need you to figure out why IOS devices could be "
+    "potentially disconnecting and reconnecting from my internet - Pi hole has "
+    "been configured to only using IPv4 as well as the router"
+)
+
+
+def test_research_request_is_recognised():
+    assert _looks_like_research_request(RESEARCH_REPRO)
+    assert _looks_like_research_request("research the best mechanical keyboards")
+    assert _looks_like_research_request("look into why the deploy is flaky")
+    assert not _looks_like_research_request("read the config file and fix the typo")
+
+
+def test_retrieved_research_tool_survives_the_terminus_swap():
+    """The exact drop that produced "deep-research tooling is unavailable"."""
+    retrieved = {"trigger_research", "search_documents", "manage_settings"}
+    result = _apply_terminus_clamp(
+        retrieved, domains={"web", "settings", "files"}, query_matched=retrieved,
+    )
+
+    assert "trigger_research" in result, (
+        "retrieval matched the deep-research tool for this query and the swap dropped it"
+    )
+    assert _WORKSPACE_TERMINUS_TOOLS <= result, "file/shell tools must still arrive"
+
+
+@pytest.mark.parametrize("text", [
+    "Deep-research tooling is unavailable. Preliminary diagnosis:",
+    "Deep-research and Vault/AI Mind search tools are unavailable in this turn, "
+    "so I cannot honestly claim researched findings from those sources.",
+    "The research toolset is currently unavailable.",
+])
+def test_one_word_unavailable_excuses_are_detected(text):
+    """Both real rounds phrased it as one word and slipped past every branch."""
+    assert _claims_missing_tools(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "Gmail returned Too many simultaneous connections, so the fetch failed.",
+    "The Pi-hole admin API is unavailable right now (connection refused).",
+    "I ran the tool and it returned an empty list.",
+])
+def test_real_upstream_failures_are_not_missing_tool_claims(text):
+    """A round that reports a genuine failure must not re-arm and retry."""
+    assert not _claims_missing_tools(text), text
+
+
+# ── 6. a domain the selector emptied is restored, not announced as missing ───
+
+def test_domain_starved_by_selection_is_restored():
+    """"Pi hole has been configured ..." matched the settings domain; the swap
+    then cleared it, and the turn opened by announcing what it could not do."""
+    selected = set(_WORKSPACE_TERMINUS_TOOLS)
+    starved = repair_starved_domains(selected, {"settings", "files"}, set())
+
+    assert starved == [], "nothing is genuinely off, so nothing should be reported"
+    assert _DOMAIN_TOOL_MAP["settings"] & selected, "settings tools should be back"
+
+
+def test_domain_the_user_switched_off_is_still_reported():
+    """A real restriction cannot be repaired, so the model must be told."""
+    selected = set(_WORKSPACE_TERMINUS_TOOLS)
+    disabled = set(_DOMAIN_TOOL_MAP["settings"])
+    starved = repair_starved_domains(selected, {"settings"}, disabled)
+
+    assert starved == ["settings"]
+    assert not (_DOMAIN_TOOL_MAP["settings"] & selected)
+    assert "settings" in _STARVED_DOMAIN_LABELS
+
+
+def test_repair_respects_a_deliberate_clamp():
+    """The Odysseus fine-tune modes mean the narrow toolset IS the behaviour."""
+    selected = {"create_document", "ask_user"}
+    starved = repair_starved_domains(
+        selected, {"email"}, set(), allow_repair=False,
+    )
+    assert starved == ["email"]
+    assert "list_emails" not in selected
+
+
+def test_repair_respects_an_open_email_draft():
+    """An open compose document drops the fetch tools on purpose."""
+    selected = {"edit_document", "send_email"} - {"send_email"}
+    starved = repair_starved_domains(
+        selected, {"email"}, set(), protected={"email"},
+    )
+    assert starved == ["email"]
+    assert "list_emails" not in selected
+
+
+def test_web_domain_is_never_treated_as_starved():
+    """Web tools are a per-turn user toggle, and "search"/"today" over-trigger it."""
+    selected = {"read_file"}
+    assert repair_starved_domains(selected, {"web"}, {"web_search", "web_fetch"}) == []

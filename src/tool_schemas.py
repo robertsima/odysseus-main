@@ -320,6 +320,48 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "recall_tool_output",
+            "description": (
+                "Read back a tool result that was too large to keep in the "
+                "conversation. When an earlier tool produced a lot of output, "
+                "only its head and tail were kept inline and the full text was "
+                "stored under a `toolout-...` reference named in that excerpt. "
+                "Pass that `ref` with a `query` to pull just the parts that "
+                "answer your question, or with an `offset` to read it in order. "
+                "Use this instead of re-running the command to see the rest — "
+                "the data is already captured. Omit both to list what is stored."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ref": {
+                        "type": "string",
+                        "description": "The `toolout-...` reference from the truncated tool result.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "What you need from that output, in natural language. Matched semantically against the stored text.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset for an ordered read (use instead of `query` to page through the output).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Characters to return for an ordered read (default 3000, max 12000).",
+                    },
+                    "k": {
+                        "type": "integer",
+                        "description": "How many matching excerpts to return for a query (default 5, max 12).",
+                    },
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_documents",
             "description": (
                 "Semantic search over the user's indexed personal documents "

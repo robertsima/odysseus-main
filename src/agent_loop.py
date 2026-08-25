@@ -555,8 +555,64 @@ _DOMAIN_TOOL_MAP = {
 
 _WORKSPACE_TERMINUS_TOOLS = (
     _DOMAIN_TOOL_MAP["files"]
-    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
+    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan",
+       # Shell and file work is where the huge outputs come from, so this is
+       # the toolset that most needs the way back to an offloaded one.
+       "recall_tool_output"}
 )
+
+# Domains that, when the user's own words name one alongside file/shell work,
+# mean the turn is mixed and Terminus must merge rather than swap.
+_TERMINUS_MERGE_DOMAINS = frozenset({
+    "email", "documents", "notes_calendar_tasks",
+    "contacts", "sessions", "cookbook", "integrations",
+})
+
+
+def apply_terminus_toolset(selected, *, query_matched, domains):
+    """Fold the local-machine (Terminus) toolset into this turn's selection.
+
+    Terminus mode used to REPLACE the selection outright. That is right for a
+    pure "fix the failing test" turn, but a single request can name file work
+    AND an assistant domain at once -- "audit my inbox for job applications ...
+    and update the Rolling Report in my vault" detects email + documents +
+    files. Replacing threw away every email and document tool, and the agent
+    truthfully reported it had no inbox tools and did nothing. So when another
+    domain was detected from the user's own words, ADD the Terminus tools.
+
+    On the swap path, whatever retrieval matched for THIS query rides across.
+    That carve-out started life as `mcp__`-only, because a user-added MCP
+    server has no domain to protect it -- "send a test notification" classifies
+    as domains=[], the ntfy tools were retrieved correctly, and the swap
+    dropped them. The same hole was open for built-ins: "do deep research on
+    why my iOS devices keep dropping off wifi ... pi-hole ... the router"
+    tripped the local-machine heuristic, the swap discarded the
+    `trigger_research` that retrieval had just matched, and the round opened
+    with "deep-research tooling is unavailable" and made zero tool calls.
+    A tool that scored against the user's words is evidence of intent in its
+    own right; the Terminus toolset is what gets ADDED here, never what that
+    evidence gets replaced by.
+    """
+    selected = set(selected or set())
+    if set(domains or set()) & _TERMINUS_MERGE_DOMAINS:
+        logger.info(
+            "[tool-rag] Workspace file/terminal request alongside %s; "
+            "adding Terminus toolset instead of replacing",
+            sorted(set(domains) & _TERMINUS_MERGE_DOMAINS),
+        )
+        return selected | set(_WORKSPACE_TERMINUS_TOOLS)
+
+    carried = {
+        tool for tool in selected
+        if tool.startswith("mcp__") or tool in set(query_matched or set())
+    }
+    logger.info(
+        "[tool-rag] Workspace file/terminal request; using Odysseus Terminus "
+        "toolset while preserving query-matched tools=%s",
+        sorted(carried),
+    )
+    return set(_WORKSPACE_TERMINUS_TOOLS) | carried
+
 
 # Human-readable names for the tool-availability note, so the model tells the
 # user "email tools" rather than echoing an internal domain key.
@@ -574,6 +630,64 @@ _STARVED_DOMAIN_LABELS = {
     "integrations": "service integrations",
     "wellbeing": "wellbeing check-ins",
 }
+
+# "web" is excluded from the starvation check: it is the most over-triggered
+# domain (the bare words "search"/"current"/"today" match it) and web tools are
+# a deliberate per-turn user toggle, not accidental starvation.
+_STARVATION_EXEMPT_DOMAINS = frozenset({"web"})
+
+
+def repair_starved_domains(relevant_tools, domains, disabled_tools,
+                           *, allow_repair=True, protected=frozenset()):
+    """Restore domains whose tools the selector dropped. Returns the rest.
+
+    A domain the user's own words named, whose tools then all vanished, is how
+    a turn ends with the agent telling the user it "doesn't have the tools" for
+    the thing it was just asked to do. There are two very different reasons
+    that happens, and they deserve opposite responses:
+
+    - Starved by SELECTION -- retrieval ranked them low, or a swap replaced the
+      set. That is our bug and it is repairable: the tools exist and policy
+      allows them, so put them back. A handful of extra schemas costs far less
+      than a turn that answers "that capability is unavailable" to a request
+      the user just made. (Observed: "Pi hole has been configured ..." matched
+      the settings domain, the Terminus swap cleared it, and the round opened
+      by announcing what it could not do.)
+    - Starved by `disabled_tools` -- the user switched that capability off.
+      No re-selection can serve it, so it is returned to the caller, which
+      tells the model plainly which capability is off.
+
+    Deliberate narrowing still wins: `allow_repair=False` for the Odysseus
+    fine-tune clamps (the small toolset IS the behaviour under test), and
+    `protected` names domains pruned on purpose this turn (an open email draft
+    drops the fetch tools so the agent edits the draft instead of re-reading
+    the thread).
+
+    Mutates `relevant_tools` in place, mirroring how the caller holds it.
+    """
+    starved: list = []
+    for domain in sorted(set(domains or set()) - _STARVATION_EXEMPT_DOMAINS):
+        domain_tools = _DOMAIN_TOOL_MAP.get(domain) or set()
+        if not domain_tools or (domain_tools & (relevant_tools - disabled_tools)):
+            continue
+        restorable = domain_tools - disabled_tools
+        if restorable and allow_repair and domain not in protected:
+            relevant_tools |= restorable
+            logger.info(
+                "[agent-intent] domain %s had no usable tools after selection; "
+                "restored %s rather than reporting it unavailable",
+                domain, sorted(restorable),
+            )
+            continue
+        starved.append(domain)
+    if starved:
+        logger.warning(
+            "[agent-intent] domains %s detected but no usable tools remain "
+            "(every tool for them is in disabled_tools)",
+            starved,
+        )
+    return starved
+
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
@@ -799,6 +913,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
     "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
+    "recall_tool_output": "- ```recall_tool_output``` — Read back a tool result that was too large to keep in the conversation. When a tool produced a lot of output, only its head and tail were kept and the rest was stored under a `toolout-...` reference named in that excerpt. Args (JSON): {\"ref\": \"toolout-abc123\", \"query\": \"what you need\"} to search it, or {\"ref\": \"toolout-abc123\", \"offset\": 3000} to keep reading in order. NEVER re-run the original command to see the trimmed part — it is already stored, and re-running it just spends the context again.",
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
@@ -1213,6 +1328,20 @@ def _looks_like_local_computer_request(text: str) -> bool:
     return bool(text.strip() and _LOCAL_COMPUTER_REFERENCE_RE.search(text))
 
 
+# "research X", "do some research on X", "look into Y", "deep dive on Z" — the
+# deep-research job, not a one-off web_search. Kept in step with the phrasing
+# the `trigger_research` prompt section and tool description already claim.
+_RESEARCH_REQUEST_RE = re.compile(
+    r"\b(?:deep[\s\-]?research|research(?:es|ed|ing)?|deep[\s\-]?dive|investigate|look into)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_research_request(text: str) -> bool:
+    text = str(text or "")
+    return bool(text.strip() and _RESEARCH_REQUEST_RE.search(text))
+
+
 # The agent ending a turn with "I don't have the tools for that" is almost
 # never true — every tool still exists; retrieval or a domain clamp just didn't
 # put it in this round's schema list. Detect the claim so the loop can re-arm
@@ -1242,6 +1371,15 @@ _MISSING_TOOL_RE = re.compile(
     r"(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
     r"|lack(?:ing)?\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
     r"|(?:tool|toolset)\s+(?:isn'?t|is\s+not|wasn'?t|was\s+not)\s+available\b"
+    # Every branch above spells the claim as a negation ("not available"), so
+    # the single word "unavailable" walked straight past all of them: two real
+    # rounds opened with "Deep-research tooling is unavailable" and "…search
+    # tools are unavailable in this turn", made zero tool calls, and the
+    # self-unblock below never fired because nothing matched. Match the
+    # one-word form too, and let it cover `tooling`/`toolset`.
+    r"|tool(?:s|ing|set)?\b[^.\n]{0,40}?\b(?:is|are|was|were|remains?|"
+    r"remain)\s+(?:currently\s+|still\s+)?unavailable\b"
+    r"|no\s+access\s+to\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
     r")",
     re.IGNORECASE,
 )
@@ -3697,6 +3835,18 @@ async def stream_agent_loop(
                 _relevant_tools.update(tools)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
+    # Snapshot what retrieval (or the keyword fallback) matched for THIS query,
+    # before domain seeding widens it and before Terminus mode can swap it out.
+    # A tool that scored against the user's own words is evidence of intent in
+    # its own right, and the Terminus swap below has repeatedly thrown exactly
+    # those away -- "do deep research on X" retrieved `trigger_research`, the
+    # swap dropped it, and the agent reported deep research was unavailable.
+    try:
+        from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS_AVAILABLE_BASE
+    except Exception:
+        _ALWAYS_AVAILABLE_BASE = frozenset()
+    _query_matched_tools = set(_relevant_tools or set()) - set(_ALWAYS_AVAILABLE_BASE)
+
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
     # injection: `_assemble_prompt()` still derives domain rules from the final
@@ -3737,47 +3887,29 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            # Terminus mode used to REPLACE the selection outright. That is
-            # right for a pure "fix the failing test" turn, but a single
-            # request can name file work AND an assistant domain at once —
-            # "audit my inbox for job applications ... and update the Rolling
-            # Report in my vault" detects email + documents + files. Replacing
-            # threw away every email and document tool, and the agent then
-            # truthfully reported it had no inbox tools and did nothing. When
-            # another domain was detected from the user's own words, ADD the
-            # terminus tools instead of swapping to them.
-            _other_domains = (_intent.get("domains") or set()) & {
-                "email", "documents", "notes_calendar_tasks",
-                "contacts", "sessions", "cookbook", "integrations",
-            }
-            if _other_domains:
-                _relevant_tools |= set(_WORKSPACE_TERMINUS_TOOLS)
-                logger.info(
-                    "[tool-rag] Workspace file/terminal request alongside %s; "
-                    "adding Terminus toolset instead of replacing",
-                    sorted(_other_domains),
-                )
-            else:
-                # `_other_domains` can only ever name a BUILT-IN domain, so a
-                # user-added MCP server can never protect itself through it:
-                # the intent classifier has no keywords for tools it has never
-                # heard of. "send a test notification" resolved to domains=[],
-                # retrieval correctly surfaced the ntfy MCP tools, and this
-                # branch then replaced the selection wholesale and dropped
-                # them -- the agent reported the notification tool wasn't
-                # callable, which was literally true, on a healthy server.
-                # Tools that retrieval matched for THIS query are evidence of
-                # intent in their own right, so carry them across the swap.
-                _mcp_tools = {
-                    tool for tool in (_relevant_tools or set())
-                    if tool.startswith("mcp__")
-                }
-                _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS) | _mcp_tools
-                logger.info(
-                    "[tool-rag] Workspace file/terminal request; using Odysseus "
-                    "Terminus toolset while preserving MCP tools=%s",
-                    sorted(_mcp_tools),
-                )
+            # This turn is file/shell work on the local machine. Whether that
+            # ADDS the Terminus toolset or swaps to it depends on what else the
+            # user's words named — see `apply_terminus_toolset`.
+            _relevant_tools = apply_terminus_toolset(
+                _relevant_tools,
+                query_matched=_query_matched_tools,
+                domains=_intent.get("domains") or set(),
+            )
+
+    # "Research X" / "do deep research on Y" is a deep-research JOB, and the
+    # system prompt says so in as many words -- but the intent classifier files
+    # those phrases under the `web` domain, which seeds only web_search and
+    # web_fetch. So the one tool the prompt names for the request was left to
+    # embedding retrieval alone, and anything that reshaped the selection after
+    # retrieval (Terminus mode, a clamp) took it away again. Seed it
+    # deterministically, after the swap, the same way email/cookbook are.
+    if not guide_only and _relevant_tools is not None and _looks_like_research_request(
+        _retrieval_query or _last_user
+    ):
+        _research_tools = {"trigger_research", "manage_research"} - disabled_tools
+        if _research_tools - _relevant_tools:
+            logger.info("[agent-intent] research request seeded tools=%s", sorted(_research_tools))
+        _relevant_tools |= _research_tools
 
     # A follow-up turn must not lose a tool this conversation has already been
     # calling just because its literal text doesn't name that domain.
@@ -3996,31 +4128,21 @@ async def stream_agent_loop(
                 _removed_doc_file_tools,
             )
 
-    if _relevant_tools is not None:
-        logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
-
-    # A domain the user's own words named, whose tools then all got dropped —
-    # by a clamp above or by `disabled_tools` — is exactly how a turn ends with
-    # the agent telling the user it "doesn't have the tools" for the thing it
-    # was just asked to do. Name the cause in the log so it's diagnosable from
-    # the server side instead of only from the model's excuse, and tell the
-    # model plainly so it reports the real reason (or asks) rather than
-    # improvising with the wrong tool.
-    # "web" is excluded: it's the most over-triggered domain (the bare words
-    # "search"/"current"/"today" match it) and web tools are a deliberate
-    # per-turn user toggle already logged above — not accidental starvation.
+    # Last pass before the prompt is built: give back any domain the user's own
+    # words named that the selection above emptied out, and find out which
+    # domains are off for real. See `repair_starved_domains`.
     _starved_domains: list[str] = []
     if _relevant_tools is not None and not guide_only:
-        for _d in sorted(_intent_domains - {"web"}):
-            _domain_tools = _DOMAIN_TOOL_MAP.get(_d) or set()
-            if _domain_tools and not (_domain_tools & (_relevant_tools - disabled_tools)):
-                _starved_domains.append(_d)
-        if _starved_domains:
-            logger.warning(
-                "[agent-intent] domains %s detected but no usable tools remain "
-                "(selection or disabled_tools removed them all)",
-                _starved_domains,
-            )
+        _starved_domains = repair_starved_domains(
+            _relevant_tools,
+            _intent_domains,
+            disabled_tools,
+            allow_repair=not _ody_qwen_finetune_model,
+            protected={"email"} if active_email else frozenset(),
+        )
+
+    if _relevant_tools is not None:
+        logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
 
     prep_timings["tool_selection"] = time.time() - _t1
 
@@ -4181,10 +4303,12 @@ async def stream_agent_loop(
         else:
             messages.insert(0, {"role": "system", "content": GUIDE_ONLY_DIRECTIVE})
     if _starved_domains and not guide_only:
-        # The user asked for something in these domains and there is no tool
-        # left to do it with. Say which, so the model reports the actual gap
-        # (or asks a targeted question) instead of the useless generic "I don't
-        # have the tools for that in this turn".
+        # These domains are switched OFF for this turn (every tool for them is
+        # in `disabled_tools`), so no amount of re-selection can serve them.
+        # Say which, so the model reports the actual gap (or asks a targeted
+        # question) instead of the useless generic "I don't have the tools for
+        # that in this turn". Note this fires only for a genuine restriction --
+        # a domain the selector merely missed was restored above.
         _starved_labels = ", ".join(_STARVED_DOMAIN_LABELS.get(d, d) for d in _starved_domains)
         messages.append({
             "role": "system",
@@ -5651,6 +5775,34 @@ async def stream_agent_loop(
                 _effectful_used = True
 
             formatted = format_tool_result(desc, result)
+            # A tool result is not paid for once: it is replayed to the model on
+            # every remaining round of the turn, so a single 60k-character log
+            # dump costs 60k tokens times the rounds that follow it. Oversized
+            # results go to the embedding-backed overflow store and leave a
+            # head/tail excerpt naming a `toolout-...` ref, which
+            # `recall_tool_output` searches or pages through on demand. Nothing
+            # is lost -- it just stops riding along until it is wanted.
+            #
+            # ask_user is exempt: that result ends the turn and carries the
+            # question the user is about to answer, so it must stay verbatim.
+            if not _awaiting_user and "ask_user" not in result:
+                try:
+                    from src.tool_output_store import maybe_offload as _maybe_offload
+
+                    formatted, _offload_record = _maybe_offload(
+                        formatted,
+                        tool=block.tool_type,
+                        command=cmd_display,
+                        session_id=session_id,
+                        round_num=round_num,
+                    )
+                    if _offload_record is not None and _relevant_tools is not None:
+                        # The excerpt just told the model to call this tool; make
+                        # sure this turn's schema list actually offers it, whatever
+                        # selection path produced the list.
+                        _relevant_tools.add("recall_tool_output")
+                except Exception as _offload_exc:
+                    logger.warning("[tool-output] offload skipped: %s", _offload_exc)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
             if (

@@ -42,6 +42,11 @@ ALWAYS_AVAILABLE = frozenset({
     "ask_user",
     # Write back to the active plan (tick steps done / revise) during execution.
     "update_plan",
+    # The way back to a tool result the agent loop moved out of context.
+    # Always reachable: the excerpt that replaced the output tells the model
+    # to call this, so a turn where tool selection had not surfaced it would
+    # be pointing at a tool that is not in its schema list.
+    "recall_tool_output",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -109,6 +114,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "create_session": "Create a new chat with a name and model.",
     "list_sessions": "List all chats with their metadata (the UI calls these 'chats'). Use for 'list my chats', 'rename all my chats' (list first, then manage_session to rename each).",
     "send_to_session": "Send a message to another chat. Cross-chat communication.",
+    "recall_tool_output": "Read back a large tool result that was moved out of the conversation. Oversized tool output (long logs, whole files, big API responses) is kept only as a head/tail excerpt naming a `toolout-...` reference; this searches or pages through the full stored text. Use for \"the rest of that output\", \"what did the log say about X\", \"show me more of that file\" — never re-run the command to see what was trimmed.",
     "search_documents": "Semantic/vector search over the user's personal documents, vault, notes, journal entries, voice logs, and uploaded files using the ChromaDB embedding index. Answers questions ABOUT the content of the user's own documents — what did I write about X, find my notes on Y, what does my vault say about Z. Returns the relevant excerpts and their file paths. This is the correct tool instead of read_file/bash/cat over the personal documents directory, which floods context with whole files.",
     "search_chats": "Search past session transcripts across chats.",
     "ask_user": "Ask the user a multiple-choice question to get a decision or clarification. Use this when the task is genuinely ambiguous and the answer changes what you do next — pick between approaches, confirm an assumption, choose among options — instead of guessing. Provide a clear `question` and 2-6 `options` (each with a short `label`, optional `description`). Omit `multi`/keep it false unless the question explicitly permits choosing multiple options. Calling this ENDS your turn: the user sees clickable buttons and their choice arrives as your next message. Don't use it for things you can decide from context or sensible defaults, or for irreversible-action confirmation if a dedicated flow exists.",
@@ -374,6 +380,10 @@ class ToolIndex:
                    "did i write", "my writing", "obsidian", "knowledge base",
                    "what do my notes say", "according to my notes"}):
             {"search_documents"},
+        frozenset({"rest of the output", "rest of that output", "full output",
+                   "truncated output", "stored output", "toolout-",
+                   "recall the output", "more of that file", "trimmed output"}):
+            {"recall_tool_output"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
         # Wellbeing / mood check-ins (Lotus). "plan my day/week" is here on

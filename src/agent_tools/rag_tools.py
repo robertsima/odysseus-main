@@ -185,3 +185,118 @@ class SearchDocumentsTool:
             len(relevant), len(results), threshold, query[:80],
         )
         return {"results": "\n\n".join(parts)}
+
+
+# Slice size for an ordered read of a stored output. Deliberately smaller than
+# the offload threshold: a recall that pastes back as much as was removed has
+# achieved nothing.
+_RECALL_SLICE_CHARS = 3000
+_RECALL_CHUNK_CHARS = 1400
+
+
+class RecallToolOutputTool:
+    """Read back a tool result that was too large to keep in the conversation.
+
+    The agent loop offloads an oversized result to `tool_output_store` and
+    leaves an excerpt naming its ref. This is the way back in: ask a question
+    of one stored output (semantic, with a keyword fallback when the vector
+    index is down), or read it in order from a character offset.
+    """
+
+    async def execute(self, content: str, ctx: dict) -> Dict[str, Any]:
+        from src import tool_output_store as store
+
+        args = _parse_args(content)
+        # A bare string argument is far more likely to be the ref than a query.
+        raw = str(args.get("query") or "").strip()
+        ref = str(args.get("ref") or args.get("id") or "").strip()
+        if not ref and store.is_ref(raw):
+            ref, raw = raw, ""
+        query = raw
+        session_id = ctx.get("session_id")
+
+        if ref and not store.is_ref(ref):
+            return {
+                "error": (
+                    f"recall_tool_output: {ref!r} is not a stored-output reference. "
+                    "Use the `toolout-...` id from the excerpt, or omit `ref` to list "
+                    "what is stored for this chat."
+                ),
+                "exit_code": 1,
+            }
+
+        if not ref and not query:
+            records = await asyncio.to_thread(store.list_recent, session_id, 10)
+            if not records:
+                return {"results": "No large tool outputs have been stored in this chat."}
+            lines = [
+                f"- `{r['ref']}` — {r.get('tool') or 'tool'}"
+                f" ({r.get('chars', 0):,} chars, {r.get('lines', 0):,} lines)"
+                + (f": {r.get('command')}" if r.get("command") else "")
+                for r in records
+            ]
+            return {"results": "Stored tool outputs (newest first):\n" + "\n".join(lines)}
+
+        if ref and not query:
+            return await self._read_slice(store, ref, args)
+
+        results = await asyncio.to_thread(
+            store.search, query, ref=ref or None, session_id=session_id, k=_clamp_k(args.get("k"))
+        )
+        if not results:
+            hint = f" in `{ref}`" if ref else " in this chat's stored outputs"
+            return {
+                "results": (
+                    f'Nothing matching "{query}" was found{hint}. '
+                    "Try different wording, or read the output in order with "
+                    "{\"ref\": \"<ref>\", \"offset\": 0}."
+                )
+            }
+
+        blocks = []
+        for row in results:
+            text = (row.get("text") or "").strip()
+            if len(text) > _RECALL_CHUNK_CHARS:
+                text = text[:_RECALL_CHUNK_CHARS] + "\n... (chunk truncated)"
+            blocks.append(
+                f"--- `{row.get('ref', '')}` chunk {row.get('chunk_index', '?')}"
+                f" ({row.get('match', 'semantic')} match {row.get('score', 0):.2f}) ---\n{text}"
+            )
+        return {"results": "\n\n".join(blocks)}
+
+    async def _read_slice(self, store, ref: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        text = await asyncio.to_thread(store.load, ref)
+        if text is None:
+            return {
+                "error": (
+                    f"recall_tool_output: `{ref}` is no longer stored (stored outputs "
+                    "are kept for a few days). Re-run the tool if you still need it."
+                ),
+                "exit_code": 1,
+            }
+        try:
+            offset = max(0, int(args.get("offset") or 0))
+        except (TypeError, ValueError):
+            offset = 0
+        try:
+            limit = int(args.get("limit") or _RECALL_SLICE_CHARS)
+        except (TypeError, ValueError):
+            limit = _RECALL_SLICE_CHARS
+        limit = max(200, min(limit, 12000))
+
+        slice_text = text[offset:offset + limit]
+        if not slice_text:
+            return {
+                "results": (
+                    f"`{ref}` has {len(text):,} characters; offset {offset:,} is past the end."
+                )
+            }
+        end = offset + len(slice_text)
+        header = f"`{ref}` characters {offset:,}-{end:,} of {len(text):,}"
+        footer = ""
+        if end < len(text):
+            footer = (
+                f"\n\n[{len(text) - end:,} characters remain — continue with "
+                f'{{"ref": "{ref}", "offset": {end}}}]'
+            )
+        return {"results": f"{header}\n\n{slice_text}{footer}"}
