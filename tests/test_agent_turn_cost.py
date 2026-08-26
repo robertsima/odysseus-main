@@ -137,3 +137,139 @@ def test_the_admin_check_on_the_tool_hot_path_reuses_one_auth_manager(monkeypatc
         tool_security.owner_is_admin_or_single_user("someone")
 
     assert len(built) <= 1, f"built {len(built)} AuthManagers for five tool calls"
+
+
+# ── Admin intent must not fire on ordinary words ───────────────────────
+#
+# Admin intent unions _ADMIN_TOOLS into both the prompt sections and the schema
+# list for EVERY round of the turn: ~2,000 tokens of extra schema per round,
+# ~35k across a seventeen-round turn. It was a bare substring test, so "docker"
+# matched "doc", "observer" matched "server", "multitasking" matched "task".
+
+from src.agent_loop import _detect_admin_intent
+
+
+def _asked(text):
+    return _detect_admin_intent([{"role": "user", "content": text}])
+
+
+@pytest.mark.parametrize("text", [
+    "can you help me with docker compose?",        # doc
+    "the observer pattern is confusing",           # server
+    "I was multitasking and lost my place",        # task
+    "resetting the counter each loop",             # setting
+    "summarize this doctor's letter",              # doc
+    "what does tokenize mean",                     # token
+    "give them the notice",                        # theme stem must not be "them"
+    "that is not what I meant",                    # note stem must not be "not"
+    "write a poem about the ocean",
+])
+def test_an_ordinary_word_does_not_buy_the_admin_toolset(text):
+    assert not _asked(text), "pays ~2k tokens of schema every round of the turn"
+
+
+@pytest.mark.parametrize("text", [
+    "delete that chat session",
+    "list my endpoints",
+    "rename this conversation",
+    "show me my documents",
+    "add a todo",
+    "what are my tasks",
+    "change my settings",
+    "configure the mcp server",
+    "set up a cron schedule",
+    "switch model please",
+    "my api key",
+    "second opinion",
+    "the 'email tags' task isnt very useful",
+])
+def test_real_admin_requests_still_fire(text):
+    assert _asked(text)
+
+
+@pytest.mark.parametrize("text", [
+    "archiving old emails",
+    "managing my webhooks",
+    "deleting the token",
+    "renaming this chat",
+    "scheduling a reminder",
+])
+def test_inflected_forms_still_fire(text):
+    """A silent-e keyword has to keep matching its -ing form."""
+    assert _asked(text)
+
+
+# ── The HTTP embedding lane must not build the fallback it discards ────
+
+
+def test_the_custom_lane_never_builds_the_fastembed_fallback(monkeypatch):
+    """It called a factory whose contract is "HTTP, else FastEmbed", then threw
+    a FastEmbed result away for being the wrong type -- after paying for an ONNX
+    load and a probe encode, on every offload and every stored-output search."""
+    from src import embedding_lanes
+    import src.embeddings as embeddings_mod
+
+    embeddings_mod.reset_http_embed_state()
+    http_probes, fastembed_builds = [], []
+
+    class _DownHttp:
+        def __init__(self, *a, **k):
+            http_probes.append(1)
+
+        def get_sentence_embedding_dimension(self):
+            raise RuntimeError("endpoint down")
+
+    def _fastembed(*a, **k):
+        fastembed_builds.append(1)
+        raise AssertionError("the HTTP lane must never build the FastEmbed fallback")
+
+    monkeypatch.setattr(embeddings_mod, "EmbeddingClient", _DownHttp)
+    monkeypatch.setattr(embeddings_mod, "FastEmbedClient", _fastembed)
+
+    for _ in range(3):
+        with pytest.raises(RuntimeError, match="HTTP embedding lane unavailable"):
+            embedding_lanes._build_custom_client()
+
+    assert not fastembed_builds
+    # The existing once-per-process latch is preserved: probe once, then skip.
+    assert len(http_probes) == 1
+    embeddings_mod.reset_http_embed_state()
+
+
+def test_a_healthy_http_lane_is_still_returned(monkeypatch):
+    """The default EmbeddingClient URL counts as a lane worth probing, so this
+    must not be short-circuited on "nothing configured"."""
+    from src import embedding_lanes
+    import src.embeddings as embeddings_mod
+
+    embeddings_mod.reset_http_embed_state()
+    monkeypatch.setattr(embedding_lanes, "_load_custom_endpoint", lambda: {}, raising=False)
+
+    class _HealthyHttp:
+        url = "http://localhost:11434/v1/embeddings"
+        model = "all-minilm"
+
+        def __init__(self, *a, **k):
+            pass
+
+        def get_sentence_embedding_dimension(self):
+            return 768
+
+    monkeypatch.setattr(embeddings_mod, "EmbeddingClient", _HealthyHttp)
+    assert isinstance(embedding_lanes._build_custom_client(), _HealthyHttp)
+    embeddings_mod.reset_http_embed_state()
+
+
+def test_the_recall_schema_advertises_the_ceiling_it_actually_enforces():
+    """It said "max 12000" after the ceiling dropped to 8000, so the model asked
+    for more than it could get and silently received a shorter slice."""
+    from src.agent_loop import FUNCTION_TOOL_SCHEMAS
+
+    schema = next(
+        s for s in FUNCTION_TOOL_SCHEMAS
+        if s.get("function", {}).get("name") == "recall_tool_output"
+    )
+    described = schema["function"]["parameters"]["properties"]["limit"]["description"]
+    assert str(_RECALL_MAX_SLICE_CHARS) in described
+    assert str(_RECALL_SLICE_CHARS) in described
+    assert "12000" not in described

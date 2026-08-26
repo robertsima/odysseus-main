@@ -1181,6 +1181,33 @@ _ADMIN_KEYWORDS = [
     "note", "notes", "todo", "todos", "reminder", "reminders",
 ]
 
+# Admin intent unions _ADMIN_TOOLS into BOTH the prompt sections and the schema
+# list, for every round of the turn — about 2,000 tokens of extra schema per
+# round, ~35k across a seventeen-round turn. A bare substring test was paying
+# that for "docker" (doc), "observer" (server), "multitasking" (task),
+# "resetting" (setting), "doctor" (doc) and "tokenize" (token).
+#
+# So: match on word boundaries. Inflections still count — a keyword ending in a
+# silent `e` also matches its `-ing` form ("archiving", "managing") — but only
+# for keywords long enough that the stem cannot collide with an ordinary word.
+# Without that guard "theme" would stem to "them" and "note" to "not", which is
+# far worse than the substring matching this replaces.
+_ADMIN_STEM_MIN_LEN = 6
+_ADMIN_INFLECTION = r"(?:s|es|d|ed|ing)?"
+
+
+def _admin_keyword_pattern(keyword: str) -> str:
+    if keyword.endswith("e") and len(keyword) >= _ADMIN_STEM_MIN_LEN:
+        return re.escape(keyword[:-1]) + r"e?" + _ADMIN_INFLECTION
+    return re.escape(keyword) + _ADMIN_INFLECTION
+
+
+_ADMIN_KEYWORD_RE = re.compile(
+    r"\b(?:" + "|".join(_admin_keyword_pattern(k) for k in _ADMIN_KEYWORDS) + r")\b",
+    re.IGNORECASE,
+)
+
+
 def _detect_admin_intent(messages: List[Dict]) -> bool:
     """Check if the last user message suggests admin/management tool usage."""
     for msg in reversed(messages):
@@ -1188,8 +1215,7 @@ def _detect_admin_intent(messages: List[Dict]) -> bool:
             content = msg.get("content", "")
             if isinstance(content, list):
                 content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            content_lower = content.lower()
-            return any(kw in content_lower for kw in _ADMIN_KEYWORDS)
+            return bool(_ADMIN_KEYWORD_RE.search(content))
     return False
 
 

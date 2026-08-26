@@ -238,8 +238,20 @@ def reset_http_embed_state():
     _http_embed_down = False
 
 
-def get_embedding_client():
-    """Factory: try HTTP API first, fall back to local fastembed."""
+def get_http_embedding_client():
+    """The HTTP embedding client, or None. Never falls back to FastEmbed.
+
+    Split out of `get_embedding_client` for callers that want the HTTP lane
+    specifically. Routing those through the fallback-capable factory meant
+    building a FastEmbedClient — an ONNX model load plus a probe encode — only
+    to discard it for being the wrong type, on every offload and every stored-
+    output search.
+
+    Note the default matters: `EmbeddingClient()` has its own default URL, so
+    "nothing persisted and nothing in env" is still a lane worth probing. The
+    `_http_embed_down` latch is set BY that probe, so it can only be consulted
+    after one has been attempted this process.
+    """
     global _http_embed_down
 
     # Check for a persisted custom endpoint (saved from admin panel)
@@ -257,15 +269,24 @@ def get_embedding_client():
             os.environ["EMBEDDING_API_KEY"] = decrypt(api_key)
     # Try the HTTP embedding API — unless we already found it down this process
     # (avoids paying the connect timeout again on every RAG/memory/tool probe).
-    if not _http_embed_down:
-        try:
-            client = EmbeddingClient()
-            client.get_sentence_embedding_dimension()  # health check
-            logger.info(f"Using HTTP embedding API: {client.url} model={client.model}")
-            return client
-        except Exception as e:
-            _http_embed_down = True
-            logger.warning(f"HTTP embedding API unavailable ({e}); using local FastEmbed for the rest of this process")
+    if _http_embed_down:
+        return None
+    try:
+        client = EmbeddingClient()
+        client.get_sentence_embedding_dimension()  # health check
+        logger.info(f"Using HTTP embedding API: {client.url} model={client.model}")
+        return client
+    except Exception as e:
+        _http_embed_down = True
+        logger.warning(f"HTTP embedding API unavailable ({e}); using local FastEmbed for the rest of this process")
+        return None
+
+
+def get_embedding_client():
+    """Factory: try HTTP API first, fall back to local fastembed."""
+    client = get_http_embedding_client()
+    if client is not None:
+        return client
 
     # Fall back to local fastembed
     try:

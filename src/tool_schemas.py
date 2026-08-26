@@ -348,7 +348,17 @@ FUNCTION_TOOL_SCHEMAS = [
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Characters to return for an ordered read (default 3000, max 12000).",
+                        # Must match _RECALL_SLICE_CHARS / _RECALL_MAX_SLICE_CHARS
+                        # in agent_tools/rag_tools.py, which is what actually
+                        # clamps. This said "max 12000" after the ceiling
+                        # dropped to 8000, so the model asked for more than it
+                        # could get (one round asked for 20,000), silently
+                        # received a shorter slice and had to page again.
+                        # Kept a plain literal on purpose: this whole structure
+                        # is read statically by ast.literal_eval in
+                        # test_tool_index_schema_parity. The numbers are tied to
+                        # the constants by test instead.
+                        "description": "Characters to return for an ordered read (default 3000, max 8000).",
                     },
                     "k": {
                         "type": "integer",

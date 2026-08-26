@@ -191,10 +191,23 @@ def _build_fastembed_client():
 
 
 def _build_custom_client():
-    from src.embeddings import EmbeddingClient, get_embedding_client
+    """The HTTP embedding lane, or nothing — never the FastEmbed fallback.
 
-    client = get_embedding_client()
-    if isinstance(client, EmbeddingClient):
+    This used to call `get_embedding_client()`, whose contract is "HTTP, else
+    FastEmbed", and then discard a FastEmbed result for being the wrong type —
+    after paying for an ONNX model load and a probe encode. Once HTTP had been
+    found down, that was every offload and every stored-output search, which is
+    why "FastEmbed loaded" kept reappearing even after the fallback client
+    itself was cached.
+
+    Asking for the HTTP half directly keeps the probe (and its once-per-process
+    latch) exactly as it was, and simply never builds the fallback here. The
+    FastEmbed lane is built separately, and cached.
+    """
+    from src.embeddings import get_http_embedding_client
+
+    client = get_http_embedding_client()
+    if client is not None:
         return client
     raise RuntimeError("HTTP embedding lane unavailable")
 
