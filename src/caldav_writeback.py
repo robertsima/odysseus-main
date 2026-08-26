@@ -18,7 +18,7 @@ network.
 
 import asyncio
 import logging
-from datetime import timezone
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,9 @@ def build_event_ical(ev: dict) -> str:
 
     ve = iEvent()
     ve.add("uid", ev["uid"])
+    # RFC 5545 requires DTSTAMP on VEVENT. python-caldav otherwise patches the
+    # payload before sending and emits a compatibility warning on every write.
+    ve.add("dtstamp", datetime.now(timezone.utc))
     ve.add("summary", ev.get("summary") or "")
     if ev.get("description"):
         ve.add("description", ev["description"])
@@ -188,12 +191,17 @@ def _discover_calendars(client):
 
 def _writeback_blocking(local_cal_id, ev, delete, url, username, password,
                         owner="", account_id="", token="") -> dict:
-    from src.caldav_sync import _build_dav_client
+    from src.caldav_sync import _build_dav_client, _google_calendar_collection_url
     # Redirects disabled here too: the write-back path opens its own DAVClient,
     # so it needs the same SSRF-via-redirect protection as the pull path.
     client = _build_dav_client(url, username, password, token=token)
     try:
-        calendars = _discover_calendars(client)
+        google_collection = _google_calendar_collection_url(url)
+        calendars = (
+            [client.calendar(url=google_collection)]
+            if google_collection
+            else _discover_calendars(client)
+        )
         if not calendars:
             return {"ok": False, "error": "no remote calendars discovered"}
         return push_event(calendars, local_cal_id, ev, delete=delete,

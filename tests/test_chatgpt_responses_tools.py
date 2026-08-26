@@ -230,6 +230,19 @@ def _tool_calls_from(chunks):
     return None
 
 
+def _usage_from(chunks):
+    for chunk in chunks:
+        if not chunk.startswith("data: "):
+            continue
+        body = chunk[6:].strip()
+        if body == "[DONE]":
+            continue
+        payload = json.loads(body)
+        if payload.get("type") == "usage":
+            return payload["data"]
+    return None
+
+
 async def test_streamed_function_call_is_emitted(monkeypatch):
     calls = _tool_calls_from(await _collect(monkeypatch, [
         {"type": "response.output_item.added", "output_index": 0,
@@ -275,6 +288,28 @@ async def test_text_only_response_emits_no_tool_calls(monkeypatch):
     ])
     assert _tool_calls_from(chunks) is None
     assert any('"delta": "hello"' in c for c in chunks)
+
+
+async def test_responses_usage_preserves_prompt_cache_details(monkeypatch):
+    chunks = await _collect(monkeypatch, [{
+        "type": "response.completed",
+        "response": {
+            "usage": {
+                "input_tokens": 1200,
+                "input_tokens_details": {
+                    "cached_tokens": 900,
+                    "cache_write_tokens": 100,
+                },
+                "output_tokens": 40,
+            }
+        },
+    }])
+    assert _usage_from(chunks) == {
+        "input_tokens": 1200,
+        "output_tokens": 40,
+        "cached_input_tokens": 900,
+        "cache_write_input_tokens": 100,
+    }
 
 
 async def test_calls_survive_a_stream_that_never_completes(monkeypatch):

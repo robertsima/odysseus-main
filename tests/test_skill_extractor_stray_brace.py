@@ -145,3 +145,40 @@ async def test_maybe_extract_skill_drops_on_multiple_json_objects(monkeypatch):
     assert entry is None
     assert not skills_manager.added
 
+
+async def test_maybe_extract_skill_uses_task_candidates_for_background_fallback(monkeypatch):
+    candidates = [
+        ("http://primary", "primary-model", {}),
+        ("http://fallback", "fallback-model", {}),
+    ]
+    observed = {}
+
+    async def fake_fallback(received_candidates, messages, **kwargs):
+        observed["candidates"] = received_candidates
+        observed["messages"] = messages
+        observed["kwargs"] = kwargs
+        return "null"
+
+    async def unexpected_direct(*args, **kwargs):
+        raise AssertionError("candidate-aware extraction should use the fallback helper")
+
+    monkeypatch.setattr("src.llm_core.llm_call_async_with_fallback", fake_fallback)
+    monkeypatch.setattr("src.llm_core.llm_call_async", unexpected_direct)
+
+    entry = await skill_extractor.maybe_extract_skill(
+        _FakeSession(),
+        _FakeSkillsManager(),
+        endpoint_url="http://primary",
+        model="primary-model",
+        headers={},
+        round_count=2,
+        tool_count=0,
+        owner="alice",
+        llm_candidates=candidates,
+    )
+
+    assert entry is None
+    assert observed["candidates"] is candidates
+    assert observed["messages"][0]["role"] == "system"
+    assert observed["kwargs"]["workload"] == "background"
+

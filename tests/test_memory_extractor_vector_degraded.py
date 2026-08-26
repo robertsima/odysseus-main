@@ -123,3 +123,37 @@ def test_healthy_vector_store_still_dedups_normally(monkeypatch):
         # The new fact was deduped against alice's own memory, so only the
         # seeded entry remains (no duplicate added).
         assert [e["text"] for e in mgr.load(owner="alice")] == ["Alice's home city is Lisbon"]
+
+
+def test_extraction_uses_task_candidates_for_background_fallback(monkeypatch):
+    candidates = [
+        ("http://primary", "primary-model", {}),
+        ("http://fallback", "fallback-model", {}),
+    ]
+    observed = {}
+
+    async def _fake_fallback(received_candidates, messages, **kwargs):
+        observed["candidates"] = received_candidates
+        observed["messages"] = messages
+        observed["kwargs"] = kwargs
+        return "[]"
+
+    async def _unexpected_direct(*args, **kwargs):
+        raise AssertionError("candidate-aware extraction should use the fallback helper")
+
+    monkeypatch.setattr(src.llm_core, "llm_call_async_with_fallback", _fake_fallback)
+    monkeypatch.setattr(src.llm_core, "llm_call_async", _unexpected_direct)
+
+    _run(extract_and_store(
+        _FakeSession(),
+        memory_manager=None,
+        memory_vector=None,
+        endpoint_url="http://primary",
+        model="primary-model",
+        headers={},
+        llm_candidates=candidates,
+    ))
+
+    assert observed["candidates"] is candidates
+    assert observed["messages"][0]["role"] == "system"
+    assert observed["kwargs"]["workload"] == "background"

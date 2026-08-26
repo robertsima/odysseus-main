@@ -228,8 +228,7 @@ def needs_auto_name(name: str) -> bool:
 async def auto_name_session(session_manager, sess):
     """Generate a short title for a session from its first user message."""
     try:
-        from src.llm_core import llm_call_async
-        from src.task_endpoint import resolve_task_endpoint
+        from src.task_endpoint import task_llm_call_async
 
         # Find first user message
         first_msg = ""
@@ -248,10 +247,7 @@ async def auto_name_session(session_manager, sess):
             return
 
         owner = getattr(sess, "owner", None)
-        t_url, t_model, t_headers = resolve_task_endpoint(
-            sess.endpoint_url, sess.model, sess.headers, owner=owner
-        )
-        if not t_model:
+        if not getattr(sess, "model", None):
             logger.debug("[auto-name] No model provided, skipping")
             return
 
@@ -260,16 +256,17 @@ async def auto_name_session(session_manager, sess):
         # plus the actual title — 200 used to clip them mid-reasoning
         # so strip_think left an empty string and no rename happened.
         # Timeout matches: 60s gives slow local reasoners room to finish.
-        title = await llm_call_async(
-            t_url,
-            t_model,
+        title = await task_llm_call_async(
             [
                 {"role": "system", "content": "Generate a short title (3-6 words, no quotes) for a conversation that starts with this message. Reply with ONLY the title, nothing else. Do NOT include any thinking, reasoning, or explanation — just the title."},
                 {"role": "user", "content": first_msg},
             ],
+            fallback_url=sess.endpoint_url,
+            fallback_model=sess.model,
+            fallback_headers=sess.headers,
+            owner=owner,
             temperature=0.3,
             max_tokens=4096,
-            headers=t_headers,
             timeout=60,
         )
 
@@ -1232,13 +1229,19 @@ def run_post_response_tasks(
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
     if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
         from services.memory.memory_extractor import extract_and_store
-        from src.task_endpoint import resolve_task_endpoint
-        t_url, t_model, t_headers = resolve_task_endpoint(
+        from src.task_endpoint import resolve_task_candidates
+        t_candidates = resolve_task_candidates(
             sess.endpoint_url, sess.model, sess.headers, owner=owner,
+        )
+        t_url, t_model, t_headers = (
+            t_candidates[0]
+            if t_candidates
+            else (sess.endpoint_url, sess.model, sess.headers)
         )
         _extraction_jobs.append(("memory", extract_and_store(
             sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
+            llm_candidates=t_candidates,
         )))
 
     # Skill extraction from complex agent runs. Only when the user actually
@@ -1270,9 +1273,14 @@ def run_post_response_tasks(
             )
         else:
             from services.memory.skill_extractor import maybe_extract_skill
-            from src.task_endpoint import resolve_task_endpoint
-            s_url, s_model, s_headers = resolve_task_endpoint(
+            from src.task_endpoint import resolve_task_candidates
+            s_candidates = resolve_task_candidates(
                 sess.endpoint_url, sess.model, sess.headers, owner=owner,
+            )
+            s_url, s_model, s_headers = (
+                s_candidates[0]
+                if s_candidates
+                else (sess.endpoint_url, sess.model, sess.headers)
             )
             logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
             _extraction_jobs.append(("skill", maybe_extract_skill(
@@ -1280,6 +1288,7 @@ def run_post_response_tasks(
                 s_url, s_model, s_headers,
                 agent_rounds, agent_tool_calls,
                 owner=owner,
+                llm_candidates=s_candidates,
             )))
 
     if _extraction_jobs:

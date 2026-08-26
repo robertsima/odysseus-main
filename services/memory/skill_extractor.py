@@ -128,6 +128,7 @@ async def maybe_extract_skill(
     round_count: int,
     tool_count: int,
     owner: Optional[str] = None,
+    llm_candidates: Optional[list] = None,
 ):
     """Extract a skill if the agent run was complex enough."""
     if not model:
@@ -144,7 +145,7 @@ async def maybe_extract_skill(
         return None
 
     try:
-        from src.llm_core import llm_call_async
+        from src.llm_core import llm_call_async, llm_call_async_with_fallback
 
         # Get recent messages
         history = session.get_context_messages()
@@ -191,16 +192,26 @@ async def maybe_extract_skill(
             "[skill-extract] calling LLM (endpoint=%s, ctx=%d msgs, timeout=30s)",
             endpoint_url, len(recent),
         )
-        response = await llm_call_async(
-            endpoint_url,
-            model,
-            [
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": f"Conversation:\n{conversation}"},
-            ],
-            headers=headers,
-            timeout=30,
-        )
+        extraction_messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": f"Conversation:\n{conversation}"},
+        ]
+        if llm_candidates:
+            response = await llm_call_async_with_fallback(
+                llm_candidates,
+                extraction_messages,
+                timeout=30,
+                workload="background",
+            )
+        else:
+            response = await llm_call_async(
+                endpoint_url,
+                model,
+                extraction_messages,
+                headers=headers,
+                timeout=30,
+                workload="background",
+            )
         logger.debug(
             "[skill-extract] LLM returned in %.1fs (len=%d, head=%r)",
             _time.monotonic() - _t0, len(response or ""), (response or "")[:80],

@@ -282,6 +282,8 @@ async def extract_and_store(
     endpoint_url: str,
     model: str,
     headers: Optional[dict] = None,
+    *,
+    llm_candidates: Optional[list] = None,
 ):
     """Extract facts from recent conversation and store them.
 
@@ -293,7 +295,7 @@ async def extract_and_store(
         return
 
     try:
-        from src.llm_core import llm_call_async
+        from src.llm_core import llm_call_async, llm_call_async_with_fallback
 
         # Get last N messages from session
         messages = session.get_context_messages()
@@ -354,20 +356,31 @@ async def extract_and_store(
 
         facts = []
         try:
-            raw = await llm_call_async(
-                endpoint_url,
-                model,
-                extraction_messages,
-                temperature=0.1,
+            call_kwargs = {
+                "temperature": 0.1,
                 # A reasoning model spends most of its budget on <think> tokens
                 # BEFORE emitting the JSON, so the old 500 truncated the response
                 # before any JSON appeared → every run logged "0 candidates". The
                 # audit path hit the same wall and raised to 16384; extraction's
                 # output (a short facts list) is small, so an ample ceiling is
                 # enough once thinking has room.
-                max_tokens=4096,
-                headers=headers,
-            )
+                "max_tokens": 4096,
+                "workload": "background",
+            }
+            if llm_candidates:
+                raw = await llm_call_async_with_fallback(
+                    llm_candidates,
+                    extraction_messages,
+                    **call_kwargs,
+                )
+            else:
+                raw = await llm_call_async(
+                    endpoint_url,
+                    model,
+                    extraction_messages,
+                    headers=headers,
+                    **call_kwargs,
+                )
 
             # Parse JSON, tolerating reasoning-model noise (<think> blocks, a
             # ```json fence, and leading/trailing commentary). See

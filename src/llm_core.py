@@ -2593,7 +2593,22 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         input_tokens = usage.get("input_tokens") or usage.get("prompt_tokens") or input_tokens
                         output_tokens = usage.get("output_tokens") or usage.get("completion_tokens") or output_tokens
                         if input_tokens or output_tokens:
-                            yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": input_tokens, "output_tokens": output_tokens}})}\n\n'
+                            input_details = (
+                                usage.get("input_tokens_details")
+                                or usage.get("prompt_tokens_details")
+                                or {}
+                            )
+                            usage_data = {
+                                "input_tokens": input_tokens,
+                                "output_tokens": output_tokens,
+                            }
+                            cached_tokens = input_details.get("cached_tokens", 0) or 0
+                            cache_write_tokens = input_details.get("cache_write_tokens", 0) or 0
+                            if cached_tokens:
+                                usage_data["cached_input_tokens"] = cached_tokens
+                            if cache_write_tokens:
+                                usage_data["cache_write_input_tokens"] = cache_write_tokens
+                            yield f'data: {json.dumps({"type": "usage", "data": usage_data})}\n\n'
                         _rs_event = _emit_resp_reasoning()
                         if _rs_event:
                             yield _rs_event
@@ -2696,6 +2711,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     if provider == "anthropic":
         _anth_input_tokens = 0
         _anth_output_tokens = 0
+        _c_read = 0
+        _c_write = 0
         # Track tool_use blocks: {index: {id, name, arguments_json}}
         _anth_tool_blocks: Dict[int, Dict] = {}
         _anth_block_idx = -1
@@ -2775,7 +2792,15 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                     })
                                 yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
                             if _anth_input_tokens or _anth_output_tokens:
-                                yield f'data: {json.dumps({"type": "usage", "data": {"input_tokens": _anth_input_tokens, "output_tokens": _anth_output_tokens}})}\n\n'
+                                _anth_usage = {
+                                    "input_tokens": _anth_input_tokens,
+                                    "output_tokens": _anth_output_tokens,
+                                }
+                                if _c_read:
+                                    _anth_usage["cached_input_tokens"] = _c_read
+                                if _c_write:
+                                    _anth_usage["cache_write_input_tokens"] = _c_write
+                                yield f'data: {json.dumps({"type": "usage", "data": _anth_usage})}\n\n'
                             yield "data: [DONE]\n\n"
                             return
                         elif evt == "error":
@@ -2897,7 +2922,21 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                                 )
                                 if "usage" in j and not _delta_has_output:
                                     u = j["usage"] or {}
-                                    _usage_data = {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}
+                                    _input_details = (
+                                        u.get("prompt_tokens_details")
+                                        or u.get("input_tokens_details")
+                                        or {}
+                                    )
+                                    _usage_data = {
+                                        "input_tokens": u.get("prompt_tokens", u.get("input_tokens", 0)),
+                                        "output_tokens": u.get("completion_tokens", u.get("output_tokens", 0)),
+                                    }
+                                    _cached_tokens = _input_details.get("cached_tokens", 0) or 0
+                                    _cache_write_tokens = _input_details.get("cache_write_tokens", 0) or 0
+                                    if _cached_tokens:
+                                        _usage_data["cached_input_tokens"] = _cached_tokens
+                                    if _cache_write_tokens:
+                                        _usage_data["cache_write_input_tokens"] = _cache_write_tokens
                                     # llama.cpp puts a `timings` block alongside `usage` with the
                                     # TRUE generation speed (predicted_per_second) — pure decode,
                                     # excluding prefill/network. Pass it through so the UI shows the

@@ -93,7 +93,45 @@ def test_agent_loop_expands_browser_mcp_tools_from_connected_server():
     source = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
     assert "def _expand_browser_mcp_tools" in source
     assert "server_id\") == \"builtin_browser\"" in source
-    assert "_relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)" in source
+    assert "_relevant_tools = _expand_browser_mcp_tools(" in source
+    assert "_looks_like_explicit_browser_request" in source
+
+
+class _FakeBrowserManager:
+    def get_all_tools(self):
+        return [
+            {
+                "server_id": "builtin_browser",
+                "qualified_name": f"mcp__builtin_browser__{name}",
+                "is_disabled": False,
+            }
+            for name in ("browser_navigate", "browser_snapshot", "browser_wait_for")
+        ]
+
+
+def test_semantic_browser_hit_does_not_expand_the_whole_server():
+    from src.agent_loop import _expand_browser_mcp_tools
+
+    selected = {"ask_user", "mcp__builtin_browser__browser_wait_for"}
+    assert _expand_browser_mcp_tools(selected, _FakeBrowserManager()) == selected
+
+
+def test_explicit_browser_intent_still_expands_connected_tools():
+    from src.agent_loop import _expand_browser_mcp_tools
+
+    selected = {"mcp__builtin_browser__browser_navigate"}
+    expanded = _expand_browser_mcp_tools(
+        selected, _FakeBrowserManager(), expand_all=True,
+    )
+    assert "mcp__builtin_browser__browser_snapshot" in expanded
+    assert "mcp__builtin_browser__browser_wait_for" in expanded
+
+
+def test_browser_sentinel_always_expands_connected_tools():
+    from src.agent_loop import _expand_browser_mcp_tools
+
+    expanded = _expand_browser_mcp_tools({"builtin_browser"}, _FakeBrowserManager())
+    assert "mcp__builtin_browser__browser_snapshot" in expanded
 
 
 def test_disabled_tools_respects_missing_vs_explicit_toggles():

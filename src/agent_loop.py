@@ -43,6 +43,11 @@ from src.agent_tools import (
 logger = logging.getLogger(__name__)
 
 _BROWSER_MCP_PREFIX = "mcp__builtin_browser__"
+_EXPLICIT_BROWSER_RE = re.compile(
+    r"\b(browser|browse|navigate|click|screenshot|web\s?page|new\s+tab|"
+    r"fill(?:\s+out)?\s+(?:the\s+)?form|upload\s+(?:the\s+)?file)\b|https?://",
+    re.IGNORECASE,
+)
 _LOTUS_MCP_TOOL_NAMES = {
     "mood_get_import_status",
     "mood_import_file",
@@ -76,18 +81,38 @@ def _apply_private_mcp_filter(
     disabled_tools.update(_LOTUS_NATIVE_TOOL_NAMES)
 
 
-def _expand_browser_mcp_tools(tool_names: Set[str], mcp_mgr) -> Set[str]:
-    """Expand browser intent to every connected Playwright MCP tool.
+def _looks_like_explicit_browser_request(text: str) -> bool:
+    """Whether the user's words explicitly ask for interactive browser work."""
+    return bool(_EXPLICIT_BROWSER_RE.search(text or ""))
+
+
+def _expand_browser_mcp_tools(
+    tool_names: Set[str],
+    mcp_mgr,
+    *,
+    expand_all: bool = False,
+) -> Set[str]:
+    """Expand explicit browser intent to every connected Playwright MCP tool.
 
     Playwright MCP tool names can change between releases (for example
     browser_click vs browser_mouse_down). Route-level intent only needs to say
     "browser"; the final prompt/schema set should use the names the connected
     MCP server actually exposed.
+
+    A single browser tool returned by semantic retrieval is not enough evidence
+    to send the entire server surface. Short unrelated follow-ups have matched
+    ``browser_wait_for`` and ballooned one harmless tool hit into ~30 schemas.
+    Keep those exact retrieval hits as-is; expand only an explicit browser ask,
+    the ``builtin_browser`` sentinel, or a follow-up to prior browser work.
     """
     names = set(tool_names or set())
     if not mcp_mgr:
         return names
     if not any(name == "builtin_browser" or name.startswith(_BROWSER_MCP_PREFIX) for name in names):
+        return names
+    if "builtin_browser" in names:
+        expand_all = True
+    if not expand_all:
         return names
     try:
         for tool in mcp_mgr.get_all_tools():
@@ -98,6 +123,23 @@ def _expand_browser_mcp_tools(tool_names: Set[str], mcp_mgr) -> Set[str]:
     except Exception as exc:
         logger.warning("Failed to expand browser MCP tools: %s", exc)
     return names
+
+
+def _estimate_tool_schema_tokens(tool_schemas: Optional[List[Dict]]) -> int:
+    """Rough token cost of the native tool-schema payload.
+
+    ``estimate_tokens(messages)`` cannot see the separate API ``tools`` field,
+    so omitting this made request logs, the context meter, and trim headroom all
+    undercount tool-heavy prompts. Use the same deliberately conservative
+    character heuristic as the rest of the context accounting.
+    """
+    if not tool_schemas:
+        return 0
+    try:
+        raw = json.dumps(tool_schemas, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        raw = str(tool_schemas)
+    return max(1, int(len(raw) * 0.3))
 
 
 def _looks_like_notes_list_request(text: str) -> bool:
@@ -3356,6 +3398,9 @@ def _compute_final_metrics(
     prep_timings: Optional[Dict[str, float]] = None,
     backend_gen_tps: float = 0,
     backend_prefill_tps: float = 0,
+    cached_input_tokens: int = 0,
+    cache_write_input_tokens: int = 0,
+    tool_schema_tokens: int = 0,
 ) -> dict:
     """Compute token counts, TPS, and build the final metrics dict."""
     if has_real_usage:
@@ -3407,6 +3452,14 @@ def _compute_final_metrics(
         "usage_source": "real" if has_real_usage else "estimated",
         "model": model,
     }
+    if has_real_usage:
+        metrics["cached_input_tokens"] = max(int(cached_input_tokens or 0), 0)
+        metrics["cache_write_input_tokens"] = max(int(cache_write_input_tokens or 0), 0)
+        metrics["uncached_input_tokens"] = max(
+            int(input_tokens) - metrics["cached_input_tokens"], 0
+        )
+    if tool_schema_tokens:
+        metrics["tool_schema_tokens"] = int(tool_schema_tokens)
     if backend_prefill_tps and backend_prefill_tps > 0:
         metrics["prefill_tps"] = round(backend_prefill_tps, 2)
     if prep_timings:
@@ -3601,6 +3654,60 @@ def _detect_runaway_call(call_freq, threshold=15):
 DEFAULT_MAX_TOOL_CALLS_PER_RUN = 60
 
 
+def _tool_schemas_for_round(
+    *,
+    force_answer: bool,
+    is_api_model: bool,
+    relevant_tools: Optional[Set[str]],
+    needs_admin: bool,
+    mcp_schemas: List[Dict],
+    disabled_tools: Set[str],
+    ody_qwen_finetune_model: bool,
+    last_user: str,
+) -> List[Dict]:
+    """Return the exact schema list sent for one model round.
+
+    Centralising this keeps the schema token reserve/accounting in lockstep
+    with the payload. Previously the schema decision lived only inside the
+    round loop, after context trimming had already decided the request fit.
+    """
+    if force_answer:
+        return []
+    if is_api_model:
+        if relevant_tools:
+            schema_names = set(relevant_tools)
+            if needs_admin:
+                schema_names |= _ADMIN_TOOLS
+            base_schemas = [
+                schema for schema in FUNCTION_TOOL_SCHEMAS
+                if schema.get("function", {}).get("name") in schema_names
+            ]
+            mcp_filtered = [
+                schema for schema in mcp_schemas
+                if schema.get("function", {}).get("name") in relevant_tools
+            ]
+            selected = base_schemas + mcp_filtered
+        else:
+            base_schemas = FUNCTION_TOOL_SCHEMAS if needs_admin else [
+                schema for schema in FUNCTION_TOOL_SCHEMAS
+                if schema.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
+            ]
+            selected = base_schemas + list(mcp_schemas)
+        if ody_qwen_finetune_model:
+            return []
+    else:
+        wants_mcp = any(keyword in (last_user or "").lower() for keyword in _MCP_KEYWORDS)
+        selected = list(mcp_schemas) if wants_mcp and mcp_schemas else []
+
+    if disabled_tools:
+        selected = [
+            schema for schema in selected
+            if schema.get("function", {}).get("name") not in disabled_tools
+            and schema.get("name") not in disabled_tools
+        ]
+    return selected
+
+
 async def stream_agent_loop(
     endpoint_url: str,
     model: str,
@@ -3771,6 +3878,8 @@ async def stream_agent_loop(
         direct_actual_model = model
         real_input_tokens = 0
         real_output_tokens = 0
+        real_cached_input_tokens = 0
+        real_cache_write_input_tokens = 0
         try:
             async for chunk in stream_llm_with_fallback(
                 [(endpoint_url, model, headers)] + list(fallbacks or []),
@@ -3794,6 +3903,8 @@ async def stream_agent_loop(
                         direct_actual_model = usage.get("model") or direct_actual_model
                         real_input_tokens += usage.get("input_tokens", 0) or 0
                         real_output_tokens += usage.get("output_tokens", 0) or 0
+                        real_cached_input_tokens += usage.get("cached_input_tokens", 0) or 0
+                        real_cache_write_input_tokens += usage.get("cache_write_input_tokens", 0) or 0
                         continue
                     if data.get("type") == "model_actual":
                         direct_actual_model = data.get("model") or direct_actual_model
@@ -3835,6 +3946,12 @@ async def stream_agent_loop(
             "tool_calls": 0,
             "direct_low_signal": True,
         }
+        if real_input_tokens or real_output_tokens:
+            metrics["cached_input_tokens"] = real_cached_input_tokens
+            metrics["cache_write_input_tokens"] = real_cache_write_input_tokens
+            metrics["uncached_input_tokens"] = max(
+                real_input_tokens - real_cached_input_tokens, 0
+            )
         yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
         yield "data: [DONE]\n\n"
         return
@@ -4042,6 +4159,7 @@ async def stream_agent_loop(
     # This runs BEFORE the deliberate prunes below (active email draft, doc
     # finetune clamps, doc-turn file-tool removal) and before disabled_tools is
     # applied, so an intentional restriction still wins over retention.
+    _prior_tools: Set[str] = set()
     if not guide_only and _relevant_tools is not None and _existing_conversation:
         try:
             from src.tool_policy import known_tool_names
@@ -4125,7 +4243,18 @@ async def stream_agent_loop(
         )
 
     if not guide_only and _relevant_tools is not None:
-        _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
+        _continue_browser_work = any(
+            name == "builtin_browser" or name.startswith(_BROWSER_MCP_PREFIX)
+            for name in _prior_tools
+        )
+        _relevant_tools = _expand_browser_mcp_tools(
+            _relevant_tools,
+            mcp_mgr,
+            expand_all=(
+                _continue_browser_work
+                or _looks_like_explicit_browser_request(_retrieval_query or _last_user)
+            ),
+        )
 
     # The skill index injected by _build_system_prompt tells the model to
     # call `manage_skills action=view`, and Jaccard-matched skills are pasted
@@ -4440,6 +4569,21 @@ async def stream_agent_loop(
         })
     prep_timings["prompt_build"] = time.time() - _t2
 
+    # Native tool schemas are a separate API field, but they consume the same
+    # context window as messages. Resolve the initial list before trimming so
+    # the trim reserve and all later observability include their real cost.
+    _initial_tool_schemas = _tool_schemas_for_round(
+        force_answer=False,
+        is_api_model=_is_api_model,
+        relevant_tools=_relevant_tools,
+        needs_admin=_needs_admin,
+        mcp_schemas=mcp_schemas,
+        disabled_tools=disabled_tools,
+        ody_qwen_finetune_model=_ody_qwen_finetune_model,
+        last_user=_last_user,
+    )
+    _initial_schema_tokens = _estimate_tool_schema_tokens(_initial_tool_schemas)
+
     _t3 = time.time()
     # How much context this turn is allowed to spend, and how it spends it.
     # Resolved once per turn from the endpoint/model's context profile (Settings
@@ -4484,7 +4628,8 @@ async def stream_agent_loop(
             soft_budget = _profile_budget
         if soft_budget > 0:
             before_trim_tokens = estimate_tokens(messages)
-            reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
+            output_reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
+            reserve_tokens = output_reserve_tokens + _initial_schema_tokens
             # Ceiling for the auto-derived budget (no effect on an explicit budget;
             # see #1230). Falls back to DEFAULT_HARD_MAX on missing/malformed values
             # so misconfig can't zero the budget.
@@ -4533,11 +4678,15 @@ async def stream_agent_loop(
     # Strip internal metadata keys before sending to the LLM API
     messages = [{k: v for k, v in msg.items() if k != "_protected"} for msg in messages]
 
-    agent_prompt_tokens = estimate_tokens(messages)
+    agent_message_tokens = estimate_tokens(messages)
+    agent_prompt_tokens = agent_message_tokens + _initial_schema_tokens
     logger.info(
-        "[agent-timing] prep_done model=%s prompt_tokens=%s context_length=%s prep=%s",
+        "[agent-timing] prep_done model=%s prompt_tokens=%s message_tokens=%s "
+        "schema_tokens=%s context_length=%s prep=%s",
         model,
         agent_prompt_tokens,
+        agent_message_tokens,
+        _initial_schema_tokens,
         context_length,
         {k: round(v, 3) for k, v in prep_timings.items()},
     )
@@ -4557,7 +4706,11 @@ async def stream_agent_loop(
     _verifier_instruction = _extract_last_user_message(messages)
     real_input_tokens = 0   # Accumulated real usage from API
     real_output_tokens = 0
+    real_cached_input_tokens = 0
+    real_cache_write_input_tokens = 0
     last_round_input_tokens = 0  # Last round's input tokens (for context % peak)
+    last_round_request_tokens = agent_prompt_tokens
+    last_round_schema_tokens = _initial_schema_tokens
     has_real_usage = False
     backend_gen_tps = 0      # backend-reported true gen speed (llama.cpp timings)
     backend_prefill_tps = 0  # backend-reported prefill speed
@@ -4667,57 +4820,17 @@ async def stream_agent_loop(
             except Exception as _e:
                 logger.warning("[agent] round %s context re-trim skipped: %s", round_num, _e)
 
-        # Merge native tool schemas with MCP tool schemas, filtering out
-        # Only send function schemas for API models (OpenAI, Anthropic, etc.).
-        # Local models use fenced code blocks or <tool_code> — schemas add overhead.
-        if _force_answer:
-            # Loop-breaker decided the model has enough info but keeps
-            # calling tools. Send NO tools this round so it's forced to
-            # write the answer instead of flailing further.
-            all_tool_schemas = []
-        elif _is_api_model:
-            # Filter schemas by RAG-selected tools (if available)
-            if _relevant_tools:
-                # _build_base_prompt unions _ADMIN_TOOLS into the prompt
-                # sections when admin intent fires — the schema list must
-                # offer the same names, or the model reads prose describing
-                # tools it cannot call and substitutes the nearest schema
-                # it does have (e.g. manage_memory for manage_skills).
-                _schema_names = set(_relevant_tools)
-                if _needs_admin:
-                    _schema_names |= _ADMIN_TOOLS
-                base_schemas = [
-                    s for s in FUNCTION_TOOL_SCHEMAS
-                    if s.get("function", {}).get("name") in _schema_names
-                ]
-                _mcp_filtered = [
-                    s for s in mcp_schemas
-                    if s.get("function", {}).get("name") in _relevant_tools
-                ]
-                all_tool_schemas = base_schemas + _mcp_filtered
-            else:
-                base_schemas = FUNCTION_TOOL_SCHEMAS if _needs_admin else [
-                    s for s in FUNCTION_TOOL_SCHEMAS
-                    if s.get("function", {}).get("name") not in _ADMIN_SCHEMA_NAMES
-                ]
-                all_tool_schemas = base_schemas + mcp_schemas
-            # Odysseus-Qwen fine-tunes are trained to emit Odysseus tool calls
-            # from the lightweight domain prompt. Do not inject OpenAI-native
-            # tool schemas; that adds prompt overhead and changes the behavior
-            # we are trying to evaluate.
-            if _ody_qwen_finetune_model:
-                all_tool_schemas = []
-            if disabled_tools:
-                all_tool_schemas = [
-                    t for t in all_tool_schemas
-                    if t.get("function", {}).get("name") not in disabled_tools
-                    and t.get("name") not in disabled_tools
-                ]
-        else:
-            # Local: only MCP schemas when message suggests MCP tool usage
-            _last_content = _last_user.lower()
-            _wants_mcp = any(kw in _last_content for kw in _MCP_KEYWORDS)
-            all_tool_schemas = mcp_schemas if (_wants_mcp and mcp_schemas) else []
+        # Resolve the exact list used both by the payload and context accounting.
+        all_tool_schemas = _tool_schemas_for_round(
+            force_answer=_force_answer,
+            is_api_model=_is_api_model,
+            relevant_tools=_relevant_tools,
+            needs_admin=_needs_admin,
+            mcp_schemas=mcp_schemas,
+            disabled_tools=disabled_tools,
+            ody_qwen_finetune_model=_ody_qwen_finetune_model,
+            last_user=_last_user,
+        )
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
@@ -4750,12 +4863,20 @@ async def stream_agent_loop(
         _round_start = time.time()
         _round_first_event_logged = False
         _round_first_token_logged = False
+        _round_message_tokens = estimate_tokens(messages)
+        _round_schema_tokens = _estimate_tool_schema_tokens(all_tool_schemas)
+        _round_prompt_tokens = _round_message_tokens + _round_schema_tokens
+        last_round_request_tokens = _round_prompt_tokens
+        last_round_schema_tokens = _round_schema_tokens
         logger.info(
-            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s tools=%s native_tools=%s timeout=%s",
+            "[agent-timing] round_start round=%s model=%s endpoint=%s prompt_tokens=%s "
+            "message_tokens=%s schema_tokens=%s tools=%s native_tools=%s timeout=%s",
             round_num,
             model,
             endpoint_url,
-            estimate_tokens(messages),
+            _round_prompt_tokens,
+            _round_message_tokens,
+            _round_schema_tokens,
             len(_tool_names_sent),
             bool(all_tool_schemas),
             agent_stream_timeout,
@@ -4855,8 +4976,20 @@ async def stream_agent_loop(
                         round_input = u.get("input_tokens", 0)
                         real_input_tokens += round_input
                         real_output_tokens += u.get("output_tokens", 0)
+                        round_cached = int(u.get("cached_input_tokens", 0) or 0)
+                        round_cache_write = int(u.get("cache_write_input_tokens", 0) or 0)
+                        real_cached_input_tokens += round_cached
+                        real_cache_write_input_tokens += round_cache_write
                         last_round_input_tokens = round_input
                         has_real_usage = True
+                        logger.info(
+                            "[agent-usage] round=%s input=%s cached=%s cache_write=%s output=%s",
+                            round_num,
+                            round_input,
+                            round_cached,
+                            round_cache_write,
+                            u.get("output_tokens", 0),
+                        )
                         # Backend-reported TRUE generation speed (llama.cpp
                         # timings.predicted_per_second) — pure decode, excludes
                         # prefill/network. Preferred over tokens/wall-clock, which
@@ -6131,7 +6264,9 @@ async def stream_agent_loop(
 
     # --- Final metrics ---
     total_duration = time.time() - total_start
-    final_context_tokens = estimate_tokens(messages)
+    final_context_tokens = last_round_request_tokens or (
+        estimate_tokens(messages) + last_round_schema_tokens
+    )
     metrics = _compute_final_metrics(
         messages, full_response, total_duration, time_to_first_token,
         context_length, real_input_tokens, real_output_tokens,
@@ -6141,6 +6276,9 @@ async def stream_agent_loop(
         prep_timings=prep_timings,
         backend_gen_tps=backend_gen_tps,
         backend_prefill_tps=backend_prefill_tps,
+        cached_input_tokens=real_cached_input_tokens,
+        cache_write_input_tokens=real_cache_write_input_tokens,
+        tool_schema_tokens=last_round_schema_tokens,
     )
     metrics["requested_model"] = requested_model
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"

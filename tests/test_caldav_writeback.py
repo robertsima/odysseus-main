@@ -71,6 +71,7 @@ def test_build_ical_timed_event_has_core_fields():
     # is_utc -> UTC instant (Z suffix)
     assert "DTSTART:20260610T140000Z" in ical
     assert "DTEND:20260610T150000Z" in ical
+    assert "DTSTAMP:" in ical
 
 
 def test_build_ical_all_day_uses_date_values():
@@ -134,6 +135,53 @@ def test_push_missing_uid_reports_input_error_before_remote_lookup():
     res = push_event([cal], CAL_ID, _ev(uid=""))
     assert res["ok"] is False and "uid" in res["error"]
     assert cal._existing.saved is False
+
+
+def test_google_event_collection_skips_principal_discovery(monkeypatch):
+    import src.caldav_sync as sync
+    import src.caldav_writeback as wb
+
+    google_url = "https://apidata.googleusercontent.com/caldav/v2/me%40gmail.com/events"
+    existing = FakeEvent(google_url + "/evt-1.ics")
+    remote = FakeCalendar(google_url, existing=existing)
+
+    class FakeClient:
+        def __init__(self):
+            self.calendar_urls = []
+            self.principal_called = False
+            self.closed = False
+
+        def calendar(self, url):
+            self.calendar_urls.append(url)
+            return remote
+
+        def principal(self):
+            self.principal_called = True
+            raise AssertionError("Google collection URLs must skip principal discovery")
+
+        def close(self):
+            self.closed = True
+
+    client = FakeClient()
+    monkeypatch.setattr(sync, "_build_dav_client", lambda *a, **k: client)
+    cal_id = _stable_cal_id(google_url, owner="alice", account_id="google-1")
+
+    result = wb._writeback_blocking(
+        cal_id,
+        _ev(),
+        False,
+        google_url,
+        "",
+        "",
+        owner="alice",
+        account_id="google-1",
+        token="oauth-token",
+    )
+
+    assert result["ok"] is True
+    assert client.calendar_urls == [google_url]
+    assert client.principal_called is False
+    assert client.closed is True
 
 
 def test_writeback_validates_saved_url_before_remote_call(monkeypatch):

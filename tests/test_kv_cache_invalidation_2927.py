@@ -300,6 +300,9 @@ async def test_run_post_response_tasks_does_not_fire_extraction_concurrently(mon
 
     task_endpoint_mod = types.ModuleType("src.task_endpoint")
     task_endpoint_mod.resolve_task_endpoint = lambda url, model, headers, owner=None: (url, model, headers)
+    task_endpoint_mod.resolve_task_candidates = lambda url, model, headers, owner=None: [
+        (url, model, headers)
+    ]
     monkeypatch.setitem(sys.modules, "src.task_endpoint", task_endpoint_mod)
 
     captured_jobs = {}
@@ -443,8 +446,8 @@ def test_payload_omits_session_id_for_official_openai_api(monkeypatch):
 
 
 def test_payload_omits_session_id_when_not_provided(monkeypatch):
-    """No session_id kwarg → no extras added (e.g. title generation, internal
-    one-off calls that don't carry a session)."""
+    """Without a session id, local calls still request prompt caching but do
+    not claim slot affinity for a particular conversation."""
     from src import llm_core
 
     captured = []
@@ -460,4 +463,4 @@ def test_payload_omits_session_id_when_not_provided(monkeypatch):
 
     assert len(captured) == 1
     assert "session_id" not in captured[0]
-    assert "cache_prompt" not in captured[0]
+    assert captured[0]["cache_prompt"] is True

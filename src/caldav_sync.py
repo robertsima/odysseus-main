@@ -235,6 +235,17 @@ def _google_caldav_events_url(url: str) -> str | None:
     return urlunparse(parts._replace(path=new_path))
 
 
+def _google_calendar_collection_url(url: str) -> str | None:
+    """Return Google's concrete event collection for principal or event URLs."""
+    mapped = _google_caldav_events_url(url)
+    if mapped:
+        return mapped
+    parts = urlparse(url)
+    if is_google_caldav_url(url) and parts.path.rstrip("/").endswith("/events"):
+        return url.rstrip("/")
+    return None
+
+
 def _open_url_as_calendar(client, url: str):
     """Open ``url`` as a single calendar collection.
 
@@ -242,7 +253,7 @@ def _open_url_as_calendar(client, url: str):
     is not an event collection, so map it to the events URL first
     (see ``_google_caldav_events_url``); other servers' URLs are used as-is.
     """
-    target = _google_caldav_events_url(url) or url
+    target = _google_calendar_collection_url(url) or url
     return client.calendar(url=target)
 
 
@@ -310,19 +321,26 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
         # support discovery (or the URL points directly at a calendar), fall
         # back to treating the URL as a single calendar.
         calendars = []
-        try:
-            principal = client.principal()
-            calendars = principal.calendars()
-        except (AuthorizationError, NotFoundError) as e:
-            result["errors"].append(f"Discovery failed: {e}")
-            return result          # outer finally will call client.close()
-        except Exception as e:
-            logger.info(f"CalDAV principal discovery failed, trying URL as calendar: {e}")
+        google_collection = _google_calendar_collection_url(url)
+        if google_collection:
+            # Google's OAuth URL is already a concrete collection (or maps to
+            # one). Asking python-caldav for current-user-principal first emits
+            # warnings and spends an extra PROPFIND on every sync/write.
+            calendars = [client.calendar(url=google_collection)]
+        else:
             try:
-                calendars = [_open_url_as_calendar(client, url)]
-            except Exception as e2:
-                result["errors"].append(f"Could not open URL as calendar: {e2}")
-                return result      # outer finally will call client.close()
+                principal = client.principal()
+                calendars = principal.calendars()
+            except (AuthorizationError, NotFoundError) as e:
+                result["errors"].append(f"Discovery failed: {e}")
+                return result          # outer finally will call client.close()
+            except Exception as e:
+                logger.info(f"CalDAV principal discovery failed, trying URL as calendar: {e}")
+                try:
+                    calendars = [_open_url_as_calendar(client, url)]
+                except Exception as e2:
+                    result["errors"].append(f"Could not open URL as calendar: {e2}")
+                    return result      # outer finally will call client.close()
 
         if not calendars:
             try:

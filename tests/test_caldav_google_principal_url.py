@@ -138,6 +138,8 @@ def test_maps_google_principal_url_to_events_collection():
     # Non-Google or non-principal URLs are left untouched (None => caller keeps URL).
     assert caldav_sync._google_caldav_events_url("https://calendar.example.com/dav") is None
     assert caldav_sync._google_caldav_events_url(_GOOGLE_EVENTS) is None
+    assert caldav_sync._google_calendar_collection_url(_GOOGLE_PRINCIPAL) == _GOOGLE_EVENTS
+    assert caldav_sync._google_calendar_collection_url(_GOOGLE_EVENTS) == _GOOGLE_EVENTS
 
 
 def test_maps_legacy_google_calendar_dav_url():
