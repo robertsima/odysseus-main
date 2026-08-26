@@ -42,6 +42,8 @@ from src.agent_loop import (
     _is_explicit_continuation,
     _looks_like_local_computer_request,
     _looks_like_research_request,
+    _looks_like_vault_request,
+    _looks_like_workspace_coding_request,
     _tools_used_in_conversation,
     apply_terminus_toolset,
     repair_starved_domains,
@@ -525,3 +527,93 @@ def test_web_domain_is_never_treated_as_starved():
     """Web tools are a per-turn user toggle, and "search"/"today" over-trigger it."""
     selected = {"read_file"}
     assert repair_starved_domains(selected, {"web"}, {"web_search", "web_fetch"}) == []
+
+
+# ── The knowledge base, by every name the user calls it ────────────────
+#
+# Repro from a real session (2026-08-26):
+#
+#     "Edit the appropriate job report in AI Mind please"
+#
+# Only the literal word "vault" seeded the files domain, so this matched
+# `documents` on the word "edit" and nothing else. The turn was handed
+# create_document/edit_document — Odysseus's own document store, a different
+# place from the files on disk — and round 1 replied that the workspace file
+# tools "aren't available", made zero tool calls, and ended.
+
+VAULT_REPRO = "Edit the appropriate job report in AI Mind please"
+
+VAULT_ALIASES = [
+    "AI Mind", "AI-Mind", "ai mind",
+    "vault", "the vault", "vault mind", "mind vault",
+    "obsidian", "Obsidian",
+    "knowledge base", "knowledge-base", "knowledgebase",
+]
+
+
+@pytest.mark.parametrize("alias", VAULT_ALIASES)
+def test_every_name_for_the_knowledge_base_reads_as_file_work(alias):
+    assert _looks_like_vault_request(f"edit the job report in {alias} please")
+
+
+@pytest.mark.parametrize("alias", VAULT_ALIASES)
+def test_every_name_for_the_knowledge_base_seeds_the_files_domain(alias):
+    domains = _classify_agent_request([], f"edit the job report in {alias} please")["domains"]
+    assert "files" in domains
+
+
+def test_the_repro_now_reaches_tools_that_can_actually_edit_a_file():
+    domains = _classify_agent_request([], VAULT_REPRO)["domains"]
+    assert {"documents", "files"} <= domains
+
+    # What retrieval gave the failing turn: document tools only.
+    selected = {"create_document", "edit_document", "update_document", "manage_documents"}
+    merged = apply_terminus_toolset(selected, query_matched=set(), domains=domains)
+
+    assert {"read_file", "edit_file", "write_file", "ls", "grep"} <= merged
+    assert selected <= merged, "naming the vault must ADD file tools, not replace the doc tools"
+
+
+def test_naming_the_vault_does_not_need_a_bound_workspace():
+    """The knowledge base has absolute paths; the workspace-coding gate is a
+    separate, narrower signal that this request never satisfied."""
+    assert _looks_like_vault_request(VAULT_REPRO)
+    assert not _looks_like_workspace_coding_request(VAULT_REPRO)
+
+
+def test_edit_counts_as_a_workspace_action_verb():
+    """`update` and `change` were actions; `edit`/`write`/`append` were not."""
+    for verb in ("edit", "write", "append", "update"):
+        assert _looks_like_workspace_coding_request(f"{verb} the config file"), verb
+
+
+# ── The self-unblock has to recognise the claim it was built for ───────
+
+
+def test_a_clause_between_tools_and_the_negation_still_counts():
+    """The exact sentence that ended the failing turn."""
+    assert _claims_missing_tools(
+        "I can't directly edit the AI Mind vault file in this turn because the "
+        "workspace file tools needed to read/write `/app/workspace/AI Mind/...` "
+        "aren't available."
+    )
+
+
+@pytest.mark.parametrize("claim", [
+    "The file tools I would need here are not available.",
+    "The email tools for that are not enabled.",
+    "the tools required to do this aren't accessible",
+])
+def test_gapped_tool_claims_are_caught(claim):
+    assert _claims_missing_tools(claim)
+
+
+@pytest.mark.parametrize("not_a_claim", [
+    "Gmail returned Too many simultaneous connections; I stopped after two retries.",
+    "The tools ran but the API is not responding right now.",
+    "That file is not available in the repo.",
+    "The search results are not available for that date range.",
+])
+def test_a_real_upstream_failure_still_does_not_re_arm(not_a_claim):
+    """Re-arming on a genuine failure would loop the turn, not unblock it."""
+    assert not _claims_missing_tools(not_a_claim)

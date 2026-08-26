@@ -1285,9 +1285,13 @@ def _uploaded_files_context_message(uploaded_files: Optional[List[Dict]]) -> Opt
 
 
 _WORKSPACE_CODE_ACTION_RE = re.compile(
+    # `edit`/`write`/`append` were missing while `update` and `change` were
+    # present — the three most direct file-modification verbs in the language,
+    # so "edit the report" read as no action at all.
     r"\b(?:fix|debug|implement|add|remove|change|update|refactor|wire|hook|"
     r"test|verify|run|build|lint|compile|commit|branch|merge|review|"
-    r"download|save|rename|move|copy|extract|convert|open|inspect|read)\b",
+    r"download|save|rename|move|copy|extract|convert|open|inspect|read|"
+    r"edit|write|append)\b",
     re.IGNORECASE,
 )
 _WORKSPACE_CODE_TARGET_RE = re.compile(
@@ -1298,6 +1302,41 @@ _WORKSPACE_CODE_TARGET_RE = re.compile(
     r"|(?:~?/[^\"'\s`<>]+)",
     re.IGNORECASE,
 )
+# The user's knowledge base, by every name they call it. It lives as real
+# files inside the workspace, so naming it is a file/shell signal — but only
+# the literal word "vault" used to say so. A real turn asked to "Edit the
+# appropriate job report in AI Mind": that matched the `documents` domain on
+# the word "edit" and nothing else, so the turn was handed create_document /
+# edit_document — Odysseus's own document store, a different place entirely —
+# and not one tool that can read or write a file. The round opened by saying
+# the workspace file tools "aren't available" and made zero tool calls.
+#
+# One pattern, used by both the domain classifier and the Terminus trigger, so
+# an alias added here can never be honoured by one and missed by the other.
+_VAULT_REFERENCE_PATTERN = (
+    r"\bvaults?\b"
+    r"|\bobsidian\b"
+    r"|\bknowledge[\s\-]?base\b"
+    r"|\bai[\s\-]?mind\b"
+    r"|\bvault[\s\-]?mind\b"
+    r"|\bmind[\s\-]?vault\b"
+)
+_VAULT_REFERENCE_RE = re.compile(_VAULT_REFERENCE_PATTERN, re.IGNORECASE)
+
+
+def _looks_like_vault_request(text: str) -> bool:
+    """True when the request names the user's knowledge base by any of its names.
+
+    Reading or editing something in there is file work, whatever else the turn
+    also touches. Deliberately no action verb required: naming the knowledge
+    base only ever ADDS the file toolset alongside whatever the other domains
+    seeded (see `apply_terminus_toolset`), so a false positive costs a few
+    extra schemas while a false negative costs the whole turn.
+    """
+    text = str(text or "")
+    return bool(text.strip() and _VAULT_REFERENCE_RE.search(text))
+
+
 _EXPLICIT_WORKSPACE_REFERENCE_RE = re.compile(
     r"\b(?:in|inside|within|from|this|current|active)\s+(?:the\s+)?workspace\b"
     r"|\b(?:this|current|active)\s+(?:workspace|repo|project)\b",
@@ -1391,6 +1430,15 @@ _MISSING_TOOL_RE = re.compile(
     # one-word form too, and let it cover `tooling`/`toolset`.
     r"|tool(?:s|ing|set)?\b[^.\n]{0,40}?\b(?:is|are|was|were|remains?|"
     r"remain)\s+(?:currently\s+|still\s+)?unavailable\b"
+    # Every negated branch above wants the negation right up against "tools",
+    # so a describing clause in between walked past all of them: "the workspace
+    # file tools needed to read/write `/app/workspace/AI Mind/...` aren't
+    # available" matched nothing, the self-unblock never fired, and the turn
+    # ended having made zero tool calls. Allow the gap — and allow periods
+    # inside it, because the path that caused this contains them.
+    r"|tool(?:s|ing|set)?\b[^\n]{0,80}?\b(?:are|is|were|was)\s*(?:n'?t|not)\s+"
+    r"(?:currently\s+|still\s+)?"
+    r"(?:available|callable|offered|enabled|exposed|provided|accessible)\b"
     r"|no\s+access\s+to\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
     r")",
     re.IGNORECASE,
@@ -1711,7 +1759,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(
         r"\b[\w][\w.\-]*\.(?:md|markdown|txt|rst|py|js|mjs|ts|tsx|jsx|json|ya?ml|"
         r"toml|ini|cfg|conf|csv|tsv|html?|css|scss|sh|bash|zsh|sql|xml|log)\b",
-        r"\bvaults?\b",
+        _VAULT_REFERENCE_PATTERN,
         r"(?:^|\s)[~.]?/[\w.\-]+/",
     ):
         domains.add("files")
@@ -3923,6 +3971,10 @@ async def stream_agent_loop(
                     and _looks_like_workspace_coding_request(_retrieval_query or _last_user)
                 )
                 or _looks_like_local_computer_request(_retrieval_query or _last_user)
+                # The knowledge base is files on disk. Naming it is as much a
+                # file-work signal as naming a path, and it does NOT depend on
+                # a workspace being bound — the paths are absolute either way.
+                or _looks_like_vault_request(_retrieval_query or _last_user)
             )
             and not _active_document_relevant
             and not active_email
