@@ -261,9 +261,14 @@ def owner_is_admin_or_single_user(owner: Optional[str]) -> bool:
         if _auth_disabled():
             return True
 
-        from core.auth import AuthManager
+        # Read-only check on the hot path: this runs for EVERY tool the agent
+        # fires. Building a throwaway AuthManager here meant two JSON reads plus
+        # four migration passes per bash/read_file/grep — the shared accessor
+        # exists for exactly this caller (see core/auth.py) and reloads only
+        # when the backing files actually change on disk.
+        from core.auth import get_auth_manager
 
-        auth = AuthManager()
+        auth = get_auth_manager()
         if not auth.is_configured:
             return False
         return bool(owner and auth.is_admin(owner))

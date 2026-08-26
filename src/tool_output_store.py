@@ -57,6 +57,19 @@ _TOOL_INLINE_LIMITS = {
     "edit_file": 20_000,
 }
 
+# Tools whose result is never offloaded, whatever its size.
+#
+# `recall_tool_output` exists to bring a slice of an ALREADY-offloaded result
+# back. Offloading that slice stores it under a new ref and hands the model an
+# excerpt of an excerpt, so the content it explicitly asked for never arrives —
+# and the model, still missing it, asks again. Observed in one turn: read_file
+# offloaded 20k chars, two paged recalls were themselves offloaded (12,255 and
+# 8,387 chars), and the model then re-read the same file three more times,
+# taking the prompt from 20k to 37k tokens over six rounds that moved nothing
+# forward. A recall is bounded by that tool's own slice ceiling, so keeping it
+# inline is both safe and the only way the mechanism terminates.
+_NEVER_OFFLOAD_TOOLS = frozenset({"recall_tool_output"})
+
 _CHUNK_CHARS = 1200
 _CHUNK_OVERLAP = 120
 _MAX_CHUNKS = 200  # ~240k chars indexed per output; the file keeps the rest
@@ -516,9 +529,12 @@ def maybe_offload(
 
     Small results are returned untouched, so the common case costs one length
     check. Anything past the limit is stored and replaced by an excerpt that
-    names its ref.
+    names its ref -- unless the tool is in `_NEVER_OFFLOAD_TOOLS`, whose results
+    must reach the model whole or the offload mechanism cannot terminate.
     """
     if not isinstance(formatted, str):
+        return formatted, None
+    if str(tool or "") in _NEVER_OFFLOAD_TOOLS:
         return formatted, None
     limit = limit if limit is not None else inline_limit(tool, profile)
     if len(formatted) <= limit:

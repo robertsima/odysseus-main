@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 import logging
 import os
+import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
@@ -104,11 +105,18 @@ class EmbeddingLane:
 
 def reset_embedding_lane_state() -> None:
     """Reset process-local embedding lane state after endpoint config changes."""
+    global _fastembed_client
+
     try:
         from src.embeddings import reset_http_embed_state
         reset_http_embed_state()
     except Exception:
         pass
+    # The cached fallback client keys off FASTEMBED_MODEL, read once at
+    # construction. Drop it here so this stays the one hook that clears every
+    # piece of process-local lane state.
+    with _fastembed_lock:
+        _fastembed_client = None
 
 
 def collection_name(base_name: str, lane_name: str) -> str:
@@ -155,12 +163,31 @@ def _load_custom_endpoint() -> Dict[str, str]:
     return {"url": url, "model": model, "api_key": api_key}
 
 
-def _build_fastembed_client():
-    from src.embeddings import FastEmbedClient
+# The FastEmbed fallback client is immutable once built — fixed model name,
+# fixed cache dir — but `build_embedding_lanes` was constructing a fresh one on
+# every call. That means loading the ONNX model AND running a probe encode for
+# the dimension, every time a tool result is offloaded or a stored output is
+# searched. One agent turn showed four of those inside eight seconds. Build it
+# once per process instead; a failure is not cached, so a transient problem
+# (model still downloading) is retried on the next call.
+_fastembed_client = None
+_fastembed_lock = threading.Lock()
 
-    client = FastEmbedClient()
-    client.get_sentence_embedding_dimension()
-    return client
+
+def _build_fastembed_client():
+    global _fastembed_client
+
+    if _fastembed_client is not None:
+        return _fastembed_client
+    with _fastembed_lock:
+        if _fastembed_client is not None:
+            return _fastembed_client
+        from src.embeddings import FastEmbedClient
+
+        client = FastEmbedClient()
+        client.get_sentence_embedding_dimension()
+        _fastembed_client = client
+        return client
 
 
 def _build_custom_client():

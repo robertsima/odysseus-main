@@ -5933,6 +5933,8 @@ async def stream_agent_loop(
             #
             # ask_user is exempt: that result ends the turn and carries the
             # question the user is about to answer, so it must stay verbatim.
+            # (`recall_tool_output` is exempt too, but that rule lives with the
+            # other per-tool policy in tool_output_store.)
             if not _awaiting_user and "ask_user" not in result:
                 try:
                     from src.tool_output_store import maybe_offload as _maybe_offload

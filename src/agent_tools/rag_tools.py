@@ -192,6 +192,13 @@ class SearchDocumentsTool:
 # achieved nothing.
 _RECALL_SLICE_CHARS = 3000
 _RECALL_CHUNK_CHARS = 1400
+# Ceiling on an explicitly requested slice. The invariant above held for the
+# default and not for the maximum, which was 12,000 — above the 8,000 that the
+# most generous context profile keeps inline. A model asking for the biggest
+# slice it was allowed therefore got one guaranteed to be too big to keep, and
+# every such recall was re-offloaded. Kept at/below the widest inline budget so
+# the ceiling honours the same rule the default does.
+_RECALL_MAX_SLICE_CHARS = 8000
 
 
 class RecallToolOutputTool:
@@ -282,7 +289,7 @@ class RecallToolOutputTool:
             limit = int(args.get("limit") or _RECALL_SLICE_CHARS)
         except (TypeError, ValueError):
             limit = _RECALL_SLICE_CHARS
-        limit = max(200, min(limit, 12000))
+        limit = max(200, min(limit, _RECALL_MAX_SLICE_CHARS))
 
         slice_text = text[offset:offset + limit]
         if not slice_text:
