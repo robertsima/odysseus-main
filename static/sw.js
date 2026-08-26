@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v376-settings-title-icons';
+const CACHE_NAME = 'odysseus-v377-assistant-tab';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -53,6 +53,7 @@ const PRECACHE = [
   '/static/js/emailLibrary/state.js',
   '/static/js/notes.js',
   '/static/js/tasks.js',
+  '/static/js/assistant.js',
   '/static/js/calendar.js',
   '/static/js/calendar/utils.js',
   '/static/js/calendar/reminders.js',

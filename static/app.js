@@ -22,7 +22,7 @@ import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
-import tasksModule from './js/tasks.js?v=20260723tasksbulkfeedback1';
+import tasksModule from './js/tasks.js?v=20260826assistanttab1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js';
 import lotusModule from './js/lotus.js';
