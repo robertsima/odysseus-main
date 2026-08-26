@@ -147,15 +147,41 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     fill.className = 'chat-context-popup-fill';
     fill.style.width = `${Math.min(100, Math.max(0, pct))}%`;
     bar.appendChild(fill);
+    // Where the agent starts trimming. It is 85% of the window capped at 200k,
+    // not the window itself, so on a long-context model it can sit well left of
+    // full — which is why "soft-trimmed context" shows up in the logs while
+    // this ring still looks comfortable. Mark it rather than leave the two
+    // numbers looking like they disagree.
+    const budget = Number(d.budget_tokens || 0);
+    const ctxLen = Number(d.context_length || 0);
+    if (budget > 0 && ctxLen > 0 && budget < ctxLen) {
+      const mark = document.createElement('div');
+      mark.className = 'chat-context-popup-mark';
+      mark.style.left = `${Math.min(100, (budget / ctxLen) * 100)}%`;
+      mark.title = `Trims at ${_fmtContextNumber(budget)} tokens`;
+      bar.appendChild(mark);
+    }
     popup.appendChild(bar);
 
     const rows = [
       ['Used', `${_fmtContextNumber(d.used_tokens)} / ${_fmtContextNumber(d.context_length)}`],
       ['Usage', `${pct}%`],
+    ];
+    // Break the number down only when there is something to break down —
+    // "why is it 40% on a short chat" is answered by the overhead row, and a
+    // chat with no measured turn yet should not sprout empty rows.
+    if (Number(d.overhead_tokens || 0) > 0) {
+      rows.push(['Transcript', _fmtContextNumber(d.history_tokens)]);
+      rows.push(['System + tools', _fmtContextNumber(d.overhead_tokens)]);
+    }
+    if (budget > 0 && ctxLen > 0 && budget < ctxLen) {
+      rows.push(['Trims at', _fmtContextNumber(budget)]);
+    }
+    rows.push(
       ['Window model', modelShort],
       ['Messages', `${Number(d.messages || 0).toLocaleString()}`],
       ['Auto compact', `${Number(d.auto_compact_threshold || 85)}%`],
-    ];
+    );
     rows.forEach(([label, value]) => {
       const row = document.createElement('div');
       row.className = 'chat-context-popup-row';
@@ -264,7 +290,9 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
       const pct = Number(data.context_percent || 0);
       _renderContextHeaderRing(pill, pct);
       _renderCompactMenuContextIcon(pct);
-      pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${String(data.model || '').split('/').pop()}`;
+      const _overhead = Number(data.overhead_tokens || 0);
+      pill.title = `${_fmtContextNumber(data.used_tokens)} / ${_fmtContextNumber(data.context_length)} tokens · ${String(data.model || '').split('/').pop()}`
+        + (_overhead > 0 ? ` (includes ~${_fmtContextNumber(_overhead)} system + tools)` : '');
       pill.classList.remove('warn', 'danger');
       const colorClass = _contextColorClass(pct);
       if (colorClass) pill.classList.add(colorClass);

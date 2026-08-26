@@ -2016,7 +2016,12 @@ export function displayMetrics(messageElement, metrics) {
       e.stopPropagation();
       document.querySelectorAll('.ctx-detail-popup').forEach(p => { if (typeof p._dismiss === 'function') p._dismiss(); else p.remove(); });
 
-      const usedTokens = inputTokens || 0;
+      // The ring's percentage is computed server-side from the prompt Odysseus
+      // assembled (request_context_tokens), not from the provider's billed
+      // input — which can be a single round or cache-adjusted. Showing
+      // input_tokens here made "N used / M total" disagree with the % printed
+      // directly under it. Same source, or the two lines contradict.
+      const usedTokens = metrics.request_context_tokens || inputTokens || 0;
       const totalCtx = ctxLen || 0;
       const modelShort = model.split('/').pop();
       const fmtNum = n => n ? n.toLocaleString() : '?';

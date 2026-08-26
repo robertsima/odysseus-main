@@ -80,6 +80,100 @@ def _history_display_content(content: Any) -> Any:
     return content
 
 
+def _prompt_overhead_tokens(messages):
+    """Split a session's context estimate into transcript and standing overhead.
+
+    The transcript is not the prompt. An agent turn also carries a system
+    prompt, the tool schemas, and whatever RAG/memory/skill text was injected —
+    none of which lives in session history — plus tool results, which are kept
+    in message METADATA and so are invisible to ``estimate_tokens``. Counting
+    the transcript alone under-reports the real prompt, and this number gates
+    the compaction warning, so it under-warns on exactly the tool-heavy
+    sessions that need it most.
+
+    The last agent turn already measured the assembled prompt, so derive the
+    overhead from that measurement rather than guessing at it: the recorded
+    ``request_context_tokens`` minus the transcript as it stood at that point.
+    Sessions with no measured turn yet report zero overhead and behave exactly
+    as before.
+
+    Returns ``(history_tokens, overhead_tokens, last_request_tokens, window)``.
+    """
+    from src.model_context import estimate_tokens
+
+    history_tokens = int(estimate_tokens(messages))
+    for idx in range(len(messages) - 1, -1, -1):
+        entry = messages[idx]
+        if entry.get("role") != "assistant":
+            continue
+        meta = entry.get("metadata") or {}
+        try:
+            measured = int(meta.get("request_context_tokens") or 0)
+        except (TypeError, ValueError):
+            continue
+        if measured <= 0:
+            continue
+        try:
+            window = int(meta.get("context_length") or 0)
+        except (TypeError, ValueError):
+            window = 0
+        overhead = max(0, measured - int(estimate_tokens(messages[: idx + 1])))
+        return history_tokens, overhead, measured, window
+    return history_tokens, 0, 0, 0
+
+
+def _trim_budget_tokens(session, context_length: int) -> int:
+    """The soft budget an agent turn on this session would trim to, or 0.
+
+    The trim gate is NOT the context window: it is 85% of the window capped at
+    200k by default, and a context profile can override it per endpoint/model.
+    Surfacing it next to the window is what stops the header ring and the
+    "soft-trimmed context" log line from looking like they contradict each
+    other — they are measured against different denominators.
+
+    Best-effort: this is a display number, so a misconfigured setting returns 0
+    (the row is then hidden) rather than failing the whole context endpoint.
+    """
+    try:
+        from src.context_budget import (
+            compute_input_token_budget,
+            budget_is_explicit,
+            DEFAULT_BUDGET,
+            DEFAULT_HARD_MAX,
+        )
+        from src.context_profiles import resolve as resolve_profile
+        from src.settings import get_setting
+
+        profile = resolve_profile(session.endpoint_url, session.model, context_length)
+        try:
+            profile_budget = int(profile.get("input_token_budget") or 0)
+        except (TypeError, ValueError):
+            profile_budget = 0
+        try:
+            soft = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
+        except (TypeError, ValueError):
+            soft = DEFAULT_BUDGET
+        if profile_budget > 0:
+            soft = profile_budget
+        if soft <= 0:
+            return 0  # trimming is switched off entirely
+        try:
+            hard_max = int(get_setting("agent_input_token_hard_max", DEFAULT_HARD_MAX) or DEFAULT_HARD_MAX)
+        except (TypeError, ValueError):
+            hard_max = DEFAULT_HARD_MAX
+        if hard_max <= 0:
+            hard_max = DEFAULT_HARD_MAX
+        return int(compute_input_token_budget(
+            soft,
+            context_length,
+            bool(profile_budget) or budget_is_explicit(soft),
+            hard_max=hard_max,
+        ))
+    except Exception as exc:  # pragma: no cover - display-only
+        logger.debug("trim budget lookup failed: %s", exc)
+        return 0
+
+
 def _merge_continue_rows_to_delete(db_messages, db1, db2):
     """DB rows to delete when merging the last two assistant messages.
 
@@ -705,7 +799,11 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
         Streaming footers report the prompt size for the last request. This
         endpoint estimates the persisted session context so the header can show
-        when the whole chat is approaching compaction.
+        when the whole chat is approaching compaction — transcript plus the
+        standing per-request overhead the last turn measured, so the figure
+        tracks the prompt the agent actually sends rather than the transcript
+        alone. The breakdown and the trim budget ride along so the popup can
+        explain the number instead of just asserting it.
         """
         _verify_session_owner(request, session_id)
         try:
@@ -714,13 +812,21 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             raise HTTPException(404, "Session not found")
 
         try:
-            from src.model_context import estimate_tokens, get_context_length
+            from src.model_context import get_context_length
 
             messages = session.get_context_messages()
-            used = int(estimate_tokens(messages))
+            history_tokens, overhead_tokens, last_request_tokens, measured_window = (
+                _prompt_overhead_tokens(messages)
+            )
+            used = history_tokens + overhead_tokens
             ctx_len = int(get_context_length(session.endpoint_url, session.model) or 0)
+            if not ctx_len:
+                # Nothing discovered for this endpoint/model — the window the
+                # last turn actually ran against beats showing no bar at all.
+                ctx_len = measured_window
             pct = round((used / ctx_len) * 100, 1) if ctx_len else 0.0
             pct = max(0.0, min(100.0, pct))
+            budget_tokens = _trim_budget_tokens(session, ctx_len)
             visible_messages = sum(
                 1 for m in session.history
                 if not (getattr(m, "metadata", None) or {}).get("hidden")
@@ -735,6 +841,13 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "model": session.model,
                 "endpoint_url": session.endpoint_url,
                 "used_tokens": used,
+                # Broken out so the popup can explain the number instead of
+                # just asserting it — "why is it 40% on a two-message chat" is
+                # the whole reason this box gets distrusted.
+                "history_tokens": history_tokens,
+                "overhead_tokens": overhead_tokens,
+                "last_request_tokens": last_request_tokens,
+                "budget_tokens": budget_tokens,
                 "context_length": ctx_len,
                 "context_percent": pct,
                 "messages": visible_messages,

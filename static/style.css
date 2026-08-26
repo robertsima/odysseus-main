@@ -3148,6 +3148,7 @@ body.bg-pattern-sparkles {
       margin-bottom: 8px;
     }
     .chat-context-popup-bar {
+      position: relative;
       height: 6px;
       overflow: hidden;
       border-radius: 999px;
@@ -3159,6 +3160,16 @@ body.bg-pattern-sparkles {
       width: 0;
       border-radius: inherit;
       background: currentColor;
+    }
+    /* Where the agent starts trimming — usually left of the window's end. */
+    .chat-context-popup-mark {
+      position: absolute;
+      top: -1px;
+      bottom: -1px;
+      width: 2px;
+      margin-left: -1px;
+      border-radius: 1px;
+      background: color-mix(in srgb, var(--fg) 55%, transparent);
     }
     .chat-context-popup-row {
       display: flex;
