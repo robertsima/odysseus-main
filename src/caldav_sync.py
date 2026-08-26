@@ -33,6 +33,8 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse
 
+from sqlalchemy.exc import IntegrityError
+
 logger = logging.getLogger(__name__)
 
 # Pull window: 90 days back, 1 year forward. Keeps the REPORT cheap and
@@ -185,23 +187,46 @@ def _to_utc_naive(dt):
     return datetime(dt.year, dt.month, dt.day), True
 
 
-def _find_existing_event(db, pending, uid_val, calendar_id):
+def _find_existing_event(db, pending, uid_val, calendar_id, owner=""):
     """Find the event to update for THIS calendar.
 
-    CalendarEvent.uid is the global primary key, so an unscoped lookup by uid
-    returns whatever row holds that VEVENT uid — including another owner's.
-    The old code then reassigned that row's calendar_id, moving (stealing)
-    another user's event into the syncing calendar whenever the two share a
-    uid (shared/subscribed/public calendars, or two accounts on one server).
-    Scope the lookup to the calendar being synced; a genuine cross-user uid
-    collision then fails the PK insert inside the per-calendar try/except
-    instead of hijacking the row. (import_ics was already fixed this way.)
+    CalendarEvent.uid is the global primary key, but CalDAV only guarantees a
+    uid is unique *within a collection*. So the row holding a given uid may sit
+    under a different calendar_id than the one being synced, and the insert we
+    would otherwise emit is guaranteed to fail the PK.
+
+    Three cases:
+    * a row under THIS calendar → update it (the common path);
+    * a row under another calendar OWNED BY THE SAME USER, or one whose calendar
+      no longer exists → adopt it, letting the caller re-point calendar_id. This
+      heals events stranded under a stale calendar id: _stable_cal_id hashes
+      owner+account_id+url, so any change to that derivation orphans every
+      existing row and leaves the sync retrying the same doomed inserts forever;
+    * anything else — another owner's row, or an owner we cannot establish →
+      None, exactly as before. Reassigning it would move (steal) that user's
+      event into this calendar, the regression #2765 fixed. The caller then
+      attempts an insert that the PK rejects, and the savepoint around it turns
+      that into a skipped event rather than a failed batch.
     """
-    from core.database import CalendarEvent
-    return pending.get(uid_val) or db.query(CalendarEvent).filter(
+    from core.database import CalendarCal, CalendarEvent
+    hit = pending.get(uid_val) or db.query(CalendarEvent).filter(
         CalendarEvent.uid == uid_val,
         CalendarEvent.calendar_id == calendar_id,
     ).first()
+    if hit is not None:
+        return hit
+
+    other = db.query(CalendarEvent).filter(CalendarEvent.uid == uid_val).first()
+    if other is None:
+        return None
+    other_cal = db.query(CalendarCal).filter(
+        CalendarCal.id == other.calendar_id,
+    ).first()
+    if other_cal is None:
+        return other          # orphaned row — its calendar is gone, safe to reclaim
+    if owner and other_cal.owner == owner:
+        return other          # same user, stale calendar id → adopt
+    return None               # another owner (or owner unknown) → never adopt
 
 
 def _google_caldav_events_url(url: str) -> str | None:
@@ -313,7 +338,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
     from core.database import CalendarCal, CalendarEvent, SessionLocal
     from routes.calendar_routes import _ensure_positive_duration
 
-    result = {"calendars": 0, "events": 0, "deleted": 0, "errors": []}
+    result = {"calendars": 0, "events": 0, "deleted": 0, "skipped_uid_conflicts": 0, "errors": []}
 
     client = _build_dav_client(url, username, password, token=token)
     try:
@@ -397,6 +422,7 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                     # several (rare).
                     from icalendar import Calendar as iCal
 
+                    _skipped_at_start = result["skipped_uid_conflicts"]
                     seen_uids = set()
                     # Track events added to the session but not yet committed so
                     # duplicate UIDs within the same batch are updated, not re-inserted
@@ -458,7 +484,9 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                                 else ""
                             )
 
-                            existing = _find_existing_event(db, pending, uid_val, local_cal.id)
+                            existing = _find_existing_event(
+                                db, pending, uid_val, local_cal.id, owner,
+                            )
                             if existing:
                                 if existing.caldav_sync_pending in {"create", "update"}:
                                     result["events"] += 1
@@ -492,9 +520,29 @@ def _sync_blocking(owner: str, url: str, username: str, password: str, account_i
                                     remote_href=str(getattr(obj, "url", "") or "") or None,
                                     remote_etag=_event_etag(obj) or None,
                                 )
-                                db.add(new_ev)
-                                pending[uid_val] = new_ev
+                                # Isolate the insert: without a savepoint a single
+                                # IntegrityError surfaces at the batch commit below
+                                # and rolls back every event parsed for this
+                                # calendar, so one bad uid cost the whole sync.
+                                sp = db.begin_nested()
+                                try:
+                                    db.add(new_ev)
+                                    db.flush()
+                                except IntegrityError:
+                                    sp.rollback()
+                                    result["skipped_uid_conflicts"] += 1
+                                    continue
+                                else:
+                                    sp.commit()
+                                    pending[uid_val] = new_ev
                             result["events"] += 1
+                    _skipped_here = result["skipped_uid_conflicts"] - _skipped_at_start
+                    if _skipped_here:
+                        logger.warning(
+                            "CalDAV sync %s: skipped %d event(s) whose uid is already "
+                            "held by another calendar; the rest of this calendar synced "
+                            "normally.", display_name, _skipped_here,
+                        )
                     db.commit()
 
                     # Prune locally-cached CalDAV events that vanished
