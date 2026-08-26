@@ -10,6 +10,7 @@ import { topPortalZ } from './toolWindowZOrder.js';
 import { sortModelIds } from './modelSort.js';
 import { ordinalSuffix } from './util/ordinal.js';
 import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
+import assistantModule from './assistant.js';
 
 const API_BASE = window.location.origin;
 let _open = false;
@@ -2014,6 +2015,7 @@ function _switchTab(tab) {
   if (tab === 'tasks') _renderMainView();
   else if (tab === 'completed') _renderCompletedView();
   else if (tab === 'activity') _renderActivityView();
+  else if (tab === 'assistant') _renderAssistantView();
   else if (tab === 'new') _showPresetPicker();
 }
 
@@ -2097,6 +2099,36 @@ async function _renderCompletedView() {
   } catch (e) {
     if (list) list.innerHTML = `<div style="opacity:0.5;padding:12px;">Failed to load completed tasks: ${_escHtml(e.message || String(e))}</div>`;
   }
+}
+
+// ---- Assistant view (settings + chat entry point) ----
+
+async function _renderAssistantView() {
+  const modal = document.getElementById('tasks-modal');
+  const body = modal?.querySelector('.modal-body');
+  if (!body) return;
+  body.innerHTML = `
+    <div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;">
+      <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
+        <h2 style="margin:0;padding:0;line-height:1;">Assistant</h2>
+        <button class="memory-toolbar-btn" id="tasks-assistant-open-chat" style="margin-left:auto;">Open chat</button>
+      </div>
+      <p class="memory-desc">Personality, model, tools, timezone, and daily check-ins.</p>
+      <div id="tasks-assistant-settings" style="flex:1;overflow:auto;min-height:0;"></div>
+    </div>
+  `;
+
+  document.getElementById('tasks-assistant-open-chat')?.addEventListener('click', async () => {
+    closeTasks();
+    await assistantModule.openAssistantChat();
+  });
+
+  // Cancel/save return to the Tasks list rather than closing a modal that,
+  // in this embedded form, isn't the assistant's own.
+  await assistantModule.renderAssistantSettingsInto(
+    document.getElementById('tasks-assistant-settings'),
+    () => _switchTab('tasks'),
+  );
 }
 
 // ---- Activity view (assistant session log) ----
@@ -2974,6 +3006,10 @@ export function openTasks(focusId, opts) {
         <button class="memory-tab tasks-tab" data-tab="activity" role="tab" aria-selected="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
           Activity
+        </button>
+        <button class="memory-tab tasks-tab" data-tab="assistant" role="tab" aria-selected="false">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          Assistant
         </button>
         <button class="memory-tab tasks-tab" data-tab="completed" role="tab" aria-selected="false">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px"><path d="M20 6 9 17l-5-5"/></svg>

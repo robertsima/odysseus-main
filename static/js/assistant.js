@@ -6,7 +6,7 @@
 // reuse the full existing chat render path.
 
 import uiModule from './ui.js';
-import { selectSession } from './sessions.js';
+import { selectSession, getCurrentSessionId } from './sessions.js';
 import { sortModelIds } from './modelSort.js';
 
 const API = '/api/assistant';
@@ -136,7 +136,7 @@ async function _fetchEndpoints() {
   } catch { return []; }
 }
 
-function _renderSettingsBody(body, data, tzList) {
+function _renderSettingsBody(body, data, tzList, onClose = _closeModal) {
   const crew = data.crew || {};
   const checkIns = data.check_ins || [];
   const enabledTools = new Set(crew.enabled_tools || []);
@@ -338,7 +338,7 @@ function _renderSettingsBody(body, data, tzList) {
   }
 
   // ── Event wiring ──
-  body.querySelector('#assistant-settings-cancel').addEventListener('click', _closeModal);
+  body.querySelector('#assistant-settings-cancel').addEventListener('click', onClose);
   body.querySelector('#assistant-settings-save').addEventListener('click', async () => {
     const selectedTools = [];
     body.querySelectorAll('.assistant-tool-cb:checked').forEach(cb => selectedTools.push(cb.value));
@@ -360,7 +360,7 @@ function _renderSettingsBody(body, data, tzList) {
     try {
       await _saveSettings(payload);
       uiModule.showToast('Assistant settings saved');
-      _closeModal();
+      onClose();
     } catch (e) {
       console.error(e);
       uiModule.showToast('Save failed');
@@ -375,7 +375,7 @@ function _renderSettingsBody(body, data, tzList) {
       btn.disabled = true;
       btn.textContent = 'Running...';
       await _runCheckInNow(taskId);
-      _closeModal();
+      onClose();
       // Poll until done, then navigate to assistant chat
       const sid = _cachedSettings?.crew?.session_id;
       const _poll = setInterval(async () => {
@@ -413,9 +413,25 @@ export async function openAssistantSettings() {
   }
 }
 
-// Sidebar wiring removed — Assistant chat + settings now live as
-// Activity / Settings tabs inside the Tasks modal (see tasks.js). The
-// exports below are still used by tasks.js to surface those views.
+// Render the same settings form into an arbitrary container so it can be
+// hosted as a tab inside another modal (the Tasks modal does this). The
+// standalone modal above and this embedded view share _renderSettingsBody;
+// only the close/cancel behaviour differs, via onClose.
+export async function renderAssistantSettingsInto(container, onClose) {
+  if (!container) return;
+  container.innerHTML = '<div class="hwfit-loading">Loading…</div>';
+  try {
+    const [data, tzList] = await Promise.all([_getSettings(true), _listTimezones()]);
+    _renderSettingsBody(container, data, tzList, onClose || (() => {}));
+  } catch (e) {
+    console.error(e);
+    container.innerHTML = '<div style="padding:12px;opacity:0.6;">Could not load assistant settings.</div>';
+  }
+}
+
+// Assistant chat + settings are surfaced as an Assistant tab inside the Tasks
+// modal (see tasks.js), which calls the exports above. The chat-header gear
+// below is an additional shortcut once that session is already open.
 
 // ── Chat-header affordances when the assistant session is active ───────────
 
@@ -445,9 +461,7 @@ function _watchForAssistantActivation() {
   let retries = 0;
   const interval = setInterval(async () => {
     retries += 1;
-    const activeSessionId = window.sessionModule?.getActiveSession?.()?.id
-      || document.body.dataset.activeSessionId
-      || null;
+    const activeSessionId = getCurrentSessionId?.() || null;
     if (activeSessionId) {
       await _ensureHeaderAffordances(activeSessionId);
     }
@@ -470,6 +484,7 @@ if (document.readyState === 'loading') {
 const assistantModule = {
   openAssistantChat,
   openAssistantSettings,
+  renderAssistantSettingsInto,
 };
 
 export default assistantModule;

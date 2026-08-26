@@ -141,6 +141,7 @@ app.add_middleware(
         "X-Odysseus-Internal-Token",
         "X-Odysseus-Owner",
         "X-Requested-With",
+        "X-TZ-Name",
         "X-TZ-Offset",
     ],
 )
