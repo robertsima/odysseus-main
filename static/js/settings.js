@@ -2453,7 +2453,7 @@ function initContextProfiles() {
   if (!epSel || !presetsBox) return;
 
   let endpoints = [];
-  let state = null;          // last /settings/context-profile payload
+  let state = null;          // last /api/auth/settings/context-profile payload
   let selectedPreset = '';   // '' = recommended (nothing saved)
 
   function say(text, isError) {
@@ -2589,7 +2589,7 @@ function initContextProfiles() {
         endpoint_url: currentEndpointUrl(),
         model: modelSel ? modelSel.value : '',
       });
-      const res = await fetch('/api/settings/context-profile?' + params.toString(),
+      const res = await fetch('/api/auth/settings/context-profile?' + params.toString(),
                               { credentials: 'same-origin' });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       state = await res.json();
@@ -2619,7 +2619,7 @@ function initContextProfiles() {
       }
     }
     try {
-      const res = await fetch('/api/settings/context-profile', {
+      const res = await fetch('/api/auth/settings/context-profile', {
         method: 'POST',
         credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },

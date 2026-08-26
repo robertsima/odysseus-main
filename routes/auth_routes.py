@@ -694,12 +694,16 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
 
         endpoint_url = (request.query_params.get("endpoint_url") or "").strip()
         model = (request.query_params.get("model") or "").strip()
-        if not model:
-            model = str(_load_settings().get("default_model") or "")
+        # An unset model means "all models on this endpoint" and must stay unset
+        # in the profile key, or the tab would read the default model's profile
+        # while the Save button writes the endpoint-wide one — the two halves
+        # would disagree and a save would look like it did nothing. The default
+        # model is only borrowed to guess a window for the recommendation.
+        window_model = model or str(_load_settings().get("default_model") or "")
         context_length = 0
-        if model:
+        if window_model:
             try:
-                context_length = int(get_context_length(endpoint_url, model) or 0)
+                context_length = int(get_context_length(endpoint_url, window_model) or 0)
             except Exception:
                 context_length = 0
         return describe(endpoint_url, model, context_length)

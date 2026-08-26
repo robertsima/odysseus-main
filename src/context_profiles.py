@@ -157,7 +157,25 @@ def preset_for_window(context_length: int) -> str:
 
 
 def profile_key(endpoint_url: str = "", model: str = "") -> str:
-    return f"{(endpoint_url or '').strip()}|{(model or '').strip()}"
+    """The settings key one endpoint/model pair is stored under.
+
+    Neither set is not "some nameless endpoint" — it is the settings tab's
+    "All endpoints / All models", which has to resolve to the global profile.
+    Keyed literally it would land on "|", a key `resolve` consults only for a
+    caller that itself has no endpoint, so a profile saved there would apply to
+    nothing and look like the tab had done nothing.
+    """
+    endpoint_url = (endpoint_url or "").strip()
+    model = (model or "").strip()
+    if not endpoint_url and not model:
+        return GLOBAL_KEY
+    return f"{endpoint_url}|{model}"
+
+
+# What "All endpoints / All models" was keyed as before it folded into
+# GLOBAL_KEY. Normalised on read so a settings.json written by hand, or by an
+# older build, keeps working.
+_LEGACY_GLOBAL_KEY = "|"
 
 
 def _clamp(name: str, value: Any) -> Optional[Any]:
@@ -196,6 +214,8 @@ def sanitize(stored: Any) -> Dict[str, Dict[str, Any]]:
         preset = str(entry.get("preset") or "").strip()
         if preset not in PRESETS and preset != "custom":
             continue
+        if key == _LEGACY_GLOBAL_KEY:
+            key = GLOBAL_KEY
         clean: Dict[str, Any] = {"preset": preset}
         if preset == "custom":
             values = entry.get("values")
@@ -220,7 +240,12 @@ def _stored_profiles() -> Dict[str, Any]:
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("context profile lookup failed: %s", exc)
         return {}
-    return stored if isinstance(stored, dict) else {}
+    if not isinstance(stored, dict):
+        return {}
+    if _LEGACY_GLOBAL_KEY in stored and GLOBAL_KEY not in stored:
+        stored = dict(stored)
+        stored[GLOBAL_KEY] = stored.pop(_LEGACY_GLOBAL_KEY)
+    return stored
 
 
 def _entry_values(entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -248,16 +273,27 @@ def resolve(
     source = "auto"
     chosen: Dict[str, Any] = {}
 
-    for key, label in (
+    # Two tiers collapse onto one key when the more specific half is unset (no
+    # model named, or neither). Search each key once, and let the most GENERAL
+    # tier that maps to it name the source, so the settings tab reports "the
+    # global profile" rather than claiming a model-specific one won.
+    tiers = (
         (profile_key(endpoint_url, model), "model"),
         (profile_key(endpoint_url, ""), "endpoint"),
         (GLOBAL_KEY, "global"),
-    ):
+    )
+    labels = {key: label for key, label in tiers}
+    ordered = []
+    for key, _label in tiers:
+        if key not in ordered:
+            ordered.append(key)
+
+    for key in ordered:
         entry = stored.get(key)
         if isinstance(entry, dict):
             values = _entry_values(entry)
             if values:
-                chosen, source = values, label
+                chosen, source = values, labels[key]
                 break
 
     auto_preset = preset_for_window(context_length)
