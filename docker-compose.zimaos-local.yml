@@ -33,6 +33,18 @@ services:
       DATABASE_URL: sqlite:///./data/app.db
       FASTEMBED_CACHE_PATH: /app/data/fastembed_cache
       FASTEMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
+      # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
+      # fills it. They are layers, not alternatives. "auto" (default) keeps the
+      # FastEmbed lane alongside a configured EMBEDDING_URL so retrieval
+      # survives that endpoint going down; "off" builds it only when the
+      # endpoint is unavailable, for deploys that run a real embedding model and
+      # do not want a second MiniLM index maintained beside it.
+      ODYSSEUS_FASTEMBED_LANE: ${ODYSSEUS_FASTEMBED_LANE:-auto}
+      # Directories the agent's file tools may touch beyond /app/data. Declared
+      # here rather than through the settings API so a mount and its permission
+      # arrive together. Left empty by default: the vault is reachable at its
+      # /app/data/personal_docs path below, which is the path retrieval cites.
+      ODYSSEUS_TOOL_EXTRA_ROOTS: ${ODYSSEUS_TOOL_EXTRA_ROOTS:-}
       LOCALHOST_BYPASS: "false"
       ODYSSEUS_ADMIN_USER: admin
       ODYSSEUS_ADMIN_PASSWORD: ${ODYSSEUS_ADMIN_PASSWORD:-}
@@ -43,7 +55,14 @@ services:
       ODYSSEUS_PI_WORKER_SCRIPT: ${ODYSSEUS_PI_WORKER_SCRIPT:-D:/Development/Start-Pi-Worker.ps1}
       ODYSSEUS_PI_WORKER_ROOT: ${ODYSSEUS_PI_WORKER_ROOT:-D:/Development}
       ODYSSEUS_PI_WORKER_IDENTITY_FILE: ${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
-      ODYSSEUS_PI_DOCUMENTATION_ROOT: ${ODYSSEUS_PI_DOCUMENTATION_ROOT:-/app/workspace/AI Mind}
+      ODYSSEUS_PI_DOCUMENTATION_ROOT: ${ODYSSEUS_PI_DOCUMENTATION_ROOT:-/app/data/personal_docs/AI Mind}
+      # Which vault trees are indexed, and under which sensitivity label.
+      # Declared next to the mounts rather than left to post-boot admin state:
+      # without it a fresh install came up with the vaults mounted, unindexed
+      # and UNLABELLED -- and an unlabelled Journal is a public Journal, which
+      # both hosted models and `read_file` are then free to read. The label is
+      # what closes the Journal, not the :ro mount.
+      ODYSSEUS_PERSONAL_DIRS: ${ODYSSEUS_PERSONAL_DIRS:-Vault Mind:public,AI Mind:public,Journal:private}
       ODYSSEUS_STARTUP_WARMUPS: "1"
       TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
       GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
@@ -87,22 +106,26 @@ services:
       # Vaults nested inside /app/data so the personal-docs API's PERSONAL_DIR
       # confinement accepts them. A bind mount is a mount point, not a symlink,
       # so realpath() resolves it to itself and it passes the check.
+      #
+      # ONE path per vault, deliberately. These used to be mounted twice — :ro
+      # here for indexing and again under /app/workspace for the file tools —
+      # which meant `search_documents` cited a path that could be read but not
+      # written, while the writable copy lived at a second path that was off the
+      # tool allowlist entirely and only reachable by binding a workspace, which
+      # in turn revoked every other path. Retrieval and editing now name the
+      # same file.
+      #
+      # Writability is a separate axis from the RAG public/private label:
+      #   Vault Mind — reference material the AI reads but does not edit, so :ro.
+      #   AI Mind    — the AI's own notes; readable AND updatable, so rw.
+      #   Journal    — :ro, and labelled `private` (ODYSSEUS_PERSONAL_DIRS), which
+      #                is what actually keeps it out of read_file: the tool path
+      #                resolver rejects anything under a private directory.
       - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind:ro
-      - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/data/personal_docs/AI Mind:ro
+      - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/data/personal_docs/AI Mind
       # On ZimaOS this was /app/journal via vault_watch.py into a separate,
       # ungated collection. Native indexing puts it under the sensitivity filter.
       - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal:ro
-
-      # Agent file tools. Writability is a separate axis from the RAG
-      # public/private label:
-      #   Vault Mind — readable only, so :ro here as well as above.
-      #   AI Mind    — the AI's own notes; readable AND updatable, so rw.
-      #   Journal    — deliberately absent. Its only exposure is the read-only
-      #                personal_docs mount above; giving it a workspace mount
-      #                would let any model read it via read_file, which the RAG
-      #                sensitivity filter does not cover.
-      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/workspace/Vault Mind:ro
-      - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/workspace/AI Mind
 
   chromadb:
     image: docker.io/chromadb/chroma:latest

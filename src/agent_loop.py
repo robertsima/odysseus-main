@@ -556,6 +556,15 @@ _DOMAIN_RULES = {
 - Use file tools for real disk files. Use document tools only for editor documents.
 - Prefer `grep`, `glob`, and `ls` over shell equivalents when available.
 - Use `edit_file`/`write_file` for writes; avoid shell redirection/heredocs for editing files.""",
+    "knowledge_base": """\
+## Knowledge base rules
+- The user's vault / knowledge base ("Vault Mind", "AI Mind", Obsidian, "my notes") is a tree of real Markdown files that is ALSO semantically indexed. Both halves are available to you at once.
+- ALWAYS start with `search_documents`. It returns the relevant excerpts plus the real path of each source file. Do not open the vault with `grep`, `glob`, `ls`, `bash`, or a directory walk to find something — the index already exists and a single note can run to 40k+ characters.
+- The paths `search_documents` returns are directly usable: pass one straight to `read_file` (with offset/limit) for more of a note, `edit_file` to change part of one, or `write_file` to create a new note. You do NOT need a workspace bound for this, and you must not tell the user to set one.
+- `grep`/`glob` over the vault are for what search cannot serve: an exact string, a filename pattern, or enumerating what exists. Use them after search, not instead of it.
+- Vault notes are files, not editor documents. Never use `create_document`/`edit_document` to change one — those write to Odysseus's own document store, a different place entirely.
+- If a write fails because the path is read-only, say so; do not go looking for a second copy of the file somewhere else on disk.
+- If `search_documents` reports the index is unavailable, say plainly that the vector index is down instead of silently falling back to reading the whole vault.""",
     "settings": """\
 ## Settings/API rules
 - Use `manage_settings` for preferences and tool enable/disable.
@@ -583,6 +592,14 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents", "search_documents"},
+    # Keyed on the retrieval tool alone. A vault turn is seeded exactly
+    # `search_documents` and no editor-document tool (see
+    # _KNOWLEDGE_BASE_TOOLS), and the "search before you read" rule has to
+    # travel with it -- the rule packs are derived from the final tool
+    # names, so without an entry here a vault turn was handed the file
+    # rules ("prefer grep, glob and ls") and nothing else, which is exactly
+    # what it then did.
+    "knowledge_base": {"search_documents"},
     "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
@@ -602,6 +619,22 @@ _WORKSPACE_TERMINUS_TOOLS = (
        # the toolset that most needs the way back to an offloaded one.
        "recall_tool_output"}
 )
+
+# What a turn that names the knowledge base needs on top of the file toolset.
+#
+# The vault is files, so naming it correctly routes the turn to Terminus (file
+# + shell tools). But Terminus SWAPS the selection when no other domain fired,
+# and `search_documents` is not in it -- so "update the rolling report in AI
+# Mind" arrived with grep/glob/ls/read_file, no semantic index, and (because
+# the rule packs are derived from the tool names) the `files` rules telling it
+# to "prefer grep, glob and ls". It did. Seeding the retrieval tool explicitly,
+# AFTER the swap, is what makes the index reachable on exactly the turns that
+# are about the index.
+#
+# Only the retrieval tool -- deliberately NOT the `documents` domain, whose
+# create_document/edit_document write to Odysseus's own document store rather
+# than to a file in the vault.
+_KNOWLEDGE_BASE_TOOLS = frozenset({"search_documents"})
 
 # Domains that, when the user's own words name one alongside file/shell work,
 # mean the turn is mixed and Terminus must merge rather than swap.
@@ -667,6 +700,7 @@ _STARVED_DOMAIN_LABELS = {
     "ui": "UI control",
     "sessions": "chat sessions",
     "files": "files and shell",
+    "knowledge_base": "the vault / knowledge base",
     "settings": "settings",
     "contacts": "contacts",
     "integrations": "service integrations",
@@ -4130,6 +4164,20 @@ async def stream_agent_loop(
                 query_matched=_query_matched_tools,
                 domains=_intent.get("domains") or set(),
             )
+
+        # The knowledge base is indexed as well as on disk. Seed the retrieval
+        # tool whenever the turn names it, after any Terminus swap so it cannot
+        # be dropped again, and regardless of whether a workspace is bound.
+        if (
+            _looks_like_vault_request(_retrieval_query or _last_user)
+            and not _active_document_relevant
+        ):
+            _missing_kb = sorted(_KNOWLEDGE_BASE_TOOLS - set(_relevant_tools))
+            if _missing_kb:
+                logger.info(
+                    "[tool-rag] Knowledge base named; adding %s", _missing_kb
+                )
+            _relevant_tools |= set(_KNOWLEDGE_BASE_TOOLS)
 
     # "Research X" / "do deep research on Y" is a deep-research JOB, and the
     # system prompt says so in as many words -- but the intent classifier files

@@ -13,6 +13,7 @@ import time
 from typing import Dict, List, Optional, Set
 
 from src.embedding_lanes import (
+    primary_collection,
     LANE_CUSTOM,
     LANE_FASTEMBED,
     build_embedding_lanes,
@@ -165,10 +166,7 @@ class ToolIndex:
         if not self._lanes:
             raise RuntimeError("No embedding lanes available")
         self._embedder = self._lanes[0].client
-        self._collection = next(
-            (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
-            self._lanes[0].collection,
-        )
+        self._collection = primary_collection(self._lanes)
         migrate_legacy_collection(COLLECTION_NAME, self._lanes)
         self._fingerprint = ""
         self._mcp_generation = -1

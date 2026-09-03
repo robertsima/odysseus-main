@@ -293,3 +293,72 @@ def test_custom_lane_uses_http_down_latch(monkeypatch):
 
     assert calls == [{"url": None, "model": None, "api_key": None}]
     embeddings.reset_http_embed_state()
+
+
+# ── the FastEmbed lane off-switch ───────────────────────────────────────────
+#
+# ChromaDB is the vector store; FastEmbed is one of the embedders that fills
+# it. They are layers, not alternatives, and until now the FastEmbed lane was
+# unconditional -- "we run a real embedding model, stop maintaining a second
+# 384-dimension MiniLM index beside it" was not a thing that could be said.
+
+def _both_clients(monkeypatch):
+    import src.embedding_lanes as lanes
+
+    monkeypatch.setattr(
+        lanes, "_build_custom_client",
+        lambda: FakeEmbedder(768, "nomic-embed-text", "http://embeddings/v1"),
+    )
+    monkeypatch.setattr(
+        lanes, "_build_fastembed_client",
+        lambda: FakeEmbedder(384, "sentence-transformers/all-MiniLM-L6-v2", "local://fastembed"),
+    )
+
+
+def test_fastembed_lane_defaults_to_on(monkeypatch):
+    patch_chroma(monkeypatch, FakeChroma())
+    _both_clients(monkeypatch)
+    monkeypatch.delenv("ODYSSEUS_FASTEMBED_LANE", raising=False)
+
+    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [
+        LANE_CUSTOM, LANE_FASTEMBED
+    ]
+
+
+def test_fastembed_lane_off_skips_it_when_the_custom_lane_is_up(monkeypatch):
+    patch_chroma(monkeypatch, FakeChroma())
+    _both_clients(monkeypatch)
+    monkeypatch.setenv("ODYSSEUS_FASTEMBED_LANE", "off")
+
+    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_CUSTOM]
+
+
+def test_fastembed_lane_off_still_falls_back_when_the_endpoint_is_down(monkeypatch):
+    """`off` must degrade retrieval, never delete it: with no custom lane the
+    fallback is built anyway rather than leaving the store with no lanes."""
+    import src.embedding_lanes as lanes
+
+    patch_chroma(monkeypatch, FakeChroma())
+    _both_clients(monkeypatch)
+    monkeypatch.setattr(
+        lanes, "_build_custom_client",
+        lambda: (_ for _ in ()).throw(RuntimeError("HTTP embedding lane unavailable")),
+    )
+    monkeypatch.setenv("ODYSSEUS_FASTEMBED_LANE", "off")
+
+    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_FASTEMBED]
+
+
+def test_primary_collection_pairs_with_the_lane_the_store_embeds_through(monkeypatch):
+    """Stores keep one `_collection` and one embedder. The embedder was
+    lanes[0] (custom when configured) while the collection preferred the
+    FastEmbed lane -- different models, different dimensions."""
+    from src.embedding_lanes import primary_collection
+
+    patch_chroma(monkeypatch, FakeChroma())
+    _both_clients(monkeypatch)
+    monkeypatch.delenv("ODYSSEUS_FASTEMBED_LANE", raising=False)
+
+    built = build_embedding_lanes("odysseus_memories")
+    assert primary_collection(built) is built[0].collection
+    assert primary_collection([]) is None

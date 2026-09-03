@@ -21,6 +21,29 @@ logger = logging.getLogger(__name__)
 LANE_FASTEMBED = "fastembed"
 LANE_CUSTOM = "custom"
 
+# Whether the local FastEmbed fallback lane is built alongside a working
+# custom (HTTP) embedding endpoint.
+#
+#   "auto" (default) -- always build it. Both lanes are indexed and both are
+#       searched, so retrieval survives the endpoint going away.
+#   "off"            -- build it ONLY when the custom lane failed to come up.
+#
+# "off" exists because "we run a real embedding model, stop also maintaining a
+# second 384-dimension MiniLM index" was a reasonable thing to want and there
+# was no way to say it: every offload, index and search paid for both lanes,
+# and the FastEmbed model was downloaded and loaded on a box that had no use
+# for it. It deliberately still falls back rather than leaving the app with no
+# lanes at all -- an unreachable endpoint must degrade retrieval, not delete it.
+FASTEMBED_LANE_ENV = "ODYSSEUS_FASTEMBED_LANE"
+
+
+def fastembed_lane_mode() -> str:
+    """Normalized value of ODYSSEUS_FASTEMBED_LANE ("auto" or "off")."""
+    raw = (os.environ.get(FASTEMBED_LANE_ENV) or "").strip().lower()
+    if raw in {"off", "false", "0", "no", "fallback-only", "fallback_only"}:
+        return "off"
+    return "auto"
+
 
 # `count()` is a network round-trip to ChromaDB, and the retrieval paths ask
 # for it several times per search: once to decide whether the lane is empty,
@@ -347,6 +370,13 @@ def build_embedding_lanes(base_name: str) -> List[EmbeddingLane]:
     except Exception as e:
         logger.warning("Custom embedding lane unavailable for %s: %s", base_name, e)
 
+    if lanes and fastembed_lane_mode() == "off":
+        logger.debug(
+            "%s=off and the custom embedding lane is up; skipping the FastEmbed "
+            "lane for %s", FASTEMBED_LANE_ENV, base_name,
+        )
+        return lanes
+
     try:
         fastembed = _build_fastembed_client()
         lanes.append(_create_lane(chroma_client, base_name, LANE_FASTEMBED, fastembed))
@@ -418,6 +448,21 @@ def migrate_legacy_collection(base_name: str, lanes: Sequence[EmbeddingLane]) ->
                 break
         else:
             logger.info("Backfilled %s %s lane rows from legacy collection %s", len(missing), lane.name, base_name)
+
+
+def primary_collection(lanes: Sequence[EmbeddingLane]):
+    """The collection that pairs with the client the store embeds through.
+
+    Every store keeps a single `_collection` for direct access and a single
+    embedder, and picked them by different rules: the embedder was
+    `lanes[0].client` (retrieval-preference order, so the custom endpoint when
+    one is configured) while the collection preferred the FastEmbed lane. With
+    both lanes up those are different models with different dimensions, so any
+    caller embedding with one and querying the other gets a dimension error --
+    latent only because nothing outside these modules reaches for the property
+    today. Both now come from the same lane.
+    """
+    return lanes[0].collection if lanes else None
 
 
 def lane_count(lanes: Sequence[EmbeddingLane]) -> int:

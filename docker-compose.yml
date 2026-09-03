@@ -62,6 +62,18 @@ services:
       - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
       - FASTEMBED_MODEL=${FASTEMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
+      # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
+      # fills it — layers, not alternatives. "auto" keeps the FastEmbed lane
+      # alongside a configured EMBEDDING_URL so retrieval survives that endpoint
+      # going down; "off" builds it only when the endpoint is unavailable.
+      - ODYSSEUS_FASTEMBED_LANE=${ODYSSEUS_FASTEMBED_LANE:-auto}
+      # Extra directories the agent's file tools may touch, beyond /app/data and
+      # the temp dirs. Declared next to the mounts so a bind mount and the
+      # permission to use it arrive together.
+      - ODYSSEUS_TOOL_EXTRA_ROOTS=${ODYSSEUS_TOOL_EXTRA_ROOTS:-}
+      # Vault trees to index, as `path:label` pairs relative to
+      # /app/data/personal_docs. An unlabelled directory is a PUBLIC directory.
+      - ODYSSEUS_PERSONAL_DIRS=${ODYSSEUS_PERSONAL_DIRS:-}
       - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
       - ODYSSEUS_INPROCESS_POLLERS=${ODYSSEUS_INPROCESS_POLLERS:-1}
       - ODYSSEUS_INPROCESS_TASKS=${ODYSSEUS_INPROCESS_TASKS:-1}

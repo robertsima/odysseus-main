@@ -101,6 +101,84 @@ The character budget is shared evenly across sources rather than spent
 front-to-back. Previously a single long note could consume the whole budget and
 silently truncate every source after it out of the prompt.
 
+## Reaching a note as a file
+
+Retrieval and file access are two views of one tree, and they are meant to be
+used together: `search_documents` finds the passage and returns the **real
+path** of the file it came from, and that path goes straight into `read_file`
+(with `offset`/`limit`), `edit_file`, or `write_file`.
+
+Three rules make that hold:
+
+**One path per note.** The vault is mounted once, under
+`/app/data/personal_docs/…`. It used to be mounted twice — read-only there for
+indexing and again under `/app/workspace/…` for the file tools — so the path
+retrieval cited could be read but not written, while the writable copy sat at a
+second path that was off the tool allowlist and reachable only by binding a
+workspace. Mount each tree once, and make it `rw` if the agent should be able
+to edit it.
+
+**The knowledge base is reachable with a workspace bound.** Binding a workspace
+(`/workspace set`) confines the file tools to that folder — plus the
+personal-documents tree, which stays in reach either way. Without that carve-out
+a coding turn could not consult the vault, and editing the vault meant binding
+the vault as the workspace, which revoked everything else.
+
+**The `private` label is the thing that closes a directory**, not the `:ro`
+mount. `_resolve_tool_path` rejects any path under a directory labelled private,
+so a private Journal is unreadable by `read_file` however it is mounted.
+Declare labels in the compose file with `ODYSSEUS_PERSONAL_DIRS`
+(`Vault Mind:public,AI Mind:public,Journal:private`) — an *undeclared* directory
+is a **public** directory, and on a fresh install the labels do not exist until
+something writes them.
+
+Directories outside `/app/data` that the file tools should reach are declared
+with `ODYSSEUS_TOOL_EXTRA_ROOTS` (path-separator or comma separated). The
+sensitive-name deny list (`.ssh`, `.gnupg`, `id_rsa`, …) applies inside every
+root, extra roots included.
+
+### Why the agent used to grep instead
+
+Tool selection is per-turn. Naming the vault marks the turn as file work, which
+swaps in the file/shell toolset — and the system-prompt rule packs are derived
+from the *selected tool names*, so a turn with no `search_documents` also had no
+rule telling it to search. What it did have was the file pack: "prefer `grep`,
+`glob` and `ls`." `search_documents` is now seeded whenever the request names
+the knowledge base, after that swap, and it carries the **Knowledge base rules**
+pack with it: search first, the returned paths are directly readable and
+writable, and no workspace needs to be set.
+
+## Embeddings and the vector store
+
+These are two layers and they are often confused for alternatives:
+
+| | What it is | Configured by |
+|---|---|---|
+| **ChromaDB** | the vector **store**, an HTTP service (`:8100`) that holds the chunks and their vectors | `CHROMADB_HOST` / `CHROMADB_PORT` |
+| **Embedder** | what turns text into those vectors | an HTTP endpoint (`EMBEDDING_URL`, or the admin panel), else local FastEmbed |
+
+Turning one off does not select the other. With Chroma unreachable there is no
+retrieval at all — `search_documents` says so explicitly, `get_rag_manager()`
+returns `None` and throttles its retries to once per 30s.
+
+Vectors from different models cannot share a collection (Chroma fixes a
+collection's dimension on first insert), so each embedder gets its own **lane**
+and its own collection: `custom` for the HTTP endpoint, `fastembed` for the
+local fallback. Both are searched, best-scoring lane wins.
+
+`ODYSSEUS_FASTEMBED_LANE` controls whether the fallback lane is maintained:
+
+- `auto` (default) — always build it, so retrieval survives the endpoint going
+  down.
+- `off` — build it only when the custom lane failed to come up. Use this when
+  you run a real embedding model and do not want a second 384-dimension MiniLM
+  index maintained beside it. It still falls back rather than leaving the app
+  with no lanes: an unreachable endpoint must degrade retrieval, not delete it.
+
+Switching embedders re-embeds rather than corrupting: a lane whose fingerprint
+(model + url + dimension) no longer matches its collection is rebuilt from the
+stored documents.
+
 ## Keeping the index current
 
 `src/vault_scan.py` polls tracked directories every 30s (`ODYSSEUS_VAULT_SCAN_SECONDS`)
@@ -129,6 +207,9 @@ All optional. See `.env.example` for the same list with defaults inline.
 | `ODYSSEUS_RAG_LINK_EXPANSION` | `1` | Follow `[[wikilinks]]`; `0` disables |
 | `ODYSSEUS_VAULT_DATE_ORDER` | `day` | Reading of an ambiguous filename date (`03-04-2026`) |
 | `ODYSSEUS_VAULT_SCAN_SECONDS` | `30` | Re-scan interval; `0` disables |
+| `ODYSSEUS_FASTEMBED_LANE` | `auto` | `off` skips the local fallback lane when an embedding endpoint is up |
+| `ODYSSEUS_TOOL_EXTRA_ROOTS` | *(empty)* | Extra directories the agent's file tools may touch |
+| `ODYSSEUS_PERSONAL_DIRS` | *(empty)* | `path:label` pairs to index at boot; an undeclared directory is public |
 
 ## Measuring it on a live index
 

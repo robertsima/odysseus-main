@@ -117,10 +117,57 @@ def _is_sensitive_path(resolved: str) -> bool:
     return filename in _SENSITIVE_FILE_PATTERNS_CF
 
 
+# Extra roots declared by the DEPLOYMENT rather than by post-boot admin state.
+# `tool_path_extra_roots` (below) is only reachable through the settings API,
+# so a compose file that bind-mounts a tree for the agent to work in came up
+# with the mount present and every path under it rejected, and the only way
+# through was to remember to bind that folder as the workspace by hand — which
+# then revoked every other path. Same reasoning as ODYSSEUS_PERSONAL_DIRS: the
+# declaration belongs next to the mount. Separator is the platform's path
+# separator (":" on POSIX, ";" on Windows); commas are also accepted because
+# every other Odysseus list variable uses them.
+TOOL_EXTRA_ROOTS_ENV = "ODYSSEUS_TOOL_EXTRA_ROOTS"
+
+
+def _env_extra_roots() -> list[str]:
+    raw = os.environ.get(TOOL_EXTRA_ROOTS_ENV, "")
+    if not raw.strip():
+        return []
+    parts = [raw]
+    for sep in (os.pathsep, ","):
+        parts = [piece for chunk in parts for piece in chunk.split(sep)]
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _personal_docs_root() -> Optional[str]:
+    """Realpath of the user's indexed knowledge base, or None."""
+    try:
+        from src.constants import PERSONAL_DIR
+
+        return os.path.realpath(PERSONAL_DIR)
+    except Exception:
+        return None
+
+
+def _is_under_personal_docs(resolved: str) -> bool:
+    """True when *resolved* sits inside the personal-documents tree.
+
+    Path-boundary match, not a prefix match, so a sibling `personal_docs2`
+    does not count as inside.
+    """
+    root = _personal_docs_root()
+    if not root:
+        return False
+    a = os.path.normcase(resolved)
+    b = os.path.normcase(root)
+    return a == b or a.startswith(b + os.sep)
+
+
 def _tool_path_roots() -> list[str]:
     """Return the list of directory roots that read_file / write_file
     may touch. Default: project data/ + system temp dirs. Extra roots
-    are loaded from the ``tool_path_extra_roots`` setting.
+    are loaded from the ``tool_path_extra_roots`` setting and from
+    ``ODYSSEUS_TOOL_EXTRA_ROOTS``.
     """
     roots: list[str] = []
 
@@ -151,6 +198,9 @@ def _tool_path_roots() -> list[str]:
     except Exception:
         pass
 
+    # Opt-in extra roots declared by the deployment.
+    roots.extend(_env_extra_roots())
+
     # Deduplicate; resolve symlinks so containment is unambiguous.
     seen: set[str] = set()
     out: list[str] = []
@@ -178,12 +228,24 @@ def _resolve_tool_path(raw_path: str) -> str:
     Returns the realpath on success. Raises ValueError on rejection.
     Symlinks are resolved before comparison.
 
-    When a workspace is active for this turn, paths are confined to it instead
-    of the default allowlist (see _resolve_tool_path_in_workspace).
+    When a workspace is active for this turn, paths are confined to it
+    (see _resolve_tool_path_in_workspace) PLUS the personal-documents tree.
     """
     ws = get_active_workspace()
     if ws:
-        return _resolve_tool_path_in_workspace(ws, raw_path)
+        try:
+            return _resolve_tool_path_in_workspace(ws, raw_path)
+        except ValueError:
+            # The knowledge base is not "somewhere else on the host" — it is
+            # the user's own indexed notes, reachable by these same tools when
+            # no workspace is bound, and the paths `search_documents` cites.
+            # Binding a workspace used to revoke that, so retrieval handed the
+            # agent a path its own file tools then refused, and the vault could
+            # only be edited by binding the vault *as* the workspace — which in
+            # turn revoked everything else. Keep it reachable in both modes.
+            # The sensitive/private deny-list below still applies, so a
+            # directory the user labelled private stays closed either way.
+            return _resolve_personal_docs_path(raw_path)
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
     expanded = os.path.expanduser(str(raw_path).strip())
@@ -207,6 +269,35 @@ def _resolve_tool_path(raw_path: str) -> str:
     raise ValueError(
         f"path '{raw_path}' is outside the allowed roots"
     )
+
+
+def _resolve_personal_docs_path(raw_path: str) -> str:
+    """Resolve a path that must land inside the personal-documents tree.
+
+    Used as the second chance when a workspace is bound: the workspace is the
+    primary root, the knowledge base is the one root that is always also in
+    reach. Raises ValueError with the workspace-style message when the path is
+    neither, so the agent sees one coherent rejection rather than two.
+    """
+    if raw_path is None or not str(raw_path).strip():
+        raise ValueError("path is required")
+    root = _personal_docs_root()
+    expanded = os.path.expanduser(str(raw_path).strip())
+    candidate = expanded
+    if not os.path.isabs(candidate) and root:
+        candidate = os.path.join(root, candidate)
+    resolved = os.path.realpath(candidate)
+    if _is_sensitive_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside a sensitive directory "
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+        )
+    if not _is_under_personal_docs(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is outside the workspace and outside the "
+            f"personal documents directory"
+        )
+    return resolved
 
 
 def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
@@ -303,15 +394,17 @@ def get_mcp_manager():
 def _resolve_search_root(raw_path: str) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
-    With a workspace active, the workspace folder is the root and a supplied
-    path is confined inside it. Otherwise an empty path defaults to the agent's
-    primary root (project data dir) and a supplied path is confined by the
-    global allowlist + sensitive-file policy.
+    With a workspace active, the workspace folder is the default root and a
+    supplied path is confined inside it (or inside the personal-documents tree
+    — see _resolve_tool_path, so grepping the vault does not require unbinding
+    the workspace). Otherwise an empty path defaults to the agent's primary
+    root (project data dir) and a supplied path is confined by the global
+    allowlist + sensitive-file policy.
     """
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-        return os.path.realpath(ws) if not raw else _resolve_tool_path_in_workspace(ws, raw)
+        return os.path.realpath(ws) if not raw else _resolve_tool_path(raw)
     if not raw:
         roots = _tool_path_roots()
         return roots[0] if roots else os.path.realpath(".")

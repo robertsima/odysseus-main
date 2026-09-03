@@ -26,6 +26,7 @@ from src.rag_sensitivity import (
 from pathlib import Path
 
 from src.embedding_lanes import (
+    primary_collection,
     LANE_CUSTOM,
     LANE_FASTEMBED,
     build_embedding_lanes,
@@ -269,10 +270,7 @@ class VectorRAG:
             self._lanes = build_embedding_lanes(COLLECTION_NAME)
             if not self._lanes:
                 raise RuntimeError("No embedding lanes available")
-            self._collection = next(
-                (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
-                self._lanes[0].collection,
-            )
+            self._collection = primary_collection(self._lanes)
             self._model = self._lanes[0].client
             migrate_legacy_collection(COLLECTION_NAME, self._lanes)
             try:
@@ -884,10 +882,7 @@ class VectorRAG:
             # Rebuild means empty current lanes. Clear the legacy unsuffixed
             # collection too so startup migration cannot resurrect stale docs.
             self._lanes = build_embedding_lanes(COLLECTION_NAME)
-            self._collection = next(
-                (lane.collection for lane in self._lanes if lane.name == LANE_FASTEMBED),
-                self._lanes[0].collection if self._lanes else None,
-            )
+            self._collection = primary_collection(self._lanes)
             self._healthy = True
             return True
         except Exception as e:
