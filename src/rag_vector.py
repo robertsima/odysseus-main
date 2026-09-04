@@ -194,7 +194,19 @@ def _query_names_document(query_words: set, meta: Any) -> bool:
 
 
 def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str, Any]]:
-    """Compose the Chroma metadata filter for an owner + sensitivity scope.
+    """Compose the Chroma metadata filter for a sensitivity scope.
+
+    ``owner`` is accepted but intentionally ignored: nothing in the indexing
+    path (``index_file`` / ``index_personal_documents``) has ever stamped an
+    ``owner`` key on a chunk unless a caller explicitly passed one, and no
+    caller ever did, on a single-user deployment. An equality filter on a key
+    that is simply absent from every chunk excluded the entire personal-docs
+    corpus from every owner-scoped search — 2026-09-04, diagnosed via a note
+    that was freshly re-indexed yet still scored zero results, including on
+    the substring pass that filename-matches the note by name. Kept as a
+    parameter (rather than removed) so a future multi-user deployment that
+    actually stamps ``owner`` at write time can re-enable scoping here without
+    hunting down every call site again.
 
     ``allow_private=False`` matches ``sensitivity == "public"`` by equality
     rather than excluding ``"private"``. That relies on every chunk carrying the
@@ -204,8 +216,6 @@ def _build_where(owner: Optional[str], allow_private: bool) -> Optional[Dict[str
     are missing a filtered field.
     """
     clauses = []
-    if owner:
-        clauses.append({"owner": owner})
     if not allow_private:
         clauses.append({SENSITIVITY_KEY: SENSITIVITY_PUBLIC})
     if not clauses:
@@ -580,11 +590,14 @@ class VectorRAG:
         owner: Optional[str] = None,
         allow_private: bool = True,
     ) -> List[Dict[str, Any]]:
-        """Hybrid search, optionally scoped to owner and to public-only chunks.
+        """Hybrid search, optionally scoped to public-only chunks.
 
         ``allow_private=False`` is what keeps notes marked private from being
         pasted into a prompt bound for a hosted API — callers derive it from
         the session's endpoint (see ``model_context.is_local_endpoint``).
+
+        ``owner`` is accepted for callers that still pass it but does not
+        filter anything — see ``_build_where``.
         """
         if not self.healthy:
             return []
@@ -665,7 +678,7 @@ class VectorRAG:
                 self._lanes,
                 query,
                 n_results=lambda lane: min(
-                    (k * 6 if (owner or not allow_private) else k * 3),
+                    (k * 6 if not allow_private else k * 3),
                     max(k, 20),
                     lane.count(),
                 ),
@@ -780,9 +793,10 @@ class VectorRAG:
     ) -> List[Dict[str, Any]]:
         """Python-side scan used when every lane's vector query fails.
 
-        It re-implements the owner and sensitivity scoping of ``search`` because
-        it bypasses Chroma's ``where`` filter entirely — without that, a lane
-        outage would turn into a private-content leak.
+        It re-implements the sensitivity scoping of ``search`` because it
+        bypasses Chroma's ``where`` filter entirely — without that, a lane
+        outage would turn into a private-content leak. ``owner`` is accepted
+        but ignored, matching ``_build_where`` — see that docstring.
         """
         try:
             if not self._active_collections():
@@ -798,8 +812,6 @@ class VectorRAG:
                     continue
                 for i, doc in enumerate(all_docs["documents"]):
                     meta = all_docs["metadatas"][i]
-                    if owner and meta.get("owner") != owner:
-                        continue
                     if not allow_private and metadata_is_private(meta):
                         continue
                     doc_lower = doc.lower()

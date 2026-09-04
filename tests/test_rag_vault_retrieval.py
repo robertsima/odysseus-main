@@ -186,9 +186,11 @@ def test_a_linked_note_is_pulled_in_even_when_it_matches_nothing(monkeypatch):
     assert any("note_key" in str(c["where"]) for c in calls)
 
 
-def test_link_expansion_keeps_the_owner_and_privacy_scope(monkeypatch):
-    # A second query that dropped the scope would reach another user's notes,
-    # or private ones on a hosted-API turn.
+def test_link_expansion_keeps_the_privacy_scope(monkeypatch):
+    # A second query that dropped the scope would reach private notes on a
+    # hosted-API turn. ``owner`` no longer scopes anything (see
+    # _build_where's docstring), so only the sensitivity scope has to survive
+    # into the link-expansion pass.
     party = _note("party", distance=0.20, filename="Party Plan.md", links=["sarah"])
     rag, calls = _install(monkeypatch, [party], linked_rows=[])
 
@@ -196,7 +198,7 @@ def test_link_expansion_keeps_the_owner_and_privacy_scope(monkeypatch):
 
     link_call = next(c for c in calls if "note_key" in str(c["where"]))
     flat = str(link_call["where"])
-    assert "rob" in flat and "public" in flat
+    assert "public" in flat
 
 
 def test_a_linked_note_does_not_outrank_a_direct_hit(monkeypatch):

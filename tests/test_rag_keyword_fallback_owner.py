@@ -1,13 +1,20 @@
-"""Regression: VectorRAG._keyword_search_fallback must not leak owner-less docs
-across users.
+"""``VectorRAG._keyword_search_fallback`` no longer filters by owner at all.
 
-The primary hybrid search filters with ChromaDB ``where={"owner": owner}``,
-which returns only documents whose ``owner == owner`` (documents with no owner
-are excluded). The keyword fallback used
-``if doc_owner and doc_owner != owner: continue``, so a document with a
-missing/empty owner fell through the guard and was returned to whichever user
-issued the query — a cross-user leak whenever the primary path errored and fell
-back to keyword search.
+Until 2026-09-04 the primary hybrid search filtered with ChromaDB
+``where={"owner": owner}``, and this file tested that the keyword fallback
+(used when that primary path errors) re-implemented the same scoping so an
+owner-less document couldn't leak across users when it did.
+
+That scoping was removed instead: no indexing path (``index_file`` /
+``index_personal_documents``) has ever stamped an ``owner`` key on a chunk on
+this single-user deployment, so the equality filter excluded every chunk in
+the vault, always — confirmed by inspecting live chunk metadata, none of
+which carried an ``owner`` key. ``owner`` is still accepted by both the
+primary search and this fallback (see ``rag_vector._build_where``) so a
+future multi-user deployment that actually stamps it at write time can
+re-enable scoping without hunting down call sites again, but today it is a
+no-op everywhere. See [[chroma-and-fastembed-are-layers]] /
+docs/vault-retrieval.md for the rest of the retrieval-scoping picture.
 """
 from src.rag_vector import VectorRAG
 
@@ -34,7 +41,7 @@ def _store(docs):
     return store
 
 
-def test_ownerless_doc_not_leaked_to_user():
+def test_owner_param_no_longer_filters():
     store = _store([
         ("a", "alice secret project", {"owner": "alice"}),
         ("b", "bob secret project", {"owner": "bob"}),
@@ -42,9 +49,7 @@ def test_ownerless_doc_not_leaked_to_user():
     ])
     results = store._keyword_search_fallback("secret project", k=10, owner="alice")
     ids = {r["id"] for r in results}
-    assert ids == {"a"}          # only alice's doc
-    assert "b" not in ids        # another user's doc excluded (already was)
-    assert "c" not in ids        # owner-less doc must NOT leak (the fix)
+    assert ids == {"a", "b", "c"}   # owner is ignored; nothing is excluded by it
 
 
 def test_no_owner_filter_returns_all():
@@ -54,4 +59,4 @@ def test_no_owner_filter_returns_all():
     ])
     results = store._keyword_search_fallback("shared note", k=10, owner=None)
     ids = {r["id"] for r in results}
-    assert ids == {"a", "c"}     # no owner requested → no filtering
+    assert ids == {"a", "c"}

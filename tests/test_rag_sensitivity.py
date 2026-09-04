@@ -74,9 +74,14 @@ def test_missing_label_is_not_private():
 # --------------------------------------------------------------------------- #
 
 
-def test_where_combines_owner_and_public_only():
+def test_where_ignores_owner_and_applies_public_only():
+    """``owner`` is accepted but never filters — see ``_build_where``'s
+    docstring. No indexing path has ever stamped an ``owner`` key on a chunk
+    on a single-user deployment, so filtering on it excluded every chunk in
+    the vault, always. Only the sensitivity scope still composes the filter.
+    """
     assert rag_vector._build_where("alice", allow_private=False) == {
-        "$and": [{"owner": "alice"}, {SENSITIVITY_KEY: SENSITIVITY_PUBLIC}]
+        SENSITIVITY_KEY: SENSITIVITY_PUBLIC
     }
 
 
@@ -87,7 +92,7 @@ def test_where_public_only_without_owner():
 
 
 def test_where_unchanged_when_private_allowed():
-    assert rag_vector._build_where("alice", allow_private=True) == {"owner": "alice"}
+    assert rag_vector._build_where("alice", allow_private=True) is None
     assert rag_vector._build_where(None, allow_private=True) is None
 
 
@@ -174,9 +179,9 @@ def test_search_sends_public_only_filter(monkeypatch):
 
     rag.search("notes", k=5, owner="alice", allow_private=False)
 
-    assert captured["where"] == {
-        "$and": [{"owner": "alice"}, {SENSITIVITY_KEY: SENSITIVITY_PUBLIC}]
-    }
+    # owner is accepted but ignored (see _build_where) — only sensitivity
+    # composes the filter that reaches the lane query.
+    assert captured["where"] == {SENSITIVITY_KEY: SENSITIVITY_PUBLIC}
 
 
 def test_keyword_fallback_drops_private():
@@ -195,7 +200,10 @@ def test_keyword_fallback_drops_private():
     assert {r["id"] for r in everything} == {"pub", "priv", "legacy"}
 
 
-def test_keyword_fallback_applies_owner_and_sensitivity_together():
+def test_keyword_fallback_ignores_owner_applies_sensitivity():
+    """``owner`` no longer scopes the keyword fallback either (see
+    ``_build_where``) — only the sensitivity label still excludes anything.
+    """
     rows = [
         ("mine-pub", {"source": "/a/1.md", "owner": "alice", SENSITIVITY_KEY: SENSITIVITY_PUBLIC}, "budget"),
         ("mine-priv", {"source": "/a/2.md", "owner": "alice", SENSITIVITY_KEY: SENSITIVITY_PRIVATE}, "budget"),
@@ -203,7 +211,7 @@ def test_keyword_fallback_applies_owner_and_sensitivity_together():
     ]
     rag = _make_vectorrag(rows)
     out = rag._keyword_search_fallback("budget", k=10, owner="alice", allow_private=False)
-    assert {r["id"] for r in out} == {"mine-pub"}
+    assert {r["id"] for r in out} == {"mine-pub", "theirs-pub"}
 
 
 def test_backfill_labels_only_unlabeled_chunks():
