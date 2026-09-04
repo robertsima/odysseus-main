@@ -37,7 +37,11 @@ def _store(collection):
     return store
 
 
-def test_rename_owner_updates_metadata_used_by_owner_filtered_search(tmp_path):
+def test_rename_owner_updates_metadata(tmp_path):
+    # Search no longer filters by owner (see rag_vector._build_where's
+    # docstring) — this only verifies rename_owner still relabels the right
+    # chunks' metadata, which matters again if a future multi-user deployment
+    # starts stamping owner at write time and needs to correct/migrate it.
     old_dir = tmp_path / "alice"
     new_dir = tmp_path / "alice2"
     old_file = old_dir / "note.txt"
@@ -72,10 +76,10 @@ def test_rename_owner_updates_metadata_used_by_owner_filtered_search(tmp_path):
 
     assert result["success"] is True
     assert result["updated_count"] == 1
-    assert store._keyword_search_fallback("private", k=10, owner="alice") == []
-    renamed = store._keyword_search_fallback("private", k=10, owner="alice2")
+    renamed = store._keyword_search_fallback("private", k=10)
     assert [row["id"] for row in renamed] == ["doc-old"]
     assert renamed[0]["metadata"]["owner"] == "alice2"
     assert renamed[0]["metadata"]["source"] == str(new_file)
     assert renamed[0]["metadata"]["directory"] == str(new_dir)
-    assert store._keyword_search_fallback("other", k=10, owner="bob")[0]["id"] == "doc-other"
+    assert store._keyword_search_fallback("other", k=10)[0]["id"] == "doc-other"
+    assert store._keyword_search_fallback("other", k=10)[0]["metadata"]["owner"] == "bob"

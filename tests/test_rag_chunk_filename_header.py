@@ -212,12 +212,13 @@ def test_forced_reindex_preserves_private_label_and_owner(tmp_path):
 def test_public_only_search_still_filters_on_metadata(tmp_path):
     # allow_private=False is what keeps private chunks out of a prompt bound
     # for a non-local endpoint. It matches sensitivity == public by equality,
-    # untouched by anything the header does to chunk text.
+    # untouched by anything the header does to chunk text. ``owner`` is
+    # accepted but ignored (see _build_where's docstring) — no indexing path
+    # has ever stamped it, so filtering on it excluded the whole vault.
     where = _build_where("admin", allow_private=False)
-    assert {SENSITIVITY_KEY: SENSITIVITY_PUBLIC} in where["$and"]
-    assert {"owner": "admin"} in where["$and"]
+    assert where == {SENSITIVITY_KEY: SENSITIVITY_PUBLIC}
 
-    assert _build_where("admin", allow_private=True) == {"owner": "admin"}
+    assert _build_where("admin", allow_private=True) is None
 
 
 def test_state_file_records_its_format_version(tmp_path):
