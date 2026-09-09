@@ -29,7 +29,8 @@ Two deliberate departures from ``normalize_sensitivity``:
 
 Reconciliation is additive: directories the operator added through the API are
 never removed just because they are absent from the variable. The variable
-declares what must exist, not the complete set.
+declares what must exist, not the complete set. Declared directories are
+application-scoped and do not require an authenticated owner at startup.
 """
 import json
 import logging
@@ -164,18 +165,6 @@ def reconcile(manager, raw: Optional[str] = None, *, owner: Optional[str] = None
         summary["errors"].append("manager has no personal_dir")
         return summary
 
-    resolved_owner = resolve_owner(owner)
-    if not resolved_owner:
-        # Indexing ownerless would write chunks the owner-scoped search can
-        # never return — a silent miss. Better to do nothing and say so.
-        message = (
-            "could not resolve an owner from auth.json; skipping (create the "
-            "admin account first, then restart)"
-        )
-        logger.error("%s: %s", ENV_VAR, message)
-        summary["errors"].append(message)
-        return summary
-
     tracked = {
         os.path.abspath(d) for d in (getattr(manager, "indexed_directories", None) or [])
     }
@@ -197,7 +186,7 @@ def reconcile(manager, raw: Optional[str] = None, *, owner: Optional[str] = None
         try:
             if resolved not in tracked:
                 manager.add_directory(
-                    resolved, index=True, owner=resolved_owner, sensitivity=entry.sensitivity
+                    resolved, index=True, owner=owner, sensitivity=entry.sensitivity
                 )
                 summary["added"].append({"directory": resolved, "sensitivity": entry.sensitivity})
                 logger.info(
