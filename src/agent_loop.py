@@ -26,6 +26,7 @@ from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
+from src.tool_schemas import compact_function_tool_schemas
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -3739,7 +3740,9 @@ def _tool_schemas_for_round(
             if schema.get("function", {}).get("name") not in disabled_tools
             and schema.get("name") not in disabled_tools
         ]
-    return selected
+    # Canonical schemas remain the execution contract. Native provider payloads
+    # omit repeated parameter prose while preserving every JSON constraint.
+    return compact_function_tool_schemas(selected) if is_api_model else selected
 
 
 async def stream_agent_loop(
