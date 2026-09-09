@@ -22,7 +22,8 @@ Keep work in the primary harness when it requires broad multi-repository context
 
 1. Determine the desired change, risks, and acceptance criteria before delegation.
 2. Build a compact task payload containing:
-   - absolute project path under `D:/Development`;
+   - the absolute project path returned by workspace discovery (the worker may
+     require a Windows `D:/Development/...` path; do not invent a translation);
    - one objective;
    - likely files, symbols, or failing tests;
    - constraints and exact verification commands;
@@ -41,7 +42,9 @@ Keep work in the primary harness when it requires broad multi-repository context
 - Never include credentials, private keys, tokens, or unnecessary personal data.
 - Do not authorize commits, pushes, deployments, dependency upgrades, or destructive commands unless the user explicitly requested them.
 - Treat the repository as potentially dirty. Preserve unrelated edits and report overlaps instead of overwriting them.
-- The worker may edit only projects below `D:/Development`. Vault documentation is performed by the Odysseus-side record tool after verification.
+- The worker may edit only projects in its configured worker root. Confirm the
+  path is accessible to that worker before delegation. Vault documentation is
+  performed by the Odysseus-side record tool after verification.
 
 ## Verify Sufficiency
 
