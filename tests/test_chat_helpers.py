@@ -422,6 +422,99 @@ def test_auto_name_session_passes_session_fallback_to_task_call(monkeypatch):
     assert updates == [("session-1", "Focused Fix")]
 
 
+def test_auto_name_session_backs_off_after_failure(monkeypatch):
+    import routes.chat_helpers as chat_helpers
+    import src.task_endpoint as task_endpoint
+
+    chat_helpers._AUTO_NAME_IN_FLIGHT.clear()
+    chat_helpers._AUTO_NAME_RETRY_AFTER.clear()
+    calls = []
+
+    async def failing_call(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("model unavailable")
+
+    monkeypatch.setattr(task_endpoint, "task_llm_call_async", failing_call)
+    sess = SimpleNamespace(
+        id="failed-session", owner="alice", endpoint_url="http://example/v1",
+        model="missing-model", headers={},
+        history=[SimpleNamespace(role="user", content="Name this chat")],
+    )
+    manager = SimpleNamespace(update_session_name=lambda *_args: None)
+
+    asyncio.run(auto_name_session(manager, sess))
+    asyncio.run(auto_name_session(manager, sess))
+
+    assert len(calls) == 1
+
+
+def test_auto_name_session_deduplicates_concurrent_requests(monkeypatch):
+    import routes.chat_helpers as chat_helpers
+    import src.task_endpoint as task_endpoint
+
+    chat_helpers._AUTO_NAME_IN_FLIGHT.clear()
+    chat_helpers._AUTO_NAME_RETRY_AFTER.clear()
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def slow_call(*args, **kwargs):
+        calls.append(1)
+        started.set()
+        await release.wait()
+        return "Concurrent Guard"
+
+    monkeypatch.setattr(task_endpoint, "task_llm_call_async", slow_call)
+    sess = SimpleNamespace(
+        id="concurrent-session", owner="alice", endpoint_url="http://example/v1",
+        model="model", headers={},
+        history=[SimpleNamespace(role="user", content="Name this chat")],
+    )
+    updates = []
+    manager = SimpleNamespace(update_session_name=lambda *args: updates.append(args))
+
+    async def run():
+        first = asyncio.create_task(auto_name_session(manager, sess))
+        await started.wait()
+        second = asyncio.create_task(auto_name_session(manager, sess))
+        await second
+        release.set()
+        await first
+
+    asyncio.run(run())
+
+    assert len(calls) == 1
+    assert updates == [("concurrent-session", "Concurrent Guard")]
+
+
+def test_auto_name_session_retries_after_cooldown(monkeypatch):
+    import routes.chat_helpers as chat_helpers
+    import src.task_endpoint as task_endpoint
+
+    chat_helpers._AUTO_NAME_IN_FLIGHT.clear()
+    chat_helpers._AUTO_NAME_RETRY_AFTER.clear()
+    clock = iter((100.0, 100.0, 401.0, 401.0))
+    monkeypatch.setattr(chat_helpers, "_auto_name_now", lambda: next(clock))
+    calls = []
+
+    async def unusable_title(*args, **kwargs):
+        calls.append(1)
+        return "x" * 80
+
+    monkeypatch.setattr(task_endpoint, "task_llm_call_async", unusable_title)
+    sess = SimpleNamespace(
+        id="retry-session", owner="alice", endpoint_url="http://example/v1",
+        model="model", headers={},
+        history=[SimpleNamespace(role="user", content="Name this chat")],
+    )
+    manager = SimpleNamespace(update_session_name=lambda *_args: None)
+
+    asyncio.run(auto_name_session(manager, sess))
+    asyncio.run(auto_name_session(manager, sess))
+
+    assert len(calls) == 2
+
+
 def test_spinoff_detected_from_dict_history():
     sess = SimpleNamespace(history=[
         {"role": "system", "metadata": {"research_spinoff_from": "rp-2"}},
