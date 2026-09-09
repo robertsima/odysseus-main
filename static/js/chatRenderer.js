@@ -1884,6 +1884,11 @@ export function displayMetrics(messageElement, metrics) {
   const ctxPct = metrics.context_percent;
   const model = metrics.model || 'Unknown';
   const cost = _billableCost(model, inputTokens, outputTokens);
+  const cachedInputTokens = Number(metrics.cached_input_tokens || 0);
+  const schemaTokens = Number(metrics.tool_schema_tokens || 0);
+  const cachePct = inputTokens > 0 && cachedInputTokens > 0
+    ? Math.round((cachedInputTokens / inputTokens) * 100)
+    : null;
 
   // Nothing useful to show — bail out (only if ALL metrics are missing)
   if (!responseTime && !inputTokens && !outputTokens && tps == null && !ctxPct) return;
@@ -1904,13 +1909,21 @@ export function displayMetrics(messageElement, metrics) {
   // Keep token counts in the Message Stats popup; the footer should stay slim.
   const costStr0 = cost !== null ? `$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(3)}` : null;
   const hasTps = tps != null && tps !== 'undefined';
-  const metricsLabel = hasTps
+  const baseMetricsLabel = hasTps
     ? `${tps} tok/s`
     : costStr0
       ? costStr0
       : responseTime != null
         ? `${responseTime}s`
         : '';
+  // One content-free signal in the footer makes cache/schema efficiency
+  // visible without turning every message into a telemetry dashboard.
+  const efficiencySignal = cachePct !== null
+    ? `${cachePct}% cached`
+    : schemaTokens > 0
+      ? `${schemaTokens.toLocaleString()} schema tok`
+      : '';
+  const metricsLabel = [baseMetricsLabel, efficiencySignal].filter(Boolean).join(' · ');
   if (!metricsLabel) return;
   metricsContainer.textContent = metricsLabel;
   metricsContainer.style.cursor = 'pointer';
@@ -1951,6 +1964,10 @@ export function displayMetrics(messageElement, metrics) {
       <div><span class="ctx-label">Input</span> ${inputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
       <div><span class="ctx-label">Output</span> ${outputTokens.toLocaleString()} tokens${isReal ? '' : '~'}</div>
       <div><span class="ctx-label">Total</span> ${totalTok.toLocaleString()} tokens</div>
+      ${cachedInputTokens > 0 ? `<div><span class="ctx-label">Cache</span> ${cachedInputTokens.toLocaleString()} tokens (${cachePct}%)</div>` : ''}
+      ${schemaTokens > 0 ? `<div><span class="ctx-label">Tool schemas</span> ${schemaTokens.toLocaleString()} tokens${metrics.tool_count != null ? ` / ${metrics.tool_count} selected` : ''}</div>` : ''}
+      ${metrics.tool_calls > 0 ? `<div><span class="ctx-label">Tool calls</span> ${metrics.tool_calls}</div>` : ''}
+      ${metrics.agent_rounds > 0 ? `<div><span class="ctx-label">Agent rounds</span> ${metrics.agent_rounds}</div>` : ''}
       <div><span class="ctx-label">Speed</span> ${speedStr}</div>
       <div><span class="ctx-label">Time</span> ${responseTime}s</div>
       ${prepTime != null ? `<div><span class="ctx-label">Prep</span> ${prepTime}s</div>` : ''}

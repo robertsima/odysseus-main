@@ -6332,6 +6332,11 @@ async def stream_agent_loop(
         tool_schema_tokens=last_round_schema_tokens,
     )
     metrics["requested_model"] = requested_model
+    # Scalar-only cost observability.  Do not expose or persist tool events
+    # themselves: their arguments/results can carry private Vault/Journal data.
+    metrics["agent_rounds"] = max(int(round_num or 0), 0)
+    metrics["tool_count"] = len(_tool_names_sent or [])
+    metrics["tool_calls"] = len(tool_events or [])
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.
