@@ -13,7 +13,8 @@ from src.runtime_paths import get_app_root
 logger = logging.getLogger(__name__)
 
 _BUNDLED_SKILLS = (
-    ("dev", "local-pi-delegation"),
+    ("dev", "local-pi-delegation", ["delegation", "local-model", "pi", "qwen", "coding", "context-efficiency"], ["linux", "windows"], ["mcp__pi_worker__run_pi_task"]),
+    ("general", "harness-context-and-tool-routing", ["harness", "tool-routing", "context", "paths", "reliability"], ["linux", "windows", "macos"], []),
 )
 
 
@@ -21,7 +22,7 @@ def seed_bundled_skills(skills_manager) -> list[str]:
     """Install and reconcile bundled skills without replacing their body."""
     installed: list[str] = []
     app_root = get_app_root()
-    for category, name in _BUNDLED_SKILLS:
+    for category, name, tags, platforms, requires_toolsets in _BUNDLED_SKILLS:
         source = os.path.join(app_root, "skills", name)
         destination = os.path.join(skills_manager.skills_root, category, name)
         if not os.path.isfile(os.path.join(source, "SKILL.md")):
@@ -48,9 +49,9 @@ def seed_bundled_skills(skills_manager) -> list[str]:
         # assigned to one account) become globally readable. Preserve the
         # operator-editable instruction body and reference files.
         skill.category = category
-        skill.tags = ["delegation", "local-model", "pi", "qwen", "coding", "context-efficiency"]
-        skill.platforms = ["linux", "windows"]
-        skill.requires_toolsets = ["mcp__pi_worker__run_pi_task"]
+        skill.tags = tags
+        skill.platforms = platforms
+        skill.requires_toolsets = requires_toolsets
         skill.status = "published"
         skill.confidence = 0.9
         skill.source = "bundled"
