@@ -21,6 +21,8 @@ from src.agent_loop import (
     _DOMAIN_RULES,
     _DOMAIN_TOOL_MAP,
     _KNOWLEDGE_BASE_TOOLS,
+    _VAULT_READ_TOOLS,
+    _is_read_only_vault_request,
     _domain_rules_for_tools,
     _looks_like_vault_request,
     apply_terminus_toolset,
@@ -182,3 +184,12 @@ def test_extra_roots_do_not_defeat_the_sensitive_deny_list(monkeypatch):
     monkeypatch.setenv(TOOL_EXTRA_ROOTS_ENV, extra)
     with pytest.raises(ValueError):
         _resolve_tool_path(os.path.join(extra, ".ssh", "authorized_keys"))
+
+
+def test_read_only_vault_request_uses_only_retrieval_and_safe_file_read_tools():
+    assert _is_read_only_vault_request("what does AI Mind say about the deploy process")
+    assert _VAULT_READ_TOOLS == {"search_documents", "read_file"}
+
+
+def test_vault_mutation_keeps_the_full_file_workflow_available():
+    assert not _is_read_only_vault_request("update the deployment report in AI Mind")

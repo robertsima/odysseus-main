@@ -637,6 +637,24 @@ _WORKSPACE_TERMINUS_TOOLS = (
 # than to a file in the vault.
 _KNOWLEDGE_BASE_TOOLS = frozenset({"search_documents"})
 
+# A read-only Vault Mind request is knowledge retrieval, not a shell task.
+# Giving it the full Terminus set adds 20+ irrelevant schemas (and their
+# instructions) before the model can run the semantic search.  File mutation
+# stays on the existing Terminus route because it needs the normal workspace
+# safety and verification tools.
+_VAULT_READ_TOOLS = frozenset({"search_documents", "read_file"})
+_VAULT_MUTATION_RE = re.compile(
+    r"\b(?:edit|write|append|update|create|rename|move|delete|remove|"
+    r"change|patch|fix|commit)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_read_only_vault_request(text: str) -> bool:
+    """Return True when a Vault Mind request needs retrieval, not mutation."""
+    text = str(text or "")
+    return bool(_looks_like_vault_request(text) and not _VAULT_MUTATION_RE.search(text))
+
 # Domains that, when the user's own words name one alongside file/shell work,
 # mean the turn is mixed and Terminus must merge rather than swap.
 _TERMINUS_MERGE_DOMAINS = frozenset({
@@ -4190,10 +4208,13 @@ async def stream_agent_loop(
                     and _looks_like_workspace_coding_request(_retrieval_query or _last_user)
                 )
                 or _looks_like_local_computer_request(_retrieval_query or _last_user)
-                # The knowledge base is files on disk. Naming it is as much a
-                # file-work signal as naming a path, and it does NOT depend on
-                # a workspace being bound — the paths are absolute either way.
-                or _looks_like_vault_request(_retrieval_query or _last_user)
+                # Vault mutations use the normal file/shell path. Read-only
+                # Vault requests are handled below with the smaller retrieval
+                # toolset so they do not pay a Terminus schema tax.
+                or (
+                    _looks_like_vault_request(_retrieval_query or _last_user)
+                    and not _is_read_only_vault_request(_retrieval_query or _last_user)
+                )
             )
             and not _active_document_relevant
             and not active_email
@@ -4206,6 +4227,11 @@ async def stream_agent_loop(
                 query_matched=_query_matched_tools,
                 domains=_intent.get("domains") or set(),
             )
+        elif _is_read_only_vault_request(_retrieval_query or _last_user):
+            # Search first; read a cited file only when the excerpt is not
+            # enough. This preserves Vault/Journal privacy policy while
+            # avoiding irrelevant shell, patch, and workspace schemas.
+            _relevant_tools |= set(_VAULT_READ_TOOLS)
 
         # The knowledge base is indexed as well as on disk. Seed the retrieval
         # tool whenever the turn names it, after any Terminus swap so it cannot

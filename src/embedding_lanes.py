@@ -60,6 +60,22 @@ def fastembed_lane_mode() -> str:
 _COUNT_TTL_SECONDS = 2.0
 _count_generation = 0
 
+# Legacy unsuffixed collections only exist during migration from pre-lane
+# installs. A missing one is normal on current installs, yet every newly
+# constructed store used to make an HTTP request that produced a Chroma 404.
+# Cache only confirmed "missing collection" results briefly: transport and
+# auth failures remain visible and retryable, while normal chat traffic stops
+# spending round trips and log volume on a completed migration.
+_LEGACY_MISSING_TTL_SECONDS = 300.0
+_legacy_missing_until: Dict[tuple[int, str], float] = {}
+
+
+def _is_missing_collection_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in (
+        "404", "not found", "does not exist", "unknown collection", "invalid collection",
+    ))
+
 
 def invalidate_count_cache(collection_name: Optional[str] = None) -> None:
     """Drop cached counts after a write, so a fresh add is searchable at once.
@@ -130,6 +146,8 @@ class EmbeddingLane:
 def reset_embedding_lane_state() -> None:
     """Reset process-local embedding lane state after endpoint config changes."""
     global _fastembed_client
+
+    _legacy_missing_until.clear()
 
     try:
         from src.embeddings import reset_http_embed_state

@@ -63,6 +63,42 @@ def classify_token(token: str) -> str:
     return "unrecognized shape"
 
 
+def find_checkouts(repo_slug: str = "", limit: int = 20) -> List[str]:
+    """Git checkouts under the data directory, preferring ones whose origin matches.
+
+    The application root is not a checkout inside a container, so the operator has
+    to name one. Guessing is unhelpful; listing the real candidates is not.
+    """
+    from src import constants
+
+    roots = [constants.DATA_DIR, os.path.join(constants.DATA_DIR, "development")]
+    found: List[str] = []
+    for root in roots:
+        try:
+            entries = sorted(os.listdir(root))
+        except OSError:
+            continue
+        for entry in entries:
+            path = os.path.join(root, entry)
+            if os.path.exists(os.path.join(path, ".git")) and path not in found:
+                found.append(path)
+            if len(found) >= limit:
+                break
+
+    def _origin(path: str) -> str:
+        try:
+            with open(os.path.join(path, ".git", "config"), "r", encoding="utf-8") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    if repo_slug:
+        # A checkout whose origin already points at the configured repository is
+        # almost certainly the one the operator means.
+        found.sort(key=lambda p: repo_slug not in _origin(p))
+    return found
+
+
 def _check_config(cfg: WorktreeConfig) -> List[Check]:
     checks: List[Check] = []
 
@@ -89,16 +125,22 @@ def _check_config(cfg: WorktreeConfig) -> List[Check]:
     else:
         checks.append(Check("repository", FAIL, "ODYSSEUS_AGENT_REPO is unset"))
 
-    checks.append(
-        Check(
-            "source repository",
-            OK if os.path.exists(os.path.join(cfg.source_repo, ".git")) else FAIL,
-            cfg.source_repo,
-            hint=""
-            if os.path.exists(os.path.join(cfg.source_repo, ".git"))
-            else "The container needs a real git checkout here. Set ODYSSEUS_AGENT_SOURCE_REPO.",
+    if os.path.exists(os.path.join(cfg.source_repo, ".git")):
+        checks.append(Check("source repository", OK, cfg.source_repo))
+    else:
+        found = find_checkouts(cfg.repo_slug)
+        hint = (
+            "The application root is not a git checkout — in a container the image "
+            "has no .git directory. Point ODYSSEUS_AGENT_SOURCE_REPO at the checkout "
+            "the agent actually works in, inside the data mount."
         )
-    )
+        if found:
+            hint += " Candidates found: " + ", ".join(found[:5])
+            hint += f"\n        Set: ODYSSEUS_AGENT_SOURCE_REPO={found[0]}"
+        checks.append(
+            Check("source repository", FAIL, f"{cfg.source_repo} is not a git checkout",
+                  hint=hint, data={"candidates": found})
+        )
 
     for label, path in (("worktree root", cfg.worktree_root), ("state directory", cfg.state_dir)):
         try:
