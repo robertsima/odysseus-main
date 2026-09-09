@@ -7,9 +7,8 @@ the weight:
   1. A malformed label never becomes "public". normalize_sensitivity coerces
      unknown input to public by design; this parser must NOT, or a typo
      ("Journal:privat") silently publishes a private tree.
-  2. Nothing is indexed ownerless. Owner-scoped search would never return such
-     chunks, so a missing owner has to skip the work loudly rather than write
-     unretrievable rows.
+  2. A declared directory is application-scoped. It must be indexed even when
+     auth.json does not exist; startup indexing must not depend on an owner.
 
 Hermetic — no chromadb, no HTTP; the manager runs against a fake RAG.
 """
@@ -198,12 +197,12 @@ def test_declared_directory_is_indexed_with_label_and_owner(personal, tmp_path, 
     assert [d["directory"] for d in summary["added"]] == [resolved]
     assert mgr.directory_sensitivity[resolved] == "private"
     assert rag.indexed == [
-        {"directory": resolved, "owner": "admin", "sensitivity": "private"}
+        {"directory": resolved, "owner": None, "sensitivity": "private"}
     ]
 
 
-def test_chunks_are_never_written_ownerless(personal, tmp_path, monkeypatch):
-    """No auth.json yet -> skip entirely rather than index unretrievable rows."""
+def test_declared_directory_is_indexed_without_auth_owner(personal, tmp_path, monkeypatch):
+    """Startup indexing must not wait for the first account to exist."""
     import src.constants as constants
 
     monkeypatch.setattr(constants, "AUTH_FILE", str(tmp_path / "missing.json"))
@@ -213,9 +212,12 @@ def test_chunks_are_never_written_ownerless(personal, tmp_path, monkeypatch):
 
     summary = reconcile(mgr, "Journal:private")
 
-    assert rag.indexed == []
-    assert mgr.indexed_directories == []
-    assert any("owner" in e for e in summary["errors"])
+    resolved = os.path.realpath(str(personal / "Journal"))
+    assert summary["errors"] == []
+    assert mgr.indexed_directories == [resolved]
+    assert rag.indexed == [
+        {"directory": resolved, "owner": None, "sensitivity": "private"}
+    ]
 
 
 def test_rerun_is_idempotent(personal, tmp_path, monkeypatch):

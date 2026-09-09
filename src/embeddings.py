@@ -3,9 +3,8 @@ embeddings.py
 
 Embedding clients for RAG and memory vector search.
 
-Priority order:
-  1. HTTP API (Ollama / vLLM / llama.cpp) — set EMBEDDING_URL in .env
-  2. Local fastembed (ONNX, ~50MB) — zero config fallback
+Runtime embedding implementation:
+  Local fastembed (ONNX). Remote embedding endpoints are unsupported.
 
 Set EMBEDDING_URL in .env, e.g.:
   EMBEDDING_URL=http://localhost:11434/v1/embeddings   (ollama)
@@ -283,20 +282,18 @@ def get_http_embedding_client():
 
 
 def get_embedding_client():
-    """Factory: try HTTP API first, fall back to local fastembed."""
-    client = get_http_embedding_client()
-    if client is not None:
-        return client
+    """Return the configured local FastEmbed client only.
 
-    # Fall back to local fastembed
+    Retrieval has no remote fallback chain: FastEmbed and Chroma are the
+    supported runtime components. Failures are surfaced to service health.
+    """
     try:
         client = FastEmbedClient()
         client.get_sentence_embedding_dimension()
-        logger.info(f"Using local FastEmbed: model={client.model}")
+        logger.info("Using local FastEmbed: model=%s", client.model)
         return client
     except ImportError:
-        logger.error("fastembed not installed — run: pip install fastembed")
+        logger.error("fastembed not installed")
     except Exception as e:
-        logger.error(f"FastEmbed init failed: {e}")
-
+        logger.error("FastEmbed init failed: %s", e)
     return None

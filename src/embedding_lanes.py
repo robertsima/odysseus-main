@@ -1,9 +1,10 @@
 """
 embedding_lanes.py
 
-Helpers for keeping FastEmbed fallback vectors separate from user-configured
-embedding vectors. ChromaDB fixes a collection's dimension on first insert, so
-different embedding models must never share one collection.
+Helpers for the supported local FastEmbed + Chroma retrieval path.
+
+The application deliberately has one embedding implementation: local FastEmbed.
+Remote/custom endpoints and legacy unsuffixed collections are not runtime paths.
 """
 
 from __future__ import annotations
@@ -231,28 +232,6 @@ def _build_fastembed_client():
         return client
 
 
-def _build_custom_client():
-    """The HTTP embedding lane, or nothing — never the FastEmbed fallback.
-
-    This used to call `get_embedding_client()`, whose contract is "HTTP, else
-    FastEmbed", and then discard a FastEmbed result for being the wrong type —
-    after paying for an ONNX model load and a probe encode. Once HTTP had been
-    found down, that was every offload and every stored-output search, which is
-    why "FastEmbed loaded" kept reappearing even after the fallback client
-    itself was cached.
-
-    Asking for the HTTP half directly keeps the probe (and its once-per-process
-    latch) exactly as it was, and simply never builds the fallback here. The
-    FastEmbed lane is built separately, and cached.
-    """
-    from src.embeddings import get_http_embedding_client
-
-    client = get_http_embedding_client()
-    if client is not None:
-        return client
-    raise RuntimeError("HTTP embedding lane unavailable")
-
-
 def _encode_with_client(client: Any, texts: Sequence[str]) -> List[List[float]]:
     vecs = client.encode(list(texts), normalize_embeddings=True)
     return vecs.tolist() if hasattr(vecs, "tolist") else [list(v) for v in vecs]
@@ -375,105 +354,20 @@ def _create_lane(chroma_client, base_name: str, lane_name: str, client: Any) -> 
 
 
 def build_embedding_lanes(base_name: str) -> List[EmbeddingLane]:
-    """Return healthy lanes in retrieval preference order: custom, fastembed."""
+    """Return the single supported local FastEmbed lane."""
     from src.chroma_client import get_chroma_client
-
     chroma_client = get_chroma_client()
-    lanes: List[EmbeddingLane] = []
-
-    try:
-        custom = _build_custom_client()
-        if custom is not None:
-            lanes.append(_create_lane(chroma_client, base_name, LANE_CUSTOM, custom))
-    except Exception as e:
-        logger.warning("Custom embedding lane unavailable for %s: %s", base_name, e)
-
-    if lanes and fastembed_lane_mode() == "off":
-        logger.debug(
-            "%s=off and the custom embedding lane is up; skipping the FastEmbed "
-            "lane for %s", FASTEMBED_LANE_ENV, base_name,
-        )
-        return lanes
-
     try:
         fastembed = _build_fastembed_client()
-        lanes.append(_create_lane(chroma_client, base_name, LANE_FASTEMBED, fastembed))
+        return [_create_lane(chroma_client, base_name, LANE_FASTEMBED, fastembed)]
     except Exception as e:
-        logger.warning("FastEmbed lane unavailable for %s: %s", base_name, e)
-
-    return lanes
+        logger.error("FastEmbed retrieval lane unavailable for %s: %s", base_name, e)
+        return []
 
 
 def migrate_legacy_collection(base_name: str, lanes: Sequence[EmbeddingLane]) -> None:
-    """Backfill empty lanes from a legacy unsuffixed collection, if present."""
-    if not lanes:
-        return
-
-    try:
-        from src.chroma_client import get_chroma_client
-
-        chroma_client = get_chroma_client()
-        cache_key = (id(chroma_client), base_name)
-        if _legacy_missing_until.get(cache_key, 0.0) > time.monotonic():
-            return
-        legacy = chroma_client.get_collection(base_name)
-        data = legacy.get(include=["documents", "metadatas"])
-    except Exception as exc:
-        # Do not hide a Chroma outage behind this cache. Only a confirmed
-        # absent legacy collection is an expected steady-state condition.
-        if 'cache_key' in locals() and _is_missing_collection_error(exc):
-            _legacy_missing_until[cache_key] = time.monotonic() + _LEGACY_MISSING_TTL_SECONDS
-        return
-
-    ids = data.get("ids") or []
-    docs = data.get("documents") or []
-    metas = data.get("metadatas") or []
-    if not ids or not docs:
-        return
-
-    for lane in lanes:
-        try:
-            existing = lane.collection.get(ids=ids)
-            existing_ids = set(existing.get("ids") or [])
-        except Exception:
-            existing_ids = set()
-        all_metas = list(metas or [])
-        if len(all_metas) < len(ids):
-            all_metas += [{}] * (len(ids) - len(all_metas))
-        missing = [
-            (row_id, doc, meta)
-            for row_id, doc, meta in zip(ids, docs, all_metas)
-            if row_id not in existing_ids
-        ]
-        if not missing:
-            continue
-
-        for start in range(0, len(missing), 100):
-            batch = missing[start:start + 100]
-            batch_ids = [row_id for row_id, _doc, _meta in batch]
-            batch_docs = [doc for _row_id, doc, _meta in batch]
-            batch_metas = [meta or {} for _row_id, _doc, meta in batch]
-            if len(batch_metas) < len(batch_ids):
-                batch_metas += [{}] * (len(batch_ids) - len(batch_metas))
-            try:
-                embeddings = lane.encode(batch_docs)
-                lane.collection.add(
-                    ids=batch_ids,
-                    documents=batch_docs,
-                    metadatas=batch_metas,
-                    embeddings=embeddings,
-                )
-            except Exception as e:
-                logger.warning(
-                    "Could not backfill %s lane from legacy collection %s: %s",
-                    lane.name,
-                    base_name,
-                    e,
-                )
-                break
-        else:
-            logger.info("Backfilled %s %s lane rows from legacy collection %s", len(missing), lane.name, base_name)
-
+    """Compatibility no-op: legacy unsuffixed collections are not read."""
+    return
 
 def primary_collection(lanes: Sequence[EmbeddingLane]):
     """The collection that pairs with the client the store embeds through.

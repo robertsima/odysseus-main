@@ -44,10 +44,33 @@ from src.agent_loop import (
     _looks_like_research_request,
     _looks_like_vault_request,
     _looks_like_workspace_coding_request,
+    _retained_tools_for_turn,
     _tools_used_in_conversation,
     apply_terminus_toolset,
     repair_starved_domains,
 )
+
+
+def test_generic_tools_are_not_retained_for_non_shell_followup():
+    retained, suppressed = _retained_tools_for_turn(
+        {"bash", "read_file", "audit_emails"},
+        query="continue the inbox audit",
+        domains={"email"},
+        workspace=None,
+    )
+    assert retained == {"read_file", "audit_emails"}
+    assert suppressed == {"bash"}
+
+
+def test_generic_tools_remain_available_for_workspace_followup():
+    retained, suppressed = _retained_tools_for_turn(
+        {"bash", "read_file"},
+        query="run the tests in the workspace",
+        domains={"workspace"},
+        workspace="/app/data/development/odysseus-main",
+    )
+    assert retained == {"bash", "read_file"}
+    assert suppressed == set()
 
 
 REPRO = (

@@ -1365,6 +1365,39 @@ def _tools_used_in_conversation(messages: List[Dict], known: set, cap: int = 24)
     return seen[:cap]
 
 
+_GENERIC_EXECUTION_TOOLS = frozenset({"bash", "python", "run_shell", "shell"})
+_EXPLICIT_TERMINAL_RE = re.compile(
+    r"\b(?:bash|python|shell|terminal|command(?: line)?|run|execute|exec|ssh|git)\b",
+    re.I,
+)
+
+
+def _retained_tools_for_turn(
+    prior_tools: set,
+    *,
+    query: str,
+    domains: set,
+    workspace: Optional[str],
+) -> tuple[set, set]:
+    """Return prior tools safe to retain and generic tools suppressed.
+
+    Conversation retention keeps a follow-up coherent, but generic execution
+    tools are not ambient capabilities. A previous shell call must not make
+    bash win over named filesystem/log/application tools on the next turn.
+    """
+    shell_context = bool(
+        {"shell", "workspace"} & set(domains or set())
+        or (workspace and _looks_like_workspace_coding_request(query or ""))
+        or _EXPLICIT_TERMINAL_RE.search(query or "")
+    )
+    suppressed = set()
+    retained = set(prior_tools or set())
+    if not shell_context:
+        suppressed = retained & _GENERIC_EXECUTION_TOOLS
+        retained -= _GENERIC_EXECUTION_TOOLS
+    return retained, suppressed
+
+
 def _insert_before_latest_user(messages: List[Dict], context_msg: Dict) -> List[Dict]:
     """Insert a context message immediately before the latest user turn."""
     out = list(messages or [])
@@ -4023,6 +4056,9 @@ async def stream_agent_loop(
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
     _relevant_tools = relevant_tools
+    _tool_selection_source = "caller" if relevant_tools else "unresolved"
+    _retained_tool_names: set[str] = set()
+    _suppressed_retained_tools: set[str] = set()
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4046,6 +4082,7 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
             from src.tool_security import PLAN_MODE_READONLY_TOOLS
             _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
+            _tool_selection_source = "low_signal_workspace"
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
             # Don't short-circuit: fall through to RAG retrieval below.
@@ -4093,6 +4130,7 @@ async def stream_agent_loop(
                             asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
+                        _tool_selection_source = "rag"
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
                     except asyncio.TimeoutError:
                         # Leave _relevant_tools unset so the keyword fallback
@@ -4115,6 +4153,7 @@ async def stream_agent_loop(
     if not guide_only and not _relevant_tools and _retrieval_query:
         from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
         _relevant_tools = set(ALWAYS_AVAILABLE)
+        _tool_selection_source = "keyword"
         ql = _retrieval_query.lower()
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
             if any(kw in ql for kw in keywords):
@@ -4247,12 +4286,24 @@ async def stream_agent_loop(
             t for t in _tools_used_in_conversation(messages, _known_names)
             if t not in disabled_tools
         }
-        _retained = sorted(_prior_tools - _relevant_tools)
+        _retained_allowed, _suppressed_retained_tools = _retained_tools_for_turn(
+            _prior_tools,
+            query=_retrieval_query or _last_user,
+            domains=_intent.get("domains") or set(),
+            workspace=workspace,
+        )
+        _retained = sorted(_retained_allowed - _relevant_tools)
+        _retained_tool_names = set(_retained)
         if _retained:
-            _relevant_tools |= _prior_tools
+            _relevant_tools |= _retained_allowed
             logger.info(
                 "[agent-intent] retaining tools already used in this conversation=%s",
                 _retained,
+            )
+        if _suppressed_retained_tools:
+            logger.info(
+                "[agent-intent] suppressed generic retained tools=%s reason=not_current_shell_context",
+                sorted(_suppressed_retained_tools),
             )
 
     # If this turn targets the open document, keep editing tools available
@@ -4467,6 +4518,16 @@ async def stream_agent_loop(
 
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+        logger.info(
+            "[tool-routing] source=%s domains=%s query_matched_count=%d selected_count=%d retained_count=%d suppressed_retained=%s disabled_count=%d",
+            _tool_selection_source,
+            sorted(_intent.get("domains") or set()),
+            len(_query_matched_tools),
+            len(_relevant_tools),
+            len(_retained_tool_names),
+            sorted(_suppressed_retained_tools),
+            len(disabled_tools),
+        )
 
     prep_timings["tool_selection"] = time.time() - _t1
 
@@ -6363,6 +6424,14 @@ async def stream_agent_loop(
     metrics["agent_rounds"] = max(int(round_num or 0), 0)
     metrics["tool_count"] = len(_tool_names_sent or [])
     metrics["tool_calls"] = len(tool_events or [])
+    metrics["tool_routing"] = {
+        "source": _tool_selection_source,
+        "query_matched_count": len(_query_matched_tools),
+        "selected_count": len(_tool_names_sent or []),
+        "retained_count": len(_retained_tool_names),
+        "suppressed_retained": sorted(_suppressed_retained_tools),
+        "disabled_count": len(disabled_tools),
+    }
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.
