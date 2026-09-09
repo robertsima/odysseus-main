@@ -402,6 +402,7 @@ class ChatProcessor:
         self,
         message: str,
         session: Any,
+        retrieval_query: Optional[str] = None,
         use_web: bool = False,
         use_rag: bool = True,
         use_memory: bool = True,
@@ -433,6 +434,7 @@ class ChatProcessor:
         """
         preface = []
         rag_sources = []
+        retrieval_query = (retrieval_query or message).strip()
 
         # Add preset system prompt if specified
         if preset_system_prompt:
@@ -454,7 +456,7 @@ class ChatProcessor:
             extended = [m for m in mem_entries if not m.get("pinned")]
 
             _used_ids: list = []
-            selected_pinned = self._select_pinned_memories(message, pinned)
+            selected_pinned = self._select_pinned_memories(retrieval_query, pinned)
             if selected_pinned:
                 pinned_text = "\n- ".join([m["text"] for m in selected_pinned])
                 preface.append(untrusted_context_message(
@@ -471,7 +473,7 @@ class ChatProcessor:
 
             remaining_memory_slots = max(self.MEMORY_CONTEXT_LIMIT - len(self._last_used_memories), 0)
             if extended and remaining_memory_slots:
-                relevant = self._hybrid_retrieve(message, extended, k=remaining_memory_slots)
+                relevant = self._hybrid_retrieve(retrieval_query, extended, k=remaining_memory_slots)
                 if relevant:
                     ext_text = "\n".join([f"- {m['text']}" for m in relevant])
                     preface.append(untrusted_context_message(
@@ -509,7 +511,7 @@ class ChatProcessor:
                     allow_private = is_local_endpoint(getattr(session, "endpoint_url", "") or "")
                     if not allow_private:
                         logger.debug("RAG: non-local endpoint — restricting retrieval to public documents")
-                    results = rag_manager.search(message, k=5, owner=owner, allow_private=allow_private)
+                    results = rag_manager.search(retrieval_query, k=5, owner=owner, allow_private=allow_private)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]
                     if relevant:
@@ -581,7 +583,10 @@ class ChatProcessor:
                     preface.append(untrusted_context_message("web search results", web_context))
             except Exception as e:
                 logger.error(f"Web search failed: {e}")
-                preface.append({"role": "system", "content": "Web search encountered an error and could not retrieve results."})
+                preface.append(untrusted_context_message(
+                    "web search status",
+                    "Web search encountered an error and could not retrieve results.",
+                ))
 
         # Process non-YouTube URLs in message (YouTube handled by preprocess_message)
         # Skip auto-fetch for long pastes (the user already pasted the content —
