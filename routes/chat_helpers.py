@@ -6,12 +6,13 @@ import logging
 import os
 import re
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from core.models import ChatMessage
 from core.database import SessionLocal
-from core.database import Session as DBSession, ModelEndpoint
+from core.database import Session as DBSession, ModelEndpoint, UsageLedgerEntry
 from src.llm_core import normalize_model_id
 from src.endpoint_resolver import normalize_base
 from src.context_compactor import maybe_compact, trim_for_context
@@ -1081,8 +1082,23 @@ async def build_chat_context(
     )
 
 
-def accumulate_token_usage(session_id: str, metrics: dict):
-    """Add input/output token counts to the session's running totals."""
+def accumulate_token_usage(
+    session_id: str,
+    metrics: dict,
+    *,
+    owner: str | None = None,
+    incognito: bool = False,
+):
+    """Update session totals and persist a content-free completed-turn ledger.
+
+    The ledger intentionally receives only allowlisted scalar measurements.
+    In particular, it never serializes metrics wholesale because those can
+    contain tool events, retrieved source identifiers, or private context.
+    """
+    # Incognito is an explicit no-persistence boundary: even aggregate totals
+    # could reveal that an otherwise private turn happened.
+    if incognito:
+        return
     in_t = metrics.get("input_tokens", 0)
     out_t = metrics.get("output_tokens", 0)
     if not (in_t or out_t):
@@ -1093,6 +1109,32 @@ def accumulate_token_usage(session_id: str, metrics: dict):
         if db_s:
             db_s.total_input_tokens = (db_s.total_input_tokens or 0) + in_t
             db_s.total_output_tokens = (db_s.total_output_tokens or 0) + out_t
+            def _nonnegative_int(key: str) -> int:
+                try:
+                    return max(int(metrics.get(key) or 0), 0)
+                except (TypeError, ValueError):
+                    return 0
+
+            response_seconds = metrics.get("response_time", 0)
+            try:
+                response_ms = max(round(float(response_seconds) * 1000), 0)
+            except (TypeError, ValueError):
+                response_ms = 0
+            db.add(UsageLedgerEntry(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                owner=owner if owner is not None else db_s.owner,
+                model=str(metrics.get("model") or "")[:512],
+                input_tokens=_nonnegative_int("input_tokens"),
+                output_tokens=_nonnegative_int("output_tokens"),
+                cached_input_tokens=_nonnegative_int("cached_input_tokens"),
+                cache_write_input_tokens=_nonnegative_int("cache_write_input_tokens"),
+                tool_schema_tokens=_nonnegative_int("tool_schema_tokens"),
+                tool_count=_nonnegative_int("tool_count"),
+                agent_rounds=_nonnegative_int("agent_rounds"),
+                response_time_ms=response_ms,
+                usage_source=("real" if metrics.get("usage_source") == "real" else "estimated"),
+            ))
             db.commit()
     except Exception:
         db.rollback()
@@ -1517,7 +1559,9 @@ def run_post_response_tasks(
 
     # Token accumulation
     if last_metrics:
-        accumulate_token_usage(session_id, last_metrics)
+        accumulate_token_usage(
+            session_id, last_metrics, owner=owner, incognito=incognito,
+        )
 
     # Webhook
     if webhook_manager and not compare_mode:

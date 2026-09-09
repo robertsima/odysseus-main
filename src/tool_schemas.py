@@ -8,6 +8,7 @@ Extracted from agent_tools.py to keep schema definitions separate from
 tool parsing / execution logic.
 """
 
+import copy
 import json
 import logging
 from typing import Optional
@@ -27,6 +28,41 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
     "edit_file": ("path",),
     "apply_patch": ("patch_text", "patchText", "patch"),
 }
+
+
+def _strip_schema_descriptions(value):
+    """Remove prose from a JSON schema while retaining its entire shape."""
+    if isinstance(value, dict):
+        value.pop("description", None)
+        for child in value.values():
+            _strip_schema_descriptions(child)
+    elif isinstance(value, list):
+        for child in value:
+            _strip_schema_descriptions(child)
+
+
+def compact_function_tool_schemas(schemas):
+    """Return compact provider-payload copies without changing callable shape.
+
+    Canonical schemas remain the execution contract. The API only needs names
+    and JSON constraints; property prose is repeated prompt overhead.
+    """
+    compact = []
+    for schema in schemas or []:
+        item = copy.deepcopy(schema)
+        fn = item.get("function") if isinstance(item, dict) else None
+        if not isinstance(fn, dict):
+            compact.append(item)
+            continue
+        description = str(fn.get("description") or "").strip()
+        if description:
+            fn["description"] = description.split(". ", 1)[0].strip()[:220]
+        # Nested object/array schemas are common in MCP tools.  Strip only
+        # explanatory prose recursively: ``type``, ``required``, ``enum``,
+        # ``items``, and every other JSON-schema constraint stay intact.
+        _strip_schema_descriptions(fn.get("parameters"))
+        compact.append(item)
+    return compact
 
 # ---------------------------------------------------------------------------
 # OpenAI-compatible function tool schemas

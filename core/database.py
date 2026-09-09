@@ -280,6 +280,35 @@ class ChatMessage(Base):
         Index('ix_messages_session_time', 'session_id', 'timestamp'),  # Composite for efficient message retrieval
     )
 
+
+class UsageLedgerEntry(Base, TimestampMixin):
+    """Content-free accounting for one completed assistant turn.
+
+    Prompts, tool arguments/results, retrieved-document identifiers, memory
+    text, and journal/private labels are deliberately excluded.
+    """
+    __tablename__ = "usage_ledger_entries"
+
+    id = Column(String, primary_key=True, index=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    owner = Column(String, nullable=True, index=True)
+    model = Column(String, nullable=False, default="")
+    input_tokens = Column(Integer, default=0)
+    output_tokens = Column(Integer, default=0)
+    cached_input_tokens = Column(Integer, default=0)
+    cache_write_input_tokens = Column(Integer, default=0)
+    tool_schema_tokens = Column(Integer, default=0)
+    tool_count = Column(Integer, default=0)
+    agent_rounds = Column(Integer, default=0)
+    response_time_ms = Column(Integer, default=0)
+    usage_source = Column(String, nullable=False, default="estimated")
+
+    __table_args__ = (
+        Index("ix_usage_ledger_session_created", "session_id", "created_at"),
+        Index("ix_usage_ledger_owner_created", "owner", "created_at"),
+    )
+
+
 class Document(TimestampMixin, Base):
     """Living document that the AI can create and edit in-place."""
     __tablename__ = "documents"
