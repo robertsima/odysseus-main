@@ -362,3 +362,51 @@ def test_primary_collection_pairs_with_the_lane_the_store_embeds_through(monkeyp
     built = build_embedding_lanes("odysseus_memories")
     assert primary_collection(built) is built[0].collection
     assert primary_collection([]) is None
+
+
+def test_missing_legacy_collection_is_cached_without_hiding_other_chroma_errors(monkeypatch):
+    import src.embedding_lanes as lanes
+
+    class MissingLegacyChroma(FakeChroma):
+        def __init__(self):
+            super().__init__()
+            self.legacy_reads = 0
+
+        def get_collection(self, name):
+            if name == "legacy":
+                self.legacy_reads += 1
+                raise RuntimeError("404 collection not found")
+            return super().get_collection(name)
+
+    fake = MissingLegacyChroma()
+    monkeypatch.setattr("src.chroma_client.get_chroma_client", lambda: fake)
+    lanes._legacy_missing_until.clear()
+    lane = type("Lane", (), {"collection": fake.get_or_create_collection("legacy_fastembed")})()
+
+    lanes.migrate_legacy_collection("legacy", [lane])
+    lanes.migrate_legacy_collection("legacy", [lane])
+
+    assert fake.legacy_reads == 1
+
+
+def test_legacy_migration_does_not_cache_a_transport_failure(monkeypatch):
+    import src.embedding_lanes as lanes
+
+    class UnavailableChroma(FakeChroma):
+        def __init__(self):
+            super().__init__()
+            self.legacy_reads = 0
+
+        def get_collection(self, name):
+            self.legacy_reads += 1
+            raise RuntimeError("connection refused")
+
+    fake = UnavailableChroma()
+    monkeypatch.setattr("src.chroma_client.get_chroma_client", lambda: fake)
+    lanes._legacy_missing_until.clear()
+    lane = type("Lane", (), {"collection": fake.get_or_create_collection("legacy_fastembed")})()
+
+    lanes.migrate_legacy_collection("legacy", [lane])
+    lanes.migrate_legacy_collection("legacy", [lane])
+
+    assert fake.legacy_reads == 2
