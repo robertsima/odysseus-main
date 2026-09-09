@@ -57,9 +57,16 @@ def _is_casual_low_signal(text: str) -> bool:
 # the background work (extraction, auto-naming) silently never runs.
 # Mirrors WebhookManager._spawn_tracked from src/webhook_manager.py.
 _BG_TASKS: set[asyncio.Task] = set()
+_AUTO_NAME_IN_FLIGHT: set[str] = set()
+_AUTO_NAME_RETRY_AFTER: dict[str, float] = {}
+_AUTO_NAME_FAILURE_COOLDOWN_SECONDS = 5 * 60
 _INCOGNITO_CONTEXTS: dict[str, dict[str, Any]] = {}
 _INCOGNITO_CONTEXT_TTL_SECONDS = 6 * 60 * 60
 _INCOGNITO_CONTEXT_MAX_MESSAGES = 80
+
+
+def _auto_name_now() -> float:
+    return time.monotonic()
 
 
 def _spawn_bg(coro) -> asyncio.Task:
@@ -227,6 +234,22 @@ def needs_auto_name(name: str) -> bool:
 
 async def auto_name_session(session_manager, sess):
     """Generate a short title for a session from its first user message."""
+    session_id = str(getattr(sess, "id", "") or "")
+    now = _auto_name_now()
+    # Failed background requests used to be scheduled after every response. If
+    # an endpoint/model was unavailable, one chat could produce many identical
+    # LLM calls and log traces in a few seconds. Keep the guard process-local:
+    # auto-naming is best-effort and does not warrant persisted retry state.
+    expired = [sid for sid, retry_after in _AUTO_NAME_RETRY_AFTER.items() if retry_after <= now]
+    for sid in expired:
+        _AUTO_NAME_RETRY_AFTER.pop(sid, None)
+    if not session_id or session_id in _AUTO_NAME_IN_FLIGHT:
+        return
+    if _AUTO_NAME_RETRY_AFTER.get(session_id, 0) > now:
+        return
+
+    _AUTO_NAME_IN_FLIGHT.add(session_id)
+    succeeded = False
     try:
         from src.task_endpoint import task_llm_call_async
 
@@ -278,10 +301,19 @@ async def auto_name_session(session_manager, sess):
         if title and len(title) < 80:
             session_manager.update_session_name(sess.id, title)
             logger.info(f"Auto-named session {sess.id}: {title}")
+            succeeded = True
 
     except Exception as e:
         import traceback
         logger.error(f"Auto-name failed for {sess.id}: {e}\n{traceback.format_exc()}")
+    finally:
+        _AUTO_NAME_IN_FLIGHT.discard(session_id)
+        if succeeded:
+            _AUTO_NAME_RETRY_AFTER.pop(session_id, None)
+        else:
+            _AUTO_NAME_RETRY_AFTER[session_id] = (
+                _auto_name_now() + _AUTO_NAME_FAILURE_COOLDOWN_SECONDS
+            )
 
 
 def try_fallback_endpoint(sess, session_id: str) -> dict | None:
