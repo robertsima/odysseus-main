@@ -40,6 +40,7 @@ from routes.chat_helpers import (
     run_post_response_tasks,
     clean_thinking_for_save,
     _enforce_chat_privileges,
+    append_dynamic_context,
 )
 from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
 from src.image_model_ids import looks_like_image_generation_model
@@ -664,9 +665,9 @@ def setup_chat_routes(
                 research_ctx = await research_handler.call_research_service(
                     message, _r_ep, _r_model, llm_headers=_r_headers
                 )
-                ctx.messages.insert(
-                    len(ctx.preface),
-                    untrusted_context_message("research context", research_ctx),
+                ctx.messages = append_dynamic_context(
+                    ctx.messages,
+                    [untrusted_context_message("research context", research_ctx)],
                 )
             except Exception as e:
                 logger.error(f"Research failed: {e}")
@@ -1590,6 +1591,7 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "usage":
                                     last_metrics = data.get("data", {})
+                                    last_metrics["context_composition"] = ctx.context_diagnostics
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model
@@ -1641,6 +1643,7 @@ def setup_chat_routes(
                                     "model": _actual_model or _answered_by or _requested_model,
                                     "requested_model": _requested_model,
                                     "usage_source": "estimated",
+                                    "context_composition": ctx.context_diagnostics,
                                 }
                                 yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
                             if full_response:
@@ -1789,6 +1792,7 @@ def setup_chat_routes(
                                     yield f'data: {json.dumps(data)}\n\n'
                                 elif data.get("type") == "metrics":
                                     last_metrics = data.get("data", {})
+                                    last_metrics["context_composition"] = ctx.context_diagnostics
                                     _reported_model = last_metrics.get("model")
                                     last_metrics["requested_model"] = last_metrics.get("requested_model") or _requested_model
                                     last_metrics["model"] = _reported_model or _actual_model or _answered_by or _requested_model

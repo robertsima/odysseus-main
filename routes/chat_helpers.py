@@ -36,6 +36,18 @@ _CASUAL_BLOCKLIST_RE = re.compile(
     r"file|folder|repo|git|settings?|endpoint|api|token|mcp)\b",
     re.IGNORECASE,
 )
+_FOLLOW_UP_RE = re.compile(
+    r"^\s*(?:(?:please\s+)?(?:continue|proceed|retry|try again|go ahead)|"
+    r"(?:please\s+)?(?:do|run|make|use|fix|check|create|apply|repeat)\s+"
+    r"(?:it|that|this|this again|that again|the same(?: thing)?)|"
+    r"(?:do|run|make)\s+(?:this|that)\s+again|same(?: thing)?|yes|ok(?:ay)?)"
+    r"[.!?\s]*$",
+    re.IGNORECASE,
+)
+_RETRIEVAL_QUERY_MAX_CHARS = 2400
+_DYNAMIC_CONTEXT_MAX_RATIO = 0.20
+_DYNAMIC_CONTEXT_MAX_TOKENS = 12_000
+_DYNAMIC_CONTEXT_RESPONSE_RESERVE = 512
 
 
 def _is_casual_low_signal(text: str) -> bool:
@@ -49,6 +61,153 @@ def _is_casual_low_signal(text: str) -> bool:
         return False
     tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
     return len(tail_words) <= 2
+
+
+def _text_content(content: Any) -> str:
+    """Return searchable text without stringifying image/tool structures."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        return "\n".join(
+            str(item.get("text") or "").strip()
+            for item in content
+            if isinstance(item, dict) and item.get("type") == "text"
+        ).strip()
+    return ""
+
+
+def build_retrieval_query(current: str, history: list[dict[str, Any]]) -> tuple[str, str]:
+    """Expand only short referential follow-ups with the prior human request.
+
+    Retrieval must not be steered by assistant prose, tool output, or injected
+    user-role reference blocks. The current turn is already present in session
+    history when this helper runs, so the first matching user message is skipped.
+    """
+    current = str(current or "").strip()
+    if not current or len(current) > 180 or len(current.split()) > 24 or not _FOLLOW_UP_RE.match(current):
+        return current, "current"
+
+    skipped_current = False
+    for msg in reversed(history or []):
+        if not isinstance(msg, dict) or msg.get("role") != "user":
+            continue
+        if (msg.get("metadata") or {}).get("trusted") is False:
+            continue
+        prior = _text_content(msg.get("content"))
+        if not prior or prior.startswith("UNTRUSTED SOURCE DATA\n") or prior.startswith("[Context —"):
+            continue
+        if not skipped_current and prior == current:
+            skipped_current = True
+            continue
+        max_prior = max(_RETRIEVAL_QUERY_MAX_CHARS - len(current) - 20, 1)
+        prior = prior[-max_prior:]
+        return f"{prior}\nFollow-up: {current}", "follow_up"
+    return current, "current"
+
+
+def append_dynamic_context(
+    messages: list[dict[str, Any]],
+    dynamic_messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Append request-local evidence without mutating the stable prompt prefix.
+
+    The active user request remains in persisted history, so putting ephemeral
+    retrieval *after* it lets the next turn reuse the prior prompt prefix through
+    that request. Inserting retrieval before it would invalidate the cache at the
+    first turn that ever used dynamic context.
+    """
+    result = [dict(msg) for msg in (messages or [])]
+    dynamic = [dict(msg) for msg in (dynamic_messages or []) if isinstance(msg, dict)]
+    return result + dynamic
+
+
+def _dynamic_source(msg: dict[str, Any]) -> str:
+    source = str((msg.get("metadata") or {}).get("source") or "").strip()
+    if source:
+        return source
+    if _text_content(msg.get("content")).startswith("[Context — current date/time"):
+        return "current date/time"
+    return "dynamic context"
+
+
+def _truncate_dynamic_message(msg: dict[str, Any], target_tokens: int) -> dict[str, Any] | None:
+    """Fit one dynamic message while preserving an untrusted block's closing guard."""
+    if target_tokens < 5:
+        return None
+    original = dict(msg)
+    content = original.get("content")
+    if not isinstance(content, str) or estimate_tokens([original]) <= target_tokens:
+        return original
+
+    marker = "\n[Context truncated to shared token budget]\n"
+    guard = "<<<END_UNTRUSTED_SOURCE_DATA>>>"
+    suffix = f"{marker}{guard}" if content.rstrip().endswith(guard) else marker.rstrip()
+    low, high = 0, len(content)
+    best: dict[str, Any] | None = None
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = dict(original)
+        candidate["content"] = content[:mid].rstrip() + suffix
+        if estimate_tokens([candidate]) <= target_tokens:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
+def budget_dynamic_context(
+    dynamic_messages: list[dict[str, Any]],
+    *,
+    context_length: int,
+    base_tokens: int,
+    response_reserve: int = _DYNAMIC_CONTEXT_RESPONSE_RESERVE,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply one fair, bounded token budget across all ephemeral sources."""
+    candidates = [dict(msg) for msg in (dynamic_messages or []) if isinstance(msg, dict)]
+    originals = [estimate_tokens([msg]) for msg in candidates]
+    available = max(int(context_length) - int(response_reserve) - int(base_tokens), 0)
+    budget = max(min(int(context_length * _DYNAMIC_CONTEXT_MAX_RATIO), _DYNAMIC_CONTEXT_MAX_TOKENS, available), 0)
+    original_total = sum(originals)
+
+    allocations = [0] * len(candidates)
+    remaining = budget
+    pending = set(range(len(candidates)))
+    # Water-filling retains every source when possible, then redistributes the
+    # space left by small messages to larger sources.
+    while pending and remaining > 0:
+        share = max(remaining // len(pending), 1)
+        completed = [idx for idx in pending if originals[idx] <= share]
+        if not completed:
+            for idx in sorted(pending):
+                take = min(share, remaining)
+                allocations[idx] = take
+                remaining -= take
+            break
+        for idx in completed:
+            allocations[idx] = originals[idx]
+            remaining -= originals[idx]
+            pending.remove(idx)
+
+    kept: list[dict[str, Any]] = []
+    source_tokens: dict[str, int] = {}
+    for msg, allocation in zip(candidates, allocations):
+        fitted = _truncate_dynamic_message(msg, allocation)
+        if not fitted:
+            continue
+        actual = estimate_tokens([fitted])
+        kept.append(fitted)
+        source = _dynamic_source(msg)
+        source_tokens[source] = source_tokens.get(source, 0) + actual
+
+    used = estimate_tokens(kept)
+    return kept, {
+        "budget_tokens": budget,
+        "original_tokens": original_total,
+        "used_tokens": used,
+        "truncated": used < original_total,
+        "sources": source_tokens,
+    }
 
 
 # Strong references to in-flight fire-and-forget tasks scheduled from this
@@ -151,6 +310,7 @@ class ChatContext:
     context_messages_after_trim: int = 0
     context_tokens_before_trim: int = 0
     context_tokens_after_trim: int = 0
+    context_diagnostics: dict = field(default_factory=dict)
     # Documents auto-created server-side during preprocess (e.g. when an
     # attached fillable PDF gets rendered into a markdown editor doc).
     # The chat route emits a doc_update SSE event for each before streaming
@@ -796,8 +956,14 @@ async def build_chat_context(
     # The stream path uses enhanced_message (with CoT/preprocessing applied),
     # the sync path uses text_for_context.
     _ctx_msg = preprocessed.enhanced_message if use_enhanced_message else preprocessed.text_for_context
+    _history_for_retrieval = _incognito_messages(session_id) if incognito else sess.get_context_messages()
+    _retrieval_query, _retrieval_mode = build_retrieval_query(
+        preprocessed.text_for_context,
+        _history_for_retrieval,
+    )
     _preface_kwargs = dict(
         message=_ctx_msg,
+        retrieval_query=_retrieval_query,
         session=sess,
         use_web=use_web and not skip_web,
         use_memory=mem_enabled,
@@ -837,11 +1003,14 @@ async def build_chat_context(
     # Build messages. In Nobody/incognito mode, never read saved session
     # history: the session id may be a temporary wrapper or, in buggy clients, a
     # stale normal session id. Only the ephemeral incognito transcript is safe.
-    messages = preface + (_incognito_messages(session_id) if incognito else sess.get_context_messages())
+    history_messages = _incognito_messages(session_id) if incognito else sess.get_context_messages()
+    static_preface = [m for m in preface if m.get("role") == "system"]
+    dynamic_preface = [m for m in preface if m.get("role") != "system"]
+    messages = static_preface + history_messages
 
     # Current date/time — injected as a standalone *user*-role context message
-    # placed immediately before the latest user turn, NOT folded into the
-    # system prompt. Its text changes every minute, and local OpenAI-compatible
+    # at the request tail, NOT folded into the system prompt. Its text changes
+    # every minute, and local OpenAI-compatible
     # backends (llama.cpp / LM Studio) key their KV-cache prefix off the
     # system message byte-for-byte; mixing ever-changing timestamp text into
     # it would invalidate the cached prefix on every request (issue #2927).
@@ -852,23 +1021,42 @@ async def build_chat_context(
         try:
             from src.user_time import current_datetime_context_message
             _dt_msg = current_datetime_context_message()
-            if messages and messages[-1].get("role") == "user":
-                messages.insert(len(messages) - 1, _dt_msg)
-            else:
-                messages.append(_dt_msg)
+            dynamic_preface.append(_dt_msg)
         except Exception:
             logger.debug("Failed to add current date/time context", exc_info=True)
 
-    # Auto-compact
+    # Auto-compact stable instructions + persisted conversation only. Dynamic
+    # retrieval is request-local evidence and must not leak into a durable
+    # recursive summary.
     messages, context_length, was_compacted = await maybe_compact(
         sess, sess.endpoint_url, sess.model, messages, sess.headers, owner=user,
     )
+    base_tokens = estimate_tokens(messages)
+    dynamic_preface, _dynamic_diag = budget_dynamic_context(
+        dynamic_preface,
+        context_length=context_length,
+        base_tokens=base_tokens,
+    )
+    messages = append_dynamic_context(messages, dynamic_preface)
     _before_trim_messages = len(messages)
     _before_trim_tokens = estimate_tokens(messages)
     messages = trim_for_context(messages, context_length)
     _after_trim_messages = len(messages)
     _after_trim_tokens = estimate_tokens(messages)
     _context_trimmed = _after_trim_messages < _before_trim_messages or _after_trim_tokens < _before_trim_tokens
+
+    _context_diagnostics = {
+        "retrieval_mode": _retrieval_mode,
+        "static_tokens": estimate_tokens(static_preface),
+        "history_tokens": max(base_tokens - estimate_tokens(static_preface), 0),
+        "dynamic_tokens": _dynamic_diag["used_tokens"],
+        "dynamic_budget_tokens": _dynamic_diag["budget_tokens"],
+        "dynamic_original_tokens": _dynamic_diag["original_tokens"],
+        "dynamic_truncated": _dynamic_diag["truncated"],
+        "dynamic_sources": _dynamic_diag["sources"],
+        "rag_source_count": len(rag_sources),
+        "memory_count": len(used_memories),
+    }
 
     return ChatContext(
         preface=preface,
@@ -887,6 +1075,7 @@ async def build_chat_context(
         context_messages_after_trim=_after_trim_messages,
         context_tokens_before_trim=_before_trim_tokens,
         context_tokens_after_trim=_after_trim_tokens,
+        context_diagnostics=_context_diagnostics,
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
     )
