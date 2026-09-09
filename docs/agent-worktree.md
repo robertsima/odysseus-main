@@ -22,6 +22,35 @@ create a worktree, edit, run tests and commit — it simply cannot push.
 The agent has no action that grants an approval. The code exists only in your
 terminal and in the agent's message from you.
 
+## If it says "unauthorized" or "cannot authenticate"
+
+Run the doctor. It asks GitHub directly and names the specific mistake:
+
+```bash
+scripts/odysseus-agent-worktree doctor
+```
+
+In a container, run it inside the container so it sees the same environment:
+
+```bash
+docker exec -it odysseus python scripts/odysseus-agent-worktree doctor
+```
+
+The four failures that actually happen:
+
+- **The agent used `bash` to push.** The credential only exists inside the
+  `manage_agent_worktree` publish path. A `git push` typed into the shell tool
+  has no token and no credential helper, so it fails with an authentication
+  error that looks like a bad App. Publishing must go through the tool.
+- **The Client ID was pasted into `ODYSSEUS_GITHUB_APP_ID`.** The App ID is a
+  short number on the app's settings page. The Client ID starts with `Iv1.` or
+  `Iv23`.
+- **The App ID was pasted into `ODYSSEUS_GITHUB_APP_INSTALLATION_ID`.** These
+  are different numbers. The Installation ID is the last segment of the app's
+  Configure URL. `doctor` lists every installation the app has, with its id.
+- **The private key is not inside the container.** A host path such as
+  `/etc/odysseus/agent-app.pem` does not exist in the container filesystem.
+
 ## Setup
 
 Add to `.env` (see `.env.example` for the full block):
@@ -47,11 +76,25 @@ ODYSSEUS_GITHUB_APP_INSTALLATION_ID=87654321
 ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH=/etc/odysseus/agent-app.pem
 ```
 
-Keep the key file readable only by the service account:
+### Where the key goes in a container
+
+The container can only read paths that are bind-mounted into it. On ZimaOS and
+the Docker Compose setups, that is the data volume, mounted at `/app/data`. Put
+the key there and point the variable at the in-container path:
 
 ```bash
-chmod 600 /etc/odysseus/agent-app.pem
+ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH=/app/data/github-app.pem
 ```
+
+Copy the `.pem` into the host directory that backs `/app/data` (on ZimaOS, the
+`AppData/odysseus/data` folder), then tighten it:
+
+```bash
+chmod 600 /path/to/AppData/odysseus/data/github-app.pem
+```
+
+The agent's own file tools refuse to open private key material, so parking the
+key under the data mount does not expose it to the agent.
 
 Fallback, for a setup where a GitHub App is not practical: a fine-grained
 personal access token scoped to the one repository, in
@@ -154,6 +197,8 @@ exactly what plan mode is for.
 - If the remote branch moved between the request and the publish, the publish is
   refused and you need a fresh request.
 - Odysseus never merges. The pull request is always created as a draft.
+- Publishing only works through `manage_agent_worktree`. Git commands the agent
+  runs in `bash` have no credential by design and will fail to authenticate.
 - The agent may still ask you to approve something it should not. The file list
   in `show` is the thing to read, not the agent's summary of it.
 - **This gate does not contain an agent that has `bash`.** Unconstrained shell

@@ -6,6 +6,7 @@ CLI, run by a human on the host, can approve a publish. An approval is a
 one-time code bound to the exact repository, branch and commit SHA, and it
 expires within minutes.
 
+    odysseus-agent-worktree doctor                     # why publishing fails
     odysseus-agent-worktree status                     # config + worktrees
     odysseus-agent-worktree requests                   # pending/granted/used
     odysseus-agent-worktree show REQUEST_ID            # full file list
@@ -37,6 +38,7 @@ import asyncio  # noqa: E402
 
 try:
     from src.agent_worktree import approval as approval_mod
+    from src.agent_worktree import diagnostics as diagnostics_mod
     from src.agent_worktree import sensitive as sensitive_mod
     from src.agent_worktree import service
     from src.agent_worktree.config import load_config, publish_blockers
@@ -55,6 +57,29 @@ def cmd_status(args) -> None:
     state = asyncio.run(service.status(getattr(args, "branch", None), cfg=cfg))
     state["publish_blockers"] = publish_blockers(cfg)
     emit(state, args)
+
+
+_STATUS_MARK = {"ok": "PASS", "fail": "FAIL", "warn": "WARN", "skip": "SKIP"}
+
+
+def cmd_doctor(args) -> None:
+    report = asyncio.run(
+        diagnostics_mod.run_diagnostics(load_config(), offline=bool(args.offline))
+    )
+    if getattr(args, "json", False):
+        emit(report, args)
+        return
+    for check in report["checks"]:
+        mark = _STATUS_MARK.get(check["status"], check["status"].upper())
+        print(f"[{mark}] {check['name']}: {check['detail']}")
+        if check.get("hint"):
+            print(f"        -> {check['hint']}")
+    print()
+    if report["ok"]:
+        print("Publishing is ready.")
+    else:
+        print(f"{report['failures']} problem(s) above must be fixed before publishing.")
+    sys.exit(0 if report["ok"] else 1)
 
 
 def cmd_requests(args) -> None:
@@ -136,6 +161,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", parents=parents, help="Config and worktree state")
     s.add_argument("--branch", help="Focus on one agent branch")
     s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("doctor", parents=parents,
+                       help="Diagnose why publishing or authentication fails")
+    s.add_argument("--offline", action="store_true",
+                   help="Skip the live GitHub calls")
+    s.add_argument("--json", action="store_true", help="Machine-readable output")
+    s.set_defaults(func=cmd_doctor)
 
     s = sub.add_parser("requests", parents=parents, help="List approval requests")
     s.add_argument("--status", choices=["pending", "granted", "used", "revoked", "expired"])

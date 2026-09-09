@@ -239,3 +239,33 @@ def test_file_tools_refuse_the_approval_state_directory(monkeypatch, tmp_path):
     ):
         with pytest.raises(ValueError, match="not allowed|sensitive|denied|outside"):
             _resolve_tool_path(candidate)
+
+
+def test_file_tools_refuse_the_github_app_private_key(monkeypatch, tmp_path):
+    """In a container the key must live under the data mount, which is also an
+    allowed tool root. Reading it would be equivalent to holding the credential,
+    so the agent's file tools must refuse key material outright."""
+    from src.tool_execution import _resolve_tool_path
+
+    key = tmp_path / "github-app.pem"
+    key.write_text("-----BEGIN RSA PRIVATE KEY-----\n")
+    monkeypatch.setenv("ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH", str(key))
+
+    with pytest.raises(ValueError):
+        _resolve_tool_path(str(key))
+    # By extension too, whatever the file is called and wherever it sits.
+    for name in ("server.key", "bundle.p12", "signing.pem", "store.jks"):
+        other = tmp_path / name
+        other.write_text("x")
+        with pytest.raises(ValueError):
+            _resolve_tool_path(str(other))
+
+
+def test_a_key_named_without_a_key_extension_is_still_refused(monkeypatch, tmp_path):
+    from src.tool_execution import _resolve_tool_path
+
+    key = tmp_path / "app-credentials"
+    key.write_text("-----BEGIN RSA PRIVATE KEY-----\n")
+    monkeypatch.setenv("ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH", str(key))
+    with pytest.raises(ValueError):
+        _resolve_tool_path(str(key))

@@ -71,6 +71,16 @@ _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
     "known_hosts",
 )
 
+# Private-key file extensions. In a container the only reliably writable path is
+# the bind-mounted data dir, which is also an allowed tool root — so a GitHub App
+# key, a TLS key, or a signing key parked there would otherwise be readable by
+# the agent's own read_file. Reading the App key is equivalent to holding the
+# credential, which would let the agent mint its own installation tokens and walk
+# around the human approval gate entirely.
+_SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".der", ".pkcs12", ".asc",
+)
+
 # Case-folded views used for matching. On a case-insensitive filesystem
 # (Windows, default macOS) ".SSH/AUTHORIZED_KEYS" and ".env" resolve to the
 # same protected files as their lowercase forms, so the deny-list has to fold
@@ -79,6 +89,7 @@ _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
 # POSIX, which is exactly where the macOS read-exfil path lives.
 _SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSITIVE_BASENAMES)
 _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
+_SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
 
 
 def _is_sensitive_path(resolved: str) -> bool:
@@ -122,8 +133,30 @@ def _is_sensitive_path(resolved: str) -> bool:
     if _is_under_agent_worktree_state(resolved):
         return True
 
+    # Private key material, by extension and by configured location.
+    if filename.endswith(_SENSITIVE_KEY_SUFFIXES_CF):
+        return True
+    if _is_configured_signing_key(resolved):
+        return True
+
     # Check filename against known sensitive files.
     return filename in _SENSITIVE_FILE_PATTERNS_CF
+
+
+def _is_configured_signing_key(resolved: str) -> bool:
+    """True for the GitHub App private key, whatever the operator named it."""
+    try:
+        from src.agent_worktree.config import load_config
+
+        configured = load_config().private_key_path
+    except Exception:
+        return False
+    if not configured:
+        return False
+    try:
+        return os.path.normcase(os.path.realpath(configured)) == os.path.normcase(resolved)
+    except (OSError, ValueError):
+        return False
 
 
 def _is_under_agent_worktree_state(resolved: str) -> bool:
