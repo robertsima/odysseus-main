@@ -22,6 +22,7 @@ from src.context_compactor import (
     COMPACT_THRESHOLD,
     SELF_SUMMARY_SYSTEM_PROMPT,
     SUMMARY_MAX_TOKENS,
+    SUMMARY_INPUT_MAX_TOKENS,
     _content_as_text,
     maybe_compact,
     trim_for_context,
@@ -192,6 +193,58 @@ class TestMaybeCompactFourthMessage:
         ]}
         result = self._run(messages)
         assert len(result) == 3 and result[2] is True
+
+
+class TestRecursiveCompactionIsBounded:
+    def test_replaces_prior_summaries_and_bounds_utility_prompt(self, monkeypatch):
+        captured = []
+
+        async def fake_summary(_url, _model, messages, **_kwargs):
+            captured.append(messages[-1]["content"])
+            return "replacement summary"
+
+        monkeypatch.setattr(cc, "get_context_length", lambda *_args: 500)
+        monkeypatch.setattr(cc, "llm_call_async", fake_summary)
+        monkeypatch.setattr(cc, "resolve_endpoint", lambda *_args, **_kwargs: (None, None, None))
+        monkeypatch.setattr(cc, "_update_session_history", lambda *_args, **_kwargs: None)
+        messages = [
+            {"role": "system", "content": "base prompt"},
+            {"role": "system", "content": "[Conversation summary]\nold state " + "s" * 30000},
+        ] + [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": "turn " + "x" * 3000}
+            for i in range(8)
+        ]
+
+        compacted, _context_length, did_compact = asyncio.run(
+            maybe_compact(None, "http://local/v1", "model", messages)
+        )
+
+        summaries = [m for m in compacted if "[Conversation summary" in (m.get("content") or "")]
+        assert did_compact is True
+        assert len(summaries) == 1
+        assert "replacement summary" in summaries[0]["content"]
+        assert "PRIOR COMPACTED CONTEXT" in captured[0]
+        assert "NEW TURNS TO FOLD IN" in captured[0]
+        assert cc._message_text_token_estimate(captured[0]) <= SUMMARY_INPUT_MAX_TOKENS + 4
+
+    def test_history_update_removes_persisted_prior_summary(self, monkeypatch):
+        monkeypatch.setattr("core.models.get_session_manager_instance", lambda: None)
+        session = MagicMock()
+        session.id = None
+        session.history = [
+            MagicMock(role="system", content="base", metadata={}),
+            MagicMock(role="system", content="[Conversation summary]\nold", metadata={"compacted": True}),
+            MagicMock(role="user", content="old question", metadata={}),
+            MagicMock(role="assistant", content="old answer", metadata={}),
+            MagicMock(role="user", content="latest", metadata={}),
+            MagicMock(role="assistant", content="answer", metadata={}),
+        ]
+
+        cc._update_session_history(session, 2, "new summary", system_msg_count=2)
+
+        summaries = [m for m in session.history if cc._is_compaction_summary(m)]
+        assert len(summaries) == 1
+        assert "new summary" in summaries[0].content
 
 
 class TestResearchPrimerPreserved:

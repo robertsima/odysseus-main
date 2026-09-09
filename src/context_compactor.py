@@ -42,6 +42,7 @@ COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
 # the budget itself. See the anchor/hysteresis note in trim_for_context.
 TRIM_TARGET_RATIO = 0.8
 SUMMARY_MAX_TOKENS = 1024
+SUMMARY_INPUT_MAX_TOKENS = 4096
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
 
 # Cursor-style self-summarization prompt — produces structured, dense summaries
@@ -80,6 +81,67 @@ def normalize_compaction_summary(summary: str) -> str:
     text = re.sub(r"^(?:#{1,3}\s*)?Conversation Summary\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\*\*Conversation Summary\*\*\s*", "", text, flags=re.IGNORECASE)
     return text.lstrip()
+
+
+def _is_compaction_summary(message: Any) -> bool:
+    """Recognize persisted and request-local compaction summary messages."""
+    if isinstance(message, dict):
+        content = message.get("content", "")
+        metadata = message.get("metadata") or {}
+    else:
+        content = getattr(message, "content", "")
+        metadata = getattr(message, "metadata", None) or {}
+    return bool(metadata.get("compacted")) or "[Conversation summary" in str(content or "")
+
+
+def _compaction_generation(messages: List[Any]) -> int:
+    """Return the highest persisted generation, with legacy summaries counting once."""
+    generations = []
+    for message in messages:
+        metadata = (
+            (message.get("metadata") or {}) if isinstance(message, dict)
+            else (getattr(message, "metadata", None) or {})
+        )
+        try:
+            generations.append(max(1, int(metadata.get("compaction_count") or 1)))
+        except (TypeError, ValueError):
+            generations.append(1)
+    return max(generations, default=0)
+
+
+def _bounded_compaction_source(prior_summaries: List[Dict], older: List[Dict]) -> str:
+    """Build bounded recursive-summary input while retaining old and new state.
+
+    Previous implementations kept every old summary as a system message and
+    added another on each compaction. Context and provider-prefix costs therefore
+    grew with compaction count. Fold prior summaries into the next summary and
+    cap the source sent to the utility model.
+    """
+    prior_text = "\n\n".join(
+        _content_as_text(msg.get("content")) for msg in prior_summaries
+    ).strip()
+    older_text = "\n".join(
+        f"{msg.get('role', 'user').upper()}: {_content_as_text(msg.get('content'))[:2000]}"
+        for msg in older
+    ).strip()
+    if prior_text and older_text:
+        # Reserve half for each source. Truncating only after concatenation can
+        # put the section boundary in the discarded middle and leave the model
+        # without either the prior state or the new turns it must fold in.
+        section_budget = (SUMMARY_INPUT_MAX_TOKENS - 64) // 2
+        prior_text = _truncate_text_to_token_budget(prior_text, section_budget)
+        older_text = _truncate_text_to_token_budget(older_text, section_budget)
+    elif prior_text:
+        prior_text = _truncate_text_to_token_budget(prior_text, SUMMARY_INPUT_MAX_TOKENS - 32)
+    else:
+        older_text = _truncate_text_to_token_budget(older_text, SUMMARY_INPUT_MAX_TOKENS - 32)
+
+    sections = []
+    if prior_text:
+        sections.append("PRIOR COMPACTED CONTEXT:\n" + prior_text)
+    if older_text:
+        sections.append("NEW TURNS TO FOLD IN:\n" + older_text)
+    return "\n\n".join(sections)
 
 
 def _sanitize_tool_messages(msgs: List[Dict]) -> List[Dict]:
@@ -403,17 +465,13 @@ async def maybe_compact(
     older = convo_msgs[:split_point]
     recent = convo_msgs[split_point:]
 
-    # Build the text to summarize
-    convo_text = "\n".join(
-        f"{msg.get('role', 'user').upper()}: {_content_as_text(msg.get('content'))[:2000]}"
-        for msg in older
-    )
-
-    # Count prior compactions from existing summary messages
-    compaction_count = sum(
-        1 for m in system_msgs
-        if "[Conversation summary" in m.get("content", "")
-    )
+    # Fold prior summaries into one replacement instead of recursively retaining
+    # every summary as a system message. Bound the utility-model input so each
+    # compaction has a predictable token cost even in very long agent sessions.
+    prior_summaries = [m for m in system_msgs if _is_compaction_summary(m)]
+    retained_system_msgs = [m for m in system_msgs if not _is_compaction_summary(m)]
+    convo_text = _bounded_compaction_source(prior_summaries, older)
+    compaction_count = _compaction_generation(prior_summaries)
 
     # Use utility model if configured, otherwise fall back to session model
     util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner)
@@ -452,16 +510,20 @@ async def maybe_compact(
     summary_msg = {
         "role": "system",
         "content": f"[Conversation summary — earlier messages were compacted]\n{summary}",
+        "metadata": {"compacted": True, "compaction_count": compaction_count + 1},
     }
 
-    compacted = system_msgs + [summary_msg] + recent
+    compacted = retained_system_msgs + [summary_msg] + recent
 
     # Update session history to match. Pass len(system_msgs) so the
     # recent_history slice in _update_session_history uses the correct
     # offset — session.history INCLUDES the system messages, but
     # split_point is indexed against convo_msgs which does NOT. Without
     # this, the slice drops the leading system message(s).
-    _update_session_history(session, split_point, summary, system_msg_count=len(system_msgs))
+    _update_session_history(
+        session, split_point, summary, system_msg_count=len(system_msgs),
+        compaction_count=compaction_count + 1,
+    )
 
     new_used = estimate_tokens(compacted)
     logger.info(
@@ -473,7 +535,8 @@ async def maybe_compact(
 
 
 def _update_session_history(session, split_point: int, summary: str,
-                            system_msg_count: int = 0):
+                            system_msg_count: int = 0,
+                            compaction_count: int = 1):
     """Update the in-memory session history after compaction.
 
     `split_point` is the index in `convo_msgs` (system-stripped). The
@@ -492,13 +555,20 @@ def _update_session_history(session, split_point: int, summary: str,
 
     # Keep the recent messages, prepend summary AND the leading system
     # messages so the system prompt survives compaction.
-    system_prefix = list(session.history[:system_msg_count])
+    system_prefix = [
+        msg for msg in session.history[:system_msg_count]
+        if not _is_compaction_summary(msg)
+    ]
     recent_history = session.history[effective_split:]
     summary = normalize_compaction_summary(summary)
     summary_msg = ChatMessage(
         role="system",
         content=f"[Conversation summary]\n{summary}",
-        metadata={"compacted": True, "summarized_count": split_point},
+        metadata={
+            "compacted": True,
+            "summarized_count": split_point,
+            "compaction_count": compaction_count,
+        },
     )
     new_history = system_prefix + [summary_msg] + recent_history
     try:
