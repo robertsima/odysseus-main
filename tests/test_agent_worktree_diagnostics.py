@@ -176,3 +176,44 @@ async def test_network_checks_are_skipped_when_credentials_are_broken(env):
     env.setenv("ODYSSEUS_AGENT_REPO", "acme/widgets")
     report = await diagnostics.run_diagnostics(load_config())
     assert _by_name(report, "github")["status"] == "skip"
+
+
+async def test_a_non_checkout_app_root_names_real_candidates(env, tmp_path, monkeypatch):
+    """The container image has no .git, so doctor must point at the data-dir
+    checkout the agent actually works in rather than just saying "not a repo"."""
+    from src import constants
+
+    data = tmp_path / "data"
+    (data / "development" / "odysseus-main" / ".git").mkdir(parents=True)
+    (data / "development" / "odysseus-main" / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://github.com/acme/widgets.git\n'
+    )
+    (data / "development" / "other-repo" / ".git").mkdir(parents=True)
+    monkeypatch.setattr(constants, "DATA_DIR", str(data))
+
+    env.setenv("ODYSSEUS_AGENT_PUBLISH_ENABLED", "1")
+    env.setenv("ODYSSEUS_AGENT_REPO", "acme/widgets")
+    env.setenv("ODYSSEUS_AGENT_SOURCE_REPO", str(tmp_path / "not-a-repo"))
+
+    check = _by_name(
+        await diagnostics.run_diagnostics(load_config(), offline=True), "source repository"
+    )
+    assert check["status"] == "fail"
+    candidates = check["data"]["candidates"]
+    assert any("odysseus-main" in c for c in candidates)
+    # The checkout whose origin matches the configured repo is offered first.
+    assert "odysseus-main" in candidates[0]
+    assert "ODYSSEUS_AGENT_SOURCE_REPO=" in check["hint"]
+
+
+def test_checkout_discovery_ignores_directories_that_are_not_repos(tmp_path, monkeypatch):
+    from src import constants
+
+    data = tmp_path / "data"
+    (data / "development" / "real" / ".git").mkdir(parents=True)
+    (data / "development" / "just-a-folder").mkdir(parents=True)
+    monkeypatch.setattr(constants, "DATA_DIR", str(data))
+
+    found = diagnostics.find_checkouts()
+    assert any(p.endswith("real") for p in found)
+    assert not any(p.endswith("just-a-folder") for p in found)

@@ -368,6 +368,21 @@ class ToolIndex:
             {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
+        # Source-control work on Odysseus itself. Without this the retrieval step
+        # never surfaced manage_agent_worktree for a "push this" / "open a PR"
+        # request, so the agent fell back to running git in bash — where there is
+        # no credential and the push always fails.
+        frozenset({"git", "commit", "branch", "pull request", "pull-request", "pr",
+                   "push", "publish", "merge", "rebase", "worktree", "checkout",
+                   "open a pr", "raise a pr", "draft pr", "codebase", "repo",
+                   "repository", "patch", "changeset", "diff"}):
+            {"manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
+        # Self-debugging: the app's own logs.
+        frozenset({"app log", "app logs", "application log", "application logs",
+                   "server log", "server logs", "the logs", "check the logs",
+                   "log output", "stack trace", "traceback", "error log",
+                   "why did it fail", "what went wrong"}):
+            {"read_app_logs"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
         frozenset({"background job", "background jobs", "bg job", "bg jobs",
                    "background task", "is the job done", "check the job",

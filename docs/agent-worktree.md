@@ -41,7 +41,15 @@ The four failures that actually happen:
 - **The agent used `bash` to push.** The credential only exists inside the
   `manage_agent_worktree` publish path. A `git push` typed into the shell tool
   has no token and no credential helper, so it fails with an authentication
-  error that looks like a bad App. Publishing must go through the tool.
+  error that looks like a bad App. The shell tool now intercepts `git push` and
+  `gh pr create` and returns the correct procedure instead of letting them fail.
+  Set `ODYSSEUS_AGENT_ALLOW_BASH_PUSH=1` if you have your own credential setup
+  and want the raw command back.
+- **The source repository is not set.** The container image has no `.git`
+  directory, so the default (the application root) is not a checkout. Point
+  `ODYSSEUS_AGENT_SOURCE_REPO` at the checkout inside the data mount, for
+  example `/app/data/development/odysseus-main`. `doctor` lists the candidates
+  it finds and prints the exact line to set.
 - **The Client ID was pasted into `ODYSSEUS_GITHUB_APP_ID`.** The App ID is a
   short number on the app's settings page. The Client ID starts with `Iv1.` or
   `Iv23`.

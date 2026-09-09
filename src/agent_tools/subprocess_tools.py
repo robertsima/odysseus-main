@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -10,6 +11,8 @@ from src.constants import MAX_OUTPUT_CHARS
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
+
+logger = logging.getLogger(__name__)
 
 PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
@@ -277,6 +280,20 @@ class BashTool:
         from src.tool_execution import agent_cwd, _truncate
         if isinstance(content, dict):
             content = str(content.get("command") or content.get("cmd") or content.get("code") or "")
+
+        # A push from here cannot authenticate: the shell tool carries no git
+        # credential by design, and the publishing credential lives only in the
+        # manage_agent_worktree flow. Left alone, git exits 128 with an
+        # authentication error and the model concludes the token is wrong, then
+        # hunts for a GitHub integration that does not exist. Point it at the
+        # tool that can actually publish instead of letting it loop.
+        from src.agent_worktree.push_guard import check as _publish_guard
+
+        blocked = _publish_guard(content)
+        if blocked is not None:
+            logger.info("bash: blocked a remote-publishing command; redirected to manage_agent_worktree")
+            return blocked
+
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         session_id = ctx.get("session_id")
