@@ -12,9 +12,7 @@ Sub-modules:
 """
 
 import logging
-from collections import namedtuple
 
-from src.tool_security import BUILTIN_EMAIL_TOOLS
 from src.tool_utils import _truncate, get_mcp_manager, set_mcp_manager
 
 logger = logging.getLogger(__name__)
@@ -81,48 +79,11 @@ MAX_AGENT_ROUNDS = 50
 SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 
-# Tool types that trigger execution
-TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_file", "edit_file",
-             "apply_patch", "todowrite",
-             # Isolated agent worktree + human-gated publishing, and read-only
-             # access to the app's own logs for self-debugging.
-             "manage_agent_worktree", "read_app_logs",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
-             "create_document", "update_document", "edit_document",
-             "search_chats", "search_documents", "recall_tool_output",
-             "chat_with_model", "create_session", "list_sessions",
-             "send_to_session",
-             "pipeline",
-             "manage_session", "manage_memory", "list_models",
-             "ui_control", "generate_image", "ask_user", "update_plan",
-             "manage_tasks", "api_call", "ask_teacher", "manage_skills",
-             "suggest_document",
-             "manage_endpoints", "manage_mcp", "manage_webhooks",
-             "manage_tokens", "manage_documents", "manage_settings",
-             "manage_notes", "manage_calendar", "manage_wellbeing",
-             "resolve_contact", "manage_contact",
-             # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
-             # so the fence regex, dispatch, and non-admin blocklist all cover
-             # the same set.
-             # Cookbook tools (LLM serving + downloads). Without these
-             # entries, native function calls to e.g. list_served_models
-             # are rejected as "Unknown function call" before reaching
-             # the dispatcher — silent failure for the whole cookbook
-             # surface.
-             "download_model", "serve_model",
-             "list_served_models", "stop_served_model",
-             "list_downloads", "cancel_download",
-             "search_hf_models", "list_cached_models",
-             "list_serve_presets", "serve_preset", "adopt_served_model",
-             "list_cookbook_servers",
-             # Other tools the agent reaches for that were also missing.
-             "edit_image", "trigger_research", "manage_research",
-             # Generic loopback to any UI-button endpoint (cookbook,
-             # gallery, email folders, etc.) — agent uses this when
-             # there's no named tool wrapper for the action.
-             "app_api"} | BUILTIN_EMAIL_TOOLS
-
-ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
+# Tool types that trigger execution, and the parsed-tool-call tuple. Defined in
+# the leaf module src/tool_types.py and re-exported here: importers that reach
+# for them through this package keep working, while parsing/schema code can take
+# the direct route without importing the registry back into itself.
+from src.tool_types import TOOL_TAGS, ToolBlock  # noqa: E402, F401
 
 # ---------------------------------------------------------------------------
 # Re-exports from sub-modules
