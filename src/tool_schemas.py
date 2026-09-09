@@ -239,6 +239,70 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_agent_worktree",
+            "description": (
+                "Work in an isolated, persistent git worktree on an agent/odysseus/* branch, "
+                "and publish it only with explicit human approval. Actions: 'start' (create or "
+                "reuse the worktree for a task name), 'status', 'diff' (changed files plus which "
+                "of them are sensitive), 'commit', 'request_publish' (freeze the change and ask a "
+                "human to approve it — this pushes NOTHING), 'publish' (needs request_id plus an "
+                "approval_code a human generated on the host), 'list_requests', 'show_request', "
+                "'remove'. You cannot approve your own change: ask the operator to run the "
+                "approval command and paste the code back to you."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["status", "start", "commit", "diff", "request_publish",
+                                 "publish", "list_requests", "show_request", "remove"],
+                        "description": "Operation to perform (default: status)"
+                    },
+                    "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>"},
+                    "branch": {"type": "string", "description": "Full agent branch, when it already exists"},
+                    "message": {"type": "string", "description": "Commit message (action=commit)"},
+                    "title": {"type": "string", "description": "Draft PR title (action=request_publish)"},
+                    "body": {"type": "string", "description": "Draft PR body (action=request_publish)"},
+                    "request_id": {"type": "string", "description": "Approval request id"},
+                    "approval_code": {
+                        "type": "string",
+                        "description": "One-time code a human produced with the operator CLI (action=publish)"
+                    }
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_app_logs",
+            "description": (
+                "Read Odysseus's own application logs to debug or troubleshoot the running app. "
+                "action='list' enumerates available log files; action='tail' returns the last N "
+                "lines of one, optionally filtered by substring or minimum level. Read-only, and "
+                "credential material is redacted before you see it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "tail"], "description": "Default: tail"},
+                    "name": {"type": "string", "description": "Log file name, e.g. app.log. Defaults to the app log."},
+                    "lines": {"type": "integer", "description": "How many lines to return (1-500, default 100)"},
+                    "contains": {"type": "string", "description": "Only lines containing this substring"},
+                    "level": {
+                        "type": "string",
+                        "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+                        "description": "Minimum log level to include"
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "create_document",
             "description": "Create a new document in the editor panel. Use this when the user asks to write, create, build, make, or generate code, scripts, programs, games, apps, or any long-form or structured content that is more than a short paragraph, AND there is no already-open document/email draft that the request refers to. If an email compose draft is open, edit that draft instead of creating another document. NEVER put large generated content directly in chat — use this tool instead.",
             "parameters": {

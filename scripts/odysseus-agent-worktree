@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""odysseus-agent-worktree — operator control for the agent's worktree.
+
+The agent can create a worktree, commit in it, and *ask* to publish. Only this
+CLI, run by a human on the host, can approve a publish. An approval is a
+one-time code bound to the exact repository, branch and commit SHA, and it
+expires within minutes.
+
+    odysseus-agent-worktree status                     # config + worktrees
+    odysseus-agent-worktree requests                   # pending/granted/used
+    odysseus-agent-worktree show REQUEST_ID            # full file list
+    odysseus-agent-worktree approve REQUEST_ID         # prints a one-time code
+    odysseus-agent-worktree approve REQUEST_ID --allow-sensitive
+    odysseus-agent-worktree revoke REQUEST_ID
+    odysseus-agent-worktree gc [--keep-days 30]
+
+Read `show` before approving. If the change touches CI, Docker, deployment,
+auth, secrets, or MCP permissions, `approve` refuses until you pass
+--allow-sensitive, which is the second acknowledgement that you looked.
+
+The code is printed once and never stored in plaintext. Paste it to the agent;
+it is spent the moment the push is attempted.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "_lib"))
+from cli import quiet_logs, emit, fail, common_parser, run  # noqa: E402
+
+quiet_logs()
+
+import argparse  # noqa: E402
+import asyncio  # noqa: E402
+
+try:
+    from src.agent_worktree import approval as approval_mod
+    from src.agent_worktree import sensitive as sensitive_mod
+    from src.agent_worktree import service
+    from src.agent_worktree.config import load_config, publish_blockers
+    quiet_logs()
+except ModuleNotFoundError as exc:  # pragma: no cover - environment problem
+    sys.stderr.write(f"error: {exc}\nhint: run from the repo root with the venv active.\n")
+    sys.exit(2)
+
+
+def _operator() -> str:
+    return os.environ.get("USER") or os.environ.get("USERNAME") or "operator"
+
+
+def cmd_status(args) -> None:
+    cfg = load_config()
+    state = asyncio.run(service.status(getattr(args, "branch", None), cfg=cfg))
+    state["publish_blockers"] = publish_blockers(cfg)
+    emit(state, args)
+
+
+def cmd_requests(args) -> None:
+    rows = approval_mod.list_requests()
+    if getattr(args, "status", None):
+        rows = [r for r in rows if r.get("status") == args.status]
+    emit(rows, args)
+
+
+def cmd_show(args) -> None:
+    try:
+        record = approval_mod.get_request(args.request_id)
+    except approval_mod.ApprovalError as exc:
+        fail(str(exc))
+        return
+    if getattr(args, "json", False):
+        emit(record, args)
+        return
+    sensitive = record.get("sensitive") or {}
+    print(f"request   {record['id']}")
+    print(f"status    {record['status']}")
+    print(f"repo      {record['repo']}")
+    print(f"branch    {record['branch']}  ->  {record['base_branch']}")
+    print(f"commit    {record['head_sha']}")
+    print(f"title     {record['title']}")
+    print(f"remote    {record.get('remote_state')}")
+    print(f"files     {len(record.get('changed_files') or [])}")
+    for path in record.get("changed_files") or []:
+        marker = "!" if any(path in paths for paths in sensitive.values()) else " "
+        print(f"  {marker} {path}")
+    print()
+    print("sensitive: " + sensitive_mod.summarize(sensitive))
+    if sensitive:
+        print("\nApproving this change requires --allow-sensitive.")
+
+
+def cmd_approve(args) -> None:
+    cfg = load_config()
+    blockers = publish_blockers(cfg)
+    if blockers:
+        fail("publishing is not available: " + "; ".join(blockers))
+        return
+    try:
+        code, record = approval_mod.grant(
+            args.request_id,
+            allow_sensitive=bool(args.allow_sensitive),
+            granted_by=_operator(),
+            cfg=cfg,
+        )
+    except approval_mod.ApprovalError as exc:
+        fail(str(exc))
+        return
+    ttl_min = round(cfg.approval_ttl_s / 60)
+    print(f"Approved {record['id']} for {record['branch']} @ {record['head_sha'][:12]}")
+    print(f"Valid for ~{ttl_min} min, single use, bound to that exact commit.\n")
+    print(f"  approval code: {code}\n")
+    print("Give this code to the agent. It is not stored and cannot be shown again.")
+
+
+def cmd_revoke(args) -> None:
+    try:
+        emit(approval_mod.revoke(args.request_id), args)
+    except approval_mod.ApprovalError as exc:
+        fail(str(exc))
+
+
+def cmd_gc(args) -> None:
+    emit({"removed": approval_mod.purge_expired(keep_days=args.keep_days)}, args)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = common_parser(
+        "odysseus-agent-worktree",
+        "Inspect the agent worktree and approve its publish requests.",
+    )
+    parents = p._common_parents
+    sub = p.add_subparsers(dest="command", required=True)
+
+    s = sub.add_parser("status", parents=parents, help="Config and worktree state")
+    s.add_argument("--branch", help="Focus on one agent branch")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("requests", parents=parents, help="List approval requests")
+    s.add_argument("--status", choices=["pending", "granted", "used", "revoked", "expired"])
+    s.set_defaults(func=cmd_requests)
+
+    s = sub.add_parser("show", parents=parents, help="Show one request in full")
+    s.add_argument("request_id")
+    s.add_argument("--json", action="store_true", help="Machine-readable output")
+    s.set_defaults(func=cmd_show)
+
+    s = sub.add_parser("approve", parents=parents, help="Grant a one-time approval code")
+    s.add_argument("request_id")
+    s.add_argument(
+        "--allow-sensitive",
+        action="store_true",
+        help="Acknowledge sensitive paths (CI, Docker, deploy, auth, secrets, MCP)",
+    )
+    s.set_defaults(func=cmd_approve)
+
+    s = sub.add_parser("revoke", parents=parents, help="Cancel a request or its grant")
+    s.add_argument("request_id")
+    s.set_defaults(func=cmd_revoke)
+
+    s = sub.add_parser("gc", parents=parents, help="Delete old request records")
+    s.add_argument("--keep-days", type=int, default=30)
+    s.set_defaults(func=cmd_gc)
+    return p
+
+
+if __name__ == "__main__":
+    sys.exit(run(build_parser()))

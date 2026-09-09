@@ -113,8 +113,30 @@ def _is_sensitive_path(resolved: str) -> bool:
     except Exception as e:  # never let a label lookup break file tools
         logger.warning("private-path check failed for %s: %s", resolved, e)
 
+    # The agent worktree's approval state is the trust anchor for human-gated
+    # publishing: the records say which change a human approved and carry the
+    # key that authenticates them. It lives under DATA_DIR, which IS an allowed
+    # tool root, so without this the agent could write itself a "granted"
+    # record with its own code hash and publish without a human. Deny-listed
+    # here so write_file / edit_file / apply_patch / read_file all refuse it.
+    if _is_under_agent_worktree_state(resolved):
+        return True
+
     # Check filename against known sensitive files.
     return filename in _SENSITIVE_FILE_PATTERNS_CF
+
+
+def _is_under_agent_worktree_state(resolved: str) -> bool:
+    """True when *resolved* sits in the agent worktree's approval state dir."""
+    try:
+        from src.agent_worktree.config import load_config
+
+        root = os.path.realpath(load_config().state_dir)
+    except Exception:
+        return False
+    a = os.path.normcase(resolved)
+    b = os.path.normcase(root)
+    return a == b or a.startswith(b + os.sep)
 
 
 # Extra roots declared by the DEPLOYMENT rather than by post-boot admin state.
@@ -415,6 +437,10 @@ logger = logging.getLogger(__name__)
 
 _ADMIN_TOOLS = {
     "app_api",
+    # Touches the operator's git checkout and the publishing flow; log content
+    # is operator-facing diagnostic data.
+    "manage_agent_worktree",
+    "read_app_logs",
     "manage_endpoints",
     "manage_mcp",
     "manage_webhooks",

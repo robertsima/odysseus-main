@@ -44,6 +44,10 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "bash",
     "python",
     "manage_bg_jobs",
+    # Runs git against the operator's checkout and can reach the publishing
+    # flow; log reading can expose internal hostnames and stack traces.
+    "manage_agent_worktree",
+    "read_app_logs",
     "read_file",
     "write_file",
     "edit_file",
@@ -95,6 +99,9 @@ PLAN_MODE_READONLY_TOOLS = {
     "glob",
     "ls",
     "get_workspace",
+    # Reading the app's own logs is inspection: it cannot mutate anything, and
+    # plan mode is exactly when the agent is diagnosing a problem.
+    "read_app_logs",
     "web_search",
     "web_fetch",
     "search_chats",
@@ -143,6 +150,8 @@ PLAN_MODE_READONLY_TOOLS = {
 # new mutating tools.
 _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "edit_file", "apply_patch", "todowrite",
+    # Creates worktrees, commits, and (with human approval) pushes.
+    "manage_agent_worktree",
     "create_document", "edit_document", "update_document",
     "suggest_document", "manage_documents", "create_session", "manage_session",
     "send_to_session", "pipeline", "manage_memory", "manage_skills",
