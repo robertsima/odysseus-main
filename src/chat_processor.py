@@ -502,6 +502,23 @@ class ChatProcessor:
         if use_rag:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
+                if rag_manager is None:
+                    # `rag_manager` is resolved once at import time with a 2s
+                    # probe; if ChromaDB was still starting, the None was
+                    # frozen for the life of the process and every turn since
+                    # silently had no document context. Re-resolve lazily.
+                    try:
+                        from src.rag_manager import get_rag_manager
+
+                        rag_manager = get_rag_manager()
+                        if rag_manager is not None:
+                            self.personal_docs_manager.rag_manager = rag_manager
+                            logger.warning(
+                                "RAG: rag_manager was unset at startup (ChromaDB not ready); "
+                                "resolved it now — document retrieval is live again"
+                            )
+                    except Exception as _e:
+                        logger.debug("RAG: lazy rag_manager resolution failed: %s", _e)
                 if rag_manager:
                     # Documents marked private are only retrieved when the turn
                     # is being served by a local endpoint. On a hosted API the

@@ -48,6 +48,13 @@ ALWAYS_AVAILABLE = frozenset({
     # to call this, so a turn where tool selection had not surfaced it would
     # be pointing at a tool that is not in its schema list.
     "recall_tool_output",
+    # The user's own notes/vault. Previously reachable only through a literal
+    # phrase ("my notes", "my vault", "obsidian", ...), so "summarize what I
+    # logged about X" or any follow-up in an ongoing conversation could not
+    # consult the vault at all — and the prompt section that says to search it
+    # first is only emitted when the tool is selected, so the model was never
+    # even told the vault existed. One schema, ambient like memory.
+    "search_documents",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
