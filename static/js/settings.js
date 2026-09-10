@@ -3986,10 +3986,11 @@ python3 ~/plugins/odysseus/scripts/odysseus_api.py capabilities`,
     setupDescription: 'Downloads a plugin bundle and registers it.',
     buildSetup: (origin, token) => `export ODYSSEUS_URL=${origin}
 export ODYSSEUS_API_TOKEN='${token}'
-mkdir -p ~/.claude
+CLAUDE_DIR="\${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+mkdir -p "$CLAUDE_DIR"
 curl -fsSL -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/claude/plugin.zip" -o /tmp/odysseus-claude-skill.zip
-python3 -m zipfile -e /tmp/odysseus-claude-skill.zip ~/.claude/
-python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py capabilities`,
+python3 -m zipfile -e /tmp/odysseus-claude-skill.zip "$CLAUDE_DIR/"
+python3 "$CLAUDE_DIR/skills/odysseus/scripts/odysseus_api.py" capabilities`,
   },
 };
 

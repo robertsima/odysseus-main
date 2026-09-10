@@ -165,3 +165,9 @@ def test_atomic_write_text_preserves_target_when_replace_fails(tmp_path, monkeyp
         atomic_write_text(str(target), "new content that never lands")
 
     assert target.read_text(encoding="utf-8") == before
+
+
+def test_atomic_write_json_supports_private_mode(tmp_path):
+    path = tmp_path / "private.json"
+    atomic_write_json(str(path), {"private": True}, mode=0o600)
+    assert path.stat().st_mode & 0o777 == 0o600
