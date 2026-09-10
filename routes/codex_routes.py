@@ -35,6 +35,16 @@ CALENDAR_READ_SCOPES = {"calendar:read", "calendar:write"}
 CALENDAR_WRITE_SCOPES = {"calendar:write"}
 DOCS_READ_SCOPES = {"documents:read", "documents:write"}
 DOCS_WRITE_SCOPES = {"documents:write"}
+# The Markdown vault (ODYSSEUS_PERSONAL_DIRS: Vault Mind / AI Mind / Journal),
+# not the editor document library above. Private-labelled directories need a
+# second, explicit scope: an agent session ships retrieved text to a hosted
+# provider, which is the same reason the chat path gates them on
+# `is_local_endpoint`. Default closed.
+VAULT_READ_SCOPES = {"vault:read", "vault:read_private"}
+VAULT_PRIVATE_SCOPES = {"vault:read_private"}
+# A search excerpt is a few hundred characters; a whole note can be enormous.
+VAULT_EXCERPT_CHARS = 1200
+VAULT_DOCUMENT_CHARS = 40000
 WRITE_ACTIONS = {"add", "create", "new", "save", "remind", "update", "delete", "toggle_item", "remove", "remove_item"}
 
 
@@ -202,6 +212,16 @@ def setup_codex_routes(
                     "write": scoped(DOCS_WRITE_SCOPES),
                     "actions": ["library", "read", "create", "delete"],
                     "available": documents_library_endpoint is not None,
+                },
+                "vault": {
+                    "read": scoped(VAULT_READ_SCOPES),
+                    "read_private": scoped(VAULT_PRIVATE_SCOPES),
+                    "actions": ["search", "document"],
+                    "note": (
+                        "Semantic search over the user's Markdown vault — the same "
+                        "context store the Odysseus agent uses. Private-labelled "
+                        "directories require vault:read_private."
+                    ),
                 },
                 "cookbook": {
                     "read": scoped(COOKBOOK_READ_SCOPES),
@@ -438,6 +458,115 @@ def setup_codex_routes(
         return await _as_owner(request, owner, calendar_create_event, request, data)
 
     # ── Documents ─────────────────────────────────────────────────────────
+
+    # ── Vault (semantic search over the personal Markdown directories) ──
+
+    def _vault_private_allowed(request: Request) -> bool:
+        """Private notes only for a token that asked for them explicitly."""
+        if not getattr(request.state, "api_token", False):
+            return True  # a cookie session is the owner at their own browser
+        scopes = set(getattr(request.state, "api_token_scopes", []) or [])
+        return bool(scopes.intersection(VAULT_PRIVATE_SCOPES))
+
+    def _vault_manager():
+        from src.rag_manager import get_rag_manager
+
+        rag = get_rag_manager()
+        if rag is None or not getattr(rag, "healthy", False):
+            raise HTTPException(503, "Vault search is unavailable: the vector store is not reachable")
+        return rag
+
+    @router.get("/vault/search")
+    def codex_vault_search(request: Request, q: str, k: int = 5, include_private: bool = False):
+        """Semantic search across the user's Markdown vault.
+
+        The same retrieval the Odysseus agent uses for `search_documents`, so
+        an external agent session can consult the same context store instead
+        of guessing or re-reading whole files.
+        """
+        _scope_owner(request, VAULT_READ_SCOPES)
+        query = (q or "").strip()
+        if not query:
+            raise HTTPException(400, "q is required")
+        allow_private = bool(include_private) and _vault_private_allowed(request)
+        if include_private and not allow_private:
+            raise HTTPException(403, "API token missing required scope: vault:read_private")
+        k = max(1, min(int(k or 5), 25))
+        try:
+            hits = _vault_manager().search(query, k=k, allow_private=allow_private) or []
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(502, f"Vault search failed: {exc}")
+        results = []
+        for hit in hits:
+            meta = hit.get("metadata") or {}
+            text = str(hit.get("document") or "")
+            results.append({
+                "path": meta.get("file_path") or meta.get("source") or meta.get("path") or "",
+                "title": meta.get("title") or meta.get("file_name") or "",
+                "sensitivity": meta.get("rag_sensitivity") or "public",
+                "similarity": round(float(hit.get("similarity") or 0.0), 4),
+                "excerpt": text[:VAULT_EXCERPT_CHARS],
+                "truncated": len(text) > VAULT_EXCERPT_CHARS,
+            })
+        return {
+            "query": query,
+            "count": len(results),
+            "include_private": allow_private,
+            "results": results,
+        }
+
+    @router.get("/vault/document")
+    def codex_vault_document(request: Request, path: str, offset: int = 0, limit: int = VAULT_DOCUMENT_CHARS):
+        """Read one vault file that a search returned.
+
+        Only files the indexer already tracks are readable, so this cannot be
+        turned into a general filesystem reader by passing `..` or an
+        absolute path outside the personal directories.
+        """
+        _scope_owner(request, VAULT_READ_SCOPES)
+        import os
+
+        from src import ai_interaction
+
+        manager = getattr(ai_interaction, "_personal_docs_manager", None)
+        if manager is None:
+            raise HTTPException(503, "Personal documents are not configured")
+        wanted = os.path.realpath(os.path.expanduser((path or "").strip()))
+        if not wanted:
+            raise HTTPException(400, "path is required")
+        allow_private = _vault_private_allowed(request)
+        entry = None
+        for indexed in (getattr(manager, "index", None) or []):
+            candidate = indexed.get("path") or indexed.get("file_path") or ""
+            if candidate and os.path.realpath(candidate) == wanted:
+                entry = indexed
+                break
+        if entry is None:
+            # Indistinguishable from "exists but you may not see it", on
+            # purpose: a filename is itself disclosure.
+            raise HTTPException(404, "No indexed vault document at that path")
+        if not allow_private and (entry.get("sensitivity") or "public") == "private":
+            raise HTTPException(403, "API token missing required scope: vault:read_private")
+        offset = max(0, int(offset or 0))
+        limit = max(1, min(int(limit or VAULT_DOCUMENT_CHARS), VAULT_DOCUMENT_CHARS))
+        try:
+            with open(wanted, encoding="utf-8", errors="replace") as handle:
+                body = handle.read()
+        except OSError as exc:
+            raise HTTPException(404, f"Vault document is unreadable: {exc}")
+        chunk = body[offset:offset + limit]
+        return {
+            "path": wanted,
+            "name": entry.get("name") or os.path.basename(wanted),
+            "sensitivity": entry.get("sensitivity") or "public",
+            "offset": offset,
+            "returned_chars": len(chunk),
+            "total_chars": len(body),
+            "has_more": offset + len(chunk) < len(body),
+            "content": chunk,
+        }
 
     @router.get("/documents")
     async def codex_documents_library(

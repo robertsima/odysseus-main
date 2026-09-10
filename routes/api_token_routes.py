@@ -32,6 +32,11 @@ ALLOWED_SCOPES = {
     # govern the opposite direction (Claude Code calling into Odysseus).
     "claude_code:read",
     "claude_code:write",
+    # Semantic search over the Markdown vault (/api/codex/vault/*). Private
+    # directories are a separate scope so a default agent token cannot ship
+    # journal text to a hosted provider.
+    "vault:read",
+    "vault:read_private",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
@@ -45,6 +50,10 @@ TOKEN_PROFILES = {
         "todos:read", "todos:write",
         "documents:read", "documents:write",
         "memory:read", "memory:write",
+        # Public vault only: the agent gets the shared context store without
+        # private journals leaving the machine. Add vault:read_private
+        # deliberately if that is wanted.
+        "vault:read",
     ],
     # A caller (automation, CI, another Odysseus admin tool) allowed to kick
     # off/poll/cancel bounded Claude Code delegation tasks against approved repos.
@@ -86,6 +95,7 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
     ensure_before("email:draft", "email:read")
     ensure_before("cookbook:launch", "cookbook:read")
     ensure_before("claude_code:write", "claude_code:read")
+    ensure_before("vault:read_private", "vault:read")
 
     return normalized or [DEFAULT_SCOPES]
 

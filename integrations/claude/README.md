@@ -160,6 +160,44 @@ A cookie-session caller must be an admin. An API-token caller needs the
 `claude_code:write` scope (`claude_code:read` is enough for the `GET`); the
 `claude_code_tasks` token profile grants exactly that.
 
+## Sharing Odysseus's context store with Claude Code
+
+The `/api/codex/*` API is how a Claude Code session reads the same data the
+Odysseus agent uses. Claude Code is the client, Odysseus is the data server,
+and no Anthropic credential is ever handled by Odysseus.
+
+Reachable with the `claude_agent` token profile: todos, memory, calendar,
+email (read/draft), the editor document library, the Cookbook serve surface,
+and — since the vault endpoints below — the user's Markdown notes.
+
+| endpoint | scope | what it returns |
+|---|---|---|
+| `GET /api/codex/vault/search?q=...&k=5` | `vault:read` | semantic hits across `ODYSSEUS_PERSONAL_DIRS` (Vault Mind, AI Mind, Journal, ...) as `{path, title, sensitivity, similarity, excerpt}` |
+| `GET /api/codex/vault/document?path=...&offset=0` | `vault:read` | one indexed vault file, paged with `total_chars` / `has_more` |
+
+Private-labelled directories (typically `Journal:private`) are withheld unless
+the token also carries `vault:read_private`. That split exists because an
+agent session ships retrieved text to a hosted provider — the same reason the
+chat path gates private notes on `is_local_endpoint`. Only indexed files are
+readable, so the document endpoint cannot be walked into a general filesystem
+reader.
+
+A token minted before these scopes existed will not have them. Regenerate the
+Claude Agent token, or enable the vault toggle on the existing one, in
+Settings > Integrations > Claude Agent.
+
+Two places the session can run:
+
+- **Inside the container**, as part of a delegation. Set
+  `claude_code_odysseus_url` (`http://127.0.0.1:7000`) and
+  `claude_code_odysseus_token_file`; the runner passes both to the child in
+  its environment and allowlists the helper script, so a delegated job can
+  search the vault mid-task.
+- **On your own machine**, in a terminal. Export `ODYSSEUS_URL` (the LAN or
+  tailnet address of the Odysseus host) and `ODYSSEUS_API_TOKEN`, then install
+  the plugin bundle with the command Settings shows. Claude Code loads the
+  `odysseus` skill from its config directory and calls back over the network.
+
 ## Scope enforcement
 
 The token is scope-gated. Every tool surface is checked server-side in Odysseus,
