@@ -227,6 +227,27 @@ def _ensure_away_reply_table():
         conn.close()
 
 
+_PROMO_SUBJECT_RE = re.compile(
+    r"(?:\b\d{1,3}\s*%\s*off\b|\bsale\b|\bends?\s+(?:tonight|today|soon|midnight)\b|"
+    r"\blimited[\s-]time\b|\bpromo\s*code\b|\bcoupon\b|\bdiscount\b|\bclearance\b|"
+    r"\bfree\s+shipping\b|\bflash\s+sale\b|\blast\s+chance\b|\bdeal\s+of\s+the\s+day\b)",
+    re.I,
+)
+
+
+def _not_calendar_material(msg, sender_addr: str, subject: str) -> bool:
+    """True for mail that cannot contain an appointment worth extracting:
+    list/bulk/no-reply senders (List-Unsubscribe, Precedence: bulk, ...) and
+    promotional subjects. Only gates calendar extraction; summaries, tags and
+    urgency still run."""
+    try:
+        if _sender_is_automated(msg, sender_addr):
+            return True
+    except Exception:
+        pass
+    return bool(_PROMO_SUBJECT_RE.search(subject or ""))
+
+
 def _sender_is_automated(msg, sender_addr: str) -> bool:
     auto_submitted = (msg.get("Auto-Submitted") or "").strip().lower()
     if auto_submitted and auto_submitted != "no":
@@ -724,6 +745,12 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 )
                 need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
                 need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
+                # Bulk/list/no-reply senders and promotional blasts are not
+                # appointments: "Up to 50% Off Ends TONIGHT" became a calendar
+                # event ("G FUEL Labor Day sale ends") because the extractor
+                # prompt treats any deadline as event-related content.
+                if need_cal and _not_calendar_material(msg, _from_addr_only, _subj_raw):
+                    need_cal = False
                 need_urgent = (auto_urgent and message_id not in _urgent_existing
                                and not _folder.lower().startswith("sent")
                                and "sent" not in _folder.lower()

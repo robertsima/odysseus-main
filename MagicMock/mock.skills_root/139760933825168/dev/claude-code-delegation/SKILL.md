@@ -1,11 +1,15 @@
 ---
 name: claude-code-delegation
-description: Delegate bounded coding work in an approved Git checkout to the locally installed Claude Code CLI through delegate_to_claude_code; preflight the integration, size the task, verify the result, and coordinate several Claude jobs from the primary harness.
-metadata:
-  version: 1.0.0
-  category: dev
-  status: published
-  source: bundled
+description: "Delegate bounded coding work in an approved Git checkout to the locally installed Claude Code CLI through delegate_to_claude_code; preflight the integration, size the task, verify the result, and coordinate several Claude jobs from the primary harness."
+version: 1.0.0
+category: dev
+tags: [delegation, claude-code, coding, multi-agent, worktree]
+platforms: [linux, windows, macos]
+requires_toolsets: [delegate_to_claude_code]
+status: published
+confidence: 0.9
+source: bundled
+created: "2026-09-10T21:47:20Z"
 ---
 
 # Claude Code Delegation
@@ -23,8 +27,6 @@ scoped Odysseus token so it can call back into this instance if that is
 configured. Read [terms-and-boundaries.md](references/terms-and-boundaries.md)
 before proposing any change to how Claude is reached.
 
-## Preflight (do this before the first delegation in a session)
-
 1. Call `delegate_to_claude_code` with `{"action": "status"}`.
    - `ready: true` means the binary exists, supports the headless flags, and
      is signed in.
@@ -39,8 +41,6 @@ before proposing any change to how Claude is reached.
 3. For Odysseus itself, prefer the dedicated agent worktree (an
    `agent_worktrees/...` entry) over the source checkout when both exist, so a
    delegation cannot disturb the running app's files.
-
-## Run the delegation loop
 
 1. Decide the change, risks, and acceptance criteria first.
 2. Build one compact prompt:
@@ -77,16 +77,6 @@ before proposing any change to how Claude is reached.
 7. Publishing is a separate, human-gated step: use `manage_agent_worktree`
    (`request_publish` → operator approval → `publish`). Claude Code cannot
    push and must not be asked to.
-8. After acceptance, record the outcome in the `AI Mind` workspace so later
-   sessions can orient without replaying this one. Follow
-   [documentation-policy.md](references/documentation-policy.md): find the
-   note with `search_documents` ("Claude Code Delegation"), append a dated
-   entry with `edit_file` (create `AI Mind/Claude Code Delegation.md` with
-   `write_file` only if the search finds nothing), keep it to project, task,
-   outcome, files changed, checks reviewed, limitations. Skip the record when
-   the user says the work is throwaway.
-
-## Protect context and state
 
 - Send paths, symbols, errors, and acceptance criteria — not whole files or
   the chat history. Keep prompts under a few thousand tokens.
@@ -98,8 +88,6 @@ before proposing any change to how Claude is reached.
 - Runs on one checkout are serialized; the aggregate limit is
   `claude_code_max_concurrent_tasks` (Settings > Tools > Claude Code).
 
-## When something fails
-
 | Symptom | Meaning | Do |
 |---|---|---|
 | "not an existing Git repository or worktree" | wrong path (e.g. `/app`) | use a path from `status`/`list_repositories` |
@@ -108,8 +96,6 @@ before proposing any change to how Claude is reached.
 | "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Tools > Claude Code |
 | `permission_denials` mentions push/remote | Claude tried to publish | expected; publishing goes through `manage_agent_worktree` |
 | exit 124 | timed out | narrow the task or split it |
-
-## Verify sufficiency before accepting
 
 - the diff matches the requested scope and `changed_files` has no surprises;
 - the stated verification ran and passed, or the failure is reported honestly;

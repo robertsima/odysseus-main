@@ -85,9 +85,28 @@ def _message_plain_text(content: Any) -> str:
 
 
 def _last_user_plain_text(messages: List[Dict[str, Any]]) -> str:
+    """The most recent thing the USER said, skipping appended evidence.
+
+    ``append_dynamic_context`` deliberately places retrieval (memories, vault
+    hits, document context) *after* the request as an untrusted-source user
+    message so the cached prompt prefix survives. That block is not the user's
+    request; treating it as such made ``_ensure_current_request_is_latest_user``
+    append the request a second time on every turn that had any retrieval
+    (the "latest user context mismatch" warning seen on each turn in the
+    2026-09-10 logs).
+    """
+    from src.llm_core import _is_untrusted_context_content
+
     for msg in reversed(messages or []):
-        if msg.get("role") == "user":
-            return _message_plain_text(msg.get("content"))
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content")
+        if _is_untrusted_context_content(content):
+            continue
+        text = _message_plain_text(content)
+        if text.startswith("[Context —"):
+            continue
+        return text
     return ""
 
 

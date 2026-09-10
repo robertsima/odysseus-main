@@ -1264,6 +1264,7 @@ def _build_chatgpt_responses_payload(
     tools: Optional[List[Dict]] = None,
     tool_choice_none: bool = False,
     target_url_hint: str = "",
+    cache_key: Optional[str] = None,
 ) -> Dict:
     from src.chatgpt_subscription import build_responses_input, build_responses_tools
 
@@ -1291,10 +1292,27 @@ def _build_chatgpt_responses_payload(
         payload["tool_choice"] = "none"
     if not _restricts_temperature(model):
         payload["temperature"] = temperature
+    # Stable per-conversation cache routing (the Responses-API analogue of the
+    # llama.cpp slot affinity in _apply_local_cache_affinity). Without it the
+    # provider may route consecutive rounds of one turn to different cache
+    # shards and miss a prefix it holds elsewhere. Codex CLI sends the same
+    # field for the same reason.
+    if cache_key and _responses_prompt_cache_key_enabled():
+        payload["prompt_cache_key"] = str(cache_key)[:128]
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
     return payload
+
+
+def _responses_prompt_cache_key_enabled() -> bool:
+    """Setting-gated so an operator can switch the field off if a proxy
+    rejects it (`chatgpt_prompt_cache_key`, default on)."""
+    try:
+        from src.settings import get_setting
+        return bool(get_setting("chatgpt_prompt_cache_key", True))
+    except Exception:
+        return True
 
 
 def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
@@ -2414,7 +2432,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, tool_choice_none=tool_choice_none,
-            target_url_hint=target_url,
+            target_url_hint=target_url, cache_key=session_id,
         )
     else:
         target_url = _normalize_openai_chat_url(url)

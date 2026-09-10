@@ -1314,6 +1314,89 @@ def _detect_admin_intent(messages: List[Dict]) -> bool:
     return False
 
 
+# Which admin tools each admin keyword actually points at. The blanket union
+# of _ADMIN_TOOLS shipped ~11 unrequested schemas (~1.3k tokens) on every
+# round of any turn that mentioned "task", "note", "doc", "chat", "settings"
+# — the 2026-09-10 logs show the same eleven in `schema_without_selection`
+# for 28 rounds straight. Match the keyword, add its tools, nothing else.
+_ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
+    "session": {"manage_session", "list_sessions", "create_session", "send_to_session"},
+    "sessions": {"manage_session", "list_sessions", "create_session", "send_to_session"},
+    "chat": {"manage_session", "list_sessions", "create_session", "send_to_session"},
+    "chats": {"manage_session", "list_sessions", "create_session", "send_to_session"},
+    "conversation": {"manage_session", "list_sessions"},
+    "conversations": {"manage_session", "list_sessions"},
+    "delete": {"manage_session", "manage_documents"},
+    "fork": {"manage_session"},
+    "truncate": {"manage_session"},
+    "archive": {"manage_session"},
+    "rename": {"manage_session", "manage_documents"},
+    "endpoint": {"manage_endpoints", "list_models"},
+    "endpoints": {"manage_endpoints", "list_models"},
+    "api key": {"manage_endpoints", "manage_tokens"},
+    "webhook": {"manage_webhooks"},
+    "webhooks": {"manage_webhooks"},
+    "token": {"manage_tokens"},
+    "tokens": {"manage_tokens"},
+    "mcp": {"manage_mcp"},
+    "server": {"manage_mcp", "manage_endpoints"},
+    "skill": {"manage_skills"},
+    "skills": {"manage_skills"},
+    "task": {"manage_tasks"},
+    "tasks": {"manage_tasks"},
+    "schedule": {"manage_tasks"},
+    "cron": {"manage_tasks"},
+    "setting": {"manage_settings"},
+    "settings": {"manage_settings"},
+    "preference": {"manage_settings"},
+    "configure": {"manage_settings", "manage_endpoints", "manage_mcp"},
+    "config": {"manage_settings", "manage_endpoints", "manage_mcp"},
+    "setup": {"manage_settings", "manage_endpoints", "manage_mcp"},
+    "manage": {"manage_settings", "manage_session", "manage_documents", "manage_tasks"},
+    "pipeline": {"pipeline"},
+    "second opinion": {"ask_teacher"},
+    "list models": {"list_models"},
+    "switch model": {"list_models", "manage_settings"},
+    "change model": {"list_models", "manage_settings"},
+    "theme": {"manage_settings"},
+    "create theme": {"manage_settings"},
+    "document": {"manage_documents"},
+    "documents": {"manage_documents"},
+    "doc": {"manage_documents"},
+    "docs": {"manage_documents"},
+    "library": {"manage_documents"},
+    "tidy": {"manage_documents"},
+    "note": {"manage_documents"},
+    "notes": {"manage_documents"},
+    "todo": {"manage_tasks"},
+    "todos": {"manage_tasks"},
+    "reminder": {"manage_tasks"},
+    "reminders": {"manage_tasks"},
+}
+
+
+def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
+    """Admin tools the last user message actually points at (see
+    _ADMIN_KEYWORD_TOOLS). Empty when no admin keyword matches."""
+    text = ""
+    for msg in reversed(messages):
+        if msg.get("role") == "user":
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+            text = str(content or "")
+            break
+    if not text or not _ADMIN_KEYWORD_RE.search(text):
+        return set()
+    found: Set[str] = set()
+    if re.search(r"\badmin\b", text, re.IGNORECASE):
+        return set(_ADMIN_TOOLS)
+    for keyword, tools in _ADMIN_KEYWORD_TOOLS.items():
+        if re.search(r"\b" + _admin_keyword_pattern(keyword) + r"\b", text, re.IGNORECASE):
+            found.update(tools)
+    return found
+
+
 def _extract_last_user_message(messages: List[Dict]) -> str:
     """Return the most recent user message as plain text."""
     for msg in reversed(messages):
@@ -1599,10 +1682,60 @@ _MISSING_TOOL_RE = re.compile(
 )
 
 
+def _harness_directive(text: str) -> Dict:
+    """A mid-turn instruction from the runtime, delivered at the TAIL of the
+    conversation.
+
+    llm_core consolidates every ``role: system`` message into the single
+    instructions/system block at the front of the request. A system message
+    appended mid-turn therefore rewrote the cached prompt prefix and
+    invalidated the cache for the tools block and the whole history behind it
+    — on exactly the rounds (loop-breaker, self-unblock, verifier, nudge)
+    where the conversation is longest. Delivering it as a clearly labelled
+    user-role message keeps the prefix byte-identical.
+    """
+    return {"role": "user", "content": "[Harness directive — from the runtime, not the user] " + str(text or "")}
+
+
 def _claims_missing_tools(text: str) -> bool:
     """True when a finished round blames a missing/unavailable tool."""
     text = str(text or "").replace("\u2019", "'").replace("\u2018", "'")
     return bool(text.strip() and _MISSING_TOOL_RE.search(text))
+
+
+def _targeted_rearm_tools(text: str, pool: Set[str], tool_idx=None) -> Set[str]:
+    """Tools the model most likely meant when it claimed one was missing.
+
+    Re-arming the whole registry (observed: 90 extra schemas, 14k schema
+    tokens on the next round, every cached prefix gone) is the blunt fallback.
+    First try to name the gap: tool names the round mentioned verbatim, the
+    keyword intents its text triggers (a "push"/"pull request" claim surfaces
+    manage_agent_worktree), and the index's nearest tools for that text.
+    Returns a subset of ``pool``; empty means "nothing specific — widen fully".
+    """
+    text = str(text or "")
+    if not text.strip() or not pool:
+        return set()
+    lowered = text.lower()
+    found: Set[str] = set()
+    for name in pool:
+        if len(name) >= 4 and re.search(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])", lowered):
+            found.add(name)
+    try:
+        from src.tool_index import ToolIndex
+        for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
+            if any(re.search(rf"\b{re.escape(kw)}\b", lowered) for kw in keywords):
+                found.update(tools)
+        if getattr(ToolIndex, "_WEB_RE", None) is not None and ToolIndex._WEB_RE.search(lowered):
+            found.update({"web_search", "web_fetch"})
+    except Exception:
+        pass
+    if tool_idx is not None:
+        try:
+            found.update(tool_idx.retrieve(text[:2000], k=12) or [])
+        except Exception:
+            pass
+    return {t for t in found if t in pool}
 
 
 def _explicitly_named_skills(text: str, skills: List[Dict]) -> List[Dict]:
@@ -3459,12 +3592,23 @@ def _append_tool_results(
     # opaque payload, so keep a sliding window of the most recent rounds instead
     # of letting it grow for a 30-round run. Runs after the append so the round
     # just added counts toward the window.
+    #
+    # Prune in BATCHES. Every pop edits an assistant turn in the middle of the
+    # input the API has already cached (the reasoning items are emitted ahead
+    # of that turn's text/calls), so popping one per round moved the cache
+    # boundary every round and left only the pre-conversation prefix cached
+    # (observed: cached=16896 flat across 28 rounds). Let the window overrun
+    # by a slack of the same size, then cut back to the window in one go, so
+    # the prefix is invalidated once per ~window rounds instead of every round.
     _reasoning_turns = [
         _m for _m in messages
         if _m.get("role") == "assistant" and _m.get("reasoning_items")
     ]
-    for _m in _reasoning_turns[:-max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))]:
-        _m.pop("reasoning_items", None)
+    _replay_window = max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))
+    _replay_slack = max(4, _replay_window)
+    if len(_reasoning_turns) > _replay_window + _replay_slack:
+        for _m in _reasoning_turns[:-_replay_window]:
+            _m.pop("reasoning_items", None)
 
 
 def _compute_final_metrics(
@@ -3753,6 +3897,7 @@ def _tool_schemas_for_round(
     disabled_tools: Set[str],
     ody_qwen_finetune_model: bool,
     last_user: str,
+    admin_tools: Optional[Set[str]] = None,
 ) -> List[Dict]:
     """Return the exact schema list sent for one model round.
 
@@ -3766,7 +3911,10 @@ def _tool_schemas_for_round(
         if relevant_tools:
             schema_names = set(relevant_tools)
             if needs_admin:
-                schema_names |= _ADMIN_TOOLS
+                # Only the admin tools the request's keywords point at; the
+                # whole _ADMIN_TOOLS set is the fallback when the caller has
+                # no keyword breakdown.
+                schema_names |= set(admin_tools) if admin_tools is not None else _ADMIN_TOOLS
             base_schemas = [
                 schema for schema in FUNCTION_TOOL_SCHEMAS
                 if schema.get("function", {}).get("name") in schema_names
@@ -3866,6 +4014,7 @@ async def stream_agent_loop(
 
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
+    _admin_tools = _detect_admin_tools(messages) if _needs_admin else set()
     _last_user = _extract_last_user_message(messages)
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     if _ody_qwen_finetune_model:
@@ -4062,6 +4211,7 @@ async def stream_agent_loop(
     _tool_selection_source = "caller" if relevant_tools else "unresolved"
     _retained_tool_names: set[str] = set()
     _suppressed_retained_tools: set[str] = set()
+    _low_signal_hints_only = False
     _t1 = time.time()
     if _relevant_tools:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
@@ -4088,10 +4238,15 @@ async def stream_agent_loop(
             _tool_selection_source = "low_signal_workspace"
             logger.info("[tool-rag] Low-signal but workspace active; including read-only file tools")
         else:
-            # Don't short-circuit: fall through to RAG retrieval below.
-            # Non-English queries are flagged low_signal by the English-only
-            # intent classifier, but fastembed retrieval works across languages.
-            logger.info("[tool-rag] Low-signal query; will run RAG retrieval")
+            # Fall through to selection below, but without embedding
+            # neighbours: the index has no similarity cutoff, so a chat turn
+            # like "i like Umni" was still handed its eight nearest tools
+            # (browser_drag, scan_email_unsubscribes, read_app_logs...) at
+            # ~1.2k schema tokens a turn and a fresh tools prefix every turn.
+            # Keyword/structural hints, domain seeding and retained tools
+            # still apply, and the targeted self-unblock covers a miss.
+            _low_signal_hints_only = True
+            logger.info("[tool-rag] Low-signal query; keyword hints only (no embedding retrieval)")
     if not guide_only and not _relevant_tools:
         try:
             from src.tool_index import get_tool_index, ALWAYS_AVAILABLE
@@ -4130,10 +4285,13 @@ async def stream_agent_loop(
                 if _retrieval_query:
                     try:
                         _relevant_tools = await asyncio.wait_for(
-                            asyncio.to_thread(tool_idx.get_tools_for_query, _retrieval_query, 8),
+                            asyncio.to_thread(
+                                tool_idx.get_tools_for_query, _retrieval_query, 8,
+                                None, not _low_signal_hints_only,
+                            ),
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
-                        _tool_selection_source = "rag"
+                        _tool_selection_source = "hints" if _low_signal_hints_only else "rag"
                         logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
                     except asyncio.TimeoutError:
                         # Leave _relevant_tools unset so the keyword fallback
@@ -4718,6 +4876,7 @@ async def stream_agent_loop(
         is_api_model=_is_api_model,
         relevant_tools=_relevant_tools,
         needs_admin=_needs_admin,
+        admin_tools=_admin_tools,
         mcp_schemas=mcp_schemas,
         disabled_tools=disabled_tools,
         ody_qwen_finetune_model=_ody_qwen_finetune_model,
@@ -4887,6 +5046,9 @@ async def stream_agent_loop(
     # after the model ended a turn claiming it had no tool for the job. Once
     # is enough — after a full re-arm there is nothing left to widen to.
     _toolset_rearm_count = 0
+    # A targeted widening (just the tools the claim points at) is free; the
+    # full-registry widening counts against _MAX_TOOLSET_REARMS.
+    _targeted_rearm_done = False
     _MAX_TOOLSET_REARMS = 1
 
     # "I said I would, then didn't" detector. The pattern that breaks debug
@@ -4967,6 +5129,7 @@ async def stream_agent_loop(
             is_api_model=_is_api_model,
             relevant_tools=_relevant_tools,
             needs_admin=_needs_admin,
+            admin_tools=_admin_tools,
             mcp_schemas=mcp_schemas,
             disabled_tools=disabled_tools,
             ody_qwen_finetune_model=_ody_qwen_finetune_model,
@@ -5345,13 +5508,10 @@ async def stream_agent_loop(
                     native_tool_calls = _filtered_converted_calls
                 if not tool_blocks:
                     _force_answer = True
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "Answer the user's identity/personal-memory question from the compact "
-                            "saved memory facts already provided. Do not call manage_memory or any tool."
-                        ),
-                    })
+                    messages.append(_harness_directive(
+                        "Answer the user's identity/personal-memory question from the compact "
+                        "saved memory facts already provided. Do not call manage_memory or any tool."
+                    ))
                     yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                     continue
 
@@ -5472,15 +5632,12 @@ async def stream_agent_loop(
                     _note = "\n\n_Double-checked the work and found something to fix._\n\n"
                     yield f'data: {json.dumps({"delta": _note})}\n\n'
                     full_response += _note
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "An independent verifier reviewed your work against the "
-                            "original request and found issues that must be fixed before "
-                            "this is actually done:\n- " + "\n- ".join(_vfail) +
-                            "\n\nFix these now using tools, then finish."
-                        ),
-                    })
+                    messages.append(_harness_directive(
+                        "An independent verifier reviewed your work against the "
+                        "original request and found issues that must be fixed before "
+                        "this is actually done:\n- " + "\n- ".join(_vfail) +
+                        "\n\nFix these now using tools, then finish."
+                    ))
                     # Require fresh effectful work before verifying again, so we
                     # never re-verify an unchanged state in a loop.
                     _effectful_used = False
@@ -5522,29 +5679,49 @@ async def stream_agent_loop(
                 if not _needs_admin:
                     _rearm_pool -= _ADMIN_TOOLS
                 _rearm_pool = {t for t in _rearm_pool if t and t not in disabled_tools}
-                _rearm_new = _rearm_pool - _relevant_tools
+                # Targeted first: the tools the claim actually points at. Only
+                # when nothing specific can be named (or a targeted widening
+                # already happened and the model still claims) fall back to
+                # the whole registry. The full re-arm costs ~14k schema tokens
+                # per remaining round and invalidates the cached prefix.
+                _rearm_scope = "full"
+                _rearm_new: Set[str] = set()
+                if not _targeted_rearm_done:
+                    _targeted = _targeted_rearm_tools(
+                        _blocked_text, _rearm_pool, tool_idx=locals().get("tool_idx")
+                    ) - _relevant_tools
+                    if _targeted:
+                        _rearm_new, _rearm_scope = _targeted, "targeted"
+                        _targeted_rearm_done = True
+                if not _rearm_new:
+                    _rearm_new = _rearm_pool - _relevant_tools
                 if _rearm_new:
-                    _toolset_rearm_count += 1
+                    if _rearm_scope == "full":
+                        _toolset_rearm_count += 1
                     _relevant_tools |= _rearm_new
                     logger.warning(
-                        "[agent] missing-tool self-unblock on round %d: re-armed %d tool(s) %s",
-                        round_num, len(_rearm_new), sorted(_rearm_new)[:25],
+                        "[agent] missing-tool self-unblock on round %d (%s): re-armed %d tool(s) %s",
+                        round_num, _rearm_scope, len(_rearm_new), sorted(_rearm_new)[:25],
                     )
-                    _note = "\n\n_That toolset was too narrow — retrying with the full set._\n\n"
+                    _note = (
+                        "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
+                        if _rearm_scope == "targeted"
+                        else "\n\n_That toolset was too narrow — retrying with the full set._\n\n"
+                    )
                     yield f'data: {json.dumps({"delta": _note})}\n\n'
                     full_response += _note
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "Correction: the tool list you were shown was filtered too "
-                            "narrowly, which is why the tool you wanted was missing. It has "
-                            "been widened — every tool you are permitted to use this turn is "
-                            "now in your schema list. Re-read it, then DO the user's request "
-                            "with real tool calls. Do not tell the user you lack tools again. "
-                            "If something is still genuinely unavailable after checking, name "
-                            "the exact tool and say why, or call `ask_user`."
-                        ),
-                    })
+                    messages.append(_harness_directive(
+                        "Correction: the tool list you were shown was filtered too "
+                        "narrowly, which is why the tool you wanted was missing. It has "
+                        "been widened — "
+                        + ("these tools were added: " + ", ".join(sorted(_rearm_new)[:20]) + ". "
+                           if _rearm_scope == "targeted"
+                           else "every tool you are permitted to use this turn is now in your schema list. ")
+                        + "Re-read it, then DO the user's request "
+                        "with real tool calls. Do not tell the user you lack tools again. "
+                        "If something is still genuinely unavailable after checking, name "
+                        "the exact tool and say why, or call `ask_user`."
+                    ))
                     yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                     continue
                 logger.info(
@@ -5587,19 +5764,16 @@ async def stream_agent_loop(
                         "session_id from the serve/list result. Never answer with "
                         "\"check logs\" when those tools are available."
                     )
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        f"You just wrote: \"{_matched_phrase}\" — but ended the "
-                        "turn without making the actual tool call. The user can "
-                        "see you announced the action but didn't run it, which "
-                        "is the most frustrating thing you can do. "
-                        "DO IT NOW: emit the actual function call this turn. "
-                        f"{_cookbook_log_hint}"
-                        "If you decided not to do it after all, say so plainly in "
-                        "one sentence instead of restating the plan."
-                    ),
-                })
+                messages.append(_harness_directive(
+                    f"You just wrote: \"{_matched_phrase}\" — but ended the "
+                    "turn without making the actual tool call. The user can "
+                    "see you announced the action but didn't run it, which "
+                    "is the most frustrating thing you can do. "
+                    "DO IT NOW: emit the actual function call this turn. "
+                    f"{_cookbook_log_hint}"
+                    "If you decided not to do it after all, say so plainly in "
+                    "one sentence instead of restating the plan."
+                ))
                 # Visible signal in the stream so the user knows we caught it.
                 yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
                 continue
@@ -5706,19 +5880,16 @@ async def stream_agent_loop(
             _off_note = (f" ({', '.join(_off)} is currently disabled — say so if "
                          f"you needed it.)" if _off else "")
             _force_answer = True
-            messages.append({
-                "role": "system",
-                "content": (
-                    ("You've used your whole tool-call budget for this turn."
-                     if (_over_budget and not _runaway and _stuck_rounds < 4)
-                     else "You're repeating tool calls without converging.")
-                    + " STOP calling "
-                    "tools and end the turn one of two ways: (a) write your best "
-                    "final answer NOW from the information already gathered, or "
-                    "(b) if you're genuinely blocked, say plainly what's blocking "
-                    "you in a sentence or two." + _off_note
-                ),
-            })
+            messages.append(_harness_directive(
+                ("You've used your whole tool-call budget for this turn."
+                 if (_over_budget and not _runaway and _stuck_rounds < 4)
+                 else "You're repeating tool calls without converging.")
+                + " STOP calling "
+                "tools and end the turn one of two ways: (a) write your best "
+                "final answer NOW from the information already gathered, or "
+                "(b) if you're genuinely blocked, say plainly what's blocking "
+                "you in a sentence or two." + _off_note
+            ))
             full_response += "\n\n"
             yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
             continue

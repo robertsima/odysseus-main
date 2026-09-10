@@ -88,6 +88,40 @@ judgment.
 - In chat, a tool timeline folds after 12 calls (`chat_tool_fold_after`) and
   shows a summary bar (counts, failures, tools used, expand/collapse all).
 
+## Known efficiency findings (2026-09-10, evening logs)
+
+Verified against the code; fixes are in `specs/prompt-prefix-stability.md`,
+`specs/tool-schema-hygiene.md` and `specs/memory-vault-email-hygiene.md`.
+
+- Prompt cache on the ChatGPT-subscription Responses path stayed flat at the
+  pre-conversation prefix for all 28 rounds of a coding turn (`cached=16896`)
+  and was zero on every single-round chat turn. Causes: the reasoning-replay
+  window edited already-sent assistant turns every round; mid-turn runtime
+  notes were appended as `system` and hoisted into the instructions prefix;
+  no `prompt_cache_key`; a fresh tool set (and therefore a fresh system
+  prompt) every turn.
+- Eleven admin tool schemas were sent on every round of any turn that
+  mentioned "task", "note", "doc", "chat" or "settings", selected by nobody.
+  One "missing tool" claim re-armed 90 tools (14k schema tokens next round).
+- Low-signal chat turns still received their eight nearest tools from the
+  index (no similarity cutoff): `browser_drag` and `scan_email_unsubscribes`
+  for "i like Umni".
+- Every turn with retrieval appended the user's request a second time because
+  the grounding helper mistook the appended untrusted-context block for the
+  latest user message.
+- The agent ran `claude -p` from `bash`, bypassing the delegation allowlist,
+  restricted mode and repo lock; the shell tool now redirects it.
+- Memory audit dropped and re-embedded the whole vector collection after a
+  brainstorm produced three "memories" (one being "User prefers Umni" from
+  the regex fallback); the audit counter was shared across owners; the
+  Memory Tidy task saved without updating the index.
+- Calendar extraction created an event from a promotional email; it now
+  skips list/bulk/no-reply senders and promotional subjects.
+- Vault reads (`search_documents`) are used as designed. Outcome recording
+  into `AI Mind` existed only for the local Pi worker; the Claude Code
+  delegation skill now carries the same policy. Note that `vault_search` /
+  `vault_get` are the Bitwarden password-vault tools, not the Markdown vault.
+
 ## Known reliability findings (2026-09-10)
 
 - A "test Claude" request was routed to `list_models`/`chat_with_model`,
@@ -107,9 +141,10 @@ judgment.
 
 ## Known reliability findings (2026-09-09)
 
-- Startup logged `ODYSSEUS_PERSONAL_DIRS: could not resolve an owner from
-  auth.json; skipping`. Personal directories can therefore be mounted but not
-  indexed until the admin account exists and the service is restarted.
+- (Resolved) Startup used to log `ODYSSEUS_PERSONAL_DIRS: could not resolve
+  an owner from auth.json; skipping`. Declared directories are now
+  application-scoped (`src/personal_dirs_config.py`) and index without an
+  authenticated owner at startup.
 - The configured HTTP embedding lane was unavailable, so the process fell
   back to local FastEmbed. This is usable but should be reported as degraded
   retrieval rather than treated as equivalent provider health.

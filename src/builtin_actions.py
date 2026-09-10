@@ -84,6 +84,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 
         manager = MemoryManager(DATA_DIR)
         all_memories = manager.load_all()
+        _ids_before = {str(m.get("id")) for m in all_memories if m.get("id")}
 
         _owner_clean = (owner or "").strip()
         text_limit = 2000
@@ -339,6 +340,20 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 
         if total_removed or total_cleaned:
             manager.save(all_memories)
+            # The JSON store is the source of truth; the vector index must
+            # follow or deleted memories keep surfacing in retrieval.
+            try:
+                import src.ai_interaction as _ai
+                _vec = getattr(_ai, "_memory_vector", None)
+                if _vec is not None and getattr(_vec, "healthy", False):
+                    _ids_after = {str(m.get("id")) for m in all_memories if m.get("id")}
+                    for _gone in _ids_before - _ids_after:
+                        _vec.remove(_gone)
+                    for m in all_memories:
+                        if m.get("id") and m.get("text"):
+                            _vec.add(str(m["id"]), str(m["text"]))
+            except Exception:
+                logger.debug("memory tidy: vector index sync skipped", exc_info=True)
             if ai_used:
                 reasons = ai_reasons[:3]
                 reason_text = f": {'; '.join(reasons)}" if reasons else ""
