@@ -269,3 +269,52 @@ def test_worktree_status_names_the_checkout_it_manages():
 
     src = inspect.getsource(service.status)
     assert '"source_repo": cfg.source_repo' in src
+
+
+# ── get_workspace answers "where is the code?" in one round ──
+
+@pytest.fixture
+def checkout_roots(tmp_path, monkeypatch):
+    """One checkout and one linked worktree under the approved roots."""
+    from src.agent_tools import claude_code_tools as cct
+
+    dev, wt = tmp_path / "development", tmp_path / "agent_worktrees"
+    main = dev / "odysseus-main"
+    (main / ".git").mkdir(parents=True)
+    (main / ".git" / "HEAD").write_text("ref: refs/heads/dev\n", encoding="utf-8")
+    gitdir = main / ".git" / "worktrees" / "feature"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/agent/odysseus/feature\n", encoding="utf-8")
+    linked = wt / "feature"
+    linked.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    monkeypatch.setattr(cct, "DEFAULT_ROOTS", (str(dev), str(wt)))
+    return {"main": main, "linked": linked}
+
+
+def test_get_workspace_lists_the_known_checkouts(checkout_roots, monkeypatch):
+    """Two or three rounds per coding turn went to `ls /app`, `find -name
+    .git` and `git -C /app status` (exit 128) before any work started."""
+    import asyncio
+
+    from src.agent_tools.filesystem_tools import GetWorkspaceTool
+
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: None)
+    out = asyncio.run(GetWorkspaceTool().execute("", {}))
+    assert out["exit_code"] == 0
+    assert str(checkout_roots["main"]) in out["output"]
+    assert "(dev)" in out["output"]
+    assert str(checkout_roots["linked"]) in out["output"]
+    assert "/app) is NOT a checkout" in out["output"]
+
+
+def test_get_workspace_still_leads_with_the_active_workspace(checkout_roots, monkeypatch):
+    import asyncio
+
+    from src.agent_tools.filesystem_tools import GetWorkspaceTool
+
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: "/work/here")
+    out = asyncio.run(GetWorkspaceTool().execute("", {}))
+    assert out["output"].startswith("/work/here")
+    assert "confined to this folder" in out["output"]
+    assert str(checkout_roots["main"]) in out["output"]
