@@ -1245,6 +1245,23 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_claude_code",
+            "description": "Delegate a bounded coding task to the installed Claude Code CLI in an approved Git worktree. Claude may inspect, edit, test, and commit, but cannot push or use arbitrary shell commands.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree."},
+                    "prompt": {"type": "string", "description": "Task instructions for Claude Code."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrow Claude permission list."},
+                    "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds."}
+                },
+                "required": ["repository", "prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "edit_image",
             "description": "Edit a gallery image: upscale, remove background, inpaint, or harmonize.",
             "parameters": {

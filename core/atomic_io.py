@@ -18,7 +18,7 @@ import os
 from typing import Any, Optional
 
 
-def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> None:
+def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None, mode: Optional[int] = None) -> None:
     """Atomically persist `data` as JSON at `path`.
 
     The temp file uses the live PID as a suffix so two processes saving the
@@ -27,6 +27,8 @@ def atomic_write_json(path: str, data: Any, *, indent: Optional[int] = None) -> 
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
+        if mode is not None:
+            os.fchmod(f.fileno(), mode)
         json.dump(data, f, indent=indent)
         f.flush()
         os.fsync(f.fileno())

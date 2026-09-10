@@ -27,12 +27,28 @@ ALLOWED_SCOPES = {
     "memory:write",
     "cookbook:read",
     "cookbook:launch",
+    # Odysseus -> Claude Code delegation (POST/GET/cancel on
+    # /api/claude-code/tasks). Separate from the codex:* scopes above, which
+    # govern the opposite direction (Claude Code calling into Odysseus).
+    "claude_code:read",
+    "claude_code:write",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],
     "codex_todos": ["todos:read", "todos:write"],
     "codex_documents": ["documents:read", "documents:write"],
     "codex_email_drafts": ["email:read", "email:draft", "documents:read", "documents:write"],
+    # A Claude Code session calling BACK into Odysseus through /api/codex/*
+    # (see integrations/claude/). Bundles the scopes a coding-assistant agent
+    # typically needs: its own todos, its own documents, and memory.
+    "claude_agent": [
+        "todos:read", "todos:write",
+        "documents:read", "documents:write",
+        "memory:read", "memory:write",
+    ],
+    # A caller (automation, CI, another Odysseus admin tool) allowed to kick
+    # off/poll/cancel bounded Claude Code delegation tasks against approved repos.
+    "claude_code_tasks": ["claude_code:write"],
 }
 
 
@@ -69,6 +85,7 @@ def _normalize_scopes(scopes: str | list[str] | None = None, profile: str | None
     ensure_before("memory:write", "memory:read")
     ensure_before("email:draft", "email:read")
     ensure_before("cookbook:launch", "cookbook:read")
+    ensure_before("claude_code:write", "claude_code:read")
 
     return normalized or [DEFAULT_SCOPES]
 

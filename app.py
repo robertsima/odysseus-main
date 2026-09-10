@@ -857,6 +857,11 @@ app.include_router(setup_codex_routes(
 ))
 app.include_router(setup_claude_routes())
 
+# Odysseus -> Claude Code delegation tasks (the other direction from the
+# codex/claude routes above, which are Claude Code -> Odysseus).
+from routes.claude_code_routes import setup_claude_code_routes
+app.include_router(setup_claude_code_routes())
+
 from routes.vault.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
 
