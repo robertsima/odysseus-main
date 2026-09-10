@@ -467,14 +467,29 @@ async def status_report() -> dict:
     auth = await auth_status(binary) if info["available"] else {"checked": False, "error": info["error"]}
     callback = _callback_config()
     callback_status = {"enabled": callback["enabled"], "url": callback["url"]}
+    token_problem = ""
     if callback["token_file"]:
         path = Path(callback["token_file"]).expanduser()
         callback_status["token_file"] = str(path)
         try:
-            mode = path.stat().st_mode
-            callback_status["token_file_ok"] = path.is_file() and not (mode & 0o077)
-        except OSError:
+            st = path.stat()
+        except OSError as exc:
             callback_status["token_file_ok"] = False
+            token_problem = f"it cannot be read ({exc.strerror or exc})"
+        else:
+            readable = os.access(path, os.R_OK)
+            if not path.is_file():
+                token_problem = "it is not a regular file (a directory is created when the path did not exist at container start)"
+            elif st.st_mode & 0o077:
+                token_problem = f"its mode is {oct(st.st_mode & 0o777)}; it must be 0600"
+            elif not readable:
+                # Typically created with `docker exec` (root) while the app
+                # runs as PUID/PGID — the classic ZimaOS case.
+                token_problem = (f"it is owned by uid {st.st_uid} but Odysseus runs as uid {os.getuid()}; "
+                                 f"chown it to {os.getuid()}:{os.getgid()}")
+            callback_status["token_file_ok"] = not token_problem
+            callback_status["token_file_owner"] = st.st_uid
+            callback_status["process_uid"] = os.getuid()
     default_repo, how = default_repository()
     runner = get_task_runner()
     _process_limit()  # refresh the gate size from settings before reporting it
@@ -494,13 +509,14 @@ async def status_report() -> dict:
     if default_repo is None:
         hints.append(how)
     if callback["token_file"] and not callback_status.get("token_file_ok"):
-        # _claude_environment() refuses to run with a loose token, so this
-        # blocks every delegation, not just the callback.
+        # _claude_environment() refuses to run with a loose or unreadable
+        # token, so this blocks every delegation, not just the callback.
         ready = False
         hints.append(
-            "The callback token file (Settings > Tools > Claude Code > Callback token file / "
-            "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE) must be a regular file readable only by its owner "
-            "(chmod 600). Fix it, or clear the callback URL and token file to delegate without the callback."
+            f"The callback token file {callback_status.get('token_file')} blocks delegation: {token_problem}. "
+            "It must be a regular file, mode 0600, owned by the Odysseus process user "
+            "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
+            "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
     return {
         "ready": ready,

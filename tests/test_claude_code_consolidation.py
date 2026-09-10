@@ -492,7 +492,23 @@ async def test_status_flags_bad_callback_token_file(roots, settings, monkeypatch
     out = await cct.status_report()
     assert out["ready"] is False
     assert out["callback"]["token_file_ok"] is False
-    assert any("chmod 600" in h for h in out["hints"])
+    assert any("mode is 0o644" in h and "0600" in h for h in out["hints"])
     token.chmod(0o600)
     out = await cct.status_report()
     assert out["ready"] is True and out["callback"]["token_file_ok"] is True
+
+    # A root-owned 0600 file (created with `docker exec`) is unreadable by the
+    # PUID the app runs as: say "chown", not "chmod".
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(cct.os, "access", lambda p, mode: False)
+        out = await cct.status_report()
+    assert out["ready"] is False
+    assert any("owned by uid" in h and "chown" in h for h in out["hints"])
+
+    # A directory at the path (Docker created it because the file did not
+    # exist at container start) is named as such.
+    token.unlink()
+    token.mkdir()
+    out = await cct.status_report()
+    assert out["ready"] is False
+    assert any("not a regular file" in h for h in out["hints"])
