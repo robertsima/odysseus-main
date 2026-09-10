@@ -27,6 +27,22 @@ _TEACHER_SYSTEM_PROMPT = (
 )
 
 
+def _claude_code_hint(spec: str) -> str:
+    """Point a 'claude' request at the right tool.
+
+    Claude Code is integrated as a coding agent (a local CLI subprocess run by
+    ``delegate_to_claude_code``), not as a chat endpoint, and it authenticates
+    with the operator's own Claude login rather than an API key held by
+    Odysseus. Asking for it through chat_with_model/list_models always fails,
+    so say where it actually lives instead of just 'not found'.
+    """
+    if "claude" not in (spec or "").lower():
+        return ""
+    return (" Note: Claude Code is not a chat model here. It is the coding agent reached with "
+            "delegate_to_claude_code (action=status to check install/sign-in and approved repositories, "
+            "then action=run or start with a repository and prompt).")
+
+
 async def chat_with_model(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Send a message to a specific model and return its response.
 
@@ -49,7 +65,7 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
     try:
         url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError as e:
-        return {"error": str(e)}
+        return {"error": str(e) + _claude_code_hint(model_spec)}
 
     try:
         response = await llm_call_async(
@@ -179,7 +195,8 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
                     total_models += 1
 
         if not result_lines:
-            return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."}
+            return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."
+                    + _claude_code_hint(keyword or "")}
 
         header = f"Available models ({total_models} total):"
         return {"results": header + "\n".join(result_lines)}

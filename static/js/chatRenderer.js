@@ -10,6 +10,7 @@ import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { matchModelKey } from './model/matchKey.js';
+import agentThread from './agentThread.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
 const REPORT_ICON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><line x1="10" y1="9" x2="8" y2="9"/></svg>';
@@ -2461,6 +2462,7 @@ export function addMessage(role, content, modelName, metadata) {
           // Check if next round has text — extend line down to connect
           const nextTxt = (roundTexts[r + 1] || '').trim();
           if (nextTxt) threadWrap.classList.add('has-bottom');
+          agentThread.refreshThread(threadWrap);
           lastWrap = threadWrap;
 
           for (const ev of roundTools) {
@@ -2523,9 +2525,20 @@ export function addMessage(role, content, modelName, metadata) {
     const isCompacted = metadata?.compacted;
     const replyModels = replyModelPair(modelName, metadata);
     const resolvedModel = replyModels.actualModel || replyModels.requestedModel;
-    var _roleText = role === 'user' ? 'You' : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(replyModels.requestedModel, resolvedModel);
+    // Messages exchanged between agents (send_to_session) carry
+    // source='agent'. Label them by the sending chat instead of "You" so a
+    // reader can follow who said what, and link back to that chat.
+    const isAgentMsg = metadata?.source === 'agent';
+    const agentFrom = isAgentMsg ? String(metadata.from_session_name || metadata.from_session || 'another chat') : '';
+    var _roleText = role === 'user'
+      ? (isAgentMsg ? 'Agent · ' + agentFrom : 'You')
+      : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(replyModels.requestedModel, resolvedModel);
     if (role === 'assistant' && (metadata?.research || metadata?.research_clarification)) {
       _roleText += ' (Research)';
+    }
+    if (isAgentMsg) {
+      wrap.classList.add(role === 'user' ? 'msg-agent-inbound' : 'msg-agent-reply');
+      wrap.dataset.fromSession = String(metadata.from_session || '');
     }
     if (metadata?.group_model && role !== 'user') {
       _roleText = metadata.group_model;
@@ -2533,6 +2546,14 @@ export function addMessage(role, content, modelName, metadata) {
       _roleText = metadata.character_name;
     }
     r.textContent = _roleText;
+    if (isAgentMsg) {
+      const badge = document.createElement('a');
+      badge.className = 'msg-agent-badge';
+      badge.textContent = role === 'user' ? 'from another agent' : 'reply to ' + agentFrom;
+      badge.title = 'Sent by the agent in chat "' + agentFrom + '" via send_to_session';
+      if (metadata.from_session) badge.href = '#session-' + encodeURIComponent(String(metadata.from_session));
+      r.appendChild(badge);
+    }
     if (role !== 'user') {
       if (!isSlash && !isCompacted && replyModels.requestedModel && resolvedModel && !sameModelName(replyModels.requestedModel, resolvedModel)) {
         r.title = replyModels.requestedModel + ' -> ' + resolvedModel;

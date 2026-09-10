@@ -9905,6 +9905,114 @@ body.fullwidth-chat .chat-history {
 .agent-thread-node.open .agent-thread-content {
   display: block;
 }
+/* Tool-heavy turns: cards off-screen skip layout/paint (a 500-call turn
+   stays scrollable), the middle of a long timeline folds behind a gap row,
+   and a summary bar at the top says what happened. */
+.agent-thread-node:not(.running):not(.open) {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 30px;
+}
+.agent-thread.folded > .agent-thread-node.agent-thread-hidden {
+  display: none;
+}
+.agent-thread-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  font-size: 0.78em;
+  color: color-mix(in srgb, var(--fg) 60%, transparent);
+  padding: 2px 0 6px;
+  user-select: none;
+}
+.agent-thread-summary .ats-count {
+  font-weight: 600;
+  color: color-mix(in srgb, var(--fg) 82%, transparent);
+}
+.agent-thread-summary .ats-sep { opacity: 0.5; }
+.agent-thread-summary .ats-running { color: var(--red); }
+.agent-thread-summary .ats-failed { color: var(--color-error, var(--red)); font-weight: 600; }
+.agent-thread-summary .ats-tools { font-family: var(--mono, ui-monospace, monospace); font-size: 0.95em; }
+.agent-thread-summary .ats-actions {
+  margin-left: auto;
+  display: flex;
+  gap: 4px;
+}
+.ats-btn {
+  font: inherit;
+  font-size: 0.95em;
+  line-height: 1.3;
+  background: color-mix(in srgb, var(--fg) 6%, transparent);
+  border: 1px solid var(--border);
+  color: inherit;
+  border-radius: 6px;
+  padding: 1px 7px;
+  cursor: pointer;
+}
+.ats-btn:hover {
+  color: var(--fg);
+  background: color-mix(in srgb, var(--fg) 11%, transparent);
+}
+.agent-thread-gap {
+  position: relative;
+  font-size: 0.78em;
+  font-style: italic;
+  color: color-mix(in srgb, var(--fg) 55%, transparent);
+  cursor: pointer;
+  padding: 4px 0;
+}
+.agent-thread-gap::before {
+  content: '';
+  position: absolute;
+  left: -19px;
+  top: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  border: 1px dashed color-mix(in srgb, var(--red) 60%, transparent);
+}
+.agent-thread-gap:hover, .agent-thread-gap:focus-visible { color: var(--fg); outline: none; }
+
+/* Messages exchanged between agents (send_to_session): tagged so a reader
+   can tell the other agent's lines from their own. */
+.msg.msg-agent-inbound {
+  border-left: 3px solid color-mix(in srgb, var(--red) 55%, transparent);
+}
+.msg-agent-badge {
+  display: inline-block;
+  font-size: 0.72em;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 9px;
+  margin-left: 6px;
+  vertical-align: middle;
+  background: color-mix(in srgb, var(--red) 12%, transparent);
+  color: color-mix(in srgb, var(--fg) 78%, transparent);
+  text-decoration: none;
+}
+.msg-agent-badge[href]:hover { text-decoration: underline; color: var(--fg); }
+
+/* Settings > Tools > Claude Code delegation */
+.cc-status { font-size: 12px; line-height: 1.5; }
+.cc-status-line { margin: 2px 0; }
+.cc-status .cc-repos { margin: 2px 0 0 14px; padding: 0; }
+.cc-status .cc-hint { color: color-mix(in srgb, var(--red) 80%, var(--fg)); }
+.cc-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  vertical-align: middle;
+}
+.cc-pill.ok { background: color-mix(in srgb, #3c9a5f 18%, transparent); }
+.cc-pill.bad { background: color-mix(in srgb, var(--red) 18%, transparent); }
+.cc-pill.run { background: color-mix(in srgb, #c08a3e 22%, transparent); }
+.cc-tasks .cc-task { font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--border); }
+.cc-tasks .cc-task:last-child { border-bottom: none; }
 .agent-thread-cmd {
   background: color-mix(in srgb, var(--fg) 5%, transparent);
   border: 1px solid var(--border);

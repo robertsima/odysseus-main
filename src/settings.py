@@ -105,8 +105,30 @@ DEFAULT_SETTINGS = {
     # unbounded model/API bill. Other values are bounded to [60, 86400].
     # Tune via Settings or by editing data/settings.json.
     "research_run_timeout_seconds": 1800,
-    "agent_max_tool_calls": 0,
-    "agent_max_rounds": 20,  # per-message agent step cap (clamped 1..200)
+    # Tool calls one agent turn may make before the loop-breaker forces a
+    # final answer. 0 = no ceiling. Raised from an implicit 60 to 500 so a
+    # long build→test→fix or multi-repository delegation turn is not cut off;
+    # the repeat/stall detectors still catch a genuinely stuck loop.
+    "agent_max_tool_calls": 500,
+    "agent_max_rounds": 100,  # per-message agent step cap (clamped 1..500)
+    # Chat UI: fold an agent tool timeline after this many calls in one turn
+    # (the first and last few stay visible; a summary bar expands the rest).
+    # 0 = never fold.
+    "chat_tool_fold_after": 12,
+    # Claude Code delegation (delegate_to_claude_code / /api/claude-code/*).
+    # Empty string / empty list / 0 means "use the CLAUDE_CODE_* environment
+    # variable or its built-in default"; a value set here wins over the
+    # environment so the operator can change it from Settings > Tools without
+    # restarting the container. See src/agent_tools/claude_code_tools.py.
+    "claude_code_binary": "",
+    "claude_code_home": "",
+    "claude_code_repository_roots": [],
+    "claude_code_default_repository": "",
+    "claude_code_max_concurrent_tasks": 0,
+    "claude_code_model": "",
+    "claude_code_restricted": True,
+    "claude_code_odysseus_url": "",
+    "claude_code_odysseus_token_file": "",
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value

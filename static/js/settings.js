@@ -1675,6 +1675,7 @@ async function initResearchSearchSettings() {
 async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
+  var foldInput = el('set-agentFoldAfter');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
@@ -1682,8 +1683,9 @@ async function initAgentSettings() {
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
     var settings = await res.json();
-    if (settings.agent_max_tool_calls) toolsInput.value = settings.agent_max_tool_calls;
+    if (settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
+    if (foldInput && settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -1696,20 +1698,24 @@ async function initAgentSettings() {
   }
 
   async function save() {
-    var tools = clampInt(toolsInput.value, 0, 1000, 0);
-    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 200, 20) : null;
+    var tools = clampInt(toolsInput.value, 0, 2000, 500);
+    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 500, 100) : null;
     toolsInput.value = tools;                       // reflect the clamped value
     if (roundsInput) roundsInput.value = rounds;
     var payload = { agent_max_tool_calls: tools };
     if (rounds != null) payload.agent_max_rounds = rounds;
+    var fold = foldInput ? clampInt(foldInput.value, 0, 500, 12) : null;
+    if (foldInput) { foldInput.value = fold; payload.chat_tool_fold_after = fold; }
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
       await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
+      if (fold != null && window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(fold);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -2663,6 +2669,162 @@ function initContextProfiles() {
   load();
 }
 
+// ── Claude Code delegation (Tools tab) ──
+// Persists the claude_code_* keys through /api/auth/settings (admin only,
+// validated server-side in auth_routes.set_settings) and shows the live
+// preflight from /api/claude-code/status plus recent jobs from
+// /api/claude-code/tasks. Empty fields keep the CLAUDE_CODE_* env defaults.
+async function initClaudeCodeSettings() {
+  var card = el('set-claudeCodeCard');
+  if (!card) return;
+  var f = {
+    binary: el('set-ccBinary'), home: el('set-ccHome'), roots: el('set-ccRoots'),
+    defaultRepo: el('set-ccDefaultRepo'), concurrency: el('set-ccConcurrency'),
+    model: el('set-ccModel'), restricted: el('set-ccRestricted'),
+    callbackUrl: el('set-ccCallbackUrl'), tokenFile: el('set-ccTokenFile'),
+  };
+  var msg = el('set-ccMsg');
+  var statusBox = el('set-ccStatus');
+  var tasksBox = el('set-ccTasks');
+  var _e = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+
+  function fill(settings) {
+    if (!settings) return;
+    if (f.binary) f.binary.value = settings.claude_code_binary || '';
+    if (f.home) f.home.value = settings.claude_code_home || '';
+    if (f.roots) f.roots.value = Array.isArray(settings.claude_code_repository_roots) ? settings.claude_code_repository_roots.join('\n') : '';
+    if (f.defaultRepo) f.defaultRepo.value = settings.claude_code_default_repository || '';
+    if (f.concurrency) f.concurrency.value = settings.claude_code_max_concurrent_tasks ? settings.claude_code_max_concurrent_tasks : '';
+    if (f.model) f.model.value = settings.claude_code_model || '';
+    if (f.restricted) f.restricted.checked = settings.claude_code_restricted !== false;
+    if (f.callbackUrl) f.callbackUrl.value = settings.claude_code_odysseus_url || '';
+    if (f.tokenFile) f.tokenFile.value = settings.claude_code_odysseus_token_file || '';
+  }
+
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    fill(await res.json());
+  } catch (e) {}
+
+  function payload() {
+    var conc = parseInt((f.concurrency && f.concurrency.value) || '0', 10);
+    if (isNaN(conc) || conc < 0) conc = 0;
+    return {
+      claude_code_binary: (f.binary && f.binary.value.trim()) || '',
+      claude_code_home: (f.home && f.home.value.trim()) || '',
+      claude_code_repository_roots: f.roots ? f.roots.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
+      claude_code_default_repository: (f.defaultRepo && f.defaultRepo.value.trim()) || '',
+      claude_code_max_concurrent_tasks: Math.min(conc, 16),
+      claude_code_model: (f.model && f.model.value.trim()) || '',
+      claude_code_restricted: f.restricted ? !!f.restricted.checked : true,
+      claude_code_odysseus_url: (f.callbackUrl && f.callbackUrl.value.trim()) || '',
+      claude_code_odysseus_token_file: (f.tokenFile && f.tokenFile.value.trim()) || '',
+    };
+  }
+
+  async function save() {
+    try {
+      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload()) });
+      if (!r.ok) {
+        var err = {};
+        try { err = await r.json(); } catch (e) {}
+        msg.textContent = 'Not saved: ' + (err.detail || r.status);
+        msg.style.color = 'var(--red)';
+        return;
+      }
+      fill(await r.json());
+      msg.textContent = 'Saved';
+      msg.style.color = 'var(--fg)';
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+
+  function renderStatus(s) {
+    if (!statusBox) return;
+    if (!s || s.error) { statusBox.innerHTML = '<span style="color:var(--red)">' + _e((s && s.error) || 'status unavailable') + '</span>'; return; }
+    var b = s.binary || {}, a = s.auth || {}, cb = s.callback || {};
+    var ready = !!s.ready;
+    var rows = [];
+    rows.push('<div class="cc-status-line"><span class="cc-pill ' + (ready ? 'ok' : 'bad') + '">' + (ready ? 'ready' : 'not ready') + '</span> '
+      + (b.available ? '<code>' + _e(b.path) + '</code> ' + _e(b.version || '') : 'binary not found at <code>' + _e(b.path) + '</code>')
+      + (b.error ? ' <span style="color:var(--red)">' + _e(b.error) + '</span>' : '') + '</div>');
+    if (a.checked) {
+      rows.push('<div class="cc-status-line">Sign-in: ' + (a.logged_in ? '<span class="cc-pill ok">signed in</span> ' + _e(a.auth_method || '') + (a.api_provider ? ' via ' + _e(a.api_provider) : '')
+        : '<span class="cc-pill bad">not signed in</span> ' + _e(a.error || '')) + '</div>');
+    }
+    rows.push('<div class="cc-status-line">Restricted mode: ' + (s.restricted_mode ? 'on' : 'off') + ' · concurrency ' + _e(s.max_concurrent_tasks) + ' · ' + _e(s.active_tasks || 0) + ' running'
+      + ' · callback ' + (cb.enabled ? '<span class="cc-pill ok">on</span> ' + _e(cb.url) + (cb.token_file_ok === false ? ' <span style="color:var(--red)">(token file not private/readable)</span>' : '') : 'off') + '</div>');
+    var repos = s.repositories || [];
+    if (repos.length) {
+      rows.push('<div class="cc-status-line">Approved repositories:<ul class="cc-repos">' + repos.map(function (r) {
+        var isDefault = s.default_repository === r.path;
+        return '<li><code>' + _e(r.path) + '</code>' + (r.branch ? ' <span style="opacity:.7">(' + _e(r.branch) + ')</span>' : '') + (isDefault ? ' <span class="cc-pill ok">default</span>' : '') + '</li>';
+      }).join('') + '</ul></div>');
+    } else {
+      rows.push('<div class="cc-status-line" style="color:var(--red)">No Git checkout found under: ' + _e((s.repository_roots || []).join(', ') || '(no roots)') + '</div>');
+    }
+    (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });
+    statusBox.innerHTML = rows.join('');
+  }
+
+  async function checkStatus() {
+    if (statusBox) statusBox.innerHTML = '<span style="opacity:.7">Checking Claude Code…</span>';
+    try {
+      var r = await fetch('/api/claude-code/status', { credentials: 'same-origin' });
+      var body = await r.json();
+      if (!r.ok) body = { error: body.detail || ('HTTP ' + r.status) };
+      renderStatus(body);
+    } catch (e) { renderStatus({ error: 'could not reach /api/claude-code/status' }); }
+  }
+
+  async function loadTasks() {
+    if (!tasksBox) return;
+    try {
+      var r = await fetch('/api/claude-code/tasks?limit=25', { credentials: 'same-origin' });
+      if (!r.ok) { tasksBox.innerHTML = '<div style="opacity:.7">Jobs unavailable (' + r.status + ')</div>'; return; }
+      var rows = ((await r.json()).tasks || []);
+      if (!rows.length) { tasksBox.innerHTML = '<div style="opacity:.7">No delegations yet. Ask the agent to "have Claude Code …" or use delegate_to_claude_code.</div>'; return; }
+      tasksBox.innerHTML = rows.map(function (t) {
+        var when = t.finished_at || t.started_at || t.created_at || '';
+        var files = Array.isArray(t.changed_files) ? t.changed_files.length : 0;
+        var cls = t.status === 'completed' ? 'ok' : (t.status === 'running' || t.status === 'queued') ? 'run' : 'bad';
+        return '<div class="cc-task" data-task-id="' + _e(t.task_id) + '">'
+          + '<span class="cc-pill ' + cls + '">' + _e(t.status) + '</span> '
+          + '<code>' + _e(t.repository || '') + '</code>'
+          + (t.label ? ' <b>' + _e(t.label) + '</b>' : '')
+          + (t.branch ? ' · ' + _e(t.branch) : '') + (t.commit ? ' @ ' + _e(String(t.commit).slice(0, 8)) : '')
+          + (files ? ' · ' + files + ' file' + (files === 1 ? '' : 's') : '')
+          + (t.total_cost_usd != null ? ' · $' + Number(t.total_cost_usd).toFixed(3) : '')
+          + (t.error ? ' <span style="color:var(--red)">' + _e(String(t.error).slice(0, 160)) + '</span>' : '')
+          + '<span style="float:right;opacity:.6">' + _e(when.replace('T', ' ').slice(0, 19)) + '</span>'
+          + ((t.status === 'running' || t.status === 'queued') ? ' <button type="button" class="ats-btn cc-cancel" data-task-id="' + _e(t.task_id) + '">cancel</button>' : '')
+          + '</div>';
+      }).join('');
+    } catch (e) { tasksBox.innerHTML = '<div style="opacity:.7">Jobs unavailable</div>'; }
+  }
+
+  Object.keys(f).forEach(function (k) { if (f[k]) f[k].addEventListener('change', save); });
+  var checkBtn = el('set-ccCheck');
+  if (checkBtn) checkBtn.addEventListener('click', function () { checkStatus(); loadTasks(); });
+  var refreshBtn = el('set-ccRefreshTasks');
+  if (refreshBtn) refreshBtn.addEventListener('click', loadTasks);
+  if (tasksBox) tasksBox.addEventListener('click', async function (e) {
+    var btn = e.target.closest('.cc-cancel');
+    if (!btn) return;
+    try {
+      await fetch('/api/claude-code/tasks/' + encodeURIComponent(btn.dataset.taskId) + '/cancel', { method: 'POST', credentials: 'same-origin' });
+    } catch (err) {}
+    loadTasks();
+  });
+  // Load lazily the first time the Tools tab becomes visible so opening
+  // Settings never spawns a `claude --version` probe by itself.
+  var tab = document.querySelector('[data-settings-tab="tools"]');
+  var loadedOnce = false;
+  function lazy() { if (loadedOnce) return; loadedOnce = true; checkStatus(); loadTasks(); }
+  if (tab) tab.addEventListener('click', lazy);
+  if (window._isAdmin && card.offsetParent !== null) lazy();
+}
+
 function initAll() {
   modalEl = el('settings-modal');
   initTabs();
@@ -2682,6 +2844,7 @@ function initAll() {
   initResearchSettings();
   initResearchSearchSettings();
   initAgentSettings();
+  initClaudeCodeSettings();
   initContextProfiles();
   initAppearance();
   initShortcuts();

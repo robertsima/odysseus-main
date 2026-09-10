@@ -159,6 +159,17 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         logger.error(f"list_sessions failed: {e}")
         return {"error": str(e)}
 
+def _session_display_name(session_manager, session_id: Optional[str]) -> str:
+    """Best-effort name of the calling session for the agent-origin tag."""
+    if not session_id or session_manager is None:
+        return ""
+    try:
+        source = session_manager.get_session(session_id)
+    except Exception:
+        return ""
+    return str(getattr(source, "name", "") or "") if source else ""
+
+
 async def send_to_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Send a message to an existing session and get a response.
 
@@ -225,9 +236,17 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             timeout=AI_CHAT_TIMEOUT,
         )
 
-        # Save both messages to session
-        sess.add_message(ChatMessage("user", message))
-        sess.add_message(ChatMessage("assistant", response))
+        # Save both messages to session, tagged with their origin. Without the
+        # tag the target chat rendered an agent's message as a plain "You"
+        # bubble, so a user reading session B could not tell which lines came
+        # from session A's agent and which they typed themselves.
+        origin = {
+            "source": "agent",
+            "from_session": session_id or "",
+            "from_session_name": _session_display_name(_session_manager, session_id),
+        }
+        sess.add_message(ChatMessage("user", message, {**origin, "direction": "inbound"}))
+        sess.add_message(ChatMessage("assistant", response, {**origin, "direction": "reply"}))
 
         # Truncate for tool output
         if len(response) > 10000:

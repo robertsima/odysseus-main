@@ -10,6 +10,7 @@ import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
 import chatStream from './chatStream.js';
+import agentThread from './agentThread.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';
@@ -2035,6 +2036,11 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
         'deep_research': 'Researching',
         'list_models': 'Browsing',
         'ui_control': 'Adjusting',
+        // Multi-agent work: another chat's agent, or the Claude Code CLI.
+        'send_to_session': 'Messaging agent',
+        'create_session': 'Starting agent',
+        'pipeline': 'Running pipeline',
+        'delegate_to_claude_code': 'Claude Code',
       };
       const _toolIcons = {
         'web_search': _searchIcon,
@@ -3083,6 +3089,8 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                 // Expand/collapse via delegated click handler (init at module bottom).
                 threadWrap.appendChild(node);
                 currentToolBubble = node;
+                // Summary bar + folding once the turn gets tool-heavy.
+                agentThread.refreshThread(threadWrap);
                 // Animate the wave
                 const waveEl = node.querySelector('.agent-thread-wave');
                 if (waveEl) {
@@ -3218,6 +3226,7 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                   currentToolBubble.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(json.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${cmdHtml2}${outHtml}${diffHtml}</div>`;
                   // Reset so thinking spinner between tools says "Thinking" not the old tool's label
                   _lastToolName = '';
+                  agentThread.refreshThread(currentToolBubble.closest('.agent-thread'));
                   uiModule.scrollHistory();
                 }
                 // --- Render generated images inline ---

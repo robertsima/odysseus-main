@@ -15,7 +15,25 @@ logger = logging.getLogger(__name__)
 _BUNDLED_SKILLS = (
     ("dev", "local-pi-delegation", ["delegation", "local-model", "pi", "qwen", "coding", "context-efficiency"], ["linux", "windows"], ["mcp__pi_worker__run_pi_task"]),
     ("general", "harness-context-and-tool-routing", ["harness", "tool-routing", "context", "paths", "reliability"], ["linux", "windows", "macos"], []),
+    ("dev", "claude-code-delegation", ["delegation", "claude-code", "coding", "multi-agent", "worktree"], ["linux", "windows", "macos"], ["delegate_to_claude_code"]),
 )
+
+
+def _bundled_source(app_root: str, category: str, name: str) -> str:
+    """Path of a bundled skill's source directory.
+
+    Bundled skills live either directly under ``skills/<name>`` (the older
+    layout) or under ``skills/<category>/<name>``. The seeder used to look only
+    at the first, so a skill checked in under its category directory was
+    logged as "source is missing" and never installed.
+    """
+    for candidate in (
+        os.path.join(app_root, "skills", category, name),
+        os.path.join(app_root, "skills", name),
+    ):
+        if os.path.isfile(os.path.join(candidate, "SKILL.md")):
+            return candidate
+    return os.path.join(app_root, "skills", name)
 
 
 def seed_bundled_skills(skills_manager) -> list[str]:
@@ -23,7 +41,7 @@ def seed_bundled_skills(skills_manager) -> list[str]:
     installed: list[str] = []
     app_root = get_app_root()
     for category, name, tags, platforms, requires_toolsets in _BUNDLED_SKILLS:
-        source = os.path.join(app_root, "skills", name)
+        source = _bundled_source(app_root, category, name)
         destination = os.path.join(skills_manager.skills_root, category, name)
         if not os.path.isfile(os.path.join(source, "SKILL.md")):
             logger.warning("Bundled skill source is missing: %s", source)

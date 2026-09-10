@@ -1,4 +1,27 @@
-"""Safe delegation to a locally installed Claude Code CLI."""
+"""Safe delegation to a locally installed Claude Code CLI.
+
+Odysseus never talks to Anthropic itself on this path. It runs the unmodified
+``claude`` binary in headless (``-p``) mode inside an approved Git checkout,
+with the operator's own Claude login or API key doing the authentication. The
+harness never reads, stores, or forwards those credentials: the only thing it
+hands the child is (optionally) a scoped *Odysseus* token so Claude can call
+back into this instance during the job.
+
+Two ways in:
+
+* the admin chat tool ``delegate_to_claude_code`` (this module's
+  :class:`ClaudeCodeTool`), which the primary Odysseus agent calls, and
+* ``/api/claude-code/tasks`` (routes/claude_code_routes.py) for automation.
+
+Both share the per-repository locks, the process limit, the task runner, and
+the same validation, so a job started from chat and a job started over HTTP
+cannot stomp on the same working tree.
+
+Configuration lives in Settings > Agents (``claude_code_*`` keys, admin-only)
+and falls back to the ``CLAUDE_CODE_*`` environment variables, so an operator
+can point the harness at a binary or repository root from the UI without
+restarting the container.
+"""
 import asyncio
 import json
 import os
@@ -11,10 +34,13 @@ from typing import Optional
 from core.atomic_io import atomic_write_json
 from src.constants import CLAUDE_CODE_TASKS_FILE
 
+# Environment defaults. The ``claude_code_*`` settings override each of these
+# (see ``_setting``); tests monkeypatch the module names directly.
 DEFAULT_BINARY = os.environ.get("CLAUDE_CODE_BINARY", "/app/data/claude-code/bin/claude")
 DEFAULT_ROOTS = tuple(filter(None, os.environ.get(
     "CLAUDE_CODE_REPOSITORY_ROOTS", "/app/data/development:/app/data/agent_worktrees"
 ).split(os.pathsep)))
+DEFAULT_REPOSITORY = os.environ.get("CLAUDE_CODE_DEFAULT_REPOSITORY", "")
 # Claude may inspect, edit, test, and commit — never push, touch a remote, or
 # run arbitrary shell (see tool_schemas.py's delegate_to_claude_code
 # description, which promises exactly this).
@@ -24,6 +50,7 @@ DEFAULT_TOOLS = (
     "Bash(git add:*)", "Bash(git commit:*)",
 )
 MAX_OUTPUT = 50000
+MAX_RESULT_TEXT = 20000
 MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_TASKS", "2")))
 # Each git subcommand is spelled out explicitly — NOT a bare "git" prefix.
 # Claude Code's --allowedTools patterns are prefix matches, so a bare
@@ -32,31 +59,263 @@ MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_TAS
 # clone/remote/fetch out of reach.
 _SAFE_GIT_SUBCOMMANDS = "status|diff|log|show|branch|rev-parse|add|commit"
 _SAFE_TEST_RUNNERS = "pytest|python -m pytest|npm test|pnpm test|yarn test"
+# The bundled Odysseus skill helper (integrations/claude/skills/odysseus/
+# scripts/odysseus_api.py). Allowing it lets a delegated Claude session call
+# back into Odysseus through the scope-gated /api/codex/* API — the only
+# way the "bidirectional" half of the integration can work inside one job.
+# Anchored to that exact script path so the rule cannot widen into
+# arbitrary python.
+_CALLBACK_HELPER = r"python3 (?:~|/)[^\s()]*/skills/odysseus/scripts/odysseus_api\.py"
 SAFE_TOOL = re.compile(
     rf"^(Read|Edit|Write"
     rf"|Bash\(git (?:{_SAFE_GIT_SUBCOMMANDS})(?::\*)?\)"
-    rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\))$"
+    rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\)"
+    rf"|Bash\({_CALLBACK_HELPER}(?::\*)?\))$"
 )
+_MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]{1,80}$")
+# Flags the runner adapts to. Claude Code < 2.1.259 has no
+# --permission-prompts (prompts are denied anyway in a hostless -p run) and
+# older builds have no --restricted; both are detected from --help rather
+# than guessed from the version string.
+_OPTIONAL_FLAGS = ("--permission-prompts", "--restricted", "--bare", "--model",
+                   "--tools", "--allowedTools", "--no-session-persistence",
+                   "--output-format")
+_REQUIRED_FLAGS = ("--tools", "--allowedTools", "--output-format", "--no-session-persistence")
 
 # Per-repository serialization shared by every caller (the admin chat tool
 # AND the HTTP task runner below) so two delegations never run concurrently
 # against the same checkout and stomp on each other's working tree.
 _REPO_LOCKS: dict[str, asyncio.Lock] = {}
 _PROCESS_LIMIT = asyncio.Semaphore(MAX_CONCURRENT_TASKS)
+_PROCESS_LIMIT_SIZE = MAX_CONCURRENT_TASKS
+# --version / --help of a binary, keyed by path and mtime so an upgraded
+# install is re-probed without a restart.
+_BINARY_INFO: dict[str, dict] = {}
+
+
+# ── Configuration (settings first, then environment) ──
+
+def _setting(key: str, default=None):
+    """A ``claude_code_*`` setting, or ``default`` when unset/blank.
+
+    Settings are read lazily so importing this module never touches the
+    settings file (tests construct the tool without a data directory).
+    """
+    try:
+        from src.settings import get_setting
+        value = get_setting(key, None)
+    except Exception:
+        return default
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return default
+    if isinstance(value, (list, tuple, dict)) and not value:
+        # An empty list is the "not overridden" sentinel for list settings
+        # (e.g. claude_code_repository_roots) — never "no roots at all".
+        return default
+    return value
+
+
+def _flag_setting(key: str, default: bool) -> bool:
+    value = _setting(key, None)
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
+def binary_path() -> Path:
+    return Path(str(_setting("claude_code_binary", DEFAULT_BINARY))).expanduser()
+
+
+def repository_roots() -> tuple[Path, ...]:
+    raw = _setting("claude_code_repository_roots", None)
+    if isinstance(raw, (list, tuple)):
+        roots = [str(item) for item in raw if str(item).strip()]
+    elif isinstance(raw, str):
+        roots = [item for item in raw.replace("\n", os.pathsep).split(os.pathsep) if item.strip()]
+    else:
+        roots = list(DEFAULT_ROOTS)
+    return tuple(Path(root.strip()).expanduser().resolve() for root in roots)
+
+
+def _process_limit() -> asyncio.Semaphore:
+    """The shared concurrency gate, resized when the setting changes.
+
+    In-flight jobs keep the semaphore they acquired; only new jobs see the
+    new size, which is the safe direction for a live change.
+    """
+    global _PROCESS_LIMIT, _PROCESS_LIMIT_SIZE
+    try:
+        # 0 (the settings default) means "use the environment/built-in value".
+        size = int(_setting("claude_code_max_concurrent_tasks", 0) or 0) or MAX_CONCURRENT_TASKS
+        size = max(1, min(16, size))
+    except (TypeError, ValueError):
+        size = MAX_CONCURRENT_TASKS
+    if size != _PROCESS_LIMIT_SIZE:
+        _PROCESS_LIMIT = asyncio.Semaphore(size)
+        _PROCESS_LIMIT_SIZE = size
+    return _PROCESS_LIMIT
 
 
 def _repo_lock(repository: Path) -> asyncio.Lock:
     return _REPO_LOCKS.setdefault(str(repository), asyncio.Lock())
 
+
+def _head_branch(repository: Path) -> str:
+    """Branch name from .git/HEAD without spawning git (worktree-aware)."""
+    try:
+        git = repository / ".git"
+        gitdir = git
+        if git.is_file():
+            # A linked worktree: ".git" is a pointer file "gitdir: <path>".
+            pointer = git.read_text(encoding="utf-8", errors="replace").strip()
+            if not pointer.startswith("gitdir:"):
+                return ""
+            gitdir = Path(pointer.split(":", 1)[1].strip())
+            if not gitdir.is_absolute():
+                gitdir = (repository / gitdir).resolve()
+        head = (gitdir / "HEAD").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return ""
+    if head.startswith("ref: refs/heads/"):
+        return head[len("ref: refs/heads/"):]
+    return head[:12] if head else ""
+
+
+def discover_repositories(limit: int = 25) -> list[dict]:
+    """Git checkouts/worktrees at or one level below each approved root.
+
+    The failed test in the 2026-09-10 log passed ``/app`` — not a checkout —
+    because the agent had no way to learn which paths *are* approved. Listing
+    the real candidates (like the worktree ``doctor`` does) is what lets the
+    one permitted retry succeed.
+    """
+    found: list[dict] = []
+    seen: set[str] = set()
+    for root in repository_roots():
+        if not root.is_dir():
+            continue
+        candidates = [root]
+        try:
+            candidates.extend(sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith(".")))
+        except OSError:
+            pass
+        for path in candidates:
+            key = str(path)
+            if key in seen or not (path / ".git").exists():
+                continue
+            seen.add(key)
+            found.append({"path": key, "root": str(root), "branch": _head_branch(path)})
+            if len(found) >= limit:
+                return found
+    return found
+
+
+def _describe_candidates() -> str:
+    roots = ", ".join(str(root) for root in repository_roots()) or "(none configured)"
+    repos = discover_repositories()
+    if repos:
+        listing = "; ".join(
+            f"{repo['path']}" + (f" ({repo['branch']})" if repo["branch"] else "") for repo in repos
+        )
+        return (f"Approved roots: {roots}. Known repositories: {listing}. "
+                "Pass one of these, or omit repository to use the default.")
+    return (f"Approved roots: {roots}, but no Git checkout was found under them. "
+            "Clone or mount one there, or set CLAUDE_CODE_REPOSITORY_ROOTS / "
+            "Settings > Agents > Claude Code repository roots.")
+
+
 def _approved_repository(value: str) -> Path:
-    path = Path(value or "").expanduser().resolve(strict=True)
+    raw = (value or "").strip()
+    try:
+        path = Path(raw).expanduser().resolve(strict=True)
+    except OSError:
+        raise ValueError(
+            f"repository {raw!r} is not an existing Git repository or worktree. {_describe_candidates()}"
+        ) from None
     if not path.is_dir() or not (path / ".git").exists():
-        raise ValueError("repository must be an existing Git repository or worktree")
-    roots = [Path(root).expanduser().resolve() for root in DEFAULT_ROOTS]
+        raise ValueError(
+            f"repository {raw!r} is not an existing Git repository or worktree. {_describe_candidates()}"
+        )
+    roots = repository_roots()
     if not any(path == root or root in path.parents for root in roots):
-        raise ValueError("repository is outside Claude Code approved roots")
+        raise ValueError(
+            f"repository {raw!r} is outside Claude Code approved roots. {_describe_candidates()}"
+        )
     return path
 
+
+def default_repository() -> tuple[Optional[Path], str]:
+    """Where a delegation goes when the caller names no repository.
+
+    Order: the ``claude_code_default_repository`` setting (or
+    ``CLAUDE_CODE_DEFAULT_REPOSITORY``), the worktree tool's
+    ``ODYSSEUS_AGENT_SOURCE_REPO``, the agent's active workspace, and finally
+    the only discovered checkout. Returns ``(path, how)`` or ``(None, why)``.
+    """
+    configured = str(_setting("claude_code_default_repository", DEFAULT_REPOSITORY) or "").strip()
+    if configured:
+        try:
+            return _approved_repository(configured), "configured default"
+        except ValueError as exc:
+            return None, f"configured default repository is unusable: {exc}"
+    source = os.environ.get("ODYSSEUS_AGENT_SOURCE_REPO", "").strip()
+    if source:
+        try:
+            return _approved_repository(source), "ODYSSEUS_AGENT_SOURCE_REPO"
+        except ValueError:
+            pass
+    try:
+        from src.tool_execution import get_active_workspace
+        workspace = get_active_workspace()
+    except Exception:
+        workspace = None
+    if workspace:
+        try:
+            return _approved_repository(workspace), "active workspace"
+        except ValueError:
+            pass
+    repos = discover_repositories()
+    if len(repos) == 1:
+        return Path(repos[0]["path"]), "only approved checkout"
+    if not repos:
+        return None, "no repository given and none found under the approved roots"
+    return None, ("no repository given and several are approved; pass one of: "
+                  + ", ".join(repo["path"] for repo in repos))
+
+
+def _callback_config() -> dict:
+    """Odysseus callback settings for the child, without the token itself."""
+    url = str(_setting("claude_code_odysseus_url", os.environ.get("CLAUDE_CODE_ODYSSEUS_URL", "")) or "").strip()
+    token_file = str(_setting("claude_code_odysseus_token_file",
+                              os.environ.get("CLAUDE_CODE_ODYSSEUS_TOKEN_FILE", "")) or "").strip()
+    return {"url": url, "token_file": token_file, "enabled": bool(url and token_file)}
+
+
+def _claude_home() -> str:
+    return str(_setting("claude_code_home", os.environ.get("CLAUDE_CODE_HOME", os.environ.get("HOME", "/app/data"))))
+
+
+def _claude_config_dir() -> str:
+    return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(_claude_home(), ".claude")
+
+
+def default_tools() -> list[str]:
+    """The default allowlist, plus the Odysseus callback helper when the
+    callback is configured (otherwise the helper is unreachable and Claude
+    would only ever see a denial)."""
+    tools = list(DEFAULT_TOOLS)
+    if _callback_config()["enabled"]:
+        helper = os.path.join(_claude_config_dir(), "skills", "odysseus", "scripts", "odysseus_api.py")
+        tools.append(f"Bash(python3 {helper}:*)")
+        # The bundled SKILL.md shows the helper as ~/.claude/…; allow that
+        # spelling too so Claude does not get denied for following its own
+        # instructions.
+        tilde = "~/.claude/skills/odysseus/scripts/odysseus_api.py"
+        if helper != os.path.expanduser(tilde):
+            tools.append(f"Bash(python3 {tilde}:*)")
+    return tools
 
 
 def _claude_environment() -> dict[str, str]:
@@ -65,17 +324,18 @@ def _claude_environment() -> dict[str, str]:
     A deployment may give delegated Claude sessions scoped access back to
     Odysseus with a private token file. Keeping the token out of argv avoids
     process-list exposure; the child receives it only in its environment.
+    The child's own Anthropic credentials (its OAuth login or API key) are
+    never read here — the unmodified binary resolves them itself.
     """
     env = {
         **os.environ,
-        "HOME": os.environ.get("CLAUDE_CODE_HOME", os.environ.get("HOME", "/app/data")),
+        "HOME": _claude_home(),
     }
-    url = os.environ.get("CLAUDE_CODE_ODYSSEUS_URL", "").strip()
-    if url:
-        env["ODYSSEUS_URL"] = url
-    token_file = os.environ.get("CLAUDE_CODE_ODYSSEUS_TOKEN_FILE", "").strip()
-    if token_file:
-        path = Path(token_file).expanduser()
+    callback = _callback_config()
+    if callback["url"]:
+        env["ODYSSEUS_URL"] = callback["url"]
+    if callback["token_file"]:
+        path = Path(callback["token_file"]).expanduser()
         try:
             info = path.stat()
             if not path.is_file() or info.st_mode & 0o077:
@@ -88,16 +348,23 @@ def _claude_environment() -> dict[str, str]:
         env["ODYSSEUS_API_TOKEN"] = token
     return env
 
+
 def _parse_args(args: dict) -> dict:
     """Validate a delegation request. Returns either
-    {"repository": Path, "prompt": str, "timeout": int, "tools": list[str]}
+    {"repository": Path, "prompt": str, "timeout": int, "tools": list[str], "model": str|None}
     or {"error": str} — never both, and never raises."""
     if not isinstance(args, dict):
         return {"error": "delegate_to_claude_code: JSON object required"}
-    try:
-        repository = _approved_repository(str(args.get("repository") or ""))
-    except (ValueError, OSError) as exc:
-        return {"error": f"delegate_to_claude_code: {exc}"}
+    requested = str(args.get("repository") or "").strip()
+    if requested and requested.lower() != "auto":
+        try:
+            repository = _approved_repository(requested)
+        except (ValueError, OSError) as exc:
+            return {"error": f"delegate_to_claude_code: {exc}"}
+    else:
+        repository, why = default_repository()
+        if repository is None:
+            return {"error": f"delegate_to_claude_code: {why}. {_describe_candidates()}"}
     prompt = str(args.get("prompt") or "").strip()
     if not prompt or len(prompt) > 20000:
         return {"error": "delegate_to_claude_code: prompt is required and must be <= 20000 characters"}
@@ -105,12 +372,196 @@ def _parse_args(args: dict) -> dict:
         timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
     except (TypeError, ValueError):
         timeout = 900
-    tools = args.get("allowed_tools") or list(DEFAULT_TOOLS)
+    tools = args.get("allowed_tools") or default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
         return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings"}
     if any(not SAFE_TOOL.fullmatch(item) for item in tools):
         return {"error": "delegate_to_claude_code: unsafe allowed tool"}
-    return {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools}
+    model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
+    if model and not _MODEL_RE.fullmatch(model):
+        return {"error": "delegate_to_claude_code: model must be a plain model name or alias"}
+    return {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
+
+
+# ── Binary probing ──
+
+async def _capture(binary: Path, *args: str, timeout: float = 30, env: Optional[dict] = None) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        str(binary), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        env=env, cwd=str(binary.parent),
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, ""
+    return proc.returncode or 0, out.decode("utf-8", errors="replace")
+
+
+async def binary_info(binary: Optional[Path] = None) -> dict:
+    """Version and supported flags of the configured binary (cached by mtime)."""
+    binary = binary or binary_path()
+    key = str(binary)
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return {"path": key, "available": False, "version": "", "flags": [],
+                "error": f"binary unavailable at {binary}"}
+    mtime = binary.stat().st_mtime
+    cached = _BINARY_INFO.get(key)
+    if cached and cached.get("mtime") == mtime:
+        return cached
+    info = {"path": key, "available": True, "mtime": mtime, "version": "", "flags": [], "error": ""}
+    try:
+        code, version = await _capture(binary, "--version", timeout=45)
+        info["version"] = version.strip().splitlines()[0] if version.strip() else ""
+        code, help_text = await _capture(binary, "--help", timeout=45)
+        info["flags"] = [flag for flag in _OPTIONAL_FLAGS if flag in help_text]
+        missing = [flag for flag in _REQUIRED_FLAGS if flag not in help_text]
+        if missing:
+            info["error"] = "binary does not support required flags: " + ", ".join(missing)
+    except OSError as exc:
+        info["error"] = f"could not run binary: {exc}"
+    _BINARY_INFO[key] = info
+    return info
+
+
+async def auth_status(binary: Optional[Path] = None) -> dict:
+    """``claude auth status`` — whether the binary is signed in, and how.
+
+    Only the booleans/labels Claude Code prints are returned; no token is
+    read or exposed. A failure here is reported, not raised, so ``status``
+    still answers everything else.
+    """
+    binary = binary or binary_path()
+    try:
+        env = _claude_environment()
+    except ValueError as exc:
+        return {"checked": False, "error": str(exc)}
+    try:
+        code, out = await _capture(binary, "auth", "status", timeout=45, env=env)
+    except OSError as exc:
+        return {"checked": False, "error": str(exc)}
+    try:
+        parsed = json.loads(out.strip() or "{}")
+    except json.JSONDecodeError:
+        parsed = {}
+    if not isinstance(parsed, dict) or not parsed:
+        return {"checked": True, "logged_in": None, "error": out.strip()[-400:] or f"exit {code}"}
+    return {
+        "checked": True,
+        "logged_in": bool(parsed.get("loggedIn")),
+        "auth_method": parsed.get("authMethod"),
+        "api_provider": parsed.get("apiProvider"),
+    }
+
+
+async def status_report() -> dict:
+    """Everything the primary agent needs before delegating.
+
+    This is the preflight the 2026-09-10 test lacked: it says whether Claude
+    Code is installed, signed in, which repositories it may work in, and
+    whether the callback into Odysseus is configured — in one call.
+    """
+    binary = binary_path()
+    info = await binary_info(binary)
+    auth = await auth_status(binary) if info["available"] else {"checked": False, "error": info["error"]}
+    callback = _callback_config()
+    callback_status = {"enabled": callback["enabled"], "url": callback["url"]}
+    if callback["token_file"]:
+        path = Path(callback["token_file"]).expanduser()
+        callback_status["token_file"] = str(path)
+        try:
+            mode = path.stat().st_mode
+            callback_status["token_file_ok"] = path.is_file() and not (mode & 0o077)
+        except OSError:
+            callback_status["token_file_ok"] = False
+    default_repo, how = default_repository()
+    runner = get_task_runner()
+    _process_limit()  # refresh the gate size from settings before reporting it
+    active = [record for record in runner.tasks.values() if record.get("status") in _ACTIVE_STATUSES]
+    ready = bool(info["available"] and not info["error"] and auth.get("logged_in"))
+    hints: list[str] = []
+    if not info["available"]:
+        hints.append("Install Claude Code or set Settings > Agents > Claude Code binary (CLAUDE_CODE_BINARY).")
+    elif info["error"]:
+        hints.append(info["error"])
+    if info["available"] and auth.get("logged_in") is False:
+        hints.append("The binary is not signed in. Run `claude` once as the container user "
+                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY." % _claude_home())
+    if info["available"] and "--permission-prompts" not in info["flags"]:
+        hints.append("Claude Code is older than 2.1.259; upgrade for --permission-prompts none "
+                     "(prompts are still denied in headless mode, but Claude may retry them).")
+    if default_repo is None:
+        hints.append(how)
+    return {
+        "ready": ready,
+        "binary": {k: info[k] for k in ("path", "available", "version", "flags", "error")},
+        "auth": auth,
+        "home": _claude_home(),
+        "restricted_mode": _flag_setting("claude_code_restricted", True) and "--restricted" in info["flags"],
+        "repository_roots": [str(root) for root in repository_roots()],
+        "repositories": discover_repositories(),
+        "default_repository": str(default_repo) if default_repo else None,
+        "default_repository_source": how if default_repo else None,
+        "default_tools": default_tools(),
+        "default_model": str(_setting("claude_code_model", "") or "") or None,
+        "callback": callback_status,
+        "max_concurrent_tasks": _PROCESS_LIMIT_SIZE,
+        "active_tasks": len(active),
+        "hints": hints,
+        "exit_code": 0 if ready else 1,
+    }
+
+
+def _build_argv(binary: Path, prompt: str, tools: list[str], flags: list[str], *,
+                model: Optional[str] = None) -> list[str]:
+    """argv for one headless run. Never shells out through a string — argv is
+    built from a fixed binary path and an allowlist-checked ``--allowedTools``
+    list, so nothing here is vulnerable to shell interpolation."""
+    # ``--tools`` limits which built-ins exist for this run; ``--allowedTools``
+    # grants only the allowlist-validated operations without an interactive
+    # permission prompt. Both are required in headless mode.
+    tool_names = list(dict.fromkeys(tool.split("(", 1)[0] for tool in tools))
+    if prompt.startswith("-"):
+        # Commander would read a leading dash as an option name.
+        prompt = " " + prompt
+    argv = [str(binary), "-p", prompt, "--output-format", "json", "--no-session-persistence"]
+    if "--permission-prompts" in flags:
+        # Nobody is at the keyboard: anything that would prompt is denied and
+        # Claude is told not to retry it.
+        argv += ["--permission-prompts", "none"]
+    if "--restricted" in flags and _flag_setting("claude_code_restricted", True):
+        # Ignore hooks/MCP servers declared inside the (possibly untrusted)
+        # checkout, confine file tools to it, and refuse bypassPermissions.
+        argv.append("--restricted")
+    if model and "--model" in flags:
+        argv += ["--model", model]
+    argv += ["--tools", *tool_names, "--allowedTools", *tools]
+    return argv
+
+
+def _summarize_envelope(result: dict, parsed: dict) -> None:
+    """Lift the fields callers actually read out of Claude Code's JSON result."""
+    result["claude"] = parsed
+    # Claude Code's JSON result commonly includes these metrics;
+    # surface them without making callers parse the raw envelope.
+    for key in ("duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "is_error",
+                "subtype", "stop_reason", "session_id"):
+        if key in parsed:
+            result[key] = parsed[key]
+    text = parsed.get("result")
+    if isinstance(text, str):
+        result["result"] = text[:MAX_RESULT_TEXT] + ("\n... (truncated)" if len(text) > MAX_RESULT_TEXT else "")
+    denials = parsed.get("permission_denials")
+    if isinstance(denials, list) and denials:
+        result["permission_denials"] = [
+            {"tool": str(item.get("tool_name") or item.get("tool") or "?"),
+             "input": str(item.get("tool_input") or "")[:200]}
+            if isinstance(item, dict) else {"tool": str(item)[:200]}
+            for item in denials[:25]
+        ]
+    if parsed.get("is_error") and "error" not in result:
+        result["error"] = (text if isinstance(text, str) else str(parsed.get("error") or "Claude Code reported an error"))[:2000]
 
 
 async def _run_claude(
@@ -119,37 +570,27 @@ async def _run_claude(
     timeout: int,
     tools: list[str],
     on_process=None,
+    model: Optional[str] = None,
 ) -> dict:
     """Run the Claude Code CLI once, serialized per repository.
 
     ``on_process`` (optional) is called with the live ``Process`` as soon as
     it starts, so a caller (the task runner) can kill it on cancellation.
-    Never shells out through a string — argv is built from a fixed binary
-    path and an allowlist-checked ``--allowedTools`` list, so nothing here is
-    vulnerable to shell interpolation.
     """
-    binary = Path(DEFAULT_BINARY)
+    binary = binary_path()
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return {"error": f"delegate_to_claude_code: binary unavailable at {binary}", "exit_code": 1}
-    # ``--tools`` limits which built-ins exist for this run; ``--allowedTools``
-    # grants only the allowlist-validated operations without an interactive
-    # permission prompt. Both are required in headless mode.
-    tool_names = list(dict.fromkeys(tool.split("(", 1)[0] for tool in tools))
-    argv = [
-        str(binary), "-p", prompt,
-        "--output-format", "json",
-        "--no-session-persistence",
-        "--permission-prompts", "none",
-        "--tools", *tool_names,
-        "--allowedTools", *tools,
-    ]
+    info = await binary_info(binary)
+    if info.get("error"):
+        return {"error": f"delegate_to_claude_code: {info['error']}", "exit_code": 1}
+    argv = _build_argv(binary, prompt, tools, info.get("flags", []), model=model)
     try:
         child_env = _claude_environment()
     except ValueError as exc:
         return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
     # The repository lock prevents worktree collisions. The process limit also
     # bounds aggregate CPU/memory/API use across different repositories.
-    async with _PROCESS_LIMIT, _repo_lock(repository):
+    async with _process_limit(), _repo_lock(repository):
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -172,34 +613,91 @@ async def _run_claude(
             raise
         except OSError as exc:
             return {"error": f"Claude Code could not start: {exc}", "exit_code": 127}
-        out = stdout.decode("utf-8", errors="replace")[-MAX_OUTPUT:]
+        full_out = stdout.decode("utf-8", errors="replace")
         err = stderr.decode("utf-8", errors="replace")[-10000:]
-        result = {"output": out, "stderr": err, "exit_code": proc.returncode, "repository": str(repository)}
+        result = {
+            "output": full_out[-MAX_OUTPUT:],
+            "stderr": err,
+            "exit_code": proc.returncode,
+            "repository": str(repository),
+            "model": model,
+        }
         try:
-            parsed = json.loads(out)
-            if isinstance(parsed, dict):
-                result["claude"] = parsed
-                # Claude Code's JSON result commonly includes these metrics;
-                # surface them without making callers parse the raw envelope.
-                for key in ("duration_ms", "duration_api_ms", "num_turns", "total_cost_usd", "is_error"):
-                    if key in parsed:
-                        result[key] = parsed[key]
+            parsed = json.loads(full_out)
         except json.JSONDecodeError:
-            pass
+            parsed = None
+        if isinstance(parsed, dict):
+            _summarize_envelope(result, parsed)
+        elif proc.returncode:
+            # No envelope at all: the CLI rejected a flag, could not
+            # authenticate, or crashed before the run started. stderr has it.
+            result["error"] = (err.strip() or full_out.strip() or f"Claude Code exited {proc.returncode}")[-2000:]
         result.update(await _git_report(repository))
         return result
 
 
+_ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_repositories", "repositories")
+
+
 class ClaudeCodeTool:
+    """The ``delegate_to_claude_code`` admin chat tool.
+
+    ``action`` selects the operation (default ``run``):
+
+    * ``status`` — preflight: binary, sign-in, approved repositories, callback.
+    * ``list_repositories`` — approved checkouts/worktrees.
+    * ``run`` — delegate and wait (blocks this agent turn up to ``timeout_seconds``).
+    * ``start`` / ``poll`` / ``cancel`` / ``list`` — the same job as a background
+      task, so the primary agent can keep working (or coordinate several
+      Claude jobs across repositories) and pick the result up later.
+    """
+
     async def execute(self, content: str, ctx: dict) -> dict:
         try:
-            args = json.loads(content)
+            args = json.loads(content) if (content or "").strip() else {}
         except (TypeError, json.JSONDecodeError):
             return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+        if not isinstance(args, dict):
+            return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+        action = str(args.get("action") or "run").strip().lower()
+        if action not in _ACTIONS:
+            return {"error": f"delegate_to_claude_code: unknown action {action!r}; one of {', '.join(_ACTIONS)}",
+                    "exit_code": 1}
+        owner = (ctx or {}).get("owner") if isinstance(ctx, dict) else None
+        if action == "status":
+            return await status_report()
+        if action in ("list_repositories", "repositories"):
+            repos = discover_repositories()
+            default_repo, how = default_repository()
+            return {
+                "repository_roots": [str(root) for root in repository_roots()],
+                "repositories": repos,
+                "default_repository": str(default_repo) if default_repo else None,
+                "default_repository_source": how,
+                "exit_code": 0,
+            }
+        runner = get_task_runner()
+        if action == "start":
+            started = await runner.start(args, owner=owner)
+            if "error" in started:
+                return {**started, "exit_code": 1}
+            return {**started, "exit_code": 0,
+                    "note": "Poll with action=poll and this task_id; cancel with action=cancel."}
+        if action in ("poll", "get", "cancel"):
+            task_id = str(args.get("task_id") or "").strip()
+            if not task_id:
+                return {"error": "delegate_to_claude_code: task_id is required", "exit_code": 1}
+            record = await runner.cancel(task_id) if action == "cancel" else runner.get(task_id)
+            if record is None:
+                return {"error": f"delegate_to_claude_code: task {task_id} not found", "exit_code": 1}
+            return {**record, "exit_code": record.get("exit_code", 0 if record.get("status") in _ACTIVE_STATUSES else 1)}
+        if action == "list":
+            return {"tasks": runner.summaries(), "exit_code": 0}
         parsed = _parse_args(args)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
-        return await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"])
+        return await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
+                                 model=parsed["model"])
 
 
 async def _git_report(repository: Path) -> dict:
@@ -233,6 +731,9 @@ _ACTIVE_STATUSES = {"queued", "running"}
 # the repo output/stderr it inlines, each capped well below MAX_OUTPUT) can't
 # grow without bound.
 _RETENTION_S = 86400
+_SUMMARY_FIELDS = ("task_id", "status", "repository", "owner", "created_at", "started_at",
+                   "finished_at", "exit_code", "branch", "commit", "changed_files", "error",
+                   "num_turns", "total_cost_usd", "model", "label")
 
 
 def _prune(tasks: dict, now: float) -> bool:
@@ -320,17 +821,21 @@ class ClaudeCodeTaskRunner:
             return {**parsed, "exit_code": 1}
         task_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
+        label = str(args.get("label") or "").strip()[:120] if isinstance(args, dict) else ""
         self.tasks[task_id] = {
             "task_id": task_id,
             "status": "queued",
             "repository": str(parsed["repository"]),
             "owner": owner,
             "created_at": now,
+            "model": parsed["model"],
+            # A short, operator-chosen name; the prompt itself is never stored.
+            "label": label or None,
         }
         self._save()
         job = asyncio.create_task(self._run(task_id, parsed))
         self.jobs[task_id] = job
-        return {"task_id": task_id, "status": "queued"}
+        return {"task_id": task_id, "status": "queued", "repository": str(parsed["repository"])}
 
     async def _run(self, task_id: str, parsed: dict):
         record = self.tasks[task_id]
@@ -343,13 +848,14 @@ class ClaudeCodeTaskRunner:
         try:
             result = await _run_claude(
                 parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
-                on_process=_register,
+                on_process=_register, model=parsed.get("model"),
             )
             record.update(result)
             if task_id in self._cancelling:
                 record.update({"status": "cancelled", "error": "Task cancelled", "exit_code": 130})
             else:
-                record["status"] = "completed" if result.get("exit_code") == 0 else "failed"
+                ok = result.get("exit_code") == 0 and not result.get("is_error")
+                record["status"] = "completed" if ok else "failed"
         except asyncio.CancelledError:
             record.update({"status": "cancelled", "error": "Task cancelled", "exit_code": 130})
         except Exception as exc:
@@ -366,6 +872,16 @@ class ClaudeCodeTaskRunner:
         if record is None or (owner is not None and record.get("owner") != owner):
             return None
         return dict(record)
+
+    def summaries(self, *, owner: Optional[str] = None, limit: int = 50) -> list[dict]:
+        """Bounded per-task rows (no output blobs) for listings and the UI."""
+        rows = []
+        for record in self.tasks.values():
+            if owner is not None and record.get("owner") != owner:
+                continue
+            rows.append({key: record.get(key) for key in _SUMMARY_FIELDS if key in record})
+        rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
+        return rows[:limit]
 
     async def cancel(self, task_id: str, *, owner: Optional[str] = None) -> dict | None:
         """Kill a queued/running task's subprocess and mark it cancelled.
