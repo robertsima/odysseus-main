@@ -151,3 +151,14 @@ def test_the_ui_defaults_document_retrieval_on():
     app_js = open("static/app.js", encoding="utf-8").read()
     assert "const ragState = st.rag || false;" not in app_js
     assert "st.rag === undefined || st.rag === null ? true : !!st.rag" in app_js
+
+
+def test_the_anthropic_fallback_model_list_is_current():
+    """This list is what an Anthropic endpoint offers when /v1/models cannot
+    be listed. Stuck on the Claude 4 generation, the picker could not offer
+    Opus 5 or Sonnet 5 at all."""
+    from src.llm_core import ANTHROPIC_MODELS
+
+    assert ANTHROPIC_MODELS[:3] == ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"]
+    # Alias IDs only — a date suffix on these is rejected by the API.
+    assert not any(m.endswith(("-20250514", "-20250929", "-20241022")) for m in ANTHROPIC_MODELS)
