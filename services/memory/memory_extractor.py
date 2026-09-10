@@ -111,8 +111,10 @@ AUDIT_SYSTEM_PROMPT = (
     "Return ONLY valid JSON, no markdown fences."
 )
 
-AUDIT_INTERVAL = 5  # audit every N new memories added
-_extractions_since_audit = 0
+AUDIT_INTERVAL = 5  # audit every N new memories added, per owner
+# Per owner: a shared counter let one user's extractions trigger a
+# whole-corpus LLM audit of another user's memories.
+_extractions_since_audit: dict = {}
 
 
 def _message_text(message) -> str:
@@ -324,6 +326,7 @@ async def extract_and_store(
             return
 
         fallback_facts = _fallback_memory_candidates(stripped_recent)
+        llm_ran = False
 
         # Flatten the window into a SINGLE user message instead of appending the
         # raw alternating role messages. Passed as raw chat messages, the model
@@ -386,6 +389,7 @@ async def extract_and_store(
             # ```json fence, and leading/trailing commentary). See
             # _parse_extraction_json — returns [] rather than raising.
             facts = _parse_extraction_json(raw)
+            llm_ran = True
         except Exception as e:
             logger.warning(f"LLM memory extraction failed; using fallback candidates if available: {e}")
 
@@ -393,6 +397,13 @@ async def extract_and_store(
             facts = []
 
         if fallback_facts:
+            if llm_ran:
+                # The model saw the same window and judged it. Only let the
+                # regex add identity facts it might have skipped ("my name
+                # is …"); a matched "I like X" in a brainstorm is not a
+                # durable preference (a naming chat produced "User prefers
+                # Umni" this way).
+                fallback_facts = [f for f in fallback_facts if f.get("category") == "identity"]
             facts = list(facts) + fallback_facts
 
         if not facts:
@@ -490,10 +501,10 @@ async def extract_and_store(
                 logger.debug("memory_added event dispatch failed", exc_info=True)
             logger.info(f"Auto-extracted {added} memories from session")
 
-            global _extractions_since_audit
-            _extractions_since_audit += added
-            if _extractions_since_audit >= AUDIT_INTERVAL:
-                _extractions_since_audit = 0
+            _audit_key = _owner or ""
+            _extractions_since_audit[_audit_key] = _extractions_since_audit.get(_audit_key, 0) + added
+            if _extractions_since_audit[_audit_key] >= AUDIT_INTERVAL:
+                _extractions_since_audit[_audit_key] = 0
                 logger.info("Audit threshold reached, running memory audit")
                 await audit_memories(
                     memory_manager, memory_vector, endpoint_url, model, headers, owner=_owner
@@ -674,11 +685,17 @@ async def audit_memories(
             f"({before_count - after_count} removed/merged)"
         )
 
-        # Rebuild vector index from the full saved set, not just this owner's
-        # slice — otherwise the shared collection is wiped of every other
-        # owner's entries until they happen to run their own audit.
+        # Reconcile the vector index with the full saved set (all owners, so
+        # the shared collection keeps every tenant's entries). ``sync`` deletes
+        # and re-embeds only what changed; the old full ``rebuild`` dropped the
+        # collection and re-embedded every entry, leaving concurrent chat
+        # turns with an empty memory search meanwhile.
         if memory_vector and memory_vector.healthy:
-            memory_vector.rebuild(saved_entries)
+            sync = getattr(memory_vector, "sync", None)
+            if callable(sync):
+                sync(saved_entries)
+            else:
+                memory_vector.rebuild(saved_entries)
 
         # Persist the post-tidy fingerprint so the next call short-circuits
         # if nothing has changed in the meantime.

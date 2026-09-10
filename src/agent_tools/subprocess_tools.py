@@ -294,6 +294,18 @@ class BashTool:
             logger.info("bash: blocked a remote-publishing command; redirected to manage_agent_worktree")
             return blocked
 
+        # Same idea for the Claude Code binary: running it from bash skips the
+        # delegation allowlist, restricted mode, per-repo lock and task
+        # tracking, and a headless run cannot answer permission prompts. The
+        # 2026-09-10 logs show the agent probing `claude --help` for three
+        # rounds and then running `claude -p` directly.
+        from src.agent_tools.claude_code_guard import check as _claude_guard
+
+        blocked = _claude_guard(content)
+        if blocked is not None:
+            logger.info("bash: blocked a direct Claude Code invocation; redirected to delegate_to_claude_code")
+            return blocked
+
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         session_id = ctx.get("session_id")

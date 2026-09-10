@@ -121,11 +121,11 @@ def test_bare_reasoning_without_encrypted_content_is_not_replayed():
     assert any(i.get("type") == "reasoning" for i in items)
 
 
-def test_replay_window_drops_the_oldest_rounds():
-    from src.agent_loop import _MAX_REASONING_REPLAY_ROUNDS, _append_tool_results
+def _run_rounds(n):
+    from src.agent_loop import _append_tool_results
 
     messages = []
-    for i in range(_MAX_REASONING_REPLAY_ROUNDS + 2):
+    for i in range(n):
         _append_tool_results(
             messages,
             "",
@@ -136,10 +136,21 @@ def test_replay_window_drops_the_oldest_rounds():
             i,
             round_reasoning_items=[dict(REASONING_ITEM, id=f"rs_{i}")],
         )
+    return messages
 
-    carried = [m for m in messages if m.get("reasoning_items")]
-    assert len(carried) == _MAX_REASONING_REPLAY_ROUNDS, (
-        "opaque payload must not accumulate for a whole 30-round turn"
-    )
-    # The rounds that kept theirs are the most recent ones.
-    assert carried[-1]["reasoning_items"][0]["id"] == f"rs_{_MAX_REASONING_REPLAY_ROUNDS + 1}"
+
+def test_replay_window_prunes_in_batches_not_every_round():
+    """Every pop edits an already-sent assistant turn in the middle of the
+    input, which moved the provider's cache boundary on every round
+    (cached=16896 flat across a 28-round turn in the 2026-09-10 logs). The
+    window is allowed to overrun by a slack, then cut back in one go."""
+    from src.agent_loop import _MAX_REASONING_REPLAY_ROUNDS as window
+
+    slack = max(4, window)
+    # Inside window + slack: nothing is touched, the prefix stays byte-stable.
+    kept = [m for m in _run_rounds(window + slack) if m.get("reasoning_items")]
+    assert len(kept) == window + slack
+    # One round past it: cut back to the window in a single edit.
+    kept = [m for m in _run_rounds(window + slack + 1) if m.get("reasoning_items")]
+    assert len(kept) == window, "opaque payload must not accumulate for a whole 30-round turn"
+    assert kept[-1]["reasoning_items"][0]["id"] == f"rs_{window + slack}"

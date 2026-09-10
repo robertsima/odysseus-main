@@ -183,9 +183,66 @@ class MemoryVectorStore:
                 logger.warning("memory similarity search failed in %s lane: %s", lane.name, e)
         return None
 
+    def sync(self, memories: List[Dict]) -> Dict[str, int]:
+        """Reconcile the index with `memories` in place.
+
+        Deletes ids that are gone, re-embeds entries whose text changed, adds
+        new ones — and never drops the collection. ``rebuild`` used to be
+        called after every memory audit: three DELETE round-trips, a CREATE,
+        and a re-embed of every entry, with a window in which ``search``
+        returned nothing to any concurrent chat turn. A 113→112 audit needs
+        one delete and, at most, a handful of re-embeds.
+        """
+        stats = {"added": 0, "updated": 0, "removed": 0}
+        if not self._healthy:
+            return stats
+        wanted: Dict[str, str] = {}
+        for mem in memories or []:
+            text = str(mem.get("text") or "").strip()
+            mid = str(mem.get("id") or "")
+            if text and mid:
+                wanted[mid] = text
+        for lane in self._lanes:
+            try:
+                existing = lane.collection.get(include=["documents"])
+            except Exception as e:
+                logger.warning("memory sync: could not list %s lane: %s", lane.name, e)
+                continue
+            ids = list(existing.get("ids") or [])
+            docs = list(existing.get("documents") or [])
+            have = {i: (docs[n] if n < len(docs) else None) for n, i in enumerate(ids)}
+            stale = [i for i in have if i not in wanted]
+            changed = [i for i, t in wanted.items() if i in have and (have[i] or "").strip() != t]
+            new = [i for i in wanted if i not in have]
+            try:
+                if stale or changed:
+                    lane.collection.delete(ids=stale + changed)
+                to_add = new + changed
+                for start in range(0, len(to_add), 100):
+                    batch = to_add[start:start + 100]
+                    texts = [wanted[i] for i in batch]
+                    lane.collection.add(
+                        ids=batch,
+                        embeddings=lane.encode(texts),
+                        documents=texts,
+                        metadatas=[{"source": "memory"}] * len(batch),
+                    )
+            except Exception as e:
+                logger.warning("memory sync failed in %s lane: %s", lane.name, e)
+                continue
+            stats["added"] += len(new)
+            stats["updated"] += len(changed)
+            stats["removed"] += len(stale)
+        logger.info(
+            "MemoryVectorStore synced: +%d ~%d -%d (%d entries)",
+            stats["added"], stats["updated"], stats["removed"], len(wanted),
+        )
+        return stats
+
     def rebuild(self, memories: List[Dict]):
         """Rebuild the entire index from a list of memory entries.
-        Each entry must have 'id' and 'text' keys."""
+        Each entry must have 'id' and 'text' keys. Prefer ``sync`` for
+        anything but a cold start: this drops the collection first."""
         if not self._healthy:
             return
 

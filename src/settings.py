@@ -115,6 +115,9 @@ DEFAULT_SETTINGS = {
     # (the first and last few stay visible; a summary bar expands the rest).
     # 0 = never fold.
     "chat_tool_fold_after": 12,
+    # Send prompt_cache_key (the Odysseus session id) on ChatGPT-subscription
+    # Responses requests so consecutive rounds hit the same prompt cache.
+    "chatgpt_prompt_cache_key": True,
     # Claude Code delegation (delegate_to_claude_code / /api/claude-code/*).
     # Empty string / empty list / 0 means "use the CLAUDE_CODE_* environment
     # variable or its built-in default"; a value set here wins over the

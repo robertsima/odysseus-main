@@ -575,12 +575,20 @@ class ToolIndex:
     }
 
     def get_tools_for_query(
-        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None
+        self, query: str, k: int = 8, always_include: Optional[Set[str]] = None,
+        use_embeddings: bool = True,
     ) -> Set[str]:
-        """Get the set of tool names to include for a given user query."""
+        """Get the set of tool names to include for a given user query.
+
+        ``use_embeddings=False`` skips the nearest-neighbour lookup and keeps
+        only the always-on set plus keyword/structural hints — for low-signal
+        conversational turns, where the top-k neighbours of "i like Umni" are
+        noise the model then has to carry as schema tokens.
+        """
         base = set(always_include or ALWAYS_AVAILABLE)
-        retrieved = self.retrieve(query, k=k)
-        base.update(retrieved)
+        if use_embeddings:
+            retrieved = self.retrieve(query, k=k)
+            base.update(retrieved)
         # Keyword-based force-include for common intents. Match on word
         # boundaries, not raw substrings, so short hints like "fix", "line",
         # "serve", "reply" or "unread" don't fire inside unrelated words
