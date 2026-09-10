@@ -493,6 +493,15 @@ async def status_report() -> dict:
                      "(prompts are still denied in headless mode, but Claude may retry them).")
     if default_repo is None:
         hints.append(how)
+    if callback["token_file"] and not callback_status.get("token_file_ok"):
+        # _claude_environment() refuses to run with a loose token, so this
+        # blocks every delegation, not just the callback.
+        ready = False
+        hints.append(
+            "The callback token file (Settings > Tools > Claude Code > Callback token file / "
+            "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE) must be a regular file readable only by its owner "
+            "(chmod 600). Fix it, or clear the callback URL and token file to delegate without the callback."
+        )
     return {
         "ready": ready,
         "binary": {k: info[k] for k in ("path", "available", "version", "flags", "error")},

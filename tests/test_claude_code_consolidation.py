@@ -469,3 +469,30 @@ def test_claude_code_delegation_skill_is_bundled_and_parseable():
     skill = Skill.from_markdown(path.read_text(encoding="utf-8"), path=str(path))
     assert skill.name == "claude-code-delegation"
     assert "delegate_to_claude_code" in path.read_text(encoding="utf-8")
+
+
+async def test_status_flags_bad_callback_token_file(roots, settings, monkeypatch, tmp_path):
+    """A loose token file blocks every delegation (see _claude_environment),
+    so status must say so and report not-ready instead of a silent flag."""
+    token = tmp_path / "token"
+    token.write_text("ody_x", encoding="utf-8")
+    token.chmod(0o644)
+    settings["claude_code_odysseus_url"] = "http://127.0.0.1:7000"
+    settings["claude_code_odysseus_token_file"] = str(token)
+
+    async def fake_info(binary=None):
+        return {"path": "/x/claude", "available": True, "version": "2.1.267", "flags": list(cct._OPTIONAL_FLAGS), "error": ""}
+
+    async def fake_auth(binary=None):
+        return {"checked": True, "logged_in": True, "auth_method": "oauth_token", "api_provider": "firstParty"}
+
+    monkeypatch.setattr(cct, "binary_info", fake_info)
+    monkeypatch.setattr(cct, "auth_status", fake_auth)
+    monkeypatch.setattr(cct, "get_task_runner", lambda: ClaudeCodeTaskRunner(store_path=str(tmp_path / "t.json")))
+    out = await cct.status_report()
+    assert out["ready"] is False
+    assert out["callback"]["token_file_ok"] is False
+    assert any("chmod 600" in h for h in out["hints"])
+    token.chmod(0o600)
+    out = await cct.status_report()
+    assert out["ready"] is True and out["callback"]["token_file_ok"] is True
