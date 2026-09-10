@@ -1712,7 +1712,13 @@ def setup_chat_routes(
                         _max_rounds = int(get_setting("agent_max_rounds", _DEFAULT_ROUNDS) or _DEFAULT_ROUNDS)
                     except (TypeError, ValueError):
                         _max_rounds = _DEFAULT_ROUNDS
-                    _max_rounds = max(1, min(_max_rounds, 200))
+                    _max_rounds = max(1, min(_max_rounds, 500))
+                    # The loop-breaker inside stream_agent_loop forces a final
+                    # answer once the turn reaches the budget. The hard stop
+                    # passed as max_tool_calls sits a margin above it so the
+                    # turn always gets that closing answer before it is cut
+                    # off — at the same number both would fire in one round.
+                    _hard_budget = _tool_budget + max(10, _tool_budget // 10) if _tool_budget > 0 else 0
 
                     _forced_tools = None
                     if _search_enabled:
@@ -1730,7 +1736,7 @@ def setup_chat_routes(
                         temperature=ctx.preset.temperature,
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
-                        max_tool_calls=_tool_budget,
+                        max_tool_calls=_hard_budget,
                         max_rounds=_max_rounds,
                         context_length=ctx.context_length,
                         active_document=active_doc,

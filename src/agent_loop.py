@@ -3737,7 +3737,10 @@ def _detect_runaway_call(call_freq, threshold=15):
 # events, a build→test→fix cycle) lands well under it — but low enough that an
 # unbounded breadth-first sweep stops before it fills the context window.
 # Override with the `agent_max_tool_calls` setting; <= 0 disables the guard.
-DEFAULT_MAX_TOOL_CALLS_PER_RUN = 60
+# 500 (was 60): a multi-repository delegation or a long build→test→fix turn
+# legitimately makes hundreds of calls; the repeat/stall detectors above still
+# stop a loop that is not making progress.
+DEFAULT_MAX_TOOL_CALLS_PER_RUN = 500
 
 
 def _tool_schemas_for_round(
@@ -5661,8 +5664,9 @@ async def stream_agent_loop(
         # Breadth backstop: distinct-but-endless exploration. Never trips on a
         # normal turn; catches the sweep that the repeat detectors cannot see.
         try:
-            _max_calls = int(get_setting("agent_max_tool_calls", DEFAULT_MAX_TOOL_CALLS_PER_RUN)
-                             or DEFAULT_MAX_TOOL_CALLS_PER_RUN)
+            # 0 is documented (settings.py, the Tools panel) as "no ceiling";
+            # it used to silently fall back to the module default instead.
+            _max_calls = int(get_setting("agent_max_tool_calls", DEFAULT_MAX_TOOL_CALLS_PER_RUN))
         except (TypeError, ValueError):
             _max_calls = DEFAULT_MAX_TOOL_CALLS_PER_RUN
         _over_budget = _max_calls > 0 and _total_tool_calls >= _max_calls

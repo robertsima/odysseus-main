@@ -92,7 +92,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "apply_patch": "Apply a multi-file patch to source files ON DISK. Use for implementation, refactors, and bug fixes where several edits belong together. Workspace-confined and returns a diff. Prefer over bash redirects/heredocs/sed.",
     "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
     "manage_agent_worktree": "Work on this codebase in an isolated, persistent git worktree on an agent/odysseus/* branch, then publish it as a DRAFT pull request once a human approves. Use for any 'change the code / fix this bug / open a PR / push a branch' request about Odysseus itself. Actions: start, status, diff, commit, request_publish, publish, list_requests, show_request, remove. This is the ONLY way to push: git commands run through bash have no credentials and will fail to authenticate.",
-    "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI, running inside an approved Git repository/worktree (under CLAUDE_CODE_REPOSITORY_ROOTS). Use for 'have Claude Code do X', 'ask the coding harness to fix/implement X in <repo>', or any request to hand off inspection/edit/test/commit work in a specific checkout to an external coding agent. Returns Claude's output plus the resulting branch, commit, and changed-file status. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
+    "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working. Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
     "read_app_logs": "Read Odysseus's own application logs to debug or troubleshoot the running app. Use when something in the app failed, errored, or behaved unexpectedly and you need to see what it recorded. action=list to enumerate log files, action=tail for the last N lines with optional substring or minimum-level filters. Read-only; credentials are redacted.",
     "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
@@ -451,6 +451,15 @@ class ToolIndex:
         # "Ask another model" intent → chat_with_model relays to a
         # different model and returns its answer. ask_teacher escalates
         # to the configured teacher. (second_opinion was removed.)
+        # Claude Code is a coding agent run as a subprocess, not a chat model.
+        # Without this hint a "test Claude Code" / "have Claude do X" request
+        # surfaced chat_with_model + list_models, which then reported that no
+        # Claude chat model exists (2026-09-10 incident log).
+        frozenset({"claude code", "claude-code", "claudecode", "claude agent",
+                   "delegate to claude", "have claude", "let claude", "ask claude code",
+                   "coding agent", "coding harness", "hand off to claude", "hand this to claude",
+                   "claude integration", "delegate coding", "delegate this coding"}):
+            {"delegate_to_claude_code", "read_app_logs"},
         frozenset({"ask gpt", "ask claude", "ask gemini", "ask deepseek",
                    "ask minimax", "ask qwen", "ask the", "ask another model",
                    "what does", "what would", "second opinion", "other model",

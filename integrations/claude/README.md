@@ -39,10 +39,92 @@ the scopes needed by the Claude Agent token.
 
 Odysseus can call the locally installed Claude Code binary through the native
 `delegate_to_claude_code` agent tool. Delegation is admin-only, limited to Git
-repositories below `CLAUDE_CODE_REPOSITORY_ROOTS` (defaults to the development
-and agent-worktree roots), and never grants push, sudo, or arbitrary shell
-permission. Configure `CLAUDE_CODE_BINARY` and `CLAUDE_CODE_HOME` when the
-installation uses non-default paths.
+repositories at or one level below the approved roots (default
+`/app/data/development` and `/app/data/agent_worktrees`), and never grants
+push, sudo, or arbitrary shell permission.
+
+Claude Code is **not** a chat model in Odysseus. `chat_with_model("claude")`
+and `list_models` will never find it; the agent is routed to
+`delegate_to_claude_code` for anything that mentions Claude Code, and the
+chat-model tools answer a `claude` lookup with that pointer.
+
+The tool takes an `action`:
+
+| action | what it does |
+|---|---|
+| `status` | preflight: binary path/version/flags, whether it is signed in (via `claude auth status`; no token is read), approved roots and every checkout under them, the default repository, callback configuration, live job count, and a repair hint per missing piece |
+| `list_repositories` | the approved checkouts/worktrees with their branch |
+| `run` (default) | delegate and wait (`timeout_seconds`, 30–1800, default 900) |
+| `start` / `poll` / `cancel` / `list` | the same job in the background: the primary agent keeps working, can run several repositories in parallel (jobs on one checkout queue), and picks the result up later |
+
+`repository` may be omitted: the configured default, `ODYSSEUS_AGENT_SOURCE_REPO`,
+the active workspace, or the only approved checkout is used, in that order. A
+wrong path (for example `/app`, the application root, which is not a checkout)
+is rejected with the approved roots and known repositories in the message.
+
+The reply carries Claude's `result` text, `permission_denials` (what Claude
+wanted but was not allowed — pushes, arbitrary shell, files outside the
+checkout), the CLI metrics (`num_turns`, `total_cost_usd`, `session_id`), and
+what git reports afterwards (`branch`, `commit`, `changed_files`, `clean`).
+
+### Settings
+
+Everything is configurable in **Settings > Tools > Claude Code delegation**
+(admin-only, persisted in `settings.json`, no restart) with the `CLAUDE_CODE_*`
+environment variables as the fallback:
+
+| setting | env | meaning |
+|---|---|---|
+| `claude_code_binary` | `CLAUDE_CODE_BINARY` | path of the unmodified `claude` binary |
+| `claude_code_home` | `CLAUDE_CODE_HOME` | `HOME` for the child; its own sign-in lives under `$HOME/.claude` |
+| `claude_code_repository_roots` | `CLAUDE_CODE_REPOSITORY_ROOTS` | absolute directories whose checkouts may be delegated to |
+| `claude_code_default_repository` | `CLAUDE_CODE_DEFAULT_REPOSITORY` | used when a delegation names no repository |
+| `claude_code_max_concurrent_tasks` | `CLAUDE_CODE_MAX_CONCURRENT_TASKS` | aggregate Claude subprocess limit (default 2) |
+| `claude_code_model` | — | Claude model alias passed with `--model` (empty = Claude Code's default) |
+| `claude_code_restricted` | — | run with `--restricted` (default on): ignore hooks/MCP servers declared inside the checkout, confine file tools to it, refuse bypassPermissions |
+| `claude_code_odysseus_url` / `claude_code_odysseus_token_file` | `CLAUDE_CODE_ODYSSEUS_URL` / `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` | callback into this Odysseus (below) |
+
+The same card shows the live preflight (`GET /api/claude-code/status`) and
+recent delegations (`GET /api/claude-code/tasks`), with a cancel button for
+running ones.
+
+The runner adapts to the installed version: `--permission-prompts none` is
+passed when the binary supports it (2.1.259+; older builds deny prompts in
+headless mode anyway), `--restricted` when supported and enabled. `--bare`
+is deliberately **not** used: it skips the operator's own sign-in.
+
+### Terms of use (why this shape)
+
+Anthropic's Claude Code legal page permits running the **unmodified** binary
+inside your own agent infrastructure as long as each user authenticates with
+their own credentials (subscription sign-in or API key) and usage is neither
+resold nor intermediated, and it expressly allows an end user to sign in to a
+hosted, unmodified Claude Code with their own subscription. It forbids
+third-party software from collecting, storing, or routing requests through
+Claude.ai credentials. Odysseus therefore:
+
+- runs the binary as published and never modifies it or its auth methods;
+- never reads, stores, or forwards Claude's OAuth/session token or API key —
+  the operator signs in once as the container user (`HOME=$CLAUDE_CODE_HOME`);
+- does **not** offer "Claude" as a chat model backed by that sign-in. To chat
+  with Claude models directly, add an Anthropic **API key** as a model
+  endpoint (billed per token under the Commercial Terms).
+
+`skills/dev/claude-code-delegation/references/terms-and-boundaries.md` keeps
+the working summary; the linked Anthropic pages are the authority.
+
+### Testing the integration
+
+1. In chat (as admin): "Check the Claude Code integration status." The agent
+   calls `delegate_to_claude_code` with `action=status`; `ready: true` means
+   binary + sign-in + at least one approved checkout. Or open Settings > Tools
+   > Claude Code delegation and press **Check status**.
+2. Then: "Have Claude Code add a docstring to `core/atomic_io.py` in
+   `/app/data/development/odysseus-main` and commit it." The reply names the
+   branch, commit, and changed files; the tool card in the timeline shows
+   Claude's own report.
+3. For a longer job: "Start a background Claude Code task in the
+   claude-code-integration worktree to …", then "poll it".
 
 To let an Odysseus-delegated Claude process call back into Odysseus during the
 same job, set `CLAUDE_CODE_ODYSSEUS_URL` and
@@ -55,8 +137,11 @@ setup command above handles both standard and custom config directories).
 The same delegation is also reachable over HTTP, for callers outside a chat
 session (automation, CI, another admin tool):
 
-- `POST /api/claude-code/tasks` — body `{repository, prompt, allowed_tools?,
-  timeout_seconds?}`, returns `{task_id, status: "queued"}`.
+- `GET /api/claude-code/status` — the preflight described above.
+- `GET /api/claude-code/tasks` — bounded recent-task rows (no output blobs);
+  API tokens see their own tasks, admin sessions see all.
+- `POST /api/claude-code/tasks` — body `{repository?, prompt, allowed_tools?,
+  timeout_seconds?, model?, label?}`, returns `{task_id, status: "queued"}`.
 - `GET /api/claude-code/tasks/{task_id}` — current status plus, once
   finished, Claude's output and the repo's resulting `branch`, `commit`,
   `clean`/`status` (changed files).

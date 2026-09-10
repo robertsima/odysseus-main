@@ -17,7 +17,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from typing import Any
 
 from core.middleware import require_admin
-from src.agent_tools.claude_code_tools import get_task_runner
+from src.agent_tools.claude_code_tools import get_task_runner, status_report
 from src.auth_helpers import require_user
 
 CLAUDE_CODE_READ_SCOPES = {"claude_code:read", "claude_code:write"}
@@ -48,6 +48,24 @@ def _require_claude_code_scope(request: Request, allowed: set[str]) -> str:
 
 def setup_claude_code_routes() -> APIRouter:
     router = APIRouter(prefix="/api/claude-code", tags=["claude-code"])
+
+    @router.get("/status")
+    async def get_status(request: Request):
+        """Preflight for the integration: binary, sign-in state (no token is
+        read), approved repositories, callback configuration, live task
+        count. Drives the Settings > Tools > Claude Code card and the chat
+        tool's action=status."""
+        _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
+        return await status_report()
+
+    @router.get("/tasks")
+    async def list_tasks(request: Request, limit: int = 50):
+        """Bounded task rows (no output blobs). API tokens see their own
+        tasks; an admin cookie session sees every task."""
+        owner = _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
+        runner = get_task_runner()
+        task_owner = owner if getattr(request.state, "api_token", False) else None
+        return {"tasks": runner.summaries(owner=task_owner, limit=max(1, min(int(limit or 50), 200)))}
 
     @router.post("/tasks", status_code=202)
     async def create_task(request: Request, body: dict[str, Any] = Body(default_factory=dict)):

@@ -1246,16 +1246,20 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_claude_code",
-            "description": "Delegate a bounded coding task to the installed Claude Code CLI in an approved Git worktree. Claude may inspect, edit, test, and commit, but cannot push or use arbitrary shell commands.",
+            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree."},
-                    "prompt": {"type": "string", "description": "Task instructions for Claude Code."},
-                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrow Claude permission list."},
-                    "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds."}
+                    "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories"], "description": "Default run. status = preflight (binary, sign-in, approved repositories, callback). list_repositories = approved checkouts. start/poll/cancel/list = background task lifecycle."},
+                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree (from action=list_repositories). Omit or pass 'auto' to use the configured default / the only approved checkout."},
+                    "prompt": {"type": "string", "description": "Task instructions for Claude Code (run/start). State the objective, likely files, constraints, and how to verify."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrower Claude permission list (Read, Edit, Write, Bash(git status:*), Bash(pytest:*), ...)."},
+                    "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds (default 900)."},
+                    "model": {"type": "string", "description": "Optional Claude model alias for this job (e.g. sonnet, opus)."},
+                    "task_id": {"type": "string", "description": "Task id for poll/cancel."},
+                    "label": {"type": "string", "description": "Short name for a background task (start)."}
                 },
-                "required": ["repository", "prompt"]
+                "required": []
             }
         }
     },

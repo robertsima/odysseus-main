@@ -35,6 +35,30 @@ pytestmark = pytest.mark.area_security
 TOOL_NAME = "delegate_to_claude_code"
 
 
+@pytest.fixture
+def approved_repo(tmp_path, monkeypatch):
+    """A real Git checkout that is the only approved root, so the tests do
+    not depend on /app/data/development/odysseus-main existing on the host."""
+    root = tmp_path / "development"
+    repo = root / "odysseus-main"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/dev\n", encoding="utf-8")
+    monkeypatch.setattr(cct, "DEFAULT_ROOTS", (str(root),))
+    monkeypatch.setattr(cct, "DEFAULT_REPOSITORY", "")
+    monkeypatch.delenv("ODYSSEUS_AGENT_SOURCE_REPO", raising=False)
+    return repo
+
+
+@pytest.fixture
+def fake_binary_info(monkeypatch):
+    """Skip probing --version/--help so runs with a stubbed subprocess work."""
+    async def _info(binary=None):
+        return {"path": str(binary or cct.binary_path()), "available": True, "version": "2.1.267 (Claude Code)",
+                "flags": list(cct._OPTIONAL_FLAGS), "error": ""}
+    monkeypatch.setattr(cct, "binary_info", _info)
+    return _info
+
+
 # ── Registration parity (dispatchable <-> admin-gated <-> plan-mode-blocked) ──
 
 def test_tool_is_dispatchable():
@@ -60,18 +84,37 @@ def test_tool_is_blocked_in_plan_mode():
 
 # ── Repository approval + input validation ──
 
-def test_approved_repository_accepts_repo():
-    assert _approved_repository("/app/data/development/odysseus-main").name == "odysseus-main"
+def test_approved_repository_accepts_repo(approved_repo):
+    assert _approved_repository(str(approved_repo)).name == "odysseus-main"
 
 
-def test_approved_repository_rejects_outside_root(tmp_path):
+def test_approved_repository_rejects_outside_root(tmp_path, approved_repo):
+    outside = tmp_path / "elsewhere"
+    (outside / ".git").mkdir(parents=True)
+    with pytest.raises(ValueError, match="outside Claude Code approved roots"):
+        _approved_repository(str(outside))
+
+
+def test_approved_repository_rejects_non_checkout(tmp_path, approved_repo):
     with pytest.raises(ValueError, match="existing Git"):
         _approved_repository(str(tmp_path))
 
 
-async def test_tool_rejects_push_permission():
+def test_rejection_lists_roots_and_candidates(approved_repo):
+    """The 2026-09-10 failure: the agent passed /app, got 'not a Git
+    repository', and had no way to learn the right path. The error now
+    carries the approved roots and the checkouts under them."""
+    with pytest.raises(ValueError) as exc:
+        _approved_repository("/app")
+    text = str(exc.value)
+    assert "Approved roots" in text
+    assert str(approved_repo) in text
+    assert "(dev)" in text
+
+
+async def test_tool_rejects_push_permission(approved_repo):
     result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": "/app/data/development/odysseus-main",
+        "repository": str(approved_repo),
         "prompt": "inspect",
         "allowed_tools": ["Bash(git push:*)"],
     }), {})
@@ -79,9 +122,9 @@ async def test_tool_rejects_push_permission():
     assert "unsafe" in result["error"]
 
 
-async def test_tool_rejects_sudo_permission():
+async def test_tool_rejects_sudo_permission(approved_repo):
     result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": "/app/data/development/odysseus-main",
+        "repository": str(approved_repo),
         "prompt": "inspect",
         "allowed_tools": ["Bash(sudo:*)"],
     }), {})
@@ -89,9 +132,9 @@ async def test_tool_rejects_sudo_permission():
     assert "unsafe" in result["error"]
 
 
-async def test_tool_rejects_arbitrary_shell():
+async def test_tool_rejects_arbitrary_shell(approved_repo):
     result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": "/app/data/development/odysseus-main",
+        "repository": str(approved_repo),
         "prompt": "inspect",
         "allowed_tools": ["Bash"],
     }), {})
@@ -111,9 +154,9 @@ async def test_tool_rejects_non_object_json():
     assert "JSON object required" in result["error"]
 
 
-async def test_tool_rejects_missing_prompt():
+async def test_tool_rejects_missing_prompt(approved_repo):
     result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": "/app/data/development/odysseus-main",
+        "repository": str(approved_repo),
     }), {})
     assert result["exit_code"] == 1
     assert "prompt" in result["error"]
@@ -142,7 +185,7 @@ def test_callback_token_is_added_only_to_child_environment(tmp_path, monkeypatch
 
 # ── Per-repository serialization ──
 
-async def test_repo_lock_serializes_concurrent_runs(monkeypatch, tmp_path):
+async def test_repo_lock_serializes_concurrent_runs(monkeypatch, tmp_path, fake_binary_info):
     """Two delegations against the same repo must not run concurrently."""
     monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
     monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
@@ -174,7 +217,7 @@ async def test_repo_lock_serializes_concurrent_runs(monkeypatch, tmp_path):
     assert order == ["start", "end", "start", "end"]
 
 
-async def test_global_process_limit_bounds_different_repositories(monkeypatch, tmp_path):
+async def test_global_process_limit_bounds_different_repositories(monkeypatch, tmp_path, fake_binary_info):
     monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
     monkeypatch.setattr(cct, "_PROCESS_LIMIT", asyncio.Semaphore(1))
     monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
@@ -273,7 +316,7 @@ async def test_cancel_kills_a_running_task(tmp_path, monkeypatch):
             killed["value"] = True
             self.returncode = -9
 
-    async def fake_run_claude(repository, prompt, timeout, tools, on_process=None):
+    async def fake_run_claude(repository, prompt, timeout, tools, on_process=None, model=None):
         proc = FakeProc()
         if on_process is not None:
             on_process(proc)

@@ -51,6 +51,60 @@ judgment.
 - Use Todoist for actionable commitments; use Calendar only for fixed,
   time-gated events.
 
+## Coding-agent delegation (Claude Code)
+
+- Claude Code is a coding agent that Odysseus runs as a local subprocess of
+  the unmodified `claude` binary. It is **not a chat model**: `chat_with_model`
+  and `list_models` never reach it. The only route is `delegate_to_claude_code`
+  (chat) or `POST /api/claude-code/tasks` (automation).
+- Before the first delegation, call `delegate_to_claude_code` with
+  `action=status`. It reports the binary, its version and flags, whether it is
+  signed in, the approved repository roots and every checkout under them, the
+  default repository, and the callback configuration — with a repair hint for
+  each missing piece.
+- Pass a repository from that list (or omit it to use the default). The
+  application root is never a checkout; `/app` is rejected, and the rejection
+  now lists the approved candidates so the one permitted retry can succeed.
+- `action=run` blocks the turn until Claude finishes; `action=start` returns a
+  task id so the primary agent can keep working, run several repositories in
+  parallel, and `poll`/`cancel` later. Jobs on one checkout are serialized.
+- Read `result`, `changed_files`, `branch`, `commit`, and
+  `permission_denials` from the reply; verify the diff with the workspace file
+  tools; publish only through `manage_agent_worktree`.
+- Configuration lives in Settings > Tools > Claude Code (`claude_code_*`
+  settings, admin-only) with `CLAUDE_CODE_*` environment variables as the
+  fallback. The bundled `claude-code-delegation` skill carries the full
+  procedure and the terms boundaries.
+
+## Multi-agent conversations
+
+- `send_to_session` stores both the message and the reply in the target chat
+  tagged `source=agent` with the sending chat's id and name; the UI labels
+  them "Agent · <chat>" with a link back instead of showing them as "You".
+- The tool-call ceiling per turn is 500 (`agent_max_tool_calls`; 0 = none)
+  with up to 100 steps per message (`agent_max_rounds`), so a long
+  build→test→fix or multi-repository turn is not cut off. The repeat/stall
+  detectors still stop a loop that makes no progress.
+- In chat, a tool timeline folds after 12 calls (`chat_tool_fold_after`) and
+  shows a summary bar (counts, failures, tools used, expand/collapse all).
+
+## Known reliability findings (2026-09-10)
+
+- A "test Claude" request was routed to `list_models`/`chat_with_model`,
+  which reported that no Claude chat model exists. Routing hints and the tool
+  descriptions now send "Claude Code" / "have Claude …" requests to
+  `delegate_to_claude_code`, and the chat-model tools answer a `claude` lookup
+  with a pointer to the delegation tool.
+- The first delegation passed `/app` (the application root, not a checkout)
+  and was rejected without saying which paths are approved. The tool now
+  discovers checkouts under the approved roots, defaults to one, and lists
+  them in every rejection.
+- `GET /api/claude/plugin.zip` returned 200: the Claude → Odysseus half
+  (the bundled skill and scoped token) was already healthy.
+- The ChatGPT subscription stream error at 17:33:52 ("peer closed connection
+  without sending complete message body") is a transient upstream disconnect
+  on a different provider path and is unrelated to Claude Code.
+
 ## Known reliability findings (2026-09-09)
 
 - Startup logged `ODYSSEUS_PERSONAL_DIRS: could not resolve an owner from

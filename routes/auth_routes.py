@@ -653,13 +653,56 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         # Per-key validation for numeric settings: coerce to int and clamp to a
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
-            "agent_max_rounds": (1, 200),
-            "agent_max_tool_calls": (0, 1000),  # 0 = unlimited
+            "agent_max_rounds": (1, 500),
+            "agent_max_tool_calls": (0, 2000),  # 0 = unlimited
+            "chat_tool_fold_after": (0, 500),  # 0 = never fold
+            "claude_code_max_concurrent_tasks": (0, 16),  # 0 = env default
+        }
+        # Filesystem-path settings: absolute paths only (or empty = unset),
+        # so a settings write can't point the delegation at a relative or
+        # shell-expanded location.
+        _ABS_PATH_KEYS = {
+            "claude_code_binary", "claude_code_home", "claude_code_default_repository",
+            "claude_code_odysseus_token_file",
         }
         for key in DEFAULT_SETTINGS:
             if key not in body:
                 continue
             val = body[key]
+            if key == "claude_code_repository_roots":
+                if not isinstance(val, list):
+                    raise HTTPException(400, f"{key} must be a list of absolute paths")
+                cleaned = []
+                for item in val:
+                    item = str(item or "").strip()
+                    if not item:
+                        continue
+                    if not os.path.isabs(item):
+                        raise HTTPException(400, f"{key}: {item!r} is not an absolute path")
+                    cleaned.append(os.path.normpath(item))
+                current[key] = cleaned
+                continue
+            if key in _ABS_PATH_KEYS:
+                val = str(val or "").strip()
+                if val and not os.path.isabs(os.path.expanduser(val)):
+                    raise HTTPException(400, f"{key} must be an absolute path (or empty)")
+                current[key] = val
+                continue
+            if key == "claude_code_odysseus_url":
+                val = str(val or "").strip()
+                if val and not val.lower().startswith(("http://", "https://")):
+                    raise HTTPException(400, f"{key} must be an http(s) URL (or empty)")
+                current[key] = val.rstrip("/")
+                continue
+            if key == "claude_code_model":
+                val = str(val or "").strip()
+                if val and not re.fullmatch(r"[A-Za-z0-9._\-]{1,80}", val):
+                    raise HTTPException(400, f"{key} must be a plain model name or alias")
+                current[key] = val
+                continue
+            if key == "claude_code_restricted":
+                current[key] = bool(val) if not isinstance(val, str) else val.strip().lower() in ("1", "true", "yes", "on")
+                continue
             if key == "context_profiles":
                 # A preferences blob, not a scalar: clamp what is out of range
                 # and drop what is unknown rather than 400ing the whole save
