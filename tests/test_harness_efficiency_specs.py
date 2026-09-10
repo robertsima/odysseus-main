@@ -217,3 +217,55 @@ def test_promotional_and_list_mail_is_not_calendar_material():
     assert _not_calendar_material({}, "no-reply@shop.com", "Your order")
     assert not _not_calendar_material({}, "dentist@clinic.com", "Appointment confirmation for Tuesday 10am")
     assert not _not_calendar_material({}, "matt@example.com", "Coffee next week?")
+
+
+# ── Skill-declared toolsets must be real tool names ──
+
+def test_skill_requires_toolsets_keeps_only_real_tool_names():
+    """A skill's `requires_toolsets` is operator-authored free text. Prose
+    entries ("email", "file search and edit", "todoist") used to land in the
+    selected set, where they can never resolve to a schema — nine of them
+    appeared in `selected_without_schema` on every round of the 2026-09-10
+    logs — and the system prompt, built from the same set, told the model it
+    had tools that do not exist."""
+    from src.agent_loop import _skill_declared_tools
+
+    skills = [
+        {"name": "jarvis", "requires_toolsets": [
+            "email", "calendar", "todoist", "file search and edit",
+            "application-log access", "memory management", "skill management",
+            "read_file", "manage_calendar",
+        ]},
+        {"name": "other", "requires_toolsets": ["bash", "write_file"]},
+    ]
+    tools, unknown = _skill_declared_tools(skills, disabled_tools=set())
+    assert tools == {"read_file", "manage_calendar", "bash", "write_file"}
+    assert "email" in unknown and "file search and edit" in unknown
+    assert "read_file" not in unknown
+
+
+def test_skill_requires_toolsets_still_respects_disabled_tools():
+    from src.agent_loop import _skill_declared_tools
+
+    tools, unknown = _skill_declared_tools(
+        [{"requires_toolsets": ["read_file", "bash"]}], disabled_tools={"bash"}
+    )
+    assert tools == {"read_file"}
+    assert unknown == set()
+
+
+def test_skill_requires_toolsets_handles_empty_input():
+    from src.agent_loop import _skill_declared_tools
+
+    assert _skill_declared_tools([], set()) == (set(), set())
+    assert _skill_declared_tools([{"name": "x"}], set()) == (set(), set())
+
+
+def test_worktree_status_names_the_checkout_it_manages():
+    """The agent could not tell that a worktree it just started belongs to
+    Odysseus and not to the third-party project it was working in."""
+    import inspect
+    from src.agent_worktree import service
+
+    src = inspect.getsource(service.status)
+    assert '"source_repo": cfg.source_repo' in src

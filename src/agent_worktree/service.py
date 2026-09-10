@@ -200,6 +200,10 @@ async def status(
     out: Dict[str, Any] = {
         "publish_enabled": cfg.publish_enabled,
         "repo": cfg.repo_slug or None,
+        # Which checkout this tool operates on. Without it the agent could not
+        # tell that a worktree it just started belongs to Odysseus rather than
+        # to the third-party project it was actually working in.
+        "source_repo": cfg.source_repo,
         "base_branch": cfg.base_branch,
         "branch_prefix": BRANCH_PREFIX,
         "worktree_root": cfg.worktree_root,

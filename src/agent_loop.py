@@ -12,7 +12,7 @@ import json
 import re
 import time
 import logging
-from typing import Any, AsyncGenerator, List, Dict, Optional, Set
+from typing import Any, AsyncGenerator, List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from src.llm_core import (
@@ -1680,6 +1680,38 @@ _MISSING_TOOL_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
+    """Split a skill's ``requires_toolsets`` into real tools and prose.
+
+    The field is operator-authored free text in SKILL.md. A skill declaring
+    prose ("email", "file search and edit", "todoist") used to put those
+    strings straight into the selected tool set, where they can never resolve
+    to a schema — the 2026-09-10 logs show nine of them in
+    `selected_without_schema` on every round. The system prompt is built from
+    the same set, so the model was also told it had tools that do not exist.
+
+    Returns ``(tools, unknown)``; ``unknown`` is worth logging so the operator
+    can fix the skill's front matter.
+    """
+    try:
+        from src.tool_policy import known_tool_names
+
+        known = known_tool_names()
+    except Exception:
+        known = set()
+    tools: Set[str] = set()
+    unknown: Set[str] = set()
+    for skill in skills or []:
+        for name in (skill.get("requires_toolsets") or []):
+            if not name or name in (disabled_tools or set()):
+                continue
+            if known and name not in known:
+                unknown.add(name)
+                continue
+            tools.add(name)
+    return tools, unknown
 
 
 def _harness_directive(text: str) -> Dict:
@@ -4517,10 +4549,13 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         if "manage_skills" not in disabled_tools:
             _relevant_tools.add("manage_skills")
-        for _skill in _explicit_skills:
-            _relevant_tools.update(
-                tool for tool in (_skill.get("requires_toolsets") or [])
-                if tool not in disabled_tools
+        _skill_tools, _unknown_toolsets = _skill_declared_tools(_explicit_skills, disabled_tools)
+        _relevant_tools.update(_skill_tools)
+        if _unknown_toolsets:
+            logger.warning(
+                "[agent-intent] skill requires_toolsets entries are not tool names "
+                "and were ignored: %s — fix the skill's front matter",
+                sorted(_unknown_toolsets),
             )
         logger.info(
             "[agent-intent] explicit skills=%s dependencies=%s",
@@ -4680,7 +4715,8 @@ async def stream_agent_loop(
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
         logger.info(
-            "[tool-routing] source=%s domains=%s query_matched_count=%d selected_count=%d retained_count=%d suppressed_retained=%s disabled_count=%d",
+            "[tool-routing] source=%s domains=%s query_matched_count=%d selected_count=%d "
+            "retained_count=%d suppressed_retained=%s disabled_count=%d admin_tools=%s",
             _tool_selection_source,
             sorted(_intent.get("domains") or set()),
             len(_query_matched_tools),
@@ -4688,6 +4724,10 @@ async def stream_agent_loop(
             len(_retained_tool_names),
             sorted(_suppressed_retained_tools),
             len(disabled_tools),
+            # Which admin schemas the request's own keywords bought, so a
+            # `schema_without_selection` list in the next log explains itself
+            # instead of needing another code read.
+            sorted(_admin_tools) if _needs_admin else [],
         )
 
     prep_timings["tool_selection"] = time.time() - _t1
