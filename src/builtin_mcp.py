@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -111,6 +112,11 @@ _BUILTIN_NPX_SERVERS = {
 # split also keeps a dozen schemas in front of the local model instead of a
 # hundred.
 GITHUB_MCP_TOKEN_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
+# Classic (ghp_), fine-grained (github_pat_), OAuth/app (gho_/ghu_/ghs_/ghr_),
+# or a pre-2021 40-hex classic token. Anything else — an Odysseus `ody_` token
+# pasted into the wrong field, say — starts the server fine and then fails
+# every call with 401, which reads as "GitHub stopped working".
+_GITHUB_TOKEN_SHAPE = re.compile(r"^(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]+$|^[0-9a-f]{40}$")
 
 GITHUB_MCP_READ_TOOLS = (
     "get_file_contents",
@@ -192,8 +198,16 @@ def github_mcp_servers() -> dict[str, dict]:
     server exits immediately without credentials, and a built-in that fails on
     every startup is just noise in the logs.
     """
-    if not os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip():
+    token = os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip()
+    if not token:
         return {}
+    if not _GITHUB_TOKEN_SHAPE.match(token):
+        logger.warning(
+            "%s does not look like a GitHub token (it starts with %r): the GitHub MCP server "
+            "will start, but every call will fail with 401. A classic token starts with ghp_, "
+            "a fine-grained one with github_pat_.",
+            GITHUB_MCP_TOKEN_ENV, token[:4],
+        )
     binary = find_github_mcp_binary()
     if not binary:
         return {}

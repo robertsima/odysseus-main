@@ -69,6 +69,9 @@ def foreign_repo(tmp_path):
         "gh release create v1",
         "make build; git push",
         "result=$(git push 2>&1)",
+        # The agent improvising a credential inline, seen 2026-09-11 round 5.
+        "git -c credential.helper='!f() { echo username=x; echo password=y; }; f' push origin main",
+        'git -c "credential.helper=store --file=/tmp/c" push',
     ],
 )
 def test_remote_publishing_commands_are_redirected(command, odysseus_repo):
@@ -137,7 +140,8 @@ def test_an_agent_odysseus_branch_is_odysseus_work_wherever_it_is_typed(odysseus
 @pytest.mark.parametrize("config_line", [
     '[remote "origin"]\n\turl = https://token:x@github.com/robertsima/Umni.git\n',
     '[remote "origin"]\n\turl = git@github.com:robertsima/Umni.git\n',
-    '[credential]\n\thelper = store\n[remote "origin"]\n\turl = https://github.com/robertsima/Umni.git\n',
+    '[credential]\n\thelper = manager\n[remote "origin"]\n\turl = https://github.com/robertsima/Umni.git\n',
+    '[credential]\n\thelper = !gh auth git-credential\n[remote "origin"]\n\turl = https://github.com/robertsima/Umni.git\n',
 ])
 def test_a_third_party_repo_with_its_own_credential_is_left_alone(tmp_path, odysseus_repo, config_line):
     """Blocking a push that would have succeeded is the regression the user
@@ -147,6 +151,46 @@ def test_a_third_party_repo_with_its_own_credential_is_left_alone(tmp_path, odys
     (repo / ".git" / "config").write_text(config_line, encoding="utf-8")
     assert push_guard.repository_has_own_credential(str(repo)) is True
     assert push_guard.check("git push origin main", cwd=str(repo)) is None
+
+
+_UMNI = '[remote "origin"]\n\turl = https://github.com/robertsima/Umni.git\n'
+
+
+def _repo_with_config(tmp_path, name, config):
+    repo = tmp_path / name
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text(config, encoding="utf-8")
+    return repo
+
+
+def test_a_store_helper_with_a_populated_store_is_left_alone(tmp_path, odysseus_repo):
+    store = tmp_path / "creds"
+    store.write_text("https://x:y@github.com\n", encoding="utf-8")
+    repo = _repo_with_config(tmp_path, "stored", f"[credential]\n\thelper = store --file={store}\n" + _UMNI)
+    assert push_guard.repository_has_own_credential(str(repo)) is True
+    assert push_guard.check("git push origin main", cwd=str(repo)) is None
+
+
+def test_a_store_helper_with_an_empty_store_is_blocked_and_named(tmp_path, odysseus_repo):
+    """2026-09-11: the dog-trainer checkout survived a container rebuild on
+    the data volume, its config still said `helper = store`, and the home
+    directory the store lived in did not. The guard waved the push through
+    as credentialed and git exited 128."""
+    repo = _repo_with_config(tmp_path, "rebuilt", "[credential]\n\thelper = store\n" + _UMNI)
+    assert push_guard.repository_has_own_credential(str(repo)) is False
+    blocked = push_guard.check("git push origin main", cwd=str(repo))
+    assert blocked["blocked_reason"] == "publish_needs_repository_credential"
+    expected_store = push_guard._global_credential_stores()[0]
+    assert push_guard.empty_credential_store(str(repo)) == expected_store
+    assert expected_store in blocked["error"]
+    assert "rebuilt" in blocked["error"]
+    assert "refill" in blocked["error"]
+
+
+def test_a_cache_helper_is_not_a_credential_after_a_restart(tmp_path, odysseus_repo):
+    repo = _repo_with_config(tmp_path, "cached", "[credential]\n\thelper = cache --timeout=3600\n" + _UMNI)
+    assert push_guard.repository_has_own_credential(str(repo)) is False
+    assert push_guard.check("git push origin main", cwd=str(repo)) is not None
 
 
 def test_a_global_credential_store_also_releases_the_guard(tmp_path, monkeypatch, odysseus_repo, foreign_repo):

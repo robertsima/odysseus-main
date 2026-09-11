@@ -38,8 +38,12 @@ from typing import Optional, Tuple
 # would be blocked as if it were a real push.
 _COMMAND_START = r"(?:^|[;&|(\n])\s*"
 
+# An option's value may carry a quoted segment with spaces inside it:
+# `git -c credential.helper='!f() { echo password=x; }; f' push` is the agent
+# improvising a credential, and it has to be caught like any other push.
+_OPTION_VALUE = r"(?:\"[^\"]*\"|'[^']*'|[^\s\"'-][^\s\"']*(?:\"[^\"]*\"|'[^']*')?\S*)"
 _GIT_PUSH = re.compile(
-    _COMMAND_START + r"git\s+(?:-[^\s]+(?:\s+[^\s-][^\s]*)?\s+)*push\b",
+    _COMMAND_START + r"git\s+(?:-\S+(?:\s+" + _OPTION_VALUE + r")?\s+)*push\b",
     re.IGNORECASE,
 )
 
@@ -157,29 +161,89 @@ def _git_config_text(repo: str) -> str:
 _URL_WITH_USERINFO = re.compile(r"url\s*=\s*\w+://[^/\s]+@", re.IGNORECASE)
 _CREDENTIAL_SECTION = re.compile(r"^\s*\[credential", re.IGNORECASE | re.MULTILINE)
 _SSH_REMOTE = re.compile(r"url\s*=\s*(?:ssh://|git@)", re.IGNORECASE)
+# `helper = store --file=/x`, `helper = cache`, `helper = !gh auth git-credential`
+_CREDENTIAL_HELPER = re.compile(r"^\s*helper\s*=\s*(?P<helper>.*?)\s*$", re.IGNORECASE | re.MULTILINE)
+_STORE_FILE = re.compile(r"--file(?:=|\s+)(?P<path>\"[^\"]+\"|'[^']+'|\S+)")
+
+
+def _non_empty_file(path: str) -> bool:
+    try:
+        return os.path.isfile(path) and os.path.getsize(path) > 0
+    except OSError:
+        return False
+
+
+def _global_credential_stores() -> list:
+    """Where `credential.helper = store` reads from when no --file is given."""
+    home = os.environ.get("HOME") or os.path.expanduser("~")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    return [os.path.join(home, ".git-credentials"), os.path.join(xdg, "git", "credentials")]
+
+
+def _store_paths(helper: str) -> list:
+    match = _STORE_FILE.search(helper)
+    if match:
+        return [os.path.expanduser(_unquote(match.group("path")))]
+    return _global_credential_stores()
+
+
+def _helper_can_authenticate(helper: str) -> bool:
+    """Whether a `credential.helper` value has a credential to hand git.
+
+    `store` is only as good as the file behind it: a container rebuilt from
+    the image keeps the repository (it lives on the data volume) but starts
+    with an empty home, so the config still says `store` while the store is
+    gone. `cache` is an in-memory daemon that dies with the process and has no
+    terminal here to be refilled from. Any other helper (a keychain, a custom
+    `!` command) is trusted, because there is no way to check it from outside.
+    """
+    helper = (helper or "").strip().strip("\"'")
+    if not helper:
+        return False
+    name = helper.split(None, 1)[0]
+    if name == "cache":
+        return False
+    if name == "store":
+        return any(_non_empty_file(p) for p in _store_paths(helper))
+    return True
+
+
+def empty_credential_store(repo: str) -> Optional[str]:
+    """The file a `store` helper would read when the repository names one
+    that is missing or empty, so the guidance can say what actually broke."""
+    config = _git_config_text(repo)
+    if not config or not _CREDENTIAL_SECTION.search(config):
+        return None
+    for match in _CREDENTIAL_HELPER.finditer(config):
+        helper = match.group("helper").strip().strip("\"'")
+        if helper.split(None, 1)[:1] == ["store"] and not _helper_can_authenticate(helper):
+            return _store_paths(helper)[0]
+    return None
 
 
 def repository_has_own_credential(repo: str) -> bool:
     """True when a push from this repository could plausibly authenticate.
 
     Blocking a push that would actually have worked is the worse failure — it
-    reads to the user as "git integration broke". So a repository that carries
-    a credential helper, an SSH remote, or a remote URL with userinfo is left
-    alone, as is any repository when a global ``~/.git-credentials`` exists.
+    reads to the user as "git integration broke". So a repository with an SSH
+    remote, a remote URL with userinfo, or a credential helper that has
+    something to hand over is left alone, as is any repository when a global
+    ``~/.git-credentials`` exists.
+
+    A ``[credential]`` section on its own is not enough. ``helper = store``
+    with an empty store is the 2026-09-11 failure: the guard waved the push
+    through as credentialed, git exited 128, and the agent spent seven rounds
+    probing helpers and SSH keys before reporting "blocked by authentication".
     """
     config = _git_config_text(repo)
-    if config and (
-        _CREDENTIAL_SECTION.search(config)
-        or _URL_WITH_USERINFO.search(config)
-        or _SSH_REMOTE.search(config)
-    ):
-        return True
-    home = os.environ.get("HOME") or os.path.expanduser("~")
-    try:
-        store = os.path.join(home, ".git-credentials")
-        return os.path.isfile(store) and os.path.getsize(store) > 0
-    except OSError:
-        return False
+    if config:
+        if _URL_WITH_USERINFO.search(config) or _SSH_REMOTE.search(config):
+            return True
+        if _CREDENTIAL_SECTION.search(config):
+            for match in _CREDENTIAL_HELPER.finditer(config):
+                if _helper_can_authenticate(match.group("helper")):
+                    return True
+    return any(_non_empty_file(p) for p in _global_credential_stores())
 
 
 def _remote_url(repo: str) -> str:
@@ -251,11 +315,23 @@ def foreign_repository_guidance(kind: str, repo: str) -> str:
     except Exception:
         slug = "the Odysseus repository"
     remote = _remote_url(repo)
+    store = empty_credential_store(repo)
     what = "Pushing to a remote" if kind == "git-push" else "Creating a pull request or release"
+    where = f"{repo}" + (f" (remote {remote})" if remote else "")
+    if store:
+        first = (
+            f"{what} from bash failed before it ran: {where} names `credential.helper = store`, "
+            f"but {store} is missing or empty, and the shell tool carries no credential of its "
+            "own. A container rebuilt from the image keeps the checkout (it lives on the data "
+            "volume) but starts with an empty home, which is how a store goes missing."
+        )
+    else:
+        first = (
+            f"{what} from bash failed before it ran: no credential is configured for {where}, "
+            "and the shell tool carries none of its own."
+        )
     lines = [
-        f"{what} from bash failed before it ran: no credential is configured for "
-        f"{repo}" + (f" (remote {remote})" if remote else "") + ", and the shell tool "
-        "carries none of its own.",
+        first,
         "",
         f"This is NOT the Odysseus checkout, so manage_agent_worktree cannot publish it — "
         f"that tool only ever pushes {slug}. Do not start an Odysseus worktree for this "
@@ -268,6 +344,13 @@ def foreign_repository_guidance(kind: str, repo: str) -> str:
         "",
         "What the operator has to do once, outside this chat:",
         "  - push from the host, or",
+    ]
+    if store:
+        lines += [
+            f"  - refill {store} (`git credential approve`, or copy it back), and keep it under "
+            "/app/data with `helper = store --file=...` so the next rebuild does not wipe it, or",
+        ]
+    lines += [
         "  - give this repository a credential (a credential helper, an SSH remote, or a "
         "token in its remote URL). Any of those and this command will be allowed through "
         "on the next attempt.",

@@ -32,6 +32,25 @@ def test_no_servers_without_a_token(monkeypatch):
     assert builtin_mcp.github_mcp_servers() == {}
 
 
+def test_a_token_that_is_not_a_github_token_is_called_out(monkeypatch, caplog):
+    """An Odysseus `ody_` token pasted into GITHUB_PERSONAL_ACCESS_TOKEN starts
+    the server and then fails every call; say so at startup instead."""
+    monkeypatch.setenv(builtin_mcp.GITHUB_MCP_TOKEN_ENV, "ody_QDpRv0I7Azf-not-a-github-token")
+    with caplog.at_level("WARNING", logger="src.builtin_mcp"):
+        servers = builtin_mcp.github_mcp_servers()
+    assert set(servers) == {"github_read"}  # still registered; the operator decides
+    assert any("does not look like a GitHub token" in r.message and "'ody_'" in r.message for r in caplog.records)
+    assert not any("QDpRv0I7" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("token", ["ghp_abc123", "github_pat_11ABC_def", "gho_x", "a" * 40])
+def test_real_github_token_shapes_do_not_warn(monkeypatch, caplog, token):
+    monkeypatch.setenv(builtin_mcp.GITHUB_MCP_TOKEN_ENV, token)
+    with caplog.at_level("WARNING", logger="src.builtin_mcp"):
+        builtin_mcp.github_mcp_servers()
+    assert not any("does not look like a GitHub token" in r.message for r in caplog.records)
+
+
 def test_no_servers_when_binary_is_missing(monkeypatch):
     monkeypatch.setenv(builtin_mcp.GITHUB_MCP_TOKEN_ENV, "ghp_token")
     monkeypatch.delenv("ODYSSEUS_GITHUB_MCP_BINARY", raising=False)
