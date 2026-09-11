@@ -27,7 +27,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     SKILL.md-backed CRUD with progressive disclosure (Hermes-style). Actions:
 
       list / index               — Level 0: name + description summary.
-      view {name}                — Level 1: full SKILL.md.
+      view {name | names[]}      — Level 1: full SKILL.md (several at once).
       view_ref {name, path}      — Level 2: a sub-file under the skill dir.
       add  {name, description, when_to_use, procedure[], pitfalls[],
             verification[], tags[], category, status}
@@ -56,6 +56,19 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
 
     # Accept legacy `skill_id` as an alias for `name`.
     name = (args.get("name") or args.get("skill_id") or "").strip()
+    # `view` takes several names — a `names` list, or one `name` string with
+    # commas/newlines. Loading N skills used to cost N rounds of one `view`
+    # each; the 2026-09-11 logs show the model walking the index one skill
+    # per call.
+    requested_names: List[str] = []
+    raw_names = args.get("names")
+    if isinstance(raw_names, str):
+        raw_names = re.split(r"[,\n]+", raw_names)
+    if isinstance(raw_names, list):
+        requested_names.extend(str(n).strip() for n in raw_names if str(n).strip())
+    if name and action == "view":
+        requested_names.extend(n.strip() for n in re.split(r"[,\n]+", name) if n.strip())
+    requested_names = list(dict.fromkeys(requested_names))
 
     if action in ("list", "index"):
         all_skills = sm.load(owner=owner)
@@ -75,12 +88,25 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         return {"results": "\n".join(lines) if lines else "No skills yet."}
 
     if action == "view":
-        if not name:
-            return {"error": "name is required for view", "exit_code": 1}
-        md = sm.read_skill_md(name, owner=owner)
-        if md is None:
-            return {"error": f"Skill {name!r} not found", "exit_code": 1}
-        return {"results": md}
+        if not requested_names:
+            return {"error": "name (or names: [...]) is required for view", "exit_code": 1}
+        found: List[tuple] = []
+        missing: List[str] = []
+        for skill_name in requested_names:
+            md = sm.read_skill_md(skill_name, owner=owner)
+            if md is None:
+                missing.append(skill_name)
+            else:
+                found.append((skill_name, md))
+        if not found:
+            label = ", ".join(repr(n) for n in missing)
+            return {"error": f"Skill {label} not found. Use action='list' for exact names.", "exit_code": 1}
+        if len(requested_names) == 1:
+            return {"results": found[0][1]}
+        parts = [f"===== skill: {skill_name} =====\n{md.rstrip()}" for skill_name, md in found]
+        if missing:
+            parts.append("Not found: " + ", ".join(missing) + " (use action='list' for exact names).")
+        return {"results": "\n\n".join(parts)}
 
     if action == "view_ref":
         if not name:
@@ -224,9 +250,13 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         query = (args.get("query") or "").strip()
         if not query:
             return {"error": "query is required for search", "exit_code": 1}
-        results = sm.get_relevant_skills(query, sm.load(owner=owner), max_items=5)
+        # An explicit search is a request to look harder than the per-turn
+        # injection does, so the bar is lower than the 0.3 default.
+        results = sm.get_relevant_skills(query, sm.load(owner=owner), threshold=0.2, max_items=5)
         if not results:
-            return {"results": "No matching skills found."}
+            return {"results": ("No matching skills found. The skills index in your context lists "
+                                "every skill by name; use action='view' with names=[...] to read "
+                                "any that look relevant.")}
         lines = []
         for sk in results:
             proc = sk.get("procedure") or sk.get("steps") or []

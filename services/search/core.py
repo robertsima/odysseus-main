@@ -2,9 +2,10 @@
 
 import json
 import logging
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List, Set
+from typing import Dict, Any, Optional, List, Set, Tuple
 from urllib.parse import urlparse
 
 from .analytics import (
@@ -20,7 +21,7 @@ from .cache import (
     generate_cache_key,
     cleanup_cache,
 )
-from .query import _cache_duration_for_query
+from .query import _cache_duration_for_query, _extract_site_filter
 from .ranking import rank_search_results
 from .providers import (
     searxng_search_api,
@@ -93,7 +94,70 @@ def update_search_config(api_key: str = None, **kwargs):
             SEARCH_CONFIG[k] = v
 
 
+def _site_scope(query: str) -> Tuple[str, Optional[str]]:
+    """Split a `site:` operator off a query.
+
+    Returns ``(query_without_operator, domain)``; ``domain`` is None when the
+    query has no operator. `site:https://www.iso.org/standards` and
+    `site:*.iso.org` both scope to their host.
+    """
+    rest, site = _extract_site_filter(query or "")
+    if not site:
+        return query, None
+    domain = site.strip().lower()
+    domain = re.sub(r"^[a-z][a-z0-9+.-]*://", "", domain)
+    domain = domain.split("/", 1)[0].split("?", 1)[0].strip(".")
+    if domain.startswith("*."):
+        domain = domain[2:]
+    return rest.strip(), domain or None
+
+
+def _url_on_site(url: str, domain: str) -> bool:
+    """True when *url*'s host is *domain* or a subdomain of it."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except (ValueError, AttributeError):
+        return False
+    return host == domain or host.endswith("." + domain)
+
+
+def _keep_on_site(results: List[dict], domain: str) -> List[dict]:
+    return [r for r in results if isinstance(r, dict) and _url_on_site(r.get("url", ""), domain)]
+
+
 def _call_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
+    """Call a search provider by name, honouring a `site:` operator.
+
+    Some engines behind SearXNG ignore `site:` and answer the remaining words
+    instead — `site:lucide.dev license accessibility icons` came back as
+    Missouri driver-licence pages, which were then fetched and handed to the
+    model as if they were the icon library's licence. Off-domain results are
+    dropped; when nothing on the domain remains, the provider is asked once
+    more with the domain as a plain keyword. An empty list lets the provider
+    chain fall through to a provider that does honour the operator.
+    """
+    results = _call_provider_raw(provider_name, query, count, time_filter)
+    rest, domain = _site_scope(query)
+    if not domain or not results:
+        return results
+    kept = _keep_on_site(results, domain)
+    if kept:
+        if len(kept) < len(results):
+            logger.info(
+                "%s: dropped %d result(s) outside site:%s",
+                provider_name, len(results) - len(kept), domain,
+            )
+        return kept
+    logger.info(
+        "%s ignored the site: operator for %r (%d off-domain results dropped); "
+        "retrying with %r as a keyword",
+        provider_name, query, len(results), domain,
+    )
+    alt_query = f"{rest} {domain}".strip() if rest else domain
+    return _keep_on_site(_call_provider_raw(provider_name, alt_query, count, time_filter), domain)
+
+
+def _call_provider_raw(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
     """Call a search provider by name. Returns list of results or empty list."""
     if provider_name == "searxng":
         return searxng_search_api(query, count, time_filter=time_filter)
@@ -311,6 +375,13 @@ def comprehensive_web_search(
                 f"No search results found. Tried: {tally}. "
                 "All providers returned empty — possibly a niche query or upstream rate-limiting; "
                 "rephrasing or using the browser tool for a specific URL may help."
+            )
+        _, _site_domain = _site_scope(query)
+        if _site_domain:
+            msg += (
+                f" The query was scoped with site:{_site_domain} and no result from that domain "
+                "came back — off-domain hits are never substituted. Fetch a page on the site "
+                "directly with web_fetch, or search again without the site: operator."
             )
         logger.warning(msg)
         return (msg, []) if return_sources else msg

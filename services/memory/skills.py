@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -42,6 +43,64 @@ def _jaccard(a: set, b: set) -> float:
     if not a or not b:
         return 0.0
     return len(a & b) / len(a | b)
+
+
+# Jaccard over raw tokens was the only relevance signal, and it cannot fire:
+# a five-word request against a skill whose name + description + procedure
+# runs to 150 tokens tops out near 0.03, far under the 0.25/0.3 thresholds.
+# In practice only a whole-token tag hit or the entire request appearing
+# verbatim in a description ever matched, so `manage_skills search` answered
+# "No matching skills found" for requests the skill was written for, and the
+# prompt injection stayed empty. Two signals that scale with the request are
+# added: how much of the request's content words the skill covers, and how
+# much of the skill's *name* the request mentions. Both work on stopword-
+# filtered, lightly stemmed terms so "delegate coding" meets
+# "claude-code-delegation".
+# Function words plus the generic verbs/adjectives every procedure uses
+# ("check", "open", "list", "set"): left in, a one-verb overlap ("check the
+# weather" vs a skill that says "check unread mail") would score as coverage.
+# Domain nouns carry the signal.
+_SKILL_STOPWORDS = frozenset("""
+a an the and or but of to in on for with by from at as is are was were be been
+being it its this that these those my me our your you i we us he she they them
+his her their do does did done how what when where which who whom why can could
+should would will shall may might must just please help need want like about
+into over under up down out off not no yes if then than so very also any all
+some each every there here now new use using used via per get got make made
+check open close list show find look see give tell ask call try start stop go
+put take keep let turn fix change edit add remove delete update set save read
+write create run send way thing things something anything one first last next
+again still current latest best good right
+""".split())
+
+_STEM_SUFFIXES = ("ing", "ion", "ies", "es", "ed", "s", "e")
+
+
+def _stem(token: str) -> str:
+    """Crude suffix stripping so plural/gerund/agentive forms meet their root
+    ("icons"/"icon", "coding"/"code", "delegation"/"delegate")."""
+    for suffix in _STEM_SUFFIXES:
+        if token.endswith(suffix) and len(token) - len(suffix) >= 3:
+            return token[: -len(suffix)]
+    return token
+
+
+def _terms(tokens) -> set:
+    """Stopword-filtered, hyphen-split, stemmed content terms."""
+    out = set()
+    for tok in tokens or ():
+        for piece in re.split(r"[-_/.]+", (tok or "").lower()):
+            piece = piece.strip('.,!?";:()[]')
+            if len(piece) > 1 and piece not in _SKILL_STOPWORDS:
+                out.add(_stem(piece))
+    return out
+
+
+def _coverage(query_terms: set, skill_terms: set) -> float:
+    """Fraction of the request's content terms the skill mentions."""
+    if not query_terms or not skill_terms:
+        return 0.0
+    return len(query_terms & skill_terms) / len(query_terms)
 
 
 def _to_float(x, default: float = 0.0) -> float:
@@ -704,6 +763,7 @@ class SkillsManager:
             return []
 
         query_tokens = _tokenize(query)
+        query_terms = _terms(query_tokens)
         scored = []
         for sk in skills:
             text = " ".join([
@@ -713,7 +773,16 @@ class SkillsManager:
                 " ".join(sk.get("tags", []) or []),
                 " ".join(sk.get("procedure", []) or []),
             ])
-            score = _jaccard(query_tokens, _tokenize(text))
+            skill_tokens = _tokenize(text)
+            score = _jaccard(query_tokens, skill_tokens)
+            # Request coverage: 0.6 × the share of the request's content terms
+            # the skill mentions — half the request → 0.3, the search threshold.
+            score = max(score, 0.6 * _coverage(query_terms, _terms(skill_tokens)))
+            # Name coverage: a request that names the skill ("delegate to
+            # claude code" → claude-code-delegation) is the strongest signal.
+            name_terms = _terms([sk.get("name", "")])
+            if name_terms:
+                score = max(score, 0.6 * len(name_terms & query_terms) / len(name_terms))
             for tag in sk.get("tags", []) or []:
                 # Match tags as whole tokens, not substrings: `tag in query`
                 # boosted e.g. a "ai" tag for any query containing "email".

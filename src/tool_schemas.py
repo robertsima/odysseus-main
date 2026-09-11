@@ -908,8 +908,12 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Read or modify the user's skill library. Skills are SKILL.md files "
                 "(YAML frontmatter + structured body: When to Use / Procedure / "
                 "Pitfalls / Verification) and follow a draft → published lifecycle. "
-                "Use progressive disclosure: 'list' to see what exists, 'view' to "
-                "load full content for a single skill, 'view_ref' for sub-files. "
+                "The skills index (every skill's name + one-line description) is already in "
+                "your context when skills exist, and skills matched to the request are injected "
+                "in full — do not 'list' to see what exists, and do not 'view' a skill whose "
+                "procedure is already in your context. 'view' loads full SKILL.md content; pass "
+                "names=[...] to load several skills in ONE call instead of one call per skill. "
+                "'view_ref' loads a sub-file. "
                 "Use 'patch' for surgical text edits and 'edit' for full rewrites. "
                 "'publish' once you've verified the procedure works. For add, "
                 "always provide an explicit name slug and only tell the user the "
@@ -919,7 +923,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "publish", "delete", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create; edit = full rewrite (content); patch = old_string→new_string; publish = flip status; delete; search = relevance match on published skills."},
-                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view/view_ref/edit/patch/publish/delete. For add, choose the exact kebab-case name the user should see and report only the returned name."},
+                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view_ref/edit/patch/publish/delete (view accepts name or names). For add, choose the exact kebab-case name the user should see and report only the returned name."},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "For view: several skill names to load in one call (preferred over repeated single-name views)."},
                     "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
                     "description": {"type": "string", "description": "One-line summary surfaced in the skills index (for add)."},
                     "category": {"type": "string", "description": "Organizational grouping like 'dev', 'email', 'system' (for add)."},

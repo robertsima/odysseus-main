@@ -1372,31 +1372,71 @@ def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
         return f"{provider} is having an outage (HTTP {status})." + (f" {detail}" if detail else "")
     return f"{provider} returned HTTP {status}" + (f": {detail}" if detail else "")
 
-# Models that require max_completion_tokens instead of max_tokens
-_MAX_COMPLETION_TOKENS_MODELS = {"o1", "o3", "o4", "gpt-4.5", "gpt-5"}
+# OpenAI model ids, anchored to the start of the id or to a provider prefix
+# (`openrouter/openai/o3-mini`). Group 1 is the GPT generation number when the
+# id is a `gpt-N...` model; the o-series (`o1`, `o3-mini`, `o4-mini`, ...)
+# matches with no group. `gpt-oss-*` (open-weight, ordinary sampling) has no
+# digit after `gpt-` and never matches.
+_OPENAI_MODEL_FAMILY_RE = re.compile(r"(?:^|/)(?:o[1-9]\d*(?:$|[-_:.])|gpt-(\d+))")
 
-def _uses_max_completion_tokens(model: str) -> bool:
-    """Check if a model requires max_completion_tokens instead of max_tokens."""
+
+def _openai_gpt_generation(model: str) -> Optional[float]:
+    """GPT generation as a number (`gpt-4.5-preview` → 4.5, `gpt-5.6-sol` → 5.6,
+    `gpt-6-astra` → 6), or None for a non-GPT id."""
+    m = re.search(r"(?:^|/)gpt-(\d+)(?:\.(\d+))?", (model or "").lower())
+    if not m:
+        return None
+    return float(f"{m.group(1)}.{m.group(2) or 0}")
+
+
+def _is_openai_reasoning_model(model: str) -> bool:
+    """o-series, or GPT-5 and every later generation.
+
+    Every OpenAI model from GPT-5 on is a reasoning model with the o-series
+    request contract (fixed temperature, `max_completion_tokens`). Matching a
+    frozen list of prefixes meant each new generation broke first and got
+    added later: `gpt-6-astra` reached the Codex backend with `temperature`
+    set and every call failed with HTTP 400 "Unsupported parameter:
+    temperature" until this was generalised.
+    """
     if not model:
         return False
     m = model.lower()
-    return any(m.startswith(p) or f"/{p}" in m for p in _MAX_COMPLETION_TOKENS_MODELS)
+    for match in _OPENAI_MODEL_FAMILY_RE.finditer(m):
+        if match.group(1) is None:
+            return True  # o-series
+        if int(match.group(1)) >= 5:
+            return True
+    return False
 
-# OpenAI reasoning models (o1, o3, o4, gpt-5 families) only accept the default
+
+def _uses_max_completion_tokens(model: str) -> bool:
+    """Check if a model requires max_completion_tokens instead of max_tokens."""
+    if _is_openai_reasoning_model(model):
+        return True
+    gen = _openai_gpt_generation(model)
+    return gen is not None and gen >= 4.5
+
+# OpenAI reasoning models (o-series, gpt-5 and later) only accept the default
 # temperature. Sending any explicit value — even 0.0 — returns HTTP 400
-# ("Only the default (1) value is supported"). That otherwise breaks chat when a
-# preset sets a non-default temperature, and makes endpoint probing report a
-# perfectly good model as failing. For these models we omit the field and let
-# the API use its required default. (gpt-4.5 is intentionally excluded — it is
-# not a reasoning model and accepts temperature normally.)
-_FIXED_TEMPERATURE_MODELS = ("o1", "o3", "o4", "gpt-5", "kimi-for-coding")
+# ("Only the default (1) value is supported" on chat completions, "Unsupported
+# parameter: temperature" on the Responses/Codex backend). That otherwise
+# breaks chat when a preset sets a non-default temperature, makes endpoint
+# probing report a perfectly good model as failing, and — before this was
+# version-aware — made every `ask_teacher`/`chat_with_model` call to a gpt-6
+# model fail outright. For these models we omit the field and let the API use
+# its required default. (gpt-4.5 is intentionally excluded — it is not a
+# reasoning model and accepts temperature normally.)
+_FIXED_TEMPERATURE_MODELS = ("kimi-for-coding",)
 
 def _restricts_temperature(model: str) -> bool:
     """Check if a model rejects any non-default temperature."""
     if not model:
         return False
     m = model.lower()
-    return any(m.startswith(p) or f"/{p}" in m for p in _FIXED_TEMPERATURE_MODELS)
+    if any(m.startswith(p) or f"/{p}" in m for p in _FIXED_TEMPERATURE_MODELS):
+        return True
+    return _is_openai_reasoning_model(m)
 
 
 # The official Moonshot API fixes temperature at 1.0 in thinking mode and 0.6
@@ -1418,6 +1458,161 @@ def _omit_temperature(provider: str, model: str) -> bool:
     return _restricts_temperature(model) or _moonshot_rejects_custom_temperature(
         provider, model
     )
+
+
+# ---------------------------------------------------------------------------
+# Self-healing for request fields an endpoint refuses outright.
+#
+# The static tables above (`_restricts_temperature`, `_uses_max_completion_
+# tokens`, ...) can only know the models that existed when they were written.
+# A newer model, a proxy, or a self-hosted server can reject a field the table
+# still sends, and the shape of that failure is always the same: HTTP 400 (422
+# on pydantic-based servers) naming the field — "Unsupported parameter:
+# temperature", "Unrecognized request argument supplied: top_p", "temperature:
+# Extra inputs are not permitted", "Only the default (1) value is supported".
+# Until now that 400 was the final answer: the tool or chat call failed, and
+# the agent gave up on that model ("Teacher call failed (gpt-6-astra): ...").
+#
+# Instead: recognise the rejection, drop the named field, replay the request
+# once (nothing has been streamed yet, so a replay cannot duplicate output),
+# and remember the (host, model) → field so every later payload omits it up
+# front. Only sampling/limit/hint fields are ever dropped — never `model`,
+# `messages`/`input`, `tools` or `stream`, whose absence changes the request's
+# meaning rather than its tuning.
+# ---------------------------------------------------------------------------
+_REJECTED_REQUEST_PARAMS: Dict[Tuple[str, str], Dict[str, Optional[str]]] = {}
+_REJECTED_REQUEST_PARAMS_LOCK = threading.Lock()
+
+# Fields whose absence leaves the request meaningful (the provider default
+# applies). Maps field → the replacement field to move the value into when the
+# rejection names one (OpenAI: "Use 'max_completion_tokens' instead").
+_STRIPPABLE_REQUEST_PARAMS: Dict[str, Optional[str]] = {
+    "temperature": None,
+    "top_p": None,
+    "top_k": None,
+    "min_p": None,
+    "presence_penalty": None,
+    "frequency_penalty": None,
+    "repetition_penalty": None,
+    "max_tokens": "max_completion_tokens",
+    "max_completion_tokens": None,
+    "max_output_tokens": None,
+    "stream_options": None,
+    "prompt_cache_key": None,
+    "reasoning_effort": None,
+    "parallel_tool_calls": None,
+    "seed": None,
+    "logprobs": None,
+    "top_logprobs": None,
+    "store": None,
+    "think": None,
+    "tool_choice": None,
+}
+
+# The phrases every provider family uses when it means "that field is not part
+# of this request's schema" — as opposed to "that field's value is bad", which
+# a retry without the field would not fix and which is left to the caller.
+_PARAM_REJECTION_RE = re.compile(
+    r"(?:unsupported|unknown|unrecognized|unrecognised|unexpected|invalid|extra|additional)"
+    r"\s+(?:request\s+)?(?:parameter|argument|param|field|input|propert|key|value)"
+    r"|not\s+(?:supported|permitted|allowed)"
+    r"|does\s+not\s+support"
+    r"|only\s+the\s+default",
+    re.IGNORECASE,
+)
+
+
+def _rejected_request_param(status: int, body, payload: Optional[Dict]) -> Optional[str]:
+    """Name the payload field a 400/422 body rejects, or None.
+
+    Returns a field only when the body both reads as a schema rejection and
+    names a field that is actually in `payload` and is safe to drop, so a rate
+    limit, a bad model id, or a context-length overflow never strips anything.
+    """
+    if status not in (400, 422) or not payload:
+        return None
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    text = (body or "")[:4000].lower()
+    if not text or not _PARAM_REJECTION_RE.search(text):
+        return None
+    best: Optional[str] = None
+    best_pos: Optional[int] = None
+    for key in payload:
+        if key not in _STRIPPABLE_REQUEST_PARAMS:
+            continue
+        m = re.search(rf"(?<![a-z0-9_]){re.escape(key)}(?![a-z0-9_])", text)
+        if m and (best_pos is None or m.start() < best_pos):
+            best, best_pos = key, m.start()
+    return best
+
+
+def _remember_rejected_param(url: str, model: str, param: str, body="") -> Optional[str]:
+    """Record that (host, model) refuses `param`; returns the replacement field
+    (when the rejection names one) so the caller can move the value across."""
+    if isinstance(body, bytes):
+        body = body.decode("utf-8", errors="replace")
+    replacement = _STRIPPABLE_REQUEST_PARAMS.get(param)
+    if replacement and replacement not in (body or "").lower():
+        replacement = None
+    key = (_host_key(url or ""), (model or "").lower())
+    with _REJECTED_REQUEST_PARAMS_LOCK:
+        entry = _REJECTED_REQUEST_PARAMS.setdefault(key, {})
+        is_new = param not in entry
+        entry[param] = replacement
+    if is_new:
+        logger.warning(
+            "%s rejected request field %r for model %s; retrying without it and "
+            "omitting it from every later request to this model%s",
+            key[0], param, model,
+            f" (value moved to {replacement!r})" if replacement else "",
+        )
+    return replacement
+
+
+def _apply_param_rejection(payload: Dict, param: str, replacement: Optional[str]) -> None:
+    """Drop `param` from `payload`, moving its value into `replacement` if set."""
+    if param not in payload:
+        return
+    value = payload.pop(param)
+    if replacement and replacement not in payload:
+        payload[replacement] = value
+
+
+def _strip_rejected_params(payload: Dict, url: str, model: str) -> Dict:
+    """Omit every field this (host, model) has previously rejected."""
+    key = (_host_key(url or ""), (model or "").lower())
+    with _REJECTED_REQUEST_PARAMS_LOCK:
+        rejected = dict(_REJECTED_REQUEST_PARAMS.get(key) or {})
+    for param, replacement in rejected.items():
+        _apply_param_rejection(payload, param, replacement)
+    return payload
+
+
+def _retry_without_rejected_param(status: int, body, payload: Dict, url: str, model: str) -> Optional[str]:
+    """Non-streaming helper: if the error names a droppable field, remember it,
+    fix the payload in place, and return the field name so the caller replays."""
+    param = _rejected_request_param(status, body, payload)
+    if not param:
+        return None
+    replacement = _remember_rejected_param(url, model, param, body)
+    _apply_param_rejection(payload, param, replacement)
+    return param
+
+
+def _rejected_param_retry_chunk(status: int, body, payload: Dict, url: str, model: str) -> Optional[str]:
+    """Streaming helper: the replay-safe error chunk `stream_llm` keys its retry
+    off (see `_connect_error_chunk`), or None when the error is not a field
+    rejection. The next attempt rebuilds the payload, which now omits the field."""
+    param = _rejected_request_param(status, body, payload)
+    if not param:
+        return None
+    _remember_rejected_param(url, model, param, body)
+    return 'event: error\ndata: ' + json.dumps({
+        "retryable": True,
+        "status": status,
+        "text": f"Retrying without unsupported parameter {param!r}",
+    }) + '\n\n'
 
 
 # Anthropic removed the sampling parameters (temperature, top_p, top_k) starting
@@ -2061,12 +2256,20 @@ def llm_call(url: str, model: str, messages: List[Dict], temperature: float = LL
         _apply_local_generation_stability(payload, target_url, model)
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
-    try:
-        note_model_activity(target_url, model)
-        r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
-    except Exception as e:
-        raise HTTPException(502, f"POST {target_url} failed: {e}")
-    if not r.is_success:
+    _strip_rejected_params(payload, target_url, model)
+    while True:
+        try:
+            note_model_activity(target_url, model)
+            r = httpx_post_kimi_aware(target_url, h, json=payload, timeout=timeout)
+        except Exception as e:
+            raise HTTPException(502, f"POST {target_url} failed: {e}")
+        if r.is_success:
+            break
+        # A field this model refuses ("Unsupported parameter: temperature") is
+        # dropped and the call replayed; each field can only be rejected once,
+        # so this converges.
+        if _retry_without_rejected_param(r.status_code, r.text, payload, target_url, model):
+            continue
         raise HTTPException(502, f"Upstream {target_url} -> {r.status_code}: {r.text}")
     data = r.json()
     try:
@@ -2277,6 +2480,7 @@ async def llm_call_async(
     if _is_host_dead(target_url):
         raise HTTPException(503, f"Upstream {_host_key(target_url)} marked unreachable (cooldown active)")
 
+    _strip_rejected_params(payload, target_url, model)
     call_timeout = _call_timeout(timeout)
     attempt = 0
     while attempt < max_retries:
@@ -2289,6 +2493,11 @@ async def llm_call_async(
                 r = await httpx_post_kimi_aware_async(client, target_url, h, json=payload, timeout=call_timeout)
             duration = time.time() - start
             if not r.is_success:
+                if _retry_without_rejected_param(r.status_code, r.text, payload, target_url, model):
+                    # Dropping the refused field is a fix, not a transient
+                    # failure: replay without spending a retry.
+                    attempt -= 1
+                    continue
                 friendly = _format_upstream_error(r.status_code, r.text, target_url)
                 logger.warning(
                     f"LLM async call to {target_url} failed in {duration:.2f}s "
@@ -2490,6 +2699,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
         return
+    # Fields this (host, model) already refused stay out of every payload; a
+    # new refusal below is remembered and the request replayed by stream_llm.
+    _strip_rejected_params(payload, target_url, model)
     note_model_activity(target_url, model)
     degenerate_guard = _DegenerateStreamGuard(model)
 
@@ -2553,6 +2765,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             "status": 400,
                             "text": "Retrying without reasoning replay",
                         }) + '\n\n')
+                        return
+                    _retry_chunk = _rejected_param_retry_chunk(r.status_code, raw, payload, target_url, model)
+                    if _retry_chunk:
+                        yield _retry_chunk
                         return
                     friendly = _format_chatgpt_subscription_error(r.status_code, raw)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
@@ -2681,6 +2897,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
+                    _retry_chunk = _rejected_param_retry_chunk(r.status_code, raw, payload, target_url, model)
+                    if _retry_chunk:
+                        yield _retry_chunk
+                        return
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                     return
@@ -2749,6 +2969,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
+                    _retry_chunk = _rejected_param_retry_chunk(r.status_code, raw, payload, target_url, model)
+                    if _retry_chunk:
+                        yield _retry_chunk
+                        return
                     friendly = _format_upstream_error(r.status_code, raw, target_url)
                     yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                     return
@@ -2895,6 +3119,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
+                _retry_chunk = _rejected_param_retry_chunk(r.status_code, raw, payload, target_url, model)
+                if _retry_chunk:
+                    yield _retry_chunk
+                    return
                 friendly = _format_upstream_error(r.status_code, raw, target_url)
                 yield f'event: error\ndata: {json.dumps({"status": r.status_code, "text": friendly, "raw": raw[:500]})}\n\n'
                 return
