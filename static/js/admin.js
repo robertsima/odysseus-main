@@ -2578,6 +2578,8 @@ const _TOKEN_SCOPES = [
   { key: 'calendar:write',    label: 'Calendar write',    detail: 'Create and update calendar events' },
   { key: 'memory:read',       label: 'Memory read',       detail: 'Read memory when enabled' },
   { key: 'memory:write',      label: 'Memory write',      detail: 'Write memory when enabled' },
+  { key: 'vault:read',        label: 'Vault read',        detail: 'Search and read the Markdown vault (Vault Mind, AI Mind)' },
+  { key: 'vault:read_private', label: 'Vault private',    detail: 'Also reach directories marked private, such as Journal' },
   { key: 'cookbook:read',     label: 'Cookbook read',     detail: 'List cookbook tasks + tail their tmux output' },
   { key: 'cookbook:launch',   label: 'Cookbook launch',   detail: 'Launch and stop cookbook serve tasks' },
 ];
@@ -2585,11 +2587,12 @@ const _TOKEN_SCOPES = [
 function _renderTokenScopeRows(t) {
   const have = new Set(t.scopes || []);
   return _TOKEN_SCOPES.map(s => {
-    const action = (s.key.split(':')[1] || '').toLowerCase();
+    const rawAction = (s.key.split(':')[1] || '').toLowerCase();
+    const action = rawAction === 'read_private' ? 'private' : rawAction;
     const pill = action === 'read'
       ? 'background:rgba(150,150,150,0.18);color:var(--fg-muted,#888);'
       : 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));';
-    const tool = s.label.replace(/\s+(read|write|draft|send|launch)$/i, '');
+    const tool = s.label.replace(/\s+(read|write|draft|send|launch|private)$/i, '');
     return `
       <label style="display:flex;align-items:center;gap:8px;min-height:28px;padding:1px 0;">
         <span class="settings-label" style="width:90px;flex-shrink:0;padding:0;font-size:12px;">${esc(tool)}</span>

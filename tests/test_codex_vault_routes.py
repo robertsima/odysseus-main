@@ -108,3 +108,19 @@ def test_document_read_is_restricted_to_indexed_files():
     src = inspect.getsource(codex_routes.setup_codex_routes)
     assert "No indexed vault document at that path" in src
     assert "os.path.realpath" in src
+
+
+def test_the_token_uis_can_actually_grant_the_vault_scopes():
+    """The integration form mints a token with `chat` and then PATCHes the
+    scopes its toggles list, so a scope missing from that catalog is a scope
+    no token created in the UI can ever hold."""
+    settings = open("static/js/settings.js", encoding="utf-8").read()
+    assert "{ key: 'vault:read', label: 'Vault'" in settings
+    assert "{ key: 'vault:read_private'" in settings
+    # Private stays off on a fresh token: the pre-check preview skips it.
+    assert "defaultOff: true" in settings
+    assert "toolScopes.filter(s => !s.defaultOff)" in settings
+
+    admin = open("static/js/admin.js", encoding="utf-8").read()
+    assert "{ key: 'vault:read'," in admin
+    assert "{ key: 'vault:read_private'," in admin

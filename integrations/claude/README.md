@@ -134,6 +134,23 @@ passed only in the child environment; it is never placed in argv or task
 persistence. Install the skill under the launcher's `CLAUDE_CONFIG_DIR` (the
 setup command above handles both standard and custom config directories).
 
+That token is minted by Odysseus, not by Claude: Settings > Integrations >
+**+ Add Integration** > **Claude Agent** creates one, shows it once, and lets
+you toggle its scopes (turn **Vault** on for the shared context store). It
+starts with `ody_`. Nothing about a Claude sign-in is involved — this
+credential only lets a Claude Code session read back into Odysseus. Write it
+into the token file as the user Odysseus runs as:
+
+```bash
+umask 077
+printf '%s' 'ody_...' > /app/data/secrets/claude-code-odysseus.token.txt
+chown "$PUID:$PGID" /app/data/secrets/claude-code-odysseus.token.txt
+```
+
+A `401` from `/api/codex/capabilities` means the file's contents are not a
+live token (a placeholder, or a revoked one); a `403` means the token is real
+but is missing the scope for that endpoint.
+
 The same delegation is also reachable over HTTP, for callers outside a chat
 session (automation, CI, another admin tool):
 
@@ -204,4 +221,5 @@ The token is scope-gated. Every tool surface is checked server-side in Odysseus,
 so even if Claude tries to call a forbidden endpoint, it gets `403` until the
 user enables the matching toggle in Settings > Integrations > Claude Agent.
 The `claude_agent` token profile bundles the scopes a Claude Code session
-typically needs against `/api/codex/*` (todos, documents, memory).
+typically needs against `/api/codex/*` (todos, documents, memory, and the
+public vault).
