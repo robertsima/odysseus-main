@@ -10,6 +10,7 @@ import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import chatRenderer from './chatRenderer.js?v=20260722emailfastindex1';
 import chatStream from './chatStream.js';
+import { renderDiffCard } from './diffView.js';
 import agentThread from './agentThread.js';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
@@ -3189,30 +3190,9 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                   if (json.output && json.output.trim()) {
                     outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(json.output)}</pre></details>`;
                   }
-                  // File-write diff (write_file): show a before/after unified diff.
-                  let diffHtml = '';
-                  if (json.diff && json.diff.text) {
-                    const d = json.diff;
-                    // Collapsed summary: filename + +adds (green) / −dels (red).
-                    const stat = [
-                      d.new_file ? '<span class="diff-stat-new">new</span>' : '',
-                      d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
-                      d.removed ? `<span class="diff-stat-del">−${d.removed}</span>` : '',
-                    ].filter(Boolean).join(' ');
-                    const rows = d.text.split('\n').map(line => {
-                      let cls = 'diff-ctx', text = line;
-                      if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                      else if (line.startsWith('@@')) cls = 'diff-hunk';
-                      // Drop the leading diff marker (+/-/space) — the row colour
-                      // already encodes add/del, and keeping it doubles up with
-                      // markdown "- " bullets (reads as "+-"/"--").
-                      else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
-                      else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
-                      else if (line.startsWith(' ')) { text = line.slice(1); }
-                      return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
-                    }).join('');  // spans are display:block — a literal \n here would double-space the diff
-                    diffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
-                  }
+                  // File-write diff (write_file): before/after unified diff, rendered by the
+                  // shared diffView so chat, history and the Workbench agree.
+                  const diffHtml = (json.diff && json.diff.text) ? renderDiffCard(json.diff) : '';
                   // For file edits the "command" is the raw JSON args — redundant
                   // next to the diff, so hide it when we have a diff to show.
                   const cmdHtml2 = (cmd && !(json.diff && json.diff.text)) ? `<pre class="agent-thread-cmd">${esc(cmd)}</pre>` : '';
