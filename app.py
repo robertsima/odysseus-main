@@ -862,6 +862,10 @@ app.include_router(setup_claude_routes())
 from routes.claude_code_routes import setup_claude_code_routes
 app.include_router(setup_claude_code_routes())
 
+# Workbench: unified agent activity feed, repository changes, PR feedback.
+from routes.workbench_routes import setup_workbench_routes
+app.include_router(setup_workbench_routes())
+
 from routes.vault.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())
 

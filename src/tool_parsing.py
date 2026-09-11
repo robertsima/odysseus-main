@@ -696,7 +696,11 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
     elif tool_type == "list_sessions":
         content = args.get("filter", "")
     elif tool_type == "send_to_session":
-        content = args.get("session_id", "") + "\n" + args.get("message", "")
+        if args.get("mode"):
+            content = json.dumps({"session_id": args.get("session_id", ""), "message": args.get("message", ""),
+                                  "mode": args.get("mode")})
+        else:
+            content = args.get("session_id", "") + "\n" + args.get("message", "")
     elif tool_type == "pipeline":
         content = json.dumps({"steps": args.get("steps", [])})
     elif tool_type == "manage_session":

@@ -19,6 +19,7 @@ import markdownModule from './js/markdown.js';
 import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
 import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
+import workbenchModule from './js/workbench.js';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
@@ -50,6 +51,11 @@ import { initSectionCollapse, initSectionDrag } from './js/section-management.js
 const API_BASE = window.location.origin;
 window.themeModule = themeModule;
 window.sessionModule = sessionModule;
+window.workbenchModule = workbenchModule;
+// The Workbench probes /api/auth/settings itself and hides its rail button for
+// non-admins, so it can boot independently of the rest of the app.
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => workbenchModule.init());
+else workbenchModule.init();
 window.uiModule = uiModule;
 window.adminModule = adminModule;
 window.cookbookModule = cookbookModule;
@@ -170,6 +176,7 @@ function initRailHoverLabels() {
     'rail-gallery': 'Gallery',
     'rail-archive': 'Library',
     'rail-memory': 'Brain',
+    'rail-workbench': 'Workbench',
     'rail-notes': 'Notes',
     'rail-tasks': 'Tasks',
     'rail-theme': 'Theme',

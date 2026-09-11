@@ -106,6 +106,8 @@ The largest and most central subsystem. Chat submission → backend SSE → prog
 | Module | Responsibility |
 |---|---|
 | **`memory.js`** | AI memory CRUD, search/filter UI, memory extraction, count badge. |
+| **`workbench.js`** | Agent observability window: unified activity feed over SSE (`/api/workbench/activity/stream`), run cards, Changes / Commits (repo inspection and Claude Code run changes), Pull Requests (comments, reviews, line comments), live agent-run cards inside the chat. |
+| **`diffView.js`** | Shared unified-diff parser and renderers: the chat's diff card (`renderDiffCard`) and the Workbench's split / unified numbered tables. Pure functions, Node-testable. |
 | **`rag.js`** | Personal document RAG: load documents, add directories/files, show included paths. |
 | **`group.js`** | Group-chat UI and model orchestration. |
 

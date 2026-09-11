@@ -23,16 +23,34 @@ can point the harness at a binary or repository root from the UI without
 restarting the container.
 """
 import asyncio
+import contextvars
 import json
 import os
 import re
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from core.atomic_io import atomic_write_json
+from src import agent_activity as activity
 from src.constants import CLAUDE_CODE_TASKS_FILE
+
+# Who a run is for. Set by the chat tool / task runner around `_run_claude`
+# rather than threaded through its signature, so the many callers and test
+# doubles that call `_run_claude(repo, prompt, timeout, tools)` keep working
+# while the run still reports to the right chat session's activity feed.
+_RUN_CONTEXT: contextvars.ContextVar[dict] = contextvars.ContextVar("claude_code_run_context", default={})
+
+
+@contextmanager
+def run_context(**fields):
+    token = _RUN_CONTEXT.set({k: v for k, v in fields.items() if v is not None})
+    try:
+        yield
+    finally:
+        _RUN_CONTEXT.reset(token)
 
 # Environment defaults. The ``claude_code_*`` settings override each of these
 # (see ``_setting``); tests monkeypatch the module names directly.
@@ -79,7 +97,14 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]{1,80}$")
 # than guessed from the version string.
 _OPTIONAL_FLAGS = ("--permission-prompts", "--restricted", "--bare", "--model",
                    "--tools", "--allowedTools", "--no-session-persistence",
-                   "--output-format")
+                   "--output-format", "--verbose", "--include-partial-messages")
+# Lines of the live transcript kept on the task record (the activity feed
+# keeps its own bounded copy per session).
+MAX_TRANSCRIPT_ENTRIES = 400
+MAX_TRANSCRIPT_TEXT = 1500
+# asyncio's default StreamReader limit is 64 KiB per line; one stream-json
+# line carrying a Write tool call can be far longer.
+_STREAM_LINE_LIMIT = 16 * 1024 * 1024
 _REQUIRED_FLAGS = ("--tools", "--allowedTools", "--output-format", "--no-session-persistence")
 
 # Per-repository serialization shared by every caller (the admin chat tool
@@ -416,6 +441,10 @@ async def binary_info(binary: Optional[Path] = None) -> dict:
         info["version"] = version.strip().splitlines()[0] if version.strip() else ""
         code, help_text = await _capture(binary, "--help", timeout=45)
         info["flags"] = [flag for flag in _OPTIONAL_FLAGS if flag in help_text]
+        # `stream-json` prints every assistant message and tool call as it
+        # happens instead of one envelope at the end — what the Workbench
+        # transcript is built from.
+        info["stream_json"] = "stream-json" in help_text and "--verbose" in help_text
         missing = [flag for flag in _REQUIRED_FLAGS if flag not in help_text]
         if missing:
             info["error"] = "binary does not support required flags: " + ", ".join(missing)
@@ -539,7 +568,7 @@ async def status_report() -> dict:
 
 
 def _build_argv(binary: Path, prompt: str, tools: list[str], flags: list[str], *,
-                model: Optional[str] = None) -> list[str]:
+                model: Optional[str] = None, stream: bool = False) -> list[str]:
     """argv for one headless run. Never shells out through a string — argv is
     built from a fixed binary path and an allowlist-checked ``--allowedTools``
     list, so nothing here is vulnerable to shell interpolation."""
@@ -550,7 +579,12 @@ def _build_argv(binary: Path, prompt: str, tools: list[str], flags: list[str], *
     if prompt.startswith("-"):
         # Commander would read a leading dash as an option name.
         prompt = " " + prompt
-    argv = [str(binary), "-p", prompt, "--output-format", "json", "--no-session-persistence"]
+    argv = [str(binary), "-p", prompt, "--output-format", "stream-json" if stream else "json",
+            "--no-session-persistence"]
+    if stream:
+        # Print mode only streams with --verbose; without it the CLI refuses
+        # the format.
+        argv.append("--verbose")
     if "--permission-prompts" in flags:
         # Nobody is at the keyboard: anything that would prompt is denied and
         # Claude is told not to retry it.
@@ -589,6 +623,235 @@ def _summarize_envelope(result: dict, parsed: dict) -> None:
         result["error"] = (text if isinstance(text, str) else str(parsed.get("error") or "Claude Code reported an error"))[:2000]
 
 
+def _tool_summary(name: str, tool_input: Any) -> str:
+    """One line that says what a Claude tool call touched."""
+    if not isinstance(tool_input, dict):
+        return _clip(str(tool_input or ""), 160)
+    for key in ("file_path", "path", "notebook_path", "command", "pattern", "query", "url", "description"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value.strip():
+            return _clip(value.strip().splitlines()[0], 160)
+    for value in tool_input.values():
+        if isinstance(value, str) and value.strip():
+            return _clip(value.strip().splitlines()[0], 160)
+    return ""
+
+
+def _clip(text: str, limit: int) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _block_text(content: Any) -> str:
+    """Text of a message/tool_result content field (string or block list)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(parts)
+    return "" if content is None else str(content)
+
+
+class _Transcript:
+    """Turns Claude Code's ``stream-json`` lines into the live transcript.
+
+    Each assistant text, tool call and tool result becomes one bounded entry
+    on the task record and one event on the session's activity feed, so the
+    chat UI and the Workbench can show Claude working while it works. The
+    final ``result`` line is the same envelope the batch mode returns and is
+    kept for :func:`_summarize_envelope`.
+    """
+
+    def __init__(self, session_id: Optional[str], run_id: str, owner: Optional[str]):
+        self.session_id = session_id
+        self.run_id = run_id
+        self.owner = owner
+        self.entries: list[dict] = []
+        self.truncated = False
+        self.envelope: Optional[dict] = None
+        self.tool_names: dict[str, str] = {}
+
+    def _add(self, entry: dict) -> None:
+        if len(self.entries) >= MAX_TRANSCRIPT_ENTRIES:
+            self.truncated = True
+            return
+        entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        self.entries.append(entry)
+
+    def _publish(self, kind: str, title: str, *, detail: Optional[str] = None,
+                 data: Optional[dict] = None, level: str = "info") -> None:
+        activity.publish(self.session_id, kind, title, source="claude_code", run_id=self.run_id,
+                         owner=self.owner, detail=detail, data=data, level=level)
+
+    def feed(self, raw: bytes) -> None:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("{"):
+            return
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(obj, dict):
+            return
+        kind = obj.get("type")
+        try:
+            if kind == "system" and obj.get("subtype") == "init":
+                tools = obj.get("tools") or []
+                summary = f"session ready (model {obj.get('model') or '?'}, {len(tools)} tools)"
+                self._add({"kind": "status", "text": summary})
+                self._publish("status", f"Claude Code {summary}",
+                              data={"model": obj.get("model"), "cwd": obj.get("cwd")})
+            elif kind == "assistant":
+                self._assistant(obj.get("message") or {})
+            elif kind == "user":
+                self._user(obj.get("message") or {})
+            elif kind == "result":
+                self.envelope = obj
+        except Exception as exc:  # never let transcript bookkeeping kill the run
+            self._add({"kind": "status", "text": f"transcript parse error: {exc}"})
+
+    def _assistant(self, message: dict) -> None:
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and (block.get("text") or "").strip():
+                text = block["text"].strip()
+                self._add({"kind": "message", "text": _clip(text, MAX_TRANSCRIPT_TEXT)})
+                self._publish("message", _clip(text.splitlines()[0], 200), detail=_clip(text, 2000))
+            elif block.get("type") == "tool_use":
+                name = str(block.get("name") or "tool")
+                summary = _tool_summary(name, block.get("input"))
+                tool_id = str(block.get("id") or "")
+                if tool_id:
+                    self.tool_names[tool_id] = name
+                entry = {"kind": "tool_start", "tool": name, "summary": summary, "tool_use_id": tool_id}
+                tool_input = block.get("input")
+                if isinstance(tool_input, dict):
+                    compact = {k: (_clip(v, 400) if isinstance(v, str) else v) for k, v in tool_input.items()}
+                    entry["input"] = compact
+                self._add(entry)
+                self._publish("tool_start", f"{name} {summary}".strip(),
+                              data={"tool": name, "tool_use_id": tool_id, "input": entry.get("input")})
+
+    def _user(self, message: dict) -> None:
+        for block in message.get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_result":
+                continue
+            tool_id = str(block.get("tool_use_id") or "")
+            name = self.tool_names.get(tool_id, "tool")
+            is_error = bool(block.get("is_error"))
+            text = _block_text(block.get("content")).strip()
+            self._add({"kind": "tool_result", "tool": name, "tool_use_id": tool_id, "is_error": is_error,
+                       "excerpt": _clip(text, MAX_TRANSCRIPT_TEXT)})
+            self._publish("tool_result", f"{name} {'failed' if is_error else 'done'}",
+                          detail=_clip(text, 2000) or None,
+                          data={"tool": name, "tool_use_id": tool_id, "is_error": is_error},
+                          level="error" if is_error else "info")
+
+
+async def _pump_stream(proc, transcript: _Transcript) -> tuple[bytes, bytes]:
+    """Read stdout line by line (feeding the transcript) and stderr whole."""
+    chunks: list[bytes] = []
+    kept = 0
+
+    async def read_out():
+        nonlocal kept
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            transcript.feed(line)
+            if kept < MAX_OUTPUT * 2:
+                chunks.append(line)
+                kept += len(line)
+
+    async def read_err():
+        return await proc.stderr.read()
+
+    _, err = await asyncio.gather(read_out(), read_err())
+    await proc.wait()
+    return b"".join(chunks), err
+
+
+async def _git_head(repository: Path) -> Optional[str]:
+    if not (Path(repository) / ".git").exists():
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "git", "rev-parse", "--verify", "--quiet", "HEAD", cwd=str(repository),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+    except (OSError, asyncio.TimeoutError):
+        return None
+    sha = stdout.decode("utf-8", errors="replace").strip()
+    return sha or None
+
+
+async def _git_changes(repository: Path, start_sha: Optional[str]) -> dict:
+    """Per-file numstat and the commits Claude made, relative to where the run
+    started, for the Changes/Commits views. Empty on any failure."""
+    from src import repo_inspect
+
+    out: dict = {"start_commit": start_sha}
+    if not (Path(repository) / ".git").exists():
+        return out
+    try:
+        roots = [str(repository)]
+        changes = await repo_inspect.changes(str(repository), base=start_sha, roots=roots)
+        out["changes"] = changes["files"]
+        out["changes_truncated"] = changes["truncated"]
+        out["total_additions"] = changes["total_additions"]
+        out["total_deletions"] = changes["total_deletions"]
+        out["commits"] = await repo_inspect.commits(str(repository), base=start_sha, roots=roots, limit=50) if start_sha else []
+    except Exception as exc:
+        out["changes_error"] = str(exc)[:300]
+    return out
+
+
+def _run_title(prompt: str, label: Optional[str]) -> str:
+    text = (label or "").strip() or " ".join((prompt or "").split())
+    return "Claude Code: " + _clip(text, 90)
+
+
+def _finish_run(ctx: dict, run_id: str, title: str, result: dict, *, status: Optional[str] = None) -> None:
+    """Close the run on the activity feed with what changed."""
+    session_id, owner = ctx.get("session_id"), ctx.get("owner")
+    changes = result.get("changes") or []
+    for row in changes[:50]:
+        activity.publish(session_id, "file_change",
+                         f"{row.get('status', 'modified')} {row.get('path')} (+{row.get('additions', 0)} −{row.get('deletions', 0)})",
+                         source="claude_code", run_id=run_id, owner=owner, data=row)
+    for commit in (result.get("commits") or [])[:20]:
+        activity.publish(session_id, "commit", f"commit {commit.get('short')}: {commit.get('subject')}",
+                         source="claude_code", run_id=run_id, owner=owner, data=commit)
+    if status is None:
+        failed = bool(result.get("error")) or bool(result.get("is_error")) or result.get("exit_code") not in (0, None)
+        status = "failed" if failed else "completed"
+    data = {
+        "task_id": ctx.get("task_id"),
+        "repository": result.get("repository"),
+        "branch": result.get("branch"),
+        "commit": result.get("commit"),
+        "changed_files": (result.get("changed_files") or [])[:100],
+        "changes_count": len(changes),
+        "commits": len(result.get("commits") or []),
+        "num_turns": result.get("num_turns"),
+        "total_cost_usd": result.get("total_cost_usd"),
+        "exit_code": result.get("exit_code"),
+        "error": _clip(result.get("error") or "", 400) or None,
+        "result_excerpt": _clip(result.get("result") or "", 400) or None,
+    }
+    suffix = {"completed": "finished", "failed": "failed", "cancelled": "cancelled"}.get(status, status)
+    activity.run_finished(session_id, "claude_code", run_id, f"{title} — {suffix}", status=status,
+                          owner=owner, data=data, detail=_clip(result.get("result") or result.get("error") or "", 2000) or None)
+
+
 async def _run_claude(
     repository: Path,
     prompt: str,
@@ -601,6 +864,9 @@ async def _run_claude(
 
     ``on_process`` (optional) is called with the live ``Process`` as soon as
     it starts, so a caller (the task runner) can kill it on cancellation.
+    The run reports to the activity feed of the session named in
+    :func:`run_context` (if any); with a ``stream-json``-capable binary the
+    transcript arrives live, otherwise only the final envelope does.
     """
     binary = binary_path()
     if not binary.is_file() or not os.access(binary, os.X_OK):
@@ -608,36 +874,57 @@ async def _run_claude(
     info = await binary_info(binary)
     if info.get("error"):
         return {"error": f"delegate_to_claude_code: {info['error']}", "exit_code": 1}
-    argv = _build_argv(binary, prompt, tools, info.get("flags", []), model=model)
+    stream = bool(info.get("stream_json")) and _flag_setting("claude_code_stream_transcript", True)
+    argv = _build_argv(binary, prompt, tools, info.get("flags", []), model=model, stream=stream)
     try:
         child_env = _claude_environment()
     except ValueError as exc:
         return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
+    ctx = dict(_RUN_CONTEXT.get() or {})
+    run_id = ctx.get("task_id") or activity.new_run_id("claude_code")
+    title = _run_title(prompt, ctx.get("label"))
     # The repository lock prevents worktree collisions. The process limit also
     # bounds aggregate CPU/memory/API use across different repositories.
     async with _process_limit(), _repo_lock(repository):
+        start_sha = await _git_head(repository)
+        activity.run_started(ctx.get("session_id"), "claude_code", title, run_id=run_id, owner=ctx.get("owner"),
+                             data={"repository": str(repository), "model": model, "task_id": ctx.get("task_id"),
+                                   "mode": "stream" if stream else "batch"},
+                             detail=_clip(prompt, 1500))
+        transcript = _Transcript(ctx.get("session_id"), run_id, ctx.get("owner"))
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
                 *argv, cwd=str(repository), stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=child_env,
+                env=child_env, limit=_STREAM_LINE_LIMIT,
             )
             if on_process is not None:
                 on_process(proc)
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            if stream:
+                stdout, stderr = await asyncio.wait_for(_pump_stream(proc, transcript), timeout=timeout)
+            else:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
             assert proc is not None
             proc.kill()
             await proc.wait()
-            return {"error": f"Claude Code timed out after {timeout}s", "exit_code": 124}
+            result = {"error": f"Claude Code timed out after {timeout}s", "exit_code": 124,
+                      "repository": str(repository), "transcript": transcript.entries}
+            result.update(await _git_changes(repository, start_sha))
+            _finish_run(ctx, run_id, title, result)
+            return result
         except asyncio.CancelledError:
             if proc is not None and proc.returncode is None:
                 proc.kill()
                 await proc.wait()
+            _finish_run(ctx, run_id, title, {"error": "Task cancelled", "exit_code": 130,
+                                             "repository": str(repository)}, status="cancelled")
             raise
         except OSError as exc:
-            return {"error": f"Claude Code could not start: {exc}", "exit_code": 127}
+            result = {"error": f"Claude Code could not start: {exc}", "exit_code": 127, "repository": str(repository)}
+            _finish_run(ctx, run_id, title, result)
+            return result
         full_out = stdout.decode("utf-8", errors="replace")
         err = stderr.decode("utf-8", errors="replace")[-10000:]
         result = {
@@ -647,17 +934,24 @@ async def _run_claude(
             "repository": str(repository),
             "model": model,
         }
-        try:
-            parsed = json.loads(full_out)
-        except json.JSONDecodeError:
-            parsed = None
+        parsed = transcript.envelope if stream else None
+        if parsed is None:
+            try:
+                parsed = json.loads(full_out)
+            except json.JSONDecodeError:
+                parsed = None
         if isinstance(parsed, dict):
             _summarize_envelope(result, parsed)
         elif proc.returncode:
             # No envelope at all: the CLI rejected a flag, could not
             # authenticate, or crashed before the run started. stderr has it.
             result["error"] = (err.strip() or full_out.strip() or f"Claude Code exited {proc.returncode}")[-2000:]
+        if stream:
+            result["transcript"] = transcript.entries
+            result["transcript_truncated"] = transcript.truncated
         result.update(await _git_report(repository))
+        result.update(await _git_changes(repository, start_sha))
+        _finish_run(ctx, run_id, title, result)
         return result
 
 
@@ -689,6 +983,7 @@ class ClaudeCodeTool:
             return {"error": f"delegate_to_claude_code: unknown action {action!r}; one of {', '.join(_ACTIONS)}",
                     "exit_code": 1}
         owner = (ctx or {}).get("owner") if isinstance(ctx, dict) else None
+        session_id = (ctx or {}).get("session_id") if isinstance(ctx, dict) else None
         if action == "status":
             return await status_report()
         if action in ("list_repositories", "repositories"):
@@ -703,7 +998,7 @@ class ClaudeCodeTool:
             }
         runner = get_task_runner()
         if action == "start":
-            started = await runner.start(args, owner=owner)
+            started = await runner.start(args, owner=owner, session_id=session_id)
             if "error" in started:
                 return {**started, "exit_code": 1}
             return {**started, "exit_code": 0,
@@ -721,8 +1016,10 @@ class ClaudeCodeTool:
         parsed = _parse_args(args)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
-        return await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
-                                 model=parsed["model"])
+        label = str(args.get("label") or "").strip()[:120] or None
+        with run_context(session_id=session_id, owner=owner, label=label):
+            return await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
+                                     model=parsed["model"])
 
 
 async def _git_report(repository: Path) -> dict:
@@ -758,7 +1055,8 @@ _ACTIVE_STATUSES = {"queued", "running"}
 _RETENTION_S = 86400
 _SUMMARY_FIELDS = ("task_id", "status", "repository", "owner", "created_at", "started_at",
                    "finished_at", "exit_code", "branch", "commit", "changed_files", "error",
-                   "num_turns", "total_cost_usd", "model", "label")
+                   "num_turns", "total_cost_usd", "model", "label", "session_id", "start_commit",
+                   "total_additions", "total_deletions")
 
 
 def _prune(tasks: dict, now: float) -> bool:
@@ -840,7 +1138,8 @@ class ClaudeCodeTaskRunner:
         if changed:
             self._save()
 
-    async def start(self, args: dict, *, owner: Optional[str] = None) -> dict:
+    async def start(self, args: dict, *, owner: Optional[str] = None,
+                    session_id: Optional[str] = None) -> dict:
         parsed = _parse_args(args if isinstance(args, dict) else {})
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
@@ -852,6 +1151,9 @@ class ClaudeCodeTaskRunner:
             "status": "queued",
             "repository": str(parsed["repository"]),
             "owner": owner,
+            # The chat session that delegated, so the run reports to its
+            # activity feed and the UI can find the task from the chat.
+            "session_id": session_id,
             "created_at": now,
             "model": parsed["model"],
             # A short, operator-chosen name; the prompt itself is never stored.
@@ -871,10 +1173,12 @@ class ClaudeCodeTaskRunner:
             self.procs[task_id] = proc
 
         try:
-            result = await _run_claude(
-                parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
-                on_process=_register, model=parsed.get("model"),
-            )
+            with run_context(session_id=record.get("session_id"), owner=record.get("owner"),
+                             task_id=task_id, label=record.get("label")):
+                result = await _run_claude(
+                    parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
+                    on_process=_register, model=parsed.get("model"),
+                )
             record.update(result)
             if task_id in self._cancelling:
                 record.update({"status": "cancelled", "error": "Task cancelled", "exit_code": 130})
@@ -904,7 +1208,11 @@ class ClaudeCodeTaskRunner:
         for record in self.tasks.values():
             if owner is not None and record.get("owner") != owner:
                 continue
-            rows.append({key: record.get(key) for key in _SUMMARY_FIELDS if key in record})
+            row = {key: record.get(key) for key in _SUMMARY_FIELDS if key in record}
+            row["changes_count"] = len(record.get("changes") or [])
+            row["commit_count"] = len(record.get("commits") or [])
+            row["has_transcript"] = bool(record.get("transcript"))
+            rows.append(row)
         rows.sort(key=lambda row: row.get("created_at") or "", reverse=True)
         return rows[:limit]
 

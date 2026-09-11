@@ -2674,6 +2674,41 @@ function initContextProfiles() {
 // validated server-side in auth_routes.set_settings) and shows the live
 // preflight from /api/claude-code/status plus recent jobs from
 // /api/claude-code/tasks. Empty fields keep the CLAUDE_CODE_* env defaults.
+async function initWorkbenchSettings() {
+  var card = el('set-workbenchCard');
+  if (!card) return;
+  var f = { enabled: el('set-wbEnabled'), autoOpen: el('set-wbAutoOpen'), stream: el('set-wbStream') };
+  var msg = el('set-wbMsg');
+  function fill(s) {
+    if (!s) return;
+    if (f.enabled) f.enabled.checked = s.workbench_enabled !== false;
+    if (f.autoOpen) f.autoOpen.checked = s.workbench_auto_open !== false;
+    if (f.stream) f.stream.checked = s.claude_code_stream_transcript !== false;
+  }
+  try {
+    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
+    if (res.ok) fill(await res.json());
+  } catch (e) {}
+  async function save() {
+    try {
+      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workbench_enabled: !!(f.enabled && f.enabled.checked),
+          workbench_auto_open: !!(f.autoOpen && f.autoOpen.checked),
+          claude_code_stream_transcript: !!(f.stream && f.stream.checked),
+        }) });
+      if (!r.ok) { msg.textContent = 'Not saved (' + r.status + ')'; msg.style.color = 'var(--red)'; return; }
+      fill(await r.json());
+      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      if (window.workbenchModule && window.workbenchModule.refreshSettings) window.workbenchModule.refreshSettings();
+      var rail = el('rail-workbench');
+      if (rail) rail.style.display = (f.enabled && f.enabled.checked) ? '' : 'none';
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  }
+  [f.enabled, f.autoOpen, f.stream].forEach(function (x) { if (x) x.addEventListener('change', save); });
+}
+
 async function initClaudeCodeSettings() {
   var card = el('set-claudeCodeCard');
   if (!card) return;
@@ -2845,6 +2880,7 @@ function initAll() {
   initResearchSearchSettings();
   initAgentSettings();
   initClaudeCodeSettings();
+  initWorkbenchSettings();
   initContextProfiles();
   initAppearance();
   initShortcuts();

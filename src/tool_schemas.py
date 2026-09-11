@@ -563,12 +563,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_to_session",
-            "description": "Send a new message to an existing live chat and get that chat model's response. Do not use this to retrieve, read, summarize, or inspect old chats; use search_chats or list_sessions for past chat evidence.",
+            "description": "Send a new message to an existing live chat and get that chat model's response. mode='agent' lets that chat's agent work the message with its own tools (files, shell, web) as a sub-agent and returns its final answer; mode='chat' (default) is a single model reply. Do not use this to retrieve, read, summarize, or inspect old chats; use search_chats or list_sessions for past chat evidence.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to"},
-                    "message": {"type": "string", "description": "The message to send"}
+                    "message": {"type": "string", "description": "The message to send"},
+                    "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"}
                 },
                 "required": ["session_id", "message"]
             }
@@ -1750,7 +1751,11 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "list_sessions":
         content = args.get("filter", "")
     elif tool_type == "send_to_session":
-        content = args.get("session_id", "") + "\n" + args.get("message", "")
+        if args.get("mode"):
+            content = json.dumps({"session_id": args.get("session_id", ""), "message": args.get("message", ""),
+                                  "mode": args.get("mode")})
+        else:
+            content = args.get("session_id", "") + "\n" + args.get("message", "")
     elif tool_type == "pipeline":
         # Pass as JSON for the pipeline parser
         content = json.dumps({"steps": args.get("steps", [])})

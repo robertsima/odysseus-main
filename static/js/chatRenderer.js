@@ -6,6 +6,7 @@ import markdownModule from './markdown.js';
 import { svgifyEmoji } from './markdown.js';
 import { addAITTSButton } from './tts-ai.js';
 import { providerLogo, providerLabel } from './providers.js';
+import { renderDiffCard } from './diffView.js';
 import settingsModule from './settings.js';
 import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
@@ -2431,26 +2432,7 @@ export function addMessage(role, content, modelName, metadata) {
             }
             // File-write/edit diff (persisted in the tool event) \u2014 re-render it
             // so it survives reload, matching the live stream.
-            let evDiffHtml = '';
-            if (ev.diff && ev.diff.text) {
-              const d = ev.diff;
-              const stat = [
-                d.new_file ? '<span class="diff-stat-new">new</span>' : '',
-                d.added ? `<span class="diff-stat-add">+${d.added}</span>` : '',
-                d.removed ? `<span class="diff-stat-del">\u2212${d.removed}</span>` : '',
-              ].filter(Boolean).join(' ');
-              const rows = d.text.split('\n').map(line => {
-                let cls = 'diff-ctx', text = line;
-                if (line.startsWith('+++') || line.startsWith('---')) cls = 'diff-meta';
-                else if (line.startsWith('@@')) cls = 'diff-hunk';
-                // Drop the leading diff marker (+/-/space) — colour encodes add/del.
-                else if (line.startsWith('+')) { cls = 'diff-add'; text = line.slice(1); }
-                else if (line.startsWith('-')) { cls = 'diff-del'; text = line.slice(1); }
-                else if (line.startsWith(' ')) { text = line.slice(1); }
-                return `<span class="${cls}">${esc(text) || '&nbsp;'}</span>`;
-              }).join('');  // spans are display:block \u2014 a literal \n would double-space
-              evDiffHtml = `<details class="agent-tool-output agent-tool-diff"><summary><span class="diff-file">${esc(d.file || 'diff')}</span> <span class="diff-summary-stats">${stat}</span></summary><pre class="diff-pre">${rows}</pre></details>`;
-            }
+            const evDiffHtml = (ev.diff && ev.diff.text) ? renderDiffCard(ev.diff) : '';
             const node = document.createElement('div');
             node.className = 'agent-thread-node' + (ok ? '' : ' error');
             // Hide the raw JSON command when a diff says it better (same as live).

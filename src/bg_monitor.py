@@ -11,7 +11,6 @@ a follow-up ("the job failed/timed out"), so the user always hears back.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 
 from src import bg_jobs
@@ -25,51 +24,26 @@ POLL_INTERVAL_S = 5
 _FOLLOWUP_MAX_ROUNDS = 12
 
 
-async def _drain_agent(sess, messages):
+async def _drain_agent(sess, messages, *, run_id=None):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
-    saves, so the frontend rebuilds them as standard agent-thread tool cards."""
-    from src.agent_loop import stream_agent_loop
-    full = ""
-    tool_events = []
-    round_num = 1
-    async for chunk in stream_agent_loop(
-        sess.endpoint_url, sess.model, messages,
-        headers=getattr(sess, "headers", None),
-        context_length=getattr(sess, "context_length", 0) or 0,
-        session_id=sess.id,
+    saves, so the frontend rebuilds them as standard agent-thread tool cards.
+    The drain itself lives in :mod:`src.headless_agent` (shared with
+    ``send_to_session`` in agent mode); the follow-up keeps every tool the
+    chat had, since it is the same chat continuing."""
+    from src.headless_agent import run_headless
+
+    return await run_headless(
+        sess, messages,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,
+        # A continuation of the user's own chat, not a sub-agent: nothing is
+        # blocked beyond what the chat already had.
+        disabled_tools=None,
+        activity_session_id=getattr(sess, "id", None) if run_id else None,
+        run_id=run_id,
+        source="bg_job",
         owner=getattr(sess, "owner", None),
-    ):
-        if not chunk.startswith("data: "):
-            continue
-        body = chunk[6:].strip()
-        if not body or body == "[DONE]":
-            continue
-        try:
-            d = json.loads(body)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(d, dict):
-            continue
-        if "delta" in d:
-            delta = d.get("delta")
-            if isinstance(delta, str):
-                if d.get("thinking"):
-                    continue
-                full += delta
-        elif d.get("type") == "agent_step":
-            round_num = d.get("round", round_num)
-        elif d.get("type") == "tool_output":
-            # Mirror the live chat's tool_event shape (chat_routes / chatRenderer).
-            tool_events.append({
-                "round": round_num,
-                "tool": d.get("tool"),
-                "command": d.get("command"),
-                "output": d.get("output"),
-                "exit_code": d.get("exit_code"),
-            })
-    return full, tool_events
+    )
 
 
 async def _run_followup(rec: dict) -> bool:
@@ -110,7 +84,22 @@ async def _run_followup(rec: dict) -> bool:
     context = sess.get_context_messages()
     context.append({"role": "user", "content": inject})
 
-    full, tool_events = await _drain_agent(sess, context)
+    from src import agent_activity as activity
+
+    job_run = f"bg_job-{rec['id']}"
+    activity.publish(sess.id, "status",
+                     f"Background job {rec['id']} {'failed' if rec.get('status') == 'failed' else 'finished'}"
+                     f" (exit {rec.get('exit_code')}) — continuing the chat",
+                     source="bg_job", run_id=job_run, owner=getattr(sess, "owner", None),
+                     data={"job_id": rec["id"], "exit_code": rec.get("exit_code"), "status": rec.get("status")},
+                     detail=bg_jobs.result_text(rec)[:2000])
+    full, tool_events = await _drain_agent(sess, context, run_id=job_run)
+    activity.run_finished(sess.id, "bg_job", job_run, f"Background job {rec['id']}: chat continued",
+                          status="failed" if rec.get("status") == "failed" else "completed",
+                          owner=getattr(sess, "owner", None),
+                          data={"job_id": rec["id"], "command": str(rec.get("command") or "")[:200],
+                                "exit_code": rec.get("exit_code"), "steps": len(tool_events),
+                                "result_excerpt": full[:400]})
 
     # Persist ONLY the assistant continuation so it renders as a normal agent
     # turn — a standard chat bubble plus `tool_events` that the frontend

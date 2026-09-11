@@ -290,6 +290,41 @@
   })();
   </script>
   <!-- Memory Management Modal -->
+  <!-- ── Workbench: agent activity, changes, commits, pull requests ── -->
+  <div id="workbench-modal" class="modal hidden">
+    <div class="modal-content workbench-modal-content" role="dialog" aria-label="Workbench" style="background:var(--bg)">
+      <div class="modal-header">
+        <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>Workbench</h4>
+        <div class="wb-header-tools">
+          <select id="wb-scope" class="settings-select wb-select" title="Which sessions to follow"><option value="session">This chat</option><option value="all">All sessions</option></select>
+          <select id="wb-filter" class="settings-select wb-select" title="Filter by source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
+          <select id="wb-repo" class="settings-select wb-select" title="Repository for Changes / Commits"><option value="">— repository —</option></select>
+          <button type="button" class="ats-btn wb-mini" id="wb-pause" title="Pause the live feed">Pause</button>
+          <button type="button" class="ats-btn wb-mini" id="wb-clear" title="Clear the visible feed">Clear</button>
+          <button type="button" class="ats-btn wb-mini" id="wb-dock-right" title="Dock to the right edge">Dock</button>
+        </div>
+        <button class="close-btn" id="close-workbench-modal" aria-label="Close workbench">✖</button>
+      </div>
+      <div class="modal-body workbench-modal-body">
+        <div class="memory-tabs wb-tabs">
+          <button class="memory-tab active" data-wb-tab="activity">Activity</button>
+          <button class="memory-tab" data-wb-tab="changes">Changes</button>
+          <button class="memory-tab" data-wb-tab="commits">Commits</button>
+          <button class="memory-tab" data-wb-tab="prs">Pull Requests</button>
+        </div>
+        <div class="wb-panel" data-wb-panel="activity" id="wb-activity"></div>
+        <div class="wb-panel hidden" data-wb-panel="changes" id="wb-changes"></div>
+        <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits"></div>
+        <div class="wb-panel hidden" data-wb-panel="prs" id="wb-prs"></div>
+      </div>
+    </div>
+  </div>
+  <div id="workbench-diff-modal" class="modal hidden">
+    <div class="modal-content workbench-diff-content" role="dialog" aria-label="Diff" style="background:var(--bg)">
+      <div class="modal-header"><h4 class="wb-popout-title">Diff</h4><button class="close-btn" id="close-workbench-diff-modal" aria-label="Close diff">✖</button></div>
+      <div class="modal-body wb-popout-body"></div>
+    </div>
+  </div>
   <div id="memory-modal" class="modal hidden">
     <div class="modal-content memory-modal-content" role="dialog" aria-label="Brain" style="background:var(--bg)">
       <div class="modal-header">
@@ -737,6 +772,7 @@
     <button class="icon-rail-btn" id="rail-gallery" title="Gallery"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg></button>
     <button class="icon-rail-btn" id="rail-archive" title="Library"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/><path d="M9 7h6M9 11h4"/></svg></button>
     <button class="icon-rail-btn" id="rail-memory" title="Brain"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/><path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/><path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/></svg></button>
+    <button class="icon-rail-btn" id="rail-workbench" title="Workbench — agent activity, changes, PRs"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg></button>
     <button class="icon-rail-btn" id="rail-notes" title="Notes"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 3h10l4 4v14H5z"/><path d="M15 3v5h5"/><path d="M8 17.5 15.5 10l2.5 2.5L10.5 20H8z"/></svg></button>
     <button class="icon-rail-btn" id="rail-tasks" title="Tasks"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg></button>
     <button class="icon-rail-btn" id="rail-theme" title="Theme"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2a10 10 0 0 0 0 20 5 5 0 0 0 5-5 3 3 0 0 0-3-3h-2a3 3 0 0 1-3-3 5 5 0 0 1 5-5"/></svg></button>
@@ -2478,6 +2514,16 @@
                 <input id="set-agentFoldAfter" type="text" inputmode="numeric" placeholder="12 (0 = never)" class="settings-select" style="width:120px;">
               </div>
               <div id="set-agentMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
+            </div>
+          </div>
+          <div class="admin-card" style="margin-bottom:12px;" id="set-workbenchCard">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>Workbench &amp; agent observability</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">The Workbench window shows every agent process for a chat as it happens — Odysseus turns, Claude Code runs, sub-agents, model pipelines and background-job follow-ups — plus the files they changed, the commits they made and the repository's pull requests. Runs also appear as live cards inside the conversation.</div>
+            <div class="settings-col">
+              <div class="settings-row"><label class="settings-label">Workbench window</label><label class="admin-toggle" style="margin:0"><input id="set-wbEnabled" type="checkbox"> <span>on</span></label></div>
+              <div class="settings-row"><label class="settings-label" title="Open the Workbench automatically the first time a Claude Code run, sub-agent or pipeline starts in the current chat.">Auto-open on delegation</label><label class="admin-toggle" style="margin:0"><input id="set-wbAutoOpen" type="checkbox"> <span>on</span></label></div>
+              <div class="settings-row"><label class="settings-label" title="Run Claude Code with --output-format stream-json so its tool calls, file edits and messages stream into the Workbench live. Falls back to plain output when the installed CLI does not support it.">Live Claude Code transcript</label><label class="admin-toggle" style="margin:0"><input id="set-wbStream" type="checkbox"> <span>on</span></label></div>
+              <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
             </div>
           </div>
           <div class="admin-card" style="margin-bottom:12px;" id="set-claudeCodeCard">
