@@ -102,3 +102,6 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Test artifact: a mocked skills_root stringified into a real path.
+MagicMock/

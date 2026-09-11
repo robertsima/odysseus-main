@@ -28,9 +28,13 @@ class _UnhealthyVectorStore:
         return []
 
 
-def _neutralize_collaborators(monkeypatch):
+def _neutralize_collaborators(monkeypatch, tmp_path=None):
     """Stub out everything initialize_managers() builds except the vector store,
     so the test isolates the memory_vector health-handling branch."""
+    # seed_bundled_skills() joins skills_manager.skills_root into a real path
+    # and copies the bundles there. A bare MagicMock is os.fspath-able, so the
+    # copy landed in a "MagicMock/..." tree inside the repo on every run.
+    monkeypatch.setattr(app_init, "seed_bundled_skills", lambda *a, **k: [])
     for name in [
         "MemoryManager", "SkillsManager", "SessionManager", "UploadHandler",
         "PersonalDocsManager", "APIKeyManager", "PresetManager",

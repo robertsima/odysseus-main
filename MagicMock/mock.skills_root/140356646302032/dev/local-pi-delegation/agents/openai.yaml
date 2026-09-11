@@ -1,4 +1,0 @@
-interface:
-  display_name: "Local Pi Delegation"
-  short_description: "Delegate focused coding work to local Pi"
-  default_prompt: "Use $local-pi-delegation to delegate this bounded coding change to the Windows Pi worker, verify it, and record accepted work."
