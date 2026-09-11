@@ -281,9 +281,18 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
     # Execute pipeline
     step_outputs = []
     previous_output = None
+    from src import agent_activity as activity
+
+    run_id = activity.run_started(
+        session_id, "pipeline", f"Pipeline: {len(resolved)} steps", owner=owner,
+        data={"steps": len(resolved), "model": ", ".join(r[1] for r in resolved)[:200]},
+        detail="\n".join(f"{i + 1}. {r[1]}: {r[3][:120]}" for i, r in enumerate(resolved)),
+    )
 
     try:
         for i, (url, model, headers, instruction) in enumerate(resolved):
+            activity.publish(session_id, "status", f"Pipeline step {i + 1}/{len(resolved)}: {model}",
+                             source="pipeline", run_id=run_id, owner=owner, detail=instruction[:1500])
             if previous_output:
                 user_content = (
                     f"Previous step's output:\n\n{previous_output}\n\n"
@@ -307,6 +316,8 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
                 "instruction": instruction,
                 "output": response[:5000] if len(response) > 5000 else response,
             })
+            activity.publish(session_id, "message", f"Step {i + 1} ({model}): {response[:160]}",
+                             source="pipeline", run_id=run_id, owner=owner, detail=response[:2000])
 
             previous_output = response
 
@@ -318,6 +329,9 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
             result_lines.append(so["output"])
             result_lines.append("\n---\n")
 
+        activity.run_finished(session_id, "pipeline", run_id, f"Pipeline finished ({len(resolved)} steps)",
+                              owner=owner, data={"steps": len(resolved),
+                                                 "result_excerpt": (previous_output or "")[:400]})
         return {
             "results": "\n".join(result_lines),
             "steps": step_outputs,
@@ -325,6 +339,8 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         }
     except Exception as e:
         logger.error(f"pipeline failed at step {len(step_outputs) + 1}: {e}")
+        activity.run_finished(session_id, "pipeline", run_id, f"Pipeline failed at step {len(step_outputs) + 1}",
+                              status="failed", owner=owner, data={"steps": len(resolved), "error": str(e)[:400]})
         return {"error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}"}
 
 

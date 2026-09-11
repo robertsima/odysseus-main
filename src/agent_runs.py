@@ -126,6 +126,13 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         )
         _publish(run, "data: [DONE]\n\n")
     finally:
+        # The turn's activity run ends with the stream, however it ended.
+        try:
+            from src import agent_activity as _activity
+
+            _activity.close_turn(session_id, status={"stopped": "cancelled", "error": "failed"}.get(run.status, "completed"))
+        except Exception:
+            pass
         # Wake every subscriber with the end sentinel so their SSE closes.
         for q in list(run.subscribers):
             try:

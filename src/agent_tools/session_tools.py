@@ -14,9 +14,33 @@ import logging
 import uuid
 from typing import Dict, Optional
 
+from src import agent_activity as activity
 from src.ai_interaction import get_session_manager, _resolve_model, AI_CHAT_TIMEOUT
 
 logger = logging.getLogger(__name__)
+
+# How many agent rounds a sub-agent exchange may take. Enough for a real
+# read → edit → test loop, small enough that a runaway child cannot hold the
+# parent's turn for long.
+SUBAGENT_MAX_ROUNDS = 12
+
+
+def _parse_send_args(content: str):
+    """``{"session_id", "message", "mode"}`` JSON, or the legacy two-line form."""
+    raw = (content or "").strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            return (str(data.get("session_id") or data.get("session") or "").strip(),
+                    str(data.get("message") or "").strip(),
+                    str(data.get("mode") or "chat").strip().lower() or "chat")
+    lines = raw.split("\n", 1)
+    if len(lines) < 2:
+        return "", "", "chat"
+    return lines[0].strip(), lines[1].strip(), "chat"
 
 
 async def create_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
@@ -184,12 +208,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     if not _session_manager:
         return {"error": "Session manager not available"}
 
-    lines = content.strip().split("\n", 1)
-    if len(lines) < 2:
-        return {"error": "Need 2 lines: session_id, then message"}
-
-    target_sid = lines[0].strip()
-    message = lines[1].strip()
+    target_sid, message, mode = _parse_send_args(content)
+    if not target_sid:
+        return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)"}
+    if mode not in ("chat", "agent"):
+        return {"error": "mode must be 'chat' (one model reply) or 'agent' (the chat's agent runs with its tools)"}
 
     sess = _session_manager.get_session(target_sid)
     if not sess:
@@ -230,11 +253,44 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         context.append({"role": "user", "content": message})
 
-        response = await llm_call_async(
-            sess.endpoint_url, sess.model, context,
-            headers=sess.headers,
-            timeout=AI_CHAT_TIMEOUT,
+        # The exchange is one run on the calling chat's activity feed, so the
+        # Workbench shows the hand-off, the child's tool calls (agent mode)
+        # and the reply next to everything else the parent is doing.
+        run_id = activity.run_started(
+            session_id, "session", f"Sub-agent · {sess.name or target_sid}: {message[:80]}",
+            owner=owner,
+            data={"target_session": target_sid, "target_session_name": sess.name, "model": sess.model,
+                  "mode": mode},
+            detail=message[:1500],
         )
+        activity.publish(session_id, "message", f"→ {sess.name or target_sid}: {message[:160]}",
+                         source="session", run_id=run_id, owner=owner, detail=message[:2000])
+        tool_events = []
+        try:
+            if mode == "agent":
+                from src.headless_agent import run_headless
+
+                response, tool_events = await run_headless(
+                    sess, context,
+                    max_rounds=SUBAGENT_MAX_ROUNDS,
+                    activity_session_id=session_id,
+                    run_id=run_id,
+                    source="session",
+                    owner=owner,
+                )
+                if not response.strip() and tool_events:
+                    response = "(the sub-agent finished with tool calls but no closing text)"
+            else:
+                response = await llm_call_async(
+                    sess.endpoint_url, sess.model, context,
+                    headers=sess.headers,
+                    timeout=AI_CHAT_TIMEOUT,
+                )
+        except Exception as exc:
+            activity.run_finished(session_id, "session", run_id,
+                                  f"Sub-agent · {sess.name or target_sid} failed", status="failed",
+                                  owner=owner, data={"target_session": target_sid, "error": str(exc)[:400]})
+            raise
 
         # Save both messages to session, tagged with their origin. Without the
         # tag the target chat rendered an agent's message as a plain "You"
@@ -246,17 +302,37 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             "from_session_name": _session_display_name(_session_manager, session_id),
         }
         sess.add_message(ChatMessage("user", message, {**origin, "direction": "inbound"}))
-        sess.add_message(ChatMessage("assistant", response, {**origin, "direction": "reply"}))
+        reply_meta = {**origin, "direction": "reply", "model": sess.model}
+        if tool_events:
+            reply_meta["tool_events"] = tool_events
+        sess.add_message(ChatMessage("assistant", response, reply_meta))
+        try:
+            _session_manager.save_sessions()
+        except Exception:
+            logger.debug("send_to_session: save_sessions failed", exc_info=True)
+
+        activity.publish(session_id, "message", f"← {sess.name or target_sid}: {response[:160]}",
+                         source="session", run_id=run_id, owner=owner, detail=response[:2000])
+        activity.run_finished(
+            session_id, "session", run_id, f"Sub-agent · {sess.name or target_sid} replied",
+            owner=owner,
+            data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
+                  "steps": len(tool_events), "result_excerpt": response[:400]},
+        )
 
         # Truncate for tool output
         if len(response) > 10000:
             response = response[:10000] + "\n... (truncated)"
 
-        return {
+        out = {
             "session_id": target_sid,
             "session_name": sess.name,
             "response": response,
+            "mode": mode,
         }
+        if tool_events:
+            out["tool_calls"] = len(tool_events)
+        return out
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")
         return {"error": f"Failed to send to session: {e}"}

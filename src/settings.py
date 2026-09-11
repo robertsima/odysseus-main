@@ -132,6 +132,15 @@ DEFAULT_SETTINGS = {
     "claude_code_restricted": True,
     "claude_code_odysseus_url": "",
     "claude_code_odysseus_token_file": "",
+    # Ask a stream-json-capable Claude Code for its transcript as it runs, so
+    # the chat and the Workbench show each edit while it happens. Off = wait
+    # for the single final envelope (the pre-2026-09 behaviour).
+    "claude_code_stream_transcript": True,
+    # Workbench (Settings > Tools): the docked agent activity / changes /
+    # commits / pull-request panel. `workbench_auto_open` pops it open when a
+    # delegated run starts in the current chat.
+    "workbench_enabled": True,
+    "workbench_auto_open": True,
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value

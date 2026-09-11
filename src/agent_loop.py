@@ -22,6 +22,7 @@ from src.llm_core import (
 )
 from src.model_context import estimate_tokens, is_local_endpoint
 from src.settings import get_setting
+from src import agent_activity as _activity
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
@@ -1008,7 +1009,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
 `calendar` accepts a name ("Main") or short-id prefix.""",
     "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
-    "send_to_session": "- ```send_to_session``` — Send a message to another session. Line 1 = session_id, rest = message. Use for orchestrating work across sessions.",
+    "send_to_session": "- ```send_to_session``` — Send a message to another chat and get its reply. Args (JSON): {\"session_id\": ..., \"message\": ..., \"mode\": \"chat\"|\"agent\"}; legacy: line 1 = session_id, rest = message. mode=agent makes that chat's agent do the work with its own tools (a sub-agent whose steps show in the Workbench) and return its final answer; mode=chat is one model reply. Use for orchestrating work across chats.",
     "recall_tool_output": "- ```recall_tool_output``` — Read back a tool result that was too large to keep in the conversation. When a tool produced a lot of output, only its head and tail were kept and the rest was stored under a `toolout-...` reference named in that excerpt. Args (JSON): {\"ref\": \"toolout-abc123\", \"query\": \"what you need\"} to search it, or {\"ref\": \"toolout-abc123\", \"offset\": 3000} to keep reading in order. NEVER re-run the original command to see the trimmed part — it is already stored, and re-running it just spends the context again.",
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
@@ -4059,6 +4060,21 @@ async def stream_agent_loop(
     if _upload_msg:
         messages = _insert_before_latest_user(messages, _upload_msg)
 
+    # Workbench: this turn is one run on the session's activity feed, next to
+    # the Claude Code jobs, sub-agents and shell jobs it may start. Closed at
+    # the final metrics below, or by agent_runs when the stream is stopped.
+    _activity_run_id = _activity.new_run_id("odysseus")
+    try:
+        _turn_excerpt = " ".join(_extract_last_user_message(messages).split())[:100]
+    except Exception:
+        _turn_excerpt = ""
+    _activity.run_started(
+        session_id, "odysseus",
+        ("Teacher turn" if _is_teacher_run else "Turn") + (f": {_turn_excerpt}" if _turn_excerpt else ""),
+        run_id=_activity_run_id, owner=owner,
+        data={"model": model, "mode": "plan" if plan_mode else "agent"},
+    )
+
     _t0 = time.time()
     _needs_admin = _detect_admin_intent(messages)
     _admin_tools = _detect_admin_tools(messages) if _needs_admin else set()
@@ -6033,6 +6049,11 @@ async def stream_agent_loop(
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
             else:
+                _activity.publish(
+                    session_id, "tool_start", f"{block.tool_type} {str(cmd_display or '')[:120]}".strip(),
+                    source="odysseus", run_id=_activity_run_id, owner=owner,
+                    data={"tool": block.tool_type, "round": round_num},
+                )
                 yield (
                     f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
                 )
@@ -6288,6 +6309,15 @@ async def stream_agent_loop(
             # Forward a file-write diff for inline before/after rendering
             if "diff" in result:
                 tool_output_data["diff"] = result["diff"]
+            _activity.publish(
+                session_id, "tool_result",
+                f"{block.tool_type} {'failed' if result.get('exit_code') not in (0, None) else 'done'}",
+                source="odysseus", run_id=_activity_run_id, owner=owner,
+                detail=str(output_text or "")[:1500] or None,
+                data={"tool": block.tool_type, "exit_code": result.get("exit_code"), "round": round_num,
+                      "diff": (result.get("diff") or {}).get("file") if isinstance(result.get("diff"), dict) else None},
+                level="error" if result.get("exit_code") not in (0, None) else "info",
+            )
             yield f'data: {json.dumps(tool_output_data)}\n\n'
             if result.get("image_url"):
                 generated_image_data = {"type": "generated_image", "url": result.get("image_url")}
@@ -6677,6 +6707,12 @@ async def stream_agent_loop(
         "suppressed_retained": sorted(_suppressed_retained_tools),
         "disabled_count": len(disabled_tools),
     }
+    _activity.run_finished(
+        session_id, "odysseus", _activity_run_id,
+        ("Teacher turn" if _is_teacher_run else "Turn") + " finished", owner=owner,
+        data={"model": actual_model, "steps": len(tool_events or []), "num_turns": int(round_num or 0),
+              "result_excerpt": " ".join(str(full_response or "").split())[:300] or None},
+    )
     yield f"data: {json.dumps({'type': 'metrics', 'data': metrics})}\n\n"
 
     # Teacher-escalation: inline takeover visible in the chat stream.
