@@ -173,11 +173,57 @@ def _non_empty_file(path: str) -> bool:
         return False
 
 
+def _agent_home() -> str:
+    """The HOME git sees from the shell tool.
+
+    tool_execution pins the agent subprocess's HOME to DATA_DIR, so that is
+    where its `~/.gitconfig` and `~/.git-credentials` resolve — not the app
+    process's own HOME, which is /root in the container and is emptied by
+    every rebuild. Checking the wrong one would block a push a global helper
+    on the data volume was about to authenticate.
+    """
+    try:
+        from src import constants
+
+        home = constants.DATA_DIR
+    except Exception:
+        home = ""
+    return home or os.environ.get("HOME") or os.path.expanduser("~")
+
+
 def _global_credential_stores() -> list:
     """Where `credential.helper = store` reads from when no --file is given."""
-    home = os.environ.get("HOME") or os.path.expanduser("~")
+    home = _agent_home()
     xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
     return [os.path.join(home, ".git-credentials"), os.path.join(xdg, "git", "credentials")]
+
+
+def _global_config_texts() -> list:
+    """The global git configs the shell tool's git reads, in git's order."""
+    home = _agent_home()
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    paths = [
+        os.environ.get("GIT_CONFIG_GLOBAL") or os.path.join(home, ".gitconfig"),
+        os.path.join(xdg, "git", "config"),
+    ]
+    texts = []
+    for path in paths:
+        try:
+            with open(path, encoding="utf-8", errors="replace") as handle:
+                texts.append(handle.read())
+        except OSError:
+            continue
+    return texts
+
+
+def _credential_helpers(repo: str) -> list:
+    """`credential.helper` values from the repository config and the global
+    configs, as git would see them."""
+    helpers = []
+    for config in [_git_config_text(repo)] + _global_config_texts():
+        if config and _CREDENTIAL_SECTION.search(config):
+            helpers += [m.group("helper").strip().strip("\"'") for m in _CREDENTIAL_HELPER.finditer(config)]
+    return helpers
 
 
 def _store_paths(helper: str) -> list:
@@ -211,11 +257,7 @@ def _helper_can_authenticate(helper: str) -> bool:
 def empty_credential_store(repo: str) -> Optional[str]:
     """The file a `store` helper would read when the repository names one
     that is missing or empty, so the guidance can say what actually broke."""
-    config = _git_config_text(repo)
-    if not config or not _CREDENTIAL_SECTION.search(config):
-        return None
-    for match in _CREDENTIAL_HELPER.finditer(config):
-        helper = match.group("helper").strip().strip("\"'")
+    for helper in _credential_helpers(repo):
         if helper.split(None, 1)[:1] == ["store"] and not _helper_can_authenticate(helper):
             return _store_paths(helper)[0]
     return None
@@ -226,9 +268,9 @@ def repository_has_own_credential(repo: str) -> bool:
 
     Blocking a push that would actually have worked is the worse failure — it
     reads to the user as "git integration broke". So a repository with an SSH
-    remote, a remote URL with userinfo, or a credential helper that has
-    something to hand over is left alone, as is any repository when a global
-    ``~/.git-credentials`` exists.
+    remote, a remote URL with userinfo, or a credential helper (in its own
+    config or the agent's global one) that has something to hand over is left
+    alone, as is any repository when a global ``~/.git-credentials`` exists.
 
     A ``[credential]`` section on its own is not enough. ``helper = store``
     with an empty store is the 2026-09-11 failure: the guard waved the push
@@ -236,13 +278,10 @@ def repository_has_own_credential(repo: str) -> bool:
     probing helpers and SSH keys before reporting "blocked by authentication".
     """
     config = _git_config_text(repo)
-    if config:
-        if _URL_WITH_USERINFO.search(config) or _SSH_REMOTE.search(config):
-            return True
-        if _CREDENTIAL_SECTION.search(config):
-            for match in _CREDENTIAL_HELPER.finditer(config):
-                if _helper_can_authenticate(match.group("helper")):
-                    return True
+    if config and (_URL_WITH_USERINFO.search(config) or _SSH_REMOTE.search(config)):
+        return True
+    if any(_helper_can_authenticate(helper) for helper in _credential_helpers(repo)):
+        return True
     return any(_non_empty_file(p) for p in _global_credential_stores())
 
 

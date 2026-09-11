@@ -18,6 +18,7 @@ import asyncio
 
 import pytest
 
+from src import constants
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_worktree import push_guard
 
@@ -28,8 +29,11 @@ pytestmark = pytest.mark.area_security
 def guard_enabled(monkeypatch, tmp_path):
     monkeypatch.delenv(push_guard.ESCAPE_HATCH_ENV, raising=False)
     # A global ~/.git-credentials would make any repository look credentialed,
-    # so pin HOME at an empty directory for deterministic results.
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    # so pin the agent's HOME (DATA_DIR, per tool_execution) at an empty
+    # directory for deterministic results.
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "home"))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     (tmp_path / "home").mkdir(exist_ok=True)
 
 
@@ -196,11 +200,45 @@ def test_a_cache_helper_is_not_a_credential_after_a_restart(tmp_path, odysseus_r
 def test_a_global_credential_store_also_releases_the_guard(tmp_path, monkeypatch, odysseus_repo, foreign_repo):
     home = tmp_path / "home"
     (home / ".git-credentials").write_text("https://x:y@github.com\n", encoding="utf-8")
-    monkeypatch.setenv("HOME", str(home))
     assert push_guard.check("git push origin main", cwd=str(foreign_repo)) is None
     # ...but Odysseus itself still goes through the approval flow.
     blocked = push_guard.check("git push origin main", cwd=str(odysseus_repo))
     assert blocked["blocked_reason"] == "publish_requires_agent_worktree_tool"
+
+
+def test_a_global_helper_in_the_agents_gitconfig_releases_the_guard(tmp_path, odysseus_repo, foreign_repo):
+    """The operator's `git config --file /app/data/.gitconfig credential.helper
+    '!f() { echo password=$GITHUB_PERSONAL_ACCESS_TOKEN; }; f'` — one line that
+    lets every third-party checkout push. It lives in the agent's HOME, which
+    is DATA_DIR, so it survives a rebuild."""
+    (tmp_path / "home" / ".gitconfig").write_text(
+        '[credential]\n\thelper = "!f() { echo username=x; echo password=$GITHUB_PERSONAL_ACCESS_TOKEN; }; f"\n',
+        encoding="utf-8",
+    )
+    assert push_guard.repository_has_own_credential(str(foreign_repo)) is True
+    assert push_guard.check("git push origin main", cwd=str(foreign_repo)) is None
+    # Odysseus itself still goes through the approval flow.
+    assert push_guard.check("git push origin main", cwd=str(odysseus_repo))["blocked_reason"] == "publish_requires_agent_worktree_tool"
+
+
+def test_a_global_store_helper_with_no_store_is_still_blocked(tmp_path, odysseus_repo, foreign_repo):
+    (tmp_path / "home" / ".gitconfig").write_text("[credential]\n\thelper = store\n", encoding="utf-8")
+    blocked = push_guard.check("git push origin main", cwd=str(foreign_repo))
+    assert blocked["blocked_reason"] == "publish_needs_repository_credential"
+    assert str(tmp_path / "home" / ".git-credentials") in blocked["error"]
+
+
+def test_the_guard_reads_the_agents_home_not_the_app_processes(tmp_path, monkeypatch, odysseus_repo, foreign_repo):
+    """In the container the app runs with HOME=/root while the shell tool runs
+    with HOME=/app/data. A credential in /root is invisible to the agent's git,
+    so it must not release the guard."""
+    app_home = tmp_path / "root"
+    app_home.mkdir()
+    (app_home / ".git-credentials").write_text("https://x:y@github.com\n", encoding="utf-8")
+    (app_home / ".gitconfig").write_text("[credential]\n\thelper = manager\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(app_home))
+    assert push_guard.repository_has_own_credential(str(foreign_repo)) is False
+    assert push_guard.check("git push origin main", cwd=str(foreign_repo)) is not None
 
 
 def test_the_operator_can_turn_the_guard_off(monkeypatch):
