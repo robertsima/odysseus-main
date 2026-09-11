@@ -231,6 +231,37 @@ def _personal_docs_root() -> Optional[str]:
         return None
 
 
+def _personal_docs_suggestion(raw_path: str) -> str:
+    """Point a rejected path at the knowledge base when it names a vault folder.
+
+    Seen live: the agent wrote to `/app/workspace/AI Mind/Projects/Note.md` —
+    the vault folder name was right, the root was invented — and after `ls`
+    and `write_file` both refused it, it wrote the note through the shell
+    instead, outside the vault. When a component of the rejected path is a
+    top-level folder of the personal-documents tree, return a sentence naming
+    the real path so the next call can succeed. Empty when nothing matches.
+    """
+    root = _personal_docs_root()
+    if not root or not raw_path:
+        return ""
+    try:
+        top = {entry.casefold(): entry for entry in os.listdir(root) if not entry.startswith(".")}
+    except OSError:
+        return ""
+    if not top:
+        return ""
+    parts = [p for p in re.split(r"[\\/]+", os.path.expanduser(str(raw_path).strip())) if p]
+    for i, part in enumerate(parts):
+        real = top.get(part.casefold())
+        if real is not None:
+            suggestion = os.path.join(root, real, *parts[i + 1:])
+            return (
+                f". The knowledge base (vault) lives under '{root}', not there — "
+                f"did you mean '{suggestion}'?"
+            )
+    return ""
+
+
 def _is_under_personal_docs(resolved: str) -> bool:
     """True when *resolved* sits inside the personal-documents tree.
 
@@ -349,7 +380,7 @@ def _resolve_tool_path(raw_path: str) -> str:
         if common == root:
             return resolved
     raise ValueError(
-        f"path '{raw_path}' is outside the allowed roots"
+        f"path '{raw_path}' is outside the allowed roots" + _personal_docs_suggestion(raw_path)
     )
 
 
@@ -377,7 +408,7 @@ def _resolve_personal_docs_path(raw_path: str) -> str:
     if not _is_under_personal_docs(resolved):
         raise ValueError(
             f"path '{raw_path}' is outside the workspace and outside the "
-            f"personal documents directory"
+            f"personal documents directory" + _personal_docs_suggestion(raw_path)
         )
     return resolved
 

@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 from typing import List, Optional
 from urllib.parse import urljoin, urlparse, parse_qs
 
@@ -158,7 +159,16 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         "safesearch": _safesearch_for("searxng"),
     }
     q_lc = query.lower()
-    is_news = time_filter is not None or any(h in q_lc for h in _NEWS_HINTS)
+    # A `site:` query is a lookup on a known site (docs, a standard, a
+    # licence page) — the news category has nothing for it and every such
+    # query used to pay a wasted news round-trip before the general retry.
+    # Likewise `time_filter="year"` is a "prefer recent" hint the agent puts
+    # on ordinary lookups, not a news signal: only day/week/month or a news
+    # word in the query switches category.
+    scoped_to_site = bool(re.search(r"\bsite:\S+", q_lc))
+    is_news = not scoped_to_site and (
+        time_filter in ("day", "week", "month") or any(h in q_lc for h in _NEWS_HINTS)
+    )
     if is_news and categories == "general":
         params["categories"] = "news"
         if time_filter in ("day", "week", "month", "year"):

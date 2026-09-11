@@ -26,6 +26,17 @@ _CACHE_DIR = Path(EMOJI_CACHE_DIR)
 # OpenMoji "black" set = monochrome line-art SVGs. Filenames are the codepoints
 # in UPPERCASE (FE0F dropped, same as we compute), '-' joined.
 _OPENMOJI_BASE = "https://cdn.jsdelivr.net/npm/openmoji@15.0.0/black/svg"
+
+
+def _openmoji_filename(code: str) -> str:
+    """OpenMoji names each file by its uppercase codepoints padded to at least
+    four hex digits: `00AE.svg` (®), `00A9.svg` (©), `1F600.svg`,
+    `1F468-200D-1F469.svg`. The frontend sends the bare hex (`ae`), and the
+    unpadded `AE.svg` is a 404 on the CDN — every BMP symbol below U+1000
+    rendered blank."""
+    return "-".join(seg.upper().zfill(4) for seg in code.split("-")) + ".svg"
+
+
 # codepoints like "1f600" or "1f468-200d-1f469-200d-1f467" (lowercase hex, '-' joined)
 _CODE_RE = re.compile(r"^[0-9a-f]{2,6}(?:-[0-9a-f]{2,6})*$")
 _MAX_SVG_BYTES = 256 * 1024
@@ -94,7 +105,7 @@ def setup_emoji_routes() -> APIRouter:
         # it. OpenMoji filenames are the codepoints uppercased.
         try:
             async with httpx.AsyncClient(timeout=8.0) as client:
-                r = await client.get(f"{_OPENMOJI_BASE}/{code.upper()}.svg")
+                r = await client.get(f"{_OPENMOJI_BASE}/{_openmoji_filename(code)}")
             if r.status_code == 200 and _is_safe_svg(r.content):
                 try:
                     fp.write_bytes(r.content)

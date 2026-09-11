@@ -562,6 +562,7 @@ _DOMAIN_RULES = {
 - The user's vault / knowledge base ("Vault Mind", "AI Mind", Obsidian, "my notes") is a tree of real Markdown files that is ALSO semantically indexed. Both halves are available to you at once.
 - ALWAYS start with `search_documents`. It returns the relevant excerpts plus the real path of each source file. Do not open the vault with `grep`, `glob`, `ls`, `bash`, or a directory walk to find something — the index already exists and a single note can run to 40k+ characters.
 - The paths `search_documents` returns are directly usable: pass one straight to `read_file` (with offset/limit) for more of a note, `edit_file` to change part of one, or `write_file` to create a new note. You do NOT need a workspace bound for this, and you must not tell the user to set one.
+- Vault folders such as `AI Mind` live inside the personal-documents directory that `search_documents` indexes — NOT under a workspace and NOT under `/app/workspace`. Take the real path from a search result (or from the path a tool error suggests); never invent one from the folder name, and never fall back to the shell to write a note when a file tool refused the path.
 - `grep`/`glob` over the vault are for what search cannot serve: an exact string, a filename pattern, or enumerating what exists. Use them after search, not instead of it.
 - Vault notes are files, not editor documents. Never use `create_document`/`edit_document` to change one — those write to Odysseus's own document store, a different place entirely.
 - If a write fails because the path is read-only, say so; do not go looking for a second copy of the file somewhere else on disk.
@@ -930,7 +931,7 @@ Generate an image. Line 1 = description, line 2 = model name, line 3 = WxH (e.g.
     "list_models": "- ```list_models``` — Show all available AI models across all endpoints. Use when user asks what models are available.",
     "manage_session": "- ```manage_session``` — Rename, archive, delete, fork, switch, or `list` chats (the UI calls them 'chats'; 'session' is internal). Line 1 = action (list/switch/rename/archive/unarchive/delete/important/unimportant/truncate/fork), Line 2 = exact chat id from `list_sessions` (or `current` where supported). For delete/archive/truncate, always list first and reuse the exact id; never invent placeholder ids. `switch`/`open` returns a clickable anchor link the user can tap to open the chat — use for \"open my X chat\".",
     "manage_memory": "- ```manage_memory``` — Manage the user's persistent memory (facts about the USER themselves, their preferences, context that persists across chats). Line 1 = action (list/add/edit/delete/search), rest = content. Use when user says 'remember this' about themselves, states identity facts like 'my name is <name>' / 'call me <name>' / 'I live in <place>', or asks about stored memories. DO NOT use for info about another person (their address, phone, email, birthday) — that goes in `manage_contact`. If the user pastes an address/phone with a name and says 'save this for <person>', use `manage_contact add` with the address arg, NOT manage_memory.",
-    "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. `list` returns the index of available skills (published + teacher-escalation drafts); `view name=foo` fetches the full SKILL.md; `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Use this BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
+    "manage_skills": "- ```manage_skills``` — Skill registry (SKILL.md format). Args (JSON): {\"action\": \"list|view|view_ref|search|add|edit|patch|publish|delete\", ...}. The skills index (name + description of every skill) is already in your context when skills exist, and skills matched to the request are injected in full — do not `list` just to see what exists, and do not `view` a skill whose procedure is already in your context. `view names=[\"a\", \"b\"]` fetches several full SKILL.md files in ONE call (never one call per skill); `view_ref name=foo path=...` loads a reference file under the skill directory. For `add`, provide an explicit kebab-case `name` and only report the exact returned name, because storage may normalize or dedupe it. Consult a relevant skill BEFORE doing domain work — there may already be a procedure (published or draft) that prescribes the correct steps. Drafts written by the teacher loop are authoritative guidance even though they're not yet published.",
     "manage_tasks": "- ```manage_tasks``` — Create and manage scheduled background tasks (recurring AI jobs). Args (JSON): {\"action\": \"list|create|edit|delete|pause|resume|run\", ...}",
     "manage_endpoints": "- ```manage_endpoints``` — Add, remove, or configure AI model API endpoints. Args (JSON): {\"action\": \"list|add|delete|enable|disable\", ...}. Use when user wants to add a new AI provider.",
     "manage_mcp": "- ```manage_mcp``` — Manage MCP (Model Context Protocol) tool servers — external tools that extend your capabilities. Args (JSON): {\"action\": \"list|add|delete|reconnect|list_tools\", ...}",
@@ -3255,10 +3256,13 @@ def _build_system_prompt(
                             pass
                     lines.append("## Relevant skills for this request")
                     lines.append("These skills are matched to your current request. Each is a "
-                                 "procedure proven to work. Follow them step by step. To see "
-                                 "the full SKILL.md (more detail, pitfalls, verification "
-                                 "steps), call `manage_skills` with action='view' and the "
-                                 "skill name.")
+                                 "procedure proven to work. Follow them step by step. The "
+                                 "procedure, pitfalls and verification below are the skill's "
+                                 "full structured content — do NOT call `manage_skills` view "
+                                 "for these skills again. Only a skill marked *(has additional "
+                                 "sections)* carries more prose; load those, several at once, "
+                                 "with action='view' and names=[...], and use view_ref for a "
+                                 "reference file a step names.")
                     for sk in relevant_skills:
                         src_tag = ""
                         if sk.get("source") == "teacher-escalation":
@@ -3277,6 +3281,11 @@ def _build_system_prompt(
                         pitfalls = sk.get("pitfalls") or []
                         if pitfalls:
                             lines.append("Pitfalls: " + "; ".join(pitfalls))
+                        verification = sk.get("verification") or []
+                        if verification:
+                            lines.append("Verification: " + "; ".join(verification))
+                        if str(sk.get("body_extra") or "").strip():
+                            lines.append("*(has additional sections — view for the full SKILL.md)*")
                 # SECURITY: do NOT concatenate the skills block into the
                 # trusted system role. Skill content (name, description,
                 # when_to_use, procedure, pitfalls) is user-editable via
@@ -5200,7 +5209,9 @@ async def stream_agent_loop(
         # looked identical to the healthy case because the list was cut at 15.
         _sent_set = {n for n in _tool_names_sent if n}
         _selected_set = set(_relevant_tools or ())
-        _selected_not_sent = sorted(_selected_set - _sent_set) if _relevant_tools else []
+        _selected_not_sent = (
+            sorted(_selected_set - _sent_set - set(disabled_tools or ())) if _relevant_tools else []
+        )
         _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
         _tool_debug_sig = (tuple(sorted(_sent_set)), tuple(sorted(_selected_set)))
         _tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug

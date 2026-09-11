@@ -12,9 +12,31 @@ inside the functions to avoid an import cycle at module load.
 """
 import asyncio
 import logging
-from typing import Dict, Optional
+import re
+from typing import Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Model specs that mean "whatever teacher is configured". The agent has been
+# seen sending 'default' — which used to be looked up as a literal model id,
+# fail with "Model 'default' not found", and cost a list_models round.
+_TEACHER_AUTO_ALIASES = frozenset({"", "auto", "default", "teacher", "teacher_model", "configured"})
+
+
+def _keyword_terms(keyword: Optional[str]) -> List[str]:
+    """Split a list_models filter into lowercase terms ('claude opus' → ['claude', 'opus'])."""
+    return [t for t in re.split(r"[\s,]+", (keyword or "").strip().lower()) if t]
+
+
+def _matches_terms(model_id: str, endpoint_name: str, terms: List[str]) -> bool:
+    """True when every term appears in the model id or the endpoint name.
+
+    The old filter needed the whole phrase as one substring, so 'claude opus'
+    matched nothing (ids are hyphenated: `claude-opus-4-7`) and the agent had
+    to call list_models a second time with no filter.
+    """
+    hay = f"{model_id or ''} {endpoint_name or ''}".lower()
+    return all(t in hay for t in terms)
 
 
 _TEACHER_SYSTEM_PROMPT = (
@@ -89,6 +111,11 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     Content format:
       Line 1: model_name (or 'auto')
       Line 2+: the problem description
+
+    The requested model is tried first; if it cannot be resolved or its call
+    fails, the configured `teacher_model` answers instead (when it is a
+    different model). One failed teacher used to be the end of it — the agent
+    saw "Teacher call failed (gpt-6-astra): ..." and carried on without help.
     """
     from src.ai_interaction import _resolve_model, AI_CHAT_TIMEOUT
     from src.llm_core import llm_call_async
@@ -101,32 +128,55 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     if not problem:
         return {"error": "No problem description provided"}
 
-    if model_spec.lower() in ("auto", ""):
-        model_spec = get_setting("teacher_model", "")
-        if not model_spec:
-            return {"error": "No teacher model configured. Specify a model name or set teacher_model in settings."}
+    configured = str(get_setting("teacher_model", "") or "").strip()
+    if model_spec.lower() in _TEACHER_AUTO_ALIASES:
+        if not configured:
+            return {"error": ("No teacher model configured. Specify a model name from list_models "
+                              "on line 1, or set teacher_model in settings.")}
+        candidates = [configured]
+    else:
+        candidates = [model_spec]
+        if configured and configured.lower() != model_spec.lower():
+            candidates.append(configured)
 
-    try:
-        url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
-    except ValueError as e:
-        return {"error": str(e)}
-
-    try:
-        response = await llm_call_async(
-            url, model,
-            [
-                {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
-                {"role": "user", "content": f"Problem:\n{problem}"},
-            ],
-            headers=headers,
-            timeout=AI_CHAT_TIMEOUT,
-        )
+    failures: List[str] = []
+    for spec in candidates:
+        try:
+            url, model, headers = await asyncio.to_thread(_resolve_model, spec, owner=owner)
+        except ValueError as e:
+            failures.append(f"{spec}: {e}{_claude_code_hint(spec)}")
+            continue
+        try:
+            response = await llm_call_async(
+                url, model,
+                [
+                    {"role": "system", "content": _TEACHER_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Problem:\n{problem}"},
+                ],
+                headers=headers,
+                timeout=AI_CHAT_TIMEOUT,
+            )
+        except Exception as e:
+            logger.error(f"ask_teacher failed ({spec}): {e}")
+            failures.append(f"{spec}: {e}")
+            continue
         if len(response) > 8000:
             response = response[:8000] + "\n... (truncated)"
-        return {"model": model, "response": response, "teacher": True}
-    except Exception as e:
-        logger.error(f"ask_teacher failed: {e}")
-        return {"error": f"Teacher call failed ({model_spec}): {e}"}
+        result = {"model": model, "response": response, "teacher": True}
+        if failures:
+            result["note"] = (
+                f"Requested teacher {candidates[0]!r} was unavailable ({failures[-1]}); "
+                f"the configured teacher {model!r} answered instead."
+            )
+        return result
+
+    tried = "; ".join(failures) if failures else "no candidate model"
+    if configured:
+        hint = " Call list_models for exact model ids and retry with one of them."
+    else:
+        hint = (" Call list_models for exact model ids and retry with one of them, "
+                "or set teacher_model in settings and pass 'auto'.")
+    return {"error": f"Teacher call failed — tried {tried}.{hint}"}
 
 
 async def list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
@@ -142,6 +192,7 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
     from src.endpoint_resolver import resolve_endpoint_runtime, build_headers, build_models_url
 
     keyword = content.strip().lower() if content.strip() else None
+    terms = _keyword_terms(keyword)
 
     db = SessionLocal()
     try:
@@ -185,8 +236,8 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
                 except Exception:
                     model_ids = ["(endpoint offline)"]
 
-            if keyword:
-                model_ids = [m for m in model_ids if keyword in m.lower() or keyword in (ep.name or "").lower()]
+            if terms:
+                model_ids = [m for m in model_ids if _matches_terms(m, ep.name or "", terms)]
 
             if model_ids:
                 result_lines.append(f"\n**{ep.name or base}** ({provider}):")
@@ -196,6 +247,8 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
 
         if not result_lines:
             return {"results": "No models found" + (f" matching '{keyword}'" if keyword else "") + "."
+                    + (" Try a shorter keyword (any word of the model id or endpoint name), "
+                       "or no filter to see everything." if keyword else "")
                     + _claude_code_hint(keyword or "")}
 
         header = f"Available models ({total_models} total):"

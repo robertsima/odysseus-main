@@ -77,14 +77,16 @@ before proposing any change to how Claude is reached.
 7. Publishing is a separate, human-gated step: use `manage_agent_worktree`
    (`request_publish` → operator approval → `publish`). Claude Code cannot
    push and must not be asked to.
-8. After acceptance, record the outcome in the `AI Mind` workspace so later
-   sessions can orient without replaying this one. Follow
-   [documentation-policy.md](references/documentation-policy.md): find the
-   note with `search_documents` ("Claude Code Delegation"), append a dated
-   entry with `edit_file` (create `AI Mind/Claude Code Delegation.md` with
-   `write_file` only if the search finds nothing), keep it to project, task,
-   outcome, files changed, checks reviewed, limitations. Skip the record when
-   the user says the work is throwaway.
+8. After acceptance, record the outcome in the `AI Mind` folder of the
+   user's knowledge base so later sessions can orient without replaying this
+   one. Follow [documentation-policy.md](references/documentation-policy.md):
+   find the note with `search_documents` ("Claude Code Delegation"), append a
+   dated entry with `edit_file` (create `Claude Code Delegation.md` with
+   `write_file` only if the search finds nothing — under the `AI Mind` path
+   the search results show, which is inside the personal-documents tree, not
+   under `/app/workspace`), keep it to project, task, outcome, files changed,
+   checks reviewed, limitations. Skip the record when the user says the work
+   is throwaway.
 
 ## Protect context and state
 

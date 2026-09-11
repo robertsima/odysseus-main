@@ -5,6 +5,22 @@ from typing import Dict, Any
 
 from src.constants import MAX_OUTPUT_CHARS
 
+
+def _fetch_error_hint(err: str) -> str:
+    """What to do next for the fetch failures that keep recurring in the logs."""
+    e = (err or "").lower()
+    if "http 403" in e or "http 401" in e:
+        return (" — the site refuses automated fetches. Open it with the browser tool if one is "
+                "enabled, or use web_search to find the same information on another page.")
+    if "http 404" in e or "http 410" in e:
+        return " — the page is gone; check the URL or web_search for its current location."
+    if "http 429" in e or "rate limit" in e:
+        return " — rate limited; wait before retrying this host."
+    if "toolarge" in e:
+        return " — the page exceeds the fetch budget; fetch a more specific URL."
+    return ""
+
+
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.search import comprehensive_web_search
@@ -136,8 +152,32 @@ class WebFetchTool:
 
         if not text:
             if err:
-                return {"error": f"web_fetch: {url}: {err}", "exit_code": 1}
-            return {"error": f"web_fetch: {url}: no readable text content (not HTML, or the page needs JS/login)", "exit_code": 1}
+                return {"error": f"web_fetch: {url}: {err}{_fetch_error_hint(str(err))}", "exit_code": 1}
+            # A JavaScript-rendered app (phosphoricons.com in the logs) ships
+            # an empty body but a real <title> and meta description. Hand
+            # those over, clearly marked partial, instead of a bare failure
+            # the agent can only retry.
+            meta = (result.get("meta_description") or "").strip()
+            if len(title) > 300:
+                title = title[:300] + "..."
+            if meta or title.strip():
+                output = (
+                    "[partial content: the page body is rendered by JavaScript, so only the "
+                    "page metadata was readable. Open the URL with the browser tool if one "
+                    "is enabled for the full page.]\n\n"
+                    + (f"# {title}\n" if title else "")
+                    + f"Source: {url}\n"
+                    + (f"\nDescription: {meta}\n" if meta else "")
+                )
+                return {"output": output, "exit_code": 0}
+            return {
+                "error": (
+                    f"web_fetch: {url}: no readable text content (not HTML, or the page needs "
+                    "JS/login). Open it with the browser tool if one is enabled, or use "
+                    "web_search to find the content elsewhere."
+                ),
+                "exit_code": 1,
+            }
 
         # Tell the model when the download budget cut the body short and how
         # to get the rest, instead of silently presenting a partial page as
