@@ -2053,7 +2053,12 @@ function initializeEventListeners() {
   // Init RAG state on load
   {
     const st = loadToggleState();
-    const ragState = st.rag || false;
+    // Default ON. `|| false` meant an empty toggle store (any fresh browser
+    // profile) disabled document retrieval on every turn, and chat.js only
+    // sends use_rag when the box is UNchecked — so the server's own default
+    // of True was never reached. An explicit `false` the user chose is still
+    // honoured; only "never set" changes meaning.
+    const ragState = st.rag === undefined || st.rag === null ? true : !!st.rag;
     _syncRagIndicator(ragState);
   }
 

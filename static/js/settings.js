@@ -5875,6 +5875,8 @@ async function initUnifiedIntegrations() {
       { key: 'calendar:write', label: 'Calendar write', detail: 'Create and update calendar events' },
       { key: 'memory:read', label: 'Memory', detail: 'Read memory when enabled' },
       { key: 'memory:write', label: 'Memory write', detail: 'Write memory when enabled' },
+      { key: 'vault:read', label: 'Vault', detail: 'Search and read the Markdown vault (Vault Mind, AI Mind) \u2014 the same notes chat retrieves from' },
+      { key: 'vault:read_private', label: 'Vault private', defaultOff: true, detail: 'Also reach directories marked private, such as Journal. An agent session sends what it retrieves to a hosted provider' },
       { key: 'cookbook:read', label: 'Cookbook', detail: 'List cookbook tasks + tail their tmux output (debug a model serve from outside the UI)' },
       { key: 'cookbook:launch', label: 'Cookbook launch', detail: 'Launch and stop cookbook serve tasks. Powerful: runs SSH commands on your configured servers, bounded by the same allowlist the UI uses (vllm/python3/sglang/llama-server/...)' },
     ];
@@ -5890,9 +5892,15 @@ async function initUnifiedIntegrations() {
       calendar: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>',
       memory: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2a2.5 2.5 0 0 0-2.5 2.5 2.5 2.5 0 0 0-2.5 2.5A2.5 2.5 0 0 0 2 9.5v3A2.5 2.5 0 0 0 4.5 15a2.5 2.5 0 0 0 2.5 2.5A2.5 2.5 0 0 0 9.5 20H10V2z"/><path d="M14.5 2a2.5 2.5 0 0 1 2.5 2.5 2.5 2.5 0 0 1 2.5 2.5A2.5 2.5 0 0 1 22 9.5v3A2.5 2.5 0 0 1 19.5 15a2.5 2.5 0 0 1-2.5 2.5A2.5 2.5 0 0 1 14.5 20H14V2z"/></svg>',
       cookbook: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>',
+      vault: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6a2 2 0 0 1 2-2h5a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H2z"/><path d="M22 6a2 2 0 0 0-2-2h-5a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H22z"/></svg>',
     };
     const _scopeNiceLabel = (label) => label.replace(/\s+(write|drafts?|send)$/i, '');
-    const _scopeAction = (key) => (key.split(':')[1] || '').toLowerCase();
+    // 'vault:read_private' would render a pill too long for the row; it is
+    // the private half of the vault scope, so label it that way.
+    const _scopeAction = (key) => {
+      const action = (key.split(':')[1] || '').toLowerCase();
+      return action === 'read_private' ? 'private' : action;
+    };
     const _pillStyle = (action) => {
       if (action === 'read') return 'background:rgba(150,150,150,0.18);color:var(--fg-muted,#888);';
       return 'background:color-mix(in srgb, var(--accent, var(--red)) 18%, transparent);color:var(--accent, var(--red));';
@@ -6159,7 +6167,12 @@ async function initUnifiedIntegrations() {
         // Populate inline scope toggles for the just-created token with
         // ALL scopes pre-checked as a UI preview — the underlying token
         // still only has 'chat' until the user clicks Save below.
-        const uiToken = { id: d.id, scopes: ['chat'].concat(toolScopes.map(s => s.key)) };
+        // defaultOff scopes (private vault) stay unchecked: granting them is a
+        // deliberate act, not something a user accepts by clicking Save.
+        const uiToken = {
+          id: d.id,
+          scopes: ['chat'].concat(toolScopes.filter(s => !s.defaultOff).map(s => s.key)),
+        };
         const inlineEl = el('uf-codex-inline-scopes');
         if (inlineEl) {
           inlineEl.innerHTML = `

@@ -88,6 +88,38 @@ judgment.
 - In chat, a tool timeline folds after 12 calls (`chat_tool_fold_after`) and
   shows a summary bar (counts, failures, tools used, expand/collapse all).
 
+## Vault retrieval (2026-09-10, late)
+
+Vault context was reaching almost no turn. Four independent causes, all fixed:
+
+- **The document index could not refill.** Indexing is one-shot and recorded
+  in `indexed_directories.json`; nothing reconciled that against ChromaDB, so
+  a wiped volume or a reset collection left a permanently empty index while
+  the app believed the vault was indexed. The periodic scanner is (mtime,
+  size) incremental against its own state file, so it re-indexed nothing
+  either. Startup now re-indexes when the store is empty but directories are
+  tracked, and clears the scanner state so the next pass re-walks. The log
+  signature of the old failure is a per-turn `GET /collections/<rag>/count`
+  with no `POST .../query` after it: an empty lane short-circuits.
+- **`rag_manager` could be `None` for the life of the process.** It is
+  resolved once at import with a two-second ChromaDB probe; if ChromaDB was
+  still starting, the `None` was frozen and every turn silently had no
+  document context. It is now re-resolved lazily, with a warning.
+- **`search_documents` was keyword-gated.** It was reachable only through a
+  literal phrase ("my notes", "my vault", "obsidian", ...), and the prompt
+  section that says to search the vault first is emitted only when the tool
+  is selected — so on an ordinary turn the model was never even told the
+  vault existed. It is now in `ALWAYS_AVAILABLE`, like memory.
+- **The chat UI defaulted retrieval off.** `loadToggleState().rag || false`
+  meant any fresh browser profile disabled it, and the client sends `use_rag`
+  only when the box is unchecked, so the server default of `True` was never
+  reached. It now defaults on; an explicit off still sticks.
+
+Worth knowing: documents in a directory labelled `private` (for example
+`Journal:private` in `ODYSSEUS_PERSONAL_DIRS`) are retrieved only when the
+turn is served by a local endpoint. On a hosted API they are filtered out
+before retrieval, by design. `GET /api/rag/stats` reports `document_count`.
+
 ## Known efficiency findings (2026-09-10, evening logs)
 
 Verified against the code; fixes are in `specs/prompt-prefix-stability.md`,

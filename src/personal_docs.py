@@ -418,6 +418,65 @@ class PersonalDocsManager:
                 self.set_directory_sensitivity(directory, label)
             logger.info(f"Directory already indexed: {directory}")
 
+    def reindex_if_empty(self) -> dict:
+        """Re-index tracked directories when the vector store has lost them.
+
+        Indexing is one-shot: ``add_directory`` indexes a directory the first
+        time it is tracked and every later call takes the "Directory already
+        indexed" branch, because the record of that lives in
+        ``indexed_directories.json``. Nothing reconciles that JSON against
+        ChromaDB, so a wiped volume, a reset collection, or an embedding
+        fingerprint change (which deletes and recreates the collection) leaves
+        a permanently empty index while the app believes the vault is
+        indexed. The periodic scanner cannot repair it either: it is (mtime,
+        size) incremental against its own state file, so with nothing changed
+        on disk it re-indexes nothing, forever.
+
+        Symptom in the logs: a per-turn ``GET /collections/<rag>/count`` with
+        no ``POST .../query`` after it — an empty lane short-circuits before
+        querying — and no document context in any answer.
+
+        Mirrors the memory vector store's "rebuild if empty" startup guard.
+        """
+        result = {"document_count": 0, "reindexed": [], "chunks": 0}
+        if self.rag_manager is None or not getattr(self.rag_manager, "healthy", False):
+            result["skipped"] = "vector store unavailable"
+            return result
+        try:
+            result["document_count"] = int(self.rag_manager.get_stats().get("document_count", 0) or 0)
+        except Exception as exc:
+            result["skipped"] = f"stats unavailable: {exc}"
+            return result
+        directories = [d for d in (self.indexed_directories or []) if os.path.isdir(d)]
+        if result["document_count"] > 0 or not directories:
+            return result
+        logger.warning(
+            "Document index is empty but %d director%s tracked as indexed — re-indexing",
+            len(directories), "y is" if len(directories) == 1 else "ies are",
+        )
+        for directory in directories:
+            try:
+                indexed = self.rag_manager.index_personal_documents(
+                    directory, sensitivity=self.directory_sensitivity.get(directory)
+                )
+                chunks = int((indexed or {}).get("indexed_count", 0) or 0)
+                result["reindexed"].append(directory)
+                result["chunks"] += chunks
+                logger.info("Re-indexed %d chunks from %s", chunks, directory)
+            except Exception as exc:
+                logger.error("Re-index failed for %s: %s", directory, exc)
+        # The incremental scanner keys off (mtime, size) in its own state file;
+        # leaving it in place would make it skip every file we just had to
+        # rebuild by hand.
+        try:
+            state = os.path.join(self.personal_dir, ".vault_scan_state.json")
+            if os.path.exists(state):
+                os.remove(state)
+                logger.info("Cleared vault scan state so the next pass re-walks every file")
+        except OSError as exc:
+            logger.warning("Could not clear vault scan state: %s", exc)
+        return result
+
     def remove_directory(self, directory: str):
         """Remove a directory from the tracking list."""
         # Normalize the path

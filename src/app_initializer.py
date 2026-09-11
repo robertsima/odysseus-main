@@ -66,6 +66,13 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
         reconcile_personal_dirs(personal_docs_manager)
     except Exception as e:  # never let declarative config block startup
         logger.error(f"Personal directory reconciliation failed: {e}")
+    # Indexing is one-shot and tracked in JSON, so an empty/reset vector store
+    # would otherwise stay empty forever while the app believed the vault was
+    # indexed — and every chat turn would silently retrieve nothing.
+    try:
+        personal_docs_manager.reindex_if_empty()
+    except Exception as e:
+        logger.error(f"Document re-index check failed: {e}")
     api_key_manager = APIKeyManager(DATA_DIR)
     preset_manager = PresetManager(DATA_DIR)
 

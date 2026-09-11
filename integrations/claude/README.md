@@ -134,6 +134,23 @@ passed only in the child environment; it is never placed in argv or task
 persistence. Install the skill under the launcher's `CLAUDE_CONFIG_DIR` (the
 setup command above handles both standard and custom config directories).
 
+That token is minted by Odysseus, not by Claude: Settings > Integrations >
+**+ Add Integration** > **Claude Agent** creates one, shows it once, and lets
+you toggle its scopes (turn **Vault** on for the shared context store). It
+starts with `ody_`. Nothing about a Claude sign-in is involved — this
+credential only lets a Claude Code session read back into Odysseus. Write it
+into the token file as the user Odysseus runs as:
+
+```bash
+umask 077
+printf '%s' 'ody_...' > /app/data/secrets/claude-code-odysseus.token.txt
+chown "$PUID:$PGID" /app/data/secrets/claude-code-odysseus.token.txt
+```
+
+A `401` from `/api/codex/capabilities` means the file's contents are not a
+live token (a placeholder, or a revoked one); a `403` means the token is real
+but is missing the scope for that endpoint.
+
 The same delegation is also reachable over HTTP, for callers outside a chat
 session (automation, CI, another admin tool):
 
@@ -160,10 +177,49 @@ A cookie-session caller must be an admin. An API-token caller needs the
 `claude_code:write` scope (`claude_code:read` is enough for the `GET`); the
 `claude_code_tasks` token profile grants exactly that.
 
+## Sharing Odysseus's context store with Claude Code
+
+The `/api/codex/*` API is how a Claude Code session reads the same data the
+Odysseus agent uses. Claude Code is the client, Odysseus is the data server,
+and no Anthropic credential is ever handled by Odysseus.
+
+Reachable with the `claude_agent` token profile: todos, memory, calendar,
+email (read/draft), the editor document library, the Cookbook serve surface,
+and — since the vault endpoints below — the user's Markdown notes.
+
+| endpoint | scope | what it returns |
+|---|---|---|
+| `GET /api/codex/vault/search?q=...&k=5` | `vault:read` | semantic hits across `ODYSSEUS_PERSONAL_DIRS` (Vault Mind, AI Mind, Journal, ...) as `{path, title, sensitivity, similarity, excerpt}` |
+| `GET /api/codex/vault/document?path=...&offset=0` | `vault:read` | one indexed vault file, paged with `total_chars` / `has_more` |
+
+Private-labelled directories (typically `Journal:private`) are withheld unless
+the token also carries `vault:read_private`. That split exists because an
+agent session ships retrieved text to a hosted provider — the same reason the
+chat path gates private notes on `is_local_endpoint`. Only indexed files are
+readable, so the document endpoint cannot be walked into a general filesystem
+reader.
+
+A token minted before these scopes existed will not have them. Regenerate the
+Claude Agent token, or enable the vault toggle on the existing one, in
+Settings > Integrations > Claude Agent.
+
+Two places the session can run:
+
+- **Inside the container**, as part of a delegation. Set
+  `claude_code_odysseus_url` (`http://127.0.0.1:7000`) and
+  `claude_code_odysseus_token_file`; the runner passes both to the child in
+  its environment and allowlists the helper script, so a delegated job can
+  search the vault mid-task.
+- **On your own machine**, in a terminal. Export `ODYSSEUS_URL` (the LAN or
+  tailnet address of the Odysseus host) and `ODYSSEUS_API_TOKEN`, then install
+  the plugin bundle with the command Settings shows. Claude Code loads the
+  `odysseus` skill from its config directory and calls back over the network.
+
 ## Scope enforcement
 
 The token is scope-gated. Every tool surface is checked server-side in Odysseus,
 so even if Claude tries to call a forbidden endpoint, it gets `403` until the
 user enables the matching toggle in Settings > Integrations > Claude Agent.
 The `claude_agent` token profile bundles the scopes a Claude Code session
-typically needs against `/api/codex/*` (todos, documents, memory).
+typically needs against `/api/codex/*` (todos, documents, memory, and the
+public vault).

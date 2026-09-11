@@ -22,6 +22,8 @@ def _usage() -> int:
     print("  odysseus_api.py documents read DOC_ID", file=sys.stderr)
     print("  odysseus_api.py documents create JSON_PAYLOAD", file=sys.stderr)
     print("  odysseus_api.py documents delete DOC_ID", file=sys.stderr)
+    print("  odysseus_api.py vault search QUERY [k]", file=sys.stderr)
+    print("  odysseus_api.py vault read PATH [offset]", file=sys.stderr)
     print("  odysseus_api.py cookbook tasks", file=sys.stderr)
     print("  odysseus_api.py cookbook servers", file=sys.stderr)
     print("  odysseus_api.py cookbook cached [HOST]", file=sys.stderr)
@@ -110,6 +112,29 @@ def main() -> int:
         elif action == "delete" and len(sys.argv) >= 4:
             method = "DELETE"
             path = f"/api/codex/documents/{sys.argv[3]}"
+            body = None
+        else:
+            return _usage()
+    elif command == "vault":
+        # Semantic search over the user's Markdown vault (Vault Mind / AI Mind
+        # / Journal) — the same context store the Odysseus agent retrieves
+        # from. Private directories need the vault:read_private scope.
+        if len(sys.argv) < 3:
+            return _usage()
+        action = sys.argv[2].lower()
+        if action in ("search", "query") and len(sys.argv) >= 4:
+            from urllib.parse import quote
+
+            method = "GET"
+            k = sys.argv[4] if len(sys.argv) >= 5 else "5"
+            path = f"/api/codex/vault/search?q={quote(sys.argv[3])}&k={quote(str(k))}"
+            body = None
+        elif action in ("read", "document", "get") and len(sys.argv) >= 4:
+            from urllib.parse import quote
+
+            method = "GET"
+            offset = sys.argv[4] if len(sys.argv) >= 5 else "0"
+            path = f"/api/codex/vault/document?path={quote(sys.argv[3])}&offset={quote(str(offset))}"
             body = None
         else:
             return _usage()

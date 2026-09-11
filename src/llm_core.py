@@ -513,10 +513,18 @@ def _set_cached_response(cache_key: str, response: str) -> None:
 
 # ── Anthropic native API adapter ──
 
+# Fallback model list for an Anthropic endpoint whose /v1/models listing is
+# unavailable. Current generation first — the picker shows this order, and a
+# list two generations stale is why Opus 5 / Sonnet 5 could not be selected.
+# Use the exact alias IDs; never append a date suffix to them.
 ANTHROPIC_MODELS = [
-    "claude-opus-4-20250514", "claude-opus-4",
-    "claude-sonnet-4-20250514", "claude-sonnet-4", "claude-sonnet-4-5-20250929", "claude-sonnet-4-5",
-    "claude-haiku-4-20250514", "claude-haiku-4", "claude-haiku-3-5-20241022", "claude-haiku-3-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+    "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    # Previous generation, for anyone pinned to it.
+    "claude-opus-4", "claude-sonnet-4-5", "claude-sonnet-4", "claude-haiku-3-5",
 ]
 
 

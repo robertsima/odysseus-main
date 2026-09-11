@@ -289,7 +289,7 @@ class BashTool:
         # tool that can actually publish instead of letting it loop.
         from src.agent_worktree.push_guard import check as _publish_guard
 
-        blocked = _publish_guard(content)
+        blocked = _publish_guard(content, cwd=agent_cwd())
         if blocked is not None:
             logger.info("bash: blocked a remote-publishing command; redirected to manage_agent_worktree")
             return blocked

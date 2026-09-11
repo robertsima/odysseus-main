@@ -104,7 +104,33 @@ python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py POST /api/codex/memory
 - `POST /api/codex/calendar/events` — body matches `EventCreate` (`summary`, `dtstart`, `dtend`, `all_day`, `description`, `location`, `calendar_href`, `rrule`, `color`). Requires `calendar:write`.
 - `DELETE /api/codex/calendar/events/{uid}` — delete event by uid (the value returned in the POST response). Requires `calendar:write`.
 
+## Vault (the user's Markdown notes)
+
+This is the context store Odysseus itself retrieves from — `Vault Mind`,
+`AI Mind`, `Journal` and any other directory in `ODYSSEUS_PERSONAL_DIRS`. Use
+it before answering anything about the user's own notes, decisions, projects
+or history; it is almost always better than guessing or asking them to paste.
+
+- `GET /api/codex/vault/search?q=...&k=5` — semantic search. Returns
+  `{path, title, sensitivity, similarity, excerpt, truncated}` per hit.
+  Requires `vault:read`.
+- `GET /api/codex/vault/document?path=...&offset=0` — read one file a search
+  returned. Only indexed vault files are readable; the response carries
+  `total_chars` and `has_more` for paging.
+
+```bash
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py vault search "zima box setup" 5
+python3 ~/.claude/skills/odysseus/scripts/odysseus_api.py vault read "/app/data/personal/AI Mind/Local Model Delegation.md"
+```
+
+Start with `search`, then `read` only the file whose excerpt was genuinely
+insufficient. Notes in a directory labelled `private` (typically `Journal`)
+are withheld unless the token carries `vault:read_private` — do not ask the
+user to widen the scope unless they raised the topic themselves.
+
 ## Documents
+
+The editor document library — separate from the vault above.
 
 - `GET /api/codex/documents?search=...&limit=50` — paginated library.
 - `GET /api/codex/documents/{doc_id}` — fetch one document.

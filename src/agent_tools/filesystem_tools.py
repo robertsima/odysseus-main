@@ -691,20 +691,48 @@ class GrepTool:
             out += f"\n... [capped at {max_hits} matches]"
         return {"output": _truncate(out), "exit_code": 0}
 
+def _known_checkouts() -> str:
+    """One line per Git checkout the agent may work in, with its branch.
+
+    Without this the answer to "where is the code?" cost two or three rounds
+    of groping on every coding turn — the 2026-09-10 logs show `ls /app`,
+    `find /app -maxdepth 4 -type d -name .git`, `git -C /app status` (exit
+    128, the app root is not a checkout), then `ls /app/data/development` —
+    before any actual work. The same discovery already exists for the Claude
+    Code delegation tool; reuse it so both answer identically.
+    """
+    rows = []
+    try:
+        from src.agent_tools.claude_code_tools import discover_repositories
+
+        for repo in discover_repositories():
+            branch = repo.get("branch") or ""
+            rows.append(f"  {repo['path']}" + (f"  ({branch})" if branch else ""))
+    except Exception:
+        return ""
+    if not rows:
+        return ""
+    return "\nGit checkouts available:\n" + "\n".join(rows)
+
+
 class GetWorkspaceTool:
     """Report the active workspace folder (no args). File tools are confined to
     it; the shell starts there (cwd) but is NOT sandboxed."""
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import get_active_workspace
         ws = get_active_workspace()
+        checkouts = _known_checkouts()
         if ws:
             return {
                 "output": f"{ws}\n(File tools are confined to this folder; the shell starts "
-                          f"here but is not sandboxed and can reach outside it.)",
+                          f"here but is not sandboxed and can reach outside it.)" + checkouts,
                 "exit_code": 0,
             }
         return {
             "output": "No workspace is set. File tools use the default allowed roots; "
-                      "resolve paths from the user or use absolute paths.",
+                      "resolve paths from the user or use absolute paths."
+                      + (checkouts or "")
+                      + ("\nThe application root (/app) is NOT a checkout; do not run git there."
+                         if checkouts else ""),
             "exit_code": 0,
         }

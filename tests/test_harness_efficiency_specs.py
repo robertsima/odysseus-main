@@ -217,3 +217,104 @@ def test_promotional_and_list_mail_is_not_calendar_material():
     assert _not_calendar_material({}, "no-reply@shop.com", "Your order")
     assert not _not_calendar_material({}, "dentist@clinic.com", "Appointment confirmation for Tuesday 10am")
     assert not _not_calendar_material({}, "matt@example.com", "Coffee next week?")
+
+
+# ── Skill-declared toolsets must be real tool names ──
+
+def test_skill_requires_toolsets_keeps_only_real_tool_names():
+    """A skill's `requires_toolsets` is operator-authored free text. Prose
+    entries ("email", "file search and edit", "todoist") used to land in the
+    selected set, where they can never resolve to a schema — nine of them
+    appeared in `selected_without_schema` on every round of the 2026-09-10
+    logs — and the system prompt, built from the same set, told the model it
+    had tools that do not exist."""
+    from src.agent_loop import _skill_declared_tools
+
+    skills = [
+        {"name": "jarvis", "requires_toolsets": [
+            "email", "calendar", "todoist", "file search and edit",
+            "application-log access", "memory management", "skill management",
+            "read_file", "manage_calendar",
+        ]},
+        {"name": "other", "requires_toolsets": ["bash", "write_file"]},
+    ]
+    tools, unknown = _skill_declared_tools(skills, disabled_tools=set())
+    assert tools == {"read_file", "manage_calendar", "bash", "write_file"}
+    assert "email" in unknown and "file search and edit" in unknown
+    assert "read_file" not in unknown
+
+
+def test_skill_requires_toolsets_still_respects_disabled_tools():
+    from src.agent_loop import _skill_declared_tools
+
+    tools, unknown = _skill_declared_tools(
+        [{"requires_toolsets": ["read_file", "bash"]}], disabled_tools={"bash"}
+    )
+    assert tools == {"read_file"}
+    assert unknown == set()
+
+
+def test_skill_requires_toolsets_handles_empty_input():
+    from src.agent_loop import _skill_declared_tools
+
+    assert _skill_declared_tools([], set()) == (set(), set())
+    assert _skill_declared_tools([{"name": "x"}], set()) == (set(), set())
+
+
+def test_worktree_status_names_the_checkout_it_manages():
+    """The agent could not tell that a worktree it just started belongs to
+    Odysseus and not to the third-party project it was working in."""
+    import inspect
+    from src.agent_worktree import service
+
+    src = inspect.getsource(service.status)
+    assert '"source_repo": cfg.source_repo' in src
+
+
+# ── get_workspace answers "where is the code?" in one round ──
+
+@pytest.fixture
+def checkout_roots(tmp_path, monkeypatch):
+    """One checkout and one linked worktree under the approved roots."""
+    from src.agent_tools import claude_code_tools as cct
+
+    dev, wt = tmp_path / "development", tmp_path / "agent_worktrees"
+    main = dev / "odysseus-main"
+    (main / ".git").mkdir(parents=True)
+    (main / ".git" / "HEAD").write_text("ref: refs/heads/dev\n", encoding="utf-8")
+    gitdir = main / ".git" / "worktrees" / "feature"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/agent/odysseus/feature\n", encoding="utf-8")
+    linked = wt / "feature"
+    linked.mkdir(parents=True)
+    (linked / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    monkeypatch.setattr(cct, "DEFAULT_ROOTS", (str(dev), str(wt)))
+    return {"main": main, "linked": linked}
+
+
+def test_get_workspace_lists_the_known_checkouts(checkout_roots, monkeypatch):
+    """Two or three rounds per coding turn went to `ls /app`, `find -name
+    .git` and `git -C /app status` (exit 128) before any work started."""
+    import asyncio
+
+    from src.agent_tools.filesystem_tools import GetWorkspaceTool
+
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: None)
+    out = asyncio.run(GetWorkspaceTool().execute("", {}))
+    assert out["exit_code"] == 0
+    assert str(checkout_roots["main"]) in out["output"]
+    assert "(dev)" in out["output"]
+    assert str(checkout_roots["linked"]) in out["output"]
+    assert "/app) is NOT a checkout" in out["output"]
+
+
+def test_get_workspace_still_leads_with_the_active_workspace(checkout_roots, monkeypatch):
+    import asyncio
+
+    from src.agent_tools.filesystem_tools import GetWorkspaceTool
+
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: "/work/here")
+    out = asyncio.run(GetWorkspaceTool().execute("", {}))
+    assert out["output"].startswith("/work/here")
+    assert "confined to this folder" in out["output"]
+    assert str(checkout_roots["main"]) in out["output"]
