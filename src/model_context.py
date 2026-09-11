@@ -423,7 +423,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     # metadata (or the default) over downloading the full catalog.
     if configured_kind in ("api", "proxy"):
         if known:
-            logger.info(f"Using known context window for {model}: {known}")
+            logger.debug(f"Using known context window for {model}: {known}")
             return known, True
         # Not in the known table: read the real window from the catalog (cached
         # once per endpoint) instead of capping every unknown model at the
@@ -457,7 +457,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     from src.copilot import is_copilot_base
     if is_copilot_base(endpoint_url):
         if known:
-            logger.info(f"Using known context window for {model}: {known}")
+            logger.debug(f"Using known context window for {model}: {known}")
             return known, True
         return DEFAULT_CONTEXT, False
 
@@ -492,7 +492,7 @@ def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     if api_ctx:
         return api_ctx, True
     if known:
-        logger.info(f"Using known context window for {model}: {known}")
+        logger.debug(f"Using known context window for {model}: {known}")
         return known, True
 
     return DEFAULT_CONTEXT, False
