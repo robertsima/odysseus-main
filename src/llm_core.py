@@ -1323,6 +1323,31 @@ def _responses_prompt_cache_key_enabled() -> bool:
         return True
 
 
+def _chatgpt_affinity_headers(h: Dict[str, str], session_id: Optional[str]) -> Dict[str, str]:
+    """Pin one conversation's rounds to one cache shard, the way Codex CLI does.
+
+    `prompt_cache_key` in the body is the documented Responses-API knob, but
+    the ChatGPT backend also routes on the `session_id` / `conversation_id`
+    request headers Codex CLI sends with every request. With only the body
+    field, the 2026-09-11 logs show a 21-round turn bouncing between shards:
+    cached_tokens 4608 -> 14848 -> 0 -> 14848 -> 4608 -> 18944 -> ... — three
+    rounds hit nothing at all and three hit only the instructions+tools
+    prefix, each one re-billing and re-prefilling ~20k tokens of history.
+
+    The header value is a UUID derived from the session id (Codex sends its
+    UUID conversation id there), so the shape is always what the backend
+    expects. Same kill switch as the body field.
+    """
+    if not session_id or not _responses_prompt_cache_key_enabled():
+        return h
+    import uuid
+
+    sid = str(uuid.uuid5(uuid.NAMESPACE_URL, f"odysseus:session:{session_id}"))
+    h.setdefault("session_id", sid)
+    h.setdefault("conversation_id", sid)
+    return h
+
+
 def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
     if status_code in (401, 403):
         return "ChatGPT Subscription credentials expired or were rejected. Reconnect the provider."
@@ -2436,7 +2461,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         )
     elif provider == "chatgpt-subscription":
         target_url = _normalize_chatgpt_subscription_url(url)
-        h = _provider_headers(provider, headers)
+        h = _chatgpt_affinity_headers(_provider_headers(provider, headers), session_id)
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, tool_choice_none=tool_choice_none,

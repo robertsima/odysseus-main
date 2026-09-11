@@ -4020,6 +4020,12 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    # Image generation is a setting, not a tool toggle. With it off the prompt
+    # builder already hides `generate_image`, but the selection still carried
+    # it — `selected_without_schema=['generate_image']` on every round of the
+    # 2026-09-11 logs. Disable it here so selection, prompt and schema agree.
+    if not get_setting("image_gen_enabled", False):
+        disabled_tools.add("generate_image")
     if tool_policy:
         disabled_tools.update(tool_policy.all_disabled_names())
         if tool_policy.disable_mcp:
@@ -4712,6 +4718,11 @@ async def stream_agent_loop(
             protected={"email"} if active_email else frozenset(),
         )
 
+    if _relevant_tools is not None and disabled_tools:
+        # A disabled tool can be neither prompted nor scheduled; keep the
+        # selection honest so the per-round schema diff below reads clean.
+        _relevant_tools = set(_relevant_tools) - disabled_tools
+
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
         logger.info(
@@ -5122,6 +5133,11 @@ async def stream_agent_loop(
     # so the user can resume instead of the turn silently stalling.
     _exhausted_rounds = False
 
+    # The tool-set diff line is worth INFO the first time and whenever the set
+    # changes (re-arm, force-answer); the same 43 names on every one of 21
+    # rounds is noise that buries the round that actually failed.
+    _last_tool_debug_sig = None
+
     for round_num in range(1, max_rounds + 1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -5186,7 +5202,10 @@ async def stream_agent_loop(
         _selected_set = set(_relevant_tools or ())
         _selected_not_sent = sorted(_selected_set - _sent_set) if _relevant_tools else []
         _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
-        logger.info(
+        _tool_debug_sig = (tuple(sorted(_sent_set)), tuple(sorted(_selected_set)))
+        _tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug
+        _last_tool_debug_sig = _tool_debug_sig
+        _tool_debug_log(
             "[agent-debug] round=%s model=%s _is_api_model=%s tools_sent=%s "
             "selected=%s selected_without_schema=%s schema_without_selection=%s",
             round_num, model, _is_api_model, len(_sent_set),

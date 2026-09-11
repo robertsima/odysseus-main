@@ -713,6 +713,70 @@ def _split_bg_marker(content: str):
     return False, content
 
 
+def _redact_for_log(text: str) -> str:
+    """Strip credential material before a preview reaches the log file.
+
+    The bash preview is the tool's own input, and the agent does put secrets in
+    there: the 2026-09-11 logs show `auth="Authorization: Bearer ` cut off by
+    the 80-char limit one character before the token. The log viewer redacts on
+    read, but the file on disk (and `docker logs`) kept the raw line.
+    """
+    try:
+        from src.agent_logs import redact_line
+        return redact_line(text)
+    except Exception:
+        return text
+
+
+# Lines that say nothing about what a script does: blank, comments, shebangs,
+# and shell option boilerplate (`set -e`, `set -euo pipefail`, `set -o pipefail`).
+_PREVIEW_SKIP_RE = re.compile(r"^(?:#.*|set(?:\s+(?:[-+][A-Za-z]+|[A-Za-z]+))+)$")
+
+
+def _command_preview(content: str, limit: int = 80) -> str:
+    """One-line, secret-free summary of a tool's input for the log and the UI.
+
+    The preview used to be the raw first line, so a multi-line script logged as
+    `bash: set -e -> exit_code=1` — nothing to diagnose with (three rounds of the
+    2026-09-11 logs read exactly that). Skip the boilerplate, show the first
+    real command, and say how many more lines follow.
+    """
+    lines = [line.strip() for line in str(content or "").split("\n")]
+    real = [line for line in lines if line and not _PREVIEW_SKIP_RE.match(line)]
+    if not real:
+        real = [line for line in lines if line]
+    if not real:
+        return ""
+    head = real[0][:limit]
+    if len(real) > 1:
+        head += f" (+{len(real) - 1} lines)"
+    return _redact_for_log(head)
+
+
+def _failure_detail(result: Any, limit: int = 200) -> str:
+    """Why a tool call failed, for the `Tool executed` log line; empty on success.
+
+    `delegate_to_claude_code -> exit_code=1` was the whole record of a failed
+    delegation — the reason lived only in the model's context. Surface the
+    error (or the tail of the output for a non-zero exit) so the log answers
+    it without a replay.
+    """
+    if not isinstance(result, dict):
+        return ""
+    code = result.get("exit_code")
+    text = result.get("error")
+    if text:
+        text = str(text)
+    elif code not in (None, 0, "0", "n/a"):
+        text = str(result.get("stderr") or result.get("output") or "")[-limit:]
+    else:
+        return ""
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return _redact_for_log(text) if text else ""
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -919,7 +983,7 @@ async def _execute_tool_block_impl(
         if _is_bg and _bg_cmd:
             from src import bg_jobs
             rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
-            short = _bg_cmd.strip().split(chr(10))[0][:80]
+            short = _command_preview(_bg_cmd)
             desc = f"bash (background): {short}"
             result = {
                 "output": (
@@ -941,28 +1005,28 @@ async def _execute_tool_block_impl(
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
     if tool in _MCP_TOOL_MAP:
-        first_line = content.split(chr(10))[0][:80]
+        first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
         result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
     elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
-        first_line = content.split(chr(10))[0][:80]
+        first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
         result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("apply_patch", "todowrite"):
-        first_line = content.split(chr(10))[0][:80]
+        first_line = _command_preview(content)
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
-        desc = f"manage_bg_jobs: {content.split(chr(10))[0][:80]}"
+        desc = f"manage_bg_jobs: {_command_preview(content)}"
         result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
             or {"error": "manage_bg_jobs: execution failed", "exit_code": 1}
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
-        desc = f"{tool}: {content.split(chr(10))[0][:80]}"
+        desc = f"{tool}: {_command_preview(content)}"
         result = await _document_tool_dispatch(tool, content, session_id, owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
@@ -976,7 +1040,7 @@ async def _execute_tool_block_impl(
         # TOOL_HANDLERS with the owner/session ctx these tools need, instead
         # of the legacy dispatch_ai_tool elif. The impls live in
         # src/agent_tools/model_interaction_tools.py.
-        first_line = content.split(chr(10))[0].strip()[:60]
+        first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _document_tool_dispatch(tool, content, session_id, owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
@@ -984,7 +1048,7 @@ async def _execute_tool_block_impl(
         # Migrated to the agent_tools registry (#3629): dispatched through
         # TOOL_HANDLERS with the owner/session ctx these tools need. The impls
         # live in src/agent_tools/session_tools.py.
-        first_line = content.split(chr(10))[0].strip()[:60]
+        first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _document_tool_dispatch(tool, content, session_id, owner) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
@@ -998,7 +1062,7 @@ async def _execute_tool_block_impl(
         desc = "manage_skills"
         result = await do_manage_skills(content, owner=owner)
     elif tool == "api_call":
-        first_line = content.split("\n")[0].strip()[:60]
+        first_line = _command_preview(content, 60)
         desc = f"api_call: {first_line}"
         result = await do_api_call(content)
     elif tool in ("manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "manage_settings"):
@@ -1173,7 +1237,7 @@ async def _execute_tool_block_impl(
 
 
     elif tool in dynamic_handlers:
-        first_line = content.split(chr(10))[0][:80]
+        first_line = _command_preview(content)
         desc = f"registry: {tool} {first_line}".strip()
         res = await _direct_fallback(tool, content, progress_cb=progress_cb)
 
@@ -1189,7 +1253,13 @@ async def _execute_tool_block_impl(
             "exit_code": 1
         }
 
-    logger.info(f"Tool executed: {desc} -> exit_code={result.get('exit_code', 'n/a')}")
+    _detail = _failure_detail(result)
+    logger.info(
+        "Tool executed: %s -> exit_code=%s%s",
+        desc,
+        result.get("exit_code", "n/a") if isinstance(result, dict) else "n/a",
+        f" error={_detail}" if _detail else "",
+    )
     return desc, result
 
 
