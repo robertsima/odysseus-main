@@ -469,7 +469,7 @@ def setup_codex_routes(
         return bool(scopes.intersection(VAULT_PRIVATE_SCOPES))
 
     def _vault_manager():
-        from src.rag_manager import get_rag_manager
+        from src.rag_singleton import get_rag_manager
 
         rag = get_rag_manager()
         if rag is None or not getattr(rag, "healthy", False):
