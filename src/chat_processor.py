@@ -508,7 +508,7 @@ class ChatProcessor:
                     # frozen for the life of the process and every turn since
                     # silently had no document context. Re-resolve lazily.
                     try:
-                        from src.rag_manager import get_rag_manager
+                        from src.rag_singleton import get_rag_manager
 
                         rag_manager = get_rag_manager()
                         if rag_manager is not None:
