@@ -39,6 +39,33 @@ from src.tool_utils import _truncate, get_mcp_manager
 _AGENT_WORKDIR = DATA_DIR
 
 
+def _git_safe_directory_env(env: Dict[str, str]) -> Dict[str, str]:
+    """Let the agent's git open checkouts under DATA_DIR owned by another uid.
+
+    The container runs as root and the data volume belongs to the host user
+    (uid 1000 on ZimaOS). Git 2.35.2+ refuses such a repository as "dubious
+    ownership", and commands that can also run outside a repository
+    (`ls-remote`) silently carry on as if there were none, so `origin` "does
+    not appear to be a git repository". Every git command in every checkout
+    under /app/data died that way on 2026-09-11 after a rebuild emptied the
+    /root/.gitconfig that used to carry the exception.
+
+    Passed through GIT_CONFIG_* so nothing is written to disk and an operator's
+    own GIT_CONFIG_* entries are kept, not clobbered.
+    """
+    try:
+        count = int((env.get("GIT_CONFIG_COUNT") or "0").strip() or 0)
+    except ValueError:
+        count = 0
+    out: Dict[str, str] = {}
+    root = _AGENT_WORKDIR.rstrip("/\\") or _AGENT_WORKDIR
+    for i, value in enumerate((root, f"{root}/*"), start=count):
+        out[f"GIT_CONFIG_KEY_{i}"] = "safe.directory"
+        out[f"GIT_CONFIG_VALUE_{i}"] = value
+    out["GIT_CONFIG_COUNT"] = str(count + 2)
+    return out
+
+
 
 # ---------------------------------------------------------------------------
 # Path confinement for read_file / write_file
@@ -700,6 +727,7 @@ async def _direct_fallback(
         "LINES": "40",
         "HOME": _AGENT_WORKDIR,
     }
+    _subproc_env.update(_git_safe_directory_env(_subproc_env))
 
     try:
         ctx = {
