@@ -3099,7 +3099,9 @@ function initializeEventListeners() {
     // custom-preset-modal (the Prompt window) is handled by the new
     // modalManager dock (registered in _AUTO_WIRE), so the legacy dock must
     // not also inject a `_`/chip for it.
-    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal']);
+    // workbench-modal minimizes through modalManager too; a legacy `_` injected
+    // before it registers only collapsed the window in place.
+    const SKIP_IDS = new Set(['styled-confirm-overlay', 'custom-preset-modal', 'workbench-modal']);
     const dockEntries = new Map(); // modal element -> dock entry element
 
     let dock = document.getElementById('modal-dock');

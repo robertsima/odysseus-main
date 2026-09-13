@@ -2702,8 +2702,10 @@ async function initWorkbenchSettings() {
       fill(await r.json());
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       if (window.workbenchModule && window.workbenchModule.refreshSettings) window.workbenchModule.refreshSettings();
-      var rail = el('rail-workbench');
-      if (rail) rail.style.display = (f.enabled && f.enabled.checked) ? '' : 'none';
+      ['rail-workbench', 'tool-workbench-btn'].forEach(function (id) {
+        var btn = el(id);
+        if (btn) btn.style.display = (f.enabled && f.enabled.checked) ? '' : 'none';
+      });
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
   [f.enabled, f.autoOpen, f.stream].forEach(function (x) { if (x) x.addEventListener('change', save); });

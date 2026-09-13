@@ -855,7 +855,9 @@ function updateChatCard(ev) {
 }
 
 // ── window plumbing ───────────────────────────────────────────────────────
-function hideRail() { const b = $('rail-workbench'); if (b) b.style.display = 'none'; }
+function hideRail() {
+  for (const id of ['rail-workbench', 'tool-workbench-btn']) { const b = $(id); if (b) b.style.display = 'none'; }
+}
 function setTab(tab) {
   state.prefs.tab = tab; savePrefs();
   document.querySelectorAll('#workbench-modal [data-wb-tab]').forEach((b) => {
@@ -869,8 +871,22 @@ function setTab(tab) {
   if (tab === 'commits') renderCommits();
   if (tab === 'prs') { if (!state.pr.config) loadPRConfig(); else renderPRs(); }
 }
+// The Workbench is a tool window like Lotus or Settings: `_` minimizes it to a
+// dock chip (freeing the chat, including a right-docked layout), and the
+// sidebar item / rail button / chip restore it.
+const MODAL_ID = 'workbench-modal';
+function registerWithManager() {
+  if (Modals.isRegistered(MODAL_ID)) return;
+  Modals.register(MODAL_ID, {
+    railBtnId: 'rail-workbench', sidebarBtnId: 'tool-workbench-btn',
+    restoreFn: () => open(), closeFn: hideWindow,
+  });
+}
+function hideWindow() { $(MODAL_ID)?.classList.add('hidden'); }
 export function open() {
-  const modal = $('workbench-modal'); if (!modal) return;
+  const modal = $(MODAL_ID); if (!modal) return;
+  if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }  // restoreFn re-enters open()
+  registerWithManager();
   if (modal.classList.contains('hidden')) {
     modal.classList.remove('hidden');
     try { window.dispatchEvent(new CustomEvent('odysseus:modal-opened', { detail: { id: 'workbench-modal' } })); } catch (_) {}
@@ -880,8 +896,10 @@ export function open() {
   setTab(state.prefs.tab || 'activity');
 }
 export function close() {
-  const modal = $('workbench-modal'); if (!modal) return;
-  modal.classList.add('hidden');
+  // The manager's close also releases a right-dock push and drops the chip;
+  // hiding the element alone left the chat squeezed.
+  if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
+  else hideWindow();
 }
 export function toggle() {
   if (Modals.toggle('workbench-modal')) return;
@@ -897,14 +915,13 @@ function wireWindow() {
     resizeStorageKey: 'odysseus-workbench-size',
     onEnterFullscreen: () => snapModalToZone(modal, { name: 'fullscreen', rect: { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight } }),
   });
-  Modals.register('workbench-modal', {
-    railBtnId: 'rail-workbench', label: 'Workbench',
-    icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>',
-    restoreFn: () => open(), closeFn: () => close(),
-  });
+  registerWithManager();
+  // Inject through this module's manager instance (the one holding the
+  // registration) so the `_` minimizes into the shared dock.
+  Modals.injectMinimizeButton(modal, MODAL_ID);
   $('close-workbench-modal')?.addEventListener('click', close);
   $('wb-dock-right')?.addEventListener('click', () => { try { applyRightDock(modal); } catch (_) {} });
-  $('rail-workbench')?.addEventListener('click', () => { if (!Modals.toggle('workbench-modal')) toggle(); });
+  for (const id of ['rail-workbench', 'tool-workbench-btn']) $(id)?.addEventListener('click', toggle);
   $('close-workbench-diff-modal')?.addEventListener('click', () => $('workbench-diff-modal')?.classList.add('hidden'));
   const dm = $('workbench-diff-modal');
   if (dm) makeWindowDraggable(dm, { content: dm.querySelector('.modal-content'), header: dm.querySelector('.modal-header'), resizeStorageKey: 'odysseus-workbench-diff-size' });
@@ -1034,7 +1051,8 @@ export async function init() {
   watchSession();
   // Auto-open on the first sub-process run of the session (Claude Code, a
   // sub-agent…), so the user sees the work as it happens.
-  document.addEventListener('workbench:run-started', () => { if (state.autoOpen && !isOpen()) open(); });
+  // A minimized Workbench stays minimized: the user put it away on purpose.
+  document.addEventListener('workbench:run-started', () => { if (state.autoOpen && !isOpen() && !Modals.isMinimized(MODAL_ID)) open(); });
 }
 
 export function refreshSettings() { return probeSettings(); }
