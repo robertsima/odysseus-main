@@ -158,10 +158,13 @@ export function renderFileTable(file, { mode = 'split', path = '' } = {}) {
   if (!file.hunks.length) return `<div class="wb-diff-note">No textual changes.</div>`;
   const rows = [];
   for (const h of file.hunks) {
-    rows.push(`<tr class="wb-l wb-hunk"><td class="wb-no" colspan="${mode === 'split' ? 4 : 3}">${esc(h.header)}</td></tr>`);
+    // Not `wb-no`: the hunk banner must not inherit the narrow, right-aligned,
+    // clickable line-number cell styling.
+    rows.push(`<tr class="wb-l wb-hunk"><td class="wb-hunk-cell" colspan="${mode === 'split' ? 4 : 3}">${esc(h.header)}</td></tr>`);
     if (mode === 'unified') {
       for (const l of h.lines) {
-        rows.push(`<tr class="wb-l wb-${l.type}" data-path="${p}" data-old="${l.oldNo ?? ''}" data-new="${l.newNo ?? ''}">${_cell(l.oldNo)}${_cell(l.newNo)}${_code((l.type === 'add' ? '+' : l.type === 'del' ? '-' : ' ') + l.text)}</tr>`);
+        // Context rows are `wb-same`: `wb-ctx` is the toolbar's repository label.
+        rows.push(`<tr class="wb-l wb-${l.type === 'ctx' ? 'same' : l.type}" data-path="${p}" data-old="${l.oldNo ?? ''}" data-new="${l.newNo ?? ''}">${_cell(l.oldNo)}${_cell(l.newNo)}${_code((l.type === 'add' ? '+' : l.type === 'del' ? '-' : ' ') + l.text)}</tr>`);
       }
       continue;
     }
@@ -172,7 +175,7 @@ export function renderFileTable(file, { mode = 'split', path = '' } = {}) {
     while (i < L.length) {
       const l = L[i];
       if (l.type === 'ctx' || l.type === 'meta') {
-        rows.push(`<tr class="wb-l wb-ctx" data-path="${p}" data-old="${l.oldNo ?? ''}" data-new="${l.newNo ?? ''}">${_cell(l.oldNo)}${_code(l.text)}${_cell(l.newNo)}${_code(l.text)}</tr>`);
+        rows.push(`<tr class="wb-l wb-same" data-path="${p}" data-old="${l.oldNo ?? ''}" data-new="${l.newNo ?? ''}">${_cell(l.oldNo)}${_code(l.text)}${_cell(l.newNo)}${_code(l.text)}</tr>`);
         i++;
         continue;
       }
@@ -186,8 +189,10 @@ export function renderFileTable(file, { mode = 'split', path = '' } = {}) {
         const a = adds[k];
         const cls = d && a ? 'wb-change' : d ? 'wb-del' : 'wb-add';
         rows.push(`<tr class="wb-l ${cls}" data-path="${p}" data-old="${d ? d.oldNo : ''}" data-new="${a ? a.newNo : ''}">`
-          + (d ? `${_cell(d.oldNo)}<td class="wb-code wb-side-del">${esc(d.text) || '&nbsp;'}</td>` : '<td class="wb-no"></td><td class="wb-code wb-empty"></td>')
-          + (a ? `${_cell(a.newNo)}<td class="wb-code wb-side-add">${esc(a.text) || '&nbsp;'}</td>` : '<td class="wb-no"></td><td class="wb-code wb-empty"></td>')
+          // `wb-blank`, not `wb-empty`: that name is the Workbench's padded
+          // empty-state block, and it inflated these filler cells.
+          + (d ? `${_cell(d.oldNo)}<td class="wb-code wb-side-del">${esc(d.text) || '&nbsp;'}</td>` : '<td class="wb-no"></td><td class="wb-code wb-blank"></td>')
+          + (a ? `${_cell(a.newNo)}<td class="wb-code wb-side-add">${esc(a.text) || '&nbsp;'}</td>` : '<td class="wb-no"></td><td class="wb-code wb-blank"></td>')
           + '</tr>');
       }
     }

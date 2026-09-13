@@ -295,24 +295,27 @@
     <div class="modal-content workbench-modal-content" role="dialog" aria-label="Workbench" style="background:var(--bg)">
       <div class="modal-header">
         <h4><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4M6 8l3 3-3 3M11 14h5"/></svg>Workbench</h4>
-        <div class="wb-header-tools">
-          <select id="wb-scope" class="settings-select wb-select" title="Which sessions to follow"><option value="session">This chat</option><option value="all">All sessions</option></select>
-          <select id="wb-filter" class="settings-select wb-select" title="Filter by source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
-          <select id="wb-repo" class="settings-select wb-select" title="Repository for Changes / Commits"><option value="">— repository —</option></select>
-          <button type="button" class="ats-btn wb-mini" id="wb-pause" title="Pause the live feed">Pause</button>
-          <button type="button" class="ats-btn wb-mini" id="wb-clear" title="Clear the visible feed">Clear</button>
-          <button type="button" class="ats-btn wb-mini" id="wb-dock-right" title="Dock to the right edge">Dock</button>
-        </div>
+        <button type="button" class="wb-icon-btn" id="wb-dock-right" title="Dock to the right edge" aria-label="Dock to the right edge"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg></button>
         <button class="close-btn" id="close-workbench-modal" aria-label="Close workbench">✖</button>
       </div>
       <div class="modal-body workbench-modal-body">
-        <div class="memory-tabs wb-tabs">
-          <button class="memory-tab active" data-wb-tab="activity">Activity</button>
-          <button class="memory-tab" data-wb-tab="changes">Changes</button>
-          <button class="memory-tab" data-wb-tab="commits">Commits</button>
-          <button class="memory-tab" data-wb-tab="prs">Pull Requests</button>
+        <div class="memory-tabs wb-tabs" role="tablist">
+          <button class="memory-tab active" data-wb-tab="activity" role="tab">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
+          <button class="memory-tab" data-wb-tab="changes" role="tab">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>
+          <button class="memory-tab" data-wb-tab="commits" role="tab">Commits<span class="wb-tab-badge" data-wb-badge="commits" hidden></span></button>
+          <button class="memory-tab" data-wb-tab="prs" role="tab">Pull Requests</button>
         </div>
-        <div class="wb-panel" data-wb-panel="activity" id="wb-activity"></div>
+        <div class="wb-panel" data-wb-panel="activity">
+          <div class="wb-toolbar">
+            <select id="wb-scope" class="wb-select" title="Which sessions to follow" aria-label="Scope"><option value="session">This chat</option><option value="all">All sessions</option></select>
+            <select id="wb-filter" class="wb-select" title="Filter by source" aria-label="Source"><option value="">All sources</option><option value="odysseus">Odysseus</option><option value="claude_code">Claude Code</option><option value="session">Sub-agents</option><option value="pipeline">Pipelines</option><option value="bg_job">Background jobs</option><option value="worktree">Worktree</option><option value="system">System</option></select>
+            <span class="wb-spacer"></span>
+            <span class="wb-live" id="wb-live" title="Live feed status">Live</span>
+            <button type="button" class="wb-btn" id="wb-pause" title="Pause the live feed">Pause</button>
+            <button type="button" class="wb-btn" id="wb-clear" title="Clear the visible feed">Clear</button>
+          </div>
+          <div class="wb-activity" id="wb-activity"></div>
+        </div>
         <div class="wb-panel hidden" data-wb-panel="changes" id="wb-changes"></div>
         <div class="wb-panel hidden" data-wb-panel="commits" id="wb-commits"></div>
         <div class="wb-panel hidden" data-wb-panel="prs" id="wb-prs"></div>
