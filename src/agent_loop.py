@@ -2069,7 +2069,15 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     def has(*patterns: str) -> bool:
         return any(re.search(p, q) for p in patterns)
 
-    if has(r"\b(cookbook|serve|serving|served|launch|start|preset|vllm|sglang|llama\.?cpp|ollama|download|downloading|pull|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|workstation|server|qwen|gemma|llama|mistral|minimax)\b"):
+    # Generic verbs (start, launch, pull, download) and "server" only count
+    # near a model word: "Push changes and start with the next slice" was
+    # classified as Cookbook on 2026-09-13, which swapped the shell and Claude
+    # Code tools out for model-serving ones and the agent said it couldn't push.
+    _MODEL_WORDS = (r"models?|weights|gguf|checkpoints?|presets?|vllm|sglang|llama\.?cpp|ollama|"
+                    r"qwen|gemma|llama|mistral|minimax|deepseek|hf|hugging\s*face")
+    if has(r"\b(cookbook|serve|serving|served|preset|downloading|downloads|vllm|sglang|llama\.?cpp|ollama|cached models?|running models?|model servers?|models? (?:are )?running|what models?|model picker|gpu box|workstation|qwen|gemma|llama|mistral|minimax)\b",
+           rf"\b(?:start|launch|stop|restart|pull|download|downloading)\b\W+(?:\w+\W+){{0,4}}(?:{_MODEL_WORDS})\b",
+           r"\b(?:gpu|inference|llm|model|cookbook)\s+servers?\b"):
         domains.add("cookbook")
     if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
         domains.add("email")
@@ -2112,6 +2120,13 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\b(?:previous|past|earlier|old|another)\s+(?:chat|conversation)s?\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
+        domains.add("files")
+    # Source-control and build work is shell/file work even when it never names
+    # a file ("push changes", "commit and open a PR", "implement the next slice").
+    if has(r"\b(?:push|commit|rebase|merge|pull request|open a pr|branch)\b.{0,40}\b(?:changes?|commits?|branch|code|repo|it|this|that)\b",
+           r"\b(?:push|commit)\s+(?:the\s+|my\s+|these\s+|all\s+)?changes\b",
+           r"\bgit\s+(?:push|pull|commit|status|diff|log)\b",
+           r"\b(?:implement|scaffold|refactor)\b.{0,60}\b(?:slice|feature|mvp|spec|todo|endpoint|screen|api|tests?)\b"):
         domains.add("files")
     # A request that names concrete files ("add X to models.md and
     # architecture.md in my vault") is file work even when it never says the

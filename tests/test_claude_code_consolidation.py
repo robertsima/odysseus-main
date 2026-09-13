@@ -189,12 +189,27 @@ async def test_poll_wait_seconds_blocks_until_the_task_finishes(roots, monkeypat
 
 def test_unsafe_allowed_tool_error_names_the_rejected_entry(roots):
     out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
-                           "allowed_tools": ["Read", "Bash(git push:*)"]})
+                           "allowed_tools": ["Bash(git push:*)"]})
     assert "Bash(git push:*)" in out["error"] and "Accepted:" in out["error"]
     ok = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
-                          "allowed_tools": ["Read", "Glob", "Grep", "Bash(./gradlew test:*)", "Bash(mvn test:*)"]})
-    assert "error" not in ok
+                          "allowed_tools": ["Read", "Glob", "Grep", "Bash(./gradlew test:*)", "Bash(mvn test:*)",
+                                            "Bash(npm run typecheck:*)", "Bash(./mvnw verify:*)"]})
+    assert "error" not in ok and "dropped_tools" not in ok
     assert not cct.SAFE_TOOL.fullmatch("Bash(./gradlew bootRun:*)")
+    assert not cct.SAFE_TOOL.fullmatch("Bash(./mvnw:*)")
+    assert not cct.SAFE_TOOL.fullmatch("Bash(npm run deploy:*)")
+
+
+def test_mixed_allowlist_runs_with_safe_entries_and_reports_dropped(roots):
+    # 2026-09-13: one list carrying `git push`, a bare `./mvnw` and a malformed
+    # entry was refused three rounds in a row. Dropping only narrows rights.
+    out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                           "allowed_tools": ["Read", "Edit", "Bash(git push:*)", "Bash(./mvnw:*)",
+                                             "Bash/npm run typecheck:*", "Bash(npm run typecheck:*)"]})
+    assert "error" not in out
+    assert out["tools"] == ["Read", "Edit", "Bash(npm run typecheck:*)"]
+    assert out["dropped_tools"] == ["Bash(git push:*)", "Bash(./mvnw:*)", "Bash/npm run typecheck:*"]
+    assert "never pushes" in out["dropped_note"]
 
 
 # ── Headless argv ──

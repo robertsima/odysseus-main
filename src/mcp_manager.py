@@ -1148,8 +1148,12 @@ class McpManager:
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
             for t in server_tools:
-                # Truncate long descriptions
-                desc = t['description'][:120] + '...' if len(t['description']) > 120 else t['description']
+                # One line per tool, truncated. A multi-line description
+                # ("Actions:\n- create: ...") otherwise reads as extra
+                # "- name: desc" rows; the tool index registered a phantom
+                # `create` tool from one (2026-09-13 logs).
+                flat = " ".join(str(t.get('description') or '').split())
+                desc = flat[:120] + '...' if len(flat) > 120 else flat
                 # Include the tool's declared inputs so the model calls it with
                 # real argument names instead of guessing from the description
                 # alone (issue #2509).

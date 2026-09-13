@@ -78,9 +78,13 @@ MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_TAS
 # Enumerating exactly the safe subcommands is what actually keeps push/pull/
 # clone/remote/fetch out of reach.
 _SAFE_GIT_SUBCOMMANDS = "status|diff|log|show|branch|rev-parse|add|commit"
-# Same trust class as `npm test`: each runs the checkout's own test config.
+# Verification commands, all the same trust class as `npm test`: each runs the
+# checkout's own test/build config and nothing that publishes or deploys.
 _SAFE_TEST_RUNNERS = (r"pytest|python -m pytest|npm test|pnpm test|yarn test"
-                      r"|\./gradlew test|gradle test|\./mvnw test|mvn test")
+                      r"|(?:npm run|pnpm(?: run)?|yarn) (?:test|typecheck|type-check|lint|build)"
+                      r"|npx tsc --noEmit"
+                      r"|(?:\./gradlew|gradle) (?:test|check|build)"
+                      r"|(?:\./mvnw|mvn) (?:test|verify|compile)")
 # The bundled Odysseus skill helper (integrations/claude/skills/odysseus/
 # scripts/odysseus_api.py). Allowing it lets a delegated Claude session call
 # back into Odysseus through the scope-gated /api/codex/* API — the only
@@ -405,19 +409,36 @@ def _parse_args(args: dict) -> dict:
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
         return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings"}
     rejected = [item for item in tools if not SAFE_TOOL.fullmatch(item)]
+    accepted_hint = (
+        f"Accepted: Read, Glob, Grep, Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
+        "Bash(<pytest/npm test/npm run typecheck|lint|build/./gradlew test|build/./mvnw test|verify>:*). "
+        "Claude never pushes: publish its commits yourself afterwards."
+    )
+    if rejected and len(rejected) == len(tools):
+        return {"error": f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. {accepted_hint} "
+                         "Omit allowed_tools to use the defaults."}
+    dropped: list[str] = []
     if rejected:
-        # Name what was refused and what is accepted: the bare "unsafe allowed
-        # tool" in the 2026-09-12 logs cost two blind retries.
-        return {"error": (
-            f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. Accepted: Read, Glob, Grep, "
-            f"Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
-            "Bash(<pytest/npm test/pnpm test/yarn test/./gradlew test/mvn test>:*). "
-            "Omit allowed_tools to use the defaults."
-        )}
+        # A mixed list runs with its safe entries. Refusing the whole job cost
+        # the 2026-09-13 run three rounds re-sending one list with `git push`
+        # and a malformed entry in it; dropping can only narrow Claude's rights.
+        dropped = rejected[:10]
+        tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
         return {"error": "delegate_to_claude_code: model must be a plain model name or alias"}
-    return {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
+    parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
+    if dropped:
+        parsed["dropped_tools"] = dropped
+        parsed["dropped_note"] = f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
+    return parsed
+
+
+def _with_dropped(result: dict, parsed: dict) -> dict:
+    if parsed.get("dropped_tools"):
+        result["dropped_allowed_tools"] = parsed["dropped_tools"]
+        result["allowed_tools_note"] = parsed["dropped_note"]
+    return result
 
 
 # ── Binary probing ──
@@ -1066,8 +1087,9 @@ class ClaudeCodeTool:
             return {**parsed, "exit_code": 1}
         label = str(args.get("label") or "").strip()[:120] or None
         with run_context(session_id=session_id, owner=owner, label=label):
-            return await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
-                                     model=parsed["model"])
+            result = await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
+                                       model=parsed["model"])
+        return _with_dropped(result, parsed)
 
 
 async def _git_report(repository: Path) -> dict:
@@ -1210,7 +1232,7 @@ class ClaudeCodeTaskRunner:
         self._save()
         job = asyncio.create_task(self._run(task_id, parsed))
         self.jobs[task_id] = job
-        return {"task_id": task_id, "status": "queued", "repository": str(parsed["repository"])}
+        return _with_dropped({"task_id": task_id, "status": "queued", "repository": str(parsed["repository"])}, parsed)
 
     async def _run(self, task_id: str, parsed: dict):
         record = self.tasks[task_id]

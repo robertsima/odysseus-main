@@ -285,8 +285,10 @@ class ToolIndex:
             elif line.startswith("- ") and ":" in line:
                 # Format: "- tool_name: description"
                 name_desc = line[2:].split(":", 1)
-                if len(name_desc) == 2:
-                    name = name_desc[0].strip()
+                name = name_desc[0].strip() if len(name_desc) == 2 else ""
+                # Only qualified MCP names are tools; anything else is a bullet
+                # from inside a description (the phantom `create` in 2026-09-13).
+                if name.startswith("mcp__") and not any(ch.isspace() for ch in name):
                     desc = name_desc[1].strip()
                     # Include server identity in the indexed text so RAG can
                     # distinguish "list_emails for server-a" from "list_emails for server-b"
