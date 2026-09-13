@@ -8,6 +8,7 @@ we ask the LLM to distill the approach into a reusable skill.
 
 import json
 import logging
+import re
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -54,11 +55,37 @@ def _skill_dicts(skills):
             yield skill
 
 
+_TITLE_STOPWORDS = frozenset(
+    "a an and the to for of with via on in into by from or my your our it its "
+    "safely completed complete new".split()
+)
+
+
+def _title_terms(title: str) -> set:
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    return {w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words if w not in _TITLE_STOPWORDS}
+
+
 def _has_duplicate_title(skills, title: str) -> bool:
+    """Exact title match, or a near-rewording of an existing title.
+
+    One conversation produced "Verify and Push Feature Slices", "Verify and
+    Push Completed Feature Slices", "Verify and Push MVP Slices" and "Iterate
+    and Push MVP Slices" as separate skills (2026-09-12 logs) because only
+    exact titles were compared. Titles whose meaningful words mostly overlap
+    (>= 3/4 of the shorter one, at least three shared) are the same procedure.
+    """
     wanted = title.lower()
+    wanted_terms = _title_terms(title)
     for skill in _skill_dicts(skills):
         existing = skill.get("title", "")
-        if isinstance(existing, str) and existing.lower() == wanted:
+        if not isinstance(existing, str):
+            continue
+        if existing.lower() == wanted:
+            return True
+        terms = _title_terms(existing)
+        shared = len(wanted_terms & terms)
+        if shared >= 3 and shared / min(len(wanted_terms), len(terms)) >= 0.75:
             return True
     return False
 

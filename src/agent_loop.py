@@ -19,6 +19,7 @@ from src.llm_core import (
     stream_llm,
     stream_llm_with_fallback,
     _is_ollama_native_url,
+    _is_untrusted_context_content,
 )
 from src.model_context import estimate_tokens, is_local_endpoint
 from src.settings import get_setting
@@ -1400,13 +1401,30 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
-    """Return the most recent user message as plain text."""
+    """Return the most recent thing the USER said, as plain text.
+
+    Retrieval, memories and tool results are appended after the request as
+    role=user "UNTRUSTED SOURCE DATA" blocks (see ``append_dynamic_context``).
+    Reading one of those as the request made the 2026-09-12 logs classify
+    intent from a RAG excerpt (`latest='UNTRUSTED SOURCE DATA...'`) and, since
+    that excerpt listed skill slugs, mark every registered skill as explicitly
+    invoked and pull in all of their dependencies.
+    """
     for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            return content
+        if msg.get("role") != "user":
+            continue
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        content = content or ""
+        if (
+            (msg.get("metadata") or {}).get("trusted") is False
+            or _is_untrusted_context_content(content)
+            or content.startswith("[Context —")
+            or content.startswith("[Tool execution results]")
+        ):
+            continue
+        return content
     return ""
 
 
@@ -1705,15 +1723,44 @@ def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
         known = set()
     tools: Set[str] = set()
     unknown: Set[str] = set()
+    disabled = disabled_tools or set()
     for skill in skills or []:
         for name in (skill.get("requires_toolsets") or []):
-            if not name or name in (disabled_tools or set()):
+            if not name or name in disabled:
                 continue
             if known and name not in known:
-                unknown.add(name)
+                # Agent-authored skills describe toolsets in prose; resolve
+                # the common ones instead of dropping the dependency.
+                alias = _SKILL_TOOLSET_ALIASES.get(str(name).strip().casefold())
+                resolved = {tool for tool in (alias or ()) if tool in known and tool not in disabled}
+                if resolved:
+                    tools |= resolved
+                else:
+                    unknown.add(name)
                 continue
             tools.add(name)
     return tools, unknown
+
+
+_FILE_READ_TOOLS = ("read_file", "grep", "glob", "ls")
+_FILE_EDIT_TOOLS = ("edit_file", "write_file", "apply_patch")
+_SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
+    "email": ("list_email_accounts", "list_emails", "read_email"),
+    "calendar": ("manage_calendar",),
+    "notes": ("manage_notes",),
+    "todoist": ("mcp__todoist__todoist",),
+    "memory": ("manage_memory",),
+    "memory management": ("manage_memory",),
+    "skills": ("manage_skills",),
+    "skill management": ("manage_skills",),
+    "git": ("bash",),
+    "shell": ("bash",),
+    "file editing": _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
+    "file search and edit": _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
+    "workspace file tools": ("get_workspace",) + _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
+    "application-log access": ("read_app_logs",),
+    "logs": ("read_app_logs",),
+}
 
 
 def _harness_directive(text: str) -> Dict:

@@ -62,8 +62,9 @@ def guidance(command: str) -> str:
         '  2. delegate_to_claude_code {"repository": "<path from status>", "prompt": "<task>"}',
         "     Waits for the result (action=run, default). Add \"timeout_seconds\" for long jobs, "
         "\"allowed_tools\" to permit a test runner such as \"Bash(pytest:*)\".",
-        '  3. delegate_to_claude_code {"action": "start", ...} then {"action": "poll", "task_id": "..."}',
-        "     Runs the job in the background so you can keep working or use several repositories.",
+        '  3. delegate_to_claude_code {"action": "start", ...} then {"action": "poll", "task_id": "...", "wait_seconds": 300}',
+        "     Runs the job in the background so you can keep working or use several repositories. "
+        "poll with wait_seconds blocks until it finishes; never sleep in the shell to wait.",
         "",
         "The reply carries Claude's result text, permission_denials, and the resulting "
         "branch, commit, and changed files. Publishing still goes through manage_agent_worktree.",

@@ -63,7 +63,9 @@ DEFAULT_REPOSITORY = os.environ.get("CLAUDE_CODE_DEFAULT_REPOSITORY", "")
 # run arbitrary shell (see tool_schemas.py's delegate_to_claude_code
 # description, which promises exactly this).
 DEFAULT_TOOLS = (
-    "Read", "Edit", "Write",
+    # Glob/Grep are read-only and confined to the checkout like Read; without
+    # them Claude has to find code by reading whole files.
+    "Read", "Glob", "Grep", "Edit", "Write",
     "Bash(git status:*)", "Bash(git diff:*)", "Bash(git log:*)",
     "Bash(git add:*)", "Bash(git commit:*)",
 )
@@ -76,7 +78,9 @@ MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_TAS
 # Enumerating exactly the safe subcommands is what actually keeps push/pull/
 # clone/remote/fetch out of reach.
 _SAFE_GIT_SUBCOMMANDS = "status|diff|log|show|branch|rev-parse|add|commit"
-_SAFE_TEST_RUNNERS = "pytest|python -m pytest|npm test|pnpm test|yarn test"
+# Same trust class as `npm test`: each runs the checkout's own test config.
+_SAFE_TEST_RUNNERS = (r"pytest|python -m pytest|npm test|pnpm test|yarn test"
+                      r"|\./gradlew test|gradle test|\./mvnw test|mvn test")
 # The bundled Odysseus skill helper (integrations/claude/skills/odysseus/
 # scripts/odysseus_api.py). Allowing it lets a delegated Claude session call
 # back into Odysseus through the scope-gated /api/codex/* API — the only
@@ -85,7 +89,7 @@ _SAFE_TEST_RUNNERS = "pytest|python -m pytest|npm test|pnpm test|yarn test"
 # arbitrary python.
 _CALLBACK_HELPER = r"python3 (?:~|/)[^\s()]*/skills/odysseus/scripts/odysseus_api\.py"
 SAFE_TOOL = re.compile(
-    rf"^(Read|Edit|Write"
+    rf"^(Read|Glob|Grep|Edit|Write"
     rf"|Bash\(git (?:{_SAFE_GIT_SUBCOMMANDS})(?::\*)?\)"
     rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\)"
     rf"|Bash\({_CALLBACK_HELPER}(?::\*)?\))$"
@@ -400,8 +404,16 @@ def _parse_args(args: dict) -> dict:
     tools = args.get("allowed_tools") or default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
         return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings"}
-    if any(not SAFE_TOOL.fullmatch(item) for item in tools):
-        return {"error": "delegate_to_claude_code: unsafe allowed tool"}
+    rejected = [item for item in tools if not SAFE_TOOL.fullmatch(item)]
+    if rejected:
+        # Name what was refused and what is accepted: the bare "unsafe allowed
+        # tool" in the 2026-09-12 logs cost two blind retries.
+        return {"error": (
+            f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. Accepted: Read, Glob, Grep, "
+            f"Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
+            "Bash(<pytest/npm test/pnpm test/yarn test/./gradlew test/mvn test>:*). "
+            "Omit allowed_tools to use the defaults."
+        )}
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
         return {"error": "delegate_to_claude_code: model must be a plain model name or alias"}
@@ -956,6 +968,33 @@ async def _run_claude(
 
 
 _ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_repositories", "repositories")
+# Longest a single poll may block. The 2026-09-12 logs show the agent
+# alternating `bash sleep 20..120` with poll for ten minutes until the
+# loop-breaker ended the turn; one poll that waits on the job replaces both.
+MAX_POLL_WAIT_S = 600
+
+
+def _running_report(record: dict) -> dict:
+    """A still-running task as the model should see it: where it is and what
+    Claude did last, plus how to wait without burning rounds."""
+    out = {key: record.get(key) for key in ("task_id", "status", "repository", "label", "model",
+                                            "created_at", "started_at") if record.get(key) is not None}
+    started = record.get("started_at") or record.get("created_at")
+    try:
+        out["elapsed_seconds"] = int(datetime.now(timezone.utc).timestamp() - datetime.fromisoformat(started).timestamp())
+    except (TypeError, ValueError):
+        pass
+    try:
+        recent = activity.run_events(record.get("task_id") or "", limit=8)
+    except Exception:
+        recent = []
+    progress = [ev.get("title") for ev in recent if ev.get("kind") in ("message", "tool_start", "tool_result", "status")]
+    if progress:
+        out["recent_activity"] = progress[-6:]
+    out["note"] = (f"Still {record.get('status')}. To wait, call poll again with wait_seconds (up to {MAX_POLL_WAIT_S}) — "
+                   "do not sleep in bash. Or end your turn and tell the user; the result is kept for 24h.")
+    out["exit_code"] = 0
+    return out
 
 
 class ClaudeCodeTool:
@@ -1007,10 +1046,19 @@ class ClaudeCodeTool:
             task_id = str(args.get("task_id") or "").strip()
             if not task_id:
                 return {"error": "delegate_to_claude_code: task_id is required", "exit_code": 1}
-            record = await runner.cancel(task_id) if action == "cancel" else runner.get(task_id)
+            if action == "cancel":
+                record = await runner.cancel(task_id)
+            else:
+                try:
+                    wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
+                except (TypeError, ValueError):
+                    wait = 0
+                record = await runner.wait(task_id, wait) if wait else runner.get(task_id)
             if record is None:
                 return {"error": f"delegate_to_claude_code: task {task_id} not found", "exit_code": 1}
-            return {**record, "exit_code": record.get("exit_code", 0 if record.get("status") in _ACTIVE_STATUSES else 1)}
+            if record.get("status") in _ACTIVE_STATUSES:
+                return _running_report(record)
+            return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
             return {"tasks": runner.summaries(), "exit_code": 0}
         parsed = _parse_args(args)
@@ -1201,6 +1249,17 @@ class ClaudeCodeTaskRunner:
         if record is None or (owner is not None and record.get("owner") != owner):
             return None
         return dict(record)
+
+    async def wait(self, task_id: str, timeout: float, *, owner: Optional[str] = None) -> dict | None:
+        """``get``, after waiting up to ``timeout`` seconds for the job to end.
+
+        ``asyncio.wait`` never cancels the job, so an abandoned wait (the chat
+        turn stopped) leaves the delegation running.
+        """
+        job = self.jobs.get(task_id)
+        if job is not None and not job.done() and timeout > 0:
+            await asyncio.wait({job}, timeout=timeout)
+        return self.get(task_id, owner=owner)
 
     def summaries(self, *, owner: Optional[str] = None, limit: int = 50) -> list[dict]:
         """Bounded per-task rows (no output blobs) for listings and the UI."""

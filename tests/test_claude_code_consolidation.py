@@ -161,6 +161,42 @@ async def test_background_start_poll_list_from_chat(roots, monkeypatch):
     assert "output" not in row and "prompt" not in row
 
 
+async def test_poll_wait_seconds_blocks_until_the_task_finishes(roots, monkeypatch):
+    # 2026-09-12: the agent alternated `bash sleep N` with poll until the
+    # loop-breaker ended its turn. poll(wait_seconds) waits on the job itself.
+    runner = ClaudeCodeTaskRunner(store_path=str(roots["dev"] / "tasks.json"))
+    monkeypatch.setattr(cct, "get_task_runner", lambda: runner)
+    release = asyncio.Event()
+
+    async def fake_run(repository, prompt, timeout, tools, on_process=None, model=None):
+        await release.wait()
+        return {"exit_code": 0, "result": "ok"}
+
+    monkeypatch.setattr(cct, "_run_claude", fake_run)
+    started = await ClaudeCodeTool().execute(json.dumps({
+        "action": "start", "repository": str(roots["main"]), "prompt": "do it",
+    }), {})
+    task_id = started["task_id"]
+    await asyncio.sleep(0)
+    running = await ClaudeCodeTool().execute(json.dumps({"action": "poll", "task_id": task_id}), {})
+    assert running["status"] == "running" and running["exit_code"] == 0
+    assert "wait_seconds" in running["note"] and "output" not in running
+
+    asyncio.get_running_loop().call_later(0.05, release.set)
+    done = await ClaudeCodeTool().execute(json.dumps({"action": "poll", "task_id": task_id, "wait_seconds": 30}), {})
+    assert done["status"] == "completed" and done["result"] == "ok"
+
+
+def test_unsafe_allowed_tool_error_names_the_rejected_entry(roots):
+    out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                           "allowed_tools": ["Read", "Bash(git push:*)"]})
+    assert "Bash(git push:*)" in out["error"] and "Accepted:" in out["error"]
+    ok = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                          "allowed_tools": ["Read", "Glob", "Grep", "Bash(./gradlew test:*)", "Bash(mvn test:*)"]})
+    assert "error" not in ok
+    assert not cct.SAFE_TOOL.fullmatch("Bash(./gradlew bootRun:*)")
+
+
 # ── Headless argv ──
 
 def test_build_argv_adapts_to_binary_flags(settings):
