@@ -736,8 +736,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
         """Create a new session with messages copied up to keep_count."""
         _verify_session_owner(request, session_id)
         try:
-            body = await request.json()
-            keep_count = body.get("keep_count", 0)
+            try:
+                body = await request.json()
+            except Exception:
+                body = {}
+            # No keep_count forks the whole conversation.
+            keep_count = (body or {}).get("keep_count")
 
             # Get the source session
             source = session_manager.sessions.get(session_id)
@@ -757,7 +761,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             )
 
             # Copy messages up to keep_count
-            msgs_to_copy = source.history[:keep_count]
+            msgs_to_copy = source.history[:] if keep_count is None else source.history[:max(0, int(keep_count))]
             for msg in msgs_to_copy:
                 # Copy the metadata dict. Sharing it would let the fork's
                 # persistence (add_message -> _persist_message stamps
@@ -766,6 +770,24 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 # edit/delete-by-id on the original conversation.
                 meta = dict(msg.metadata) if isinstance(msg.metadata, dict) else None
                 new_session.add_message(ChatMessage(msg.role, msg.content, meta))
+            # Remember the source chat (the sidebar used to recognise forks only
+            # by their name prefix, with no way back), and carry its settings so
+            # the fork runs the way the original did.
+            try:
+                from core.database import (
+                    SessionLocal as _SL, Session as _DbS, get_session_settings, update_session_settings,
+                )
+                _db = _SL()
+                try:
+                    _db.query(_DbS).filter(_DbS.id == new_id).update({"forked_from": session_id})
+                    _db.commit()
+                finally:
+                    _db.close()
+                _src_settings = get_session_settings(session_id)
+                if _src_settings:
+                    update_session_settings(new_id, _src_settings)
+            except Exception:
+                logger.debug("fork lineage/settings copy failed", exc_info=True)
             try:
                 from src.event_bus import fire_event
                 fire_event("session_created", getattr(source, 'owner', None))
@@ -777,6 +799,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 "id": new_id,
                 "name": fork_name,
                 "kept": len(msgs_to_copy),
+                "forked_from": session_id,
             }
         except HTTPException:
             raise

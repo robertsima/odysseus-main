@@ -17,23 +17,40 @@ close / navigation / refresh). It does NOT survive a server restart.
 import asyncio
 import json
 import logging
-from typing import AsyncGenerator, Dict, Optional
+import time
+from contextlib import contextmanager
+from typing import AsyncGenerator, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 
 class _Run:
-    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task")
+    __slots__ = ("buffer", "subscribers", "status", "task", "evict_task",
+                 "owner", "source", "started_at", "finished_at")
 
-    def __init__(self) -> None:
+    def __init__(self, owner: Optional[str] = None, source: str = "chat") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
         self.subscribers: set = set()   # one asyncio.Queue per connected client
         self.status: str = "running"    # running | done | error | stopped
         self.task: Optional[asyncio.Task] = None
         self.evict_task: Optional[asyncio.Task] = None
+        self.owner = owner
+        self.source = source
+        self.started_at = time.time()
+        self.finished_at: Optional[float] = None
 
 
 _RUNS: Dict[str, _Run] = {}
+
+# Turns that run in a chat without a streaming client: a background-job
+# follow-up continuing the chat. They are not replayable, but the sidebar must
+# still show the chat as busy — before this only the tab that sent a message
+# knew a chat was running, so a reload or second tab showed every chat idle.
+_EXTERNAL: Dict[str, Dict] = {}
+# Finished turns are reported for this long so a client that was not watching
+# (another tab, a reload) can still light the "finished" dot.
+_RECENT_S = 30 * 60
+_FINISHED: Dict[str, Dict] = {}
 
 # How long a FINISHED run (and its full replay buffer) is retained after the
 # last subscriber disconnects, so a reconnect within the window can still
@@ -78,6 +95,59 @@ def _schedule_evict(session_id: str) -> None:
 def is_active(session_id: str) -> bool:
     r = _RUNS.get(session_id)
     return bool(r and r.status == "running")
+
+
+def is_busy(session_id: str) -> bool:
+    """A streamed run or a background turn is working in this chat."""
+    return is_active(session_id) or session_id in _EXTERNAL
+
+
+def _remember_finished(session_id: str, *, status: str, source: str, owner: Optional[str],
+                       started_at: float) -> None:
+    now = time.time()
+    _FINISHED[session_id] = {"session_id": session_id, "status": status, "source": source,
+                             "owner": owner, "started_at": started_at, "finished_at": now}
+    for sid in [sid for sid, rec in _FINISHED.items() if now - rec["finished_at"] > _RECENT_S]:
+        _FINISHED.pop(sid, None)
+
+
+@contextmanager
+def track_external(session_id: str, *, source: str, owner: Optional[str] = None):
+    """Mark a chat busy for the duration of a turn that has no stream."""
+    rec = {"session_id": session_id, "status": "running", "source": source, "owner": owner,
+           "started_at": time.time(), "finished_at": None}
+    _EXTERNAL[session_id] = rec
+    status = "done"
+    try:
+        yield rec
+    except BaseException:
+        status = "error"
+        raise
+    finally:
+        if _EXTERNAL.get(session_id) is rec:
+            _EXTERNAL.pop(session_id, None)
+        _remember_finished(session_id, status=status, source=source, owner=owner,
+                           started_at=rec["started_at"])
+
+
+def list_runs(session_ids: Optional[set] = None) -> List[Dict]:
+    """Running and recently finished chat turns, newest first.
+
+    ``session_ids`` scopes the listing to chats the caller owns; the route
+    passes the user's sessions so one user never sees another's activity.
+    """
+    rows: Dict[str, Dict] = {}
+    for sid, rec in _FINISHED.items():
+        rows[sid] = dict(rec)
+    for sid, run in _RUNS.items():
+        if run.status == "running" or sid not in rows:
+            rows[sid] = {"session_id": sid, "status": run.status, "source": run.source, "owner": run.owner,
+                         "started_at": run.started_at, "finished_at": run.finished_at}
+    for sid, rec in _EXTERNAL.items():
+        rows[sid] = dict(rec)
+    out = [row for sid, row in rows.items() if session_ids is None or sid in session_ids]
+    out.sort(key=lambda row: (row["status"] != "running", -(row.get("finished_at") or row["started_at"])))
+    return out
 
 
 def get_status(session_id: str) -> Optional[str]:
@@ -126,6 +196,9 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         )
         _publish(run, "data: [DONE]\n\n")
     finally:
+        run.finished_at = time.time()
+        _remember_finished(session_id, status=run.status, source=run.source, owner=run.owner,
+                           started_at=run.started_at)
         # The turn's activity run ends with the stream, however it ended.
         try:
             from src import agent_activity as _activity
@@ -145,7 +218,7 @@ async def _drain(session_id: str, agen: AsyncGenerator[str, None],
         _schedule_evict(session_id)
 
 
-def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
+def start(session_id: str, agen: AsyncGenerator[str, None], *, owner: Optional[str] = None) -> _Run:
     """Start a detached run draining `agen` for a session. If a run is already in
     flight for this session (e.g. a rapid double-send), it's cancelled first."""
     prev = _RUNS.get(session_id)
@@ -156,7 +229,8 @@ def start(session_id: str, agen: AsyncGenerator[str, None]) -> _Run:
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
             prev.evict_task.cancel()
-    run = _Run()
+    _FINISHED.pop(session_id, None)
+    run = _Run(owner=owner)
     _RUNS[session_id] = run
     run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
     return run

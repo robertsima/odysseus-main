@@ -1097,11 +1097,13 @@ async function _cmdSessionUnimportant(args, ctx) {
 
 async function _cmdSessionFork(args, ctx) {
   if (!ctx.sid) { slashReply('No active session'); return true; }
-  const keepCount = parseInt(args[0]) || 0;
+  // `/fork` alone copies the whole conversation (it used to create an empty
+  // chat); `/fork N` keeps the first N messages.
+  const keepCount = parseInt(args[0]);
   const res = await fetch(`${API_BASE}/api/session/${ctx.sid}/fork`, {
     method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keep_count: keepCount })
+    body: JSON.stringify(Number.isFinite(keepCount) && keepCount >= 0 ? { keep_count: keepCount } : {})
   });
   if (res.ok) {
     const data = await res.json();
@@ -1529,6 +1531,7 @@ async function _cmdModels(args, ctx) {
 async function _cmdModel(args, ctx) {
   const sub = (args[0] || '').toLowerCase();
   if (sub === 'list' || sub === 'ls') return _cmdModels(args.slice(1), ctx);
+  if (sub) return _switchModel(args.join(' ').trim(), ctx);
 
   const model = sessionModule.getCurrentModel ? sessionModule.getCurrentModel() : '';
   const endpoint = sessionModule.getCurrentEndpointUrl ? sessionModule.getCurrentEndpointUrl() : '';
@@ -1536,8 +1539,67 @@ async function _cmdModel(args, ctx) {
     `Current model: ${ctx.esc(model || 'None selected')}`,
     endpoint ? `Endpoint: ${ctx.esc(endpoint)}` : 'Endpoint: not available',
     '',
-    'Usage: /model list to show all available models'
+    'Usage: /model <name> to switch this chat · /model list to show all available models'
   ].join('\n')}</pre>`);
+  return true;
+}
+
+/** `/model <name>`: switch this chat's model without opening the picker.
+ *  Matches an exact id (or its last path segment) first, then a substring. */
+async function _switchModel(query, ctx) {
+  const sid = ctx.sid || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+  if (!sid) { slashReply('Open a chat first, then /model <name> switches its model.'); return true; }
+  let items = [];
+  try {
+    const res = await fetch(`${API_BASE}/api/models`, { credentials: 'same-origin' });
+    items = (await res.json()).items || [];
+  } catch (_) {
+    slashReply('Could not load the model list.');
+    return true;
+  }
+  const candidates = [];
+  for (const ep of items) {
+    if (ep.offline) continue;
+    for (const m of (ep.models || []).concat(ep.models_extra || [])) {
+      const id = typeof m === 'string' ? m : (m && (m.id || m.name)) || '';
+      if (id) candidates.push({ id, url: ep.url || ep.endpoint_url || '', endpointId: ep.endpoint_id || '', endpoint: ep.endpoint_name || ep.url || '' });
+    }
+  }
+  const q = query.toLowerCase();
+  const exact = candidates.filter((c) => c.id.toLowerCase() === q || c.id.split('/').pop().toLowerCase() === q);
+  const matches = exact.length ? exact : candidates.filter((c) => c.id.toLowerCase().includes(q));
+  if (!matches.length) { slashReply(`No available model matches <b>${ctx.esc(query)}</b>. Try /model list.`); return true; }
+  if (matches.length > 1 && !exact.length) {
+    slashReply(`<pre>${ctx.esc(`Several models match "${query}"; be more specific:\n`)}${matches.slice(0, 10).map((c) => `  ${ctx.esc(c.id)}  (${ctx.esc(c.endpoint)})`).join('\n')}</pre>`);
+    return true;
+  }
+  const pick = matches[0];
+  const fd = new FormData();
+  fd.append('model', pick.id);
+  fd.append('endpoint_url', pick.url);
+  if (pick.endpointId) fd.append('endpoint_id', pick.endpointId);
+  const res = await fetch(`${API_BASE}/api/session/${encodeURIComponent(sid)}`, { method: 'PATCH', body: fd, credentials: 'same-origin' });
+  if (!res.ok) { slashReply(`Could not switch model (${res.status}).`); return true; }
+  const s = (sessionModule.getSessions ? sessionModule.getSessions() : []).find((x) => x.id === sid);
+  if (s) { s.model = pick.id; s.endpoint_url = pick.url; s.endpoint_id = pick.endpointId || s.endpoint_id || ''; }
+  try { (await import('./modelPicker.js')).updateModelPicker(); } catch (_) {}
+  if (window.refreshChatContextHeader) window.refreshChatContextHeader('model-pick');
+  slashReply(`This chat now uses <b>${ctx.esc(pick.id)}</b> (${ctx.esc(pick.endpoint)}).`);
+  return true;
+}
+
+/** `/stop`: stop this chat's running turn (same as the Stop button). */
+async function _cmdStop(args, ctx) {
+  const sid = ctx.sid || (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId());
+  if (!sid) { slashReply('No chat is open.'); return true; }
+  try { window.chatModule?.abortCurrentRequest?.(true); } catch (_) {}
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/stop/${encodeURIComponent(sid)}`, { method: 'POST', credentials: 'same-origin' });
+    const body = res.ok ? await res.json() : {};
+    slashReply(body.stopped ? 'Stopped this chat\'s turn.' : 'Nothing is running in this chat.');
+  } catch (_) {
+    slashReply('Could not reach the server to stop the turn.');
+  }
   return true;
 }
 
@@ -6061,9 +6123,16 @@ const COMMANDS = {
   model: {
     alias: [],
     category: 'Settings',
-    help: 'Show current chat model',
+    help: 'Show or switch this chat\'s model',
     handler: _cmdModel,
-    usage: '/model  ·  /model list'
+    usage: '/model  ·  /model <name>  ·  /model list'
+  },
+  stop: {
+    alias: ['cancel', 'abort'],
+    category: 'Agent',
+    help: 'Stop this chat\'s running turn',
+    handler: _cmdStop,
+    usage: '/stop'
   },
   models: {
     alias: [],

@@ -289,6 +289,7 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
       const latestSm = _liveSessionModule();
       if (!latestSm.getCurrentSessionId || latestSm.getCurrentSessionId() !== sid) return;
       _contextHeaderData = data;
+      try { document.dispatchEvent(new CustomEvent('odysseus:context-usage', { detail: { sessionId: sid, ...data } })); } catch (_) {}
       const pct = Number(data.context_percent || 0);
       _renderContextHeaderRing(pill, pct);
       _renderCompactMenuContextIcon(pct);

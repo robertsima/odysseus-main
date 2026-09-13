@@ -1,4 +1,5 @@
 import os
+import json
 import logging
 import sqlite3
 from datetime import datetime, timezone
@@ -221,6 +222,12 @@ class Session(TimestampMixin, Base):
     total_output_tokens = Column(Integer, default=0)
     mode = Column(String, nullable=True)  # 'agent', 'chat', or 'research'
     crew_member_id = Column(String, nullable=True)  # links to crew_members.id
+    # Per-chat settings (approval mode, tools switched off for this chat, and
+    # the toggles/workspace/preset the chat last ran with) — see
+    # get_session_settings. JSON text so new keys need no migration.
+    settings_json = Column(Text, nullable=True)
+    # The chat this one was forked from, so a fork can link back to its source.
+    forked_from = Column(String, nullable=True)
 
     # Relationship to chat messages
     messages = relationship("ChatMessage", back_populates="session", cascade="all, delete-orphan")
@@ -1710,6 +1717,20 @@ def _migrate_add_crew_member_id():
     except Exception as e:
         logging.getLogger(__name__).warning(f"crew_member_id migration: {e}")
 
+def _migrate_add_session_settings_columns():
+    """Add per-chat settings_json and forked_from columns to sessions if missing."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(sessions)"))]
+            for name in ("settings_json", "forked_from"):
+                if name not in cols:
+                    conn.execute(text(f"ALTER TABLE sessions ADD COLUMN {name} TEXT"))
+                    conn.commit()
+                    logging.getLogger(__name__).info("Added %s column to sessions", name)
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"session settings migration: {e}")
+
+
 def _migrate_add_assistant_columns():
     """Add is_default_assistant + timezone columns to crew_members for the personal-assistant feature."""
     try:
@@ -1987,6 +2008,7 @@ def init_db():
     _migrate_add_notifications_enabled()
     _migrate_drop_ping_notes_tasks()
     _migrate_add_crew_member_id()
+    _migrate_add_session_settings_columns()
     _migrate_add_assistant_columns()
     _migrate_add_email_smtp_security()
     _migrate_seed_email_account()
@@ -2543,6 +2565,44 @@ def set_session_mode(session_id: str, mode: str) -> bool:
     except Exception:
         logger.warning("Failed to persist mode %r for session %s", mode, session_id)
         return False
+
+def get_session_settings(session_id: str) -> dict:
+    """A chat's saved settings dict ({} when none). Never raises."""
+    try:
+        with get_db_session() as db:
+            raw = db.query(Session.settings_json).filter(Session.id == session_id).scalar()
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        logger.warning("Failed to read settings for session %s", session_id)
+        return {}
+
+
+def update_session_settings(session_id: str, patch: dict) -> Optional[dict]:
+    """Merge ``patch`` into a chat's settings (a ``None`` value removes the key).
+    Returns the merged dict, or None when the write failed."""
+    try:
+        with get_db_session() as db:
+            row = db.query(Session).filter(Session.id == session_id).first()
+            if row is None:
+                return None
+            try:
+                current = json.loads(row.settings_json) if row.settings_json else {}
+            except (TypeError, ValueError):
+                current = {}
+            if not isinstance(current, dict):
+                current = {}
+            for key, value in (patch or {}).items():
+                if value is None:
+                    current.pop(key, None)
+                else:
+                    current[key] = value
+            row.settings_json = json.dumps(current, ensure_ascii=False, sort_keys=True)
+        return current
+    except Exception:
+        logger.warning("Failed to persist settings for session %s", session_id)
+        return None
+
 
 def get_session_by_id(session_id: str):
     """Get a session by ID"""

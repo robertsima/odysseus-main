@@ -295,3 +295,49 @@ def blocked_tools_for_owner(owner: Optional[str]) -> Set[str]:
     if owner_is_admin_or_single_user(owner):
         return set()
     return set(NON_ADMIN_BLOCKED_TOOLS)
+
+
+def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
+    """What every agent turn for ``owner`` must be denied, however it started.
+
+    The chat route merges the operator's global ``disabled_tools`` setting and
+    the user's privileges before entering the agent loop; turns that do not go
+    through that route (a ``send_to_session`` sub-agent, a background-job
+    follow-up) used to skip both, so a sub-agent could run a tool the operator
+    had switched off. This is the owner-level part of that merge, shared.
+    """
+    out: Set[str] = set()
+    try:
+        from src.settings import get_setting
+
+        configured = get_setting("disabled_tools", [])
+        if isinstance(configured, list):
+            out.update(str(name) for name in configured if name)
+    except Exception:
+        pass
+    privileges: dict = {}
+    try:
+        from core.auth import get_auth_manager
+
+        auth = get_auth_manager()
+        if owner and auth.is_configured:
+            privileges = auth.get_privileges(owner) or {}
+    except Exception as exc:
+        logger.debug("owner privileges unavailable for %s: %s", owner, exc)
+    if privileges:
+        if not privileges.get("can_use_bash", True):
+            out.update({"bash", "python", "read_file", "write_file"})
+        if not privileges.get("can_use_browser", True):
+            try:
+                from routes.chat_routes import _BROWSER_MCP_TOOLS
+
+                out.update(_BROWSER_MCP_TOOLS)
+            except Exception:
+                pass
+        if not privileges.get("can_use_documents", True):
+            out.update({"create_document", "edit_document", "update_document", "suggest_document"})
+        if not privileges.get("can_generate_images", True):
+            out.add("generate_image")
+        if not privileges.get("can_manage_memory", True):
+            out.update({"manage_memory", "manage_skills"})
+    return out

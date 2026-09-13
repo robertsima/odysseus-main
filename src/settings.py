@@ -141,6 +141,11 @@ DEFAULT_SETTINGS = {
     # delegated run starts in the current chat.
     "workbench_enabled": True,
     "workbench_auto_open": True,
+    # Default approval mode for chats that have not chosen one
+    # (auto | ask_risky | ask_all; see src/tool_approvals.py).
+    "agent_approval_mode": "auto",
+    # Named sub-agent worker profiles (src/agent_profiles.py).
+    "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
     # "auto" sentinel: it means "scale the budget to the model's context window"
     # (#1230) — so long-context models aren't capped at 6000. Set ANY OTHER value

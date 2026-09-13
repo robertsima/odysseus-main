@@ -1218,6 +1218,13 @@ def setup_chat_routes(
         _global_disabled = get_setting("disabled_tools", [])
         if _global_disabled and isinstance(_global_disabled, list):
             disabled_tools.update(_global_disabled)
+        # This chat's own settings: tools switched off for it, and whether
+        # risky tool calls stop for approval.
+        from core.database import get_session_settings, update_session_settings
+        from src import session_settings as _session_settings
+        _chat_settings = get_session_settings(session) if session else {}
+        disabled_tools.update(_chat_settings.get("disabled_tools") or [])
+        _approval_mode = _session_settings.effective_approval_mode(_chat_settings)
 
         # Light auto-escalation: the user is in chat mode and just expressed a
         # notes/calendar/email intent. Grant the relevant managers but withhold
@@ -1274,6 +1281,17 @@ def setup_chat_routes(
         _effective_mode = 'research' if effective_do_research else (chat_mode or 'chat')
         if _effective_mode in ('agent', 'research', 'chat'):
             set_session_mode(session, _effective_mode)
+        # Remember how this chat last ran, so reopening it restores its own
+        # toggles / workspace / preset rather than the last chat's.
+        if session and not incognito and not compare_mode:
+            try:
+                update_session_settings(session, _session_settings.last_used_from_request(
+                    chat_mode=chat_mode, allow_web=allow_web_search if chat_mode == "agent" else use_web,
+                    allow_bash=allow_bash, plan_mode=plan_mode, use_rag=use_rag,
+                    workspace=workspace, preset_id=preset_id,
+                ))
+            except Exception:
+                logger.debug("chat settings snapshot failed", exc_info=True)
 
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
@@ -1770,6 +1788,7 @@ def setup_chat_routes(
                         workspace=workspace or None,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
+                        approval_mode=_approval_mode,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1927,7 +1946,7 @@ def setup_chat_routes(
         if compare_mode:
             return StreamingResponse(_safe_stream(), media_type="text/event-stream")
 
-        agent_runs.start(session, _safe_stream())
+        agent_runs.start(session, _safe_stream(), owner=effective_user(request))
         return StreamingResponse(agent_runs.subscribe(session), media_type="text/event-stream")
 
     # ------------------------------------------------------------------ #
@@ -1968,6 +1987,39 @@ def setup_chat_routes(
                 return {"status": "streaming", "detached": True}
             raise HTTPException(404, "No active stream for this session")
         return rec
+
+    # ------------------------------------------------------------------ #
+    # GET /api/chat/runs — every chat of this user that is working or just
+    # finished, plus how many sub-agents / jobs each one has running. The
+    # sidebar polls this so running and finished dots survive a reload and
+    # show up in every tab, not only the one that sent the message.
+    # ------------------------------------------------------------------ #
+    @router.get("/api/chat/runs")
+    async def chat_runs(request: Request) -> Dict[str, Any]:
+        user = effective_user(request)
+        try:
+            owned = set(session_manager.get_sessions_for_user(user).keys())
+        except Exception:
+            owned = set()
+        runs = agent_runs.list_runs(owned)
+        children: Dict[str, int] = {}
+        try:
+            from src import agent_activity as _activity
+
+            for rec in _activity.list_runs(limit=200, active_only=True):
+                sid = rec.get("session_id")
+                if sid in owned and rec.get("source") != "odysseus":
+                    children[sid] = children.get(sid, 0) + 1
+        except Exception:
+            pass
+        for row in runs:
+            row.pop("owner", None)
+            row["agents_running"] = children.pop(row["session_id"], 0)
+        # Chats whose own turn ended but that still have a job or sub-agent going.
+        for sid, count in children.items():
+            runs.append({"session_id": sid, "status": "idle", "source": "chat", "started_at": None,
+                         "finished_at": None, "agents_running": count})
+        return {"runs": runs, "now": time.time()}
 
     # ------------------------------------------------------------------ #
     # POST /api/inject_context

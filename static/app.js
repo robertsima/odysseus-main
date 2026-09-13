@@ -20,6 +20,8 @@ import chatRenderer from './js/chatRenderer.js?v=20260722emailfastindex1';
 import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 import workbenchModule from './js/workbench.js';
+// Per-chat settings + the status line under the composer (self-initialising).
+import './js/chatSettings.js';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
@@ -2052,6 +2054,19 @@ function initializeEventListeners() {
   }
   window._syncRagIndicator = _syncRagIndicator;
   window._syncResearchIndicator = _syncResearchIndicator;
+  // Restore a chat's own toggles when it is reopened (js/chatSettings.js).
+  // The per-mode web/shell prefs are written before switching mode, because
+  // applyModeToToggles reads them from the toggle store. Plan mode is not
+  // restored: it is a one-message modifier, not a property of the chat.
+  window.__odysseusApplyChatToggles = (t) => {
+    if (!t || typeof t !== 'object') return;
+    const mode = (t.mode === 'agent' || t.mode === 'chat') ? t.mode : (loadToggleState().mode || 'chat');
+    if (typeof t.web === 'boolean') saveToolPref('web', mode, t.web);
+    if (typeof t.bash === 'boolean') saveToolPref('bash', mode, t.bash);
+    if (t.mode && window.__odysseusSetChatMode) window.__odysseusSetChatMode(mode);
+    else applyModeToToggles(mode);
+    if (typeof t.rag === 'boolean') _syncRagIndicator(t.rag);
+  };
   // Must be assigned at module level (not inside the function body) so the very
   // first external caller — group.js / sessions.js fire it before it has ever
   // run locally — finds it instead of silently no-op'ing (the "group indicator

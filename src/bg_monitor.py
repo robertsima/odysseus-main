@@ -93,7 +93,11 @@ async def _run_followup(rec: dict) -> bool:
                      source="bg_job", run_id=job_run, owner=getattr(sess, "owner", None),
                      data={"job_id": rec["id"], "exit_code": rec.get("exit_code"), "status": rec.get("status")},
                      detail=bg_jobs.result_text(rec)[:2000])
-    full, tool_events = await _drain_agent(sess, context, run_id=job_run)
+    from src import agent_runs
+
+    # The chat is working again: every sidebar should show it.
+    with agent_runs.track_external(sess.id, source="bg_job", owner=getattr(sess, "owner", None)):
+        full, tool_events = await _drain_agent(sess, context, run_id=job_run)
     activity.run_finished(sess.id, "bg_job", job_run, f"Background job {rec['id']}: chat continued",
                           status="failed" if rec.get("status") == "failed" else "completed",
                           owner=getattr(sess, "owner", None),

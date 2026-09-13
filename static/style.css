@@ -41328,7 +41328,11 @@ body.theme-frosted .modal {
    ═══════════════════════════════════════════════════════════════════════ */
 .workbench-modal-content,
 .workbench-diff-content,
-.agent-run-card {
+.agent-run-card,
+.agent-strip,
+.chat-status-line,
+.chat-settings-panel,
+.approval-card {
   --wb-accent: var(--accent, var(--red));
   --wb-run: var(--hl-function, #61afef);
   --wb-ok: var(--green);
@@ -41594,6 +41598,131 @@ table.wb-diff tr.wb-hunk:first-child td.wb-hunk-cell { border-top: 0; }
 .agent-run-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
 .agent-run-card .wb-btn { margin: 0; }
 
+/* Agents strip — the chat's live sub-agents / Claude Code jobs / background
+   jobs, directly above the composer (workbench.js renderAgentStrip). */
+.agent-strip { max-width: 800px; width: 100%; margin: 0 auto 6px; padding: 0 8px; box-sizing: border-box; font-size: 12px; }
+.agent-strip[hidden] { display: none; }
+.agent-strip > * { background: var(--panel); }
+.agent-strip-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 4px; border: 1px solid var(--wb-line); border-radius: var(--wb-r) var(--wb-r) 0 0; }
+.agent-strip-head:last-child { border-radius: var(--wb-r); }
+.agent-strip-toggle { display: inline-flex; align-items: center; gap: 7px; height: 22px; margin: 0; padding: 0 6px; border: 0; border-radius: var(--wb-r-sm); background: transparent; color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; }
+.agent-strip-toggle:hover { background: var(--wb-hover); }
+.agent-strip-toggle[aria-expanded="true"] .agent-run-caret { transform: rotate(90deg); }
+.agent-strip-label { font-weight: 600; }
+.agent-strip-rows { border: 1px solid var(--wb-line); border-top: 0; border-radius: 0 0 var(--wb-r) var(--wb-r); max-height: 150px; overflow: auto; }
+.agent-strip-row { display: grid; grid-template-columns: auto auto minmax(90px, 1.2fr) minmax(0, 2fr) auto auto auto; align-items: center; gap: 8px; min-height: 30px; padding: 3px 8px; border-top: 1px solid var(--wb-line); }
+.agent-strip-row:first-child { border-top: 0; }
+.agent-strip-row.done { opacity: 0.6; }
+.agent-strip-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.agent-strip-activity { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wb-muted); font-family: var(--wb-mono); font-size: 11px; }
+.agent-strip-time { font-family: var(--wb-mono); font-size: 11px; color: var(--wb-faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.agent-strip button { margin-top: 0; }
+@media (max-width: 640px) {
+  .agent-strip-row { grid-template-columns: auto minmax(0, 1fr) auto auto auto; gap: 6px; }
+  .agent-strip-row .wb-chip, .agent-strip-activity { display: none; }
+}
+
+/* Sidebar: a running chat's sub-agent count and Stop control (sessions.js). */
+.session-run-meta { display: inline-flex; align-items: center; gap: 4px; flex-shrink: 0; margin-left: 4px; }
+.session-agents-chip { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px; font-size: 10px; line-height: 1; color: var(--fg); background: color-mix(in srgb, var(--hl-function, #61afef) 28%, transparent); font-variant-numeric: tabular-nums; }
+.session-stop-btn { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; margin: 0; padding: 0; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--fg); opacity: 0; cursor: pointer; transition: opacity 0.12s, background 0.12s; }
+.session-item:hover .session-stop-btn, .session-item:focus-within .session-stop-btn, .session-stop-btn:focus-visible { opacity: 0.75; }
+.session-stop-btn:hover { opacity: 1; background: color-mix(in srgb, var(--red) 22%, transparent); border-color: color-mix(in srgb, var(--red) 45%, transparent); }
+@media (hover: none) { .session-stop-btn { opacity: 0.75; } }
+
+/* Approval card — a tool call held for the user's decision (chatRenderer.js
+   renderApprovalCard; src/tool_approvals.py). Extends .ask-user-card. */
+.approval-card { border-color: color-mix(in srgb, var(--wb-warn) 45%, var(--border)); box-shadow: inset 3px 0 0 var(--wb-warn); }
+.approval-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.approval-badge { display: inline-flex; align-items: center; height: 18px; padding: 0 8px; border-radius: 999px; font-size: 10.5px; font-weight: 600; color: var(--fg); background: color-mix(in srgb, var(--wb-warn) 22%, transparent); }
+.approval-tool { font-family: var(--wb-mono); font-size: 11.5px; color: var(--fg); background: none; padding: 0; }
+.approval-reason { font-size: 12px; line-height: 1.45; color: var(--fg); margin-bottom: 8px; }
+.approval-command { margin: 0 0 10px; padding: 8px 10px; max-height: 180px; overflow: auto; white-space: pre-wrap; word-break: break-word; font-family: var(--wb-mono); font-size: 11px; line-height: 1.5; color: var(--fg); background: var(--wb-sunken); border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); }
+.approval-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.approval-btn { display: inline-flex; align-items: center; height: 28px; margin: 0; padding: 0 12px; font: inherit; font-size: 12px; color: var(--fg); background: color-mix(in srgb, var(--fg) 5%, transparent); border: 1px solid var(--border); border-radius: var(--wb-r-sm); cursor: pointer; }
+.approval-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--fg) 10%, transparent); }
+.approval-btn:disabled { opacity: 0.55; cursor: default; }
+.approval-approve { background: color-mix(in srgb, var(--wb-ok) 20%, transparent); border-color: color-mix(in srgb, var(--wb-ok) 55%, var(--border)); }
+.approval-approve:hover:not(:disabled) { background: color-mix(in srgb, var(--wb-ok) 30%, transparent); }
+.approval-deny:hover:not(:disabled) { background: color-mix(in srgb, var(--wb-bad) 18%, transparent); border-color: color-mix(in srgb, var(--wb-bad) 55%, var(--border)); }
+.approval-btn.is-busy { opacity: 0.8; }
+.approval-status:empty { display: none; }
+.approval-status { margin-top: 6px; font-size: 11.5px; color: var(--wb-bad); }
+:root.light .approval-btn { background: color-mix(in srgb, var(--fg) 5%, transparent); }
+:root.light .approval-approve { background: color-mix(in srgb, var(--wb-ok) 20%, transparent); }
+
+/* Status line under the composer (chatSettings.js). */
+.chat-status-line { display: flex; align-items: center; flex-wrap: wrap; gap: 2px 4px; max-width: 800px; width: 100%; margin: 4px auto 0; padding: 0 12px; box-sizing: border-box; font-size: 11px; color: var(--wb-muted); }
+.chat-status-line[hidden] { display: none; }
+.csl-item { display: inline-flex; align-items: center; gap: 5px; height: 20px; margin: 0; padding: 0 6px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; font-size: 11px; line-height: 1; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+button.csl-item { cursor: pointer; }
+button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
+.csl-model { color: var(--fg); font-family: var(--wb-mono); }
+.csl-workspace { font-family: var(--wb-mono); }
+.csl-meter { display: inline-block; width: 28px; height: 4px; border-radius: 2px; background: color-mix(in srgb, var(--fg) 14%, transparent); overflow: hidden; }
+.csl-meter i { display: block; height: 100%; background: var(--wb-run); }
+.csl-ctx.warn .csl-meter i { background: var(--wb-warn); }
+.csl-ctx.danger .csl-meter i { background: var(--wb-bad); }
+.csl-mode-ask_risky, .csl-mode-ask_all { color: var(--fg); }
+.csl-mode-ask_risky::after, .csl-mode-ask_all::after { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--wb-warn); }
+.csl-attn { color: var(--fg); }
+.csl-fork { font-family: var(--wb-mono); }
+.csl-spacer { flex: 1 1 auto; }
+.csl-gear { opacity: 0.75; }
+.chat-status-line button { margin-top: 0; }
+:root.light .csl-item { background: transparent; }
+:root.light button.csl-item:hover { background: var(--wb-hover); }
+
+/* Chat settings panel — opens above the status line. */
+.chat-settings-panel { max-width: 800px; width: calc(100% - 16px); margin: 0 auto 6px; box-sizing: border-box; max-height: min(60vh, 520px); overflow: auto; padding: 10px 12px 12px; font-size: 12px; color: var(--fg); background: var(--panel); border: 1px solid var(--wb-line); border-radius: var(--wb-r); box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35); }
+.csp-head { position: sticky; top: -10px; z-index: 1; display: flex; align-items: center; gap: 8px; margin: -10px -12px 8px; padding: 8px 12px; background: var(--panel); border-bottom: 1px solid var(--wb-line); }
+.csp-title { font-weight: 600; font-size: 13px; }
+.csp-sub { color: var(--wb-muted); font-size: 11px; }
+.csp-close { margin: 0 0 0 auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--wb-muted); font-size: 16px; line-height: 1; cursor: pointer; }
+.csp-close:hover { color: var(--fg); background: var(--wb-hover); }
+.csp-section { margin-bottom: 12px; }
+.csp-section h4 { display: flex; align-items: baseline; gap: 8px; margin: 4px 0 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--wb-muted); }
+.csp-count { font-weight: normal; letter-spacing: 0; text-transform: none; color: var(--wb-faint); }
+.csp-radio { display: flex; gap: 8px; align-items: flex-start; padding: 6px 8px; border-radius: var(--wb-r-sm); cursor: pointer; }
+.csp-radio:hover { background: var(--wb-hover); }
+.csp-radio input { margin: 2px 0 0; accent-color: var(--wb-accent); }
+.csp-radio span { display: flex; flex-direction: column; gap: 2px; }
+.csp-radio small { color: var(--wb-muted); font-size: 11px; line-height: 1.4; }
+.csp-tools-actions { display: flex; justify-content: flex-end; margin: -4px 0 4px; }
+.csp-link { margin: 0; padding: 0; border: 0; background: none; color: var(--wb-muted); font: inherit; font-size: 11px; cursor: pointer; text-decoration: underline; }
+.csp-link:hover { color: var(--fg); }
+.csp-tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+.csp-group { margin: 0; padding: 6px 8px 8px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); min-width: 0; }
+.csp-group legend { padding: 0 4px; font-size: 11px; color: var(--wb-muted); }
+.csp-tool { display: flex; align-items: center; gap: 6px; padding: 2px 0; cursor: pointer; min-width: 0; }
+.csp-tool input { margin: 0; accent-color: var(--wb-accent); }
+.csp-tool code { font-family: var(--wb-mono); font-size: 11px; background: none; padding: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.csp-tool.is-global { opacity: 0.5; cursor: default; }
+.csp-note { margin: 4px 0 0; font-size: 11px; color: var(--wb-faint); }
+.csp-empty { padding: 10px; color: var(--wb-muted); }
+.chat-settings-panel button { margin-top: 0; }
+
+/* Settings › Workbench: agent profile editor (settings.js initAgentProfilesEditor). */
+.agent-profiles-title { margin: 14px 0 4px; font-size: 13px; font-weight: 600; }
+.agent-profiles { display: flex; flex-direction: column; gap: 8px; }
+.agent-profile { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--border) 60%, transparent); border-radius: 8px; background: var(--bg); }
+.agent-profile-head { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(140px, 1.6fr) 72px auto; gap: 8px; align-items: end; }
+.agent-profile-field { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 11px; }
+.agent-profile-field > span { color: color-mix(in srgb, var(--fg) 60%, transparent); }
+.agent-profile-field input, .agent-profile-field textarea { width: 100%; box-sizing: border-box; font: inherit; font-size: 12px; min-width: 0; }
+.agent-profile-field textarea { resize: vertical; min-height: 54px; }
+.agent-profile-remove { height: 28px; }
+.agent-profiles-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+@media (max-width: 600px) { .agent-profile-head { grid-template-columns: 1fr 1fr; } }
+
+/* Search palette: the message a result pointed at (search-chat.js). */
+.search-hit-flash { animation: search-hit-flash 2.2s ease-out; border-radius: 8px; }
+@keyframes search-hit-flash {
+  0%, 30% { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent, var(--red)) 70%, transparent); background-color: color-mix(in srgb, var(--accent, var(--red)) 10%, transparent); }
+  100% { box-shadow: 0 0 0 2px transparent; background-color: transparent; }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .wb-pill.run i { animation: none; }
+  .search-hit-flash { animation: none; outline: 2px solid color-mix(in srgb, var(--accent, var(--red)) 70%, transparent); }
 }

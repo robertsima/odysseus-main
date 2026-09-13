@@ -138,3 +138,38 @@ async def test_pr_endpoints_report_blockers_and_post_feedback(env, monkeypatch):
     assert out["state"] == "CHANGES_REQUESTED" and posted["review"][1] == "REQUEST_CHANGES"
     notes = [e for e in act.history("s9") if e["kind"] == "note"]
     assert len(notes) == 2 and notes[0]["source"] == "worktree" and notes[0]["data"]["pull_request"] == 3
+
+
+async def test_stop_run_dispatches_by_source(env, monkeypatch):
+    ep = _endpoints()
+    stop = ep[("POST", "/api/workbench/runs/{run_id}/stop")]
+
+    # A running sub-agent: stopped through the headless registry.
+    import src.headless_agent as headless
+
+    sub = act.run_started("s1", "session", "Sub-agent · worker: look", owner="alice")
+    asked = []
+    monkeypatch.setattr(headless, "request_stop", lambda rid: asked.append(rid) or rid == sub)
+    assert (await stop(_req(), run_id=sub)) == {"stopped": True, "how": "headless"}
+
+    # A background job: killed, which also closes its run.
+    import src.bg_jobs as bg_jobs
+
+    job = act.run_started("s1", "bg_job", "Background job: sleep", run_id="bg_job-j1", data={"job_id": "j1"})
+    killed = []
+    monkeypatch.setattr(bg_jobs, "kill", lambda jid: killed.append(jid) or {"status": "failed"})
+    out = await stop(_req(), run_id=job)
+    assert out["how"] == "bg_job" and killed == ["j1"]
+
+    # Finished and unknown runs.
+    act.run_finished("s1", "session", sub, "done")
+    assert (await stop(_req(), run_id=sub))["stopped"] is False
+    with pytest.raises(HTTPException) as exc:
+        await stop(_req(), run_id="nope")
+    assert exc.value.status_code == 404
+
+    # A pipeline has no per-run control.
+    pipe = act.run_started("s1", "pipeline", "Pipeline: x")
+    with pytest.raises(HTTPException) as exc:
+        await stop(_req(), run_id=pipe)
+    assert exc.value.status_code == 409

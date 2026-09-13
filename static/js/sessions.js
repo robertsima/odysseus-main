@@ -276,6 +276,8 @@ async function _cleanupIncognitoSessions() {
 const _researchingSessions = new Set();
 const _streamingSessions = new Set();   // Background chat streams (not polled against research API)
 const _completedSessions = new Set();   // Sessions with completed background streams
+const _serverRunning = new Set();       // Chats the server reports as working (see _pollServerRuns)
+const _serverAgents = new Map();        // session id -> sub-agents / jobs running
 let _researchPollTimer = null;
 
 // Session list keyboard navigation state
@@ -526,7 +528,7 @@ function createSessionItem(s) {
 
   // Session type icon
   const icon = document.createElement('span');
-  const _isFork = s.name && (s.name.startsWith('Fork:') || s.name.startsWith('\u2ADD'));
+  const _isFork = !!s.forked_from || (s.name && (s.name.startsWith('Fork:') || s.name.startsWith('\u2ADD')));
   const _isGroup = s.name && s.name.startsWith('[GRP]');
   icon.className = 'session-icon' + (s.has_documents ? ' has-docs' : '');
   if (_isGroup) {
@@ -534,6 +536,8 @@ function createSessionItem(s) {
   } else if (_isFork) {
     icon.textContent = '\u2ADD';
     icon.style.fontSize = '14px';
+    const _src = s.forked_from && sessions.find((x) => x.id === s.forked_from);
+    icon.title = _src ? `Forked from \u201C${_src.name || 'untitled chat'}\u201D` : 'Forked chat';
   } else if (s.has_documents) {
     icon.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>';
   } else if (s.has_images) {
@@ -1836,6 +1840,9 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
     if (prevSessionId !== id && window.documentModule?.clearSelection) {
       try { window.documentModule.clearSelection(); } catch {}
     }
+    // Whatever finished in the chat being left or opened has now been seen.
+    _markSessionSeen(prevSessionId);
+    _markSessionSeen(id);
     currentSessionId = id;
     try { window.__odysseusLastSelectedSessionId = id; } catch (_) {}
     // Identify Assistant / task-output sessions so we don't "trap" the user
@@ -2532,12 +2539,16 @@ window.addEventListener('hashchange', () => {
 function _updateResearchDots() {
   document.querySelectorAll('.session-star[data-session-id]').forEach(function(star) {
     var sid = star.dataset.sessionId;
-    var isRunning = _researchingSessions.has(sid) || _streamingSessions.has(sid);
+    var isRunning = _researchingSessions.has(sid) || _streamingSessions.has(sid) || _serverRunning.has(sid);
     var isCompleted = _completedSessions.has(sid) && !isRunning;
     var listItem = star.closest('.list-item');
     star.classList.toggle('processing', isRunning);
     star.classList.toggle('notify', isCompleted);
-    if (listItem) listItem.classList.toggle('stream-complete', isCompleted);
+    if (listItem) {
+      listItem.classList.toggle('stream-complete', isCompleted);
+      listItem.classList.toggle('session-running', isRunning);
+      _decorateRunRow(listItem, sid, isRunning && !_researchingSessions.has(sid));
+    }
 
     if (isRunning || isCompleted) {
       star.style.opacity = '1';
@@ -2665,6 +2676,124 @@ function _updateRailNotifs() {
   }
   // Trigger rail sync so buttons become visible
   if (window._syncRailDynamic) window._syncRailDynamic();
+}
+
+// ── Server-side run state ──
+// The server knows which chats are working (a streamed turn, a sub-agent
+// answering in a child chat, a background-job follow-up) and which finished
+// recently. Polling it is what makes the sidebar's running / finished dots
+// survive a reload and agree across tabs; before, only the tab that sent the
+// message knew. `agents_running` counts sub-agents and jobs a chat has going.
+const _LAST_SEEN_KEY = 'odysseus-session-last-seen';
+const _pageOpenedAt = Date.now() / 1000;
+let _runsPollTimer = null;
+let _runsPollBusy = false;
+
+function _lastSeenMap() {
+  try { return JSON.parse(localStorage.getItem(_LAST_SEEN_KEY) || '{}') || {}; } catch (_) { return {}; }
+}
+function _markSessionSeen(sid) {
+  if (!sid) return;
+  try {
+    const map = _lastSeenMap();
+    map[sid] = Date.now() / 1000;
+    const ids = Object.keys(map);
+    if (ids.length > 400) ids.sort((a, b) => map[a] - map[b]).slice(0, ids.length - 400).forEach((id) => delete map[id]);
+    localStorage.setItem(_LAST_SEEN_KEY, JSON.stringify(map));
+  } catch (_) {}
+}
+
+async function _pollServerRuns() {
+  if (_runsPollBusy) return;
+  _runsPollBusy = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/chat/runs`, { credentials: 'same-origin' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const seen = _lastSeenMap();
+    const running = new Set();
+    _serverAgents.clear();
+    // The chat on screen is being read as it finishes.
+    if (currentSessionId) { _markSessionSeen(currentSessionId); seen[currentSessionId] = Date.now() / 1000; }
+    for (const run of (data.runs || [])) {
+      const sid = run.session_id;
+      if (!sid) continue;
+      if (run.agents_running) _serverAgents.set(sid, run.agents_running);
+      if (run.status === 'running') { running.add(sid); continue; }
+      if (!run.finished_at || run.status === 'stopped' || run.status === 'idle' || sid === currentSessionId) continue;
+      const since = seen[sid] || (_pageOpenedAt - 1800);
+      if (run.finished_at > since) _completedSessions.add(sid);
+    }
+    _serverRunning.clear();
+    running.forEach((sid) => _serverRunning.add(sid));
+    _updateResearchDots();
+    _updateRailNotifs();
+  } catch (_) {
+    // Offline or logged out: keep the last known state.
+  } finally {
+    _runsPollBusy = false;
+  }
+}
+
+function _scheduleRunsPoll() {
+  if (_runsPollTimer) clearTimeout(_runsPollTimer);
+  const delay = document.visibilityState === 'hidden' ? 20000 : 4000;
+  _runsPollTimer = setTimeout(async () => { await _pollServerRuns(); _scheduleRunsPoll(); }, delay);
+}
+
+export function refreshRunState() { return _pollServerRuns(); }
+
+/** Sub-agent count and a Stop control on a sidebar row while its chat runs. */
+function _decorateRunRow(listItem, sid, stoppable) {
+  let meta = listItem.querySelector(':scope > .session-run-meta');
+  const agents = _serverAgents.get(sid) || 0;
+  if (!stoppable && !agents) { if (meta) meta.remove(); return; }
+  if (!meta) {
+    meta = document.createElement('span');
+    meta.className = 'session-run-meta';
+    const grow = listItem.querySelector(':scope > .grow');
+    if (grow && grow.nextSibling) listItem.insertBefore(meta, grow.nextSibling);
+    else listItem.appendChild(meta);
+  }
+  const key = `${agents}|${stoppable ? 1 : 0}`;
+  if (meta.dataset.key === key) return;
+  meta.dataset.key = key;
+  meta.innerHTML = '';
+  if (agents) {
+    const chip = document.createElement('span');
+    chip.className = 'session-agents-chip';
+    chip.textContent = String(agents);
+    chip.title = `${agents} sub-agent${agents === 1 ? '' : 's'} or job${agents === 1 ? '' : 's'} running`;
+    meta.appendChild(chip);
+  }
+  if (stoppable) {
+    const stop = document.createElement('button');
+    stop.type = 'button';
+    stop.className = 'session-stop-btn';
+    stop.title = 'Stop this chat';
+    stop.setAttribute('aria-label', 'Stop this chat');
+    stop.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>';
+    stop.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      stop.disabled = true;
+      try {
+        const r = await fetch(`${API_BASE}/api/chat/stop/${encodeURIComponent(sid)}`, { method: 'POST', credentials: 'same-origin' });
+        const body = r.ok ? await r.json() : {};
+        uiModule.showToast(body.stopped ? 'Stopped' : 'Nothing to stop');
+      } catch (_) {
+        uiModule.showToast('Could not stop the chat', 'error');
+      }
+      _streamingSessions.delete(sid);
+      _pollServerRuns();
+    });
+    meta.appendChild(stop);
+  }
+}
+
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') _pollServerRuns(); _scheduleRunsPoll(); });
+  setTimeout(() => { _pollServerRuns(); _scheduleRunsPoll(); }, 1500);
 }
 
 /**

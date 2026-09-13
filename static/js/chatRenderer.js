@@ -2199,8 +2199,114 @@ export function removeAskUserCards(root) {
  * same UI can be used both for a live SSE event and for a persisted tool event
  * after a session reload.
  */
+/**
+ * A tool call held for approval (src/tool_approvals.py). The decision is
+ * recorded server-side as a grant, then sent as the user's reply so the agent
+ * re-issues the call — or, on Deny, picks another way.
+ */
+function renderApprovalCard(aq, options) {
+  const chatBox = document.getElementById('chat-history');
+  const ap = aq.approval || {};
+  if (!chatBox || !ap.id) return null;
+  const renderOptions = options || {};
+  removeAskUserCards(chatBox);
+
+  const card = document.createElement('div');
+  card.className = 'ask-user-card approval-card';
+  card.setAttribute('role', 'group');
+  card.setAttribute('aria-label', 'Approval needed');
+  card.tabIndex = -1;
+
+  const head = document.createElement('div');
+  head.className = 'approval-head';
+  const badge = document.createElement('span');
+  badge.className = 'approval-badge';
+  badge.textContent = 'Approval needed';
+  const tool = document.createElement('code');
+  tool.className = 'approval-tool';
+  tool.textContent = ap.tool || 'tool';
+  head.append(badge, tool);
+  card.appendChild(head);
+
+  const reason = document.createElement('div');
+  reason.className = 'approval-reason';
+  reason.textContent = `This call ${ap.reason || 'needs your approval'}.`;
+  card.appendChild(reason);
+
+  if (ap.command) {
+    const pre = document.createElement('pre');
+    pre.className = 'approval-command';
+    pre.textContent = ap.command;
+    card.appendChild(pre);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'approval-actions';
+  const status = document.createElement('div');
+  status.className = 'approval-status';
+  status.setAttribute('role', 'status');
+
+  const decide = async (decision, button) => {
+    const sid = window.sessionModule?.getCurrentSessionId?.();
+    actions.querySelectorAll('button').forEach((b) => { b.disabled = true; });
+    button.classList.add('is-busy');
+    let expired = false;
+    try {
+      const res = await fetch(`/api/session/${encodeURIComponent(sid || '')}/approvals/${encodeURIComponent(ap.id)}`, {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ decision }),
+      });
+      expired = res.status === 404;
+      if (!res.ok && !expired) throw new Error(`${res.status}`);
+    } catch (err) {
+      status.textContent = 'Could not record the decision. Try again.';
+      actions.querySelectorAll('button').forEach((b) => { b.disabled = false; });
+      button.classList.remove('is-busy');
+      return;
+    }
+    if (expired && decision !== 'deny') {
+      uiModule.showToast('That approval expired (server restarted); the agent will ask again.', 'warning');
+    }
+    const toolName = ap.tool || 'tool';
+    const text = decision === 'deny'
+      ? `Denied: don't run that \`${toolName}\` call. Tell me what you'll do instead.`
+      : decision === 'always'
+        ? `Approved, and always allow \`${toolName}\` in this chat. Run that call now.`
+        : `Approved: run that \`${toolName}\` call now.`;
+    card.remove();
+    try { document.dispatchEvent(new CustomEvent('odysseus:approval-decided', { detail: { id: ap.id, decision } })); } catch (_) {}
+    const input = uiModule.el('message');
+    if (input) input.value = text;
+    const sendButton = document.querySelector('.send-btn');
+    if (sendButton) sendButton.click();
+  };
+
+  const mk = (label, cls, decision, title) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = `approval-btn ${cls}`;
+    b.textContent = label;
+    if (title) b.title = title;
+    b.addEventListener('click', () => decide(decision, b));
+    actions.appendChild(b);
+    return b;
+  };
+  const approve = mk('Approve once', 'approval-approve', 'once', 'Run this exact call once');
+  mk(`Always allow ${ap.tool || 'this tool'}`, 'approval-always', 'always', 'Allow this tool without asking for the rest of this chat');
+  mk('Deny', 'approval-deny', 'deny', 'Do not run it');
+  card.appendChild(actions);
+  card.appendChild(status);
+
+  chatBox.appendChild(card);
+  if (renderOptions.scroll !== false) card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  if (renderOptions.focus !== false) { try { approve.focus(); } catch (_) {} }
+  return card;
+}
+
 export function renderAskUserCard(payload, options) {
   const aq = payload || {};
+  if (aq.approval) return renderApprovalCard(aq, options);
   const opts = Array.isArray(aq.options) ? aq.options : [];
   const chatBox = document.getElementById('chat-history');
   if (!chatBox || !aq.question || opts.length < 2) return null;

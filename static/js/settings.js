@@ -2677,18 +2677,29 @@ function initContextProfiles() {
 async function initWorkbenchSettings() {
   var card = el('set-workbenchCard');
   if (!card) return;
-  var f = { enabled: el('set-wbEnabled'), autoOpen: el('set-wbAutoOpen'), stream: el('set-wbStream') };
+  var f = { enabled: el('set-wbEnabled'), autoOpen: el('set-wbAutoOpen'), stream: el('set-wbStream'), approval: el('set-wbApproval') };
   var msg = el('set-wbMsg');
   function fill(s) {
     if (!s) return;
     if (f.enabled) f.enabled.checked = s.workbench_enabled !== false;
     if (f.autoOpen) f.autoOpen.checked = s.workbench_auto_open !== false;
     if (f.stream) f.stream.checked = s.claude_code_stream_transcript !== false;
+    if (f.approval) f.approval.value = s.agent_approval_mode || 'auto';
   }
+  var loaded = null;
   try {
     var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    if (res.ok) fill(await res.json());
+    if (res.ok) { loaded = await res.json(); fill(loaded); }
   } catch (e) {}
+  initAgentProfilesEditor(loaded && Array.isArray(loaded.agent_profiles) ? loaded.agent_profiles : []);
+  if (f.approval) f.approval.addEventListener('change', async function () {
+    try {
+      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_approval_mode: f.approval.value }) });
+      msg.textContent = r.ok ? 'Saved' : 'Not saved (' + r.status + ')';
+      msg.style.color = r.ok ? 'var(--fg)' : 'var(--red)';
+    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+  });
   async function save() {
     try {
       var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
@@ -2709,6 +2720,99 @@ async function initWorkbenchSettings() {
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
   [f.enabled, f.autoOpen, f.stream].forEach(function (x) { if (x) x.addEventListener('change', save); });
+}
+
+// ── Agent profiles (Workbench card) ──
+// A list editor for the `agent_profiles` setting (validated server-side by
+// src/agent_profiles.validate_profiles through /api/auth/settings).
+function initAgentProfilesEditor(initial) {
+  var list = el('set-agentProfiles');
+  var addBtn = el('set-agentProfileAdd');
+  var saveBtn = el('set-agentProfileSave');
+  var note = el('set-agentProfileMsg');
+  if (!list || list.dataset.wired) return;
+  list.dataset.wired = '1';
+  var profiles = (initial || []).map(function (p) { return Object.assign({}, p); });
+
+  function field(label, input, hint) {
+    var wrap = document.createElement('label');
+    wrap.className = 'agent-profile-field';
+    var span = document.createElement('span');
+    span.textContent = label;
+    if (hint) span.title = hint;
+    wrap.appendChild(span);
+    wrap.appendChild(input);
+    return wrap;
+  }
+  function render() {
+    list.textContent = '';
+    if (!profiles.length) {
+      var empty = document.createElement('div');
+      empty.className = 'admin-toggle-sub';
+      empty.textContent = 'No profiles yet.';
+      list.appendChild(empty);
+      return;
+    }
+    profiles.forEach(function (p, i) {
+      var card = document.createElement('div');
+      card.className = 'agent-profile';
+      var mk = function (tag, key, attrs) {
+        var inp = document.createElement(tag);
+        inp.className = tag === 'textarea' ? 'settings-textarea' : 'settings-input';
+        Object.keys(attrs || {}).forEach(function (a) { inp.setAttribute(a, attrs[a]); });
+        var v = p[key];
+        inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
+        inp.addEventListener('input', function () {
+          p[key] = key === 'max_rounds' ? inp.value : (key === 'disabled_tools'
+            ? inp.value.split(/[\s,]+/).filter(Boolean) : inp.value);
+          note.textContent = 'Unsaved changes';
+          note.style.color = 'var(--fg)';
+        });
+        return inp;
+      };
+      var head = document.createElement('div');
+      head.className = 'agent-profile-head';
+      head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
+      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'empty = calling chat’s model' }), 'model or model@endpoint'));
+      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '1', max: '40', placeholder: '12' })));
+      var remove = document.createElement('button');
+      remove.type = 'button';
+      remove.className = 'ats-btn agent-profile-remove';
+      remove.textContent = 'Remove';
+      remove.addEventListener('click', function () { profiles.splice(i, 1); render(); note.textContent = 'Unsaved changes'; });
+      head.appendChild(remove);
+      card.appendChild(head);
+      card.appendChild(field('Description', mk('input', 'description', { placeholder: 'What this worker is for (shown to the agent)', maxlength: '300' })));
+      card.appendChild(field('Tools it may not use', mk('input', 'disabled_tools', { placeholder: 'e.g. bash, send_email, write_file' })));
+      card.appendChild(field('Instructions', mk('textarea', 'instructions', { rows: '3', placeholder: 'System instructions for this worker' })));
+      list.appendChild(card);
+    });
+  }
+  addBtn && addBtn.addEventListener('click', function () {
+    profiles.push({ name: '', description: '', model: '', max_rounds: 12, disabled_tools: [], instructions: '' });
+    render();
+    var inputs = list.querySelectorAll('.agent-profile:last-child input');
+    if (inputs[0]) inputs[0].focus();
+  });
+  saveBtn && saveBtn.addEventListener('click', async function () {
+    note.textContent = 'Saving…';
+    note.style.color = 'var(--fg)';
+    try {
+      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_profiles: profiles }) });
+      var body = null;
+      try { body = await r.json(); } catch (e) {}
+      if (!r.ok) {
+        note.textContent = (body && body.detail) || ('Not saved (' + r.status + ')');
+        note.style.color = 'var(--red)';
+        return;
+      }
+      profiles = ((body && body.agent_profiles) || profiles).map(function (p) { return Object.assign({}, p); });
+      render();
+      note.textContent = 'Saved';
+    } catch (e) { note.textContent = 'Failed to save'; note.style.color = 'var(--red)'; }
+  });
+  render();
 }
 
 async function initClaudeCodeSettings() {

@@ -567,9 +567,10 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "The id of the chat to send the message to"},
-                    "message": {"type": "string", "description": "The message to send"},
-                    "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"}
+                    "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
+                    "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
+                    "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
+                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent."}
                 },
                 "required": ["session_id", "message"]
             }
@@ -1752,9 +1753,12 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     elif tool_type == "list_sessions":
         content = args.get("filter", "")
     elif tool_type == "send_to_session":
-        if args.get("mode"):
-            content = json.dumps({"session_id": args.get("session_id", ""), "message": args.get("message", ""),
-                                  "mode": args.get("mode")})
+        if args.get("mode") or args.get("profile"):
+            payload = {"session_id": args.get("session_id", ""), "message": args.get("message", ""),
+                       "mode": args.get("mode") or "agent"}
+            if args.get("profile"):
+                payload["profile"] = args.get("profile")
+            content = json.dumps(payload)
         else:
             content = args.get("session_id", "") + "\n" + args.get("message", "")
     elif tool_type == "pipeline":

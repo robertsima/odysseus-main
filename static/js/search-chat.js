@@ -125,15 +125,41 @@ function renderResults(data, query) {
   container.querySelectorAll('.search-result-item').forEach(item => {
     item.addEventListener('click', () => {
       const sid = item.dataset.session;
-      navigateToSession(sid);
+      navigateToSession(sid, results[Number(item.dataset.index)]);
     });
   });
 }
 
-function navigateToSession(sessionId) {
+/** Open the chat, then bring the matching message into view and flash it.
+ *  Found by its database id when the renderer stamped one, else by snippet
+ *  text; a message older than the loaded page just opens the chat. */
+async function navigateToSession(sessionId, hit) {
   closeSearch();
-  if (sessionModule && sessionModule.selectSession) {
-    sessionModule.selectSession(sessionId);
+  if (!sessionModule || !sessionModule.selectSession) return;
+  await sessionModule.selectSession(sessionId);
+  if (!hit) return;
+  const plain = String(hit.content_snippet || '').replace(/<[^>]+>/g, '').replace(/…|\.\.\./g, ' ').trim();
+  const probe = plain.split(/\s+/).filter((w) => w.length > 3).slice(0, 6).join(' ').toLowerCase();
+  const find = () => {
+    const box = document.getElementById('chat-history');
+    if (!box) return null;
+    if (hit.message_id) {
+      const byId = box.querySelector(`[data-db-id="${CSS.escape(String(hit.message_id))}"]`);
+      if (byId) return byId;
+    }
+    if (!probe) return null;
+    const norm = (s) => s.replace(/\s+/g, ' ').toLowerCase();
+    return Array.from(box.querySelectorAll('.msg')).find((m) => norm(m.textContent || '').includes(probe)) || null;
+  };
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const target = find();
+    if (target) {
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      target.classList.add('search-hit-flash');
+      setTimeout(() => target.classList.remove('search-hit-flash'), 2200);
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 150));
   }
 }
 
@@ -169,7 +195,7 @@ function handleKeydown(e) {
     e.preventDefault();
     if (selectedIndex >= 0 && items[selectedIndex]) {
       const sid = items[selectedIndex].dataset.session;
-      navigateToSession(sid);
+      navigateToSession(sid, results[Number(items[selectedIndex].dataset.index)]);
     }
   }
 }

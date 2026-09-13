@@ -156,6 +156,15 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
     jobs = _load()
     jobs[job_id] = rec
     _save(jobs)
+    # Visible (and stoppable) as a run of its chat from the moment it starts;
+    # the monitor closes the run when its follow-up turn completes.
+    try:
+        from src import agent_activity as activity
+
+        activity.run_started(session_id, "bg_job", f"Background job: {' '.join(command.split())[:90]}",
+                             run_id=f"bg_job-{job_id}", data={"job_id": job_id, "command": command[:200]})
+    except Exception:
+        pass
     return rec
 
 
@@ -280,6 +289,15 @@ def kill(job_id: str) -> Optional[Dict[str, Any]]:
         rec["killed"] = True
         rec["followed_up"] = True
         _save(jobs)
+        # No follow-up will close this run (followed_up is set), so close it here.
+        try:
+            from src import agent_activity as activity
+
+            activity.run_finished(rec.get("session_id"), "bg_job", f"bg_job-{job_id}",
+                                  f"Background job {job_id} stopped", status="cancelled",
+                                  data={"job_id": job_id, "exit_code": -1})
+        except Exception:
+            pass
     return rec
 
 

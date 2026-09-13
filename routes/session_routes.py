@@ -269,7 +269,8 @@ def setup_session_routes(
             last_msg_map = {}
             mode_map = {}
             msg_count_map = {}
-            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count).filter(DbSession.archived == False)
+            forked_map = {}
+            q = db.query(DbSession.id, DbSession.folder, DbSession.total_input_tokens, DbSession.total_output_tokens, DbSession.is_important, DbSession.created_at, DbSession.updated_at, DbSession.last_message_at, DbSession.mode, DbSession.message_count, DbSession.forked_from).filter(DbSession.archived == False)
             q = owner_filter(q, DbSession, user)
             rows = q.all()
             for row in rows:
@@ -287,6 +288,7 @@ def setup_session_routes(
                 )
                 mode_map[row.id] = row.mode
                 msg_count_map[row.id] = row.message_count or 0
+                forked_map[row.id] = row.forked_from
             # Sessions with active documents that have content
             from sqlalchemy import func
             doc_session_ids = set(
@@ -319,7 +321,8 @@ def setup_session_routes(
                      "has_documents": s.id in doc_session_ids,
                      "has_images": s.id in img_session_ids,
                      "mode": mode_map.get(s.id),
-                     "message_count": msg_count_map.get(s.id, 0)}
+                     "message_count": msg_count_map.get(s.id, 0),
+                     "forked_from": forked_map.get(s.id)}
                     for s in user_sessions.values()
                     if not s.archived
                     and (s.name or "").strip() not in ("Nobody", "Incognito")
@@ -972,6 +975,91 @@ def setup_session_routes(
 
         except KeyError:
             raise HTTPException(404, f"Session {session_id} not found")
+
+    # ── Per-chat settings and tool approvals ──────────────────────────────
+    def _settings_payload(session_id: str) -> dict:
+        from core.database import get_session_settings
+        from src import session_settings, tool_approvals
+
+        settings = get_session_settings(session_id)
+        forked = None
+        parent = None
+        db = SessionLocal()
+        try:
+            def _link(target_id):
+                src_row = db.query(DbSession.id, DbSession.name, DbSession.archived).filter(DbSession.id == target_id).first()
+                return ({"id": src_row.id, "name": src_row.name, "archived": bool(src_row.archived)}
+                        if src_row else {"id": target_id, "name": None, "missing": True})
+
+            row = db.query(DbSession.forked_from).filter(DbSession.id == session_id).first()
+            if row and row.forked_from:
+                forked = _link(row.forked_from)
+            # A sub-agent chat started by send_to_session(session_id="new").
+            if settings.get("parent_session"):
+                parent = _link(settings["parent_session"])
+        finally:
+            db.close()
+        return {
+            "settings": settings,
+            "approval_mode": session_settings.effective_approval_mode(settings),
+            "approval_modes": list(tool_approvals.MODES),
+            "always_allowed_tools": tool_approvals.chat_grants(session_id),
+            "forked_from": forked,
+            "parent_session": parent,
+        }
+
+    @router.get("/session/{session_id}/settings")
+    async def get_chat_settings(request: Request, session_id: str):
+        """This chat's settings: its approval mode, tools switched off for it,
+        and the toggles / workspace / preset it last ran with."""
+        _verify_session_owner(request, session_id, session_manager)
+        return _settings_payload(session_id)
+
+    @router.patch("/session/{session_id}/settings")
+    async def update_chat_settings(request: Request, session_id: str):
+        _verify_session_owner(request, session_id, session_manager)
+        from core.database import update_session_settings
+        from src import session_settings
+
+        try:
+            patch = session_settings.validate_patch(await request.json())
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        except Exception:
+            raise HTTPException(400, "settings must be a JSON object")
+        if update_session_settings(session_id, patch) is None:
+            raise HTTPException(500, "Failed to save chat settings")
+        return _settings_payload(session_id)
+
+    @router.post("/session/{session_id}/approvals/{approval_id}")
+    async def decide_tool_approval(request: Request, session_id: str, approval_id: str):
+        """Record the user's answer to a held tool call: ``once``, ``always``
+        (this tool, for the rest of this chat) or ``deny``."""
+        _verify_session_owner(request, session_id, session_manager)
+        from src import tool_approvals
+
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        try:
+            rec = tool_approvals.decide(session_id, approval_id, str((body or {}).get("decision") or ""))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        if rec is None:
+            # Unknown after a server restart: the agent simply asks again.
+            raise HTTPException(404, "That approval request is no longer pending")
+        return {"id": rec["id"], "tool": rec["tool"], "decision": rec["decision"],
+                "always_allowed_tools": tool_approvals.chat_grants(session_id)}
+
+    @router.delete("/session/{session_id}/approvals")
+    async def revoke_tool_approvals(request: Request, session_id: str):
+        """Forget every "always allow" granted in this chat."""
+        _verify_session_owner(request, session_id, session_manager)
+        from src import tool_approvals
+
+        tool_approvals.revoke_chat_grants(session_id)
+        return {"always_allowed_tools": []}
 
     @router.post("/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):

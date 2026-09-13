@@ -25,6 +25,58 @@ logger = logging.getLogger(__name__)
 SUBAGENT_MAX_ROUNDS = 12
 
 
+def _parse_send_extras(content: str) -> Dict:
+    """``profile`` from the JSON form (the legacy two-line form has none)."""
+    raw = (content or "").strip()
+    if not raw.startswith("{"):
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {"profile": str(data.get("profile") or "").strip()}
+
+
+def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
+                       profile: Optional[Dict]) -> tuple:
+    """Create a fresh chat for a delegated task. Returns ``(session, error)``.
+
+    The child runs on the profile's model when it names one, else on the
+    parent chat's model; it remembers its parent so the UI can link back.
+    """
+    parent = manager.get_session(parent_id) if parent_id else None
+    if profile and profile.get("model"):
+        try:
+            url, model, headers = _resolve_model(profile["model"], owner=owner)
+        except ValueError as exc:
+            return None, f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}"
+    elif parent is not None:
+        url, model, headers = parent.endpoint_url, parent.model, getattr(parent, "headers", None)
+    else:
+        return None, "session_id 'new' needs a profile with a model or a calling chat to copy the model from"
+    label = profile["name"] if profile else "Sub-agent"
+    sid = str(uuid.uuid4())
+    sess = manager.create_session(session_id=sid, name=f"↳ {label}: {' '.join(message.split())[:48]}",
+                                  endpoint_url=url, model=model, rag=False, owner=owner)
+    if headers and hasattr(sess, "headers"):
+        sess.headers = headers
+    try:
+        from core.database import update_session_settings
+
+        patch = {"parent_session": parent_id} if parent_id else {}
+        if profile:
+            patch["agent_profile"] = profile["name"]
+            if profile.get("disabled_tools"):
+                patch["disabled_tools"] = profile["disabled_tools"]
+        if patch:
+            update_session_settings(sid, patch)
+    except Exception:
+        logger.debug("child session settings failed", exc_info=True)
+    return sess, None
+
+
 def _parse_send_args(content: str):
     """``{"session_id", "message", "mode"}`` JSON, or the legacy two-line form."""
     raw = (content or "").strip()
@@ -209,12 +261,33 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         return {"error": "Session manager not available"}
 
     target_sid, message, mode = _parse_send_args(content)
+    extras = _parse_send_extras(content)
     if not target_sid:
         return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)"}
     if mode not in ("chat", "agent"):
         return {"error": "mode must be 'chat' (one model reply) or 'agent' (the chat's agent runs with its tools)"}
 
-    sess = _session_manager.get_session(target_sid)
+    profile = None
+    if extras.get("profile"):
+        from src import agent_profiles
+
+        profile = agent_profiles.get_profile(extras["profile"])
+        if profile is None:
+            names = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined (Settings › Workbench)"
+            return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}"}
+        mode = "agent"  # a profile is a worker definition: it always runs with tools
+
+    if target_sid.lower() == "new":
+        if not message:
+            return {"error": "No message provided"}
+        sess, err = _new_child_session(_session_manager, session_id, owner, message, profile)
+        if err:
+            return {"error": err}
+        target_sid = sess.id
+        mode = "agent"
+        extras["_child_created"] = True  # already on the profile's model
+    else:
+        sess = _session_manager.get_session(target_sid)
     if not sess:
         return {"error": f"Session '{target_sid}' not found"}
 
@@ -252,40 +325,64 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                 "offline_transcript": True,
             }
         context.append({"role": "user", "content": message})
+        runner = sess
+        if profile:
+            if profile.get("instructions"):
+                context.insert(0, {"role": "system", "content": profile["instructions"]})
+            if profile.get("model") and not extras.get("_child_created"):
+                # An existing chat delegated to under a profile runs this one
+                # exchange on the profile's model without changing the chat.
+                try:
+                    from types import SimpleNamespace
+
+                    url, model_id, headers = await asyncio.to_thread(_resolve_model, profile["model"], owner=owner)
+                    runner = SimpleNamespace(id=sess.id, endpoint_url=url, model=model_id, headers=headers,
+                                             owner=getattr(sess, "owner", None),
+                                             context_length=getattr(sess, "context_length", 0))
+                except ValueError as exc:
+                    return {"error": f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}"}
 
         # The exchange is one run on the calling chat's activity feed, so the
         # Workbench shows the hand-off, the child's tool calls (agent mode)
         # and the reply next to everything else the parent is doing.
+        label = f"{profile['name']} · " if profile else ""
         run_id = activity.run_started(
-            session_id, "session", f"Sub-agent · {sess.name or target_sid}: {message[:80]}",
+            session_id, "session", f"Sub-agent · {label}{sess.name or target_sid}: {message[:80]}",
             owner=owner,
-            data={"target_session": target_sid, "target_session_name": sess.name, "model": sess.model,
-                  "mode": mode},
+            data={"target_session": target_sid, "target_session_name": sess.name, "model": runner.model,
+                  "mode": mode, **({"profile": profile["name"]} if profile else {})},
             detail=message[:1500],
         )
         activity.publish(session_id, "message", f"→ {sess.name or target_sid}: {message[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=message[:2000])
         tool_events = []
-        try:
-            if mode == "agent":
-                from src.headless_agent import run_headless
+        outcome: Dict = {}
+        from src import agent_runs
 
-                response, tool_events = await run_headless(
-                    sess, context,
-                    max_rounds=SUBAGENT_MAX_ROUNDS,
-                    activity_session_id=session_id,
-                    run_id=run_id,
-                    source="session",
-                    owner=owner,
-                )
-                if not response.strip() and tool_events:
-                    response = "(the sub-agent finished with tool calls but no closing text)"
-            else:
-                response = await llm_call_async(
-                    sess.endpoint_url, sess.model, context,
-                    headers=sess.headers,
-                    timeout=AI_CHAT_TIMEOUT,
-                )
+        try:
+            # The child chat shows as working in every sidebar while it runs.
+            with agent_runs.track_external(target_sid, source="subagent", owner=owner):
+                if mode == "agent":
+                    from src.headless_agent import run_headless
+
+                    response, tool_events = await run_headless(
+                        runner, context,
+                        max_rounds=profile["max_rounds"] if profile else SUBAGENT_MAX_ROUNDS,
+                        disabled_tools=set(profile["disabled_tools"]) if profile else frozenset(),
+                        activity_session_id=session_id,
+                        run_id=run_id,
+                        source="session",
+                        owner=owner,
+                        outcome=outcome,
+                    )
+                    if not response.strip() and tool_events:
+                        response = "(the sub-agent finished with tool calls but no closing text)"
+                else:
+                    response = await llm_call_async(
+                        sess.endpoint_url, sess.model, context,
+                        headers=sess.headers,
+                        timeout=AI_CHAT_TIMEOUT,
+                    )
         except Exception as exc:
             activity.run_finished(session_id, "session", run_id,
                                   f"Sub-agent · {sess.name or target_sid} failed", status="failed",
@@ -313,8 +410,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
 
         activity.publish(session_id, "message", f"← {sess.name or target_sid}: {response[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=response[:2000])
+        stopped = bool(outcome.get("stopped"))
         activity.run_finished(
-            session_id, "session", run_id, f"Sub-agent · {sess.name or target_sid} replied",
+            session_id, "session", run_id,
+            f"Sub-agent · {sess.name or target_sid} {'stopped' if stopped else 'replied'}",
+            status="cancelled" if stopped else "completed",
             owner=owner,
             data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
                   "steps": len(tool_events), "result_excerpt": response[:400]},
@@ -330,6 +430,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             "response": response,
             "mode": mode,
         }
+        if stopped:
+            out["stopped_by_user"] = True
         if tool_events:
             out["tool_calls"] = len(tool_events)
         return out

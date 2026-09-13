@@ -199,6 +199,7 @@ function ingest(ev, { live = true } = {}) {
   }
   if (live) {
     updateChatCard(ev);
+    scheduleStrip();
     if (!state.paused && isOpen()) scheduleRender('activity');
     else updateBadges();
     if (ev.kind === 'run_started' && CHAT_CARD_SOURCES.has(ev.source) && ev.session_id === state.sessionId) {
@@ -220,6 +221,137 @@ function scheduleRender(which) {
     if (which === 'activity' && state.prefs.tab === 'activity') renderActivity();
     else updateBadges();
   }, 120);
+}
+
+// ── agent strip (above the composer) ─────────────────────────────────────
+// The chat's live delegated work, where the user is looking: each sub-agent,
+// Claude Code job and background job with what it is doing right now, how
+// long it has run, and Open / Stop. Finished rows linger briefly so the end
+// of a run is visible rather than a row silently vanishing.
+const STRIP_LINGER_S = 8;
+const STRIP_PREVIEW = 3;
+let _stripTimer = null;
+let _stripTick = null;
+function scheduleStrip() {
+  if (_stripTimer) return;
+  _stripTimer = setTimeout(() => { _stripTimer = null; renderAgentStrip(); }, 150);
+}
+function stripRuns() {
+  const now = Date.now() / 1000;
+  return Array.from(state.runs.values())
+    .filter((r) => r.session_id === state.sessionId && r.source !== 'odysseus'
+      && (r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S)))
+    .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) || (a.started_at || 0) - (b.started_at || 0));
+}
+function latestActivity(run) {
+  for (let i = run.events.length - 1; i >= 0; i--) {
+    const ev = run.events[i];
+    if (['message', 'tool_start', 'tool_result', 'status', 'file_change', 'commit'].includes(ev.kind)) return ev.title || '';
+  }
+  return run.detail ? String(run.detail).split('\n')[0] : '';
+}
+function stripRowHtml(run) {
+  const d = run.data || {};
+  const running = run.status === 'running';
+  const end = run.finished_at || Date.now() / 1000;
+  const openTitle = run.source === 'session' && d.target_session ? `Open the ${d.target_session_name || 'sub-agent'} chat`
+    : run.source === 'claude_code' && d.task_id ? 'Open its changes in the Workbench' : 'Open its events in the Workbench';
+  return `<div class="agent-strip-row${running ? '' : ' done'}" data-run="${esc(run.run_id)}">
+    ${statusPill(run.status)}
+    ${sourceChip(run.source)}
+    <span class="agent-strip-title" title="${esc(run.detail || run.title || '')}">${esc(String(run.title || '').replace(/^(Sub-agent|Claude Code|Background job)\s*[·:]\s*/, ''))}</span>
+    <span class="agent-strip-activity" title="${esc(latestActivity(run))}">${esc(latestActivity(run))}</span>
+    <span class="agent-strip-time" data-started="${run.started_at || ''}" data-running="${running ? 1 : 0}">${esc(fmtDur(run.started_at, end))}</span>
+    <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="open" data-run="${esc(run.run_id)}" title="${esc(openTitle)}">Open</button>
+    ${running ? `<button type="button" class="wb-btn wb-btn-sm" data-strip-act="stop" data-run="${esc(run.run_id)}" title="Stop this run; its partial result goes back to the chat">Stop</button>` : ''}
+  </div>`;
+}
+function renderAgentStrip() {
+  const box = $('agent-strip');
+  if (!box) return;
+  const runs = state.enabled ? stripRuns() : [];
+  if (!runs.length) {
+    box.hidden = true;
+    box.innerHTML = '';
+    if (_stripTick) { clearInterval(_stripTick); _stripTick = null; }
+    return;
+  }
+  const running = runs.filter((r) => r.status === 'running').length;
+  const collapsed = !!state.prefs.stripCollapsed;
+  const expanded = !!state.stripExpanded;
+  const shown = collapsed ? [] : (expanded ? runs : runs.slice(0, STRIP_PREVIEW));
+  const more = runs.length - shown.length;
+  box.hidden = false;
+  box.innerHTML = `
+    <div class="agent-strip-head">
+      <button type="button" class="agent-strip-toggle" data-strip-act="collapse" aria-expanded="${!collapsed}" title="${collapsed ? 'Show' : 'Hide'} agents">
+        <span class="agent-run-caret" aria-hidden="true"></span><span class="agent-strip-label">Agents</span>
+        <span class="wb-count">${running ? `${running} running` : 'finished'}</span>
+      </button>
+      <span class="wb-spacer"></span>
+      ${!collapsed && more > 0 ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="more">+${more} more</button>` : ''}
+      ${!collapsed && expanded && runs.length > STRIP_PREVIEW ? '<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="less">Show fewer</button>' : ''}
+      <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="workbench" title="Open the Workbench activity view">Workbench</button>
+    </div>
+    ${shown.length ? `<div class="agent-strip-rows">${shown.map(stripRowHtml).join('')}</div>` : ''}`;
+  if (!_stripTick) {
+    _stripTick = setInterval(() => {
+      const el = $('agent-strip');
+      if (!el || el.hidden) return;
+      let lingering = false;
+      el.querySelectorAll('.agent-strip-time[data-running="1"]').forEach((t) => {
+        const started = parseFloat(t.dataset.started);
+        if (started) t.textContent = fmtDur(started, Date.now() / 1000);
+      });
+      // Drop rows whose linger window ended.
+      for (const r of stripRuns()) if (r.status !== 'running') lingering = true;
+      if (el.querySelector('.agent-strip-row.done') || lingering) renderAgentStrip();
+    }, 1000);
+  }
+}
+async function onStripAction(btn) {
+  const act = btn.dataset.stripAct;
+  if (act === 'collapse') { state.prefs.stripCollapsed = !state.prefs.stripCollapsed; savePrefs(); renderAgentStrip(); return; }
+  if (act === 'more' || act === 'less') { state.stripExpanded = act === 'more'; renderAgentStrip(); return; }
+  if (act === 'workbench') { open(); setTab('activity'); return; }
+  const run = state.runs.get(btn.dataset.run);
+  if (!run) return;
+  const d = run.data || {};
+  if (act === 'open') {
+    if (run.source === 'session' && d.target_session && window.sessionModule?.selectSession) {
+      window.sessionModule.selectSession(d.target_session);
+    } else if (run.source === 'claude_code' && d.task_id) {
+      open(); loadTask(d.task_id);
+    } else {
+      open(); state.focusRun = run.run_id; setTab('activity');
+    }
+    return;
+  }
+  if (act === 'stop') {
+    btn.disabled = true;
+    btn.textContent = 'Stopping…';
+    try {
+      const r = await post(`/api/workbench/runs/${encodeURIComponent(run.run_id)}/stop`, {});
+      showToast(r.stopped ? 'Stopping — its partial result goes back to the chat' : `Not stopped: ${r.reason || r.status || 'already finished'}`, r.stopped ? 'success' : 'warning');
+    } catch (e) {
+      showToast(e.message, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+    }
+  }
+}
+/** History can show a run as started with no end when the server restarted
+ *  mid-run; the run registry knows it was interrupted. */
+async function reconcileRunningRuns(sessionId) {
+  const stale = Array.from(state.runs.values()).filter((r) => r.status === 'running' && r.session_id === sessionId);
+  if (!stale.length) return;
+  try {
+    const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sessionId)}&active=true&limit=200`);
+    const live = new Set((r.runs || []).map((x) => x.run_id));
+    for (const run of stale) {
+      if (!live.has(run.run_id)) { run.status = 'interrupted'; run.finished_at = run.finished_at || run.started_at; }
+    }
+  } catch (_) {}
 }
 
 // ── SSE ───────────────────────────────────────────────────────────────────
@@ -247,6 +379,9 @@ async function connect(force = false) {
       if (gen !== _connectGen) return;  // superseded by a newer connect
       (h.events || []).forEach((ev) => ingest(ev, { live: false }));
       state.lastSeq = h.seq || state.lastSeq;
+      await reconcileRunningRuns(key);
+      if (gen !== _connectGen) return;
+      renderAgentStrip();
     } catch (e) {
       if (gen !== _connectGen) return;
       if (e.status === 403) { state.enabled = false; hideRail(); return; }
@@ -289,6 +424,8 @@ function watchSession() {
       state.sessionId = sid;
       state.chatCards.clear();
       state.focusRun = null;
+      state.stripExpanded = false;
+      renderAgentStrip();
       if (state.es || isOpen() || state.enabled) connect(true);
     }
   };
@@ -923,6 +1060,10 @@ function wireWindow() {
   $('wb-dock-right')?.addEventListener('click', () => { try { applyRightDock(modal); } catch (_) {} });
   for (const id of ['rail-workbench', 'tool-workbench-btn']) $(id)?.addEventListener('click', toggle);
   $('close-workbench-diff-modal')?.addEventListener('click', () => $('workbench-diff-modal')?.classList.add('hidden'));
+  $('agent-strip')?.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-strip-act]');
+    if (b) onStripAction(b);
+  });
   const dm = $('workbench-diff-modal');
   if (dm) makeWindowDraggable(dm, { content: dm.querySelector('.modal-content'), header: dm.querySelector('.modal-header'), resizeStorageKey: 'odysseus-workbench-diff-size' });
 
@@ -1037,7 +1178,7 @@ async function probeSettings() {
     const s = await r.json();
     state.enabled = s.workbench_enabled !== false;
     state.autoOpen = s.workbench_auto_open !== false;
-    if (!state.enabled) { hideRail(); disconnect(); }
+    if (!state.enabled) { hideRail(); disconnect(); renderAgentStrip(); }
   } catch (_) {}
 }
 

@@ -24,6 +24,7 @@ from src.llm_core import (
 from src.model_context import estimate_tokens, is_local_endpoint
 from src.settings import get_setting
 from src import agent_activity as _activity
+from src import tool_approvals as _tool_approvals
 from src.prompt_security import untrusted_context_message
 from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
@@ -1010,7 +1011,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
 `calendar` accepts a name ("Main") or short-id prefix.""",
     "create_session": "- ```create_session``` — Create a new chat. Line 1 = chat name, line 2 = model name. Use for background/parallel work.",
     "list_sessions": "- ```list_sessions``` — List chats sorted MOST-RECENT FIRST (the UI calls them 'chats') with clickable chat-title links. Output includes a relative \"last active\" timestamp per row, so the first row is the user's most recent chat. Content = optional filter keyword (matches chat name). When answering, preserve the `[title](#session-id)` links exactly; do not convert them into plain text.",
-    "send_to_session": "- ```send_to_session``` — Send a message to another chat and get its reply. Args (JSON): {\"session_id\": ..., \"message\": ..., \"mode\": \"chat\"|\"agent\"}; legacy: line 1 = session_id, rest = message. mode=agent makes that chat's agent do the work with its own tools (a sub-agent whose steps show in the Workbench) and return its final answer; mode=chat is one model reply. Use for orchestrating work across chats.",
+    "send_to_session": "- ```send_to_session``` — Send a message to another chat and get its reply. Args (JSON): {\"session_id\": ..., \"message\": ..., \"mode\": \"chat\"|\"agent\"}; legacy: line 1 = session_id, rest = message. mode=agent makes that chat's agent do the work with its own tools (a sub-agent whose steps show in the Workbench) and return its final answer; mode=chat is one model reply. session_id \"new\" starts a fresh sub-agent chat (give it the whole task, it has no context); add \"profile\": \"<name>\" to run a named worker profile (its own instructions, model, tool limits). Use for orchestrating work across chats.",
     "recall_tool_output": "- ```recall_tool_output``` — Read back a tool result that was too large to keep in the conversation. When a tool produced a lot of output, only its head and tail were kept and the rest was stored under a `toolout-...` reference named in that excerpt. Args (JSON): {\"ref\": \"toolout-abc123\", \"query\": \"what you need\"} to search it, or {\"ref\": \"toolout-abc123\", \"offset\": 3000} to keep reading in order. NEVER re-run the original command to see the trimmed part — it is already stored, and re-running it just spends the context again.",
     "search_chats": "- ```search_chats``` — Search past session transcripts for direct conversation evidence. Use when user asks 'did we discuss X?', 'find the conversation about Y', or when prior chat context is more appropriate than persistent memory.",
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
@@ -1134,6 +1135,16 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
         if name not in included:
             continue
         section = _section_text(name, _default_section)
+        if name == "send_to_session":
+            # The worker profiles the operator defined, so the model knows the names.
+            try:
+                from src.agent_profiles import describe_for_prompt
+
+                _profiles_line = describe_for_prompt()
+                if _profiles_line:
+                    section = f"{section} {_profiles_line}"
+            except Exception:
+                pass
         if section.startswith("```") or section.startswith("-"):
             if section.startswith("- "):
                 one_liners.append(section)
@@ -4077,8 +4088,14 @@ async def stream_agent_loop(
     uploaded_files: Optional[List[Dict]] = None,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
+    approval_mode: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
+
+    ``approval_mode`` is passed only by the interactive chat route: under
+    ``ask_risky``/``ask_all`` a risky tool call ends the turn with an approval
+    card instead of running (see :mod:`src.tool_approvals`). Headless callers
+    leave it None and are never gated — nobody would be there to answer.
 
     Yields SSE events:
       - data: {"delta": "text"}                             (text chunks)
@@ -6102,6 +6119,10 @@ async def stream_agent_loop(
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
+            _approval_why = (
+                _tool_approvals.approval_reason(block.tool_type, full_command, approval_mode)
+                if approval_mode and session_id else None
+            )
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -6110,6 +6131,34 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
+            elif _approval_why and not _tool_approvals.consume_grant(session_id, block.tool_type, full_command):
+                # Stop and ask. The call is recorded as pending; the card's
+                # decision becomes a grant, and the user's reply lets the agent
+                # re-issue exactly this call, which the grant then lets through.
+                _pending = _tool_approvals.request(session_id, block.tool_type, full_command, _approval_why)
+                desc = f"{block.tool_type}: APPROVAL REQUIRED"
+                # The command goes in the visible (and replayed) text: the next
+                # turn sees only message text, not this call's arguments, and the
+                # agent must re-issue the identical call for the grant to match.
+                _shown = full_command if len(full_command) <= 1500 else full_command[:1500] + " …"
+                _question = (f"May I run `{block.tool_type}`? It {_approval_why}.\n\n```\n{_shown}\n```")
+                result = {
+                    "output": (f"Not run yet: this {block.tool_type} call {_approval_why}, and this chat asks for "
+                               "approval first. Wait for the user's decision. If they approve, issue exactly "
+                               "the same call again; if they deny, do not run it and say what you will do instead."),
+                    "exit_code": 0,
+                    "approval_required": True,
+                    "ask_user": {
+                        "question": _question,
+                        "options": [],
+                        "approval": {"id": _pending["id"], "tool": block.tool_type, "reason": _approval_why,
+                                     "command": _pending["command"][:2000], "mode": approval_mode},
+                    },
+                }
+                logger.info("Tool %s held for approval (%s) in session %s", block.tool_type, _approval_why, session_id)
+                _activity.publish(session_id, "status", f"Waiting for approval: {block.tool_type} {_approval_why}",
+                                  source="odysseus", run_id=_activity_run_id, owner=owner,
+                                  data={"tool": block.tool_type, "approval_id": _pending["id"]}, level="warning")
             else:
                 _activity.publish(
                     session_id, "tool_start", f"{block.tool_type} {str(cmd_display or '')[:120]}".strip(),

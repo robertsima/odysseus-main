@@ -1071,6 +1071,9 @@
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
 
+    <!-- Live sub-agents / Claude Code jobs / background jobs of this chat (workbench.js) -->
+    <div id="agent-strip" class="agent-strip" aria-live="polite" hidden></div>
+
     <!-- Attachments strip -->
     <div id="attach-strip" class="attach-strip"></div>
 
@@ -2535,7 +2538,17 @@
               <div class="settings-row"><label class="settings-label">Workbench window</label><label class="admin-toggle" style="margin:0"><input id="set-wbEnabled" type="checkbox"> <span>on</span></label></div>
               <div class="settings-row"><label class="settings-label" title="Open the Workbench automatically the first time a Claude Code run, sub-agent or pipeline starts in the current chat.">Auto-open on delegation</label><label class="admin-toggle" style="margin:0"><input id="set-wbAutoOpen" type="checkbox"> <span>on</span></label></div>
               <div class="settings-row"><label class="settings-label" title="Run Claude Code with --output-format stream-json so its tool calls, file edits and messages stream into the Workbench live. Falls back to plain output when the installed CLI does not support it.">Live Claude Code transcript</label><label class="admin-toggle" style="margin:0"><input id="set-wbStream" type="checkbox"> <span>on</span></label></div>
+              <div class="settings-row"><label class="settings-label" title="How a chat treats risky tool calls unless the chat picks its own mode in its status line: Auto runs them, Ask for risky stops destructive or outward-facing actions for approval, Ask for everything stops every tool that can change something.">Default approvals</label>
+                <select id="set-wbApproval" class="settings-select" style="max-width:220px"><option value="auto">Auto — never ask</option><option value="ask_risky">Ask for risky actions</option><option value="ask_all">Ask for everything</option></select></div>
               <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
+            </div>
+            <h3 class="agent-profiles-title">Agent profiles</h3>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Named workers the agent can delegate to with <code>send_to_session</code> (<code>session_id: "new"</code>, <code>profile: "name"</code>). Each runs in its own chat with these instructions, an optional cheaper or stronger model (<code>model</code> or <code>model@endpoint</code>; empty = the calling chat's model), tools it may not use, and a round budget. Live workers show above the composer with Open and Stop.</div>
+            <div id="set-agentProfiles" class="agent-profiles"></div>
+            <div class="agent-profiles-actions">
+              <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
+              <button type="button" class="ats-btn" id="set-agentProfileSave">Save profiles</button>
+              <span id="set-agentProfileMsg" class="admin-toggle-sub"></span>
             </div>
           </div>
           <div class="admin-card" style="margin-bottom:12px;" id="set-claudeCodeCard">

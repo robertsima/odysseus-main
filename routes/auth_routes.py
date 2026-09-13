@@ -703,6 +703,21 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key == "claude_code_restricted":
                 current[key] = bool(val) if not isinstance(val, str) else val.strip().lower() in ("1", "true", "yes", "on")
                 continue
+            if key == "agent_profiles":
+                from src.agent_profiles import validate_profiles
+
+                try:
+                    current[key] = validate_profiles(val)
+                except ValueError as exc:
+                    raise HTTPException(400, f"agent_profiles: {exc}")
+                continue
+            if key == "agent_approval_mode":
+                from src.tool_approvals import MODES as _APPROVAL_MODES
+
+                if val not in _APPROVAL_MODES:
+                    raise HTTPException(400, f"agent_approval_mode must be one of {', '.join(_APPROVAL_MODES)}")
+                current[key] = val
+                continue
             if key == "context_profiles":
                 # A preferences blob, not a scalar: clamp what is out of range
                 # and drop what is unknown rather than 400ing the whole save
