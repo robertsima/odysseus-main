@@ -1481,7 +1481,11 @@ def _tools_used_in_conversation(messages: List[Dict], known: set, cap: int = 24)
 
 _GENERIC_EXECUTION_TOOLS = frozenset({"bash", "python", "run_shell", "shell"})
 _EXPLICIT_TERMINAL_RE = re.compile(
-    r"\b(?:bash|python|shell|terminal|command(?: line)?|run|execute|exec|ssh|git)\b",
+    r"\b(?:bash|python|shell|terminal|command(?: line)?|run|execute|exec|ssh|git|"
+    # Source-control and build verbs are shell work in a chat that has been
+    # using the shell: "Push changes up" dropped bash on 2026-09-13 and the
+    # agent answered it had no way to push.
+    r"push|pull|commit|merge|rebase|ship|deploy|build|compile|install)\b",
     re.I,
 )
 
@@ -1492,17 +1496,24 @@ def _retained_tools_for_turn(
     query: str,
     domains: set,
     workspace: Optional[str],
+    continuation: bool = False,
 ) -> tuple[set, set]:
     """Return prior tools safe to retain and generic tools suppressed.
 
     Conversation retention keeps a follow-up coherent, but generic execution
     tools are not ambient capabilities. A previous shell call must not make
     bash win over named filesystem/log/application tools on the next turn.
+
+    A plain continuation of the work ("keep going with the next slice") that
+    names no other kind of work keeps the shell the conversation was using:
+    suppressing it left a coding chat with nothing to act with.
     """
+    domains = set(domains or set())
     shell_context = bool(
-        {"shell", "workspace"} & set(domains or set())
+        {"shell", "workspace"} & domains
         or (workspace and _looks_like_workspace_coding_request(query or ""))
         or _EXPLICIT_TERMINAL_RE.search(query or "")
+        or (continuation and not (domains - {"files"}))
     )
     suppressed = set()
     retained = set(prior_tools or set())
@@ -1979,6 +1990,25 @@ def _is_explicit_continuation(text: str) -> bool:
     return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
 
 
+# "Continue with the next slice if the MVP isn't done", "keep going and finish
+# the rest", "next slice": a request to carry the current work forward. The
+# terse-reply regex above only accepts a bare "continue", so these read as
+# low-signal new requests with no domain — on 2026-09-13 the agent got no
+# shell or file tools and answered with a plan instead of doing the work.
+# Anchored to the start, and only honoured when there is earlier work in the
+# conversation to continue.
+_CONTINUE_WORK_RE = re.compile(
+    r"^\s*(?:ok(?:ay)?[,.!]?\s{1,5}|great[,.!]?\s{1,5}|thanks[,.!]?\s{1,5}|now\s{1,5}|please\s{1,5})?"
+    r"(?:continue|keep\s(?:going|working|at\sit)|carry\son|proceed|resume|go\son|move\son|"
+    r"finish(?:\sup)?|do\sthe\snext|start\sthe\snext|next\s(?:slice|step|task|part|phase|one|item))\b",
+    re.IGNORECASE,
+)
+
+
+def _is_work_continuation(messages: List[Dict], text: str) -> bool:
+    return bool(_CONTINUE_WORK_RE.match(str(text or ""))) and _user_turn_count(messages) > 1
+
+
 def _is_casual_low_signal(text: str) -> bool:
     """True for short greetings/slang that should not inherit stale context."""
     s = str(text or "").strip()
@@ -2063,7 +2093,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     """
     text = str(last_user or "").strip()
     retry_continuation = _is_contextual_retry_continuation(messages, text)
-    continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages) or retry_continuation
+    continuation = (_is_explicit_continuation(text) or _assistant_requested_followup(messages)
+                    or retry_continuation or _is_work_continuation(messages, text))
     retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
 
@@ -2136,6 +2167,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # a file ("push changes", "commit and open a PR", "implement the next slice").
     if has(r"\b(?:push|commit|rebase|merge|pull request|open a pr|branch)\b.{0,40}\b(?:changes?|commits?|branch|code|repo|it|this|that)\b",
            r"\b(?:push|commit)\s+(?:the\s+|my\s+|these\s+|all\s+)?changes\b",
+           r"\bship\s+(?:it|this|that|the\s+changes)\b",
            r"\bgit\s+(?:push|pull|commit|status|diff|log)\b",
            r"\b(?:implement|scaffold|refactor)\b.{0,60}\b(?:slice|feature|mvp|spec|todo|endpoint|screen|api|tests?)\b"):
         domains.add("files")
@@ -4594,6 +4626,7 @@ async def stream_agent_loop(
             query=_retrieval_query or _last_user,
             domains=_intent.get("domains") or set(),
             workspace=workspace,
+            continuation=bool(_intent.get("continuation")),
         )
         _retained = sorted(_retained_allowed - _relevant_tools)
         _retained_tool_names = set(_retained)

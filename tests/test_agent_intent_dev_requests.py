@@ -19,6 +19,31 @@ def test_push_and_implement_request_is_files_not_cookbook():
     assert "files" in d
 
 
+def test_git_followups_and_work_continuations_keep_the_shell():
+    # 2026-09-13: "Push changes up" and "Continue with next splice ..." both
+    # dropped bash ("suppressed generic retained tools") in a chat that had
+    # been using it, and the agent said it could not push / only planned.
+    from src.agent_loop import _retained_tools_for_turn
+
+    history = [{"role": "user", "content": "implement the homework slice in the dog-trainer repo"},
+               {"role": "assistant", "content": "done, committed"}]
+    for text in ("Push changes up", "ship it",
+                 "Continue with next splice if MVP is not complete - finish as much as possibe",
+                 "keep going with the next slice"):
+        messages = history + [{"role": "user", "content": text}]
+        intent = _classify_agent_request(messages, text)
+        assert not intent["low_signal"], text
+        kept, suppressed = _retained_tools_for_turn(
+            {"bash", "read_file"}, query=intent["retrieval_query"], domains=intent["domains"],
+            workspace=None, continuation=intent["continuation"])
+        assert "bash" in kept and not suppressed, text
+
+    # A continuation of other work still does not drag the shell along.
+    kept, suppressed = _retained_tools_for_turn({"bash", "audit_emails"}, query="continue the inbox audit",
+                                                domains={"email"}, workspace=None, continuation=True)
+    assert suppressed == {"bash"}
+
+
 def test_generic_verbs_do_not_imply_model_serving():
     for text in ("start the next feature", "pull the latest changes", "restart the server and try again",
                  "download the report and summarise it"):

@@ -302,12 +302,24 @@ def _audit_conversation(latest=FOLLOWUP):
 
 
 def test_the_followup_really_does_look_like_a_new_low_signal_turn():
-    """Pin the precondition: nothing about this text names email or continues."""
-    assert not _is_explicit_continuation(FOLLOWUP)
-    intent = _classify_agent_request(_audit_conversation(), FOLLOWUP)
+    """Pin the precondition: a follow-up that names no email and does not say
+    "continue" still classifies without the email domain, so retention (below)
+    remains the general fix."""
+    bare = "There should be at least a hundred applications total"
+    assert not _is_explicit_continuation(bare)
+    intent = _classify_agent_request(_audit_conversation(bare), bare)
     assert "email" not in intent["domains"], (
         "if this ever starts matching, the retention fix is still the general one"
     )
+
+
+def test_a_continue_with_tail_now_inherits_the_conversation_context():
+    # 2026-09-13: "Continue with next slice ..." was a low-signal new request.
+    # A leading continue/keep going/next slice now carries the prior work's
+    # context, so the original FOLLOWUP routes back to the email tools too.
+    assert not _is_explicit_continuation(FOLLOWUP)
+    intent = _classify_agent_request(_audit_conversation(), FOLLOWUP)
+    assert intent["continuation"] and "email" in intent["domains"]
 
 
 def test_followup_turn_keeps_the_email_tools_the_conversation_was_using():
