@@ -667,6 +667,13 @@ app.include_router(setup_session_routes(
 from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager))
 
+# Capability registry + declared settings schema. Importing capabilities_builtin
+# registers the declarations; without it the registry is empty and every
+# capability reads as available, which would defeat the point of gating.
+import src.capabilities_builtin  # noqa: F401
+from routes.capability_routes import setup_capability_routes
+app.include_router(setup_capability_routes())
+
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
 memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
