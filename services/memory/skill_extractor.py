@@ -338,6 +338,14 @@ async def maybe_extract_skill(
         # Real exceptions stay INFO+warning so they don't get lost when
         # users only have default log level. `exc_info=True` ships the
         # full traceback so timeouts vs auth vs import errors are
-        # distinguishable from outside.
-        logger.warning("[skill-extract] FAILED: %s", e, exc_info=True)
+        # distinguishable from outside — except for upstream states that
+        # already say what happened and what to do (expired credentials, rate
+        # limits, outages). Those repeat once per session for as long as the
+        # condition lasts, and a stack trace each time only buries real faults.
+        try:
+            from src.llm_core import is_expected_upstream_failure
+            expected = is_expected_upstream_failure(e)
+        except Exception:
+            expected = False
+        logger.warning("[skill-extract] FAILED: %s", e, exc_info=not expected)
         return None

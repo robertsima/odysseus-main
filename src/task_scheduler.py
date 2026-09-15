@@ -1205,7 +1205,19 @@ class TaskScheduler:
                 task.next_run = None
 
             db.commit()
-            logger.info(f"Task '{task.name}' completed (run {run_id})")
+            # Report what actually happened. `run.status` is already correct
+            # here ("error" when the action returned success=False), but this
+            # line used to say "completed" unconditionally, so a failed run read
+            # as a clean one in the logs:
+            #   ERROR audit_skills action failed: No model configured
+            #   INFO  Task 'Skills Audit' completed (run …)
+            if run.status == "success":
+                logger.info(f"Task '{task.name}' completed (run {run_id})")
+            else:
+                logger.warning(
+                    "Task '%s' finished with status=%s (run %s): %s",
+                    task.name, run.status, run_id, (run.error or run.result or "no detail"),
+                )
             output = task.output_target or "session"
             # Per-task notification gate. Default True (notifications_enabled
             # defaults to True at column level), but skip when the user has

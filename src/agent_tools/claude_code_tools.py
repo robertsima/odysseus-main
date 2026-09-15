@@ -70,6 +70,10 @@ DEFAULT_TOOLS = (
     "Bash(git add:*)", "Bash(git commit:*)",
 )
 MAX_OUTPUT = 50000
+# How much raw stream-json to keep once a parsed transcript already carries the
+# run. Enough to show the tail of a broken stream, small enough not to duplicate
+# the transcript. See the note in _run_claude.
+RAW_TAIL_ON_ENVELOPE = 2000
 MAX_RESULT_TEXT = 20000
 MAX_CONCURRENT_TASKS = max(1, int(os.environ.get("CLAUDE_CODE_MAX_CONCURRENT_TASKS", "2")))
 # Each git subcommand is spelled out explicitly — NOT a bare "git" prefix.
@@ -982,6 +986,17 @@ async def _run_claude(
         if stream:
             result["transcript"] = transcript.entries
             result["transcript_truncated"] = transcript.truncated
+            if isinstance(parsed, dict):
+                # `output` here is the raw stream-json the transcript was parsed
+                # *from*: same events, same final text, one machine-readable
+                # layer less. Shipping both put ~50KB of duplicate JSONL in every
+                # delegation result — into the agent's context, the offload
+                # store, and the embedding queue. Keep the structured view and
+                # a short tail for debugging; keep the raw bytes only when
+                # there is no envelope, which is exactly when they are the only
+                # evidence of what went wrong.
+                result["output"] = full_out[-RAW_TAIL_ON_ENVELOPE:]
+                result["output_truncated"] = len(full_out) > RAW_TAIL_ON_ENVELOPE
         result.update(await _git_report(repository))
         result.update(await _git_changes(repository, start_sha))
         _finish_run(ctx, run_id, title, result)

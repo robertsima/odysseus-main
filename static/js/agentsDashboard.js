@@ -37,6 +37,12 @@ async function api(path, opts = {}) {
   if (!r.ok) { const e = new Error((body && (body.detail || body.error)) || `${r.status}`); e.status = r.status; throw e; }
   return body;
 }
+// Reads fired by our own timers, not by the user. The header keeps the
+// foreground gate from treating "a tab is open" as "the user is working", which
+// would cancel the very background runs this dashboard exists to display.
+async function apiPoll(path) {
+  return api(path, { headers: { 'X-Odysseus-Poll': '1' } });
+}
 const post = (path, data) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data || {}) });
 function fmtDur(a, b) {
   if (!a) return '';
@@ -52,7 +58,7 @@ async function refresh() {
   if (state.refreshing) { state.refreshQueued = true; return; }
   state.refreshing = true;
   try {
-    const [ov, ap] = await Promise.all([api('/api/agents/overview'), api('/api/agents/approvals')]);
+    const [ov, ap] = await Promise.all([apiPoll('/api/agents/overview'), apiPoll('/api/agents/approvals')]);
     state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || [];
     state.approvals = ap.approvals || [];
     state.error = '';

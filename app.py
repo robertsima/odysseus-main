@@ -204,7 +204,7 @@ class _InteractiveActivityMiddleware(_BaseHTTPMiddleware):
         from src.interactive_gate import should_track_interactive_request, track_interactive_request
 
         path = request.url.path or ""
-        if not should_track_interactive_request(path, request.method):
+        if not should_track_interactive_request(path, request.method, request.headers):
             return await call_next(request)
         async def _stop_background():
             try:
