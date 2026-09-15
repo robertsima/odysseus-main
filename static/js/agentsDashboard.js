@@ -1,8 +1,8 @@
 /* agentsDashboard.js — the Agents page: every chat and worker the user runs.
  *
  * A full-page view (rail button, sidebar item, Ctrl+Shift+A, /agents) with:
- *   Fleet     — every chat with agent activity, grouped by what needs you:
- *               waiting for approval → running → failed → finished → idle.
+ *   Fleet     — every chat with agent activity in three triage buckets:
+ *               Needs you → Active → Recent, filterable from the header.
  *   Detail    — the selected chat: its live event stream, child runs (sub-
  *               agents, Claude Code, background jobs) with Stop, pending
  *               approvals with Approve/Deny, a Steer box that lands mid-turn,
@@ -28,6 +28,8 @@ const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
   error: '', refreshing: false, refreshQueued: false,
+  // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
+  bucket: 'all',
 };
 
 async function api(path, opts = {}) {
@@ -153,25 +155,60 @@ function updateBadges() {
   $('rail-agents')?.classList.toggle('rail-notify', attention > 0);
 }
 
+// ── triage ────────────────────────────────────────────────────────────────
+// Three buckets, because that is how many decisions the page actually supports:
+// something is blocked on you, something is working, everything else is history.
+// The six status groups this replaced put "Failed / Finished / Stopped / Workers
+// & recent" under four separate headers that all mean "not running".
+const BUCKETS = [
+  ['attention', 'Needs you', (r) => r.status === 'waiting_approval'],
+  ['active', 'Active', (r) => r.status === 'running'],
+  ['recent', 'Recent', (r) => r.status !== 'waiting_approval' && r.status !== 'running'],
+];
+
+/** The live-connection dot. Replaces a Refresh button on a page that already
+ *  polls every 5s and streams SSE — the honest thing to show is whether the
+ *  feed is up, not a control implying it isn't. Still clickable to force one. */
+function liveHtml() {
+  const live = !!state.es;
+  return `<button type="button" class="ag-live${live ? ' on' : ''}" data-ag="refresh"
+    title="${live ? 'Live — click to refresh now' : 'Reconnecting — click to refresh now'}">
+    <i aria-hidden="true"></i>${live ? 'Live' : 'Reconnecting'}</button>`;
+}
+
+function triageHtml() {
+  const t = state.totals;
+  const counts = { attention: t.waiting_approval || 0, active: t.running || 0, recent: null };
+  const seg = BUCKETS.map(([key, label]) => {
+    const n = counts[key];
+    const on = state.bucket === key;
+    const attn = key === 'attention' && n > 0;
+    return `<button type="button" class="ag-seg${on ? ' on' : ''}${attn ? ' attn' : ''}"
+      data-ag="bucket" data-bucket="${key}" aria-pressed="${on ? 'true' : 'false'}">${label}${
+      n == null ? '' : `<b>${n}</b>`}</button>`;
+  }).join('');
+  // Historical numbers are context, not controls — one muted line, not tiles
+  // styled identically to the buttons beside them.
+  const hist = [
+    t.workers_running ? `${t.workers_running} worker${t.workers_running === 1 ? '' : 's'} live` : '',
+    `${t.finished_24h || 0} done today`,
+    t.failed_24h ? `<em class="ag-hist-bad">${t.failed_24h} failed</em>` : '',
+  ].filter(Boolean).join(' · ');
+  return `<div class="ag-seg-group" role="group" aria-label="Filter agents">${seg}</div>
+    <span class="ag-hist">${hist}</span>`;
+}
+
 // ── render ────────────────────────────────────────────────────────────────
 function render() {
   const root = $('agents-dashboard');
   if (!root || !state.open) return;
-  const t = state.totals;
   root.innerHTML = `
     <div class="ag-head">
-      <div class="ag-title"><span class="ag-title-text">Agents</span><span class="ag-sub">every chat and worker you're running</span></div>
-      <div class="ag-stats">
-        <button type="button" class="ag-stat${t.waiting_approval ? ' attn' : ''}" data-ag="filter-status" data-status="waiting_approval"><b>${t.waiting_approval || 0}</b><span>need approval</span></button>
-        <button type="button" class="ag-stat" data-ag="filter-status" data-status="running"><b>${t.running || 0}</b><span>running</span></button>
-        <div class="ag-stat"><b>${t.workers_running || 0}</b><span>workers live</span></div>
-        <div class="ag-stat"><b>${t.finished_24h || 0}</b><span>finished · 24h</span></div>
-        <div class="ag-stat${t.failed_24h ? ' bad' : ''}"><b>${t.failed_24h || 0}</b><span>failed · 24h</span></div>
-      </div>
+      <div class="ag-title"><span class="ag-title-text">Agents</span>${liveHtml()}</div>
+      <div class="ag-triage">${triageHtml()}</div>
       <div class="ag-head-actions">
         <button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>
-        <button type="button" class="wb-btn" data-ag="refresh" title="Refresh agent status">Refresh</button>
-        <button type="button" class="wb-btn" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button>
+        <button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button>
         <button type="button" class="wb-icon-btn" data-ag="close" aria-label="Close" title="Close (Esc)">✕</button>
       </div>
     </div>
@@ -193,12 +230,25 @@ function filteredRows() {
 }
 function fleetHtml() {
   const rows = filteredRows();
-  const groups = [['waiting_approval', 'Needs you'], ['running', 'Running'], ['failed', 'Failed'], ['finished', 'Finished'], ['stopped', 'Stopped'], ['idle', 'Workers & recent']];
-  return groups.map(([key, label]) => {
-    const items = rows.filter((r) => r.status === key);
+  // The segmented control is a real filter now. It used to only jump the
+  // selection, so clicking "2 need approval" appeared to do nothing when the
+  // first such chat was already selected.
+  const shown = state.bucket === 'all' ? BUCKETS : BUCKETS.filter(([key]) => key === state.bucket);
+  const html = shown.map(([key, label, match]) => {
+    const items = rows.filter(match);
     if (!items.length) return '';
-    return `<div class="ag-group"><div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>${items.map(rowHtml).join('')}</div>`;
-  }).join('') || `<div class="wb-empty">${state.rows.length ? 'No chats match.' : 'Nothing is running. Send a chat a task, or launch a worker.'}</div>`;
+    const solo = shown.length === 1;
+    return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
+      solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
+    }${items.map(rowHtml).join('')}</div>`;
+  }).join('');
+  if (html) return html;
+  if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
+  if (state.bucket !== 'all') {
+    const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
+    return `<div class="wb-empty">Nothing in “${label}”. <button type="button" class="ag-inline-link" data-ag="bucket" data-bucket="all">Show all</button></div>`;
+  }
+  return '<div class="wb-empty">No chats match.</div>';
 }
 function renderFleetOnly() {
   const list = $('agents-dashboard')?.querySelector('.ag-fleet-list');
@@ -208,15 +258,10 @@ function renderFleetOnly() {
   list.scrollTop = top;
 }
 function updateStats() {
-  const box = $('agents-dashboard')?.querySelector('.ag-stats');
-  if (!box) return;
-  const t = state.totals;
-  box.innerHTML = `
-    <button type="button" class="ag-stat${t.waiting_approval ? ' attn' : ''}" data-ag="filter-status" data-status="waiting_approval"><b>${t.waiting_approval || 0}</b><span>need approval</span></button>
-    <button type="button" class="ag-stat" data-ag="filter-status" data-status="running"><b>${t.running || 0}</b><span>running</span></button>
-    <div class="ag-stat"><b>${t.workers_running || 0}</b><span>workers live</span></div>
-    <div class="ag-stat"><b>${t.finished_24h || 0}</b><span>finished · 24h</span></div>
-    <div class="ag-stat${t.failed_24h ? ' bad' : ''}"><b>${t.failed_24h || 0}</b><span>failed · 24h</span></div>`;
+  const box = $('agents-dashboard')?.querySelector('.ag-triage');
+  if (box) box.innerHTML = triageHtml();
+  const live = $('agents-dashboard')?.querySelector('.ag-live');
+  if (live) live.outerHTML = liveHtml();
 }
 function updateOpenView() {
   if (!state.open || !$('agents-dashboard')?.querySelector('.ag-body')) return;
@@ -229,10 +274,20 @@ function updateOpenView() {
 function rowHtml(r) {
   const sel = r.session_id === state.selected;
   const dur = r.status === 'running' && r.started_at ? fmtDur(r.started_at) : '';
-  return `<div class="ag-row${sel ? ' active' : ''}" data-sid="${esc(r.session_id)}" role="button" tabindex="0" aria-selected="${sel ? 'true' : 'false'}">
+  // Two lines, not three. The model/profile/worker chips used to occupy a whole
+  // row of their own above the one line that says what the agent is doing; they
+  // are now a muted prefix on that same line, so twice as many agents fit on
+  // screen and the eye lands on the status text.
+  const meta = [
+    r.profile ? esc(r.profile) : '',
+    r.model ? esc(String(r.model).split('/').pop()) : '',
+    r.children_running ? `${r.children_running}w` : '',
+  ].filter(Boolean).join(' · ');
+  const blocked = r.pending_approvals
+    ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
+  return `<div class="ag-row${sel ? ' active' : ''}${r.status === 'waiting_approval' ? ' attn' : ''}" data-sid="${esc(r.session_id)}" role="button" tabindex="0" aria-selected="${sel ? 'true' : 'false'}">
     <div class="ag-row-top">${pill(r.status)}<span class="ag-row-name" title="${esc(r.name)}">${esc(r.name)}</span>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
-    <div class="ag-row-meta">${r.profile ? `<span class="wb-chip wb-src-session">${esc(r.profile)}</span>` : ''}${r.model ? `<span class="wb-meta-item">${esc(String(r.model).split('/').pop())}</span>` : ''}${r.children_running ? `<span class="wb-meta-item">${r.children_running} worker${r.children_running === 1 ? '' : 's'}</span>` : ''}${r.pending_approvals ? `<span class="wb-meta-item wb-text-bad">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : ''}</div>
-    ${r.latest ? `<div class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</div>` : ''}
+    <div class="ag-row-sub">${blocked}${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : ''}</div>
   </div>`;
 }
 function renderDetail() {
@@ -262,8 +317,10 @@ function renderDetail() {
       ${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
     </div>
     <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}</div>
-    ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
-    ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
+    ${approvals.length || children.length ? `<div class="ag-detail-top">
+      ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
+      ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
+    </div>` : ''}
     <div class="ag-section ag-compose">
       ${running
         ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} queued` : ''}</small></label>
@@ -337,12 +394,19 @@ async function onClick(e) {
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
     else if (act === 'launch') { state.launchOpen = true; render(); $('ag-task')?.focus(); }
     else if (act === 'launch-close') { state.launchOpen = false; render(); }
-    else if (act === 'filter-status') {
-      const s = b.dataset.status;
+    else if (act === 'bucket') {
+      // Toggle: clicking the active bucket clears the filter, so the control
+      // can always get you back to everything without a separate "All" chip.
+      const next = b.dataset.bucket;
+      state.bucket = (next === 'all' || state.bucket === next) ? 'all' : next;
       state.filter = '';
       const input = $('ag-filter'); if (input) input.value = '';
-      state.selected = (state.rows.find((r) => r.status === s) || {}).session_id || state.selected;
-      renderFleetOnly(); renderDetail();
+      // Keep a selection that is still visible in the new bucket.
+      const match = (BUCKETS.find(([k]) => k === state.bucket) || [])[2];
+      if (match && !state.rows.some((r) => r.session_id === state.selected && match(r))) {
+        state.selected = (state.rows.find(match) || {}).session_id || state.selected;
+      }
+      updateStats(); renderFleetOnly(); renderDetail();
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'inspect-run') {

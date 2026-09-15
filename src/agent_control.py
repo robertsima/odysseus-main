@@ -56,6 +56,48 @@ def pending_steer(session_id: str) -> List[dict]:
     return list(_STEER.get(str(session_id), ()))
 
 
+def clear_steer(session_id: Optional[str]) -> List[str]:
+    """Drop anything still queued for a turn that has ended, returning it.
+
+    The queue is keyed only by session, so a steer nobody drained would sit
+    there until some *future* turn picked it up and answered a correction from
+    an hour ago with no idea what it referred to. The agent loop extends a turn
+    to absorb a late steer (see the round loop), so reaching here means the turn
+    really is over — the caller logs what it dropped instead of leaking it.
+    """
+    if not session_id:
+        return []
+    queue = _STEER.pop(str(session_id), None)
+    return [rec["text"] for rec in queue] if queue else []
+
+
+def is_steerable(session_id: str) -> bool:
+    """True unless we know the running turn has no rounds to land between.
+
+    Only the agent loop drains the queue, and only between rounds. Everything
+    that runs through it is steerable — chat agent turns, but equally the
+    detached worker / background-job / pipeline runs tracked via
+    ``agent_runs.track_external``, which have no ``_active_streams`` entry at
+    all. The one case to refuse is a plain single-shot chat reply: it is "busy"
+    but never reaches the loop, so a steer would sit in the queue unread and
+    then surface inside some unrelated later turn.
+
+    So this reads as "reject what is positively known to be non-agent", not
+    "accept only what is positively known to be an agent turn" — the latter
+    silently broke steering for workers.
+    """
+    try:
+        from routes import chat_routes
+
+        streams = getattr(chat_routes, "_active_streams", {}) or {}
+    except Exception:
+        return True
+    rec = streams.get(str(session_id))
+    if not isinstance(rec, dict) or "mode" not in rec:
+        return True
+    return str(rec.get("mode") or "").strip().lower() == "agent"
+
+
 # ── stop ──────────────────────────────────────────────────────────────────
 
 async def stop_run(run_id: str) -> dict:

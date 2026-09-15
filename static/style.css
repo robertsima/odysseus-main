@@ -2286,6 +2286,31 @@ body.bg-pattern-sparkles {
       flex: 0 0 auto;
       opacity: 0.9;
     }
+    /* Steered: already delivered to the running agent, so it reads as accepted
+       (solid, calm green) rather than waiting (dashed, accent) like a queued
+       message. Not clickable — there is nothing to promote. */
+    .msg-user.msg-user-steered {
+      opacity: 0.78;
+      animation: none;
+      border: 1px solid color-mix(in srgb, var(--green, #3fb950) 45%, transparent);
+      background: color-mix(in srgb, var(--green, #3fb950) 8%, var(--input-bg, var(--panel)));
+    }
+    .msg-user.msg-user-steered .steered-pill {
+      display: inline-flex;
+      align-items: center;
+      height: 14px;
+      padding: 0 5px;
+      margin-left: 5px;
+      border-radius: 999px;
+      border: 1px solid color-mix(in srgb, var(--green, #3fb950) 45%, transparent);
+      color: var(--green, #3fb950);
+      background: color-mix(in srgb, var(--green, #3fb950) 12%, transparent);
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      vertical-align: 1px;
+    }
 .msg-ai .body {
   color: var(--fg);
 }
@@ -41732,14 +41757,27 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .ag-title { display: flex; align-items: baseline; gap: 10px; }
 .ag-title-text { font-size: 18px; font-weight: 600; letter-spacing: -0.02em; }
 .ag-sub { color: var(--wb-muted); font-size: 12px; }
-.ag-stats { display: flex; flex-wrap: wrap; gap: 6px; }
-.ag-stat { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; min-width: 88px; height: auto; margin: 0; padding: 6px 10px; border: 1px solid var(--wb-line); border-radius: var(--wb-r); background: var(--panel); color: var(--fg); font: inherit; text-align: left; }
-.ag-stat b { font-size: 18px; line-height: 1.1; font-variant-numeric: tabular-nums; }
-.ag-stat span { font-size: 10.5px; color: var(--wb-muted); text-transform: uppercase; letter-spacing: 0.05em; }
-.ag-stat.attn { border-color: color-mix(in srgb, var(--wb-warn) 60%, var(--border)); box-shadow: inset 3px 0 0 var(--wb-warn); }
-.ag-stat.bad b { color: var(--wb-bad); }
-button.ag-stat { cursor: pointer; }
-button.ag-stat:hover { background: var(--wb-hover); }
+/* Triage: one segmented filter instead of five tiles where two were buttons,
+   three were inert, and all five looked the same. */
+.ag-triage { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 12px; }
+.ag-seg-group { display: inline-flex; padding: 2px; border: 1px solid var(--wb-line); border-radius: var(--wb-r); background: var(--panel); }
+.ag-seg { display: inline-flex; align-items: center; gap: 6px; height: 26px; margin: 0; padding: 0 10px; border: 0; border-radius: var(--wb-r-sm); background: transparent; color: var(--wb-muted); font: inherit; font-size: 12px; cursor: pointer; transition: background 0.12s ease, color 0.12s ease; }
+.ag-seg:hover { background: var(--wb-hover); color: var(--fg); }
+.ag-seg.on { background: var(--wb-selected); color: var(--fg); font-weight: 600; box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wb-accent) 45%, transparent); }
+.ag-seg b { min-width: 16px; padding: 0 4px; border-radius: 999px; background: color-mix(in srgb, var(--fg) 10%, transparent); font-size: 10.5px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: center; }
+/* Blocked work is the one thing that should pull the eye. */
+.ag-seg.attn { color: var(--wb-warn); }
+.ag-seg.attn b { background: var(--wb-warn); color: var(--bg); }
+.ag-hist { color: var(--wb-faint); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.ag-hist .ag-hist-bad { color: var(--wb-bad); font-style: normal; }
+/* Live feed state, in place of a Refresh button on a page that self-refreshes. */
+.ag-live { display: inline-flex; align-items: center; gap: 5px; height: 20px; margin: 0; padding: 0 8px 0 6px; border: 1px solid var(--wb-line); border-radius: 999px; background: transparent; color: var(--wb-faint); font: inherit; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; cursor: pointer; }
+.ag-live i { width: 6px; height: 6px; border-radius: 50%; background: var(--wb-faint); }
+.ag-live.on { color: var(--wb-ok, var(--green)); border-color: color-mix(in srgb, var(--wb-ok, var(--green)) 35%, var(--border)); }
+.ag-live.on i { background: var(--wb-ok, var(--green)); animation: ag-pulse 2.4s ease-in-out infinite; }
+@keyframes ag-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .ag-live.on i { animation: none; } }
+.ag-inline-link { margin: 0; padding: 0; border: 0; background: none; color: var(--wb-accent); font: inherit; text-decoration: underline; cursor: pointer; }
 .ag-head-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
 .ag-refresh-error { flex-shrink: 0; padding: 7px 10px; border: 1px solid color-mix(in srgb, var(--wb-bad) 45%, var(--border)); border-radius: var(--wb-r-sm); background: color-mix(in srgb, var(--wb-bad) 8%, var(--panel)); color: var(--wb-bad); }
 .ag-refresh-error[hidden] { display: none; }
@@ -41756,9 +41794,21 @@ button.ag-stat:hover { background: var(--wb-hover); }
 .ag-row-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ag-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .ag-row-dur { font-family: var(--wb-mono); font-size: 11px; color: var(--wb-faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
-.ag-row-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 11px; color: var(--wb-muted); }
-.ag-row-latest { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--wb-mono); font-size: 11px; color: var(--wb-muted); }
-.ag-detail { display: flex; flex-direction: column; min-height: 0; overflow: auto; padding: 12px 14px; gap: 10px; }
+/* One muted line carries chips + status text, so a row is two lines not three
+   and roughly twice as many agents fit without scrolling. */
+.ag-row-sub { display: flex; align-items: baseline; gap: 6px; min-width: 0; font-size: 11px; }
+.ag-row-meta-inline { flex: 0 0 auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wb-faint); font-family: var(--wb-mono); }
+.ag-row-latest { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--wb-mono); font-size: 11px; color: var(--wb-muted); }
+.ag-row-attn { flex: 0 0 auto; color: var(--wb-warn); font-weight: 600; }
+.ag-row.attn { border-color: color-mix(in srgb, var(--wb-warn) 55%, var(--border)); box-shadow: inset 2px 0 0 var(--wb-warn); }
+.ag-row.attn.active { box-shadow: inset 2px 0 0 var(--wb-warn), inset 0 0 0 1px color-mix(in srgb, var(--wb-accent) 35%, transparent); }
+.ag-group-attn { margin-bottom: 4px; }
+/* The pane itself no longer scrolls. It used to, which meant the Steer box —
+   the one control you reach for on a running agent — slid out of view as the
+   event log grew. Now approvals/workers scroll in their own bounded region and
+   the event log is the flexible one, so head + compose always stay put. */
+.ag-detail { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 12px 14px; gap: 10px; }
+.ag-detail-top { display: flex; flex-direction: column; gap: 10px; flex: 0 1 auto; min-height: 0; max-height: 42%; overflow: auto; }
 .ag-detail-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .ag-detail-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; font-weight: 600; }
 .ag-detail-meta { display: flex; flex-wrap: wrap; gap: 4px 8px; font-size: 11.5px; color: var(--wb-muted); }
@@ -41790,7 +41840,11 @@ button.ag-stat:hover { background: var(--wb-hover); }
 @media (max-width: 900px) {
   .ag-body, .agents-dashboard:has(.ag-launch) .ag-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(140px, 35%) minmax(0, 1fr); }
   .ag-launch { position: fixed; inset: 60px 8px 8px; z-index: 2; }
-  .ag-stats { order: 3; width: 100%; }
+  .ag-triage { order: 3; width: 100%; justify-content: space-between; }
+  /* The bounded approvals region would eat a short viewport; let the pane
+     scroll as one on narrow screens instead. */
+  .ag-detail { overflow: auto; }
+  .ag-detail-top { max-height: none; overflow: visible; }
 }
 
 /* Search palette: the message a result pointed at (search-chat.js). */

@@ -6029,6 +6029,19 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # A steer that landed *during* this round would otherwise be
+            # orphaned: the drain runs at the top of a round, and this is the
+            # turn ending. Leaving it queued means the user's message is
+            # silently dropped (or, worse, surfaces inside an unrelated turn
+            # much later). Loop once more so it is actually read — which is the
+            # whole promise of steering. Bounded by max_rounds like everything
+            # else, and _STEER_MAX caps how much can be pending.
+            if _agent_control.pending_steer(session_id) and round_num < max_rounds:
+                logger.info(
+                    "[agent] round %d would end the turn but a steer is pending; continuing",
+                    round_num,
+                )
+                continue
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -6773,6 +6786,18 @@ async def stream_agent_loop(
         # paths, including a verifier `continue` on the final round (the old
         # bottom-of-loop flag missed those).
         _exhausted_rounds = True
+
+    # The turn is over, so nothing will drain the steer queue again. Anything
+    # still in it (a steer that raced the last round, or arrived after the round
+    # cap) must not survive into a later turn, where it would read as a
+    # correction to work the user has long since moved on from.
+    _dropped_steer = _agent_control.clear_steer(session_id)
+    if _dropped_steer:
+        logger.warning(
+            "[agent] turn ended with %d undrained steer message(s); dropping: %s",
+            len(_dropped_steer), "; ".join(text[:120] for text in _dropped_steer),
+        )
+        yield f'data: {json.dumps({"type": "steer_dropped", "messages": _dropped_steer})}\n\n'
 
     # If the loop hit the round cap while still working, tell the client so it
     # can show a "Continue" affordance instead of the turn just stopping.

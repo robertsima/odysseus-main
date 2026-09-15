@@ -982,6 +982,32 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     return true;
   }
 
+  /** Render the "already handed to the running agent" form of a user bubble. */
+  function _createSteeredBubble(text) {
+    const host = _ensureQueuedBubbleHost();
+    if (!host) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-user msg-user-steered';
+    wrap.title = 'Delivered to the running agent — it lands before its next step';
+    wrap.innerHTML = `<div class="role">You <span class="steered-pill">Steering</span></div>` +
+      `<div class="body">${_escapeQueueText(text)}</div>`;
+    host.appendChild(wrap);
+    uiModule.scrollHistory();
+    return wrap;
+  }
+
+  /**
+   * Send a message typed while a turn is still running.
+   *
+   * An agent turn drains the steer queue between rounds, so the message lands
+   * within seconds instead of waiting out the whole loop — which is what
+   * "queued for after this response" used to mean even for a 56-round turn.
+   * A plain single-shot reply has no rounds to land between, so the server
+   * answers 409 and we fall back to queueing it as the next turn.
+   *
+   * Stays synchronous for its caller (which uses the boolean to decide whether
+   * the submit was handled); the steer/queue decision resolves after.
+   */
   export function queueStreamingComposerRequest() {
     if (!isStreaming) return false;
     const queuedInput = uiModule.el('message');
@@ -991,12 +1017,36 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
       try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
       return true;
     }
-    if (_queueAgentRequest(queuedText)) {
-      queuedInput.value = '';
-      queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
-      if (uiModule.autoResize) uiModule.autoResize(queuedInput);
-      try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
-    }
+    const sid = sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+    // Clear the composer up front either way: the submit is handled from here.
+    queuedInput.value = '';
+    queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
+    if (uiModule.autoResize) uiModule.autoResize(queuedInput);
+    try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
+
+    const fallbackToQueue = () => { _queueAgentRequest(queuedText); };
+    if (!sid) { fallbackToQueue(); return true; }
+
+    (async () => {
+      let steered = false;
+      try {
+        const res = await fetch(`${API_BASE}/api/agents/sessions/${encodeURIComponent(sid)}/steer`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: queuedText }),
+        });
+        steered = res.ok;
+      } catch (_) {
+        steered = false;
+      }
+      if (steered) {
+        _createSteeredBubble(queuedText);
+        try { uiModule.showToast && uiModule.showToast('Sent to the running agent'); } catch (_) {}
+      } else {
+        fallbackToQueue();
+      }
+    })();
     return true;
   }
 
@@ -4113,10 +4163,43 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     };
     // Defer so the stream's finally resets state first — otherwise the send
     // button is still in "stop" mode and clicking it would toggle, not send.
-    setTimeout(() => {
+    setTimeout(async () => {
       // The stream that died may not be the chat the user is now looking at —
       // never inject the recovery handshake into the wrong conversation.
       if (sessionId && sessionModule.getCurrentSessionId() !== sessionId) { _abandon(); return; }
+      // Losing the SSE is not losing the run. Chat/agent turns are detached
+      // server-side (agent_runs.start), so dropping this connection only
+      // removed a subscriber — the agent is very likely still working. Nudging
+      // it here injected a fake user turn ("The stream dropped before you
+      // finished…") into a live conversation, which is where the stray bare
+      // "DONE" rounds came from. Ask the server first, and re-attach to the run
+      // we already have instead of inventing a new one. Only a server that
+      // confirms no run (404) earns a handshake.
+      if (sessionId) {
+        let stillRunning = false;
+        try {
+          const probe = await fetch(
+            `${API_BASE}/api/chat/stream_status/${encodeURIComponent(sessionId)}`,
+            { credentials: 'same-origin', cache: 'no-store' },
+          );
+          stillRunning = probe.status !== 404;
+        } catch (_) {
+          // Can't reach the server at all: the network, not the run, is down.
+          // A nudge cannot be delivered either, so don't corrupt the transcript
+          // trying — let the caller surface the failure.
+          _abandon();
+          _autoNudges--;
+          return;
+        }
+        if (stillRunning) {
+          _abandon();
+          _autoNudges--;
+          if (sessionModule.getCurrentSessionId() === sessionId) {
+            try { await resumeStream(sessionId); } catch (_) {}
+          }
+          return;
+        }
+      }
       const msgInput = uiModule.el('message');
       const sb = document.querySelector('.send-btn');
       if (!msgInput || !sb) { _abandon(); return; }

@@ -182,6 +182,12 @@ def setup_agents_routes(session_manager) -> APIRouter:
         body = await request.json()
         if not agent_runs.is_busy(session_id):
             raise HTTPException(409, "That chat is not running; send it a normal message instead")
+        # Only the agent loop drains the queue, and only between rounds. A plain
+        # single-shot reply is "busy" but has no rounds, so accepting a steer for
+        # one would swallow the message outright. 409 tells the caller to send it
+        # as an ordinary turn instead.
+        if not agent_control.is_steerable(session_id):
+            raise HTTPException(409, "That chat is not running an agent turn; send it a normal message instead")
         try:
             rec = agent_control.steer(session_id, str((body or {}).get("text") or ""), owner=user)
         except ValueError as exc:
