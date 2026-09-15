@@ -15,6 +15,18 @@ Unlabeled content is treated as ``public``. Chunks indexed before this feature
 existed were already being sent to whatever model the session used, so
 defaulting them to ``public`` preserves behaviour instead of silently emptying
 an existing index. ``private`` is never inferred — a user has to ask for it.
+
+``resolve_sensitivity`` (below) is the store-agnostic entry point added on top
+of that: it lets any vault-backed store — not just PersonalDocsManager's own
+directory tracking — answer "public or private?" for a path via one
+precedence chain (per-file frontmatter, then the ``vault_folder_sensitivity``
+setting, then the legacy per-directory state file, then the configured
+default). It is deliberately layered ON TOP of, not a replacement for,
+``private_directories`` / ``path_is_under_private_directory``: those two keep
+their exact current behaviour because the file-tool deny-list that calls them
+is one of four enforcement paths that fail independently by design (the
+Chroma where-filter, the Python keyword fallback, the keyword index, and the
+file tools) — see each call site's own docstring. Do not fold them together.
 """
 import json
 import logging
@@ -140,3 +152,301 @@ def apply_sensitivity(metadata: Dict[str, Any], sensitivity: Any = None) -> Dict
     else:
         result[SENSITIVITY_KEY] = normalize_sensitivity(result.get(SENSITIVITY_KEY))
     return result
+
+
+# --------------------------------------------------------------------------- #
+# Store-agnostic policy: resolve_sensitivity
+# --------------------------------------------------------------------------- #
+#
+# Everything below answers "public or private?" for a path that may not even
+# live under PERSONAL_DIR any more (``vault_directory`` can point anywhere),
+# and may not be a real file at all (a note stored as a DB row still needs a
+# label). It reads three settings from ``src.settings`` — ``vault_directory``,
+# ``vault_default_sensitivity``, ``vault_folder_sensitivity`` — without ever
+# writing them; this module only consumes policy, it does not administer it.
+
+
+def vault_root() -> str:
+    """Root of the document vault.
+
+    ``vault_directory`` empty means "no override yet configured" — every
+    existing deployment already has content indexed under PERSONAL_DIR, so
+    that is the fallback rather than some new empty default (see the
+    DEFAULT_SETTINGS comment in ``src.settings``).
+    """
+    from src.constants import PERSONAL_DIR
+    from src.settings import get_setting
+
+    configured = get_setting("vault_directory", "")
+    if isinstance(configured, str) and configured.strip():
+        return configured
+    return PERSONAL_DIR
+
+
+def _looks_absolute(path: str) -> bool:
+    """True if ``path`` is (or resembles) a real filesystem reference rather
+    than an already vault-relative logical path such as ``"Journal/note.md"``.
+
+    ``os.path.isabs`` alone is not enough on Windows: a path with a drive but
+    no root (``"C:foo"``) or a leading slash but no drive (``"/etc/passwd"``)
+    is *drive-relative*, not absolute by that function's definition, yet both
+    are real filesystem references and must not be treated as vault-relative
+    text.
+    """
+    if os.path.isabs(path):
+        return True
+    if os.path.splitdrive(path)[0]:
+        return True
+    return path.replace("\\", "/").startswith("/")
+
+
+def _normalize_vault_relative(raw: str) -> Optional[str]:
+    """Normalize a candidate vault-relative folder path, or ``None`` if it
+    cannot be trusted as one.
+
+    Used for both ``vault_folder_sensitivity`` keys (admin-declared folders)
+    and a caller-supplied logical path with no file on disk, so both go
+    through the same paranoid gate before they can participate in matching.
+    Rejects anything absolute, drive-qualified, or containing a ``..``
+    segment — a folder key is meant to name something *inside* the vault, and
+    a traversal segment is exactly how it could be made to mean something
+    else.
+    """
+    if not isinstance(raw, str) or not raw:
+        return None
+    if _looks_absolute(raw):
+        return None
+    parts = [p for p in raw.replace("\\", "/").split("/") if p not in ("", ".")]
+    if any(p == ".." for p in parts):
+        return None
+    return "/".join(parts)  # "" denotes the vault root itself
+
+
+def _to_vault_relative(path: str, root: str) -> Optional[str]:
+    """Best-effort vault-relative, forward-slash path for folder matching.
+
+    Accepts either a real filesystem path (resolved against ``root``) or a
+    purely logical vault-relative path for content with no file on disk.
+    Returns ``None`` when the path cannot be placed inside the vault at all —
+    a real path outside ``root``, or a logical path that tries to traverse
+    out of it — so the caller moves on to the next precedence layer instead
+    of matching the wrong folder.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    if _looks_absolute(path):
+        root_abs = os.path.realpath(root)
+        candidate_abs = os.path.realpath(path)
+        try:
+            if os.path.commonpath([candidate_abs, root_abs]) != root_abs:
+                return None
+        except ValueError:  # different drives on Windows
+            return None
+        rel = os.path.relpath(candidate_abs, root_abs).replace("\\", "/")
+        return "" if rel == "." else rel
+    return _normalize_vault_relative(path)
+
+
+def _deepest_folder_match(folder_map: Dict[str, str], vault_rel: str) -> Optional[str]:
+    """Label of the deepest folder in ``folder_map`` that contains
+    ``vault_rel``, or ``None`` if nothing matches.
+
+    Deepest (longest) match wins so a public subfolder can be carved out of
+    an otherwise private tree, or a private subfolder out of a public one,
+    without re-declaring every sibling.
+    """
+    target = vault_rel.casefold()
+    best_label: Optional[str] = None
+    best_len = -1
+    for folder, label in folder_map.items():
+        folder_cf = folder.casefold()
+        matches = folder_cf == "" or target == folder_cf or target.startswith(folder_cf + "/")
+        if matches and len(folder_cf) > best_len:
+            best_len = len(folder_cf)
+            best_label = label
+    return best_label
+
+
+def _safe_folder_sensitivity_map() -> Tuple[Dict[str, str], bool]:
+    """Validate the ``vault_folder_sensitivity`` setting as a whole.
+
+    This is admin-controlled security policy, not user content, so it is
+    validated all-or-nothing: a wrong container type, a non-string key or
+    value, an unrecognised label, or a key that tries to escape the vault via
+    ``..`` makes the ENTIRE setting untrustworthy for this call rather than
+    silently dropping just the one bad entry and matching everything else. A
+    corrupt or hand-edited settings.json must not let some paths quietly fall
+    through to a public default — the caller treats ``valid=False`` as "fail
+    closed to private".
+
+    Returns ``(map, valid)``. ``map`` is only meaningful when ``valid`` is
+    ``True``.
+    """
+    from src.settings import get_setting
+
+    raw = get_setting("vault_folder_sensitivity", {})
+    if not isinstance(raw, dict):
+        logger.warning(
+            "vault_folder_sensitivity is not an object (got %s); failing closed to private",
+            type(raw).__name__,
+        )
+        return {}, False
+
+    result: Dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            logger.warning(
+                "vault_folder_sensitivity has a non-string key or value (%r: %r); "
+                "failing closed to private",
+                key, value,
+            )
+            return {}, False
+        normalized_key = _normalize_vault_relative(key)
+        if normalized_key is None:
+            logger.warning(
+                "vault_folder_sensitivity has an unsafe folder path %r; failing closed to private",
+                key,
+            )
+            return {}, False
+        label = value.strip().lower()
+        if label not in VALID_SENSITIVITIES:
+            logger.warning(
+                "vault_folder_sensitivity has an unrecognised label %r for %r; "
+                "failing closed to private",
+                value, key,
+            )
+            return {}, False
+        result[normalized_key] = label
+
+    return result, True
+
+
+# Second, independent cache over the SAME legacy state file `private_directories`
+# reads — kept as its own cache (not a shared refactor of `_private_dirs_cache`)
+# because that one backs the file-tool deny-list and must keep behaving exactly
+# as it always has, unaffected by anything added here for the newer, vault-wide
+# policy. See the module docstring on the four independent enforcement paths.
+_legacy_state_cache: Dict[str, Any] = {"mtime": None, "map": {}}
+
+
+def _read_legacy_sensitivity_map() -> Dict[str, str]:
+    """Full (public + private) view of the legacy directory_sensitivity.json
+    state file, keyed by absolute directory, for resolve_sensitivity's
+    precedence layer (c). A missing or corrupt file behaves like
+    `private_directories`: missing means no declarations, corrupt keeps the
+    last known-good map instead of clearing it.
+    """
+    from src.constants import PERSONAL_DIR
+
+    path = os.path.join(PERSONAL_DIR, SENSITIVITY_STATE_FILENAME)
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError:
+        _legacy_state_cache["mtime"] = None
+        _legacy_state_cache["map"] = {}
+        return {}
+
+    if _legacy_state_cache["mtime"] != mtime:
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                stored = json.load(handle)
+            if not isinstance(stored, dict):
+                raise ValueError("directory sensitivity must be an object")
+            _legacy_state_cache["map"] = {
+                os.path.abspath(key): normalize_sensitivity(value)
+                for key, value in stored.items()
+                if isinstance(key, str)
+            }
+            _legacy_state_cache["mtime"] = mtime
+        except Exception as e:
+            logger.warning("Could not read %s (%s); keeping previous state", path, e)
+
+    return _legacy_state_cache["map"]
+
+
+def _legacy_sensitivity_for(path: str) -> Optional[str]:
+    """Deepest-matching label from the legacy per-directory declarations, or
+    ``None`` when nothing in the state file covers ``path``.
+
+    A logical (non-absolute) path is resolved against `vault_root` first —
+    the legacy file always stores absolute directories, so there is nothing
+    else to compare a bare logical path against.
+    """
+    if not isinstance(path, str) or not path:
+        return None
+    if _looks_absolute(path):
+        abs_path = os.path.abspath(path)
+    else:
+        abs_path = os.path.abspath(os.path.join(vault_root(), path))
+
+    best_label: Optional[str] = None
+    best_len = -1
+    for directory, label in _read_legacy_sensitivity_map().items():
+        if abs_path == directory or abs_path.startswith(directory + os.sep):
+            if len(directory) > best_len:
+                best_len = len(directory)
+                best_label = label
+    return best_label
+
+
+def _frontmatter_sensitivity(frontmatter: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Explicit per-file override from a note's own frontmatter, or ``None``
+    when the key is absent — as opposed to present-but-odd, which still
+    counts as explicit (see `normalize_sensitivity`)."""
+    if not isinstance(frontmatter, dict) or SENSITIVITY_KEY not in frontmatter:
+        return None
+    return normalize_sensitivity(frontmatter.get(SENSITIVITY_KEY))
+
+
+def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = None) -> str:
+    """Resolve the sensitivity label that applies to ``path``.
+
+    ``path`` may be a real filesystem path (absolute, or resolvable against
+    `vault_root`) or a purely logical vault-relative path for content with no
+    file on disk — a note stored as a DB row still needs a label from the
+    same policy a file on disk would get.
+
+    Precedence, highest first:
+      1. An explicit ``sensitivity:`` in the file's OWN frontmatter. A
+         statement about this one file beats every folder-wide rule, in
+         either direction — a public note inside a private tree, or a
+         private note inside a public one.
+      2. The deepest ancestor folder declared in the ``vault_folder_sensitivity``
+         setting. Deepest match wins so a subfolder can carve out an
+         exception without re-declaring every sibling.
+      3. The legacy ``directory_sensitivity.json`` state file inside
+         PERSONAL_DIR — deployments that labelled directories before
+         ``vault_folder_sensitivity`` existed (PersonalDocsManager still
+         writes here) keep working.
+      4. ``vault_default_sensitivity`` — the label for a folder that declares
+         nothing. This is NOT hardcoded to private: an undeclared folder gets
+         whatever the operator configured as the default (public, unless they
+         changed it).
+
+    ``vault_folder_sensitivity`` is validated as a whole before layer 2 runs
+    (see `_safe_folder_sensitivity_map`); if it is malformed, resolution fails
+    closed to ``private`` for everything except an explicit frontmatter
+    override, rather than risk silently falling through to a public default
+    on a corrupted admin setting.
+    """
+    explicit = _frontmatter_sensitivity(frontmatter)
+    if explicit is not None:
+        return explicit
+
+    folder_map, config_is_valid = _safe_folder_sensitivity_map()
+    if not config_is_valid:
+        return SENSITIVITY_PRIVATE
+
+    vault_rel = _to_vault_relative(path, vault_root())
+    if vault_rel is not None:
+        folder_label = _deepest_folder_match(folder_map, vault_rel)
+        if folder_label is not None:
+            return folder_label
+
+    legacy_label = _legacy_sensitivity_for(path)
+    if legacy_label is not None:
+        return legacy_label
+
+    from src.settings import get_setting
+
+    return normalize_sensitivity(get_setting("vault_default_sensitivity", SENSITIVITY_PUBLIC))

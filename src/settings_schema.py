@@ -125,6 +125,44 @@ def env_locked(spec: SettingSpec) -> bool:
     return bool(spec.env_override and str(os.environ.get(spec.env_override, "") or "").strip())
 
 
+# ── write-time validation ─────────────────────────────────────────────────
+# Some settings are security policy, and their readers are deliberately
+# fail-closed: `rag_sensitivity` discards a malformed `vault_folder_sensitivity`
+# wholesale and treats everything as private. That is the right read-time
+# behaviour, but on its own it means one typo silently turns the whole vault
+# private and the operator experiences "search stopped working" with the reason
+# only in a log line. Validating on write makes that state nearly unreachable and
+# reports exactly which entry is wrong, while the fail-closed reader stays as the
+# backstop for a hand-edited settings.json.
+
+
+def _validate_folder_sensitivity(value: Any) -> None:
+    if not isinstance(value, dict):
+        raise ValueError("must be an object mapping a folder path to \"public\" or \"private\"")
+    for key, label in value.items():
+        if not isinstance(key, str) or not isinstance(label, str):
+            raise ValueError(f"every folder and label must be text (got {key!r}: {label!r})")
+        if str(label).strip().lower() not in {"public", "private"}:
+            raise ValueError(f"{key!r} has label {label!r}; expected \"public\" or \"private\"")
+        cleaned = key.replace("\\", "/").strip()
+        if cleaned.startswith("/") or ".." in cleaned.split("/") or ":" in cleaned:
+            raise ValueError(
+                f"{key!r} must be a folder inside the vault — no absolute paths, drive letters or '..'"
+            )
+
+
+VALIDATORS: Dict[str, Any] = {
+    "vault_folder_sensitivity": _validate_folder_sensitivity,
+}
+
+
+def validate_value(key: str, value: Any) -> None:
+    """Raise ``ValueError`` with an operator-readable reason if ``value`` is unusable."""
+    check = VALIDATORS.get(key)
+    if check is not None:
+        check(value)
+
+
 def ui_payload(owner: str = "", is_admin: bool = True) -> List[dict]:
     """Everything the settings UI needs to render, grouped, in one payload.
 

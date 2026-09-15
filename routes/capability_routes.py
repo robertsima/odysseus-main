@@ -188,7 +188,16 @@ def setup_capability_routes() -> APIRouter:
             if settings_schema.env_locked(spec):
                 locked.append(key)
                 continue
-            updates[key] = _coerce(spec, raw)
+            value = _coerce(spec, raw)
+            # Security-policy settings have fail-closed readers, so a bad value
+            # degrades quietly rather than erroring. Catch it here, where we can
+            # name the offending entry, instead of letting the operator discover
+            # it as "retrieval stopped working".
+            try:
+                settings_schema.validate_value(key, value)
+            except ValueError as exc:
+                raise HTTPException(400, f"{key}: {exc}")
+            updates[key] = value
 
         if unknown:
             raise HTTPException(400, f"Unknown setting(s): {', '.join(sorted(unknown))}")
