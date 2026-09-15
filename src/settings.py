@@ -29,6 +29,27 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # ── Knowledge: notes and vault documents are one Markdown store ──
+    # Notes used to be SQLite rows with no privacy label at all, while vault
+    # files had folder-scoped sensitivity. One store, one policy: a note is a
+    # Markdown file, so it inherits the folder's label like everything else.
+    # Empty means "use PERSONAL_DIR", so an existing deployment keeps working.
+    "vault_directory": "",
+    "notes_directory": "Notes",
+    "notes_archive_directory": "Notes/Archive",
+    # Folder-wide by default, per-file override available — the coarse default
+    # is the safe one, because an undeclared folder that reads as public is how
+    # private content leaks to a hosted model.
+    "vault_default_sensitivity": "public",
+    "vault_folder_sensitivity": {},
+    # ── Agents ──
+    # "auto" picks the first provider that reports itself usable on this host.
+    "delegation_provider": "auto",
+    "agent_peer_messaging": True,
+    "agent_peer_message_budget": 8,
+    # ── Remote hosts ──
+    "remote_hosts": [],
+
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
