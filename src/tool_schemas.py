@@ -1544,6 +1544,21 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "message_agent",
+            "description": "Tell another RUNNING agent something now, without waiting for a reply — the opposite of send_to_session. send_to_session blocks your turn until the target produces one response and the target can only ever answer, never speak first; message_agent queues the message and returns immediately, and it lands before the target's next round, tagged as coming from you (not from its user, so it won't be mistaken for a user instruction). Use it to steer, warn, or hand off a status update to a peer doing its own independent work ('don't also fix that, I'm on it', 'done, here's the result') — not to delegate a task and wait for the outcome (use send_to_session for that). A peer that wants to answer calls message_agent right back naming your session, so a back-and-forth is possible with neither side blocked. Limited to a few sends per turn and to sessions you own; refused with a reason (not an error) when the limit is hit or the target belongs to someone else.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "The id of the running agent session to message"},
+                    "message": {"type": "string", "description": "The message to deliver now"}
+                },
+                "required": ["session_id", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_bg_jobs",
             "description": "Inspect and control detached background `bash` jobs (started with the `#!bg` marker). action='list' shows this chat's jobs with id/status/age/command; action='output' returns a job's captured output so far (use for a still-running job, or to re-read a finished one); action='kill' terminates a runaway job's process tree instead of waiting out its max-runtime. output and kill need job_id from list.",
             "parameters": {
@@ -1761,6 +1776,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(payload)
         else:
             content = args.get("session_id", "") + "\n" + args.get("message", "")
+    elif tool_type == "message_agent":
+        content = json.dumps({"session_id": args.get("session_id", ""), "message": args.get("message", "")})
     elif tool_type == "pipeline":
         # Pass as JSON for the pipeline parser
         content = json.dumps({"steps": args.get("steps", [])})

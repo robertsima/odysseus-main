@@ -30,16 +30,33 @@ _STEER: Dict[str, List[dict]] = {}
 _STEER_MAX = 10
 
 
-def steer(session_id: str, text: str, *, owner: Optional[str] = None) -> dict:
+def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
+          from_session: Optional[str] = None, from_session_name: Optional[str] = None) -> dict:
+    """Queue a message for the next round of ``session_id``'s turn.
+
+    ``kind``/``from_session``/``from_session_name`` are new, optional, and
+    default to the original human-steer shape (``kind="user"``, no sender) so
+    every existing caller — the Agents dashboard, the chat composer — is
+    unaffected. ``agent_mailbox.send()`` is the other caller: it passes
+    ``kind="peer"`` and the sending session so a peer message can be told
+    apart from a human's steer (see ``pending_steer``/``agent_mailbox.inbox``)
+    even though both live in this same queue and drain through the same
+    ``drain_steer``.
+    """
     text = " ".join(str(text or "").split())[:4000]
     if not text:
         raise ValueError("steer text is empty")
-    rec = {"text": text, "ts": time.time(), "owner": owner}
+    rec = {"text": text, "ts": time.time(), "owner": owner, "kind": kind}
+    if from_session:
+        rec["from_session"] = from_session
+    if from_session_name:
+        rec["from_session_name"] = from_session_name
     queue = _STEER.setdefault(str(session_id), [])
     if len(queue) >= _STEER_MAX:
         raise ValueError("too many queued steer messages")
     queue.append(rec)
-    activity.publish(session_id, "note", f"Steer queued: {text[:160]}", source="odysseus",
+    label = "Peer message" if kind == "peer" else "Steer"
+    activity.publish(session_id, "note", f"{label} queued: {text[:160]}", source="odysseus",
                      run_id=activity.active_turn(session_id), owner=owner, detail=text, level="warning")
     return rec
 
@@ -50,6 +67,26 @@ def drain_steer(session_id: Optional[str]) -> List[str]:
         return []
     queue = _STEER.pop(str(session_id), None)
     return [rec["text"] for rec in queue] if queue else []
+
+
+def drain_steer_records(session_id: Optional[str]) -> List[dict]:
+    """Like ``drain_steer``, but keeps each record's metadata instead of just its text.
+
+    ``drain_steer`` returns bare strings because the agent loop's round-boundary
+    drain (agent_loop.py, near the top of the round loop) wraps every one of
+    them the same way: ``"[Mid-task instruction from the user] " + text``. That
+    is correct for a human steer and wrong for a peer's — see
+    ``agent_mailbox.send()``, which works around it today by baking its own
+    "this is a peer, not your user" tag into the text itself so it survives
+    that wrapper. The proper fix is for the loop to call this instead and pick
+    the wrapper from ``rec.get("kind")`` (``"peer"`` vs the default ``"user"``)
+    rather than hard-coding "the user"; this function exists so that switch is
+    a small change there whenever that lands, not a new queue here.
+    """
+    if not session_id:
+        return []
+    queue = _STEER.pop(str(session_id), None)
+    return list(queue) if queue else []
 
 
 def pending_steer(session_id: str) -> List[dict]:

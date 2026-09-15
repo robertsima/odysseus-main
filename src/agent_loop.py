@@ -4035,6 +4035,74 @@ def _detect_runaway_call(call_freq, threshold=15):
 DEFAULT_MAX_TOOL_CALLS_PER_RUN = 500
 
 
+# The withheld-tool line is worth INFO the first time and whenever the set
+# changes (a binary installed, a capability switched on); repeating the same
+# names on all 21 rounds of a turn is the noise that buries the round that
+# actually failed. Same idea as `_last_tool_debug_sig` in the round loop.
+_last_withheld_sig: Optional[Tuple[str, ...]] = None
+
+
+def _withhold_unavailable_tools(selected: List[Dict]) -> List[Dict]:
+    """Drop schemas for tools this host cannot actually run.
+
+    The worst failure mode a fresh install had was an honest-looking schema: the
+    model picked `delegate_to_claude_code`, the binary was not there, and the
+    call failed at the far end — after which the model retried, apologised, or
+    invented a workaround. Withholding the schema turns that into a capability
+    the model never claims to have.
+
+    Deliberately narrow:
+
+    * A tool belonging to no registered capability is never withheld, so this
+      cannot hide anything by omission (see `capabilities.unavailable_tools`).
+    * Only exact tool names are matched, so connected external MCP tools — which
+      bind independently of RAG selection — are untouched unless a capability
+      declares one by name.
+    * If it would empty the list, it does nothing. A model with no tools at all
+      fails far worse than one holding a tool that errors, so that case is
+      logged loudly and the unfiltered list is sent.
+    """
+    global _last_withheld_sig
+    try:
+        # Importing the declarations is what populates the registry; the
+        # mechanism module alone knows nothing.
+        import src.capabilities_builtin  # noqa: F401  (registers the declarations)
+        from src.capabilities import capability_for_tool, unavailable_tools
+
+        withheld = unavailable_tools()
+    except Exception:
+        # Never let capability bookkeeping cost the turn its tools.
+        logger.debug("[capabilities] tool gating skipped", exc_info=True)
+        return selected
+    if not withheld:
+        return selected
+
+    def _name(schema: Dict) -> str:
+        return schema.get("function", {}).get("name") or schema.get("name") or ""
+
+    kept = [schema for schema in selected if _name(schema) not in withheld]
+    if selected and not kept:
+        logger.error(
+            "[capabilities] refusing to send an empty tool list: every tool in this "
+            "round (%s) belongs to an unavailable capability — sending unfiltered. "
+            "Check Settings › Capabilities; something is disabled that should not be.",
+            len(selected),
+        )
+        return selected
+    removed = tuple(sorted({_name(s) for s in selected} - {_name(s) for s in kept}))
+    if removed:
+        _log = logger.info if removed != _last_withheld_sig else logger.debug
+        _last_withheld_sig = removed
+        # Name the owning capability: "withheld delegate_to_claude_code" alone
+        # sends the reader hunting for which switch or missing binary did it.
+        _owners = []
+        for _tool in removed:
+            _cap = capability_for_tool(_tool)
+            _owners.append(f"{_tool} ({_cap.name if _cap else '?'})")
+        _log("[capabilities] withheld %d tool(s) from the model: %s", len(removed), ", ".join(_owners))
+    return kept
+
+
 def _tool_schemas_for_round(
     *,
     force_answer: bool,
@@ -4101,6 +4169,12 @@ def _tool_schemas_for_round(
             if schema.get("function", {}).get("name") not in disabled_tools
             and schema.get("name") not in disabled_tools
         ]
+    # Last gate before the payload: a tool whose capability is unavailable on
+    # this host is not offered at all. Applied here, next to `disabled_tools`,
+    # because this function is the single place both the round payload and the
+    # schema token reserve read their list from — filtering anywhere earlier
+    # would leave the two disagreeing about what was sent.
+    selected = _withhold_unavailable_tools(selected)
     # Canonical schemas remain the execution contract. Native provider payloads
     # omit repeated parameter prose while preserving every JSON constraint.
     return compact_function_tool_schemas(selected) if is_api_model else selected
@@ -5290,14 +5364,29 @@ async def stream_agent_loop(
     _last_tool_debug_sig = None
 
     for round_num in range(1, max_rounds + 1):
-        # A steer from the Agents dashboard lands here, between rounds, as a
-        # user message — the correction reaches the model mid-task instead of
-        # after the turn. The route persists it when it sees steer_applied.
-        for _steer_text in _agent_control.drain_steer(session_id):
-            _steer_msg = f"[Mid-task instruction from the user] {_steer_text}"
+        # A steer lands here, between rounds, so a correction reaches the model
+        # mid-task instead of after the turn. Three senders share this queue: the
+        # Agents dashboard, the chat composer, and another agent via
+        # agent_mailbox. The route persists it when it sees steer_applied.
+        #
+        # The wrapper is chosen per record rather than fixed, because it tells
+        # the model WHO is talking. Labelling a peer agent's message "from the
+        # user" would be a lie with consequences — a model that thinks a peer is
+        # the person it works for changes whose instructions it prioritises. A
+        # peer message already carries its own attribution from agent_mailbox
+        # (which bakes it into the text so attribution survives any drain path),
+        # so it is passed through rather than wrapped twice and contradicted.
+        for _steer_rec in _agent_control.drain_steer_records(session_id):
+            _steer_text = _steer_rec.get("text") or ""
+            if not _steer_text:
+                continue
+            _is_peer = str(_steer_rec.get("kind") or "user") == "peer"
+            _steer_msg = _steer_text if _is_peer else f"[Mid-task instruction from the user] {_steer_text}"
             messages.append({"role": "user", "content": _steer_msg})
-            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num})}\n\n'
-            _activity.publish(session_id, "status", f"Steer applied: {_steer_text[:160]}", source="odysseus",
+            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user"})}\n\n'
+            _activity.publish(session_id, "status",
+                              f"{'Peer message' if _is_peer else 'Steer'} applied: {_steer_text[:160]}",
+                              source="odysseus",
                               run_id=_activity_run_id, owner=owner, detail=_steer_text)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)

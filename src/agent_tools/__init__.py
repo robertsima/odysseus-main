@@ -26,7 +26,7 @@ from .worktree_tools import AgentWorktreeTool, ReadAppLogsTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
-from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
+from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool, MessageAgentTool
 from .bg_job_tools import ManageBgJobsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
@@ -61,6 +61,7 @@ TOOL_HANDLERS = {
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
+    "message_agent": MessageAgentTool().execute,
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,

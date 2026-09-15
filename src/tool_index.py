@@ -125,6 +125,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "create_session": "Create a new chat with a name and model.",
     "list_sessions": "List all chats with their metadata (the UI calls these 'chats'). Use for 'list my chats', 'rename all my chats' (list first, then manage_session to rename each).",
     "send_to_session": "Send a message to another chat. Cross-chat communication.",
+    "message_agent": "Tell a running agent something now, without waiting for its reply. Peer-to-peer agent messaging; lands between its rounds.",
     "recall_tool_output": "Read back a large tool result that was moved out of the conversation. Oversized tool output (long logs, whole files, big API responses) is kept only as a head/tail excerpt naming a `toolout-...` reference; this searches or pages through the full stored text. Use for \"the rest of that output\", \"what did the log say about X\", \"show me more of that file\" — never re-run the command to see what was trimmed.",
     "search_documents": "Semantic/vector search over the user's personal documents, vault, notes, journal entries, voice logs, and uploaded files using the ChromaDB embedding index. Answers questions ABOUT the content of the user's own documents — what did I write about X, find my notes on Y, what does my vault say about Z. Returns the relevant excerpts and their file paths. This is the correct tool instead of read_file/bash/cat over the personal documents directory, which floods context with whole files.",
     "search_chats": "Search past session transcripts across chats.",
