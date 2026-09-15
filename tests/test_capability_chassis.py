@@ -141,15 +141,32 @@ class TestToolWithholding:
 
 class TestBuiltinDeclarations:
     def test_host_control_capabilities_are_off_by_default(self):
-        """Anything that hands a model the host, or writes to a remote, must
-        require an explicit decision — not inherit one from the author."""
+        """Anything that hands a model the host, or reaches another machine,
+        must require an explicit decision — not inherit one from the author."""
         import src.capabilities_builtin  # noqa: F401  (registers)
         from src import capabilities
 
-        for name in ("host_docker", "worktree_publish", "remote_hosts", "model_serving"):
+        for name in ("host_docker", "remote_hosts", "model_serving"):
             cap = capabilities.get(name)
             assert cap is not None, name
             assert cap.default_enabled is False, f"{name} must be opt-in"
+
+    def test_local_worktrees_are_not_gated_behind_publishing(self):
+        """Gating the worktree tool on "publishing is risky" would have removed
+        local worktrees from every default install — a capability regression
+        dressed up as caution. Creating a worktree and committing to a branch is
+        ordinary local work; *pushing* is the part needing a decision, and that
+        already has its own gate (ODYSSEUS_AGENT_PUBLISH_ENABLED, enforced in
+        src/agent_worktree/config.py)."""
+        import src.capabilities_builtin  # noqa: F401
+        from src import capabilities
+
+        cap = capabilities.get("agent_worktrees")
+        assert cap is not None, "agent_worktrees capability is missing"
+        assert cap.default_enabled is True
+        assert "manage_agent_worktree" in cap.tools
+        # And the old over-broad capability must be gone, not merely unused.
+        assert capabilities.get("worktree_publish") is None
 
     def test_image_runners_live_with_model_serving(self):
         """DDColor / inpaint / MLX image generation are serve targets for image

@@ -180,11 +180,11 @@ register(Capability(
 ))
 
 register(Capability(
-    name="worktree_publish",
-    title="Publish agent branches",
+    name="agent_worktrees",
+    title="Agent worktrees",
     summary=(
-        "Lets an agent push a branch and open a pull request. Off by default "
-        "because it writes to a remote nobody reviewed first."
+        "Lets an agent work in its own git worktree and branch, so parallel "
+        "changes never collide in one checkout."
     ),
     requirements=(
         Requirement(
@@ -193,5 +193,13 @@ register(Capability(
             hint="Install git on the machine running Odysseus.",
         ),
     ),
+    # On by default, and deliberately NOT gating the whole tool behind
+    # publishing. Creating a local worktree and committing to a branch is
+    # ordinary local work; what needs an explicit decision is *pushing* to a
+    # remote nobody reviewed — and that already has its own gate,
+    # ODYSSEUS_AGENT_PUBLISH_ENABLED, enforced in agent_worktree/config.py.
+    # Gating the tool here too would have removed local worktrees from every
+    # default install, which is a capability regression dressed up as caution.
+    default_enabled=True,
     tools=("manage_agent_worktree",),
 ))
