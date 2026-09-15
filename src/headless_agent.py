@@ -42,7 +42,7 @@ def running_ids() -> Set[str]:
 # Tools a headless child must never get: each one starts *another* agent, so
 # without this a sub-agent could fan out sub-sub-agents without bound.
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
-    "send_to_session", "create_session", "pipeline", "delegate_to_claude_code",
+    "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
     "manage_session", "manage_agent_worktree",
 })
 

@@ -29,12 +29,14 @@ from src.subscription import base
 # --- the interface --------------------------------------------------------
 
 
-def test_registry_lists_both_providers():
+def test_registry_lists_only_compliant_providers():
     import src.subscription as subscription
 
     ids = [p.provider_id for p in subscription.providers()]
     assert "chatgpt-subscription" in ids
-    assert "claude-subscription" in ids
+    # Claude.ai consumer OAuth is intentionally not an Odysseus provider. Its
+    # subscription must be used through the unmodified Claude Code/MCP path.
+    assert "claude-subscription" not in ids
 
 
 def test_get_returns_provider_and_none_for_unknown():
@@ -45,9 +47,9 @@ def test_get_returns_provider_and_none_for_unknown():
     assert subscription.get("totally-unknown") is None
 
 
-@pytest.mark.parametrize("provider_id", ["chatgpt-subscription", "claude-subscription"])
+@pytest.mark.parametrize("provider_id", ["chatgpt-subscription"])
 def test_providers_satisfy_the_contract(provider_id):
-    """Both providers implement the whole interface, not a subset of it."""
+    """Registered providers implement the whole interface, not a subset."""
     import src.subscription as subscription
 
     provider = subscription.get(provider_id)
@@ -298,8 +300,10 @@ def test_configured_claude_matches_only_its_own_base(monkeypatch):
         claude, "DEFAULT_CLAUDE_SUBSCRIPTION_BASE_URL", "https://example.invalid/sub/v1"
     )
     provider = claude.provider()
-    assert provider.owns_base_url("https://example.invalid/sub/v1") is True
-    assert provider.owns_base_url("https://example.invalid/sub/v1/messages") is True
+    # The module is retained only as a fail-closed compatibility placeholder;
+    # environment values must not re-enable consumer OAuth.
+    assert provider.owns_base_url("https://example.invalid/sub/v1") is False
+    assert provider.owns_base_url("https://example.invalid/sub/v1/messages") is False
     assert provider.owns_base_url("https://example.invalid/other") is False
     assert provider.owns_base_url("https://elsewhere.invalid/sub/v1") is False
 
@@ -316,10 +320,7 @@ def test_claude_is_linked_reports_not_configured_without_raising(monkeypatch):
 
     linked, reason = claude.is_linked()
     assert linked is False
-    assert "not configured" in reason.lower()
-    # The reason names what is missing, so an operator knows what to go and get.
-    assert "client id" in reason.lower()
-    assert "token url" in reason.lower()
+    assert "disabled" in reason.lower()
 
 
 def test_claude_is_linked_matches_the_capability_registry_contract():
@@ -370,7 +371,7 @@ def test_claude_refresh_without_a_refresh_token_asks_for_reconnect(monkeypatch):
         raise AssertionError("must not post without a refresh token")
 
     monkeypatch.setattr(claude.httpx, "post", _no_network)
-    with pytest.raises(base.SubscriptionReauthRequired):
+    with pytest.raises(base.SubscriptionNotConfigured):
         claude.provider().refresh_oauth_tokens("old", "")
 
 

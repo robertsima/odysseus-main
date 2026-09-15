@@ -6,7 +6,7 @@ meaning, in one place:
 * ``auto`` — the first registered provider that reports itself usable. An
   operator who installs a CLI or links a subscription gets delegation without
   reading a settings page.
-* an explicit id (``claude_code_cli``, ``claude_subscription``, ``mcp``) — that
+* an explicit id (``claude_code_cli``, ``mcp``) — that
   provider or nothing. An explicit choice is not silently overridden by a
   different vendor, even when the chosen one is unusable; the operator gets a
   reason instead.
@@ -49,7 +49,6 @@ _REGISTRY: Dict[str, DelegationProvider] = {}
 # Optional provider modules, tried once. Each is expected to call ``register``.
 # Named rather than discovered so the order stays deterministic.
 _OPTIONAL_MODULES: Tuple[str, ...] = (
-    "src.delegation.claude_subscription",
     "src.delegation.mcp",
 )
 _optional_loaded = False

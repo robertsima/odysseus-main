@@ -257,3 +257,14 @@ class TestExistingSteerBehaviourUnchanged:
 
         assert [r["kind"] for r in records] == ["user", "peer"]
         assert agent_control.drain_steer_records("s") == []
+
+
+def test_message_agent_native_call_reaches_execution_pipeline():
+    """A schema and handler are useless if TOOL_TAGS rejects the native call."""
+    from src.tool_schemas import function_call_to_tool_block
+
+    block = function_call_to_tool_block(
+        "message_agent", '{"session_id":"peer","message":"status?"}'
+    )
+    assert block is not None
+    assert block.tool_type == "message_agent"

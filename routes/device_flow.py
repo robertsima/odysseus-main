@@ -14,6 +14,22 @@ from fastapi import APIRouter, Form, HTTPException, Request
 from core.middleware import require_admin
 
 
+_INITIATOR_OWNER_KEY = "__odysseus_device_flow_initiator"
+
+
+def _request_owner(request: Request) -> Optional[str]:
+    """Return the authenticated principal used to bind a pending flow."""
+    owner = getattr(request.state, "current_user", None)
+    return str(owner) if owner else None
+
+
+def _assert_flow_owner(request: Request, payload: Mapping[str, Any]) -> None:
+    """Ensure a pending flow cannot be polled/cancelled by another admin."""
+    initiator = payload.get(_INITIATOR_OWNER_KEY)
+    if initiator and initiator != _request_owner(request):
+        raise HTTPException(403, "This login session belongs to another administrator")
+
+
 @dataclass(frozen=True)
 class DeviceFlowStart:
     """Provider-specific start result consumed by the shared route wrapper."""
@@ -151,7 +167,9 @@ def create_device_flow_router(
         start = await _maybe_await(start_flow(request, form))
         interval = int(start.interval or 5)
         expires_in = int(start.expires_in or 900)
-        poll_id = store.add(start.pending, interval=interval, expires_in=expires_in)
+        pending = dict(start.pending)
+        pending[_INITIATOR_OWNER_KEY] = _request_owner(request)
+        poll_id = store.add(pending, interval=interval, expires_in=expires_in)
         response = dict(start.response)
         response.update({"poll_id": poll_id, "interval": interval, "expires_in": expires_in})
         return response
@@ -162,11 +180,14 @@ def create_device_flow_router(
         payload = store.get_payload(poll_id)
         if payload is None:
             raise HTTPException(404, "Unknown or expired login session")
+        _assert_flow_owner(request, payload)
         if store.is_throttled(poll_id):
             return {"status": "pending"}
 
         try:
-            outcome = await _maybe_await(poll_flow(request, payload))
+            provider_payload = dict(payload)
+            provider_payload.pop(_INITIATOR_OWNER_KEY, None)
+            outcome = await _maybe_await(poll_flow(request, provider_payload))
         except Exception:
             store.pop(poll_id)
             raise
@@ -187,6 +208,10 @@ def create_device_flow_router(
     @router.post("/device/cancel")
     def device_cancel(request: Request, poll_id: str = Form(...)):
         require_admin(request)
+        payload = store.get_payload(poll_id)
+        if payload is None:
+            raise HTTPException(404, "Unknown or expired login session")
+        _assert_flow_owner(request, payload)
         store.pop(poll_id)
         return {"status": "cancelled"}
 

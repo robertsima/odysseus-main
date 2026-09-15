@@ -610,7 +610,7 @@ _DOMAIN_TOOL_MAP = {
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
-    "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
+    "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "message_agent", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
@@ -3498,7 +3498,7 @@ _ADMIN_TOOLS = {
     "manage_session", "manage_skills", "manage_tasks",
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
     "manage_documents", "manage_settings", "create_session", "list_sessions",
-    "send_to_session", "pipeline", "ask_teacher", "list_models",
+    "send_to_session", "message_agent", "pipeline", "ask_teacher", "list_models", "delegate_to_agent",
 }
 
 def _build_base_prompt(

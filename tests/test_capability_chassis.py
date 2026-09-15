@@ -189,6 +189,15 @@ class TestBuiltinDeclarations:
         assert "subscription" in hint
         assert "api key" in hint  # explicitly says one is *not* required
 
+    def test_disabling_rag_does_not_disable_notes_or_document_editor(self):
+        import src.capabilities_builtin  # noqa: F401
+        from src import capabilities
+
+        cap = capabilities.get("vault")
+        assert cap is not None
+        assert cap.feature_key == "rag"
+        assert cap.tools == ("search_documents",)
+
 
 class TestSettingsSchema:
     def test_every_setting_has_a_control(self):

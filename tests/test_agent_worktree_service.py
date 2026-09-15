@@ -8,6 +8,7 @@ and the substitutes assert on what they were handed.
 
 import dataclasses
 import os
+import shutil
 import subprocess
 
 import pytest
@@ -20,7 +21,7 @@ from src.agent_worktree.gitcmd import auth_env
 pytestmark = pytest.mark.area_security
 
 git_required = pytest.mark.skipif(
-    subprocess.run(["which", "git"], capture_output=True).returncode != 0,
+    shutil.which("git") is None,
     reason="git is not installed",
 )
 

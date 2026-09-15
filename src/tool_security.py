@@ -71,6 +71,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "resolve_contact",
     "manage_contact",
     # Delegates repository mutation to an external coding agent; admin-only.
+    "delegate_to_agent",
     "delegate_to_claude_code",
     "manage_calendar",
     "vault_search",
@@ -155,7 +156,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     # Creates worktrees, commits, and (with human approval) pushes.
     "manage_agent_worktree",
     # Runs an external coding agent that can edit/commit inside an approved repo.
-    "delegate_to_claude_code",
+    "delegate_to_agent", "delegate_to_claude_code",
     "create_document", "edit_document", "update_document",
     "suggest_document", "manage_documents", "create_session", "manage_session",
     "send_to_session", "message_agent", "pipeline", "manage_memory", "manage_skills",

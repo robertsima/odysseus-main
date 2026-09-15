@@ -1,6 +1,5 @@
 """Shared device-flow route helper regressions."""
 
-import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
@@ -18,7 +17,11 @@ def _client(monkeypatch, now_ref, start_flow, poll_flow):
     )
     app = FastAPI()
     app.include_router(router)
-    monkeypatch.setattr(device_flow, "require_admin", lambda request: None)
+    def _allow_admin(request):
+        # Test-only identity source; production middleware sets current_user.
+        request.state.current_user = request.headers.get("x-test-owner")
+
+    monkeypatch.setattr(device_flow, "require_admin", _allow_admin)
     return TestClient(app)
 
 
@@ -119,6 +122,44 @@ def test_cancel_and_expiry_remove_pending_session(monkeypatch):
     expired = client.post("/api/test-device/device/start").json()["poll_id"]
     now[0] += 21
     assert client.post("/api/test-device/device/poll", data={"poll_id": expired}).status_code == 404
+
+
+def test_pending_flow_is_bound_to_the_initiating_admin(monkeypatch):
+    now = [100.0]
+    calls = []
+
+    def poll(_request, pending):
+        calls.append(dict(pending))
+        return device_flow.DeviceFlowPoll.pending()
+
+    client = _client(monkeypatch, now, _start, poll)
+    started = client.post(
+        "/api/test-device/device/start", headers={"x-test-owner": "alice"}
+    ).json()
+    poll_id = started["poll_id"]
+
+    denied = client.post(
+        "/api/test-device/device/poll",
+        data={"poll_id": poll_id},
+        headers={"x-test-owner": "bob"},
+    )
+    assert denied.status_code == 403
+    assert calls == []
+
+    allowed = client.post(
+        "/api/test-device/device/poll",
+        data={"poll_id": poll_id},
+        headers={"x-test-owner": "alice"},
+    )
+    assert allowed.status_code == 200
+    assert calls == [{"secret": "server-only", "owner": "alice"}]
+
+    cancel_denied = client.post(
+        "/api/test-device/device/cancel",
+        data={"poll_id": poll_id},
+        headers={"x-test-owner": "bob"},
+    )
+    assert cancel_denied.status_code == 403
 
 
 def test_routes_are_admin_gated(monkeypatch):

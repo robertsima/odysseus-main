@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from src.index_walk import is_indexable_file, prune_index_dirs
 from src.rag_sensitivity import SENSITIVITY_PUBLIC
+from src.settings import get_setting_or_env
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +227,7 @@ class VaultScanner:
 
 
 def _interval_seconds() -> int:
-    raw = os.environ.get("ODYSSEUS_VAULT_SCAN_SECONDS")
+    raw = get_setting_or_env("vault_scan_seconds", "ODYSSEUS_VAULT_SCAN_SECONDS", DEFAULT_SCAN_INTERVAL_S)
     if raw is None or not str(raw).strip():
         return DEFAULT_SCAN_INTERVAL_S
     try:

@@ -10,12 +10,10 @@ import asyncio
 import json
 import sys
 import types
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
-import pytest
 
 from src import tool_implementations
+from src.notes_markdown import NoteRecord
+from tests.helpers.fake_notes_store import FakeNotesStore
 
 
 def _install_fakes(monkeypatch, note, parse=None):
@@ -28,34 +26,8 @@ def _install_fakes(monkeypatch, note, parse=None):
     this leaf import order-independent. Placing each leaf module in sys.modules
     means the parent package is never re-imported.
     """
-    fake_sa_attrs = types.ModuleType("sqlalchemy.orm.attributes")
-    fake_sa_attrs.flag_modified = lambda *a, **k: None
-    monkeypatch.setitem(sys.modules, "sqlalchemy.orm.attributes", fake_sa_attrs)
-
-    class FakeQuery:
-        def filter(self, *a, **k):
-            return self
-
-        def first(self):
-            return note
-
-    class FakeDB:
-        def query(self, *a, **k):
-            return FakeQuery()
-
-        def add(self, *a, **k):
-            pass
-
-        def commit(self):
-            pass
-
-        def close(self):
-            pass
-
-    fake_core_db = types.ModuleType("core.database")
-    fake_core_db.SessionLocal = lambda: FakeDB()
-    fake_core_db.Note = MagicMock()  # only used as a query/filter argument
-    monkeypatch.setitem(sys.modules, "core.database", fake_core_db)
+    from src import notes_store
+    monkeypatch.setattr(notes_store, "STORE", FakeNotesStore(note))
 
     calls = {"parsed": []}
 
@@ -74,9 +46,9 @@ def _run_update(args):
 
 
 def test_update_parses_natural_language_due_date(monkeypatch):
-    note = SimpleNamespace(
+    note = NoteRecord(
         id="abc12345-existing", owner=None, title="Dentist", content=None,
-        note_type="note", color=None, label=None, items=None,
+        color=None, label=None, items=None,
         pinned=False, archived=False, due_date=None,
     )
     calls = _install_fakes(monkeypatch, note)
@@ -92,9 +64,9 @@ def test_update_parses_natural_language_due_date(monkeypatch):
 
 
 def test_update_still_sets_other_fields_without_parsing_them(monkeypatch):
-    note = SimpleNamespace(
+    note = NoteRecord(
         id="abc12345-existing", owner=None, title="Old", content=None,
-        note_type="note", color=None, label=None, items=None,
+        color=None, label=None, items=None,
         pinned=False, archived=False, due_date=None,
     )
     calls = _install_fakes(monkeypatch, note)

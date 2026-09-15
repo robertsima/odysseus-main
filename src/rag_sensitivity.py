@@ -16,17 +16,13 @@ existed were already being sent to whatever model the session used, so
 defaulting them to ``public`` preserves behaviour instead of silently emptying
 an existing index. ``private`` is never inferred — a user has to ask for it.
 
-``resolve_sensitivity`` (below) is the store-agnostic entry point added on top
-of that: it lets any vault-backed store — not just PersonalDocsManager's own
+``resolve_sensitivity`` (below) is the store-agnostic entry point: it lets any vault-backed store — not just PersonalDocsManager's own
 directory tracking — answer "public or private?" for a path via one
 precedence chain (per-file frontmatter, then the ``vault_folder_sensitivity``
 setting, then the legacy per-directory state file, then the configured
-default). It is deliberately layered ON TOP of, not a replacement for,
-``private_directories`` / ``path_is_under_private_directory``: those two keep
-their exact current behaviour because the file-tool deny-list that calls them
-is one of four enforcement paths that fail independently by design (the
-Chroma where-filter, the Python keyword fallback, the keyword index, and the
-file tools) — see each call site's own docstring. Do not fold them together.
+default). The file-tool deny-list calls the same resolver for paths inside the
+vault, so a folder cannot be private to search while remaining readable by an
+agent through ``read_file``.
 """
 import json
 import logging
@@ -131,6 +127,32 @@ def path_is_under_private_directory(path: str) -> bool:
     if not isinstance(path, str) or not path:
         return False
     abs_path = os.path.abspath(path)
+    root = os.path.realpath(vault_root())
+    candidate = os.path.realpath(abs_path)
+    try:
+        inside_vault = os.path.commonpath([candidate, root]) == root
+    except ValueError:
+        inside_vault = False
+    if inside_vault:
+        frontmatter = None
+        if os.path.isfile(candidate) and candidate.lower().endswith((".md", ".markdown")):
+            try:
+                from src.vault_markdown import split_frontmatter
+
+                with open(candidate, "r", encoding="utf-8") as handle:
+                    # Frontmatter is bounded and appears first; do not read a whole
+                    # large document merely to decide whether file tools may see it.
+                    header = handle.read(65537)
+                    frontmatter, _ = split_frontmatter(header)
+                # An opening header that cannot be parsed within the bound is
+                # security metadata we cannot trust. Fail closed instead of
+                # silently falling through to a public folder default.
+                if header.lstrip("\ufeff").startswith("---") and not frontmatter:
+                    return True
+            except Exception as exc:
+                logger.warning("Could not read vault frontmatter for %s (%s); denying access", candidate, exc)
+                return True
+        return resolve_sensitivity(candidate, frontmatter=frontmatter) == SENSITIVITY_PRIVATE
     for directory in private_directories():
         if abs_path == directory or abs_path.startswith(directory + os.sep):
             return True
@@ -321,11 +343,8 @@ def _safe_folder_sensitivity_map() -> Tuple[Dict[str, str], bool]:
     return result, True
 
 
-# Second, independent cache over the SAME legacy state file `private_directories`
-# reads — kept as its own cache (not a shared refactor of `_private_dirs_cache`)
-# because that one backs the file-tool deny-list and must keep behaving exactly
-# as it always has, unaffected by anything added here for the newer, vault-wide
-# policy. See the module docstring on the four independent enforcement paths.
+# Second cache over the same legacy state file.  It retains public declarations
+# as well as private ones for precedence resolution.
 _legacy_state_cache: Dict[str, Any] = {"mtime": None, "map": {}}
 
 
@@ -393,9 +412,12 @@ def _frontmatter_sensitivity(frontmatter: Optional[Dict[str, Any]]) -> Optional[
     """Explicit per-file override from a note's own frontmatter, or ``None``
     when the key is absent — as opposed to present-but-odd, which still
     counts as explicit (see `normalize_sensitivity`)."""
-    if not isinstance(frontmatter, dict) or SENSITIVITY_KEY not in frontmatter:
+    if not isinstance(frontmatter, dict):
         return None
-    return normalize_sensitivity(frontmatter.get(SENSITIVITY_KEY))
+    for key, value in frontmatter.items():
+        if str(key).lower() == SENSITIVITY_KEY:
+            return normalize_sensitivity(value)
+    return None
 
 
 def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = None) -> str:

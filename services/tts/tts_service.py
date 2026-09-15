@@ -2,7 +2,6 @@
 """Multi-provider TTS service — dispatches to local Kokoro, OpenAI-compatible API, or browser."""
 
 import io
-import os
 import wave
 import logging
 import hashlib
@@ -44,8 +43,16 @@ class TTSService:
         self._kokoro = None  # lazy-init
         
         try:
-            self.max_cache_bytes = int(os.getenv("ODYSSEUS_TTS_CACHE_MAX_BYTES", 500 * 1024 * 1024))
-        except ValueError:
+            from src.settings import get_setting_or_env
+
+            self.max_cache_bytes = int(
+                get_setting_or_env(
+                    "tts_cache_max_bytes", "ODYSSEUS_TTS_CACHE_MAX_BYTES", 500 * 1024 * 1024
+                )
+            )
+            if self.max_cache_bytes < 1:
+                raise ValueError
+        except (TypeError, ValueError):
             self.max_cache_bytes = 500 * 1024 * 1024
 
     # ── Settings ──

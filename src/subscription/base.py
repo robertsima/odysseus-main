@@ -11,9 +11,11 @@ for anything in this package and nothing here accepts one.
 :mod:`src.chatgpt_subscription` already implements the whole shape for one
 provider: device authorization, a token exchange, a refresh with skew, and a
 runtime resolve that hands the caller a token that is good *right now*. This
-module lifts that shape out so a second subscription (Claude) can be connected
-the same way rather than by shelling out to a vendor CLI -- which is what
-Odysseus does today, for exactly the billing reason above.
+module lifts that shape out so another *compliant* subscription provider can be
+connected the same way rather than by hard-coding vendor details into the
+request path. A provider whose consumer terms prohibit third-party credential
+handling must not be added here; its approved CLI/MCP integration belongs in
+the delegation layer instead.
 
 Everything provider-specific -- endpoints, client ids, header names, which hosts
 a provider owns -- stays in the provider module. What lives here is the contract,

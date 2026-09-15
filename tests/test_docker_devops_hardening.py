@@ -48,11 +48,14 @@ def _cors_allow_methods() -> list[str]:
     raise AssertionError("CORS_ALLOW_METHODS not found")
 
 
-def test_compose_files_forward_every_upload_limit_env_var():
+def test_compose_files_do_not_inject_user_upload_limit_defaults():
     expected = _upload_limit_env_names()
     assert expected
     for path in COMPOSE_FILES:
-        assert expected <= _compose_env_names(path), path.name
+        # Upload caps are Settings UI choices. Compose must not manufacture an
+        # environment value that would shadow the per-user setting; existing
+        # native installs can still use the legacy variables as fallbacks.
+        assert expected.isdisjoint(_compose_env_names(path)), path.name
 
 
 def test_default_compose_files_do_not_mount_host_docker_socket():
@@ -66,7 +69,8 @@ def test_host_docker_overlay_mounts_socket_and_adds_docker_group():
     service = overlay["services"]["odysseus"]
 
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
-    assert "${DOCKER_GID:-963}" in service["group_add"]
+    assert service["group_add"]
+    assert service["group_add"][0].startswith("${DOCKER_GID:?Set DOCKER_GID")
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
 
 

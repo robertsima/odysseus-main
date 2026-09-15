@@ -5,8 +5,8 @@ provider directly -- ``is_chatgpt_subscription_base(url)`` in the routing path,
 ``from src.chatgpt_subscription import resolve_runtime_credentials`` in the
 resolver. Every such call site is a place a second subscription has to be
 special-cased again. This module is the seam: ask it which provider owns a URL, or
-for one by id, and adding a third provider is a registration rather than an edit
-to the request path.
+for one by id, and adding a third compliant provider is a registration rather than
+an edit to the request path.
 
 Providers are imported lazily on first lookup. A capability probe asking whether a
 Claude subscription is linked must not drag ``httpx``, FastAPI or the ORM into the
@@ -46,17 +46,19 @@ __all__ = [
     "SubscriptionReauthRequired",
     "TokenBundle",
     "get",
+    "provider_for_auth_id",
     "provider_for_url",
     "providers",
     "to_http_exception",
 ]
 
 # Module path -> factory attribute. Order is the order the admin UI lists them in
-# and the order :func:`provider_for_url` consults, so the established provider
-# comes first.
+# and the order :func:`provider_for_url` consults. Only providers with a verified
+# and policy-compliant authentication path belong here. In particular, do not
+# register a Claude.ai OAuth adapter: Claude consumer subscription login must use
+# the unmodified Claude Code/MCP path, not a copied credential flow.
 _PROVIDER_MODULES = (
     ("src.subscription.chatgpt", "provider"),
-    ("src.subscription.claude", "provider"),
 )
 
 _cache: Dict[str, SubscriptionProvider] = {}
@@ -103,6 +105,55 @@ def get(provider_id: str) -> Optional[SubscriptionProvider]:
     normal condition, not an error.
     """
     return _load().get((provider_id or "").strip())
+
+
+def provider_for_auth_id(
+    auth_id: str, owner: Optional[str] = None
+) -> Optional[SubscriptionProvider]:
+    """Return the registered provider for a stored auth-session id.
+
+    The auth-session row is authoritative when it exists. URL matching remains
+    a compatibility fallback for old/test rows with no database record, but an
+    unknown provider id fails closed instead of being treated as ChatGPT.
+    """
+    if not (auth_id or "").strip():
+        return None
+    try:
+        from core.database import ProviderAuthSession, SessionLocal
+    except Exception:
+        return None
+    db = None
+    try:
+        db = SessionLocal()
+        query = db.query(ProviderAuthSession).filter(
+            ProviderAuthSession.id == auth_id,
+        )
+        if owner:
+            query = query.filter(ProviderAuthSession.owner == owner)
+        row = query.first()
+        if row is None:
+            return None
+        provider_id = (getattr(row, "provider", None) or "").strip()
+        provider = get(provider_id)
+        if provider is None:
+            raise SubscriptionNotConfigured(
+                f"Subscription provider {provider_id or '(empty)'} is not installed.",
+                provider=provider_id or None,
+            )
+        return provider
+    except SubscriptionNotConfigured:
+        raise
+    except Exception:
+        # Capability probes and legacy/test environments may not have the auth
+        # table or a full ORM query double. Treat that as an absent row so URL
+        # matching can preserve the established ChatGPT fallback.
+        return None
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def provider_for_url(url: str) -> Optional[SubscriptionProvider]:

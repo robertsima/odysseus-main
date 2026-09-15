@@ -124,10 +124,19 @@ def setup_admin_wipe_routes(session_manager):
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "notes":
-                count = db.query(Note).count()
+                from src.notes_store import STORE as notes_store
+                file_notes = notes_store.list(None, archived=False) + notes_store.list(None, archived=True)
+                for note in file_notes:
+                    notes_store.delete(note.id, None)
+                legacy_count = db.query(Note).count()
                 db.query(Note).delete()
                 db.commit()
-                return {"status": "deleted", "kind": kind, "count": count}
+                return {
+                    "status": "deleted",
+                    "kind": kind,
+                    "count": len(file_notes),
+                    "legacy_rows_deleted": legacy_count,
+                }
 
             if kind == "tasks":
                 # TaskRun rows reference tasks via FK — clear them first.

@@ -974,6 +974,17 @@ def _detect_provider(url: str) -> str:
         return "nvidia"
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
+    # Subscription providers are registered independently of this transport
+    # module. Keep the established direct fallback below for legacy installs,
+    # but let the registry be the source of truth when available.
+    try:
+        from src.subscription import provider_for_url
+
+        subscription_provider = provider_for_url(url)
+        if subscription_provider is not None:
+            return subscription_provider.provider_id
+    except Exception:
+        pass
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -1691,9 +1702,17 @@ def _anthropic_rejects_temperature(model: str) -> bool:
 
 # Reasoning effort level sent to Mistral thinking-capable models. Mistral's
 # API accepts "high", "medium", "low", "none" — see
-# https://docs.mistral.ai/capabilities/reasoning/. Override via env var
-# ODYSSEUS_MISTRAL_REASONING_EFFORT (e.g. set to "medium" for cheaper chat).
-_MISTRAL_REASONING_EFFORT = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
+# https://docs.mistral.ai/capabilities/reasoning/. The Settings value is the
+# primary control; the env var remains a compatibility fallback for old hosts.
+from src.settings import get_setting_or_env as _get_setting_or_env
+
+_MISTRAL_REASONING_EFFORT = str(
+    _get_setting_or_env(
+        "mistral_reasoning_effort", "ODYSSEUS_MISTRAL_REASONING_EFFORT", "high"
+    )
+).strip().lower()
+if _MISTRAL_REASONING_EFFORT not in {"high", "medium", "low", "none"}:
+    _MISTRAL_REASONING_EFFORT = "high"
 
 # Models that support structured thinking — may output </think> without opening tag
 _THINKING_MODEL_PATTERNS = (
@@ -2756,7 +2775,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["tool_choice"] = "none"
         # Mistral thinking-capable models — send reasoning_effort so Mistral
         # activates thinking mode and returns structured reasoning_content.
-        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
+        # Effort level is configurable via Settings (legacy env fallback).
         # (high / medium / low / none); default "high".
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT

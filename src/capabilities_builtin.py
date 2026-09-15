@@ -12,23 +12,7 @@ that works and one that advertises tools which fail on first use.
 
 from __future__ import annotations
 
-from src.capabilities import (
-    Capability,
-    Requirement,
-    any_of,
-    binary_on_path,
-    env_flag,
-    executable_file,
-    register,
-)
-
-
-def _claude_code_binary() -> str:
-    from src.settings import get_setting
-
-    from src.agent_tools.claude_code_tools import DEFAULT_BINARY
-
-    return str(get_setting("claude_code_binary", DEFAULT_BINARY) or DEFAULT_BINARY)
+from src.capabilities import Capability, Requirement, any_of, binary_on_path, env_flag, register
 
 
 def _has_configured_remote_hosts() -> tuple[bool, str]:
@@ -40,20 +24,11 @@ def _has_configured_remote_hosts() -> tuple[bool, str]:
     return False, "no remote hosts configured"
 
 
-def _claude_subscription_linked() -> tuple[bool, str]:
-    """Whether a Claude subscription has been connected.
+def _delegation_provider_available() -> tuple[bool, str]:
+    from src.delegation import selection
 
-    Deliberately a soft probe: the provider module is optional, so a build
-    without it reports "not linked" rather than failing to import.
-    """
-    try:
-        from src.subscription import claude as claude_sub
-    except Exception:
-        return False, "Claude subscription provider is not installed in this build"
-    try:
-        return claude_sub.is_linked()
-    except Exception as exc:
-        return False, f"could not check: {type(exc).__name__}"
+    provider, reason = selection()
+    return provider is not None, reason
 
 
 # ── knowledge ─────────────────────────────────────────────────────────────
@@ -71,7 +46,9 @@ register(Capability(
         "vault_directory", "notes_directory", "notes_archive_directory",
         "vault_default_sensitivity", "vault_folder_sensitivity",
     ),
-    tools=("search_documents", "manage_notes", "manage_documents"),
+    # RAG can be disabled without disabling the file-backed notes UI or the
+    # separate document editor. Only retrieval belongs to the `rag` feature.
+    tools=("search_documents",),
 ))
 
 # ── delegation ────────────────────────────────────────────────────────────
@@ -87,20 +64,19 @@ register(Capability(
     requirements=(
         Requirement(
             name="a usable provider",
-            check=any_of(
-                executable_file(_claude_code_binary),
-                binary_on_path("claude"),
-                _claude_subscription_linked,
-            ),
+            check=_delegation_provider_available,
             hint=(
                 "Install a coding-agent CLI and set its path in Settings › Agents, "
-                "or connect a Claude subscription. No API key is required — a "
-                "subscription is billed as a subscription, not per token."
+                "or configure a connected coding-agent MCP tool. Claude "
+                "subscriptions remain available through the unmodified Claude Code CLI; "
+                "Odysseus does not collect Claude account tokens. No API key is required "
+                "for a subscription-authenticated CLI or MCP server."
             ),
         ),
     ),
     default_enabled=True,
-    settings=("delegation_provider", "claude_code_binary", "claude_code_repository_roots"),
+    settings=("delegation_provider", "delegation_mcp_tool", "delegation_mcp_default_arguments",
+              "claude_code_binary", "claude_code_repository_roots"),
     tools=("delegate_to_agent", "delegate_to_claude_code"),
 ))
 

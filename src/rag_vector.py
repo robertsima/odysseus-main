@@ -22,6 +22,7 @@ from src.rag_sensitivity import (
     apply_sensitivity,
     metadata_is_private,
     normalize_sensitivity,
+    resolve_sensitivity,
 )
 from pathlib import Path
 
@@ -991,12 +992,23 @@ class VectorRAG:
             if not content or not content.strip():
                 return (0, 0)
 
+            resolved_sensitivity = sensitivity
+            if resolved_sensitivity is None:
+                frontmatter = None
+                if ext in MARKDOWN_EXTENSIONS:
+                    try:
+                        from src.vault_markdown import split_frontmatter
+                        frontmatter, _ = split_frontmatter(content)
+                    except Exception:
+                        logger.debug("sensitivity frontmatter parse failed for %s", path, exc_info=True)
+                resolved_sensitivity = resolve_sensitivity(path, frontmatter=frontmatter)
+
             meta = apply_sensitivity({
                 'source': path,
                 'filename': fname,
                 'directory': os.path.dirname(path),
                 'type': ext,
-            }, sensitivity)
+            }, resolved_sensitivity)
             if owner:
                 meta['owner'] = owner
 

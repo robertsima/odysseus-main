@@ -173,7 +173,8 @@ def test_base_plus_host_docker_overlay_has_explicit_access(base):
 
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
-    assert service["group_add"] == ["${DOCKER_GID:-963}"]
+    assert len(service["group_add"]) == 1
+    assert service["group_add"][0].startswith("${DOCKER_GID:?Set DOCKER_GID")
 
 
 def test_nvidia_plus_host_docker_preserves_gpu_and_docker_access(base):
@@ -190,7 +191,8 @@ def test_nvidia_plus_host_docker_preserves_gpu_and_docker_access(base):
     ]
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]
-    assert service["group_add"] == ["${DOCKER_GID:-963}"]
+    assert len(service["group_add"]) == 1
+    assert service["group_add"][0].startswith("${DOCKER_GID:?Set DOCKER_GID")
 
 
 def test_amd_plus_host_docker_preserves_gpu_and_docker_groups(base):
@@ -205,7 +207,7 @@ def test_amd_plus_host_docker_preserves_gpu_and_docker_groups(base):
     assert service["group_add"] == [
         "video",
         "${RENDER_GID:-render}",
-        "${DOCKER_GID:-963}",
+        "${DOCKER_GID:?Set DOCKER_GID to your host docker group id — see getent group docker}",
     ]
     assert "/var/run/docker.sock:/var/run/docker.sock" in service["volumes"]
     assert "ODYSSEUS_ENABLE_HOST_DOCKER=true" in service["environment"]

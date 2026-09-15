@@ -34,6 +34,8 @@ from fastapi import Query, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 
+from src.settings import get_setting_or_env
+
 from src.auth_helpers import _auth_disabled, get_current_user
 from src.secret_storage import decrypt as _decrypt
 
@@ -1154,7 +1156,9 @@ def _coerce_imap_timeout_seconds(raw: str | None) -> int:
     return max(5, min(value, 300))
 
 
-_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(os.environ.get("ODYSSEUS_IMAP_TIMEOUT_SECONDS"))
+_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(
+    str(get_setting_or_env("imap_timeout_seconds", "ODYSSEUS_IMAP_TIMEOUT_SECONDS", 30))
+)
 
 
 def _open_imap_connection(

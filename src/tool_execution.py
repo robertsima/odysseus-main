@@ -533,7 +533,7 @@ _ADMIN_TOOLS = {
     "manage_agent_worktree",
     "read_app_logs",
     # Runs an external coding agent against an approved repo checkout.
-    "delegate_to_claude_code",
+    "delegate_to_agent", "delegate_to_claude_code",
     "manage_endpoints",
     "manage_mcp",
     "manage_webhooks",
@@ -1181,10 +1181,10 @@ async def _execute_tool_block_impl(
     elif tool == "manage_contact":
         desc = "manage_contact"
         result = await do_manage_contact(content, owner=owner)
-    elif tool == "delegate_to_claude_code":
-        desc = "delegate_to_claude_code"
+    elif tool in ("delegate_to_agent", "delegate_to_claude_code"):
+        desc = tool
         result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
-            or {"error": "delegate_to_claude_code: execution failed", "exit_code": 1}
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "vault_search":
         desc = "vault_search"
         result = await do_vault_search(content, owner=owner)

@@ -323,13 +323,8 @@ def test_frontmatter_still_overrides_a_malformed_folder_setting(vault, fake_sett
 # --------------------------------------------------------------------------- #
 
 
-def test_legacy_file_tool_check_ignores_vault_folder_sensitivity(vault, fake_settings):
-    """`path_is_under_private_directory` backs the file-tool deny-list and is
-    one of four independently-failing enforcement paths (see the module
-    docstring). It must stay driven by the legacy state file only — a
-    vault_folder_sensitivity entry with no legacy counterpart must not affect
-    it in either direction.
-    """
+def test_file_tool_check_uses_vault_folder_sensitivity(vault, fake_settings):
+    """The file-tool guard must use the same folder policy as retrieval."""
     fake_settings["vault_folder_sensitivity"] = {"Journal": "private"}
     (vault / "Journal").mkdir()
     note = vault / "Journal" / "note.md"
@@ -337,18 +332,41 @@ def test_legacy_file_tool_check_ignores_vault_folder_sensitivity(vault, fake_set
 
     # resolve_sensitivity sees it as private via the folder setting...
     assert resolve_sensitivity(str(note)) == SENSITIVITY_PRIVATE
-    # ...but the legacy, file-tool-facing check knows nothing about that
-    # setting and has no legacy JSON entry for Journal either.
-    assert path_is_under_private_directory(str(note)) is False
+    # ...and direct file tools cannot walk around that policy.
+    assert path_is_under_private_directory(str(note)) is True
 
 
-def test_legacy_file_tool_check_unaffected_by_malformed_vault_folder_sensitivity(
+def test_file_tool_check_fails_closed_on_malformed_vault_folder_sensitivity(
     vault, fake_settings
 ):
-    """A broken vault_folder_sensitivity must not also break (or fail closed)
-    the unrelated legacy file-tool check — the two paths are independent."""
+    """A broken security policy must not make file tools fall open."""
     fake_settings["vault_folder_sensitivity"] = ["not", "a", "dict"]
     note = vault / "note.md"
     note.write_text("x", encoding="utf-8")
 
+    assert path_is_under_private_directory(str(note)) is True
+
+
+def test_file_tool_check_honours_public_frontmatter_override(vault, fake_settings):
+    fake_settings["vault_folder_sensitivity"] = {"Journal": "private"}
+    folder = vault / "Journal"
+    folder.mkdir()
+    note = folder / "share.md"
+    note.write_text("---\nsensitivity: public\n---\nShareable", encoding="utf-8")
     assert path_is_under_private_directory(str(note)) is False
+
+
+def test_file_tool_check_fails_closed_on_malformed_frontmatter(vault, fake_settings):
+    fake_settings["vault_default_sensitivity"] = SENSITIVITY_PUBLIC
+    note = vault / "broken.md"
+    note.write_text("---\nsensitivity: [unterminated\n---\nsecret", encoding="utf-8")
+
+    assert path_is_under_private_directory(str(note)) is True
+
+
+def test_frontmatter_sensitivity_key_is_case_insensitive(vault, fake_settings):
+    fake_settings["vault_default_sensitivity"] = SENSITIVITY_PUBLIC
+
+    assert resolve_sensitivity(
+        "note.md", frontmatter={"Sensitivity": "private"}
+    ) == SENSITIVITY_PRIVATE

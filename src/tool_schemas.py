@@ -1252,6 +1252,28 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "delegate_to_agent",
+            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories"]},
+                    "repository": {"type": "string", "description": "Repository or worktree understood by the selected provider."},
+                    "prompt": {"type": "string", "description": "Bounded coding task instructions."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                    "timeout_seconds": {"type": "integer"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "wait_seconds": {"type": "integer"},
+                    "label": {"type": "string"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_claude_code",
             "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel); to wait for it, poll with wait_seconds instead of sleeping in bash.",
             "parameters": {

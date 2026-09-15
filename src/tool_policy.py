@@ -65,6 +65,7 @@ _COMMON_TOOL_NAMES = {
     "create_document",
     "create_session",
     "delete_email",
+    "delegate_to_agent",
     "download_model",
     "edit_document",
     "edit_file",

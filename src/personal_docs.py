@@ -11,6 +11,7 @@ from src.rag_sensitivity import (
     SENSITIVITY_PRIVATE,
     SENSITIVITY_PUBLIC,
     normalize_sensitivity,
+    resolve_sensitivity,
 )
 
 from src.markitdown_runtime import MARKITDOWN_EXTS
@@ -318,11 +319,22 @@ class PersonalDocsManager:
     def sensitivity_for(self, path: str) -> str:
         """Resolve the sensitivity label that applies to ``path``.
 
-        Longest matching tracked directory wins, so a private vault nested
-        inside a public tree keeps its own label no matter which walk reached
-        the file. Untracked paths are public — the label is only ever set
-        explicitly (see ``rag_sensitivity``).
+        Uses the shared vault resolver: per-file frontmatter, configured folder
+        policy, legacy directory state, then the configured default.
         """
+        try:
+            from src.rag_sensitivity import vault_root
+
+            root = os.path.realpath(vault_root())
+            candidate = os.path.realpath(path)
+            if os.path.commonpath([candidate, root]) == root:
+                return resolve_sensitivity(path)
+        except (OSError, ValueError):
+            pass
+
+        # A separately tracked directory outside the configured vault retains
+        # the legacy policy.  This is also the compatibility path during a
+        # staged migration before vault_directory is switched over.
         abs_path = os.path.abspath(path)
         best_label = SENSITIVITY_PUBLIC
         best_len = -1
@@ -332,6 +344,17 @@ class PersonalDocsManager:
                     best_len = len(directory)
                     best_label = label
         return best_label
+
+    def _index_sensitivity(self, path: str):
+        """Let the vector layer resolve each file when walking the main vault."""
+        try:
+            from src.rag_sensitivity import vault_root
+
+            if os.path.commonpath([os.path.realpath(path), os.path.realpath(vault_root())]) == os.path.realpath(vault_root()):
+                return None
+        except (OSError, ValueError):
+            pass
+        return self.sensitivity_for(path)
 
     def set_directory_sensitivity(self, directory: str, sensitivity: str) -> Dict[str, Any]:
         """Relabel a tracked directory and the chunks already indexed from it.
@@ -378,7 +401,7 @@ class PersonalDocsManager:
         if sensitivity is not None:
             self.directory_sensitivity[directory] = normalize_sensitivity(sensitivity)
             self._save_sensitivity()
-        label = self.directory_sensitivity.get(directory, SENSITIVITY_PUBLIC)
+        label = self.sensitivity_for(directory)
 
         # Clear any exclusions for files in this directory. Match on a path
         # boundary (the directory itself or paths under it) rather than a raw
@@ -457,7 +480,7 @@ class PersonalDocsManager:
         for directory in directories:
             try:
                 indexed = self.rag_manager.index_personal_documents(
-                    directory, sensitivity=self.directory_sensitivity.get(directory)
+                    directory, sensitivity=self._index_sensitivity(directory)
                 )
                 chunks = int((indexed or {}).get("indexed_count", 0) or 0)
                 result["reindexed"].append(directory)
@@ -626,7 +649,7 @@ class PersonalDocsManager:
         """Tracked directories plus their labels, optionally public-only."""
         out = []
         for directory in self.indexed_directories:
-            label = self.directory_sensitivity.get(os.path.abspath(directory), SENSITIVITY_PUBLIC)
+            label = self.sensitivity_for(directory)
             if not allow_private and label == SENSITIVITY_PRIVATE:
                 continue
             out.append({"directory": directory, "sensitivity": label})
@@ -670,9 +693,7 @@ class PersonalDocsManager:
         try:
             result = self.rag_manager.index_personal_documents(
                 self.personal_dir,
-                sensitivity=self.directory_sensitivity.get(
-                    os.path.abspath(self.personal_dir), SENSITIVITY_PUBLIC
-                ),
+                sensitivity=self._index_sensitivity(self.personal_dir),
             )
             if result.get('success'):
                 success_count += 1
@@ -691,9 +712,7 @@ class PersonalDocsManager:
             try:
                 result = self.rag_manager.index_personal_documents(
                     directory,
-                    sensitivity=self.directory_sensitivity.get(
-                        os.path.abspath(directory), SENSITIVITY_PUBLIC
-                    ),
+                    sensitivity=self._index_sensitivity(directory),
                 )
                 if result.get('success'):
                     success_count += 1

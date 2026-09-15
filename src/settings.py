@@ -8,6 +8,7 @@ All modules should import from here instead of accessing files directly.
 import json
 import time
 import logging
+import os
 from typing import Any
 
 from src.constants import SETTINGS_FILE, FEATURES_FILE
@@ -45,6 +46,10 @@ DEFAULT_SETTINGS = {
     # ── Agents ──
     # "auto" picks the first provider that reports itself usable on this host.
     "delegation_provider": "auto",
+    # Qualified MCP tool used when delegation_provider=mcp. Remote-server OAuth
+    # stays in the MCP connection; Odysseus never stores model-vendor tokens.
+    "delegation_mcp_tool": "",
+    "delegation_mcp_default_arguments": {},
     "agent_peer_messaging": True,
     "agent_peer_message_budget": 8,
     # ── Remote hosts ──
@@ -77,6 +82,39 @@ DEFAULT_SETTINGS = {
     "stt_provider": "local",
     "stt_model": "base",
     "stt_language": "",
+    # Tunable limits and model/retrieval preferences. Environment variables
+    # remain a one-way compatibility fallback for installs that have not yet
+    # saved the corresponding Settings value.
+    "stt_beam_size": 1,
+    "stt_max_audio_seconds": 300,
+    "chat_upload_max_bytes": 10 * 1024 * 1024,
+    "gallery_upload_max_bytes": 100 * 1024 * 1024,
+    "gallery_transform_upload_max_bytes": 25 * 1024 * 1024,
+    "memory_import_max_bytes": 10 * 1024 * 1024,
+    "personal_upload_max_bytes": 25 * 1024 * 1024,
+    "email_compose_upload_max_bytes": 25 * 1024 * 1024,
+    "stt_max_audio_bytes": 25 * 1024 * 1024,
+    "ics_import_max_bytes": 10 * 1024 * 1024,
+    "tts_cache_max_bytes": 500 * 1024 * 1024,
+    "imap_timeout_seconds": 30,
+    "slow_request_log_seconds": 0.75,
+    "startup_warmups_enabled": False,
+    "model_keepalive_enabled": False,
+    "mistral_reasoning_effort": "high",
+    "rag_recency_halflife_days": 180.0,
+    "rag_temporal_weight": 0.05,
+    "rag_temporal_intent_weight": 0.30,
+    "rag_tag_credit": 1.0,
+    "rag_max_chunks_per_doc": 2,
+    "rag_focused_cap_multiplier": 2,
+    "rag_link_expansion": True,
+    "vault_date_order": "day",
+    "vault_scan_seconds": 30,
+    "gallery_sam_model": "facebook/sam-vit-base",
+    "gallery_grounding_model": "google/owlvit-base-patch32",
+    "browser_isolated": True,
+    "agent_approval_ttl_seconds": 900,
+    "agent_base_branch": "dev",
     "search_provider": "searxng",
     # Default fallback chain — when the primary provider fails or
     # rate-limits, we try DuckDuckGo next. Free, no API key required, so
@@ -307,6 +345,21 @@ def get_setting(key: str, default: Any = None) -> Any:
     return load_settings().get(key, default)
 
 
+def get_setting_or_env(key: str, env_name: str, default: Any = None) -> Any:
+    """Return a saved setting, falling back to a legacy env value.
+
+    Environment support is intentionally transitional for migrated choices:
+    once a user/admin saves the setting, the environment can no longer shadow
+    it. Blank environment values are treated as unset.
+    """
+    if is_setting_overridden(key):
+        return get_setting(key, default)
+    legacy = os.environ.get(env_name)
+    if legacy is not None and str(legacy).strip():
+        return legacy
+    return get_setting(key, default)
+
+
 def is_setting_overridden(key: str) -> bool:
     """True if ``key`` is explicitly present in the saved settings file.
 
@@ -321,7 +374,7 @@ def is_setting_overridden(key: str) -> bool:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
         return isinstance(saved, dict) and key in saved
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         return False
 
 

@@ -155,9 +155,14 @@ class ChatGPTSubscriptionProvider(SubscriptionProvider):
         self, auth_id: str, owner: Optional[str] = None, *, force_refresh: bool = False
     ) -> RuntimeCredentials:
         try:
-            return _impl.resolve_runtime_credentials(
-                auth_id, owner, force_refresh=force_refresh
-            )
+            # Preserve compatibility with the established implementation and
+            # its lightweight test doubles: the old call omitted this keyword
+            # on the common path. Only pass it when explicitly requested.
+            if force_refresh:
+                return _impl.resolve_runtime_credentials(
+                    auth_id, owner, force_refresh=True
+                )
+            return _impl.resolve_runtime_credentials(auth_id, owner)
         except _impl.ChatGPTSubscriptionError as exc:
             raise to_neutral_error(exc) from exc
 

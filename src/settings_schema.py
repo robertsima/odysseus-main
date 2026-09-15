@@ -24,7 +24,7 @@ pretending the click will stick.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Coarse types, chosen for what the UI must render rather than for Python.
@@ -118,10 +118,52 @@ EXEMPT: frozenset[str] = frozenset({
     "keybinds",            # Settings › Keyboard shortcuts
 })
 
+# Choice controls that used to be deployment-file knobs. Keep the old names
+# visible as compatibility overrides in the UI while the saved Settings value
+# remains the canonical control for normal installs.
+_MIGRATED_ENV_OVERRIDES = {
+    "agent_approval_ttl_seconds": "ODYSSEUS_AGENT_APPROVAL_TTL_SECONDS",
+    "agent_base_branch": "ODYSSEUS_AGENT_BASE_BRANCH",
+    "browser_isolated": "ODYSSEUS_BROWSER_ISOLATED",
+    "chat_upload_max_bytes": "ODYSSEUS_CHAT_UPLOAD_MAX_BYTES",
+    "email_compose_upload_max_bytes": "ODYSSEUS_EMAIL_COMPOSE_UPLOAD_MAX_BYTES",
+    "gallery_upload_max_bytes": "ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES",
+    "gallery_transform_upload_max_bytes": "ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES",
+    "ics_import_max_bytes": "ODYSSEUS_ICS_MAX_BYTES",
+    "imap_timeout_seconds": "ODYSSEUS_IMAP_TIMEOUT_SECONDS",
+    "memory_import_max_bytes": "ODYSSEUS_MEMORY_IMPORT_MAX_BYTES",
+    "mistral_reasoning_effort": "ODYSSEUS_MISTRAL_REASONING_EFFORT",
+    "model_keepalive_enabled": "ODYSSEUS_MODEL_KEEPALIVE",
+    "personal_upload_max_bytes": "ODYSSEUS_PERSONAL_UPLOAD_MAX_BYTES",
+    "rag_focused_cap_multiplier": "ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER",
+    "rag_link_expansion": "ODYSSEUS_RAG_LINK_EXPANSION",
+    "rag_max_chunks_per_doc": "ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC",
+    "rag_recency_halflife_days": "ODYSSEUS_RAG_RECENCY_HALFLIFE_DAYS",
+    "rag_tag_credit": "ODYSSEUS_RAG_TAG_CREDIT",
+    "rag_temporal_intent_weight": "ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT",
+    "rag_temporal_weight": "ODYSSEUS_RAG_TEMPORAL_WEIGHT",
+    "slow_request_log_seconds": "ODYSSEUS_SLOW_REQUEST_LOG_SECONDS",
+    "stt_beam_size": "ODYSSEUS_STT_BEAM_SIZE",
+    "stt_max_audio_bytes": "ODYSSEUS_STT_MAX_AUDIO_BYTES",
+    "stt_max_audio_seconds": "ODYSSEUS_STT_MAX_AUDIO_SECONDS",
+    "startup_warmups_enabled": "ODYSSEUS_STARTUP_WARMUPS",
+    "tts_cache_max_bytes": "ODYSSEUS_TTS_CACHE_MAX_BYTES",
+    "vault_date_order": "ODYSSEUS_VAULT_DATE_ORDER",
+    "vault_scan_seconds": "ODYSSEUS_VAULT_SCAN_SECONDS",
+    "gallery_sam_model": "ODYSSEUS_SAM_MODEL",
+    "gallery_grounding_model": "ODYSSEUS_GROUNDING_MODEL",
+}
+
 
 def env_locked(spec: SettingSpec) -> bool:
     import os
 
+    # These names are retained only as a one-way migration fallback. A saved
+    # Settings value deliberately wins, so showing the control as deployment-
+    # locked would be misleading and would prevent the user from completing
+    # the migration in the UI.
+    if spec.env_override in _MIGRATED_ENV_OVERRIDES.values():
+        return False
     return bool(spec.env_override and str(os.environ.get(spec.env_override, "") or "").strip())
 
 
@@ -268,7 +310,27 @@ register_all([
             "model, so it cannot pick a tool that will fail."
         ),
         group="Agents",
-        choices=("auto", "claude_code_cli", "claude_subscription", "mcp", "none"),
+        choices=("auto", "claude_code_cli", "mcp", "none"),
+        capability="code_delegation",
+    ),
+    SettingSpec(
+        key="delegation_mcp_tool",
+        type="string",
+        label="MCP delegation tool",
+        help=(
+            "Qualified tool exposed by a connected coding-agent MCP server, "
+            "such as mcp__server__delegate. The server owns authentication and billing."
+        ),
+        group="Agents",
+        capability="code_delegation",
+        placeholder="mcp__server__delegate",
+    ),
+    SettingSpec(
+        key="delegation_mcp_default_arguments",
+        type="json",
+        label="MCP delegation defaults",
+        help="Arguments merged into every call before the task-specific fields are sent.",
+        group="Agents",
         capability="code_delegation",
     ),
     SettingSpec(
@@ -365,6 +427,7 @@ def register_existing_defaults() -> None:
             group=infer_group(key),
             per_user=key in _PER_USER_KEYS,
             sensitive=any(m in key for m in sensitive_markers),
+            env_override=_MIGRATED_ENV_OVERRIDES.get(key, ""),
         ))
 
 

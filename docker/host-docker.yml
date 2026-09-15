@@ -2,11 +2,15 @@
 # management from Cookbook is required and you accept that raw socket access
 # grants broad control over the host Docker daemon.
 #   COMPOSE_FILE=docker-compose.yml:docker/host-docker.yml
-#   DOCKER_GID=<numeric host Docker group id>
+#   DOCKER_GID=<numeric host Docker group id>   (find yours: getent group docker | cut -d: -f3)
+#
+# No fallback default: the host docker group's GID varies by distro (963 on
+# ZimaOS, 999 on Debian/Ubuntu, others elsewhere), and guessing wrong fails
+# with a confusing EACCES on the socket instead of a clear error. Required.
 services:
   odysseus:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-    group_add: ["${DOCKER_GID:-963}"]
+    group_add: ["${DOCKER_GID:?Set DOCKER_GID to your host docker group id — see getent group docker}"]
     environment:
       - ODYSSEUS_ENABLE_HOST_DOCKER=true

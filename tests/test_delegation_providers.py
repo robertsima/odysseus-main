@@ -21,6 +21,7 @@ import pytest
 import src.delegation as delegation
 from src.delegation.base import DelegationProvider
 from src.delegation.claude_cli import ClaudeCliProvider
+from src.delegation.mcp import McpDelegationProvider
 
 
 class _FakeProvider(DelegationProvider):
@@ -254,3 +255,105 @@ async def test_delegate_forwards_the_request_to_the_existing_implementation(monk
     assert seen["ctx"] == {"owner": "rob", "session_id": "s1"}
     assert result["task_id"] == "t-1" and result["exit_code"] == 0
     assert result["provider"] == "claude_code_cli"
+
+
+class _FakeMcpManager:
+    def __init__(self, tools):
+        self.tools = tools
+        self.calls = []
+
+    def get_all_tools(self, disabled_map=None):
+        disabled_map = disabled_map or {}
+        return [
+            {**item, "is_disabled": item["name"] in disabled_map.get(item["server_id"], set())}
+            for item in self.tools
+        ]
+
+    async def call_tool(self, name, args):
+        self.calls.append((name, args))
+        return {"output": "done"}
+
+
+def _mcp_settings(monkeypatch, *, tool="mcp__remote__delegate", defaults=None):
+    import src.settings as settings
+
+    values = {
+        "delegation_mcp_tool": tool,
+        "delegation_mcp_default_arguments": defaults or {},
+    }
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: values.get(key, default))
+
+
+def test_mcp_provider_requires_an_explicit_qualified_tool(monkeypatch):
+    _mcp_settings(monkeypatch, tool="")
+    ok, detail = McpDelegationProvider().is_available()
+    assert ok is False
+    assert "delegation_mcp_tool" in detail
+
+
+async def test_mcp_provider_calls_connected_tool_and_merges_defaults(monkeypatch):
+    import src.delegation.mcp as mcp_provider
+    import src.tool_utils as tool_utils
+
+    manager = _FakeMcpManager([{
+        "server_id": "remote", "name": "delegate", "qualified_name": "mcp__remote__delegate"
+    }])
+    _mcp_settings(monkeypatch, defaults={"workspace": "main", "model": "small"})
+    monkeypatch.setattr(tool_utils, "get_mcp_manager", lambda: manager)
+    monkeypatch.setattr(mcp_provider, "_disabled_tools", lambda: {})
+
+    result = await McpDelegationProvider().delegate(
+        {"prompt": "fix it", "model": "large", "provider": "ignored"}
+    )
+
+    assert manager.calls == [("mcp__remote__delegate", {
+        "workspace": "main", "model": "large", "prompt": "fix it"
+    })]
+    assert result["provider"] == "mcp" and result["exit_code"] == 0
+
+
+async def test_provider_neutral_tool_uses_registry_selection(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+    result = await DelegationTool().execute(
+        '{"action":"run","prompt":"fix it"}', {"owner": "admin", "session_id": "s1"}
+    )
+    assert chosen.calls[0][0]["prompt"] == "fix it"
+    assert result["provider"] == "remote"
+    assert result["selection"] == "selected remote"
+
+
+async def test_provider_neutral_tool_returns_provider_failures(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+
+    async def fail(request, ctx=None):
+        raise RuntimeError("connection closed")
+
+    monkeypatch.setattr(chosen, "delegate", fail)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+
+    result = await DelegationTool().execute('{"prompt":"fix it"}', {})
+
+    assert result["exit_code"] == 1
+    assert result["provider"] == "remote"
+    assert "connection closed" in result["error"]
+
+
+def test_provider_neutral_native_call_reaches_execution_pipeline():
+    from src.tool_schemas import function_call_to_tool_block
+
+    block = function_call_to_tool_block(
+        "delegate_to_agent", '{"action":"run","prompt":"fix it"}'
+    )
+    assert block is not None
+    assert block.tool_type == "delegate_to_agent"
+
+
+def test_provider_neutral_tool_is_admin_only():
+    from src.tool_security import NON_ADMIN_BLOCKED_TOOLS
+
+    assert "delegate_to_agent" in NON_ADMIN_BLOCKED_TOOLS

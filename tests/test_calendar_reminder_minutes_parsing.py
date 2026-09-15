@@ -20,7 +20,7 @@ from tests.helpers.sqlite_db import make_temp_sqlite
 clear_fake_database_modules()
 
 import core.database as cdb
-from core.database import Note
+from tests.helpers.fake_notes_store import FakeNotesStore
 
 _TS, _ENGINE, _TMPDB = make_temp_sqlite(cdb.Base.metadata)
 
@@ -32,7 +32,10 @@ def _bind_temp_db(monkeypatch):
     if parent is not None:
         monkeypatch.setattr(parent, "database", cdb, raising=False)
     monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    yield
+    from src import notes_store
+    store = FakeNotesStore()
+    monkeypatch.setattr(notes_store, "STORE", store)
+    yield store
 
 
 async def _create_with_reminder(reminder, owner):
@@ -56,22 +59,14 @@ async def _create_with_reminder(reminder, owner):
     ("15 minutes", 15),   # regression: long form still works
     ("30m", 30),          # regression: bare unit still works
 ])
-async def test_reminder_minutes_accepts_abbreviations(reminder, expected):
+async def test_reminder_minutes_accepts_abbreviations(reminder, expected, _bind_temp_db):
     owner = "tester-" + uuid.uuid4().hex[:6]
     res = await _create_with_reminder(reminder, owner)
     assert res.get("exit_code") == 0, res
     assert f"reminder {expected} min before" in res.get("response", ""), res
 
-    db = _TS()
-    try:
-        note = (
-            db.query(Note)
-            .filter(Note.owner == owner, Note.title == "Reminder: Dentist")
-            .first()
-        )
-        assert note is not None, "reminder note should have been created"
-    finally:
-        db.close()
+    notes = _bind_temp_db.list(owner, archived=False)
+    assert any(n.title == "Reminder: Dentist" for n in notes)
 
 
 async def test_no_reminder_when_offset_absent():

@@ -1,4 +1,4 @@
-"""Claude subscription OAuth provider.
+"""Disabled Claude consumer-subscription OAuth placeholder.
 
 Odysseus reaches Claude today by shelling out to a locally installed Claude Code
 CLI. That looks like sloppy coupling and is not: the CLI is the only path that
@@ -21,9 +21,12 @@ cleanly, :meth:`ClaudeSubscriptionProvider.owns_base_url` claims nothing, and
 every network step raises :class:`SubscriptionNotConfigured` instead of calling
 out.
 
-Filling them in is a small, mechanical job for whoever has the CLI in front of
-them: run its own login and read the request it makes. It is not a job for
-recall.
+This module is intentionally disabled. Anthropic's consumer terms reserve
+Claude.ai subscription login for the unmodified Claude Code client and do not
+permit third-party applications to collect or intermediate those credentials.
+Claude delegation therefore belongs in the approved Claude Code/MCP provider,
+not in a copied OAuth flow here. The placeholder remains only so old imports can
+fail closed with an actionable message instead of an ImportError.
 """
 
 from __future__ import annotations
@@ -57,6 +60,7 @@ logger = logging.getLogger(__name__)
 
 CLAUDE_SUBSCRIPTION_PROVIDER = "claude-subscription"
 CLAUDE_SUBSCRIPTION_TITLE = "Claude Subscription"
+CLAUDE_SUBSCRIPTION_DISABLED = True
 
 # --- unverified OAuth configuration ---------------------------------------
 #
@@ -151,7 +155,12 @@ def _missing_configuration() -> List[str]:
 
 
 def is_configured() -> Tuple[bool, str]:
-    """Whether this build knows enough to attempt a Claude subscription login."""
+    """Always fail closed: direct Claude consumer OAuth is unsupported here."""
+    if CLAUDE_SUBSCRIPTION_DISABLED:
+        return False, (
+            "Direct Claude consumer-subscription OAuth is disabled. Use the "
+            "approved Claude Code or MCP delegation provider instead."
+        )
     missing = _missing_configuration()
     if missing:
         return False, (
@@ -305,7 +314,7 @@ class ClaudeSubscriptionProvider(SubscriptionProvider):
     @property
     def supports_device_flow(self) -> bool:
         """False until the device endpoints are confirmed to exist for this client."""
-        return bool(
+        return not CLAUDE_SUBSCRIPTION_DISABLED and bool(
             CLAUDE_OAUTH_DEVICE_CODE_URL
             and CLAUDE_OAUTH_DEVICE_TOKEN_URL
             and not _missing_configuration()
@@ -323,6 +332,8 @@ class ClaudeSubscriptionProvider(SubscriptionProvider):
         configured base this owns nothing, which is the correct answer for an
         unconfigured provider.
         """
+        if CLAUDE_SUBSCRIPTION_DISABLED:
+            return False
         base = DEFAULT_CLAUDE_SUBSCRIPTION_BASE_URL
         if not base:
             return False

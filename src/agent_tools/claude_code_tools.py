@@ -375,8 +375,11 @@ def _claude_environment() -> dict[str, str]:
         path = Path(callback["token_file"]).expanduser()
         try:
             info = path.stat()
-            if not path.is_file() or info.st_mode & 0o077:
-                raise ValueError("Claude Code Odysseus token file must be a private regular file (mode 0600)")
+            if not path.is_file() or (os.name != "nt" and info.st_mode & 0o077):
+                raise ValueError(
+                    "Claude Code Odysseus token file must be a private regular "
+                    "file (mode 0600 on POSIX; restricted ACL on Windows)"
+                )
             token = path.read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise ValueError(f"Claude Code Odysseus token file is unavailable: {exc}") from exc
@@ -544,18 +547,23 @@ async def status_report() -> dict:
             token_problem = f"it cannot be read ({exc.strerror or exc})"
         else:
             readable = os.access(path, os.R_OK)
+            process_uid = os.getuid() if hasattr(os, "getuid") else None
+            process_gid = os.getgid() if hasattr(os, "getgid") else None
             if not path.is_file():
                 token_problem = "it is not a regular file (a directory is created when the path did not exist at container start)"
-            elif st.st_mode & 0o077:
+            elif os.name != "nt" and st.st_mode & 0o077:
                 token_problem = f"its mode is {oct(st.st_mode & 0o777)}; it must be 0600"
             elif not readable:
                 # Typically created with `docker exec` (root) while the app
                 # runs as PUID/PGID — the classic ZimaOS case.
-                token_problem = (f"it is owned by uid {st.st_uid} but Odysseus runs as uid {os.getuid()}; "
-                                 f"chown it to {os.getuid()}:{os.getgid()}")
+                if process_uid is not None and process_gid is not None:
+                    token_problem = (f"it is owned by uid {st.st_uid} but Odysseus runs as uid {process_uid}; "
+                                     f"chown it to {process_uid}:{process_gid}")
+                else:
+                    token_problem = "it is not readable by the Odysseus process"
             callback_status["token_file_ok"] = not token_problem
             callback_status["token_file_owner"] = st.st_uid
-            callback_status["process_uid"] = os.getuid()
+            callback_status["process_uid"] = process_uid
     default_repo, how = default_repository()
     runner = get_task_runner()
     _process_limit()  # refresh the gate size from settings before reporting it
@@ -580,7 +588,8 @@ async def status_report() -> dict:
         ready = False
         hints.append(
             f"The callback token file {callback_status.get('token_file')} blocks delegation: {token_problem}. "
-            "It must be a regular file, mode 0600, owned by the Odysseus process user "
+            "It must be a regular file, mode 0600 on POSIX (or protected by a "
+            "restricted ACL on Windows), owned by the Odysseus process user "
             "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
@@ -1083,20 +1092,20 @@ class ClaudeCodeTool:
             if not task_id:
                 return {"error": "delegate_to_claude_code: task_id is required", "exit_code": 1}
             if action == "cancel":
-                record = await runner.cancel(task_id)
+                record = await runner.cancel(task_id, owner=owner)
             else:
                 try:
                     wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
                 except (TypeError, ValueError):
                     wait = 0
-                record = await runner.wait(task_id, wait) if wait else runner.get(task_id)
+                record = await runner.wait(task_id, wait, owner=owner) if wait else runner.get(task_id, owner=owner)
             if record is None:
                 return {"error": f"delegate_to_claude_code: task {task_id} not found", "exit_code": 1}
             if record.get("status") in _ACTIVE_STATUSES:
                 return _running_report(record)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
-            return {"tasks": runner.summaries(), "exit_code": 0}
+            return {"tasks": runner.summaries(owner=owner), "exit_code": 0}
         parsed = _parse_args(args)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
