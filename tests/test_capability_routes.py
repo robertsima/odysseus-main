@@ -172,6 +172,15 @@ class TestSettingsValidation:
         with pytest.raises(HTTPException):
             _coerce(spec, "lots")
 
+    def test_schema_numeric_bounds_are_enforced(self):
+        from src import settings_schema
+
+        with pytest.raises(ValueError, match="at least"):
+            settings_schema.validate_value("agent_approval_ttl_seconds", 59)
+        with pytest.raises(ValueError, match="no more than"):
+            settings_schema.validate_value("agent_approval_ttl_seconds", 3601)
+        settings_schema.validate_value("agent_approval_ttl_seconds", 900)
+
 
 class TestCapabilityToggle:
     def test_unknown_capability_is_a_404(self, monkeypatch):

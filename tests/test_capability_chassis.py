@@ -241,9 +241,49 @@ class TestSettingsSchema:
         spec = settings_schema.SettingSpec(
             key="x_api_key", type="secret", label="Key", sensitive=True,
         )
-        rendered = spec.as_dict("s3cret-value")
+        rendered = spec.as_dict("s3cret-value", default="another-secret")
         assert "s3cret-value" not in str(rendered)
+        assert "another-secret" not in str(rendered)
         assert rendered["value"] == "********"
+
+    def test_numeric_budgets_are_not_mistaken_for_secrets(self):
+        """A name containing 'token' describes a unit, not necessarily a credential."""
+        from src import settings_schema
+
+        for key in ("agent_input_token_budget", "agent_input_token_hard_max", "research_max_tokens"):
+            spec = settings_schema.get_spec(key)
+            assert spec is not None
+            assert spec.type == "int"
+            assert spec.sensitive is False
+
+    def test_common_enums_are_real_choices_with_friendly_labels(self):
+        from src import settings_schema
+
+        expected = {
+            "agent_approval_mode": "ask_risky",
+            "mistral_reasoning_effort": "medium",
+            "image_quality": "high",
+            "search_safesearch": "moderate",
+            "reminder_channel": "email",
+            "vault_date_order": "month",
+        }
+        for key, option in expected.items():
+            spec = settings_schema.get_spec(key)
+            assert spec.type == "choice"
+            assert option in spec.choices
+            assert len(spec.choice_labels) == len(spec.choices)
+
+    def test_ui_payload_includes_defaults_units_and_advanced_metadata(self):
+        from src import settings_schema
+
+        groups = settings_schema.ui_payload(is_admin=True)
+        settings = {item["key"]: item for group in groups for item in group["settings"]}
+        upload = settings["chat_upload_max_bytes"]
+        assert upload["default"] == 10 * 1024 * 1024
+        assert upload["unit"] == "MiB"
+        assert upload["scale"] == 1024 * 1024
+        assert settings["agent_input_token_budget"]["advanced"] is True
+        assert any(group["group"] == "Limits & uploads" and group["help"] for group in groups)
 
     def test_env_pinned_settings_render_locked(self, monkeypatch):
         """A deployment may pin a value; the UI must say so rather than accept a
