@@ -415,3 +415,49 @@ def test_agent_debug_line_names_the_demoted_servers():
     src = inspect.getsource(al.stream_agent_loop)
     assert "mcp_demoted=%s" in src
     assert "demoted_servers(_mcp_disabled_map)" in src
+
+
+# ── Section 5: a gated catalog is not advertised as callable ────────────────
+#
+# The prompt lists every connected server's tools under "you also have access
+# to these". For a gated server that is only half true: the tools exist, but no
+# call schema is attached until retrieval surfaces one. Telling a model a tool
+# is callable when it is not is what produces the "I do not have X" refusals
+# the self-unblock then has to rescue. The note was added for newly demoted
+# servers; the builtin catalogs were gated all along and had the same gap.
+
+def test_a_builtin_catalog_says_its_schemas_are_not_attached():
+    text = _mgr(builtin_browser=("browser", 12)).get_tool_descriptions_for_prompt()
+    assert "CONNECTED AND WORKING" in text
+    assert "attached on demand" in text
+    assert "12 call schemas are not attached this turn" in text
+
+
+def test_a_demoted_server_keeps_its_own_reason():
+    text = _mgr(fc=("firecrawl", 27)).get_tool_descriptions_for_prompt()
+    assert "too large to attach to every turn" in text
+    assert "attached on demand" not in text
+
+
+def test_a_small_user_server_gets_no_note():
+    """It really is attached every turn — saying otherwise would be the lie in
+    the other direction."""
+    text = _mgr(ntfy=("ntfy", 2)).get_tool_descriptions_for_prompt()
+    assert "CONNECTED AND WORKING" not in text
+
+
+def test_a_gated_catalog_still_lists_its_tools():
+    """The note explains the missing schema; it must not replace the listing,
+    or the model cannot learn the tools exist and the index loses its corpus."""
+    text = _mgr(builtin_browser=("browser", 12)).get_tool_descriptions_for_prompt()
+    assert "browser_t0" in text and "browser_t11" in text
+
+
+def test_the_note_speaks_the_phrase_the_self_unblock_listens_for():
+    """The note tells the model how to ask for a schema. If its wording and the
+    detector drift apart, the instruction becomes a dead end."""
+    from src.agent_loop import _claims_missing_tools
+
+    assert _claims_missing_tools(
+        "I do not have the mcp__builtin_browser__browser_click tool available."
+    )

@@ -1362,7 +1362,14 @@ class McpManager:
             identity = self._connections.get(sid, {}).get("identity", "")
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
-            if sid in _demoted_ids:
+            # Builtin catalogs are gated by identity on every turn, so they have
+            # exactly the same honesty problem a demoted server has: listed here
+            # under "you also have access to these", with no attached schema
+            # until retrieval surfaces one. Telling the model a tool is callable
+            # when it is not is what produces the "I do not have X" refusals this
+            # note exists to prevent, so both cases get it -- only the reason
+            # differs.
+            if sid in _demoted_ids or sid in _BUILTIN_FUNCTION_CALLING_SERVERS:
                 # A demoted server keeps its full listing here -- the model must
                 # be able to find out these tools EXIST, or the always-bound
                 # budget just reintroduces the vanishing bug one level down
@@ -1375,13 +1382,15 @@ class McpManager:
                 # targeted re-arm then matches the tool name verbatim. Reusing
                 # that existing path beats inventing a second one -- it already
                 # handles the identical case for the builtin catalogs.
+                _why = ("it is too large to attach to every turn"
+                        if sid in _demoted_ids
+                        else "this catalog is attached on demand")
                 lines.append(
                     f"  (CONNECTED AND WORKING, but this server's {len(server_tools)} call "
-                    "schemas are not attached this turn -- it is too large to attach to every "
-                    "turn. Do NOT report these tools as unavailable to the user, and do NOT "
-                    "substitute an unrelated tool. To get one attached, state that you do not "
-                    "have the exact tool available, by its full mcp__ name, and it will be "
-                    "attached for the next round.)"
+                    f"schemas are not attached this turn -- {_why}. Do NOT report these tools "
+                    "as unavailable to the user, and do NOT substitute an unrelated tool. To "
+                    "get one attached, state that you do not have the exact tool available, by "
+                    "its full mcp__ name, and it will be attached for the next round.)"
                 )
             for t in server_tools:
                 # One line per tool, truncated. A multi-line description
