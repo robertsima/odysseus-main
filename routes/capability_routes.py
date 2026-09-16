@@ -102,6 +102,19 @@ def setup_capability_routes() -> APIRouter:
 
         return {"capabilities": [st.as_dict() for st in capabilities.all_status()]}
 
+    @router.post("/api/capabilities/recheck")
+    async def recheck(request: Request) -> Dict[str, Any]:
+        """Re-probe requirements now — after installing a binary, say."""
+        _require_admin(request)
+        import src.capabilities_builtin  # noqa: F401
+        from src import capabilities
+
+        capabilities.invalidate_probes()
+        return {"capabilities": [st.as_dict() for st in capabilities.all_status()]}
+
+    # Keep the static /recheck route above the dynamic /{name} route. Starlette
+    # matches in declaration order; the reverse order turns "recheck" into a
+    # capability name and returns "No capability named 'recheck'".
     @router.post("/api/capabilities/{name}")
     async def set_capability(request: Request, name: str) -> Dict[str, Any]:
         """Enable or disable one capability.
@@ -130,16 +143,6 @@ def setup_capability_routes() -> APIRouter:
         st = capabilities.status(name)
         logger.info("capability %s set enabled=%s by admin", name, enabled)
         return {"capability": st.as_dict() if st else None}
-
-    @router.post("/api/capabilities/recheck")
-    async def recheck(request: Request) -> Dict[str, Any]:
-        """Re-probe requirements now — after installing a binary, say."""
-        _require_admin(request)
-        import src.capabilities_builtin  # noqa: F401
-        from src import capabilities
-
-        capabilities.invalidate_probes()
-        return {"capabilities": [st.as_dict() for st in capabilities.all_status()]}
 
     @router.get("/api/settings/schema")
     async def settings_schema_payload(request: Request) -> Dict[str, Any]:

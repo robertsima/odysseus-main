@@ -96,14 +96,25 @@ def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE
 
 
-def test_each_agent_has_a_collapsed_server_backed_capability_loadout():
+def test_each_agent_has_a_dedicated_server_backed_capability_loadout():
     for token in ("Agent loadout", "delegation_policy", "memory_access", "skill_access",
                   "model_access", "allowed_mcp_servers", "private_vault_access", "save-config"):
         assert token in AGENTS
     assert "'/api/agents/catalog'" in AGENTS
     assert "method: 'PATCH'" in AGENTS
-    assert ".ag-cap-group, .ag-cap-group[open]" in STYLE
-    assert '<details class="ag-cap-group">' in AGENTS
+    assert 'class="ag-loadout-workspace wb-card"' in AGENTS
+    assert 'data-ag="config-tab"' in AGENTS
+    assert 'data-config-panel="tools"' in AGENTS
+    assert ".ag-config-panel-scroll" in STYLE
+
+
+def test_control_room_has_visible_expansion_and_resizable_monitor_panes():
+    assert 'data-ag="expand"' in AGENTS
+    assert 'data-ag-splitter' in AGENTS
+    assert "beginFleetResize" in AGENTS
+    assert "odysseus-agents-fleet-width" in AGENTS
+    assert ".ag-pane-splitter" in STYLE
+    assert ".agents-modal-content::after" in STYLE
 
 
 def test_control_room_reply_keeps_the_window_open_while_switching_chat():

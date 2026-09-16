@@ -48,6 +48,12 @@ class TestRoutesExist:
             "/api/settings/schema",
         }
 
+    def test_recheck_static_route_precedes_dynamic_capability_name(self):
+        """Starlette matches routes in declaration order; otherwise the
+        recheck button is interpreted as a capability named 'recheck'."""
+        paths = [route.path for route in _router().routes]
+        assert paths.index("/api/capabilities/recheck") < paths.index("/api/capabilities/{name}")
+
 
 class TestAdminBoundary:
     @pytest.mark.parametrize("path,method", [

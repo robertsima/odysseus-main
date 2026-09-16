@@ -34,7 +34,8 @@ let returnFocus = null;
 const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
-  catalog: null, configOpen: false, configDrafts: new Map(),
+  catalog: null, configOpen: false, configTab: 'general', configDrafts: new Map(),
+  fleetWidth: Number(localStorage.getItem('odysseus-agents-fleet-width') || 380),
   error: '', refreshing: false, refreshQueued: false,
   // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
   bucket: 'all',
@@ -252,24 +253,26 @@ function render() {
   if (!surface) return;
   surface.innerHTML = `
     <div class="ag-head">
-      <div class="ag-title"><span class="ag-title-text">Mission floor</span>${liveHtml()}</div>
-      <div class="ag-triage">${triageHtml()}</div>
+      <div class="ag-title"><span class="ag-title-text">${state.configOpen ? 'Loadout workspace' : 'Mission floor'}</span>${liveHtml()}</div>
+      ${state.configOpen ? '' : `<div class="ag-triage">${triageHtml()}</div>`}
       <div class="ag-head-actions">
-        <button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>
-        <button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button>
+        ${state.configOpen
+          ? '<button type="button" class="wb-btn" data-ag="config-back">← Monitoring</button><button type="button" class="wb-btn wb-btn-primary" data-ag="expand">Expand workspace</button>'
+          : '<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="expand">Expand</button>'}
       </div>
     </div>
-    <div class="ag-telemetry-strip" aria-label="Fleet summary">${telemetryHtml()}</div>
+    ${state.configOpen ? '' : `<div class="ag-telemetry-strip" aria-label="Fleet summary">${telemetryHtml()}</div>`}
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
-    <div class="ag-body">
+    ${state.configOpen ? loadoutWorkspaceHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
       <aside class="ag-fleet wb-card">
         <div class="ag-fleet-tools"><span><b>Robot fleet</b><small>select a unit to inspect</small></span><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
+      <div class="ag-pane-splitter" data-ag-splitter role="separator" aria-orientation="vertical" aria-label="Resize fleet and agent details" tabindex="0"><span></span></div>
       <section class="ag-detail wb-card" id="ag-detail"></section>
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
-    </div>`;
-  renderDetail();
+    </div>`}`;
+  if (!state.configOpen) renderDetail();
   $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; renderFleetOnly(); });
 }
 function filteredRows() {
@@ -378,8 +381,8 @@ function profileConfig(profile) {
 function loadoutSummaryHtml(row) {
   const c = configFor(row);
   const mcp = c.allowed_mcp_servers?.includes('*') ? 'all connections' : `${c.allowed_mcp_servers?.length || 0} connections`;
-  return `<button type="button" class="ag-loadout-summary" data-ag="config-toggle" aria-expanded="${state.configOpen ? 'true' : 'false'}">
-    <span class="ag-loadout-glyph" aria-hidden="true">⌬</span><span><b>Agent loadout</b><small>${esc(c.agent_profile || 'custom')} · ${esc(c.delegation_policy)} delegation · ${esc(c.memory_access)} memory · ${esc(mcp)}</small></span><i>${state.configOpen ? 'Close' : 'Configure'}</i>
+  return `<button type="button" class="ag-loadout-summary" data-ag="config-toggle">
+    <span class="ag-loadout-glyph" aria-hidden="true">⌬</span><span><b>Agent loadout</b><small>${esc(c.agent_profile || 'custom')} · ${esc(c.delegation_policy)} delegation · ${esc(c.memory_access)} memory · ${esc(mcp)}</small></span><i>Open editor</i>
   </button>`;
 }
 function configEditorHtml(row) {
@@ -394,22 +397,52 @@ function configEditorHtml(row) {
   catalog.tools.forEach((tool) => { const group = tool.group || 'Other'; if (!toolGroups.has(group)) toolGroups.set(group, []); toolGroups.get(group).push(tool); });
   const groupedTools = [...toolGroups.entries()].map(([group, tools]) => `<fieldset class="ag-cap-subgroup"><legend>${esc(group)}</legend>${capabilityChecks(tools, toolSelected, 'enabled_tools')}</fieldset>`).join('');
   const mcpSelected = c.allowed_mcp_servers?.includes('*') ? catalog.mcp_servers.map((m) => m.id) : (c.allowed_mcp_servers || []);
-  return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-loadout-intro"><div><b>Runtime controls</b><span>Changes apply to this agent's next step. Denied capabilities are enforced server-side.</span></div><span class="ag-policy-shield">Policy active</span></div>
-    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+  const tab = state.configTab || 'general';
+  const tabButton = (id, label, summary) => `<button type="button" class="ag-config-tab${tab === id ? ' active' : ''}" data-ag="config-tab" data-tab="${id}" aria-selected="${tab === id ? 'true' : 'false'}"><span>${label}</span><small>${summary}</small></button>`;
+  const generalPanel = `<div class="ag-config-panel ag-config-general" data-config-panel="general">
+    <div class="ag-panel-heading"><div><b>Behavior</b><span>Decide how independently this agent may operate.</span></div></div>
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
       <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
-      <label class="ag-field"><span>Memory</span><select class="wb-select" data-config="memory_access">${option('none','No memory',c.memory_access)}${option('read','Read only',c.memory_access)}${option('write','Read and write',c.memory_access)}</select><small>Read-only blocks add, edit and delete.</small></label>
       <label class="ag-field"><span>Parallel workers</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8.</small></label>
     </div>
+  </div>`;
+  const toolsPanel = `<div class="ag-config-panel" data-config-panel="tools">
+    <div class="ag-panel-heading"><div><b>Action tools</b><span>Choose what this agent can do. Unselected tools are blocked during execution.</span></div><label class="ag-panel-access">Access<select class="wb-select" data-config="tool_access">${option('all','All tools',c.tool_access)}${option('selected','Selected tools',c.tool_access)}${option('none','No action tools',c.tool_access)}</select></label></div>
+    <div class="ag-cap-grid ag-tool-grid" data-show-when="tool_access:selected"${c.tool_access === 'selected' ? '' : ' hidden'}>${groupedTools}</div>
+    ${c.tool_access === 'selected' && !catalog.tools.length ? '<div class="wb-empty">No tools are available to this account.</div>' : ''}
+  </div>`;
+  const knowledgePanel = `<div class="ag-config-panel" data-config-panel="knowledge">
+    <div class="ag-panel-heading"><div><b>Knowledge & memory</b><span>Control persistent memory, reusable skills, and private-note retrieval.</span></div></div>
+    <div class="ag-policy-grid ag-knowledge-policy"><label class="ag-field"><span>Memory</span><select class="wb-select" data-config="memory_access">${option('none','No memory',c.memory_access)}${option('read','Read only',c.memory_access)}${option('write','Read and write',c.memory_access)}</select><small>Read-only blocks add, edit and delete.</small></label>
+      <label class="ag-field"><span>Skills</span><select class="wb-select" data-config="skill_access">${option('all','All skills',c.skill_access)}${option('selected','Selected skills',c.skill_access)}${option('none','No skills',c.skill_access)}</select><small>Skills add specialized procedures and instructions.</small></label></div>
     <label class="ag-switch-card"><input type="checkbox" data-config="private_vault_access"${c.private_vault_access ? ' checked' : ''}><span><b>Private vault reads</b><small>Allow this agent to retrieve private notes. Human access is unaffected.</small></span></label>
-    <details class="ag-cap-group"><summary><span>Tools</span><small>${c.tool_access === 'all' ? 'All available' : `${toolSelected.length} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="tool_access">${option('all','All tools',c.tool_access)}${option('selected','Selected tools',c.tool_access)}${option('none','No action tools',c.tool_access)}</select></label><div class="ag-cap-grid" data-show-when="tool_access:selected"${c.tool_access === 'selected' ? '' : ' hidden'}>${groupedTools}</div></div></details>
-    <details class="ag-cap-group"><summary><span>Skills</span><small>${c.skill_access === 'all' ? 'All skills' : c.skill_access === 'none' ? 'Disabled' : `${c.skill_names?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="skill_access">${option('all','All skills',c.skill_access)}${option('selected','Selected skills',c.skill_access)}${option('none','No skills',c.skill_access)}</select></label><div class="ag-cap-grid" data-show-when="skill_access:selected"${c.skill_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.skills, c.skill_names, 'skill_names')}</div></div></details>
-    <details class="ag-cap-group"><summary><span>Models</span><small>${c.model_access === 'current' ? 'Current model only' : c.model_access === 'all' ? 'All configured' : `${c.allowed_models?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="model_access">${option('current','Current model only',c.model_access)}${option('selected','Selected models',c.model_access)}${option('all','All configured models',c.model_access)}</select></label><div class="ag-cap-grid" data-show-when="model_access:selected"${c.model_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.models.map((name) => ({name})), c.allowed_models, 'allowed_models')}</div></div></details>
-    <details class="ag-cap-group"><summary><span>MCP & integrations</span><small>${c.allowed_mcp_servers?.includes('*') ? 'All connected' : `${c.allowed_mcp_servers?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="mcp_access">${option('all','All connected',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('selected','Selected connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('none','No connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}</select></label><div class="ag-cap-grid" data-show-when="mcp_access:selected"${!c.allowed_mcp_servers?.includes('*') && c.allowed_mcp_servers?.length ? '' : ' hidden'}>${capabilityChecks(catalog.mcp_servers, mcpSelected, 'allowed_mcp_servers', 'name')}</div></div></details>
+    <div class="ag-cap-grid" data-show-when="skill_access:selected"${c.skill_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.skills, c.skill_names, 'skill_names')}</div>
+  </div>`;
+  const connectionsPanel = `<div class="ag-config-panel" data-config-panel="connections">
+    <div class="ag-panel-heading"><div><b>Models & integrations</b><span>Limit model switching and connected MCP servers independently.</span></div></div>
+    <section class="ag-connection-section"><div class="ag-connection-head"><div><b>Models</b><small>${c.model_access === 'current' ? 'Current model only' : c.model_access === 'all' ? 'All configured models' : `${c.allowed_models?.length || 0} selected`}</small></div><select class="wb-select" data-config="model_access">${option('current','Current model only',c.model_access)}${option('selected','Selected models',c.model_access)}${option('all','All configured models',c.model_access)}</select></div><div class="ag-cap-grid" data-show-when="model_access:selected"${c.model_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.models.map((name) => ({name})), c.allowed_models, 'allowed_models')}</div></section>
+    <section class="ag-connection-section"><div class="ag-connection-head"><div><b>MCP & integrations</b><small>${c.allowed_mcp_servers?.includes('*') ? 'All connected servers' : `${c.allowed_mcp_servers?.length || 0} selected`}</small></div><select class="wb-select" data-config="mcp_access">${option('all','All connected',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('selected','Selected connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('none','No connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}</select></div><div class="ag-cap-grid" data-show-when="mcp_access:selected"${!c.allowed_mcp_servers?.includes('*') && c.allowed_mcp_servers?.length ? '' : ' hidden'}>${capabilityChecks(catalog.mcp_servers, mcpSelected, 'allowed_mcp_servers', 'name')}</div></section>
+  </div>`;
+  const panels = { general: generalPanel, tools: toolsPanel, knowledge: knowledgePanel, connections: connectionsPanel };
+  return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
+    <div class="ag-loadout-intro"><div><b>Runtime controls</b><span>Changes apply to this agent's next step. Denied capabilities are enforced server-side.</span></div><span class="ag-policy-shield">Policy active</span></div>
+    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+    <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
+    <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
     <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
   </div>`;
+}
+
+function loadoutWorkspaceHtml() {
+  const row = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
+  if (!row) return '<section class="ag-loadout-workspace wb-card"><div class="wb-empty">No agent is available to configure.</div></section>';
+  if (row.session_id !== state.selected) state.selected = row.session_id;
+  const choices = state.rows.map((item) => `<option value="${esc(item.session_id)}"${item.session_id === row.session_id ? ' selected' : ''}>${esc(item.name)} — ${esc(STATUS[item.status]?.[0] || item.status)}</option>`).join('');
+  return `<section class="ag-loadout-workspace wb-card">
+    <div class="ag-loadout-workspace-head"><div class="ag-loadout-agent"><span class="ag-loadout-agent-avatar">${robotHtml(row, 'mini')}</span><label><span>Editing agent</span><select class="wb-select" data-config-agent>${choices}</select></label></div><div class="ag-loadout-context">${pill(row.status)}<span>${esc(row.model || 'Default model')}</span></div></div>
+    ${configEditorHtml(row)}
+  </section>`;
 }
 function rowHtml(r) {
   const sel = r.session_id === state.selected;
@@ -471,7 +504,6 @@ function renderDetail() {
       ${r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
     </div>
     ${loadoutSummaryHtml(r)}
-    ${state.configOpen ? configEditorHtml(r) : ''}
     ${approvals.length || children.length ? `<div class="ag-detail-top">
       ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
       ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
@@ -535,6 +567,12 @@ function syncConfigVisibility(editor, draft) {
   });
 }
 function onConfigChange(e) {
+  if (e.target.matches('[data-config-agent]')) {
+    state.selected = e.target.value;
+    state.configTab = 'general';
+    render();
+    return;
+  }
   const editor = e.target.closest('.ag-loadout-editor');
   const row = state.rows.find((item) => item.session_id === state.selected);
   if (!editor || !row) return;
@@ -638,13 +676,24 @@ async function onClick(e) {
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'config-toggle') {
-      state.configOpen = !state.configOpen;
-      if (state.configOpen) {
-        renderDetail();
-        try { await loadCatalog(); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
-      }
-      renderDetail();
-      if (state.configOpen) syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
+      state.configOpen = true;
+      state.configTab = 'general';
+      render();
+      try { await loadCatalog(); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+      render();
+      syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
+    }
+    else if (act === 'config-back') {
+      state.configOpen = false;
+      render();
+    }
+    else if (act === 'config-tab') {
+      state.configTab = b.dataset.tab || 'general';
+      render();
+      syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
+    }
+    else if (act === 'expand') {
+      snapModalToZone($('agents-dashboard'), { name: 'maximize', rect: workspaceRect() });
     }
     else if (act === 'apply-profile') {
       const row = state.rows.find((item) => item.session_id === state.selected);
@@ -652,7 +701,7 @@ async function onClick(e) {
       const profile = state.profiles.find((item) => item.name === selectedName);
       if (!row || !profile) { uiModule.showToast('Choose a preset first', 'warning'); return; }
       state.configDrafts.set(row.session_id, profileConfig(profile));
-      renderDetail();
+      state.configOpen ? render() : renderDetail();
       uiModule.showToast(`Loaded ${profile.name}; save to apply it to this agent`);
     }
     else if (act === 'save-config') {
@@ -662,7 +711,7 @@ async function onClick(e) {
       const msg = $('ag-config-msg'); if (msg) msg.textContent = 'Saving…';
       await saveAgentConfig(row);
       uiModule.showToast(`Loadout saved for ${row.name}`, 'success');
-      renderDetail();
+      state.configOpen ? render() : renderDetail();
     }
     else if (act === 'inspect-run') {
       if (!window.workbenchModule?.openRun) throw new Error('Workbench inspection is unavailable');
@@ -795,6 +844,36 @@ export function toggle() {
   state.open ? close() : open();
 }
 
+function setFleetWidth(body, width) {
+  if (!body) return;
+  const max = Math.max(250, body.getBoundingClientRect().width - 390);
+  state.fleetWidth = Math.round(Math.max(250, Math.min(width, max)));
+  body.style.setProperty('--ag-fleet-width', `${state.fleetWidth}px`);
+  try { localStorage.setItem('odysseus-agents-fleet-width', String(state.fleetWidth)); } catch (_) {}
+}
+
+function beginFleetResize(e) {
+  const splitter = e.target.closest('[data-ag-splitter]');
+  if (!splitter || e.button !== 0) return;
+  const body = splitter.closest('.ag-body');
+  if (!body || getComputedStyle(splitter).display === 'none') return;
+  e.preventDefault();
+  const rect = body.getBoundingClientRect();
+  splitter.classList.add('dragging');
+  document.body.classList.add('ag-split-resizing');
+  const move = (ev) => setFleetWidth(body, ev.clientX - rect.left);
+  const end = () => {
+    splitter.classList.remove('dragging');
+    document.body.classList.remove('ag-split-resizing');
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', end);
+    window.removeEventListener('pointercancel', end);
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+}
+
 function init() {
   const root = $('agents-dashboard'); if (!root) return;
   const content = root.querySelector('.agents-modal-content');
@@ -816,9 +895,15 @@ function init() {
   $('ag-dock-right')?.addEventListener('click', () => applyEdgeDock(root, 'right'));
   $('ag-maximize')?.addEventListener('click', () => snapModalToZone(root, { name: 'maximize', rect: workspaceRect() }));
   root.addEventListener('pointerdown', bringToFront, true);
+  root.addEventListener('pointerdown', beginFleetResize);
   root.addEventListener('click', onClick);
   root.addEventListener('change', onConfigChange);
   document.addEventListener('keydown', (e) => {
+    if (state.open && e.target?.matches?.('[data-ag-splitter]') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      e.preventDefault();
+      setFleetWidth(e.target.closest('.ag-body'), state.fleetWidth + (e.key === 'ArrowLeft' ? -24 : 24));
+      return;
+    }
     if (e.key === 'Escape' && state.open) { close(); return; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }
   });

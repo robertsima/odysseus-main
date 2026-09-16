@@ -49,6 +49,13 @@ class SettingSpec:
     # Optional display labels matching ``choices`` by position. Values sent to
     # the server remain the stable machine names above.
     choice_labels: Tuple[str, ...] = ()
+    # Populate a select from the live installation rather than asking the user
+    # to type an opaque endpoint/model identifier. Supported sources are
+    # interpreted by capabilitiesPanel.js.
+    options_source: str = ""
+    # Suggested finite values for a setting that must still accept custom text
+    # (for example provider-defined voices or ISO language codes).
+    suggestions: Tuple[str, ...] = ()
     # Deployment may pin this; the UI renders it read-only when the var is set.
     env_override: str = ""
     # Never echo the stored value back to the browser.
@@ -76,6 +83,8 @@ class SettingSpec:
             "capability": self.capability,
             "choices": list(self.choices),
             "choice_labels": list(self.choice_labels),
+            "options_source": self.options_source,
+            "suggestions": list(self.suggestions),
             "locked": locked,
             "placeholder": self.placeholder,
             "default": "" if self.sensitive else default,
@@ -313,6 +322,67 @@ def ui_payload(owner: str = "", is_admin: bool = True) -> List[dict]:
 # Grouped as the operator thinks about them, not as the code is organised.
 
 register_all([
+    # ── Installed endpoints and models ──
+    *[
+        SettingSpec(key=key, type="string", label=label, help=help_text,
+                    group=group, options_source="endpoints")
+        for key, label, help_text, group in (
+            ("default_endpoint_id", "Default endpoint", "Endpoint used for new chats unless a chat chooses another.", "Models"),
+            ("utility_endpoint_id", "Utility endpoint", "Endpoint used for lightweight summaries and utility calls.", "Models"),
+            ("research_endpoint_id", "Research endpoint", "Endpoint used by Deep Research.", "Research"),
+            ("task_endpoint_id", "Task endpoint", "Endpoint used by scheduled and background tasks.", "Tasks"),
+        )
+    ],
+    *[
+        SettingSpec(key=key, type="string", label=label, help=help_text,
+                    group=group, options_source="models")
+        for key, label, help_text, group in (
+            ("default_model", "Default model", "Model used for new chats.", "Models"),
+            ("utility_model", "Utility model", "Model used for lightweight summaries and utility calls.", "Models"),
+            ("research_model", "Research model", "Model used by Deep Research.", "Research"),
+            ("task_model", "Task model", "Model used by scheduled and background tasks.", "Tasks"),
+            ("teacher_model", "Teacher model", "Model used for teacher and critique calls.", "Teacher"),
+            ("image_model", "Image model", "Configured image-generation model.", "Images"),
+            ("vision_model", "Vision model", "Configured image-understanding model.", "Images"),
+            ("claude_code_model", "Claude Code model", "Optional model override for Claude Code delegation.", "Agents"),
+        )
+    ],
+    SettingSpec(
+        key="tts_provider", type="string", label="Text-to-speech provider",
+        help="Speech provider or compatible configured endpoint.", group="Voice",
+        options_source="tts_providers",
+    ),
+    SettingSpec(
+        key="stt_provider", type="string", label="Speech-to-text provider",
+        help="Transcription provider or compatible configured endpoint.", group="Voice",
+        options_source="stt_providers",
+    ),
+    SettingSpec(
+        key="tts_model", type="string", label="Text-to-speech model",
+        help="Speech model exposed by the selected provider.", group="Voice",
+        options_source="tts_models",
+    ),
+    SettingSpec(
+        key="stt_model", type="string", label="Speech-to-text model",
+        help="Whisper size or transcription model exposed by the selected provider.", group="Voice",
+        options_source="stt_models",
+    ),
+    SettingSpec(
+        key="tts_voice", type="string", label="Text-to-speech voice",
+        help="Provider voice name. Choose a common voice or enter a provider-specific one.", group="Voice",
+        suggestions=("alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "af_heart"),
+    ),
+    SettingSpec(
+        key="stt_language", type="string", label="Speech recognition language",
+        help="Language code for transcription; leave empty to detect automatically.", group="Voice",
+        suggestions=("en", "es", "fr", "de", "it", "pt", "nl", "pl", "ja", "ko", "zh"),
+    ),
+    SettingSpec(
+        key="tts_speed", type="choice", label="Speech speed",
+        help="Playback speed for generated speech.", group="Voice",
+        choices=("0.75", "1", "1.25", "1.5", "2"),
+        choice_labels=("0.75× — slower", "1× — normal", "1.25×", "1.5×", "2× — faster"),
+    ),
     # ── Knowledge: one store for notes and vault documents ──
     SettingSpec(
         key="vault_directory",

@@ -23,7 +23,8 @@ const esc = (s) => String(s == null ? '' : s)
 
 const state = {
   capabilities: [], groups: [], isAdmin: false, loaded: false, busy: false,
-  dirty: new Map(), activeGroup: '', query: '', showAdvanced: false,
+  dirty: new Map(), activeGroup: '', query: '', showAdvanced: false, capabilitiesOpen: false,
+  endpoints: [], models: [],
 };
 
 async function api(path, opts = {}) {
@@ -120,6 +121,39 @@ function defaultLabel(s) {
   return value === '' || value == null ? 'Empty' : String(value);
 }
 
+function sourcedOptions(s, value) {
+  const endpoints = state.endpoints.filter((endpoint) => endpoint.is_enabled !== false);
+  const allModels = state.models || [];
+  let options = [];
+  if (s.options_source === 'endpoints') {
+    options = endpoints.map((endpoint) => ({ value: String(endpoint.id), label: `${endpoint.name}${endpoint.online === false ? ' (offline)' : ''}` }));
+  } else if (s.options_source === 'models') {
+    options = allModels.map((model) => ({ value: model, label: model }));
+  } else if (s.options_source === 'tts_providers') {
+    options = [{ value: 'disabled', label: 'Disabled' }, { value: 'browser', label: 'Browser / operating system' }, { value: 'local', label: 'Local speech service' }]
+      .concat(endpoints.filter((endpoint) => (endpoint.models || []).some((model) => /tts|audio|speech/i.test(model)))
+        .map((endpoint) => ({ value: `endpoint:${endpoint.id}`, label: `${endpoint.name} (API endpoint)` })));
+  } else if (s.options_source === 'stt_providers') {
+    options = [{ value: 'disabled', label: 'Disabled' }, { value: 'local', label: 'Local Whisper' }]
+      .concat(endpoints.map((endpoint) => ({ value: `endpoint:${endpoint.id}`, label: `${endpoint.name} (API endpoint)` })));
+  } else if (s.options_source === 'tts_models') {
+    options = ['tts-1', 'tts-1-hd', 'gpt-4o-mini-tts']
+      .concat(allModels.filter((model) => /tts|audio|speech/i.test(model)))
+      .map((model) => ({ value: model, label: model }));
+  } else if (s.options_source === 'stt_models') {
+    options = ['tiny', 'base', 'small', 'medium', 'large-v3']
+      .concat(allModels.filter((model) => /whisper|transcri|audio/i.test(model)))
+      .map((model) => ({ value: model, label: model }));
+  }
+  const seen = new Set();
+  options = options.filter((item) => item.value && !seen.has(item.value) && seen.add(item.value));
+  const current = String(value ?? '');
+  if (current && !options.some((item) => item.value === current)) {
+    options.unshift({ value: current, label: `${current} (saved; not currently detected)` });
+  }
+  return options;
+}
+
 function controlHtml(s) {
   const id = `set-${s.key}`;
   const locked = s.locked ? ' disabled' : '';
@@ -130,12 +164,20 @@ function controlHtml(s) {
   if (s.type === 'bool') {
     input = `<label class="set-switch"><input type="checkbox" id="${id}" data-set-key="${esc(s.key)}"
       ${value ? 'checked' : ''}${locked}><span></span></label>`;
+  } else if (s.options_source) {
+    const options = sourcedOptions(s, value);
+    const blank = `<option value=""${value ? '' : ' selected'}>Use the app default</option>`;
+    input = `<select id="${id}" class="set-input" data-set-key="${esc(s.key)}"${locked}>${blank}${options.map((item) => `<option value="${esc(item.value)}"${String(value) === item.value ? ' selected' : ''}>${esc(item.label)}</option>`).join('')}</select>`;
   } else if (s.type === 'choice') {
     const opts = (s.choices || []).map((c, i) => {
       const label = (s.choice_labels || [])[i] || choiceLabel(s, c);
       return `<option value="${esc(c)}"${String(value) === String(c) ? ' selected' : ''}>${esc(label)}</option>`;
     }).join('');
     input = `<select id="${id}" class="set-input" data-set-key="${esc(s.key)}"${locked}>${opts}</select>`;
+  } else if ((s.suggestions || []).length) {
+    input = `<input type="text" id="${id}" class="set-input" data-set-key="${esc(s.key)}"
+      value="${esc(value ?? '')}" list="${id}-suggestions" placeholder="${esc(s.placeholder || 'Choose or type a value')}"${locked}>
+      <datalist id="${id}-suggestions">${s.suggestions.map((suggestion) => `<option value="${esc(suggestion)}"></option>`).join('')}</datalist>`;
   } else if (s.type === 'json' || s.type === 'text' || s.type === 'list') {
     const text = s.type === 'json' ? JSON.stringify(value ?? null, null, 2)
       : Array.isArray(value) ? value.join('\n') : (value ?? '');
@@ -211,7 +253,7 @@ function render() {
   const advancedCount = state.groups.reduce((n, g) => n + (g.settings || []).filter((s) => s.advanced).length, 0);
 
   host.innerHTML = `
-    <details class="cap-section"${attentionCaps ? ' open' : ''}>
+    <details class="cap-section"${state.capabilitiesOpen ? ' open' : ''}>
       <summary><span>Capabilities</span><span class="cap-summary-count">${activeCaps} active${attentionCaps ? ` · ${attentionCaps} need setup` : ''}</span></summary>
       <div class="cap-intro">
         <p class="set-help">A capability needs both your switch and its requirements on this machine.
@@ -277,13 +319,16 @@ function findSetting(key) {
 
 async function load() {
   try {
-    const [caps, schema] = await Promise.all([
+    const [caps, schema, endpoints] = await Promise.all([
       api('/api/capabilities'),
       api('/api/settings/schema'),
+      api('/api/model-endpoints').catch(() => []),
     ]);
     state.capabilities = caps.capabilities || [];
     state.groups = schema.groups || [];
     state.isAdmin = !!schema.is_admin;
+    state.endpoints = Array.isArray(endpoints) ? endpoints : [];
+    state.models = [...new Set(state.endpoints.flatMap((endpoint) => endpoint.models || []).map(String))].sort((a, b) => a.localeCompare(b));
   } catch (e) {
     if (e.status === 403) {
       // A non-admin can still see their own settings; capability state is not
@@ -362,7 +407,18 @@ function onEvent(e) {
   if (btn) {
     const act = btn.dataset.capAction;
     if (act === 'save') { save(); return; }
-    if (act === 'advanced') { state.showAdvanced = !state.showAdvanced; render(); return; }
+    if (act === 'advanced') {
+      state.showAdvanced = !state.showAdvanced;
+      if (state.showAdvanced) {
+        const current = state.groups.find((group) => group.group === state.activeGroup);
+        if (!current || !(current.settings || []).some((setting) => setting.advanced)) {
+          state.activeGroup = (state.groups.find((group) => (group.settings || []).some((setting) => setting.advanced)) || current || {}).group || state.activeGroup;
+        }
+      }
+      render();
+      toast(state.showAdvanced ? 'Advanced settings are now visible' : 'Advanced settings hidden');
+      return;
+    }
     if (act === 'recheck') {
       post('/api/capabilities/recheck')
         .then((out) => { state.capabilities = out.capabilities || []; render(); toast('Requirements re-checked'); })
@@ -391,6 +447,9 @@ export function mount() {
   host.dataset.wired = '1';
   host.addEventListener('click', onEvent);
   host.addEventListener('change', onEvent);
+  host.addEventListener('toggle', (e) => {
+    if (e.target.matches?.('.cap-section')) state.capabilitiesOpen = e.target.open;
+  }, true);
   host.addEventListener('input', (e) => {
     if (e.target.id === 'settings-schema-search') {
       state.query = e.target.value;
