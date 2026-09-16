@@ -20,19 +20,39 @@ logger = logging.getLogger(__name__)
 
 
 def _list_visible_notes(owner, *, archived=False, label=None):
-    """Human/API callers are already owner-authenticated; keep old test-store
-    adapters working while explicitly opting into private vault notes."""
+    """Human callers see private notes; agent loopback callers do not."""
+    allow_private = owner != INTERNAL_TOOL_USER
     try:
-        return STORE.list(owner, archived=archived, label=label, allow_private=True)
+        return STORE.list(owner, archived=archived, label=label, allow_private=allow_private)
     except TypeError:
         return STORE.list(owner, archived=archived, label=label)
 
 
 def _find_visible_note(note_id, owner):
+    allow_private = owner != INTERNAL_TOOL_USER
     try:
-        return STORE.find(note_id, owner, allow_private=True)
+        return STORE.find(note_id, owner, allow_private=allow_private)
     except TypeError:
         return STORE.find(note_id, owner)
+
+
+def _save_authenticated_note(note, owner):
+    """Bypass readonly for humans, but never for agent loopback requests."""
+    try:
+        return STORE.save(note, enforce_readonly=owner == INTERNAL_TOOL_USER)
+    except TypeError:
+        return STORE.save(note)
+
+
+def _delete_authenticated_note(note_id, owner):
+    try:
+        return STORE.delete(
+            note_id,
+            owner,
+            enforce_readonly=owner == INTERNAL_TOOL_USER,
+        )
+    except TypeError:
+        return STORE.delete(note_id, owner)
 
 
 # ---------------------------------------------------------------------------
@@ -680,7 +700,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
                 repeat=body.repeat or "none",
                 sort_order=body.sort_order if body.sort_order is not None else 0,
         )
-        STORE.save(note)
+        _save_authenticated_note(note, user)
         return _note_to_dict(note)
 
     # --- GET ONE ---
@@ -740,14 +760,14 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         if body.agent_session_id is not None:
             note.agent_session_id = body.agent_session_id
 
-        STORE.save(note)
+        _save_authenticated_note(note, user)
         return _note_to_dict(note)
 
     # --- DELETE ---
     @router.delete("/{note_id}")
     def delete_note(request: Request, note_id: str):
         user = _owner(request)
-        if not STORE.delete(note_id, user):
+        if not _delete_authenticated_note(note_id, user):
             raise HTTPException(404, "Note not found")
         return {"ok": True}
 
@@ -759,7 +779,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         if not note:
             raise HTTPException(404, "Note not found")
         note.pinned = not note.pinned
-        STORE.save(note)
+        _save_authenticated_note(note, user)
         return {"ok": True, "pinned": note.pinned}
 
     # --- TOGGLE ARCHIVE ---
@@ -770,7 +790,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         if not note:
             raise HTTPException(404, "Note not found")
         note.archived = not note.archived
-        STORE.save(note)
+        _save_authenticated_note(note, user)
         return {"ok": True, "archived": note.archived}
 
     # --- TOGGLE CHECKLIST ITEM ---
@@ -786,7 +806,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         if index < 0 or index >= len(items):
             raise HTTPException(400, f"Item index {index} out of range")
         items[index].done = not items[index].done
-        STORE.save(note)
+        _save_authenticated_note(note, user)
         return {"ok": True, "items": [{"text": item.text, "done": item.done, **item.extra} for item in items]}
 
     # --- FIRE REMINDER ---
@@ -855,7 +875,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             note = _find_visible_note(str(nid), user)
             if note:
                 note.sort_order = i
-                STORE.save(note)
+                _save_authenticated_note(note, user)
                 count += 1
         return {"ok": True, "count": count}
 

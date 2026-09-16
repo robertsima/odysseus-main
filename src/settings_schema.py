@@ -374,7 +374,8 @@ register_all([
             "Map each vault-relative folder to \"public\", \"private\" or \"readonly\". "
             "For both privacy and write protection, use an object such as "
             "{\"Journal\": {\"sensitivity\": \"private\", \"readonly\": true}}. "
-            "Rules inherit into subfolders; {\"readonly\": false} creates a writable child exception. "
+            "These rules constrain LLMs and agents only; signed-in humans can still use the vault editor. "
+            "Rules inherit into subfolders; {\"readonly\": false} creates a model-writable child exception. "
             "Use an empty folder key to apply a rule to the vault root."
         ),
         group="Knowledge",

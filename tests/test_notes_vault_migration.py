@@ -306,22 +306,20 @@ def test_apply_is_idempotent_even_if_the_note_title_changed_after_first_migratio
     assert len(_all_files(vault_dir)) == 1
 
 
-def test_apply_preflights_all_readonly_targets_before_writing(vault, owner, monkeypatch):
+def test_migration_is_not_blocked_by_llm_readonly_policy(vault, owner, monkeypatch):
     vault_dir, manifest_path = vault
     _add_note(owner, title="Writable first", archived=False)
     _add_note(owner, title="Locked later", archived=True)
     import src.rag_sensitivity as sensitivity
 
     def _guard(path, *, operation="modify"):
-        if "Archive" in str(path):
-            raise sensitivity.VaultReadOnlyError("configured readonly")
+        raise AssertionError("human/system migration must not consult LLM readonly policy")
 
     monkeypatch.setattr(sensitivity, "assert_vault_writable", _guard)
 
-    with pytest.raises(sensitivity.VaultReadOnlyError):
-        apply(plan(owner=owner), owner=owner, manifest_path=manifest_path)
-    assert _all_files(vault_dir) == []
-    assert not manifest_path.exists()
+    apply(plan(owner=owner), owner=owner, manifest_path=manifest_path)
+    assert len(_all_files(vault_dir)) == 2
+    assert manifest_path.exists()
 
 
 # ---------------------------------------------------------------------------

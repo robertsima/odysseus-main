@@ -111,7 +111,7 @@ class MarkdownNotesStore:
                 return path
         return None
 
-    def save(self, note: NoteRecord) -> NoteRecord:
+    def save(self, note: NoteRecord, *, enforce_readonly: bool = True) -> NoteRecord:
         root, _active, _archive = _paths()
         relative_dir = resolve_note_directory(
             note.archived,
@@ -125,9 +125,10 @@ class MarkdownNotesStore:
         target = current if current and current.parent == target_dir else target_dir / note_filename(note.title, note.id)
         if target.exists() and (current is None or target.resolve() != current.resolve()):
             target = target_dir / f"{target.stem}-{note.id[:8]}.md"
-        assert_vault_writable(target, operation="save note to")
-        if current is not None and current.resolve() != target.resolve():
-            assert_vault_writable(current, operation="move note from")
+        if enforce_readonly:
+            assert_vault_writable(target, operation="save note to")
+            if current is not None and current.resolve() != target.resolve():
+                assert_vault_writable(current, operation="move note from")
         target_dir.mkdir(parents=True, exist_ok=True)
         now = datetime.now(timezone.utc).replace(tzinfo=None)
         if note.created_at is None:
@@ -148,14 +149,21 @@ class MarkdownNotesStore:
                 os.unlink(temp_name)
         return note
 
-    def delete(self, note_id: str, owner: Optional[str] = None) -> bool:
+    def delete(
+        self,
+        note_id: str,
+        owner: Optional[str] = None,
+        *,
+        enforce_readonly: bool = True,
+    ) -> bool:
         note = self.find(note_id, owner)
         if note is None:
             return False
         path = self._path_for(note.id, owner)
         if path is None:
             return False
-        assert_vault_writable(path, operation="delete note from")
+        if enforce_readonly:
+            assert_vault_writable(path, operation="delete note from")
         path.unlink()
         return True
 

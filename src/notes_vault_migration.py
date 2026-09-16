@@ -336,17 +336,6 @@ def apply(migration_plan: MigrationPlan, owner: Optional[str] = None, manifest_p
 
     records_by_id = {record.id: record for record in _load_note_records(owner=owner)}
 
-    # Validate every planned target before the first mutation. In particular,
-    # a later read-only target must not leave earlier files written while the
-    # migration aborts before its final manifest save.
-    from src.rag_sensitivity import assert_vault_writable
-    for write in migration_plan.writes:
-        target = safe_join(migration_plan.vault_dir, write.relative_path)
-        if target is not None and not (
-            write.relative_path in manifest.entries and target.exists()
-        ) and not target.exists():
-            assert_vault_writable(target, operation="migrate note to")
-
     for write in migration_plan.writes:
         target = safe_join(migration_plan.vault_dir, write.relative_path)
         if target is None:
@@ -477,8 +466,6 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
             result.kept_due_to_edits.append(relative_path)
             remaining_entries[relative_path] = entry
             continue
-        from src.rag_sensitivity import assert_vault_writable
-        assert_vault_writable(target, operation="roll back note from")
         target.unlink()
         result.removed.append(relative_path)
 
@@ -491,8 +478,6 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
             continue
         try:
             if directory.is_dir() and not any(directory.iterdir()):
-                from src.rag_sensitivity import assert_vault_writable
-                assert_vault_writable(directory, operation="remove directory from")
                 directory.rmdir()
                 result.removed_dirs.append(rel_dir)
             elif directory.exists():

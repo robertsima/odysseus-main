@@ -34627,6 +34627,272 @@ body.notes-drag-mode .note-card-pin svg {
   scrollbar-width: thin;
 }
 
+/* Notes / full-vault switcher. The policy badges describe what models may do;
+   the authenticated human editor remains usable for every mounted file. */
+.notes-mode-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px 0;
+  flex-shrink: 0;
+}
+.notes-mode-tabs button {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg);
+  color: color-mix(in srgb, var(--fg) 66%, transparent);
+  padding: 5px 10px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.notes-mode-tabs button.active {
+  color: var(--accent, var(--red));
+  border-color: color-mix(in srgb, var(--accent, var(--red)) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent, var(--red)) 12%, transparent);
+}
+.notes-mode-tabs > span {
+  margin-left: auto;
+  color: color-mix(in srgb, var(--fg) 45%, transparent);
+  font-size: 9px;
+}
+.notes-pane.notes-vault-mode .notes-pane-body {
+  display: block !important;
+  padding: 0 8px 8px !important;
+  overflow: hidden;
+  min-height: 0;
+}
+.vault-browser {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg);
+}
+.vault-tree-pane {
+  width: 34%;
+  min-width: 190px;
+  max-width: 320px;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  background: color-mix(in srgb, var(--panel) 78%, var(--bg));
+}
+.vault-tree-heading {
+  height: 34px;
+  flex-shrink: 0;
+  padding: 0 7px 0 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
+  font-size: 10px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.vault-tree-heading button {
+  border: 0;
+  background: transparent;
+  color: var(--fg);
+  opacity: .62;
+  cursor: pointer;
+  font-size: 17px;
+}
+.vault-tree-heading button:hover { opacity: 1; }
+.vault-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 5px;
+}
+.vault-tree-folder { margin: 0; }
+.vault-tree-folder > summary,
+.vault-tree-file {
+  --vault-indent: 0px;
+  width: 100%;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px 4px calc(6px + var(--vault-indent));
+  color: color-mix(in srgb, var(--fg) 78%, transparent);
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.vault-tree-folder > summary { list-style: none; font-weight: 600; }
+.vault-tree-folder > summary::-webkit-details-marker { display: none; }
+.vault-tree-folder > summary::before {
+  content: '›';
+  width: 8px;
+  transform: rotate(90deg);
+  transition: transform .12s ease;
+  opacity: .55;
+}
+.vault-tree-folder:not([open]) > summary::before { transform: rotate(0); }
+.vault-tree-file { padding-left: calc(20px + var(--vault-indent)); }
+.vault-tree-file:hover,
+.vault-tree-folder > summary:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
+.vault-tree-file.active {
+  color: var(--accent, var(--red));
+  background: color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
+}
+.vault-tree-file svg,
+.vault-tree-folder summary svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+}
+.vault-tree-file span,
+.vault-tree-folder summary span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.vault-policy-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  flex: 0 0 6px;
+  border-radius: 50%;
+  background: #68b984;
+}
+.vault-policy-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-left: auto;
+}
+.vault-policy-dots .vault-policy-dot { margin-left: 0; }
+.vault-policy-dot.private { background: #d782e8; }
+.vault-policy-dot.readonly { background: #e6b25d; }
+.vault-tree-empty,
+.vault-loading {
+  padding: 22px 12px;
+  color: color-mix(in srgb, var(--fg) 48%, transparent);
+  font-size: 11px;
+  text-align: center;
+}
+.vault-editor-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel);
+}
+.vault-editor-header {
+  min-height: 46px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 11px;
+  border-bottom: 1px solid var(--border);
+}
+.vault-editor-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.vault-editor-title b,
+.vault-editor-title small {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.vault-editor-title b { font-size: 12px; }
+.vault-editor-title small { opacity: .48; font-size: 9px; }
+.vault-policy-badge {
+  padding: 3px 7px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, #68b984 55%, var(--border));
+  color: #68b984;
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.vault-policy-badges { display: inline-flex; align-items: center; gap: 4px; }
+.vault-policy-badge.private { color: #d782e8; border-color: color-mix(in srgb, #d782e8 55%, var(--border)); }
+.vault-policy-badge.readonly { color: #e6b25d; border-color: color-mix(in srgb, #e6b25d 55%, var(--border)); }
+.vault-save-btn {
+  border: 1px solid var(--accent, var(--red));
+  border-radius: 6px;
+  background: var(--accent, var(--red));
+  color: #fff;
+  height: 28px;
+  padding: 0 11px;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.vault-save-btn:disabled { opacity: .38; cursor: default; }
+.vault-human-note {
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border);
+  color: color-mix(in srgb, var(--fg) 48%, transparent);
+  background: color-mix(in srgb, var(--accent, var(--red)) 4%, transparent);
+  font-size: 9px;
+}
+#vault-file-editor {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 13px 15px;
+  box-sizing: border-box;
+  background: var(--panel);
+  color: var(--fg);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  tab-size: 2;
+}
+.vault-editor-empty {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px;
+  color: color-mix(in srgb, var(--fg) 50%, transparent);
+  text-align: center;
+  font-size: 11px;
+}
+.vault-editor-empty svg { width: 30px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.vault-editor-empty span { max-width: 330px; line-height: 1.45; }
+@media (max-width: 768px) {
+  .notes-mode-tabs > span { display: none; }
+  .vault-browser { flex-direction: column; }
+  .vault-tree-pane {
+    width: 100%;
+    min-width: 0;
+    max-width: none;
+    height: 34%;
+    min-height: 150px;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .vault-editor-pane { flex: 1; }
+}
+
 .note-card.note-card-sliding-out {
   transform: translateX(120%);
   opacity: 0;

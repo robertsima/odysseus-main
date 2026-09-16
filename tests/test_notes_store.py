@@ -114,6 +114,30 @@ def test_readonly_notes_can_be_read_but_not_edited_or_deleted(monkeypatch, tmp_p
     assert path.read_text(encoding="utf-8").endswith("original")
 
 
+def test_human_override_can_edit_and_delete_llm_readonly_note(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(sensitivity, "vault_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        sensitivity,
+        "_safe_folder_policy_map",
+        lambda: ({"Notes": sensitivity.FolderPolicy(readonly=True)}, True),
+    )
+    notes = tmp_path / "Notes"
+    notes.mkdir()
+    path = notes / "human.md"
+    path.write_text(
+        "---\nid: human\ntitle: Human\nowner: alice\n---\noriginal", encoding="utf-8"
+    )
+    store = MarkdownNotesStore()
+    note = store.find("human", "alice")
+    note.content = "changed by human"
+
+    store.save(note, enforce_readonly=False)
+    assert "changed by human" in path.read_text(encoding="utf-8")
+    assert store.delete("human", "alice", enforce_readonly=False) is True
+    assert not path.exists()
+
+
 def test_archiving_checks_both_source_and_destination_policy(monkeypatch, tmp_path):
     _configure(monkeypatch, tmp_path)
     monkeypatch.setattr(sensitivity, "vault_root", lambda: str(tmp_path))

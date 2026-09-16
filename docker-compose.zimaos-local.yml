@@ -54,8 +54,8 @@ services:
       # Declared next to the mounts rather than left to post-boot admin state:
       # without it a fresh install came up with the vaults mounted, unindexed
       # and UNLABELLED -- and an unlabelled Journal is a public Journal, which
-      # both hosted models and `read_file` are then free to read. The label is
-      # what closes the Journal, not the :ro mount.
+      # hosted models and agent file tools are then free to read. The label is
+      # what closes the Journal to LLMs; it does not restrict the human UI.
       ODYSSEUS_PERSONAL_DIRS: ${ODYSSEUS_PERSONAL_DIRS:-Vault Mind:public,AI Mind:public,Journal:private}
       TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
       GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
@@ -79,7 +79,8 @@ services:
     extra_hosts:
       # Reach a model served on the Docker host, e.g. Ollama at
       # http://host.docker.internal:11434. Classified local by
-      # model_context.is_local_endpoint, so private docs ARE retrievable.
+      # model_context.is_local_endpoint. Private docs still require the
+      # session's explicit private-read grant.
       - "host.docker.internal:host-gateway"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
@@ -104,16 +105,14 @@ services:
       # same file.
       #
       # Writability is a separate axis from the RAG public/private label:
-      #   Vault Mind — reference material the AI reads but does not edit, so :ro.
-      #   AI Mind    — the AI's own notes; readable AND updatable, so rw.
-      #   Journal    — :ro, and labelled `private` (ODYSSEUS_PERSONAL_DIRS), which
-      #                is what actually keeps it out of read_file: the tool path
-      #                resolver rejects anything under a private directory.
-      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind:ro
+      # All mounts are writable for the authenticated human vault editor.
+      # LLM/agent access is governed inside Odysseus by the folder policy:
+      # public/private controls reads and readonly controls model writes.
+      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind
       - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/data/personal_docs/AI Mind
       # On ZimaOS this was /app/journal via vault_watch.py into a separate,
       # ungated collection. Native indexing puts it under the sensitivity filter.
-      - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal:ro
+      - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal
 
   chromadb:
     image: docker.io/chromadb/chroma:latest

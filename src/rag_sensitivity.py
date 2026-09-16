@@ -291,7 +291,7 @@ def _to_vault_relative(path: str, root: str) -> Optional[str]:
 
 @dataclass(frozen=True)
 class FolderPolicy:
-    """Independent privacy and write-access rules for a vault folder.
+    """Independent privacy and agent-write rules for a vault folder.
 
     ``None`` means that property is inherited from the closest ancestor (or
     the vault default). Keeping the properties independent lets a folder be
@@ -412,7 +412,7 @@ def _safe_folder_policy_map() -> Tuple[Dict[str, FolderPolicy], bool]:
 
 
 def path_is_readonly(path: str) -> bool:
-    """Return whether ``path`` is inside a read-only vault folder.
+    """Return whether ``path`` is read-only for an LLM/agent write.
 
     Read-only rules inherit independently from sensitivity rules. A child can
     explicitly opt back into writes with ``{"readonly": false}``. Paths
@@ -429,11 +429,15 @@ def path_is_readonly(path: str) -> bool:
 
 
 class VaultReadOnlyError(PermissionError):
-    """Raised when an application write targets a read-only vault path."""
+    """Raised when a guarded LLM/agent write targets a read-only vault path."""
 
 
 def assert_vault_writable(path: str, *, operation: str = "modify") -> None:
-    """Raise a clear error before changing a read-only vault path."""
+    """Raise before an LLM/agent changes a read-only vault path.
+
+    Human-facing routes intentionally bypass this guard. Filesystem
+    permissions remain the ultimate limit for those human edits.
+    """
     if path_is_readonly(str(path)):
         raise VaultReadOnlyError(
             f"cannot {operation} {path}: its vault folder is configured readonly"

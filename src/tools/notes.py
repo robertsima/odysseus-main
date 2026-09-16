@@ -44,13 +44,29 @@ async def do_manage_notes(
         "remove_item": "toggle_item",
     }
     action = _NOTE_ACTION_ALIASES.get(action, action)
+
+    def _store_list(*, archived=False, label=None):
+        """Keep legacy/test store adapters working with private filtering."""
+        try:
+            return STORE.list(
+                owner,
+                archived=archived,
+                label=label,
+                allow_private=allow_private,
+            )
+        except TypeError:
+            return STORE.list(owner, archived=archived, label=label)
+
     def _norm_note_title(value: str) -> str:
         text = (value or "").strip().lower()
         text = re.sub(r"^\s*reminder\s*:\s*", "", text)
         return re.sub(r"\s+", " ", text)
 
     def _note_by_prefix(note_id: str):
-        return STORE.find(note_id, owner, allow_private=allow_private)
+        try:
+            return STORE.find(note_id, owner, allow_private=allow_private)
+        except TypeError:
+            return STORE.find(note_id, owner)
 
     def _format_note_list(notes) -> str:
         lines = []
@@ -75,8 +91,7 @@ async def do_manage_notes(
             if label_filter.lower() == "default":
                 label_filter = ""
             show_archived = args.get("archived", False)
-            notes = STORE.list(owner, archived=bool(show_archived), label=label_filter or None,
-                               allow_private=allow_private)
+            notes = _store_list(archived=bool(show_archived), label=label_filter or None)
             if action in ("search", "find"):
                 query = str(
                     args.get("query")
@@ -176,7 +191,7 @@ async def do_manage_notes(
                 # also creates a separate note reminder for the same title/time,
                 # keep the existing note so the user gets only one dispatch.
                 target_title = _norm_note_title(title)
-                for existing in STORE.list(owner, archived=False, allow_private=allow_private)[:25]:
+                for existing in _store_list(archived=False)[:25]:
                     if existing.due_date != due_iso:
                         continue
                     if _norm_note_title(existing.title or "") == target_title:

@@ -3,14 +3,16 @@
 import os
 import logging
 import shutil
+import tempfile
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile, File, Depends
+from pydantic import BaseModel, Field
 from src.request_models import DirectoryRequest
 from core.constants import BASE_DIR, PERSONAL_DIR, PERSONAL_UPLOADS_DIR
 from src.rag_singleton import get_rag_manager
 from src.auth_helpers import require_privilege, require_user
-from core.middleware import require_admin
+from core.middleware import INTERNAL_TOOL_USER, require_admin
 from src.upload_handler import secure_filename
 from src.upload_limits import PERSONAL_UPLOAD_MAX_BYTES
 from src.rag_sensitivity import SENSITIVITY_PUBLIC, normalize_sensitivity
@@ -18,6 +20,14 @@ from src.rag_sensitivity import SENSITIVITY_PUBLIC, normalize_sensitivity
 UPLOADS_DIR = PERSONAL_UPLOADS_DIR
 
 logger = logging.getLogger(__name__)
+
+VAULT_EDITOR_MAX_BYTES = 5 * 1024 * 1024
+
+
+class VaultFileUpdate(BaseModel):
+    path: str = Field(..., min_length=1, max_length=2000)
+    content: str = Field(..., max_length=VAULT_EDITOR_MAX_BYTES)
+    modified: Optional[float] = None
 
 
 def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) -> str:
@@ -142,6 +152,13 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     """
     router = APIRouter(prefix="/api/personal")
 
+    def _require_human_user(request: Request) -> str:
+        """Authenticate a UI caller without admitting agent loopback tokens."""
+        owner = require_user(request)
+        if owner == INTERNAL_TOOL_USER:
+            raise HTTPException(403, "The vault editor is available only to human UI sessions")
+        return owner
+
     def _rag():
         """Get the current RAG manager, retrying init if needed."""
         return get_rag_manager()
@@ -164,6 +181,102 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         if not in_base:
             raise HTTPException(403, "Directory must be inside personal documents")
         return resolved
+
+    def _vault_root() -> str:
+        # Use the exact same configured root as sensitivity/readonly policy.
+        # App initialization points PersonalDocsManager here as well, but
+        # keeping this route coupled to the policy source prevents a stale
+        # manager instance from producing incorrect badges.
+        from src.rag_sensitivity import vault_root
+
+        root = os.path.realpath(vault_root())
+        if not os.path.isdir(root):
+            raise HTTPException(404, "Configured vault directory is not mounted or does not exist")
+        return root
+
+    def _resolve_vault_file(relative_path: str) -> Tuple[str, str]:
+        """Resolve a human-selected Markdown file inside the active vault."""
+        raw = str(relative_path or "").strip().replace("\\", "/")
+        if not raw or raw.startswith("/") or os.path.isabs(raw):
+            raise HTTPException(400, "A vault-relative file path is required")
+        parts = [part for part in raw.split("/") if part not in ("", ".")]
+        if any(part == ".." for part in parts):
+            raise HTTPException(403, "Path must stay inside the vault")
+        rel = "/".join(parts)
+        if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
+            raise HTTPException(400, "Only Markdown vault files can be edited")
+        root = _vault_root()
+        target = os.path.realpath(os.path.join(root, *parts))
+        try:
+            inside = os.path.commonpath([target, root]) == root
+        except ValueError:
+            inside = False
+        if not inside:
+            raise HTTPException(403, "Path must stay inside the vault")
+        if not os.path.isfile(target):
+            raise HTTPException(404, "Vault file not found")
+        return target, rel
+
+    def _vault_file_policy(path: str) -> Dict[str, Any]:
+        from src.rag_sensitivity import path_is_readonly, resolve_sensitivity
+        from src.vault_markdown import split_frontmatter
+
+        frontmatter = None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                header = handle.read(65537)
+            frontmatter, _body = split_frontmatter(header)
+        except (OSError, UnicodeError, ValueError):
+            frontmatter = None
+        return {
+            "sensitivity": resolve_sensitivity(path, frontmatter=frontmatter),
+            "readonly": path_is_readonly(path),
+            # These labels constrain model/agent access, not the authenticated
+            # human editor exposed by the routes below.
+            "policy_scope": "llm_only",
+        }
+
+    def _vault_tree_node(directory: str, rel_dir: str = "") -> Dict[str, Any]:
+        children: List[Dict[str, Any]] = []
+        try:
+            entries = sorted(
+                os.scandir(directory),
+                key=lambda entry: (not entry.is_dir(follow_symlinks=False), entry.name.casefold()),
+            )
+        except OSError as exc:
+            raise HTTPException(500, f"Could not read vault directory: {exc}")
+
+        for entry in entries:
+            if entry.name.startswith(".") or entry.name in {"__pycache__", "node_modules"}:
+                continue
+            rel = f"{rel_dir}/{entry.name}" if rel_dir else entry.name
+            if entry.is_dir(follow_symlinks=False):
+                node = _vault_tree_node(entry.path, rel)
+                if node["children"]:
+                    children.append(node)
+                continue
+            if not entry.is_file(follow_symlinks=False):
+                continue
+            if os.path.splitext(entry.name)[1].lower() not in (".md", ".markdown"):
+                continue
+            try:
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            children.append({
+                "type": "file",
+                "name": entry.name,
+                "path": rel.replace("\\", "/"),
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                **_vault_file_policy(entry.path),
+            })
+        return {
+            "type": "directory",
+            "name": os.path.basename(directory.rstrip(os.sep)) or "Vault",
+            "path": rel_dir.replace("\\", "/"),
+            "children": children,
+        }
     
     @router.get("")
     def api_personal_list(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
@@ -201,6 +314,120 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "directories": directories,
             "directories_detail": directories_detail,
             "directory_sensitivity": directory_sensitivity,
+        }
+
+    @router.get("/vault/tree")
+    def api_vault_tree(
+        owner: str = Depends(_require_human_user),
+    ):
+        """Return every Markdown file in the active vault for the human UI."""
+        root = _vault_root()
+        tree = _vault_tree_node(root)
+        return {
+            "root_name": tree["name"],
+            "tree": tree,
+            "policy_scope": "llm_only",
+        }
+
+    @router.get("/vault/file")
+    def api_vault_file(
+        path: str = Query(...),
+        owner: str = Depends(_require_human_user),
+    ):
+        """Open a Markdown file for an authenticated human UI session."""
+        target, rel = _resolve_vault_file(path)
+        try:
+            if os.path.getsize(target) > VAULT_EDITOR_MAX_BYTES:
+                raise HTTPException(413, "Vault file is too large for the browser editor")
+            with open(target, "r", encoding="utf-8") as handle:
+                content = handle.read(VAULT_EDITOR_MAX_BYTES + 1)
+        except HTTPException:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(500, f"Could not read vault file: {exc}")
+        if len(content.encode("utf-8")) > VAULT_EDITOR_MAX_BYTES:
+            raise HTTPException(413, "Vault file is too large for the browser editor")
+        return {
+            "path": rel,
+            "name": os.path.basename(rel),
+            "content": content,
+            "modified": os.path.getmtime(target),
+            **_vault_file_policy(target),
+        }
+
+    @router.put("/vault/file")
+    def update_vault_file(
+        body: VaultFileUpdate,
+        owner: str = Depends(_require_human_user),
+    ):
+        """Save a vault file as a human, independent of the LLM policy labels."""
+        target, rel = _resolve_vault_file(body.path)
+        payload = body.content
+        if len(payload.encode("utf-8")) > VAULT_EDITOR_MAX_BYTES:
+            raise HTTPException(413, "Vault file is too large for the browser editor")
+        if body.modified is not None:
+            try:
+                current_modified = os.path.getmtime(target)
+            except OSError as exc:
+                raise HTTPException(404, "Vault file is no longer available") from exc
+            if abs(current_modified - body.modified) > 0.000001:
+                raise HTTPException(
+                    409,
+                    "This file changed outside Odysseus. Reopen it before saving so those changes are not overwritten.",
+                )
+
+        temp_name = None
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=".vault-edit-", suffix=".tmp", dir=os.path.dirname(target))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, target)
+            temp_name = None
+        except PermissionError as exc:
+            raise HTTPException(
+                409,
+                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Could not save vault file: {exc}") from exc
+        finally:
+            if temp_name and os.path.exists(temp_name):
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+
+        # Update the shared embedding corpus immediately. Failure here does not
+        # roll back the human's file edit; the periodic scanner will retry it.
+        indexed = False
+        rag = _rag()
+        if rag:
+            try:
+                rag.delete_by_source(target)
+                owner_for = getattr(rag, "owner_for_directory", None)
+                chunk_owner = owner_for(os.path.dirname(target)) if callable(owner_for) else None
+                policy = _vault_file_policy(target)
+                indexed_count, _failed = rag.index_file(
+                    target,
+                    owner=chunk_owner,
+                    sensitivity=policy["sensitivity"],
+                )
+                indexed = bool(indexed_count)
+            except Exception as exc:
+                logger.warning("Immediate re-index failed for human vault edit %s: %s", target, exc)
+        try:
+            personal_docs_manager.refresh_index()
+        except Exception as exc:
+            logger.warning("Keyword index refresh failed after human vault edit %s: %s", target, exc)
+
+        return {
+            "success": True,
+            "path": rel,
+            "indexed": indexed,
+            "modified": os.path.getmtime(target),
+            **_vault_file_policy(target),
         }
     
     @router.post("/reload")
@@ -390,8 +617,6 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         for upload in files:
             try:
                 file_path, stored_name, safe_name = _unique_personal_upload_path(upload_dir, upload.filename)
-                from src.rag_sensitivity import assert_vault_writable
-                assert_vault_writable(file_path, operation="upload to")
                 content_bytes = await upload.read(PERSONAL_UPLOAD_MAX_BYTES + 1)
                 if len(content_bytes) > PERSONAL_UPLOAD_MAX_BYTES:
                     logger.warning(f"Rejected oversized personal upload: {upload.filename!r}")
@@ -449,9 +674,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Delete a specific file from RAG index and optionally from disk."""
         try:
-            # Resolve disk scope and enforce read-only policy before touching
-            # either the file or its index entries. Otherwise a refused delete
-            # could still make the document disappear from search.
+            # Resolve disk scope before touching the file or its index entries.
+            # Folder policy is for LLMs/agents; authenticated humans retain UI
+            # control over their own uploads.
             try:
                 abs_target = os.path.realpath(filepath)
                 base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
@@ -462,10 +687,6 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             except ValueError:
                 # commonpath raises on mixed drives / non-comparable paths
                 in_uploads = False
-            if in_uploads and abs_target != base_abs:
-                from src.rag_sensitivity import assert_vault_writable
-                assert_vault_writable(abs_target, operation="delete")
-
             # Remove chunks from RAG vector store (best-effort)
             removed = 0
             rag = _rag()
@@ -494,9 +715,6 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 "removed_chunks": removed,
                 "deleted_from_disk": deleted_from_disk,
             }
-        except PermissionError as e:
-            logger.warning("Refused read-only vault file deletion %s: %s", filepath, e)
-            raise HTTPException(409, str(e))
         except Exception as e:
             logger.error(f"Failed to delete file {filepath}: {e}")
             raise HTTPException(500, f"Failed to delete file: {str(e)}")

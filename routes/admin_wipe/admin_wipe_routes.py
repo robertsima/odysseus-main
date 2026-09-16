@@ -125,7 +125,6 @@ def setup_admin_wipe_routes(session_manager):
 
             if kind == "notes":
                 from src.notes_store import STORE as notes_store
-                from src.rag_sensitivity import assert_vault_writable
                 try:
                     active_notes = notes_store.list(
                         None, archived=False, allow_private=True
@@ -140,18 +139,11 @@ def setup_admin_wipe_routes(session_manager):
                     active_notes = notes_store.list(None, archived=False)
                     archived_notes = notes_store.list(None, archived=True)
                 file_notes = active_notes + archived_notes
-                # Validate the complete batch before deleting anything. File
-                # changes cannot participate in the SQLite rollback below, so
-                # discovering a read-only note halfway through would otherwise
-                # leave a partial wipe on disk.
-                path_for = getattr(notes_store, "_path_for", None)
-                if callable(path_for):
-                    for note in file_notes:
-                        path = path_for(note.id, None)
-                        if path is not None:
-                            assert_vault_writable(path, operation="wipe note from")
                 for note in file_notes:
-                    notes_store.delete(note.id, None)
+                    try:
+                        notes_store.delete(note.id, None, enforce_readonly=False)
+                    except TypeError:
+                        notes_store.delete(note.id, None)
                 legacy_count = db.query(Note).count()
                 db.query(Note).delete()
                 db.commit()
