@@ -129,6 +129,22 @@ _PROCESS_LIMIT_SIZE = MAX_CONCURRENT_TASKS
 # install is re-probed without a restart.
 _BINARY_INFO: dict[str, dict] = {}
 
+# ``delegate_to_agent`` can use this implementation through the local CLI
+# provider.  Keep diagnostics tied to the spelling the model actually called;
+# otherwise a provider-neutral call receives a misleading Claude-specific
+# correction message.
+_TOOL_NAMES = {"delegate_to_agent", "delegate_to_claude_code"}
+_DEFAULT_TOOL_NAME = "delegate_to_claude_code"
+
+
+def _tool_name(value: Optional[str] = None) -> str:
+    value = str(value or "").strip()
+    return value if value in _TOOL_NAMES else _DEFAULT_TOOL_NAME
+
+
+def _tool_error(message: str, value: Optional[str] = None) -> str:
+    return f"{_tool_name(value)}: {message}"
+
 
 # ── Configuration (settings first, then environment) ──
 
@@ -389,43 +405,71 @@ def _claude_environment() -> dict[str, str]:
     return env
 
 
-def _parse_args(args: dict) -> dict:
+def _canonical_allowed_tool(value: str) -> str:
+    """Canonicalize tool-name casing without broadening the safe grammar.
+
+    Only the fixed built-in names (and the ``Bash`` wrapper spelling) are
+    case-normalized.  The command inside ``Bash(...)`` remains byte-for-byte
+    unchanged and is still checked by ``SAFE_TOOL``; e.g. ``git PUSH`` remains
+    rejected.
+    """
+    builtins = {name.lower(): name for name in ("Read", "Glob", "Grep", "Edit", "Write")}
+    if value.lower() in builtins:
+        return builtins[value.lower()]
+    if len(value) >= 5 and value[:4].lower() == "bash" and value[4] == "(":
+        return "Bash" + value[4:]
+    return value
+
+
+def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
     """Validate a delegation request. Returns either
     {"repository": Path, "prompt": str, "timeout": int, "tools": list[str], "model": str|None}
     or {"error": str} — never both, and never raises."""
+    prefix = _tool_name(tool_name)
     if not isinstance(args, dict):
-        return {"error": "delegate_to_claude_code: JSON object required"}
+        return {"error": _tool_error("JSON object required", prefix)}
     requested = str(args.get("repository") or "").strip()
     if requested and requested.lower() != "auto":
         try:
             repository = _approved_repository(requested)
         except (ValueError, OSError) as exc:
-            return {"error": f"delegate_to_claude_code: {exc}"}
+            return {"error": _tool_error(str(exc), prefix)}
     else:
         repository, why = default_repository()
         if repository is None:
-            return {"error": f"delegate_to_claude_code: {why}. {_describe_candidates()}"}
+            return {"error": _tool_error(f"{why}. {_describe_candidates()}", prefix)}
     prompt = str(args.get("prompt") or "").strip()
     if not prompt or len(prompt) > 20000:
-        return {"error": "delegate_to_claude_code: prompt is required and must be <= 20000 characters"}
+        return {"error": _tool_error("prompt is required and must be <= 20000 characters", prefix)}
     try:
         timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
     except (TypeError, ValueError):
         timeout = 900
-    tools = args.get("allowed_tools") or default_tools()
+    requested_tools = args.get("allowed_tools")
+    tools = requested_tools if requested_tools else default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
-        return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings"}
+        return {"error": _tool_error("allowed_tools must be a list of strings", prefix)}
+    # Normalize only the names whose casing is cosmetic.  Safety matching is
+    # intentionally still exact, so malformed or unsafe Bash expressions do
+    # not become valid through a broad IGNORECASE regex.
+    tools = [_canonical_allowed_tool(item) for item in tools]
     rejected = [item for item in tools if not SAFE_TOOL.fullmatch(item)]
     accepted_hint = (
         f"Accepted: Read, Glob, Grep, Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
         "Bash(<pytest/npm test/npm run typecheck|lint|build/./gradlew test|build/./mvnw test|verify>:*). "
         "Claude never pushes: publish its commits yourself afterwards."
     )
-    if rejected and len(rejected) == len(tools):
-        return {"error": f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. {accepted_hint} "
-                         "Omit allowed_tools to use the defaults."}
     dropped: list[str] = []
-    if rejected:
+    dropped_note = ""
+    if rejected and len(rejected) == len(tools):
+        # Falling back to the known-safe defaults is strictly safer than
+        # refusing the whole delegation: no caller-supplied permission survives
+        # and the model gets a corrective note instead of retrying forever.
+        dropped = rejected[:10]
+        tools = default_tools()
+        dropped_note = (f"Ignored unsafe allowed_tools {dropped}; none were safe, so ran with the defaults. "
+                        f"{accepted_hint}")
+    elif rejected:
         # A mixed list runs with its safe entries. Refusing the whole job cost
         # the 2026-09-13 run three rounds re-sending one list with `git push`
         # and a malformed entry in it; dropping can only narrow Claude's rights.
@@ -433,16 +477,20 @@ def _parse_args(args: dict) -> dict:
         tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
-        return {"error": "delegate_to_claude_code: model must be a plain model name or alias"}
+        return {"error": _tool_error("model must be a plain model name or alias", prefix)}
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
     if dropped:
         parsed["dropped_tools"] = dropped
-        parsed["dropped_note"] = f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
+        parsed["dropped_note"] = dropped_note or f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
     return parsed
 
 
 def _with_dropped(result: dict, parsed: dict) -> dict:
     if parsed.get("dropped_tools"):
+        # Keep the parser's concise names in the tool result as well as the
+        # older descriptive aliases used by existing callers.
+        result["dropped_tools"] = parsed["dropped_tools"]
+        result["dropped_note"] = parsed["dropped_note"]
         result["dropped_allowed_tools"] = parsed["dropped_tools"]
         result["allowed_tools_note"] = parsed["dropped_note"]
     return result
@@ -916,16 +964,16 @@ async def _run_claude(
     """
     binary = binary_path()
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        return {"error": f"delegate_to_claude_code: binary unavailable at {binary}", "exit_code": 1}
+        return {"error": _tool_error(f"binary unavailable at {binary}", _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     info = await binary_info(binary)
     if info.get("error"):
-        return {"error": f"delegate_to_claude_code: {info['error']}", "exit_code": 1}
+        return {"error": _tool_error(str(info["error"]), _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     stream = bool(info.get("stream_json")) and _flag_setting("claude_code_stream_transcript", True)
     argv = _build_argv(binary, prompt, tools, info.get("flags", []), model=model, stream=stream)
     try:
         child_env = _claude_environment()
     except ValueError as exc:
-        return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
+        return {"error": _tool_error(str(exc), _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     ctx = dict(_RUN_CONTEXT.get() or {})
     run_id = ctx.get("task_id") or activity.new_run_id("claude_code")
     title = _run_title(prompt, ctx.get("label"))
@@ -1056,15 +1104,16 @@ class ClaudeCodeTool:
     """
 
     async def execute(self, content: str, ctx: dict) -> dict:
+        invoked_tool = _tool_name((ctx or {}).get("tool_name") if isinstance(ctx, dict) else None)
         try:
             args = json.loads(content) if (content or "").strip() else {}
         except (TypeError, json.JSONDecodeError):
-            return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+            return {"error": _tool_error("JSON object required", invoked_tool), "exit_code": 1}
         if not isinstance(args, dict):
-            return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+            return {"error": _tool_error("JSON object required", invoked_tool), "exit_code": 1}
         action = str(args.get("action") or "run").strip().lower()
         if action not in _ACTIONS:
-            return {"error": f"delegate_to_claude_code: unknown action {action!r}; one of {', '.join(_ACTIONS)}",
+            return {"error": _tool_error(f"unknown action {action!r}; one of {', '.join(_ACTIONS)}", invoked_tool),
                     "exit_code": 1}
         owner = (ctx or {}).get("owner") if isinstance(ctx, dict) else None
         session_id = (ctx or {}).get("session_id") if isinstance(ctx, dict) else None
@@ -1082,7 +1131,7 @@ class ClaudeCodeTool:
             }
         runner = get_task_runner()
         if action == "start":
-            started = await runner.start(args, owner=owner, session_id=session_id)
+            started = await runner.start(args, owner=owner, session_id=session_id, tool_name=invoked_tool)
             if "error" in started:
                 return {**started, "exit_code": 1}
             return {**started, "exit_code": 0,
@@ -1090,7 +1139,7 @@ class ClaudeCodeTool:
         if action in ("poll", "get", "cancel"):
             task_id = str(args.get("task_id") or "").strip()
             if not task_id:
-                return {"error": "delegate_to_claude_code: task_id is required", "exit_code": 1}
+                return {"error": _tool_error("task_id is required", invoked_tool), "exit_code": 1}
             if action == "cancel":
                 record = await runner.cancel(task_id, owner=owner)
             else:
@@ -1100,17 +1149,17 @@ class ClaudeCodeTool:
                     wait = 0
                 record = await runner.wait(task_id, wait, owner=owner) if wait else runner.get(task_id, owner=owner)
             if record is None:
-                return {"error": f"delegate_to_claude_code: task {task_id} not found", "exit_code": 1}
+                return {"error": _tool_error(f"task {task_id} not found", invoked_tool), "exit_code": 1}
             if record.get("status") in _ACTIVE_STATUSES:
                 return _running_report(record)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
             return {"tasks": runner.summaries(owner=owner), "exit_code": 0}
-        parsed = _parse_args(args)
+        parsed = _parse_args(args, invoked_tool)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
         label = str(args.get("label") or "").strip()[:120] or None
-        with run_context(session_id=session_id, owner=owner, label=label):
+        with run_context(session_id=session_id, owner=owner, label=label, tool_name=invoked_tool):
             result = await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
                                        model=parsed["model"])
         return _with_dropped(result, parsed)
@@ -1233,8 +1282,9 @@ class ClaudeCodeTaskRunner:
             self._save()
 
     async def start(self, args: dict, *, owner: Optional[str] = None,
-                    session_id: Optional[str] = None) -> dict:
-        parsed = _parse_args(args if isinstance(args, dict) else {})
+                    session_id: Optional[str] = None,
+                    tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
+        parsed = _parse_args(args if isinstance(args, dict) else {}, tool_name)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
         task_id = uuid.uuid4().hex
@@ -1248,6 +1298,7 @@ class ClaudeCodeTaskRunner:
             # The chat session that delegated, so the run reports to its
             # activity feed and the UI can find the task from the chat.
             "session_id": session_id,
+            "tool_name": _tool_name(tool_name),
             "created_at": now,
             "model": parsed["model"],
             # A short, operator-chosen name; the prompt itself is never stored.
@@ -1268,7 +1319,8 @@ class ClaudeCodeTaskRunner:
 
         try:
             with run_context(session_id=record.get("session_id"), owner=record.get("owner"),
-                             task_id=task_id, label=record.get("label")):
+                             task_id=task_id, label=record.get("label"),
+                             tool_name=record.get("tool_name")):
                 result = await _run_claude(
                     parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
                     on_process=_register, model=parsed.get("model"),

@@ -188,10 +188,13 @@ async def test_poll_wait_seconds_blocks_until_the_task_finishes(roots, monkeypat
     assert done["status"] == "completed" and done["result"] == "ok"
 
 
-def test_unsafe_allowed_tool_error_names_the_rejected_entry(roots):
+def test_all_unsafe_allowed_tools_fall_back_and_name_rejected_entries(roots):
     out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
                            "allowed_tools": ["Bash(git push:*)"]})
-    assert "Bash(git push:*)" in out["error"] and "Accepted:" in out["error"]
+    assert "error" not in out
+    assert out["tools"] == cct.default_tools()
+    assert out["dropped_tools"] == ["Bash(git push:*)"]
+    assert "Accepted:" in out["dropped_note"]
     ok = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
                           "allowed_tools": ["Read", "Glob", "Grep", "Bash(./gradlew test:*)", "Bash(mvn test:*)",
                                             "Bash(npm run typecheck:*)", "Bash(./mvnw verify:*)"]})
@@ -211,6 +214,55 @@ def test_mixed_allowlist_runs_with_safe_entries_and_reports_dropped(roots):
     assert out["tools"] == ["Read", "Edit", "Bash(npm run typecheck:*)"]
     assert out["dropped_tools"] == ["Bash(git push:*)", "Bash(./mvnw:*)", "Bash/npm run typecheck:*"]
     assert "never pushes" in out["dropped_note"]
+
+
+def test_allowed_tools_canonicalizes_builtin_case_without_widening_bash(roots):
+    out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                           "allowed_tools": ["read", "READ", "grep", "BASH(git status:*)", "BASH(git PUSH:*)"]})
+    assert "error" not in out
+    assert out["tools"] == ["Read", "Read", "Grep", "Bash(git status:*)"]
+    assert out["dropped_tools"] == ["Bash(git PUSH:*)"]
+
+
+def test_all_invalid_allowlist_falls_back_to_defaults(roots):
+    out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                           "allowed_tools": ["rm -rf /"]}, "delegate_to_agent")
+    assert "error" not in out
+    assert out["tools"] == cct.default_tools()
+    assert out["dropped_tools"] == ["rm -rf /"]
+    assert "none were safe" in out["dropped_note"]
+    assert out["dropped_note"].startswith("Ignored unsafe allowed_tools")
+
+
+def test_parse_errors_use_invoked_tool_name(roots):
+    out = cct._parse_args({"repository": str(roots["main"]), "prompt": "x",
+                           "allowed_tools": "Read"}, "delegate_to_agent")
+    assert out["error"].startswith("delegate_to_agent:")
+
+
+@pytest.mark.asyncio
+async def test_provider_neutral_dispatch_preserves_its_tool_name(roots, monkeypatch):
+    """Exercise the real adapter path, not only the parser helper.
+
+    The live failure entered through ``delegate_to_agent`` and then used the
+    Claude CLI provider.  Losing the concrete name anywhere in that chain
+    recreates the misleading ``delegate_to_claude_code:`` correction.
+    """
+    from src.agent_tools.delegation_tools import DelegationTool
+    from src.delegation.claude_cli import ClaudeCliProvider
+    import src.delegation as delegation
+
+    provider = ClaudeCliProvider()
+    monkeypatch.setattr(provider, "is_available", lambda: (True, "test binary"))
+    monkeypatch.setattr(delegation, "selection", lambda: (provider, "test provider"))
+
+    out = await DelegationTool().execute(json.dumps({
+        "repository": str(roots["main"]),
+        "prompt": "inspect it",
+        "allowed_tools": "Read",
+    }), {"tool_name": "delegate_to_agent"})
+
+    assert out["error"].startswith("delegate_to_agent:")
 
 
 # ── Headless argv ──
@@ -456,6 +508,13 @@ def test_schema_marks_repository_optional_and_lists_actions():
     schema = next(t["function"] for t in FUNCTION_TOOL_SCHEMAS if t["function"]["name"] == "delegate_to_claude_code")
     assert schema["parameters"]["required"] == []
     assert set(schema["parameters"]["properties"]["action"]["enum"]) >= {"run", "start", "poll", "cancel", "status", "list_repositories"}
+    for name in ("delegate_to_agent", "delegate_to_claude_code"):
+        description = next(
+            t["function"]["description"] for t in FUNCTION_TOOL_SCHEMAS
+            if t["function"]["name"] == name
+        )
+        assert "repository-wide" in description
+        assert "action=start" in description and "poll" in description
 
 
 # ── HTTP: status + list ──

@@ -4,11 +4,6 @@
 # Note: chromadb-client + fastembed moved to requirements.txt — RAG, semantic
 # memory, and tool selection are core paths, so they ship by default now.
 
-# DuckDuckGo as a search provider option.
-# Install if you want DDG in the search-provider dropdown.
-# Alternatives: SearXNG, Brave, Tavily, Serper, Google PSE.
-ddgs
-
 # PDF form-filling feature (fillable AcroForm detection, field extraction,
 # value/annotation/signature stamping, page rendering for the form overlay).
 # NOTE: PyMuPDF is AGPL-3.0. Installing it brings AGPL obligations for a

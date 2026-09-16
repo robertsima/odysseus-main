@@ -156,6 +156,20 @@ def test_the_skill_alias_table_is_the_refusal_vocabulary():
         "I lack shell access and application-log access.", LOG_POOL)
 
 
+def test_unavailable_delegation_capability_rearms_its_matching_toolset():
+    pool = LOG_POOL | {"delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"}
+    found = _targeted_rearm_tools(
+        "The agent delegation capability is unavailable to me in this session.", pool,
+    )
+    assert {"delegate_to_agent", "manage_agent_loadout"} <= found
+
+
+def test_session_scoped_calendar_access_refusal_rearms_calendar():
+    assert "manage_calendar" in _targeted_rearm_tools(
+        "calendar access isn't available in this session", POOL,
+    )
+
+
 def test_flattening_leaves_tool_names_and_ordinary_text_alone():
     assert _flatten_capability_phrase("Application-Log  Access") == "application log access"
     assert _flatten_capability_phrase("well-being") == "well being"

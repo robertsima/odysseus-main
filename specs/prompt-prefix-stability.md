@@ -38,6 +38,11 @@ Code causes, in order of weight:
    the field).
 4. Cross-turn stability is addressed by the tool-schema hygiene spec (fewer,
    more deterministic tools per turn); it is a smaller win than 1–3.
+5. Emit privacy-safe per-round cache diagnostics: a hash of the static
+   system/tool-schema prefix and a request-history continuity flag. When an
+   older message changes, log only its index and short before/after hashes—
+   never prompt or tool-output content. This distinguishes a legitimate tail
+   append from the mid-history mutation that invalidates a long cached prefix.
 
 ## Expected effect
 
@@ -57,4 +62,7 @@ drop at the batch prune.
   the five runtime notes go through `_harness_directive`.
 - `_build_chatgpt_responses_payload(..., cache_key=sid)` emits
   `prompt_cache_key`; the setting turns it off.
+- Cache diagnostics remain stable when messages are appended at the tail and
+  report the first changed index when an earlier message is replaced or
+  removed. Diagnostic logs contain hashes and counts only.
 - Existing reasoning-replay, Responses-tools and agent-loop tests pass.

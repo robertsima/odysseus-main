@@ -81,6 +81,13 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
 
 COLLECTION_NAME = "odysseus_tool_index"
 
+# Chroma reports cosine distance here and retrieval historically accepted every
+# top-K neighbour, even one with effectively no semantic overlap.  That let an
+# ntfy notification request bind the email suite merely because email text was
+# its least-bad neighbour.  0.18 retains intentionally broad tool requests
+# while rejecting the weak tail observed from unrelated connected services.
+_MIN_RETRIEVAL_SIMILARITY = 0.18
+
 # ── Tool description registry ──
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
@@ -354,7 +361,13 @@ class ToolIndex:
             except Exception as e:
                 logger.warning("Tool retrieval failed in %s lane: %s", lane.name, e)
         rows.sort(key=lambda row: (-row["score"], lane_priority.get(row["embedding_lane"], 99)))
-        return [row["tool_name"] for row in dedupe_results(rows, id_key="tool_name", limit=k)]
+        above_floor = [row for row in rows if row["score"] >= _MIN_RETRIEVAL_SIMILARITY]
+        if rows and not above_floor:
+            logger.debug(
+                "Tool retrieval rejected %d weak neighbour(s); best similarity=%.4f floor=%.2f",
+                len(rows), rows[0]["score"], _MIN_RETRIEVAL_SIMILARITY,
+            )
+        return [row["tool_name"] for row in dedupe_results(above_floor, id_key="tool_name", limit=k)]
 
     # Structural recurring-schedule intent. Typo-resilient (matches "every dya"
     # via "every <word>"), and catches bare clock times ("at 7:30 am", "7am").

@@ -708,3 +708,21 @@ class TestRunAnAgentPhrasing:
         # ...and it must also clear the per-chat delegation-policy gate, or the
         # tools are selected and then disabled again.
         assert _explicit_delegation_requested(text)
+
+
+def test_delegated_work_gate_includes_loadouts_and_dynamic_pi_workers_not_worktrees():
+    """Only tools that start another worker/remote run obey this gate."""
+    from src.agent_loop import _delegated_work_tools, _starts_delegated_work
+
+    pi = "mcp__pi_worker__run_pi_task"
+    assert _starts_delegated_work("manage_agent_loadout")
+    assert _starts_delegated_work(pi)
+    assert not _starts_delegated_work("manage_agent_worktree")
+
+    class _Mcp:
+        def get_all_tools(self):
+            return [{"qualified_name": pi}, {"qualified_name": "mcp__pi_worker__status"}]
+
+    names = _delegated_work_tools(_Mcp())
+    assert {"manage_agent_loadout", pi} <= names
+    assert "manage_agent_worktree" not in names

@@ -392,7 +392,12 @@ def _resolve_ddg_redirect(raw: str) -> str:
 
 
 def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
-    """Search using DuckDuckGo via the duckduckgo-search library. No API key needed."""
+    """Search DuckDuckGo via the maintained ``ddgs`` package.
+
+    The package is optional; when it is absent, the HTML endpoint remains a
+    best-effort fallback so selecting DuckDuckGo still has honest degraded
+    behavior rather than an import-time failure.
+    """
     count = count if count is not None else _get_result_count()
     def _html_fallback() -> List[dict]:
         try:
@@ -427,7 +432,7 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
     try:
         from ddgs import DDGS
     except ImportError:
-        logger.warning("duckduckgo-search package not installed; using HTML fallback")
+        logger.warning("ddgs package not installed; using HTML fallback")
         return _html_fallback()
 
     timelimit = None

@@ -104,7 +104,9 @@ so it can only ever clear `low_signal`, never set it.
 ### 2.2 Retrieval and hints
 
 - **Embedding retrieval** (`src/tool_index.py`) scores the query against tool
-  descriptions, including every connected MCP tool. Skipped on low-signal turns.
+  descriptions, including every connected MCP tool. Skipped on low-signal turns,
+  and neighbours below the conservative similarity floor are discarded instead
+  of padding the selection with unrelated tools.
 - **Keyword hints** (`_KEYWORD_HINTS`) map literal phrases to tools. Matched on
   word boundaries in both the index pass and the loop's fallback pass — these
   two had drifted, and a raw-substring match meant "local **pr**oject" pulled in
@@ -129,7 +131,7 @@ and selection was invisible.
 
 | gate | effect |
 | --- | --- |
-| delegation policy | `never`, or `explicit` without an explicit request, disables the delegation tools |
+| delegation policy | `never`, or `explicit` without an explicit request, disables delegation launchers, loadout creation and qualified MCP `run_pi_task` tools |
 | model / memory / skill access | the chat's loadout (§6) removes what it is not allowed |
 | plan mode | allowlist of read-only tools only |
 | owner baseline | the operator's global `disabled_tools`, the user's privileges, and the non-admin blocklist |
@@ -162,8 +164,9 @@ that its call schemas are not attached this turn and how to ask for one. The
 listing is also what `ToolIndex` embeds, so dropping it would make those tools
 unretrievable as well as uncallable.
 
-The `[agent-debug]` line reports `tools_sent`, `selected`,
-`schema_without_selection` and `mcp_demoted` for exactly this audit.
+The `[agent-debug]` line reports `tools_sent`, `selected`, `admin_selected`,
+`schema_without_selection` and `mcp_demoted` for exactly this audit. A hints-only
+selection is labelled that way rather than being reported as embedding retrieval.
 
 ---
 
@@ -187,6 +190,11 @@ edits history mid-turn:
 - deliver mid-turn directives as a labelled **user**-role message at the tail
   (`_harness_directive`), never `role: system` — `llm_core` hoists every system
   message into the single instructions block, rewriting the front of the prefix.
+
+`[agent-cache]` diagnostics log privacy-safe hashes of the static system/schema
+prefix and compare each request history with the prior round. They report only
+the first changed message index and short old/new hashes, so an accidental
+mid-history rewrite is visible without logging prompt content.
 
 **Untrusted content is fenced.** Retrieved documents, memories, web pages, tool
 output and skill text are reference data, not instructions. The fence is
@@ -284,18 +292,23 @@ genuinely needed:
   `delegate_to_claude_code {"action": "poll"}` polls under a name with nothing
   poll-shaped in it. Missing any of these three makes a job impossible to
   observe finishing.
-- **A mutating call clears the memo**, so a re-read after an edit is correct.
-  Recognised by the same three routes.
-- **Only successful results are memoised.** An approval hold is never recorded:
-  the approval contract requires re-issuing byte-identical arguments.
+- **A mutating call clears cached results**, so a re-read after an edit is
+  correct. Recognised by the same three routes. Its own same-signature failure
+  counter is retained so a repeatedly failing mutation cannot evade the guard.
+- **A failed call gets one real retry.** The second identical failure is retained
+  and the third call is suppressed with the prior error quoted to the model.
+  Approval holds are never counted or memoised: the approval contract requires
+  re-issuing byte-identical arguments.
 
 ### Missing-tool self-unblock
 
 A round that ends with "I don't have the tools for that" is almost never
 telling the truth — the tool exists; selection just did not put it in this
-round's list. Two detectors:
+round's list. The detectors are:
 
-- a narrow **regex** for claims about tools or access being unavailable;
+- a narrow **regex** for self- or session-scoped claims about tools, capabilities
+  or access being unavailable, including phrases such as "calendar access isn't
+  available in this session" while excluding upstream-service outage reports;
 - a **structural** signal: zero tool calls plus two or more enumerated
   capability negations ("- I do not have application-log access"). Wording
   varies endlessly; the shape does not. Three real refusals missed the regex in
@@ -330,6 +343,12 @@ narrowing is reported back. A chat denied `bash` cannot mint a helper that has
 it. This is an *authoring* rule — what a worker may actually do is still decided
 at execution time by its own stored policy and the owner baseline.
 
+The explicit-delegation gate covers built-in delegate tools,
+`manage_agent_loadout`, and dynamically qualified MCP tools whose name ends in
+`run_pi_task`. `manage_agent_worktree` is intentionally outside this launch gate:
+it prepares or inspects a checkout but does not start delegated work. Publishing
+continues to use its separate human-confirmation gate.
+
 ### Steering
 
 A human or a peer agent can queue a message for a turn already running; the
@@ -359,7 +378,8 @@ A turn's behaviour is reconstructable from these lines.
 | --- | --- |
 | `[agent-intent]` | what the turn was classified as, and which tools were selected |
 | `[tool-routing]` | which source dominated, what was dropped and by which gate |
-| `[agent-debug]` | how many schemas were sent vs selected, and which MCP servers were demoted |
+| `[agent-debug]` | how many schemas were sent vs selected, which admin schemas were intentional, and which MCP servers were demoted |
+| `[agent-cache]` | whether the static prefix stayed stable and where request history first changed |
 | `[context-profile]` | the profile, inline limit and trim target in force |
 | `[agent-timing]` | prep breakdown, per-round elapsed, time to first token |
 | `[agent-usage]` | input / cached / output tokens per round |

@@ -150,6 +150,34 @@ def test_the_model_is_told_once_that_it_repeated_itself(monkeypatch):
     assert len(repeats) <= 2, f"the nudge is capped, not repeated forever: {len(repeats)}"
 
 
+def test_identical_failures_retry_once_then_quote_the_prior_error(monkeypatch):
+    """Transient failures deserve one retry, not an unbounded retry loop."""
+    _patch_common(monkeypatch)
+    calls, directives = [], []
+
+    async def _failing_exec(block, *a, **k):
+        calls.append(block.content)
+        return ("bash", {"error": "fatal: remote is unavailable", "exit_code": 128})
+
+    real_directive = al._harness_directive
+    monkeypatch.setattr(al, "execute_tool_block", _failing_exec, raising=False)
+    monkeypatch.setattr(
+        al, "_harness_directive",
+        lambda text: (directives.append(str(text)) or real_directive(text)),
+        raising=False,
+    )
+
+    events = _run_loop(monkeypatch, "```bash\ngit push\n```", max_rounds=4)
+
+    assert len(calls) == 2, "the third identical failure must not execute"
+    duplicate = [event for event in events if event.get("type") == "tool_output"
+                 and "failed twice" in (event.get("output") or "")]
+    assert duplicate
+    assert "fatal: remote is unavailable" in duplicate[0]["output"]
+    failure_directives = [d for d in directives if "third identical attempt" in d]
+    assert failure_directives and "fatal: remote is unavailable" in failure_directives[0]
+
+
 def test_distinct_calls_are_never_suppressed(monkeypatch):
     """The guard must only ever fire on an EXACT repeat: real multi-step work
     (a file hunt, a build->test->fix cycle) is distinct calls all the way down."""

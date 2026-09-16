@@ -1290,7 +1290,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_agent",
-            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider.",
+            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider. For repository-wide audits or multi-file work, prefer action=start and then poll with wait_seconds; reserve action=run for short bounded tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1312,7 +1312,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_claude_code",
-            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel); to wait for it, poll with wait_seconds instead of sleeping in bash.",
+            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel). For repository-wide audits or multi-file work, prefer action=start followed by poll with wait_seconds; reserve action=run for short bounded tasks. To wait, poll with wait_seconds instead of sleeping in bash.",
             "parameters": {
                 "type": "object",
                 "properties": {

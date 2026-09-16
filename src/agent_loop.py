@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import hashlib
 import json
 import re
 import time
@@ -153,6 +154,50 @@ def _estimate_tool_schema_tokens(tool_schemas: Optional[List[Dict]]) -> int:
     except (TypeError, ValueError):
         raw = str(tool_schemas)
     return max(1, int(len(raw) * 0.3))
+
+
+def _cached_prefix_hash(messages: List[Dict], tool_schemas: Optional[List[Dict]]) -> str:
+    """Stable fingerprint of the request prefix a backend may KV-cache.
+
+    Conversation and harness directives are user/assistant messages and must
+    not alter this fingerprint.  System instructions and the ordered native
+    tool schema payload do alter the backend's cacheable prefix, so include
+    both exactly as sent.  The digest is diagnostic only; it never changes
+    request routing or cache behaviour.
+    """
+    system_messages = [
+        {"role": "system", "content": message.get("content", "")}
+        for message in (messages or [])
+        if message.get("role") == "system"
+    ]
+    payload = {"system": system_messages, "tools": tool_schemas or []}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _history_prefix_continuity(
+    previous_serialized: Optional[List[str]], messages: List[Dict],
+) -> Tuple[List[str], Optional[bool], Optional[int], str, str]:
+    """Fingerprint request history and detect mutations before the tail.
+
+    KV reuse needs more than a stable system/tool prefix: a pruning or replay
+    bug that changes an older assistant/tool message invalidates the long
+    history prefix too.  Keep only canonical serializations and short hashes
+    in memory/logs; no request content is emitted.
+    """
+    current = [
+        json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+        for message in (messages or [])
+    ]
+    if previous_serialized is None:
+        return current, None, None, "-", "-"
+    for index, prior in enumerate(previous_serialized):
+        now = current[index] if index < len(current) else None
+        if now != prior:
+            prior_hash = hashlib.sha256(prior.encode("utf-8")).hexdigest()[:12]
+            now_hash = hashlib.sha256(now.encode("utf-8")).hexdigest()[:12] if now is not None else "-"
+            return current, False, index, prior_hash, now_hash
+    return current, True, None, "-", "-"
 
 
 def _looks_like_notes_list_request(text: str) -> bool:
@@ -1618,8 +1663,40 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
 
 _DELEGATION_TOOLS = frozenset({
     "delegate_to_agent", "delegate_to_claude_code", "send_to_session",
-    "message_agent", "pipeline", "create_session",
+    "message_agent", "pipeline", "create_session", "manage_agent_loadout",
 })
+
+
+def _starts_delegated_work(tool_name: str) -> bool:
+    """Whether a tool can launch work outside the current agent turn.
+
+    This is intentionally a small capability-style predicate rather than a
+    second static MCP allowlist.  Builtins are named by policy, while an MCP
+    provider can expose its local Pi worker under a deployment-specific server
+    id.  Those qualified names all end in ``__run_pi_task`` and must obey the
+    same explicit-delegation setting.  ``manage_agent_worktree`` is excluded:
+    it manages this agent's local checkout state, not another worker or remote
+    run (and its publish action has its own human approval gate).
+    """
+    name = str(tool_name or "")
+    return name in _DELEGATION_TOOLS or (
+        name.startswith("mcp__") and name.endswith("__run_pi_task")
+    )
+
+
+def _delegated_work_tools(mcp_mgr=None) -> Set[str]:
+    """Known delegated-work starters, including dynamically connected MCPs."""
+    names = set(_DELEGATION_TOOLS)
+    if mcp_mgr is None:
+        return names
+    try:
+        for tool in mcp_mgr.get_all_tools() or []:
+            name = str(tool.get("qualified_name") or tool.get("name") or "")
+            if _starts_delegated_work(name):
+                names.add(name)
+    except Exception:
+        logger.debug("Could not enumerate MCP delegated-work tools", exc_info=True)
+    return names
 _EXPLICIT_DELEGATION_RE = re.compile(
     r"\b(?:delegate|hand\s+off|sub[ -]?agent|another\s+agent|other\s+agent|"
     r"ask\s+(?:claude\s+code|a\s+worker|another\s+agent)|"
@@ -2035,6 +2112,11 @@ _SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
     "workspace file tools": ("get_workspace",) + _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
     "application-log access": ("read_app_logs",),
     "logs": ("read_app_logs",),
+    # Refusal prose says "capability" where a skill normally says "toolset".
+    # Keep the same vocabulary available to targeted self-unblock recovery.
+    "delegation": ("delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
+    "agent delegation": ("delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
+    "agent launcher": ("delegate_to_agent", "manage_agent_loadout"),
 }
 
 
@@ -2091,6 +2173,35 @@ _CAPABILITY_NOUN_RE = re.compile(
     r"capabilit(?:y|ies)|credentials?|integrations?|connectors?|"
     r"abilit(?:y|ies)|commands?|shell|terminal|sandbox|runner|launcher|"
     r"apis?|endpoints?|scopes?|mcp)\b",
+    re.IGNORECASE,
+)
+
+# A single self-report can be enough when it explicitly says the model's own
+# capability is unavailable.  This is deliberately possession-scoped ("to
+# me/us" or "this session/turn") so an upstream fact such as "the Pi-hole API
+# capability is unavailable" does not re-arm a schema that was already used.
+_SELF_UNAVAILABLE_CAPABILITY_RE = re.compile(
+    r"\b(?:my|the|these|required)\s+(?:[\w/-]+\s+){0,4}?capabilit(?:y|ies)\s+"
+    r"(?:is|are|was|were)\s+(?:currently\s+|still\s+)?(?:unavailable|inaccessible|missing|"
+    r"not\s+available)\s+(?:to\s+(?:me|us)|in\s+(?:this\s+)?(?:turn|session))\b"
+    r"|\b(?:i|we)\s+(?:am|are)\s+(?:unable|not\s+able)\s+to\s+(?:use|access)\s+"
+    r"(?:[\w/-]+\s+){0,4}?capabilit(?:y|ies)\b",
+    re.IGNORECASE,
+)
+
+# "calendar access isn't available in this session" is a schema claim even
+# though it says neither "tool" nor "capability".  A service/API access
+# outage has the same grammar, so it is explicitly filtered below.
+_SESSION_SCOPED_ACCESS_UNAVAILABLE_RE = re.compile(
+    r"\b(?:the\s+|my\s+)?(?:[\w/-]+\s+){0,3}?access\s+(?:is|are)\s*"
+    r"(?:n'?t|not)\s+(?:currently\s+|still\s+)?available\s+in\s+"
+    r"(?:this\s+)?(?:turn|session)\b",
+    re.IGNORECASE,
+)
+_UPSTREAM_ACCESS_UNAVAILABLE_RE = re.compile(
+    r"\b(?:[\w/-]+\s+){0,3}?(?:api|service|endpoint|server)\s+access\s+"
+    r"(?:is|are)\s*(?:n'?t|not)\s+(?:currently\s+|still\s+)?available\s+in\s+"
+    r"(?:this\s+)?(?:turn|session)\b",
     re.IGNORECASE,
 )
 
@@ -2211,6 +2322,13 @@ def _missing_tool_signal(text: str, *, made_tool_calls: bool = False) -> Optiona
         return None
     if _MISSING_TOOL_RE.search(text):
         return "regex"
+    if _SELF_UNAVAILABLE_CAPABILITY_RE.search(text):
+        return "capability"
+    if (
+        _SESSION_SCOPED_ACCESS_UNAVAILABLE_RE.search(text)
+        and not _UPSTREAM_ACCESS_UNAVAILABLE_RE.search(text)
+    ):
+        return "capability"
     if not made_tool_calls and _enumerates_missing_capabilities(text):
         return "structural"
     return None
@@ -4808,7 +4926,9 @@ def _detect_runaway_call(call_freq, threshold=15):
 #      any call that can mutate the world drops the memo: every observation
 #      recorded before it may now be stale and is fair to take again.
 #   3. Retries. A first call that FAILED is worth another go — transient
-#      errors are real — so only successful results are memoised.
+#      errors are real — so the first failure is allowed one retry.  A second
+#      identical failure is memoised too, and a third attempt is suppressed
+#      with the actual prior error in its directive.
 #
 # The guard also never fires on a call held for approval: that contract asks
 # the model to re-issue byte-identical arguments once the user decides.
@@ -4902,25 +5022,53 @@ def _dedupe_signature(tool_type: str, content: str) -> str:
     return f"{tool_type}\x00{raw}"
 
 
-def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str],
+def _memo_entry_output(entry: Any) -> str:
+    """Read output from the current memo record and old string-shaped tests."""
+    if isinstance(entry, dict):
+        return str(entry.get("output") or "(no output)")
+    return str(entry or "(no output)")
+
+
+def _memo_entry_failures(entry: Any) -> int:
+    """How many consecutive failures this exact call has returned."""
+    return int(entry.get("failures") or 0) if isinstance(entry, dict) else 0
+
+
+def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, Any],
                       content: str = "") -> bool:
-    """Whether this exact call already ran, successfully, with nothing in
-    between that could have changed its answer. See the guard notes above."""
+    """Whether this exact call must not run again this turn.
+
+    A successful call is suppressed on its first repeat.  Failure gets one
+    real retry for transient errors; only the third identical failure is
+    suppressed.  See the guard notes above.
+    """
     if tool_type in _DEDUPE_POLLING_TOOLS:
         return False
     if _DEDUPE_POLLING_NAME_RE.search(_bare_tool_name(tool_type)):
         return False
     if _dedupe_action(content) in _DEDUPE_POLLING_ACTIONS:
         return False
-    return bool(sig in memo)
+    entry = memo.get(sig)
+    if entry is None:
+        return False
+    failures = _memo_entry_failures(entry)
+    return failures == 0 or failures >= 2
 
 
-def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str],
-                       content: str = "") -> None:
-    """Memoise a successful call's result, first clearing the memo when the
-    call could have changed the world (rule 2 above). Clearing BEFORE
-    recording matters: the mutating call's own signature must survive, or a
-    model that fires the same `bash` twice in a row is never caught."""
+def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, Any],
+                       content: str = "", *, failed: bool = False) -> None:
+    """Memoise a call result, first clearing stale reads after mutations.
+
+    Failed calls are retained as well: retry once, then suppress the third
+    identical failure.  Clearing BEFORE recording matters: the mutating call's
+    own signature must survive, or a model that fires the same `bash` twice in
+    a row is never caught.
+    """
+    # Preserve this call's failure count across a mutating retry.  The memo has
+    # to clear stale *other* reads before a mutation, but clearing first and
+    # then looking up `previous` would reset a failing `bash` retry to one
+    # forever and defeat the third-attempt guard.
+    previous = memo.get(sig)
     if (
         tool_type in _KNOWN_MUTATING_TOOLS
         or tool_type in _VERIFIER_EFFECTFUL_TOOLS
@@ -4928,7 +5076,11 @@ def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, s
         or _DEDUPE_MUTATING_NAME_RE.search(_dedupe_action(content))
     ):
         memo.clear()
-    memo[sig] = _truncate(str(output or "").strip() or "(no output)", 1500)
+    failures = (_memo_entry_failures(previous) + 1) if failed else 0
+    memo[sig] = {
+        "output": _truncate(str(output or "").strip() or "(no output)", 1500),
+        "failures": failures,
+    }
 
 
 def _name_list(names, limit: int) -> str:
@@ -5305,8 +5457,13 @@ async def stream_agent_loop(
     if _delegation_policy == "never" or (
         _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
     ):
-        disabled_tools.update(_DELEGATION_TOOLS)
-        _mark_dropped(_DELEGATION_TOOLS, f"delegation-policy:{_delegation_policy}")
+        # Policy must cover every entry point that can start another worker,
+        # including a dynamically-connected Pi worker MCP.  The local
+        # worktree tool deliberately remains outside this set; it does not
+        # delegate or start remote work (see `_starts_delegated_work`).
+        _policy_delegation_tools = _delegated_work_tools(mcp_mgr)
+        disabled_tools.update(_policy_delegation_tools)
+        _mark_dropped(_policy_delegation_tools, f"delegation-policy:{_delegation_policy}")
     _model_access = str(_agent_settings.get("model_access") or "all")
     if _model_access == "current":
         _model_tools = {"chat_with_model", "ask_teacher", "list_models"}
@@ -5614,7 +5771,13 @@ async def stream_agent_loop(
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                         _tool_selection_source = "hints" if _low_signal_hints_only else "rag"
-                        logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
+                        if _low_signal_hints_only:
+                            logger.info(
+                                "[tool-rag] Hints-only selection (embedding retrieval skipped): %s",
+                                sorted(_relevant_tools - ALWAYS_AVAILABLE),
+                            )
+                        else:
+                            logger.info(f"[tool-rag] Retrieved tools for query: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
                     except asyncio.TimeoutError:
                         # Leave _relevant_tools unset so the keyword fallback
                         # below still runs. Hard-coding ALWAYS_AVAILABLE here
@@ -6441,7 +6604,7 @@ async def stream_agent_loop(
     # {exact call signature: the result that call already returned}. Turn-scoped
     # on purpose — a repeat in a LATER turn is the user asking again, and the
     # approval flow explicitly requires re-issuing an identical call next turn.
-    _call_memo: Dict[str, str] = {}
+    _call_memo: Dict[str, Any] = {}
     _dup_calls_skipped = 0
     # Bounded like _MAX_TOOLSET_REARMS / _MAX_INTENT_NUDGES: the suppressed
     # result itself tells the model on every repeat, but the sharper directive
@@ -6508,6 +6671,8 @@ async def stream_agent_loop(
     # changes (re-arm, force-answer); the same 43 names on every one of 21
     # rounds is noise that buries the round that actually failed.
     _last_tool_debug_sig = None
+    _last_cached_prefix_hash = None
+    _last_serialized_history = None
 
     for round_num in range(1, max_rounds + 1):
         # A steer lands here, between rounds, so a correction reaches the model
@@ -6608,10 +6773,15 @@ async def stream_agent_loop(
         # looked identical to the healthy case because the list was cut at 15.
         _sent_set = {n for n in _tool_names_sent if n}
         _selected_set = set(_relevant_tools or ())
+        # Admin schemas are selected deterministically by the request's own
+        # admin keywords inside `_tool_schemas_for_round`; treating them as
+        # "schema_without_selection" made the routing accounting lie.
+        _admin_schema_set = (_sent_set & set(_admin_tools)) if _needs_admin else set()
+        _accounted_selected_set = _selected_set | _admin_schema_set
         _selected_not_sent = (
             sorted(_selected_set - _sent_set - set(disabled_tools or ())) if _relevant_tools else []
         )
-        _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
+        _sent_not_selected = sorted(_sent_set - _accounted_selected_set) if _relevant_tools else []
         # Which MCP servers lost their always-bound status, and how big they
         # were. Without this the budget is an invisible decision: the operator
         # sees a server's tools missing from `schema_without_selection` and has
@@ -6628,20 +6798,48 @@ async def stream_agent_loop(
             # that can't answer still gets its schemas resolved above.
             _mcp_demoted = []
         _tool_debug_sig = (
-            tuple(sorted(_sent_set)), tuple(sorted(_selected_set)), tuple(_mcp_demoted),
+            tuple(sorted(_sent_set)), tuple(sorted(_accounted_selected_set)), tuple(_mcp_demoted),
         )
         _tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug
         _last_tool_debug_sig = _tool_debug_sig
         _tool_debug_log(
             "[agent-debug] round=%s model=%s _is_api_model=%s tools_sent=%s "
             "selected=%s selected_without_schema=%s schema_without_selection=%s "
-            "mcp_demoted=%s",
+            "admin_selected=%s mcp_demoted=%s",
             round_num, model, _is_api_model, len(_sent_set),
-            len(_selected_set) if _relevant_tools else "ALL",
+            len(_accounted_selected_set) if _relevant_tools else "ALL",
             _selected_not_sent or "-", _sent_not_selected or "-",
+            sorted(_admin_schema_set) or "-",
             _mcp_demoted or "-",
         )
         logger.debug("[agent-debug] round=%s tool_names=%s", round_num, sorted(_sent_set))
+
+        _prefix_hash = _cached_prefix_hash(messages, all_tool_schemas)
+        _prefix_changed = _last_cached_prefix_hash is not None and _prefix_hash != _last_cached_prefix_hash
+        _prefix_log = logger.info if _last_cached_prefix_hash is None or _prefix_changed else logger.debug
+        _prefix_log(
+            "[agent-cache] round=%s cached_prefix_hash=%s prior=%s changed=%s system_messages=%s schemas=%s",
+            round_num, _prefix_hash, _last_cached_prefix_hash or "-", _prefix_changed,
+            sum(1 for message in messages if message.get("role") == "system"), len(all_tool_schemas),
+        )
+        _last_cached_prefix_hash = _prefix_hash
+
+        (
+            _last_serialized_history,
+            _history_continuous,
+            _history_changed_index,
+            _prior_message_hash,
+            _current_message_hash,
+        ) = _history_prefix_continuity(_last_serialized_history, messages)
+        _history_log = logger.warning if _history_continuous is False else logger.debug
+        _history_log(
+            "[agent-cache] round=%s history_prefix_continuity=%s first_changed_index=%s "
+            "prior_message_hash=%s current_message_hash=%s messages=%s",
+            round_num,
+            "initial" if _history_continuous is None else _history_continuous,
+            _history_changed_index if _history_changed_index is not None else "-",
+            _prior_message_hash, _current_message_hash, len(_last_serialized_history),
+        )
 
         # Primary target + any configured fallback models. stream_llm_with_fallback
         # only switches on a pre-content failure, so streamed output is never
@@ -7520,20 +7718,22 @@ async def stream_agent_loop(
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
             elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo, block.content):
-                # Exact repeat of a call that already succeeded this turn, with
-                # nothing mutating in between — running it again can only
-                # reproduce the same bytes at full price. Hand back what it
-                # returned the first time instead of executing. Ahead of the
-                # approval branch so a repeat never re-prompts the user for a
-                # decision they already made.
+                # Exact success repeats are never useful. Failed calls get one
+                # real retry; this branch therefore means either a success
+                # repeat or the third identical failure (with no mutation in
+                # between). It stays ahead of approval so a repeat never
+                # re-prompts the user for a decision they already made.
                 _dup_calls_skipped += 1
-                _prior = _call_memo.get(_dup_sig) or "(no output)"
+                _memo_entry = _call_memo.get(_dup_sig)
+                _prior = _memo_entry_output(_memo_entry)
+                _prior_failures = _memo_entry_failures(_memo_entry)
                 desc = f"{block.tool_type}: DUPLICATE (not run)"
+                _repeat_label = "failed twice" if _prior_failures >= 2 else "returned"
                 result = {
                     "output": (
                         "Not run — you already made this exact call this turn (same "
                         "tool, same arguments) and nothing has changed since. It "
-                        "returned:\n\n" + _prior +
+                        + _repeat_label + ":\n\n" + _prior +
                         "\n\nRepeating it cannot produce a different answer. Use this "
                         "result, or take a different step."
                     ),
@@ -7549,6 +7749,12 @@ async def stream_agent_loop(
                     # Queued, not appended: _append_tool_results has not run
                     # yet, so appending here would put the correction BEFORE
                     # the assistant turn and tool results it is about.
+                    _failure_instruction = (
+                        " This is the third identical attempt after two failures. "
+                        "The previous error was: " + repr(_prior) +
+                        ". Diagnose or change the arguments/tool; do not retry it unchanged."
+                        if _prior_failures >= 2 else ""
+                    )
                     _dup_pending_directive = (
                         f"You just called `{block.tool_type}` with arguments identical to "
                         "a call you already made earlier in this turn, so it was not run "
@@ -7559,6 +7765,7 @@ async def stream_agent_loop(
                         "schema list, say so plainly and name it instead of retrying. If "
                         "you genuinely need this call again because something changed, "
                         "explain what changed first."
+                        + _failure_instruction
                     )
             elif _approval_why and not _tool_approvals.consume_grant(session_id, block.tool_type, full_command):
                 # Stop and ask. The call is recorded as pending; the card's
@@ -8035,19 +8242,21 @@ async def stream_agent_loop(
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
-            # Duplicate-call guard: memoise what this call returned so an
-            # identical one later in the turn can be answered from here instead
-            # of re-run. Only successful calls — a retry after a real failure is
-            # legitimate work — and never an approval hold, whose whole contract
-            # is that the model re-issues the same call once the user decides.
+            # Duplicate-call guard: memoise every completed result so an exact
+            # repeat can be suppressed. A failed result gets one real retry;
+            # the third identical failure is blocked and quotes this error in a
+            # harness directive. Approval holds remain exempt because their
+            # contract requires the model to re-issue the call after approval.
             if (
-                not result.get("error")
-                and not result.get("blocked")
+                not result.get("blocked")
                 and not result.get("approval_required")
                 and not result.get("duplicate_call")
-                and result.get("exit_code", 0) in (0, None)
             ):
-                _record_call_result(_dup_sig, block.tool_type, output_text, _call_memo, block.content)
+                _failed_call = bool(result.get("error")) or result.get("exit_code", 0) not in (0, None)
+                _record_call_result(
+                    _dup_sig, block.tool_type, output_text, _call_memo, block.content,
+                    failed=_failed_call,
+                )
 
             formatted = format_tool_result(desc, result)
             # A tool result is not paid for once: it is replayed to the model on

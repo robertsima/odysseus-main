@@ -867,6 +867,9 @@ async def _direct_fallback(
             "session_id": session_id,
             "owner": owner,
             "allow_private": bool(allow_private),
+            # Provider-neutral delegation still needs the concrete tool name
+            # for actionable, stable error prefixes.
+            "tool_name": tool,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -888,7 +891,8 @@ async def _document_tool_dispatch(
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
-    ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private)}
+    ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private),
+           "tool_name": tool}
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
