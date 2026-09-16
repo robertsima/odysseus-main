@@ -29,6 +29,7 @@ from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool, MessageAgentTool
 from .bg_job_tools import ManageBgJobsTool
+from .loadout_tools import ManageAgentLoadoutTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -66,6 +67,7 @@ TOOL_HANDLERS = {
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
+    "manage_agent_loadout": ManageAgentLoadoutTool().execute,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,

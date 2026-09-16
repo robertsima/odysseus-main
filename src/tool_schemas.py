@@ -1252,6 +1252,42 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_agent_loadout",
+            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name')."},
+                    "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
+                    "task": {"type": "string", "description": "start only: the whole task. The worker begins with no other context."},
+                    "description": {"type": "string", "description": "One line explaining when to use this loadout."},
+                    "instructions": {"type": "string", "description": "System instructions the worker starts with."},
+                    "model": {"type": "string", "description": "Model for the worker. Omit to inherit."},
+                    "model_fallbacks": {"type": "array", "items": {"type": "string"}},
+                    "model_access": {"type": "string", "enum": ["current", "selected", "all"], "description": "Whether the worker may switch model."},
+                    "allowed_models": {"type": "array", "items": {"type": "string"}},
+                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names when tool_access=selected."},
+                    "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
+                    "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
+                    "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "skill_names": {"type": "array", "items": {"type": "string"}},
+                    "mcp_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "allowed_mcp_servers": {"type": "array", "items": {"type": "string"}},
+                    "private_vault_access": {"type": "boolean", "description": "Granted only if this chat already has it."},
+                    "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
+                    "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
+                    "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
+                    "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
+                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_agent",
             "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider.",
             "parameters": {

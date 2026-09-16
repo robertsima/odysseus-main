@@ -4,8 +4,16 @@
 // existing DOM nodes, so every tool keeps the listeners installed by app.js
 // and its feature module. Importing this file is enough to initialize it; the
 // exported API is useful to the Settings/UI customizer and for tests.
+//
+// The order belongs to the signed-in account, not to the browser. localStorage
+// stays the fast path so the rail is in the right order on first paint, but the
+// authoritative copy lives in /api/prefs so a second browser (or a new device)
+// picks up the same arrangement. See serverPrefs.js for the reconcile rules.
+
+import { reconcile, writePref } from './serverPrefs.js';
 
 export const NAV_ORDER_KEY = 'odysseus-nav-order-v1';
+export const NAV_ORDER_PREF = 'nav-order';
 
 // Core controls, dynamic indicators, and Settings stay fixed. One-sided tools
 // (Email on the rail, Lotus in the sidebar) still participate where present.
@@ -50,16 +58,44 @@ function normalize(order) {
 
 export function defaultNavOrder() { return NAV_ITEMS.map((item) => item.key); }
 
-export function readNavOrder() {
+// Stored locally as { value: [...keys], updated_at }. A bare array is what
+// older builds wrote; it still reads, and counts as older than any stamped
+// order so an arrangement made on another browser takes precedence over it.
+function readLocalEntry() {
   const store = storage();
-  if (!store) return defaultNavOrder();
-  try { return normalize(JSON.parse(store.getItem(NAV_ORDER_KEY) || '[]')); }
-  catch (_) { return defaultNavOrder(); }
+  if (!store) return null;
+  try {
+    const raw = JSON.parse(store.getItem(NAV_ORDER_KEY) || 'null');
+    if (Array.isArray(raw)) return raw.length ? { value: raw, updated_at: 0 } : null;
+    if (raw && Array.isArray(raw.value)) return { value: raw.value, updated_at: Number(raw.updated_at) || 0 };
+  } catch (_) {}
+  return null;
 }
 
-export function writeNavOrder(order) {
+export function readNavOrder() {
+  const entry = readLocalEntry();
+  return entry ? normalize(entry.value) : defaultNavOrder();
+}
+
+/** Persist an order. `sync: false` records a value that came *from* the
+ *  account, so applying it does not bounce straight back to the server. */
+export function writeNavOrder(order, { sync = true, at } = {}) {
   const normalized = normalize(order);
-  try { storage()?.setItem(NAV_ORDER_KEY, JSON.stringify(normalized)); } catch (_) {}
+  const stamped = Number(at) || Date.now();
+  try { storage()?.setItem(NAV_ORDER_KEY, JSON.stringify({ value: normalized, updated_at: stamped })); } catch (_) {}
+  if (sync) writePref(NAV_ORDER_PREF, normalized, stamped);
+  return normalized;
+}
+
+/** Ask the account for its navigation order and adopt it when it is newer than
+ *  what this browser last stored. Safe to call before or after the first paint;
+ *  applyNavOrder only moves nodes, so re-running it is not disruptive. */
+export async function syncNavOrderWithAccount(doc = document) {
+  const local = readLocalEntry();
+  const { source, entry } = await reconcile(NAV_ORDER_PREF, local);
+  if (source !== 'remote' || !entry || !Array.isArray(entry.value)) return readNavOrder();
+  const normalized = writeNavOrder(entry.value, { sync: false, at: entry.updated_at || Date.now() });
+  applyNavOrder(normalized, doc);
   return normalized;
 }
 
@@ -145,7 +181,10 @@ function showContextMenu(event, doc) {
 
 export function resetNavOrder(doc = document) {
   const order = defaultNavOrder();
-  try { storage()?.removeItem(NAV_ORDER_KEY); } catch (_) {}
+  // Record the reset rather than just dropping the local copy: the account
+  // still holds the old arrangement, and an unrecorded reset would be undone
+  // by the next page load (or by any other browser signed into this account).
+  writeNavOrder(order);
   applyNavOrder(order, doc);
   return order;
 }
@@ -155,6 +194,7 @@ export function initNavOrder(doc = document) {
   _initialized = true;
   const order = readNavOrder();
   applyNavOrder(order, doc);
+  syncNavOrderWithAccount(doc).catch(() => {});
   const roots = [doc.getElementById('icon-rail'), doc.getElementById('tools-section')].filter(Boolean);
   for (const root of roots) {
     root.addEventListener('dragstart', (event) => {
@@ -225,4 +265,4 @@ if (typeof document !== 'undefined') {
   else initNavOrder();
 }
 
-export default { initNavOrder, readNavOrder, writeNavOrder, applyNavOrder, resetNavOrder, defaultNavOrder, NAV_ORDER_KEY, NAV_ITEMS };
+export default { initNavOrder, readNavOrder, writeNavOrder, applyNavOrder, resetNavOrder, defaultNavOrder, syncNavOrderWithAccount, NAV_ORDER_KEY, NAV_ORDER_PREF, NAV_ITEMS };

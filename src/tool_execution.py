@@ -1091,16 +1091,8 @@ async def _execute_tool_block_impl(
         if tool in {"delegate_to_agent", "delegate_to_claude_code", "send_to_session", "pipeline", "create_session"}:
             _raw_limit = _agent_settings.get("max_parallel_workers")
             _limit = int(1 if _raw_limit is None else _raw_limit)
-            try:
-                from src import agent_activity as _agent_activity
-                _live_children = sum(
-                    1 for rec in _agent_activity.list_runs(limit=400)
-                    if rec.get("session_id") == session_id
-                    and rec.get("status") == "running"
-                    and rec.get("source") != "odysseus"
-                )
-            except Exception:
-                _live_children = 0
+            from src import agent_control as _agent_control
+            _live_children = _agent_control.live_children(session_id)
             if _limit <= 0 or _live_children >= _limit:
                 return f"{tool}: BLOCKED", {
                     "error": f"This agent's worker limit is {_limit}; {_live_children} child process(es) are already running.",
@@ -1220,6 +1212,12 @@ async def _execute_tool_block_impl(
         desc = f"{tool}: {first_line}" if first_line else tool
         result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "manage_agent_loadout":
+        # Authors/starts worker loadouts; needs session_id to read the calling
+        # chat's own policy, which is the ceiling for anything it creates.
+        desc = f"manage_agent_loadout: {_command_preview(content, 60)}"
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
+            or {"error": "manage_agent_loadout: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {_command_preview(content)}"

@@ -63,7 +63,8 @@ loadouts. The living behavior specification is
 ### Next
 
 - [ ] Add versioned agent loadout presets: clone, rename, import/export, diff,
-  restore defaults, and preview the effective policy before save.
+  restore defaults, and preview the effective policy before save. Agent-side
+  authoring already exists (`manage_agent_loadout`); this is the human UI.
 - [ ] Add temporary per-run grants with expiry and revocation for private vault
   reads, write tools, shell/host control, integrations, and model switching.
 - [ ] Add an admin-readable policy audit log covering profile changes, grants,
@@ -106,6 +107,12 @@ loadouts. The living behavior specification is
 
 ### Completed in the current pass
 
+- [x] Agent-authored worker loadouts: an agent can create, update, delete and
+  start a loadout, clamped to its own chat's policy with every narrowing
+  reported back (`manage_agent_loadout`, `src/agent_loadouts.py`).
+- [x] Theme, custom themes and navigation order follow the signed-in account
+  across browsers, reconciled newest-wins against `/api/prefs` on every boot
+  (`static/js/serverPrefs.js`).
 - [x] Capability registry, availability checks, requirement recheck, and
   settings-schema metadata.
 - [x] Collapsed-by-default capability panel and functional advanced-settings

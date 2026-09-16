@@ -323,6 +323,9 @@ _TOOL_NAME_MAP = {
     "notes": "manage_notes",
     "todo": "manage_notes",
     "todos": "manage_notes",
+    "manage_agent_loadout": "manage_agent_loadout",
+    "agent_loadout": "manage_agent_loadout",
+    "manage_loadout": "manage_agent_loadout",
     "manage_bg_jobs": "manage_bg_jobs",
     "bg_jobs": "manage_bg_jobs",
     "background_jobs": "manage_bg_jobs",
@@ -741,7 +744,8 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
     elif tool_type in ("manage_tasks", "manage_skills", "api_call", "manage_endpoints",
                        "manage_mcp", "manage_webhooks", "manage_tokens",
                        "manage_documents", "manage_settings", "manage_notes",
-                       "manage_research", "manage_bg_jobs", "manage_wellbeing"):
+                       "manage_research", "manage_bg_jobs", "manage_wellbeing",
+                       "manage_agent_loadout"):
         content = json.dumps(args)
     elif tool_type in ("get_workspace", "list_models"):
         content = args.get("filter", "") if tool_type == "list_models" else ""

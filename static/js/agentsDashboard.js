@@ -80,17 +80,6 @@ function robotHtml(agent, size = '') {
     <span class="ag-bot-body"><i></i><small>${unit}</small></span>
   </span>`;
 }
-function telemetryHtml() {
-  const t = state.totals || {};
-  const stats = [
-    ['active', t.running || 0, 'Units active'],
-    ['attention', t.waiting_approval || 0, 'Need you'],
-    ['workers', t.workers_running || 0, 'Workers live'],
-    ['done', t.finished_24h || 0, 'Done today'],
-  ];
-  return stats.map(([kind, count, label]) => `<div class="ag-telemetry ag-telemetry-${kind}"><i></i><b>${count}</b><span>${label}</span></div>`).join('');
-}
-
 // ── data ──────────────────────────────────────────────────────────────────
 async function refresh() {
   if (state.refreshing) { state.refreshQueued = true; return; }
@@ -213,6 +202,14 @@ const BUCKETS = [
   ['recent', 'Recent', (r) => r.status !== 'waiting_approval' && r.status !== 'running'],
 ];
 
+/** Whether the Workbench shortcut is worth offering. Workbench is admin-gated
+ *  and workbench.js hides its rail button on a 403, so mirror that signal
+ *  rather than showing a button whose only outcome is an error toast. */
+function workbenchAvailable() {
+  const btn = $('rail-workbench') || $('tool-workbench-btn');
+  return !!(window.workbenchModule?.open && btn && btn.style.display !== 'none');
+}
+
 /** The live-connection dot. Replaces a Refresh button on a page that already
  *  polls every 5s and streams SSE — the honest thing to show is whether the
  *  feed is up, not a control implying it isn't. Still clickable to force one. */
@@ -234,8 +231,12 @@ function triageHtml() {
       data-ag="bucket" data-bucket="${key}" aria-pressed="${on ? 'true' : 'false'}">${label}${
       n == null ? '' : `<b>${n}</b>`}</button>`;
   }).join('');
-  // Historical numbers are context, not controls — one muted line, not tiles
-  // styled identically to the buttons beside them.
+  // Context, not controls — one muted line. This used to sit above a strip of
+  // four tiles ("Units active", "Need you", "Workers live", "Done today") that
+  // restated the very same four numbers in a louder style, so the header
+  // published every count three times: on the segment badges, on the tiles, and
+  // here. The tiles are gone; this line is the single place the non-filterable
+  // numbers live.
   const hist = [
     t.workers_running ? `${t.workers_running} worker${t.workers_running === 1 ? '' : 's'} live` : '',
     `${t.finished_24h || 0} done today`,
@@ -251,21 +252,24 @@ function render() {
   if (!root || !state.open) return;
   const surface = $('agents-dashboard-body');
   if (!surface) return;
+  // One header row. It used to carry a second window title ("Mission floor",
+  // under a title bar already reading "Agent Control Room"), and an Expand
+  // button doing exactly what the title bar's maximize button does.
   surface.innerHTML = `
     <div class="ag-head">
-      <div class="ag-title"><span class="ag-title-text">${state.configOpen ? 'Loadout workspace' : 'Mission floor'}</span>${liveHtml()}</div>
-      ${state.configOpen ? '' : `<div class="ag-triage">${triageHtml()}</div>`}
+      ${state.configOpen
+        ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="config-back">← Monitoring</button>'
+        : `<div class="ag-triage">${triageHtml()}</div>`}
       <div class="ag-head-actions">
-        ${state.configOpen
-          ? '<button type="button" class="wb-btn" data-ag="config-back">← Monitoring</button><button type="button" class="wb-btn wb-btn-primary" data-ag="expand">Expand workspace</button>'
-          : '<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="expand">Expand</button>'}
+        ${liveHtml()}
+        ${state.configOpen ? '' : `<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${
+          workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`}
       </div>
     </div>
-    ${state.configOpen ? '' : `<div class="ag-telemetry-strip" aria-label="Fleet summary">${telemetryHtml()}</div>`}
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
     ${state.configOpen ? loadoutWorkspaceHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
       <aside class="ag-fleet wb-card">
-        <div class="ag-fleet-tools"><span><b>Robot fleet</b><small>select a unit to inspect</small></span><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
+        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
       <div class="ag-pane-splitter" data-ag-splitter role="separator" aria-orientation="vertical" aria-label="Resize fleet and agent details" tabindex="0"><span></span></div>
@@ -316,8 +320,6 @@ function updateStats() {
   if (box) box.innerHTML = triageHtml();
   const live = $('agents-dashboard')?.querySelector('.ag-live');
   if (live) live.outerHTML = liveHtml();
-  const telemetry = $('agents-dashboard')?.querySelector('.ag-telemetry-strip');
-  if (telemetry) telemetry.innerHTML = telemetryHtml();
 }
 function updateOpenView() {
   if (!state.open || !$('agents-dashboard')?.querySelector('.ag-body')) return;
@@ -368,6 +370,12 @@ function capabilityChecks(items, selected, key, labelKey = 'name') {
 function profileConfig(profile) {
   const mcp = profile.mcp_access === 'none' ? [] : profile.mcp_access === 'selected' ? (profile.allowed_mcp_servers || []) : ['*'];
   return {
+    // `mcp_access` must be carried explicitly. saveAgentConfig() reads it to
+    // decide what to persist, and defaults to ['*'] — every connected server —
+    // when it is missing. Without this line, applying a preset that grants no
+    // MCP access (or a narrowed list) rendered correctly, then saved as full
+    // access: the editor showed one policy and the server stored another.
+    mcp_access: profile.mcp_access || 'all',
     agent_profile: profile.name || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
     memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
@@ -426,7 +434,6 @@ function configEditorHtml(row) {
   </div>`;
   const panels = { general: generalPanel, tools: toolsPanel, knowledge: knowledgePanel, connections: connectionsPanel };
   return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-loadout-intro"><div><b>Runtime controls</b><span>Changes apply to this agent's next step. Denied capabilities are enforced server-side.</span></div><span class="ag-policy-shield">Policy active</span></div>
     <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
@@ -491,17 +498,24 @@ function renderDetail() {
   const running = r.status === 'running' || r.status === 'waiting_approval';
   const events = (state.events.get(r.session_id) || []).slice(-200).reverse();
   const children = r.children || [];
-  const lastEvent = events[0];
+  // One identity block, not two. The hero and the meta strip under it each
+  // introduced the same agent: the hero repeated the latest-step line already
+  // printed on the unit's fleet card and at the top of Live events, and the
+  // strip counted workers and events that the section headers below count
+  // again. What is left is the agent, what it is running on, and its controls.
   box.innerHTML = `
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
-      <div class="ag-console-identity"><span class="ag-console-eyebrow">Selected unit${r.is_current ? ' · open chat' : ''}</span><span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span><span>${esc(r.latest || lastEvent?.title || 'Standing by')}</span></div>
-      <div class="ag-console-status">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</div>
-    </div>
-    <div class="ag-detail-head">
-      <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}<span class="wb-meta-item">${children.length} worker${children.length === 1 ? '' : 's'}</span><span class="wb-meta-item">${events.length} events</span></div>
-      <span class="wb-spacer"></span><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>
-      ${r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
+      <div class="ag-console-identity">
+        <span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span>
+        <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
+      </div>
+      <div class="ag-console-status">
+        <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
+        <span class="ag-console-actions"><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>${
+          r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${
+          r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}</span>
+      </div>
     </div>
     ${loadoutSummaryHtml(r)}
     ${approvals.length || children.length ? `<div class="ag-detail-top">
@@ -691,9 +705,6 @@ async function onClick(e) {
       state.configTab = b.dataset.tab || 'general';
       render();
       syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
-    }
-    else if (act === 'expand') {
-      snapModalToZone($('agents-dashboard'), { name: 'maximize', rect: workspaceRect() });
     }
     else if (act === 'apply-profile') {
       const row = state.rows.find((item) => item.session_id === state.selected);

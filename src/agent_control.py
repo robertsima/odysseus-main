@@ -24,6 +24,29 @@ from src import agent_activity as activity
 
 logger = logging.getLogger(__name__)
 
+
+def live_children(session_id: Optional[str]) -> int:
+    """Child runs currently in flight for ``session_id``.
+
+    The per-chat ``max_parallel_workers`` limit is checked in two places — the
+    spawning-tool gate in :mod:`src.tool_execution` and the loadout tool's
+    ``start`` action — so the counting rule lives here rather than being
+    written twice and drifting. ``odysseus`` runs are the chat's own turns, not
+    children, so they do not count against the limit.
+    """
+    if not session_id:
+        return 0
+    try:
+        return sum(
+            1 for rec in activity.list_runs(limit=400)
+            if rec.get("session_id") == session_id
+            and rec.get("status") == "running"
+            and rec.get("source") != "odysseus"
+        )
+    except Exception:
+        return 0
+
+
 # ── steering ──────────────────────────────────────────────────────────────
 
 _STEER: Dict[str, List[dict]] = {}

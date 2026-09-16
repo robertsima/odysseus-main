@@ -1,8 +1,15 @@
-// Theme system — preset themes + custom color editing, stored in localStorage
+// Theme system — preset themes + custom color editing.
+//
+// The active theme and any custom themes belong to the signed-in account, not
+// to the browser. localStorage is the first-paint cache (index.html reads it
+// inline before any module loads); /api/prefs holds the account copy, and the
+// two are reconciled newest-wins on boot so signing in from a second browser
+// restores the same look rather than falling back to the default.
 // ES6 module
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
+import { readPref, writePref, envelope, localCopyBelongsToAccount } from './serverPrefs.js';
 import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -34,6 +41,11 @@ export const THEMES = {
 const DEFAULT_THEME = 'dark';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
+const THEME_PREF = 'theme';
+const CUSTOM_THEMES_PREF = 'custom-themes';
+// The custom-theme map is a plain object on disk for backward compatibility,
+// so its write time is kept beside it rather than inside it.
+const CUSTOM_THEMES_STAMP_KEY = 'odysseus-custom-themes-updated';
 
 const FONT_MAP = {
   mono: "'Fira Code', monospace",
@@ -118,14 +130,11 @@ export function deleteCustomTheme(name) {
   initThemeUI();
 }
 function _syncCustomThemesToServer(ct) {
-  try {
-    fetch('/api/prefs/custom-themes', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ value: ct }),
-    }).catch(e => console.warn('Theme sync (custom) failed:', e));
-  } catch (e) { console.warn('Theme sync (custom) error:', e); }
+  // Stamped, so a delete made here wins over an older copy held by another
+  // browser instead of being resurrected by it on the next merge.
+  const at = Date.now();
+  Storage.set(CUSTOM_THEMES_STAMP_KEY, String(at));
+  writePref(CUSTOM_THEMES_PREF, ct, at);
 }
 
 // --- Syntax color derivation from theme base colors ---
@@ -477,27 +486,20 @@ export function save(name, colors, opts) {
     if (opts.bgEffectSize !== undefined && opts.bgEffectSize !== 1) obj.bgEffectSize = opts.bgEffectSize;
     if (opts.frosted) obj.frosted = true;
   }
+  if (opts && opts.uiScale && opts.uiScale !== DEFAULT_UI_SCALE) obj.uiScale = opts.uiScale;
+  obj.updated_at = Date.now();
   Storage.setJSON(LS_KEY, obj);
-  _syncToServer(obj);
+  writePref(THEME_PREF, obj, obj.updated_at);
 }
 
-function _syncToServer(obj) {
-  try {
-    fetch('/api/prefs/theme', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'same-origin',
-      body: JSON.stringify({ value: obj }),
-    }).catch(e => console.warn('Theme sync failed:', e));
-  } catch (e) { console.warn('Theme sync error:', e); }
-}
-
+/** The account's theme, unwrapped from the serverPrefs envelope. Older builds
+ *  stored the theme object bare; that still reads, and counts as older than any
+ *  stamped edit. */
 async function _loadFromServer() {
-  try {
-    const res = await fetch('/api/prefs/theme', { credentials: 'same-origin' });
-    const data = await res.json();
-    return data.value || null;
-  } catch { return null; }
+  const entry = envelope(await readPref(THEME_PREF));
+  if (!entry || !entry.value || typeof entry.value !== 'object') return null;
+  const theme = entry.value;
+  return { theme, updated_at: entry.updated_at || Number(theme.updated_at) || 0 };
 }
 
 
@@ -690,6 +692,8 @@ export function initThemeUI() {
     if (sz) opts.bgEffectSize = parseFloat(sz.value) / 100;
     const fr = document.getElementById('theme-frosted-toggle');
     if (fr) opts.frosted = !!fr.checked;
+    const ts = document.getElementById('theme-text-size-select');
+    if (ts) opts.uiScale = ts.value;
     return opts;
   }
   function _saveFull(name, colors) { save(name, colors, _getOpts()); }
@@ -1151,13 +1155,17 @@ export function initThemeUI() {
   const textSizeSelect = document.getElementById('theme-text-size-select');
   if (textSizeSelect) {
     const nts = textSizeSelect.cloneNode(true); textSizeSelect.parentNode.replaceChild(nts, textSizeSelect);
+    // Text size rides the saved theme so it follows the account like every
+    // other look-and-feel choice. The standalone key stays as the fallback for
+    // browsers that stored a size before the theme object carried one.
     let initScale = DEFAULT_UI_SCALE;
-    try { initScale = localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
+    try { initScale = (saved && saved.uiScale) || localStorage.getItem(UI_SCALE_KEY) || DEFAULT_UI_SCALE; } catch (e) {}
     nts.value = initScale;
     applyUiScale(initScale);
     nts.addEventListener('change', () => {
       applyUiScale(nts.value);
       try { localStorage.setItem(UI_SCALE_KEY, nts.value); } catch (e) {}
+      const s = getSaved(); if (s) _saveFull(s.name, s.colors);
     });
   }
   if (patternSelect) {
@@ -2080,32 +2088,88 @@ const themeModule = { initThemeUI, togglePopup, closePopup, makeDraggable,
 
 export default themeModule;
 
-// Init on DOM ready, with server-side sync fallback
-async function _initWithSync() {
-  // If no local theme, try loading from server (cross-device sync)
-  if (!getSaved()) {
-    const serverTheme = await _loadFromServer();
-    if (serverTheme && serverTheme.colors) {
-      if (serverTheme.name === 'sakura') serverTheme.name = 'ume';
-      Storage.setJSON(LS_KEY, serverTheme);
-      applyColors(serverTheme.colors);
-    }
+// ── Boot: reconcile this browser's copy with the account's ──
+//
+// The old behavior only consulted the server when localStorage held no theme
+// at all, so a browser that had *ever* picked a theme stayed frozen on it: a
+// change made anywhere else never arrived, and signing in as a second user
+// inherited the first user's look. Now both copies are compared on every boot
+// and the newer one wins. It also restores the whole theme — font, density,
+// background pattern, effect color/intensity/size, frosted glass, text size —
+// where the previous code applied only the five base colors, leaving a
+// second browser with the right palette and the wrong everything else.
+
+/** Adopt an account theme: write it to the first-paint cache so the single
+ *  initThemeUI() pass below applies every part of it, not just the colors. */
+function _adoptServerTheme(theme, updatedAt) {
+  if (!theme || !theme.colors) return false;
+  if (theme.name === 'sakura') theme.name = 'ume';
+  if (theme.name === 'chatgpt') theme.name = 'gpt';
+  Storage.setJSON(LS_KEY, Object.assign({}, theme, { updated_at: updatedAt || Date.now() }));
+  return true;
+}
+
+/** Returns true when the account's theme replaced this browser's. */
+async function _syncThemeWithAccount() {
+  // A local copy left behind by a previous signed-in user must never be pushed
+  // up as this account's theme; it may only be replaced by the account's own.
+  const mine = await localCopyBelongsToAccount();
+  const local = mine ? getSaved() : null;
+  const localAt = Number(local && local.updated_at) || 0;
+  const remote = await _loadFromServer();
+  if (!remote) {
+    // Nothing stored for this account yet — seed it from this browser so the
+    // next browser to sign in has something to restore.
+    if (local && local.colors) writePref(THEME_PREF, local, localAt || Date.now());
+    return false;
   }
-  // Also sync custom themes from server
-  try {
-    const res = await fetch('/api/prefs/custom-themes', { credentials: 'same-origin' });
-    const data = await res.json();
-    if (data.value && typeof data.value === 'object') {
-      const local = _loadCustomThemes();
-      // Merge: server themes fill in missing local ones
-      let changed = false;
-      for (const [name, colors] of Object.entries(data.value)) {
-        if (!local[name]) { local[name] = colors; changed = true; }
-      }
-      if (changed) _saveCustomThemes(local);
+  // Ties go to the account copy: two browsers holding unstamped legacy themes
+  // should converge on the account's, not each keep its own.
+  if (!local || remote.updated_at >= localAt) return _adoptServerTheme(remote.theme, remote.updated_at);
+  writePref(THEME_PREF, local, localAt);
+  return false;
+}
+
+/** Returns true when the local custom-theme map changed. */
+async function _syncCustomThemesWithAccount() {
+  const entry = envelope(await readPref(CUSTOM_THEMES_PREF));
+  if (!entry || !entry.value || typeof entry.value !== 'object') return false;
+  const mine = await localCopyBelongsToAccount();
+  const local = mine ? _loadCustomThemes() : {};
+  const localAt = mine ? Number(Storage.get(CUSTOM_THEMES_STAMP_KEY, '0')) || 0 : 0;
+  if (entry.updated_at || localAt) {
+    // At least one side is stamped — newest wins outright, so deleting a custom
+    // theme in one browser is not undone by another browser merging it back.
+    if (entry.updated_at >= localAt) {
+      _saveCustomThemes(entry.value);
+      Storage.set(CUSTOM_THEMES_STAMP_KEY, String(entry.updated_at));
+      return true;
     }
-  } catch (e) { console.warn('Custom theme server sync failed:', e); }
-  initThemeUI();
+    writePref(CUSTOM_THEMES_PREF, local, localAt);
+    return false;
+  }
+  // Both sides predate stamping: union-merge, which is what older builds did
+  // and cannot lose a theme that only one side knows about.
+  let changed = false;
+  for (const [name, colors] of Object.entries(entry.value)) {
+    if (!local[name]) { local[name] = colors; changed = true; }
+  }
+  if (changed) _saveCustomThemes(local);
+  return changed;
+}
+
+async function _initWithSync() {
+  // Paint from the local cache first. Waiting on /api/prefs before applying a
+  // theme this browser already has would hold the page on the half-styled
+  // first-paint colors for the length of a round trip.
+  const hadLocal = !!getSaved();
+  if (hadLocal) initThemeUI();
+  let changed = false;
+  try { changed = await _syncCustomThemesWithAccount(); } catch (e) { console.warn('Custom theme sync failed:', e); }
+  try { changed = await _syncThemeWithAccount() || changed; } catch (e) { console.warn('Theme sync failed:', e); }
+  // Re-run only when the account actually had something different to say.
+  // initThemeUI() re-reads localStorage and re-applies every part of the theme.
+  if (!hadLocal || changed) initThemeUI();
 }
 
 if (document.readyState === 'loading') {

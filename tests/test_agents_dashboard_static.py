@@ -60,12 +60,35 @@ def test_agent_fleet_uses_animated_robot_personification_with_reduced_motion():
 
 def test_navigation_order_module_is_loaded_by_main_app():
     app = (ROOT / "static/app.js").read_text(encoding="utf-8")
-    assert "import './js/navOrder.js?v=20260915controlroom1';" in app
+    assert "import './js/navOrder.js?v=20260916accountprefs1';" in app
 
 
-def test_live_refresh_updates_fleet_telemetry():
+def test_live_refresh_updates_fleet_counts():
     stats = AGENTS.split("function updateStats()", 1)[1].split("function updateOpenView()", 1)[0]
-    assert "telemetry.innerHTML = telemetryHtml()" in stats
+    assert "box.innerHTML = triageHtml()" in stats
+    assert "live.outerHTML = liveHtml()" in stats
+
+
+def test_header_publishes_each_fleet_count_once():
+    """The triage row and the telemetry tile strip rendered the same four
+    numbers one above the other. Only the triage row remains."""
+    assert "ag-telemetry" not in AGENTS
+    assert "ag-telemetry" not in STYLE
+    assert "function telemetryHtml" not in AGENTS
+    # Counts still reach the header: filterable ones on the segment badges,
+    # the rest on the single muted summary line.
+    assert 'class="ag-seg' in AGENTS
+    assert 'class="ag-hist"' in AGENTS
+
+
+def test_applying_a_preset_keeps_its_mcp_policy_through_save():
+    """profileConfig() fed saveAgentConfig(), which falls back to ['*'] when
+    mcp_access is missing — a preset granting no connections used to save as
+    'every connection'."""
+    profile_config = AGENTS.split("function profileConfig(profile)", 1)[1].split("function loadoutSummaryHtml", 1)[0]
+    assert "mcp_access: profile.mcp_access || 'all'," in profile_config
+    save = AGENTS.split("async function saveAgentConfig(row)", 1)[1].split("// ── actions", 1)[0]
+    assert "draft.mcp_access === 'none'" in save
 
 
 def test_fleet_selection_and_window_focus_are_keyboard_accessible():
@@ -88,6 +111,39 @@ def test_opening_chat_or_workbench_keeps_control_room_open():
     assert "close()" not in open_chat
 
 
+def test_selected_agent_is_introduced_once():
+    """The detail pane opened with a hero *and* a meta strip: two headers for
+    one agent, restating a latest-step line the fleet card and the event log
+    already show, plus worker/event counts the section headers repeat."""
+    detail = AGENTS.split("function renderDetail()", 1)[1].split("function approvalHtml", 1)[0]
+    assert "ag-detail-head" not in detail
+    assert "ag-console-eyebrow" not in detail
+    assert "events.length} events" not in detail
+    assert "ag-detail-head" not in STYLE
+    # The single header still carries identity, runtime facts and the controls.
+    assert 'class="ag-detail-name"' in detail
+    assert 'class="ag-detail-meta"' in detail
+    assert 'data-ag="open-chat"' in detail
+    assert 'class="ag-console-actions"' in detail
+
+
+def test_body_header_does_not_restate_the_window_title():
+    assert "ag-title-text" not in AGENTS
+    assert "ag-title" not in STYLE
+    markup = AGENTS.split("surface.innerHTML = `", 1)[1].split("  if (!state.configOpen) renderDetail();", 1)[0]
+    assert "Mission floor" not in markup
+    # The window's own title bar is the one place the window is named.
+    assert '<h3 id="ag-window-title">Agent Control Room</h3>' in INDEX
+
+
+def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():
+    """workbench.js hides its rail button on a 403; offering the shortcut
+    anyway left non-admins a button whose only outcome was an error toast."""
+    assert "function workbenchAvailable()" in AGENTS
+    head = AGENTS.split("function render()", 1)[1].split("function filteredRows", 1)[0]
+    assert "workbenchAvailable() ?" in head
+
+
 def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-card-avatar { min-height: 60px" in STYLE
     assert "padding-top: 5px" in STYLE.split(".ag-bot {", 1)[1].split("}", 1)[0]
@@ -108,8 +164,12 @@ def test_each_agent_has_a_dedicated_server_backed_capability_loadout():
     assert ".ag-config-panel-scroll" in STYLE
 
 
-def test_control_room_has_visible_expansion_and_resizable_monitor_panes():
-    assert 'data-ag="expand"' in AGENTS
+def test_control_room_has_one_expansion_control_and_resizable_monitor_panes():
+    """Expansion lives on the title bar only. The body used to carry an
+    "Expand" button running the identical snapModalToZone call."""
+    assert 'data-ag="expand"' not in AGENTS
+    assert 'id="ag-maximize"' in INDEX
+    assert "$('ag-maximize')?.addEventListener('click', () => snapModalToZone(root" in AGENTS
     assert 'data-ag-splitter' in AGENTS
     assert "beginFleetResize" in AGENTS
     assert "odysseus-agents-fleet-width" in AGENTS

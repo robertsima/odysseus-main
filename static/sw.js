@@ -7,7 +7,7 @@
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
-const CACHE_NAME = 'odysseus-v386-workspace-settings';
+const CACHE_NAME = 'odysseus-v387-account-prefs';
 
 // Core shell precached on install so repeat opens are instant without any
 // network wait. Keep this list in sync with the <script type="module"> tags
@@ -17,6 +17,7 @@ const PRECACHE = [
   '/static/style.css',
   '/static/app.js',
   '/static/js/storage.js',
+  '/static/js/serverPrefs.js',
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',

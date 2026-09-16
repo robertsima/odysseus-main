@@ -77,11 +77,31 @@ special cases.
   docked layouts stack cleanly. Opening chat or workbench does not implicitly
   close the control room.
 - Navigation order is user-reorderable and stored as a preference.
+- An agent may author and start worker loadouts (`manage_agent_loadout`). Every
+  capability in a loadout an agent creates is intersected with the calling
+  chat's own effective policy before it is stored, and each narrowing is
+  reported back to the agent. An agent cannot write itself a loadout wider than
+  it has.
+
+### Account-scoped interface preferences
+
+- Look-and-feel and layout choices belong to the signed-in account, not to the
+  browser: theme (including font, density, background pattern and effects,
+  frosted glass and text size), saved custom themes, and navigation order are
+  persisted through `/api/prefs`, which keys by signed-in user.
+- localStorage remains the first-paint cache. Both copies carry a write time
+  and are reconciled newest-wins on every boot, so a second browser adopts the
+  account's choice instead of keeping whatever it happened to store first. A
+  tie resolves to the account copy.
 
 ## Required invariants
 
 1. Human file access and model policy are distinct. A `readonly` badge means
    “agents cannot write,” not “the signed-in user cannot edit.”
+1a. An agent-authored loadout is a narrowing of the authoring chat's policy,
+   never an extension of it. This is an authoring rule; what a worker may
+   actually do is still decided at execution time by its own stored policy and
+   the owner baseline.
 2. Private content never enters a prompt, tool result, memory extraction pass,
    or delegated task without an explicit private-read grant.
 3. A grant is checked at read time. Indexing private material in the shared
