@@ -121,6 +121,18 @@ class TestPrefixIsDistinguishableFromAHumanSteer:
         assert kinds[None] == "user"
         assert kinds["sender-2"] == "peer"
 
+    def test_sender_is_given_the_message_id_to_follow_up_with(self, monkeypatch):
+        """The sender's turn is over long before the recipient reads anything,
+        so the id is its only handle for asking later what became of the
+        message (agent_control.steer_history)."""
+        monkeypatch.setattr(agent_mailbox, "get_setting", _settings())
+
+        result = agent_mailbox.send("target", "don't also fix the parser", from_session="sender")
+
+        assert result["state"] == "queued"
+        queued = agent_control.pending_steer("target")[0]
+        assert result["message_id"] == queued["id"]
+
 
 class TestBudget:
     def test_exhaustion_is_refused_not_raised(self, monkeypatch):

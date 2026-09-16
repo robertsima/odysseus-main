@@ -58,6 +58,30 @@ def test_agent_fleet_uses_animated_robot_personification_with_reduced_motion():
     assert ".ag-bot, .ag-bot-antenna i, .ag-card-beacon, .ag-bot-card::after { animation: none !important; }" in STYLE
 
 
+def test_steering_messages_show_their_state_and_age():
+    """A queued steer that silently never lands is the failure the steering
+    log exists to expose, so the detail pane must show what became of each
+    message — not just how many are queued."""
+    detail = AGENTS.split("function renderDetail()", 1)[1].split("function steerLogHtml", 1)[0]
+    assert "${steerLogHtml(r)}" in detail
+    row = AGENTS.split("function steerRowHtml(m)", 1)[1].split("function approvalHtml", 1)[0]
+    assert "pill(state)" in row, "state is rendered in the existing pill language"
+    # Age uses the same ticking element as every other duration on the page,
+    # and stops at the state the message reached.
+    assert 'class="ag-row-dur" data-started=' in row
+    assert "const finished = waiting ? '' : (stamps[state] || m.updated_at || '');" in row
+    for state in ("queued", "acknowledged", "injected", "cancelled"):
+        assert f"{state}: [" in AGENTS, "steer states reuse the STATUS pill map"
+
+
+def test_the_ui_does_not_claim_a_steer_was_carried_out():
+    """Nothing observes an agent acting on a steer, so the UI stops at
+    `injected` and says as much instead of inventing a completed state."""
+    notes = AGENTS.split("const STEER_STATE_NOTE", 1)[1].split("};", 1)[0]
+    assert "not something the server can see" in notes
+    assert "completed:" not in notes and "superseded:" not in notes
+
+
 def test_navigation_order_module_is_loaded_by_main_app():
     app = (ROOT / "static/app.js").read_text(encoding="utf-8")
     assert "import './js/navOrder.js?v=20260916accountprefs1';" in app

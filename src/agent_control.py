@@ -5,7 +5,12 @@ owner-scoped by the routes; this module only knows run ids and session ids.
 
 * **Steer** — queue a message for a running turn. The agent loop drains the
   queue at the start of each round and appends it as a user message, so the
-  correction lands mid-task instead of after the turn ends.
+  correction lands mid-task instead of after the turn ends. Every message has
+  an id and a visible state (``queued`` → ``acknowledged`` → ``injected``,
+  or ``cancelled``/``failed``); the transitions go to the activity feed, which
+  is where the history of a steer lives once it has left the queue. See the
+  block comment above ``STEER_STATES`` for what each state is evidence of —
+  and for the two states this module refuses to invent.
 * **Stop** — end one unit of work (a sub-agent, Claude Code task, background
   job, or a chat turn) without stopping anything else.
 * **Launch** — start a named worker profile in a fresh chat as a detached
@@ -18,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import uuid
 from typing import Any, Dict, List, Optional
 
 from src import agent_activity as activity
@@ -49,70 +55,268 @@ def live_children(session_id: Optional[str]) -> int:
 
 # ── steering ──────────────────────────────────────────────────────────────
 
+# A steering message is queued here and drained by the agent loop between
+# rounds. That used to be the whole of it: session -> list of records, no ids,
+# no states, nothing written down. Once a message left the queue there was no
+# way to answer the only question anyone actually asks about steering — "did
+# it land?" — because an empty queue looks identical whether the loop read the
+# message or the turn ended and threw it away.
+#
+# So every message now carries an id and a state, and every transition is
+# published to the activity feed (src/agent_activity.py). The feed is the
+# history store, deliberately: it already persists one JSONL file per session,
+# already survives a restart, already fans out to the Control Room's SSE
+# stream, and is already owner-scoped by the routes that expose it. A second
+# store would have to re-earn all four and then be kept consistent with the
+# feed the same UI reads beside it.
+#
+# The states below are the ones this code can actually WITNESS:
+#
+#   queued        steer() accepted the message into the queue.
+#   acknowledged  a running turn drained it (drain_steer_records) — proof that
+#                 a live loop took ownership, which is the one thing the queue
+#                 alone can never tell you.
+#   injected      the loop appended it to the model's messages for a numbered
+#                 round. This is the last honest point of observation.
+#   cancelled     the turn ended with the message still queued, so it was
+#                 dropped rather than left to ambush an unrelated later turn
+#                 (clear_steer).
+#   failed        it never made it into a turn, with a reason: the queue was
+#                 full, the target was not running or not steerable, or it was
+#                 drained and then found unusable.
+#
+# Two states from the original spec are deliberately NOT emitted:
+#
+#   completed     nothing here observes a steering message being *carried
+#                 out*. After injection the text is one user message among
+#                 many; the model's later prose, tool calls and final answer
+#                 carry no back-reference to it and the loop never asks for
+#                 one. A "completed" written at turn end would mean only "the
+#                 turn ended", which is precisely the false assurance this
+#                 work exists to remove: a reader would take it as evidence
+#                 the correction was applied when no such evidence exists.
+#                 When a real signal appears (the model quoting a steer id,
+#                 say), this is where it goes.
+#   superseded    nothing replaces one queued message with another. Sends are
+#                 additive and every queued record is either delivered or
+#                 cancelled, so the state would never be set and would
+#                 advertise a capability the system does not have.
+STEER_STATES = ("queued", "acknowledged", "injected", "cancelled", "failed")
+# Nothing moves out of these; a message that reaches one is history, not queue.
+STEER_TERMINAL = ("injected", "cancelled", "failed")
+
 _STEER: Dict[str, List[dict]] = {}
 _STEER_MAX = 10
+
+# Warning for the two states a human should notice unprompted (a correction is
+# waiting; a correction was thrown away), error for the one that means the
+# message is definitively not going to be read, info for normal progress.
+_STEER_LEVEL = {"queued": "warning", "acknowledged": "info", "injected": "info",
+                "cancelled": "warning", "failed": "error"}
+_STEER_PHRASE = {"queued": "queued", "acknowledged": "acknowledged by the running turn",
+                 "injected": "injected", "cancelled": "cancelled", "failed": "failed"}
+# `status` events are what the dashboard reads as an agent's latest step, which
+# is right for the two transitions that mean work is happening and wrong for
+# the ones that are bookkeeping about a message the loop never used.
+_STEER_EVENT_KIND = {"acknowledged": "status", "injected": "status"}
+# How far back a lookup reads the feed. One steering message is at most five
+# events and the per-session buffer holds MAX_EVENTS_PER_SESSION, so this is
+# "the recent past", not "all of history" — the JSONL file is the archive.
+_STEER_SCAN = 300
+
+
+def _new_steer_id() -> str:
+    """Short, unique, and readable in a log line beside a run id."""
+    return f"steer-{uuid.uuid4().hex[:10]}"
+
+
+def _steer_label(rec: dict) -> str:
+    """"Peer message" or "Steer" — the two things that share this queue."""
+    return "Peer message" if str(rec.get("kind") or "user") == "peer" else "Steer"
+
+
+def _steer_transition(rec: dict, state: str, *, reason: Optional[str] = None,
+                      round_num: Optional[int] = None, run_id: Optional[str] = None) -> dict:
+    """Record one state change, both on the record and on the activity feed.
+
+    Both halves matter. The record is what the caller and ``pending_steer``
+    see right now; the feed entry is all that anyone asking "did that steer
+    land?" an hour later has to work from, so it carries the message's whole
+    identity — id, state, target, sender, when it was queued, how old it was
+    at this transition, which round took it, why it failed — as structured
+    ``data`` rather than only a sentence of prose. ``activity.publish``
+    swallows its own errors, so a steering message is never lost because
+    observing it failed.
+    """
+    now = time.time()
+    queued_at = float(rec.get("queued_at") or rec.get("ts") or now)
+    rec["state"] = state
+    rec.setdefault("timestamps", {})[state] = now
+    if round_num is not None:
+        rec["round"] = int(round_num)
+    if reason:
+        rec["reason"] = str(reason)[:300]
+    session_id = str(rec.get("session_id") or "")
+    text = str(rec.get("text") or "")
+    label = _steer_label(rec)
+    data: Dict[str, Any] = {
+        "steer_id": rec.get("id"),
+        "steer_state": state,
+        "steer_kind": rec.get("kind") or "user",
+        # The target is the session this event is filed under, but naming it
+        # explicitly means a row lifted out of the feed (or read from the
+        # global stream) still says which agent was being steered.
+        "target_session": session_id or None,
+        "queued_at": queued_at,
+        "state_at": now,
+        "age_s": round(now - queued_at, 3),
+        "text": text[:400],
+    }
+    for key in ("from_session", "from_session_name"):
+        if rec.get(key):
+            data[key] = rec[key]
+    if round_num is not None:
+        data["round"] = int(round_num)
+    if rec.get("reason"):
+        data["reason"] = rec["reason"]
+    phrase = _STEER_PHRASE.get(state, state)
+    where = f" (round {int(round_num)})" if round_num is not None and state == "injected" else ""
+    why = f" — {rec['reason']}" if rec.get("reason") and state in ("failed", "cancelled") else ""
+    title = f"{label} {phrase}{where}{why}: {text[:160]}" if text else f"{label} {phrase}{where}{why}"
+    activity.publish(
+        session_id, _STEER_EVENT_KIND.get(state, "note"), title, source="odysseus",
+        run_id=run_id or activity.active_turn(session_id), owner=rec.get("owner"),
+        detail=text or None, data=data, level=_STEER_LEVEL.get(state, "info"),
+    )
+    return rec
 
 
 def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
           from_session: Optional[str] = None, from_session_name: Optional[str] = None) -> dict:
     """Queue a message for the next round of ``session_id``'s turn.
 
-    ``kind``/``from_session``/``from_session_name`` are new, optional, and
-    default to the original human-steer shape (``kind="user"``, no sender) so
-    every existing caller — the Agents dashboard, the chat composer — is
-    unaffected. ``agent_mailbox.send()`` is the other caller: it passes
-    ``kind="peer"`` and the sending session so a peer message can be told
-    apart from a human's steer (see ``pending_steer``/``agent_mailbox.inbox``)
-    even though both live in this same queue and drain through the same
-    ``drain_steer``.
+    ``kind``/``from_session``/``from_session_name`` are optional and default to
+    the original human-steer shape (``kind="user"``, no sender) so every
+    existing caller — the Agents dashboard, the chat composer — is unaffected.
+    ``agent_mailbox.send()`` is the other caller: it passes ``kind="peer"`` and
+    the sending session so a peer message can be told apart from a human's
+    steer (see ``pending_steer``/``agent_mailbox.inbox``) even though both live
+    in this same queue and drain through the same ``drain_steer``.
+
+    The returned record carries ``id`` and ``state`` as well as ``text``, so a
+    caller can hand the id back to whoever sent the message and that message
+    can be looked up afterwards (``steer_history``).
     """
     text = " ".join(str(text or "").split())[:4000]
     if not text:
+        # Never a queued message, so there is nothing to give a lifecycle to;
+        # the caller is told synchronously and shows its own error.
         raise ValueError("steer text is empty")
-    rec = {"text": text, "ts": time.time(), "owner": owner, "kind": kind}
+    now = time.time()
+    rec = {"id": _new_steer_id(), "session_id": str(session_id), "text": text, "ts": now,
+           "queued_at": now, "owner": owner, "kind": kind, "state": "queued", "timestamps": {}}
     if from_session:
         rec["from_session"] = from_session
     if from_session_name:
         rec["from_session_name"] = from_session_name
     queue = _STEER.setdefault(str(session_id), [])
     if len(queue) >= _STEER_MAX:
+        # A refusal is exactly the case the operator needs afterwards: the
+        # sender believes it steered, and without this nothing would ever
+        # mention this message again.
+        _steer_transition(rec, "failed", reason=f"queue full ({_STEER_MAX} already waiting)")
         raise ValueError("too many queued steer messages")
     queue.append(rec)
-    label = "Peer message" if kind == "peer" else "Steer"
-    activity.publish(session_id, "note", f"{label} queued: {text[:160]}", source="odysseus",
-                     run_id=activity.active_turn(session_id), owner=owner, detail=text, level="warning")
+    _steer_transition(rec, "queued")
     return rec
 
 
+def note_refused(session_id: str, text: str, reason: str, *, owner: Optional[str] = None,
+                 kind: str = "user", from_session: Optional[str] = None) -> dict:
+    """Record a steering message that was turned away before it was queued.
+
+    The dashboard refuses a steer when the chat is not running, or is running
+    something with no rounds to land between (``is_steerable``). The sender
+    gets an error, but the *target's* timeline said nothing at all — so the
+    only trace of a correction someone tried to make lived in one browser
+    toast. This writes it where the rest of the lifecycle lives, as a
+    ``failed`` record that was never in the queue.
+    """
+    text = " ".join(str(text or "").split())[:4000]
+    now = time.time()
+    rec = {"id": _new_steer_id(), "session_id": str(session_id), "text": text, "ts": now,
+           "queued_at": now, "owner": owner, "kind": kind, "state": "failed", "timestamps": {}}
+    if from_session:
+        rec["from_session"] = from_session
+    return _steer_transition(rec, "failed", reason=reason)
+
+
 def drain_steer(session_id: Optional[str]) -> List[str]:
-    """Messages queued since the last round, oldest first (and cleared)."""
-    if not session_id:
-        return []
-    queue = _STEER.pop(str(session_id), None)
-    return [rec["text"] for rec in queue] if queue else []
+    """Messages queued since the last round, oldest first (and cleared).
+
+    Delegates to ``drain_steer_records`` so a caller that only wants the text
+    still moves the messages to ``acknowledged``: a drain that left no trace is
+    the hole this whole lifecycle exists to close.
+    """
+    return [rec["text"] for rec in drain_steer_records(session_id)]
 
 
-def drain_steer_records(session_id: Optional[str]) -> List[dict]:
+def drain_steer_records(session_id: Optional[str], *, round_num: Optional[int] = None) -> List[dict]:
     """Like ``drain_steer``, but keeps each record's metadata instead of just its text.
 
-    ``drain_steer`` returns bare strings because the agent loop's round-boundary
-    drain (agent_loop.py, near the top of the round loop) wraps every one of
-    them the same way: ``"[Mid-task instruction from the user] " + text``. That
-    is correct for a human steer and wrong for a peer's — see
-    ``agent_mailbox.send()``, which works around it today by baking its own
-    "this is a peer, not your user" tag into the text itself so it survives
-    that wrapper. The proper fix is for the loop to call this instead and pick
-    the wrapper from ``rec.get("kind")`` (``"peer"`` vs the default ``"user"``)
-    rather than hard-coding "the user"; this function exists so that switch is
-    a small change there whenever that lands, not a new queue here.
+    ``drain_steer`` returns bare strings because a caller that only appends
+    them needs nothing else. The agent loop calls this one, because the wrapper
+    it puts around a drained message depends on ``rec["kind"]`` (``"peer"`` vs
+    the default ``"user"``) — labelling a peer agent's message as coming from
+    the user changes whose instructions the model thinks it is following — and
+    because it has to mark each record ``injected`` once it really has appended
+    it.
+
+    Draining is what moves a message to ``acknowledged``: the queue is popped
+    here, so from this point the running turn owns the message, and a reader of
+    the feed can tell "a live loop took it" apart from "it was still sitting
+    there when the turn ended". ``round_num`` is recorded when the caller knows
+    it, so the acknowledgement says which round took the message.
     """
     if not session_id:
         return []
     queue = _STEER.pop(str(session_id), None)
-    return list(queue) if queue else []
+    if not queue:
+        return []
+    for rec in queue:
+        _steer_transition(rec, "acknowledged", round_num=round_num)
+    return list(queue)
+
+
+def mark_injected(rec: dict, *, round_num: Optional[int] = None,
+                  run_id: Optional[str] = None) -> dict:
+    """The loop really did append this message to the model's messages.
+
+    Called from the drain site in ``agent_loop.py`` *after* the append, not
+    before: the point of a separate state is that "the loop took it" and "the
+    model was given it" are different claims, and the gap between them is
+    where a drained message can still be dropped.
+    """
+    return _steer_transition(rec, "injected", round_num=round_num, run_id=run_id)
+
+
+def mark_failed(rec: dict, reason: str, *, round_num: Optional[int] = None,
+                run_id: Optional[str] = None) -> dict:
+    """A drained message that could not be injected, with why."""
+    return _steer_transition(rec, "failed", reason=reason, round_num=round_num, run_id=run_id)
 
 
 def pending_steer(session_id: str) -> List[dict]:
+    """Records still waiting to be drained — the live queue, nothing else.
+
+    This still backs the ``steer_queued`` count on the Agents overview, and the
+    number means more than it did, not less: a message leaves the queue the
+    moment a turn acknowledges it, so a non-zero count is now exactly "this
+    many corrections no turn has picked up yet". What used to vanish from the
+    count without trace is now an ``acknowledged``/``injected`` record on the
+    feed, so the count dropping to zero can be read against what became of each
+    message instead of being the end of the story.
+    """
     return list(_STEER.get(str(session_id), ()))
 
 
@@ -123,12 +327,77 @@ def clear_steer(session_id: Optional[str]) -> List[str]:
     there until some *future* turn picked it up and answered a correction from
     an hour ago with no idea what it referred to. The agent loop extends a turn
     to absorb a late steer (see the round loop), so reaching here means the turn
-    really is over — the caller logs what it dropped instead of leaking it.
+    really is over — each dropped message is marked ``cancelled`` with that
+    reason, so "it never landed" is on the record instead of only in a server
+    log line the operator never sees.
     """
     if not session_id:
         return []
     queue = _STEER.pop(str(session_id), None)
-    return [rec["text"] for rec in queue] if queue else []
+    if not queue:
+        return []
+    for rec in queue:
+        _steer_transition(rec, "cancelled", reason="the turn ended before it was drained")
+    return [rec["text"] for rec in queue]
+
+
+def steer_history(session_id: str, *, limit: int = 20) -> List[dict]:
+    """Reconstruct each recent steering message's lifecycle from the feed.
+
+    One message is several events; this folds them back into one row per id —
+    ``state`` is the newest one seen, ``timestamps`` maps every state to when
+    it happened — so a caller gets "what became of it" rather than a pile of
+    transitions to reassemble. Reading the feed instead of a cache is the point
+    of keeping the history there: it works for a session whose queue was
+    drained long ago, and after a restart that emptied ``_STEER`` entirely.
+    """
+    rows: Dict[str, dict] = {}
+    try:
+        events = activity.history(str(session_id or ""), limit=_STEER_SCAN)
+    except Exception:  # a broken feed must not break the dashboard
+        logger.debug("steer_history: feed read failed for %s", session_id, exc_info=True)
+        events = []
+    for ev in events:
+        data = ev.get("data")
+        if not isinstance(data, dict) or not data.get("steer_id"):
+            continue
+        sid = str(data["steer_id"])
+        row = rows.setdefault(sid, {"id": sid, "session_id": ev.get("session_id"),
+                                    "kind": "user", "text": "", "state": None,
+                                    "timestamps": {}, "queued_at": None})
+        state = str(data.get("steer_state") or "")
+        if state:
+            # Events replay oldest first, so the last one wins — which is the
+            # message's current state even if a transition was published late.
+            row["state"] = state
+            row["timestamps"][state] = data.get("state_at") or ev.get("ts")
+        for key in ("steer_kind", "queued_at", "text", "reason", "round", "from_session",
+                    "from_session_name", "target_session"):
+            if data.get(key) not in (None, ""):
+                row["kind" if key == "steer_kind" else key] = data[key]
+        row["updated_at"] = ev.get("ts")
+    ordered = sorted(rows.values(), key=lambda r: r.get("queued_at") or r.get("updated_at") or 0,
+                     reverse=True)
+    return ordered[: max(1, int(limit or 20))]
+
+
+def steer_status(session_id: str, *, limit: int = 6) -> dict:
+    """What the Control Room shows about steering for one chat.
+
+    ``queued`` is the live count (the same number ``steer_queued`` has always
+    been); ``messages`` is the recent lifecycle, newest first. A row still in
+    state ``queued`` is cross-checked against the live queue and marked
+    ``live: False`` when it is not in it, because the queue is in memory only:
+    a message queued before a restart is not waiting for anything, and saying
+    so is the difference between "still pending" and "silently lost" — the
+    exact confusion this is meant to end.
+    """
+    live = {str(rec.get("id")) for rec in pending_steer(session_id)}
+    messages = steer_history(session_id, limit=limit)
+    for row in messages:
+        if row.get("state") == "queued":
+            row["live"] = row["id"] in live
+    return {"queued": len(live), "messages": messages}
 
 
 def is_steerable(session_id: str) -> bool:

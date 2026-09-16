@@ -5,8 +5,9 @@
  *               Needs you → Active → Recent, filterable from the header.
  *   Detail    — the selected chat: its live event stream, child runs (sub-
  *               agents, Claude Code, background jobs) with Stop, pending
- *               approvals with Approve/Deny, a Steer box that lands mid-turn,
- *               and a Reply box for an idle chat.
+ *               approvals with Approve/Deny, a Steer box that lands mid-turn
+ *               with the log of what became of each steering message, and a
+ *               Reply box for an idle chat.
  *   Launch    — start a worker profile in a fresh chat from here.
  *
  * Data comes from /api/agents/* (owner-scoped, routes/agents_routes.py); the
@@ -30,6 +31,24 @@ const STATUS = {
   // not a failure — without this entry pill() fell through to the raw status
   // word with no class at all.
   incomplete: ['Out of rounds', 'warn'],
+  // Steering-message states (src/agent_control.py). They share this map, and
+  // therefore the same pill colours, because they answer the same question the
+  // run statuses above do: is this still going, did it land, or did it not.
+  // `cancelled` also covers a stopped child run, which until now fell through
+  // to the raw word with no class.
+  queued: ['Queued', 'warn'], acknowledged: ['Acknowledged', 'run'], injected: ['Injected', 'ok'],
+  cancelled: ['Cancelled', 'warn'],
+};
+// What each state is evidence of, shown on hover. `injected` is where the
+// trail ends on purpose: the server can see the message being handed to the
+// model and nothing after that, so the UI does not claim the agent acted on it
+// (see the STEER_STATES comment in src/agent_control.py).
+const STEER_STATE_NOTE = {
+  queued: 'Waiting — no turn has picked it up yet',
+  acknowledged: 'A running turn took it off the queue',
+  injected: 'Handed to the model. Whether the agent then acted on it is not something the server can see',
+  cancelled: 'The turn ended before the agent read it',
+  failed: 'Never reached the agent',
 };
 const SOURCE_LABEL = { odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
 const KIND_ICON = { run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←', file_change: '±', commit: '●', status: '·', error: '!', note: '~' };
@@ -529,11 +548,12 @@ function renderDetail() {
     </div>` : ''}
     <div class="ag-section ag-compose">
       ${running
-        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} queued` : ''}</small></label>
+        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} waiting to be picked up` : ''}</small></label>
            <div class="ag-compose-row"><textarea id="ag-steer" class="wb-input ag-textarea" rows="2" placeholder="e.g. Skip the tests for now and focus on the migration"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="steer" data-sid="${esc(r.session_id)}">Steer</button></div>`
         : `<label class="ag-compose-label" for="ag-reply">Send a message <small>opens the chat and sends it</small></label>
            <div class="ag-compose-row"><textarea id="ag-reply" class="wb-input ag-textarea" rows="2" placeholder="Next task for this chat…"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="reply" data-sid="${esc(r.session_id)}">Send</button></div>`}
     </div>
+    ${steerLogHtml(r)}
     <div class="ag-section ag-events">
       <div class="wb-group-h"><span class="wb-group-title">Live events</span><span class="wb-count">${events.length}</span></div>
       <div class="wb-ev-list ag-ev-list" data-wb-scroll="events">${events.map(eventHtml).join('') || '<div class="wb-empty">No events yet.</div>'}</div>
@@ -548,6 +568,46 @@ function renderDetail() {
     }
   }
   if (!state.events.has(r.session_id)) loadHistory(r.session_id).then(() => { if (state.selected === r.session_id) renderDetail(); });
+}
+/** The steering log for the selected chat: one row per message, newest first.
+ *
+ *  The Steer box used to be write-only — it said "2 queued", then the number
+ *  went away, and nothing distinguished "the agent read them" from "the turn
+ *  ended and they were dropped". A queued message that silently never lands is
+ *  the failure worth seeing, so each row shows the state it reached and how
+ *  long it has been in it: "Queued · 40s" (nothing has taken it) reads nothing
+ *  like "Injected · round 7". Rows come from /api/agents/overview, which reads
+ *  them back off the activity feed, so they survive the turn that made them.
+ */
+function steerLogHtml(r) {
+  const messages = (r.steer && r.steer.messages) || [];
+  if (!messages.length) return '';
+  return `<div class="ag-section ag-steer-log">
+    <div class="wb-group-h"><span class="wb-group-title">Steering messages</span><span class="wb-count">${messages.length}</span></div>
+    ${messages.map(steerRowHtml).join('')}
+  </div>`;
+}
+function steerRowHtml(m) {
+  const state = STATUS[m.state] && STEER_STATE_NOTE[m.state] ? m.state : 'queued';
+  // `live: false` on a queued row means the feed remembers it but the in-memory
+  // queue does not — it was queued before a restart, so nothing is waiting to
+  // read it. Saying so is the difference between "still pending" and "lost".
+  const waiting = state === 'queued' && m.live !== false;
+  const stamps = m.timestamps || {};
+  // The clock stops at the state the message reached; an age that kept running
+  // after injection would read as "still waiting".
+  const finished = waiting ? '' : (stamps[state] || m.updated_at || '');
+  const meta = [
+    m.kind === 'peer' ? `from ${m.from_session_name || m.from_session || 'a peer agent'}` : '',
+    state === 'injected' && m.round ? `round ${Number(m.round)}` : '',
+    state === 'queued' && !waiting ? 'not in the live queue — lost on restart' : '',
+    m.reason || '',
+  ].filter(Boolean);
+  const age = m.queued_at ? fmtDur(m.queued_at, finished || undefined) : '';
+  return `<div class="ag-child${waiting ? '' : ' done'}" title="${esc(m.id || '')} — ${esc(STEER_STATE_NOTE[state])}">
+    ${pill(state)}<span class="ag-child-title" title="${esc(m.text || '')}">${esc(m.text || '(no text)')}</span>
+    ${meta.map((item) => `<span class="wb-meta-item">${esc(item)}</span>`).join('')}
+    ${age ? `<span class="ag-row-dur" data-started="${esc(m.queued_at)}" data-finished="${esc(finished)}">${esc(age)}</span>` : ''}</div>`;
 }
 function approvalHtml(a) {
   return `<div class="ag-approval"><div class="ag-approval-head"><span class="approval-badge">Approval needed</span><code class="approval-tool">${esc(a.tool)}</code><span class="wb-meta-item">${esc(a.reason)}</span></div>
@@ -755,7 +815,12 @@ async function onClick(e) {
       const ta = $('ag-steer'); const text = (ta?.value || '').trim(); if (!text) return;
       b.disabled = true;
       await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/steer`, { text });
-      ta.value = ''; b.disabled = false; uiModule.showToast('Steer queued — applied before the next step'); scheduleRefresh();
+      // "Queued" is a promise the toast used to make and never keep. It now
+      // points at the row that will keep it: the message is listed below with
+      // its state, so a steer that is never picked up stays visible instead of
+      // being assumed delivered.
+      ta.value = ''; b.disabled = false;
+      uiModule.showToast('Steer queued — track it under Steering messages'); scheduleRefresh();
     } else if (act === 'reply') {
       const ta = $('ag-reply'); const text = (ta?.value || '').trim(); if (!text) return;
       await sendToChat(b.dataset.sid, text, { open: true });
