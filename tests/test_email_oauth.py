@@ -10,6 +10,8 @@ IMAP/SMTP support:
 - `_xoauth2_raw` / `_xoauth2_bytes` — SASL XOAUTH2 framing for SMTP/IMAP.
 - `_refresh_google_token` — token refresh stores result encrypted; failure is
   silent (no token/secret in logs or return value).
+- `_classify_google_token_failure` / `_refresh_google_token_status` — a dead
+  grant and an unreachable Google must not look the same to callers.
 - `_get_valid_google_token` — uses cached token when fresh; calls refresh when
   expired.
 - `google_oauth_callback` (real route) — invalid/tampered/missing state and
@@ -796,3 +798,137 @@ async def test_config_response_does_not_expose_oauth_storage_fields():
     assert "oauth_token_expiry" not in result
     assert encrypted_access not in json.dumps(result)
     assert encrypted_refresh not in json.dumps(result)
+
+
+# ── Terminal vs transient token failures ──────────────────────────
+#
+# `invalid_grant` means the refresh token is dead and only re-authorization
+# brings the mailbox back; a timeout means try again in a minute. The old
+# helper returned None for both, so a permanently broken account looked
+# exactly like a network hiccup and every hiccup told the user to reconnect.
+
+
+def _token_response(status, body):
+    resp = mock.MagicMock()
+    resp.status_code = status
+    resp.json.return_value = body
+    resp.raise_for_status.side_effect = Exception(f"{status} error")
+    return resp
+
+
+@pytest.mark.parametrize("error_code", [
+    "invalid_grant", "invalid_client", "unauthorized_client", "invalid_scope",
+])
+def test_dead_grant_is_terminal(error_code):
+    from routes.email_helpers import _classify_google_token_failure, TOKEN_TERMINAL
+
+    assert _classify_google_token_failure(_token_response(400, {"error": error_code})) == TOKEN_TERMINAL
+
+
+def test_no_response_at_all_is_transient():
+    """DNS failure, TLS error, timeout: Google never answered, so nothing was
+    learned about whether the grant is still good."""
+    from routes.email_helpers import _classify_google_token_failure, TOKEN_TRANSIENT
+
+    assert _classify_google_token_failure(None) == TOKEN_TRANSIENT
+
+
+def test_server_error_is_transient():
+    from routes.email_helpers import _classify_google_token_failure, TOKEN_TRANSIENT
+
+    assert _classify_google_token_failure(_token_response(503, {})) == TOKEN_TRANSIENT
+    assert _classify_google_token_failure(_token_response(429, {"error": "rate_limit"})) == TOKEN_TRANSIENT
+
+
+def test_unparseable_body_falls_back_to_status():
+    from routes.email_helpers import (
+        _classify_google_token_failure, TOKEN_TERMINAL, TOKEN_TRANSIENT,
+    )
+
+    broken = mock.MagicMock()
+    broken.status_code = 400
+    broken.json.side_effect = ValueError("not json")
+    assert _classify_google_token_failure(broken) == TOKEN_TERMINAL
+
+    broken.status_code = 500
+    assert _classify_google_token_failure(broken) == TOKEN_TRANSIENT
+
+
+def test_refresh_status_reports_terminal_for_revoked_refresh_token():
+    from src.secret_storage import encrypt as _enc
+    from routes.email_helpers import TOKEN_TERMINAL
+
+    db, Factory = _make_db()
+    _make_account(db, account_id="acct-revoked", owner="dave",
+                  oauth_refresh_token=_enc("ref-tok"))
+    db.close()
+
+    with mock.patch("httpx.post", return_value=_token_response(400, {"error": "invalid_grant"})), \
+         mock.patch("core.database.SessionLocal", Factory), \
+         mock.patch("routes.email_helpers.os.environ.get", side_effect=lambda k, d="": {
+             "GOOGLE_OAUTH_CLIENT_ID": "cid", "GOOGLE_OAUTH_CLIENT_SECRET": "csec"
+         }.get(k, d)):
+        from routes.email_helpers import _refresh_google_token_status
+        token, kind = _refresh_google_token_status("acct-revoked")
+
+    assert token is None
+    assert kind == TOKEN_TERMINAL
+
+
+def test_refresh_status_reports_transient_when_google_is_unreachable():
+    from src.secret_storage import encrypt as _enc
+    from routes.email_helpers import TOKEN_TRANSIENT
+
+    db, Factory = _make_db()
+    _make_account(db, account_id="acct-blip", owner="dave",
+                  oauth_refresh_token=_enc("ref-tok"))
+    db.close()
+
+    with mock.patch("httpx.post", side_effect=OSError("connection reset")), \
+         mock.patch("core.database.SessionLocal", Factory), \
+         mock.patch("routes.email_helpers.os.environ.get", side_effect=lambda k, d="": {
+             "GOOGLE_OAUTH_CLIENT_ID": "cid", "GOOGLE_OAUTH_CLIENT_SECRET": "csec"
+         }.get(k, d)):
+        from routes.email_helpers import _refresh_google_token_status
+        token, kind = _refresh_google_token_status("acct-blip")
+
+    assert token is None
+    assert kind == TOKEN_TRANSIENT
+
+
+def test_failure_messages_differ_and_carry_no_secrets():
+    from routes.email_helpers import (
+        google_token_failure_message, TOKEN_TERMINAL, TOKEN_TRANSIENT,
+    )
+
+    terminal = google_token_failure_message(TOKEN_TERMINAL)
+    transient = google_token_failure_message(TOKEN_TRANSIENT)
+
+    assert terminal != transient
+    assert "reconnect" in terminal.lower()
+    assert "temporary" in transient.lower()
+    assert "reconnect" not in transient.lower(), \
+        "a network blip must not send the user off to re-authorize"
+    for text in (terminal, transient):
+        for secret in ("ya29", "ref-tok", "csec", "client_secret", "refresh_token"):
+            assert secret not in text
+
+
+def test_imap_connect_reports_a_transient_failure_as_transient():
+    """The message raised here is what the email library's error banner shows."""
+    from routes.email_helpers import _imap_connect, TOKEN_TRANSIENT, google_token_failure_message
+
+    cfg = {
+        "imap_host": "imap.gmail.com", "imap_port": 993, "imap_user": "u@example.com",
+        "imap_password": "", "imap_starttls": False, "oauth_provider": "google",
+        "account_id": "acct-blip", "account_name": "Gmail",
+    }
+
+    with mock.patch("routes.email_helpers._get_email_config", return_value=cfg), \
+         mock.patch("routes.email_helpers._open_imap_connection", return_value=mock.MagicMock()), \
+         mock.patch("routes.email_helpers._get_valid_google_token_status",
+                    return_value=(None, TOKEN_TRANSIENT)):
+        with pytest.raises(RuntimeError) as excinfo:
+            _imap_connect("acct-blip", owner="dave")
+
+    assert str(excinfo.value) == google_token_failure_message(TOKEN_TRANSIENT)
