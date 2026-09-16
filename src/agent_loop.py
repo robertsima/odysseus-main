@@ -3775,7 +3775,12 @@ def _resolve_tool_blocks(
             if block:
                 tool_blocks.append(block)
                 converted_calls.append(tc)
-                logger.info(f"  -> converted: {tc_name} -> {block.tool_type}")
+                # A real rename is worth seeing at INFO; the identity mapping
+                # (`read_file -> read_file`) is one line per call per round that
+                # says nothing, and buries the rounds that matter. Same line,
+                # demoted to DEBUG when nothing changed.
+                _log_converted = logger.info if tc_name != block.tool_type else logger.debug
+                _log_converted(f"  -> converted: {tc_name} -> {block.tool_type}")
             else:
                 logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]}")
         if tool_blocks:
@@ -7336,8 +7341,15 @@ async def stream_agent_loop(
     # If the loop hit the round cap while still working, tell the client so it
     # can show a "Continue" affordance instead of the turn just stopping.
     if _exhausted_rounds:
-        logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
-        yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+        # Carry how far the turn got, not just that it was cut off. A chat has
+        # the transcript in front of it, but a headless caller (worker,
+        # sub-agent, background follow-up) sees only this frame and the prose,
+        # and has to tell its parent where to resume from — see
+        # `headless_agent._rounds_exhausted_note`.
+        logger.info("[agent] round cap (%d) reached mid-task after %d tool call(s) — emitting rounds_exhausted",
+                    max_rounds, len(tool_events))
+        yield (f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds, "tool_calls": len(tool_events)})}'
+               "\n\n")
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

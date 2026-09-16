@@ -115,6 +115,37 @@ def test_tool_set_diff_line_is_info_only_when_the_set_changes():
     assert re.search(r'logger\.info\(\s*"\[agent-debug\] round=%s model=%s', src) is None
 
 
+# ── native-call conversion logging ──
+#
+# One INFO line per native tool call, per round, for a mapping that changed
+# nothing: `-> converted: read_file -> read_file`. A five-call round is five
+# lines of no information between the lines that matter.
+
+
+def _conversion_records(caplog, calls):
+    from src import agent_loop
+
+    caplog.clear()
+    with caplog.at_level("DEBUG", logger="src.agent_loop"):
+        agent_loop._resolve_tool_blocks("", calls, 1)
+    return [r for r in caplog.records if "-> converted:" in r.getMessage()]
+
+
+def test_an_unchanged_tool_name_logs_at_debug(caplog):
+    records = _conversion_records(caplog, [
+        {"name": "read_file", "arguments": '{"path": "a.py"}'},
+        {"name": "grep", "arguments": '{"pattern": "x"}'},
+    ])
+    assert [r.levelname for r in records] == ["DEBUG", "DEBUG"]
+
+
+def test_a_real_rename_is_still_info(caplog):
+    # `shell` really does execute as `bash` — that one is worth seeing.
+    records = _conversion_records(caplog, [{"name": "shell", "arguments": '{"command": "ls"}'}])
+    assert [r.levelname for r in records] == ["INFO"]
+    assert "shell -> bash" in records[0].getMessage()
+
+
 def test_image_generation_off_disables_generate_image_in_the_selection():
     from src import agent_loop
     src = inspect.getsource(agent_loop.stream_agent_loop)

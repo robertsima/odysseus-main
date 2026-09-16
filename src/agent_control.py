@@ -240,10 +240,16 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         context.append({"role": "system", "content": profile["instructions"]})
     context.append({"role": "user", "content": task})
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
+    # The loadout's own round budget (validate_profiles clamps it to 1..40, and
+    # defaults it to DEFAULT_ROUNDS). Recorded on the run and returned to the
+    # caller because it is the number a "ran out of rounds" result has to be read
+    # against — otherwise the cap that ended a worker is invisible until someone
+    # reopens the loadout in Settings.
+    rounds = int(profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS)
     run_id = activity.run_started(
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
-              "mode": "agent", "launched_from": "dashboard",
+              "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
               **({"profile": profile["name"]} if profile and profile.get("name") else {})},
         detail=task[:1500],
     )
@@ -260,12 +266,18 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             with agent_runs.track_external(sess.id, source="worker", owner=owner):
                 text, events = await run_headless(
                     sess, context,
-                    max_rounds=profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS,
+                    max_rounds=rounds,
                     disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
                     activity_session_id=sess.id, run_id=run_id, source="session", owner=owner, outcome=outcome,
                 )
             if outcome.get("stopped"):
                 status = "cancelled"
+            elif outcome.get("rounds_exhausted"):
+                # It did real work and then ran out of rounds. Reporting that as
+                # "completed" is what let a cut-off worker hand the parent an
+                # empty result that read like a finished one; `run_headless` has
+                # already appended the "here is where I got to" line to `text`.
+                status = "incomplete"
         except asyncio.CancelledError:
             status = "cancelled"
         except Exception as exc:
@@ -294,7 +306,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         _WORKERS.pop(run_id, None)
 
     _WORKERS[run_id] = asyncio.create_task(_run())
-    return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model}
+    return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
+            "max_rounds": rounds}
 
 
 _HANDOFF_MAX_ROUNDS = 12
@@ -316,9 +329,11 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     parent = manager.get_session(parent_id)
     if parent is None:
         return
-    headline = "finished" if status == "completed" else status
+    headline = {"completed": "finished", "incomplete": "ran out of rounds"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
-              "Continue the task using this result. Don't repeat work the worker already did. "
+              + ("The worker was cut off by its round budget, so the result above is partial — "
+                 "pick the task up from where it stopped. " if status == "incomplete" else "")
+              + "Continue the task using this result. Don't repeat work the worker already did. "
               "If the task is now complete, give the user the final result.")
     parent.add_message(ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
                                                     "from_session_name": worker.name, "direction": "inbound"}))
@@ -332,12 +347,15 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})
     reply, events = "", []
+    # The continuation is itself a bounded agent run, so it can be cut off the
+    # same way the worker was — report that rather than closing the run green.
+    followup: Dict[str, Any] = {}
     try:
         with agent_runs.track_external(parent_id, source="worker", owner=owner):
             reply, events = await run_headless(parent, parent.get_context_messages(), max_rounds=_HANDOFF_MAX_ROUNDS,
                                                disabled_tools=None, activity_session_id=parent_id, run_id=run_id,
-                                               source="session", owner=owner)
-        status = "completed"
+                                               source="session", owner=owner, outcome=followup)
+        status = "incomplete" if followup.get("rounds_exhausted") else "completed"
     except Exception as exc:
         reply, status = f"Could not continue after the worker: {exc}", "failed"
     meta: Dict[str, Any] = {"model": parent.model, "source": "worker_followup", "worker_session": worker.id}
