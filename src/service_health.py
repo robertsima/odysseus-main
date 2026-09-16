@@ -343,6 +343,38 @@ def email_health(accounts: List[Dict[str, Any]],
 
 # ── Provider endpoints ──
 
+def _endpoint_probe_input(row) -> Dict[str, Any]:
+    """The {name, base_url, api_key} a probe needs, with credentials resolved.
+
+    Reading `row.api_key` straight off the ORM is the trap
+    `endpoint_resolver.endpoint_runtime_headers` exists to prevent: a
+    session-backed provider (ChatGPT subscription, GitHub Copilot) keeps its
+    credential in ProviderAuthSession and mints a short-lived token per call,
+    leaving that column empty. `_probe_endpoint` then takes the
+    `chatgpt-subscription` branch, finds no key, and returns no models — so a
+    provider that is connected and answering requests is reported `no_models`,
+    i.e. down. Observed 2026-09-16: the diagnostics page called the ChatGPT
+    provider unhealthy while the same endpoint was serving 200s all session.
+
+    Falls back to the stored key when the resolve fails, matching
+    `endpoint_runtime_headers`: a provider with a broken refresh degrades to
+    the old reading rather than to no auth at all.
+    """
+    api_key = getattr(row, "api_key", None)
+    base_url = getattr(row, "base_url", "")
+    try:
+        from src.endpoint_resolver import resolve_endpoint_runtime
+
+        resolved_base, resolved_key = resolve_endpoint_runtime(row)
+        base_url = resolved_base or base_url
+        api_key = resolved_key or api_key
+    except Exception as e:
+        # Never log the key or the raw URL — this record reaches diagnostics.
+        logger.debug("service_health: runtime credential resolve failed for %s: %s",
+                     _safe_url(getattr(row, "base_url", "")), e)
+    return {"name": getattr(row, "name", ""), "base_url": base_url, "api_key": api_key}
+
+
 def providers_health(endpoints: List[Dict[str, Any]],
                      *, probe: Optional[Callable] = None) -> Dict[str, Any]:
     """Probe each enabled model endpoint's model list, concurrently.
@@ -438,8 +470,7 @@ def _gather_inputs() -> Dict[str, Any]:
         try:
             rows = db.query(ModelEndpoint).filter(
                 ModelEndpoint.is_enabled == True).all()  # noqa: E712
-            endpoints = [{"name": r.name, "base_url": r.base_url,
-                          "api_key": r.api_key} for r in rows]
+            endpoints = [_endpoint_probe_input(r) for r in rows]
         finally:
             db.close()
     except Exception as e:
