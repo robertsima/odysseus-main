@@ -125,8 +125,12 @@ def send(to_session: str, text: str, *, from_session: str, owner: Optional[str] 
     are turn-ending mistakes a calling agent should be told about and recover
     from, not crashes.
 
-    On success: ``{"ok": True, "to_session", "queued_text", "pending",
-    "budget_remaining"}``.
+    On success: ``{"ok": True, "to_session", "message_id", "state",
+    "queued_text", "pending", "budget_remaining"}``. ``message_id`` is the
+    steering message's id: the sender's turn ends long before the recipient
+    reads anything, so the id is the only handle it has for asking later
+    whether the message was ever taken (``agent_control.steer_history``), and
+    it is worth putting in the sender's own transcript.
     """
     to_session = str(to_session or "").strip()
     from_session = str(from_session or "").strip()
@@ -170,13 +174,21 @@ def send(to_session: str, text: str, *, from_session: str, owner: Optional[str] 
     except ValueError as exc:
         # _STEER_MAX reached for the recipient (or, defensively, empty text
         # after normalizing) -- a clean refusal, not a stack trace the caller
-        # has no way to act on.
+        # has no way to act on. A full queue also lands on the RECIPIENT's
+        # activity feed as a failed steering message (agent_control.steer), so
+        # the message a peer thought it sent is not invisible to the operator
+        # watching that agent. The earlier refusals above are deliberately not
+        # published there: they are the sender's own problem (feature off, no
+        # budget, self-send) or a cross-owner miss that must not write anything
+        # into a timeline the caller cannot see.
         return {"ok": False, "reason": f"could not queue for {to_session!r}: {exc}"}
 
     _SEND_COUNTS[key] = used + 1
     return {
         "ok": True,
         "to_session": to_session,
+        "message_id": rec.get("id"),
+        "state": rec.get("state"),
         "queued_text": rec["text"],
         "pending": len(agent_control.pending_steer(to_session)),
         "budget_remaining": budget - _SEND_COUNTS[key],

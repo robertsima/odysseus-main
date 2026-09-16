@@ -25,12 +25,18 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _clear_steer_queue():
-    from src import agent_control
+def _clear_steer_queue(tmp_path, monkeypatch):
+    from src import agent_activity, agent_control, constants
 
+    # Queueing a steer writes to the activity feed (that feed is where a
+    # steering message's history lives), so the data directory is relocated for
+    # every case here — otherwise these tests would append to the real one.
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+    agent_activity._reset_for_tests()
     agent_control._STEER.clear()
     yield
     agent_control._STEER.clear()
+    agent_activity._reset_for_tests()
 
 
 class TestSteerQueueLifecycle:
@@ -162,3 +168,103 @@ class TestClientTrustsTheServer:
         # the background runs it exists to display.
         assert "apiPoll('/api/agents/overview')" in src
         assert "apiPoll('/api/agents/approvals')" in src
+
+
+class TestSteerIsObservable:
+    """A queued steer used to leave no trace: the queue emptied whether the
+    loop read the message or the turn ended and dropped it, so "did that
+    correction land?" had no answer. Each message now carries an id and moves
+    through states that are written to the activity feed, which is what makes
+    the answer survive the turn."""
+
+    def _states(self, session_id):
+        from src import agent_control
+
+        return [(row["id"], row["state"]) for row in agent_control.steer_history(session_id)]
+
+    def test_queue_drain_and_injection_are_three_separate_facts(self):
+        from src import agent_control
+
+        rec = agent_control.steer("s", "use the staging database")
+        assert rec["state"] == "queued" and rec["id"]
+        assert self._states("s") == [(rec["id"], "queued")]
+
+        # Draining is the running turn taking ownership — on its own it is not
+        # proof the model was given anything.
+        drained = agent_control.drain_steer_records("s", round_num=4)
+        assert [r["state"] for r in drained] == ["acknowledged"]
+        assert self._states("s") == [(rec["id"], "acknowledged")]
+
+        agent_control.mark_injected(drained[0], round_num=4)
+        history = agent_control.steer_history("s")
+        assert history[0]["state"] == "injected"
+        assert history[0]["round"] == 4
+        # Every transition kept its own timestamp, which is what makes an age
+        # ("queued 40s ago, still not picked up") possible after the fact.
+        assert set(history[0]["timestamps"]) == {"queued", "acknowledged", "injected"}
+
+    def test_completed_is_never_claimed(self):
+        """Nothing observes a steering message being carried out, so nothing
+        may say it was. A fabricated terminal state is worse than a missing
+        one: it is the false assurance this whole change exists to remove."""
+        from src import agent_control
+
+        assert "completed" not in agent_control.STEER_STATES
+        assert "superseded" not in agent_control.STEER_STATES
+        rec = agent_control.steer("s", "stop and summarise")
+        agent_control.mark_injected(agent_control.drain_steer_records("s")[0], round_num=1)
+        agent_control.clear_steer("s")  # the turn ends after the injection
+        row = agent_control.steer_history("s")[0]
+        assert row["id"] == rec["id"]
+        assert row["state"] == "injected", "turn end is not evidence the agent acted on it"
+
+    def test_a_dropped_message_says_so_and_says_why(self):
+        from src import agent_control
+
+        agent_control.steer("s", "too late")
+        assert agent_control.clear_steer("s") == ["too late"]
+        row = agent_control.steer_history("s")[0]
+        assert row["state"] == "cancelled"
+        assert "turn ended" in row["reason"]
+
+    def test_a_refused_message_is_recorded_against_the_target(self):
+        """The sender gets an error; without this the target's own timeline
+        never mentions that someone tried to correct it."""
+        from src import agent_control
+
+        agent_control.note_refused("s", "focus on the migration", "not queued: the chat was not running")
+        row = agent_control.steer_history("s")[0]
+        assert row["state"] == "failed" and row["reason"].startswith("not queued")
+        assert agent_control.pending_steer("s") == []
+
+    def test_a_full_queue_is_a_failure_with_a_reason_not_just_an_exception(self):
+        from src import agent_control
+
+        for i in range(agent_control._STEER_MAX):
+            agent_control.steer("s", f"m{i}")
+        with pytest.raises(ValueError):
+            agent_control.steer("s", "one too many")
+        refused = [row for row in agent_control.steer_history("s", limit=50) if row["state"] == "failed"]
+        assert len(refused) == 1 and "queue full" in refused[0]["reason"]
+
+    def test_history_outlives_the_in_memory_queue(self):
+        """The queue is memory only. A process restart empties it, and a
+        message left in it is not waiting for anything — steer_status says so
+        rather than showing it as pending forever."""
+        from src import agent_control
+
+        agent_control.steer("s", "survives a restart")
+        agent_control._STEER.clear()  # what a restart looks like from here
+        status = agent_control.steer_status("s")
+        assert status["queued"] == 0
+        assert status["messages"][0]["state"] == "queued"
+        assert status["messages"][0]["live"] is False
+
+    def test_peer_messages_get_the_same_lifecycle(self):
+        from src import agent_control
+
+        agent_control.steer("s", "found the bug, don't also fix it", kind="peer",
+                            from_session="a1", from_session_name="Parser fix")
+        row = agent_control.steer_history("s")[0]
+        assert row["kind"] == "peer" and row["from_session"] == "a1"
+        assert row["state"] == "queued"

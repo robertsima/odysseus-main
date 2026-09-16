@@ -6295,18 +6295,25 @@ async def stream_agent_loop(
         # peer message already carries its own attribution from agent_mailbox
         # (which bakes it into the text so attribution survives any drain path),
         # so it is passed through rather than wrapped twice and contradicted.
-        for _steer_rec in _agent_control.drain_steer_records(session_id):
+        #
+        # Draining is also the only moment anything can witness a steer being
+        # picked up, so the two halves are reported separately: the drain marks
+        # each record `acknowledged` (this round took it), and `mark_injected`
+        # below is called only after the message is really in `messages` for
+        # the model. A record that falls into the `mark_failed` branch is the
+        # case that used to disappear without trace — queued, drained, and then
+        # never given to anyone.
+        for _steer_rec in _agent_control.drain_steer_records(session_id, round_num=round_num):
             _steer_text = _steer_rec.get("text") or ""
             if not _steer_text:
+                _agent_control.mark_failed(_steer_rec, "empty after draining", round_num=round_num,
+                                           run_id=_activity_run_id)
                 continue
             _is_peer = str(_steer_rec.get("kind") or "user") == "peer"
             _steer_msg = _steer_text if _is_peer else f"[Mid-task instruction from the user] {_steer_text}"
             messages.append({"role": "user", "content": _steer_msg})
-            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user"})}\n\n'
-            _activity.publish(session_id, "status",
-                              f"{'Peer message' if _is_peer else 'Steer'} applied: {_steer_text[:160]}",
-                              source="odysseus",
-                              run_id=_activity_run_id, owner=owner, detail=_steer_text)
+            _agent_control.mark_injected(_steer_rec, round_num=round_num, run_id=_activity_run_id)
+            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user", "steer_id": _steer_rec.get("id")})}\n\n'
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         round_reasoning_items = []  # opaque Responses reasoning items, replayed next round

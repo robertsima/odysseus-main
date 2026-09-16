@@ -134,6 +134,50 @@ async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, mo
     assert seen["messages"][-1]["content"].endswith("focus on tests")
     assert agent_control.pending_steer("a1") == []
 
+    # Leaving the queue is no longer the end of the story: the message reached
+    # `injected`, and says which round took it.
+    row = agent_control.steer_history("a1")[0]
+    assert (row["id"], row["state"], row["round"]) == (out["id"], "injected", 1)
+
+
+async def test_steer_lifecycle_is_visible_to_the_control_room(env, monkeypatch):
+    """The dashboard has to be able to show a steer that never landed — that
+    is the failure being fixed — so state travels with the overview row and
+    there is a per-chat log for after the turn is over."""
+    mgr, eps = env
+    steer = eps[("POST", "/api/agents/sessions/{session_id}/steer")]
+    steer_log = eps[("GET", "/api/agents/sessions/{session_id}/steer")]
+    from fastapi import HTTPException
+
+    # Refused because nothing is running: the sender sees an error, and the
+    # target chat's own record now mentions the attempt.
+    with pytest.raises(HTTPException):
+        await steer(_req({"text": "never lands"}), session_id="a1")
+    refused = await steer_log(_req(), session_id="a1")
+    assert refused["queued"] == 0
+    assert refused["messages"][0]["state"] == "failed"
+    assert "not queued" in refused["messages"][0]["reason"]
+
+    with agent_runs.track_external("a1", source="bg_job", owner="alice"):
+        queued = await steer(_req({"text": "use the staging database"}), session_id="a1")
+        ov = await eps[("GET", "/api/agents/overview")](_req())
+        row = next(r for r in ov["rows"] if r["session_id"] == "a1")
+        # The old count still means what it meant, and now has company.
+        assert row["steer_queued"] == 1 and row["steer"]["queued"] == 1
+        newest = row["steer"]["messages"][0]
+        assert (newest["id"], newest["state"], newest["live"]) == (queued["id"], "queued", True)
+        assert newest["text"] == "use the staging database"
+
+    # Nothing drained it before the turn ended.
+    agent_control.clear_steer("a1")
+    after = await steer_log(_req(), session_id="a1")
+    assert after["queued"] == 0
+    assert after["messages"][0]["state"] == "cancelled"
+    assert "turn ended" in after["messages"][0]["reason"]
+
+    with pytest.raises(HTTPException):  # still owner-scoped
+        await steer_log(_req(), session_id="b1")
+
 
 async def test_launch_starts_a_worker_chat_and_stop_ends_it(env, monkeypatch):
     mgr, eps = env

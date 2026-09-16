@@ -10,6 +10,8 @@ stop and launch their agents.
 * ``GET  /runs/{id}/events``    — one run's events.
 * ``POST /runs/{id}/stop``      — stop one run.
 * ``POST /sessions/{id}/steer`` — queue a mid-task instruction for a running turn.
+* ``GET  /sessions/{id}/steer`` — that chat's recent steering messages and the
+  state each one reached (queued / acknowledged / injected / cancelled / failed).
 * ``GET  /approvals``           — pending tool approvals across the caller's chats.
 * ``POST /launch``              — start a worker profile in a fresh chat.
 """
@@ -108,7 +110,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
                              for c in sorted(children, key=lambda c: c.get("started_at") or 0, reverse=True)[:12]],
                 "children_running": len(live_children),
                 "pending_approvals": pending.get(sid, 0),
+                # `steer_queued` is unchanged and still means "waiting for a
+                # turn to pick it up" — it just no longer has to stand in for
+                # the whole story, because `steer` carries the recent messages
+                # with the state each one reached and why. Capped at five per
+                # row: this is a fleet overview, and the full log for one chat
+                # is GET /sessions/{id}/steer.
                 "steer_queued": len(agent_control.pending_steer(sid)),
+                "steer": agent_control.steer_status(sid, limit=5),
                 "profile": settings.get("agent_profile"),
                 "parent_session": settings.get("parent_session"),
                 "approval_mode": settings.get("approval_mode"),
@@ -251,19 +260,47 @@ def setup_agents_routes(session_manager) -> APIRouter:
     async def steer(request: Request, session_id: str):
         user = _require_owned(request, session_id)
         body = await request.json()
+        text = str((body or {}).get("text") or "")
+        # Every refusal below is recorded against the target chat as a failed
+        # steering message before it is raised. The caller sees an error either
+        # way; what it buys is that someone reading that agent's timeline later
+        # can see a correction was attempted and why it did not land — which
+        # used to exist only as a toast in one browser. The reasons say only
+        # what is true (the message was not queued as a steer) and not that it
+        # was lost: the chat composer answers this same 409 by sending the text
+        # as an ordinary next turn (static/js/chat.js), and that delivery shows
+        # up in the transcript on its own.
         if not agent_runs.is_busy(session_id):
+            agent_control.note_refused(session_id, text, "not queued: the chat was not running", owner=user)
             raise HTTPException(409, "That chat is not running; send it a normal message instead")
         # Only the agent loop drains the queue, and only between rounds. A plain
         # single-shot reply is "busy" but has no rounds, so accepting a steer for
         # one would swallow the message outright. 409 tells the caller to send it
         # as an ordinary turn instead.
         if not agent_control.is_steerable(session_id):
+            agent_control.note_refused(session_id, text, "not queued: the chat was not running an agent turn",
+                                       owner=user)
             raise HTTPException(409, "That chat is not running an agent turn; send it a normal message instead")
         try:
-            rec = agent_control.steer(session_id, str((body or {}).get("text") or ""), owner=user)
+            rec = agent_control.steer(session_id, text, owner=user)
         except ValueError as exc:
             raise HTTPException(400, str(exc))
-        return {"queued": True, "text": rec["text"], "pending": len(agent_control.pending_steer(session_id))}
+        return {"queued": True, "id": rec["id"], "state": rec["state"], "text": rec["text"],
+                "pending": len(agent_control.pending_steer(session_id))}
+
+    @router.get("/sessions/{session_id}/steer")
+    async def steer_log(request: Request, session_id: str, limit: int = 50):
+        """Every recent steering message for one chat, with its lifecycle.
+
+        The overview carries the last few per row, which is what the detail
+        pane renders; this is the after-the-fact view for one chat — including
+        chats the overview has dropped because they have been idle for a day.
+        It reads the activity feed, so it answers for messages that left the
+        in-memory queue long ago.
+        """
+        _require_owned(request, session_id)
+        return {"session_id": session_id,
+                **agent_control.steer_status(session_id, limit=max(1, min(int(limit or 50), 200)))}
 
     @router.get("/approvals")
     async def approvals(request: Request):
