@@ -31,7 +31,7 @@ import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260826assistanttab1';
 import calendarModule from './js/calendar.js';
-import notesModule from './js/notes.js';
+import notesModule from './js/notes.js?v=20260915vaulttree1';
 import lotusModule from './js/lotus.js';
 import adminModule from './js/admin.js?v=20260716openrouter3';
 import settingsModule from './js/settings.js?v=20260722emailfastindex1';

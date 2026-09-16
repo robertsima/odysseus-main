@@ -34664,89 +34664,117 @@ body.notes-drag-mode .note-card-pin svg {
   min-height: 0;
 }
 .vault-browser {
+  --vault-public: var(--color-success, var(--green));
+  --vault-private: var(--hl-keyword, var(--accent, var(--red)));
+  --vault-readonly: var(--color-warning, var(--warn));
+  --vault-active: var(--color-accent, var(--accent, var(--red)));
   height: 100%;
   min-height: 0;
   display: flex;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--bg);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .vault-tree-pane {
-  width: 34%;
-  min-width: 190px;
-  max-width: 320px;
+  width: 31%;
+  min-width: 210px;
+  max-width: 340px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
-  background: color-mix(in srgb, var(--panel) 78%, var(--bg));
+  background: color-mix(in srgb, var(--panel) 86%, var(--bg));
 }
 .vault-tree-heading {
-  height: 34px;
+  min-height: 42px;
   flex-shrink: 0;
-  padding: 0 7px 0 10px;
+  padding: 0 8px 0 11px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   border-bottom: 1px solid var(--border);
-  color: color-mix(in srgb, var(--fg) 62%, transparent);
-  font-size: 10px;
-  font-weight: 650;
-  text-transform: uppercase;
-  letter-spacing: .05em;
+  color: color-mix(in srgb, var(--fg) 72%, transparent);
 }
+.vault-tree-heading > span { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.vault-tree-heading > span b { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .055em; }
+.vault-tree-heading > span small { color: color-mix(in srgb, var(--fg) 42%, transparent); font-size: 8.5px; font-weight: 500; }
+.vault-tree-actions { display: flex; gap: 2px; }
 .vault-tree-heading button {
-  border: 0;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 6px;
   background: transparent;
-  color: var(--fg);
-  opacity: .62;
+  color: color-mix(in srgb, var(--fg) 62%, transparent);
   cursor: pointer;
-  font-size: 17px;
 }
-.vault-tree-heading button:hover { opacity: 1; }
+.vault-tree-heading button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.vault-tree-heading button:hover { color: var(--fg); border-color: var(--border); background: color-mix(in srgb, var(--fg) 6%, transparent); }
+.vault-tree-heading button:disabled { opacity: .3; cursor: default; border-color: transparent; background: transparent; }
 .vault-tree {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 5px;
+  padding: 6px;
+  scrollbar-width: thin;
 }
 .vault-tree-folder { margin: 0; }
+.vault-tree-folder[open] { position: relative; }
+.vault-tree-folder[open]::after {
+  content: '';
+  position: absolute;
+  left: calc(15px + var(--vault-indent, 0px));
+  top: 27px;
+  bottom: 3px;
+  width: 1px;
+  background: color-mix(in srgb, var(--border) 65%, transparent);
+  pointer-events: none;
+}
 .vault-tree-folder > summary,
 .vault-tree-file {
-  --vault-indent: 0px;
   width: 100%;
-  min-height: 28px;
+  min-height: 27px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px 4px calc(6px + var(--vault-indent));
-  color: color-mix(in srgb, var(--fg) 78%, transparent);
+  gap: 7px;
+  padding: 3px 6px 3px calc(6px + var(--vault-indent));
+  color: color-mix(in srgb, var(--fg) 76%, transparent);
   border: 0;
-  border-radius: 5px;
+  border-radius: 6px;
   background: transparent;
   font: inherit;
-  font-size: 11px;
+  font-size: 10.5px;
   text-align: left;
   cursor: pointer;
   box-sizing: border-box;
 }
-.vault-tree-folder > summary { list-style: none; font-weight: 600; }
+.vault-tree-folder > summary { list-style: none; font-weight: 620; user-select: none; }
 .vault-tree-folder > summary::-webkit-details-marker { display: none; }
 .vault-tree-folder > summary::before {
   content: '›';
-  width: 8px;
+  width: 9px;
   transform: rotate(90deg);
   transition: transform .12s ease;
   opacity: .55;
 }
 .vault-tree-folder:not([open]) > summary::before { transform: rotate(0); }
-.vault-tree-file { padding-left: calc(20px + var(--vault-indent)); }
+.vault-tree-folder > summary small { margin-left: auto; color: color-mix(in srgb, var(--fg) 35%, transparent); font: 8px/1 var(--mono, ui-monospace, monospace); }
+.vault-tree-file { position: relative; padding-left: calc(22px + var(--vault-indent)); z-index: 1; }
 .vault-tree-file:hover,
 .vault-tree-folder > summary:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
 .vault-tree-file.active {
-  color: var(--accent, var(--red));
-  background: color-mix(in srgb, var(--accent, var(--red)) 13%, transparent);
+  color: var(--vault-active);
+  background: color-mix(in srgb, var(--vault-active) 13%, transparent);
+  box-shadow: inset 2px 0 0 var(--vault-active);
 }
+.vault-tree-file:focus-visible,
+.vault-tree-folder > summary:focus-visible,
+.vault-tree-heading button:focus-visible,
+.vault-save-btn:focus-visible { outline: 2px solid var(--vault-active); outline-offset: -2px; }
 .vault-tree-file svg,
 .vault-tree-folder summary svg {
   width: 13px;
@@ -34763,12 +34791,13 @@ body.notes-drag-mode .note-card-pin svg {
   text-overflow: ellipsis;
 }
 .vault-policy-dot {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   margin-left: auto;
-  flex: 0 0 6px;
+  flex: 0 0 5px;
   border-radius: 50%;
-  background: #68b984;
+  background: var(--vault-public);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-public) 24%, transparent);
 }
 .vault-policy-dots {
   display: inline-flex;
@@ -34777,8 +34806,14 @@ body.notes-drag-mode .note-card-pin svg {
   margin-left: auto;
 }
 .vault-policy-dots .vault-policy-dot { margin-left: 0; }
-.vault-policy-dot.private { background: #d782e8; }
-.vault-policy-dot.readonly { background: #e6b25d; }
+.vault-policy-dot.private { background: var(--vault-private); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-private) 24%, transparent); }
+.vault-policy-dot.readonly { background: var(--vault-readonly); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-readonly) 24%, transparent); }
+.vault-search-result { min-height: 38px; padding-left: 8px; }
+.vault-search-file-name { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
+.vault-search-file-name b,
+.vault-search-file-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vault-search-file-name b { font-size: 10.5px; }
+.vault-search-file-name small { color: color-mix(in srgb, var(--fg) 42%, transparent); font-size: 8px; }
 .vault-tree-empty,
 .vault-loading {
   padding: 22px 12px;
@@ -34792,7 +34827,7 @@ body.notes-drag-mode .note-card-pin svg {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
 }
 .vault-editor-header {
   min-height: 46px;
@@ -34820,20 +34855,20 @@ body.notes-drag-mode .note-card-pin svg {
 .vault-policy-badge {
   padding: 3px 7px;
   border-radius: 999px;
-  border: 1px solid color-mix(in srgb, #68b984 55%, var(--border));
-  color: #68b984;
+  border: 1px solid color-mix(in srgb, var(--vault-public) 55%, var(--border));
+  color: var(--vault-public);
   font-size: 9px;
   font-weight: 700;
   text-transform: uppercase;
 }
 .vault-policy-badges { display: inline-flex; align-items: center; gap: 4px; }
-.vault-policy-badge.private { color: #d782e8; border-color: color-mix(in srgb, #d782e8 55%, var(--border)); }
-.vault-policy-badge.readonly { color: #e6b25d; border-color: color-mix(in srgb, #e6b25d 55%, var(--border)); }
+.vault-policy-badge.private { color: var(--vault-private); border-color: color-mix(in srgb, var(--vault-private) 55%, var(--border)); }
+.vault-policy-badge.readonly { color: var(--vault-readonly); border-color: color-mix(in srgb, var(--vault-readonly) 55%, var(--border)); }
 .vault-save-btn {
   border: 1px solid var(--accent, var(--red));
   border-radius: 6px;
   background: var(--accent, var(--red));
-  color: #fff;
+  color: var(--accent-contrast, #fff);
   height: 28px;
   padding: 0 11px;
   font: inherit;
@@ -34858,7 +34893,7 @@ body.notes-drag-mode .note-card-pin svg {
   outline: 0;
   padding: 13px 15px;
   box-sizing: border-box;
-  background: var(--panel);
+  background: color-mix(in srgb, var(--panel) 96%, var(--bg));
   color: var(--fg);
   font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
   font-size: 12px;

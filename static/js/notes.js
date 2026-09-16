@@ -34,6 +34,10 @@ let _vaultTree = null;
 let _vaultFile = null;
 let _vaultLoading = false;
 let _vaultDirty = false;
+// Folders start collapsed and only open after a human toggles them. Keep that
+// explicit state across file loads/search rerenders without persisting it as a
+// surprising default for the next browser session.
+const _vaultExpandedFolders = new Set();
 // Tracks the global keydown listener so closePanel can remove it
 // (previously leaked one per openPanel; on multi-open sessions this
 // stacked dozens of identical handlers).
@@ -594,21 +598,50 @@ function _vaultPolicyLabels(file) {
   return file.readonly ? [sensitivity, 'readonly'] : [sensitivity];
 }
 
+function _vaultFileHtml(node, depth = 0, searchResult = false) {
+  const active = _vaultFile?.path === node.path ? ' active' : '';
+  const policies = _vaultPolicyLabels(node);
+  const policyTags = policies.map(policy => {
+    const label = policy === 'readonly' ? 'Read only' : policy[0].toUpperCase() + policy.slice(1);
+    return `<i class="vault-policy-dot ${_attrEsc(policy)}" role="img" title="LLM policy: ${_attrEsc(label)}" aria-label="${_attrEsc(label)}"></i>`;
+  }).join('');
+  const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>';
+  const name = searchResult
+    ? `<span class="vault-search-file-name"><b>${_esc(node.name)}</b><small>${_esc(node.path)}</small></span>`
+    : `<span>${_esc(node.name)}</span>`;
+  return `<button type="button" class="vault-tree-file${searchResult ? ' vault-search-result' : ''}${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 13}px" title="${_attrEsc(node.path)}">${icon}${name}<span class="vault-policy-dots">${policyTags}</span></button>`;
+}
+
+function _vaultDescendantCount(node) {
+  if (!node) return 0;
+  if (node.type === 'file') return 1;
+  return (node.children || []).reduce((total, child) => total + _vaultDescendantCount(child), 0);
+}
+
 function _vaultTreeHtml(node, depth = 0) {
   if (!node || node.type === 'error') return '';
-  const query = _searchQuery;
-  if (!_vaultNodeMatches(node, query)) return '';
-  if (node.type === 'file') {
-    const active = _vaultFile?.path === node.path ? ' active' : '';
-    const policies = _vaultPolicyLabels(node);
-    const policyDots = policies.map(policy => `<i class="vault-policy-dot ${_attrEsc(policy)}" title="LLM policy: ${_attrEsc(policy)}"></i>`).join('');
-    const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>';
-    return `<button type="button" class="vault-tree-file${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 11}px">${icon}<span>${_esc(node.name)}</span><span class="vault-policy-dots">${policyDots}</span></button>`;
-  }
+  if (node.type === 'file') return _vaultFileHtml(node, depth);
   const visible = (node.children || []).map(child => _vaultTreeHtml(child, depth + 1)).join('');
   if (!visible && depth > 0) return '';
   const folderIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
-  return `<details class="vault-tree-folder" open><summary style="--vault-indent:${depth * 11}px">${folderIcon}<span>${_esc(node.name || 'Vault')}</span></summary>${visible}</details>`;
+  const folderPath = node.path || '';
+  const open = _vaultExpandedFolders.has(folderPath) ? ' open' : '';
+  const count = _vaultDescendantCount(node);
+  return `<details class="vault-tree-folder" data-vault-folder="${_attrEsc(folderPath)}" style="--vault-indent:${depth * 13}px"${open}><summary title="${_attrEsc(folderPath || node.name || 'Vault')}">${folderIcon}<span>${_esc(node.name || 'Vault')}</span><small>${count}</small></summary>${visible}</details>`;
+}
+
+function _vaultSearchHtml(root) {
+  const matches = [];
+  const collect = (node) => {
+    if (!node) return;
+    if (node.type === 'file') {
+      if (_vaultNodeMatches(node, _searchQuery)) matches.push(node);
+      return;
+    }
+    (node.children || []).forEach(collect);
+  };
+  collect(root);
+  return matches.map(node => _vaultFileHtml(node, 0, true)).join('');
 }
 
 function _renderVault() {
@@ -624,15 +657,22 @@ function _renderVault() {
     return;
   }
 
-  const treeHtml = _vaultTreeHtml(_vaultTree);
+  const treeHtml = _searchQuery ? _vaultSearchHtml(_vaultTree) : _vaultTreeHtml(_vaultTree);
+  const fileCount = _vaultDescendantCount(_vaultTree);
   const policies = _vaultPolicyLabels(_vaultFile);
   const policyText = policies.join(' + ');
   const policyBadges = policies.map(policy => `<span class="vault-policy-badge ${_attrEsc(policy)}" title="This label limits LLM and agent access only">${_esc(policy)}</span>`).join('');
   body.innerHTML = `
     <div class="vault-browser">
       <aside class="vault-tree-pane">
-        <div class="vault-tree-heading"><span>Markdown files</span><button type="button" id="vault-tree-refresh" title="Refresh vault tree">↻</button></div>
-        <div class="vault-tree">${treeHtml || '<div class="vault-tree-empty">No matching Markdown files</div>'}</div>
+        <div class="vault-tree-heading">
+          <span><b>${_searchQuery ? 'Search results' : 'Vault files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
+          <div class="vault-tree-actions">
+            <button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_searchQuery ? ' disabled' : ''}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>
+            <button type="button" id="vault-tree-refresh" title="Refresh vault tree" aria-label="Refresh vault tree"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+          </div>
+        </div>
+        <div class="vault-tree" aria-label="Vault file tree">${treeHtml || `<div class="vault-tree-empty">${_searchQuery ? 'No matching Markdown files' : 'No Markdown files found'}</div>`}</div>
       </aside>
       <section class="vault-editor-pane">
         ${_vaultFile ? `
@@ -672,6 +712,17 @@ function _renderVault() {
   document.getElementById('vault-tree-refresh')?.addEventListener('click', async () => {
     await _fetchVaultTree();
     _renderVault();
+  });
+  document.getElementById('vault-tree-collapse')?.addEventListener('click', () => {
+    _vaultExpandedFolders.clear();
+    _renderVault();
+  });
+  body.querySelectorAll('[data-vault-folder]').forEach(folder => {
+    folder.addEventListener('toggle', () => {
+      const path = folder.dataset.vaultFolder || '';
+      if (folder.open) _vaultExpandedFolders.add(path);
+      else _vaultExpandedFolders.delete(path);
+    });
   });
   body.querySelectorAll('[data-vault-file]').forEach(button => {
     button.addEventListener('click', () => _openVaultFile(button.dataset.vaultFile));
