@@ -52,6 +52,79 @@ the codebase, you are probably right to stay away.
   propose safer caching/prefetch/batching without breaking multi-account state.
 - Provider setup/probing audit for Anthropic, Gemini, Groq, xAI, OpenRouter, OpenAI, and DeepSeek.
 
+## Redistributable Control Plane
+
+The first productization pass is now in place: schema-driven configuration,
+capability detection, provider-neutral delegation, Markdown notes in the vault,
+folder/file access policy, a human vault explorer, and enforceable per-agent
+loadouts. The living behavior specification is
+[`specs/personal-directories-and-tool-routing.md`](specs/personal-directories-and-tool-routing.md).
+
+### Next
+
+- [ ] Add versioned agent loadout presets: clone, rename, import/export, diff,
+  restore defaults, and preview the effective policy before save.
+- [ ] Add temporary per-run grants with expiry and revocation for private vault
+  reads, write tools, shell/host control, integrations, and model switching.
+- [ ] Add an admin-readable policy audit log covering profile changes, grants,
+  denied tool calls, private reads, agent messages, and approval decisions.
+- [ ] Add a policy inspector explaining why a selected agent can or cannot use
+  a tool, model, MCP server, memory operation, or vault path.
+- [ ] Turn the monitoring view into a live task topology: parent/child/peer
+  links, active objective, critical path, waiting/approval state, last message,
+  and failure propagation without opening every chat.
+- [ ] Add per-agent budgets for turns, wall time, context, tool calls, parallel
+  children, and optional provider spend. Surface approaching limits before a
+  task is interrupted.
+- [ ] Add loadout assignment rules for scheduled tasks, subagents, externally
+  triggered jobs, and named agent roles—not only already-running sessions.
+- [ ] Complete vault file management: create folder/note, move, rename, delete
+  with recovery, drag-and-drop, keyboard navigation, favorites, and recently
+  opened files.
+- [ ] Add vault indexing telemetry: mounted-root health, discovered/indexed/
+  skipped counts, current file, stale index warning, reindex progress, and
+  actionable Chroma/embedding errors.
+- [ ] Add a policy-aware search preview so an administrator can compare public
+  results with results available to a selected private-enabled agent without
+  exposing private excerpts to unauthorized sessions.
+- [ ] Handle external-edit conflicts explicitly with file revision checks,
+  reload/compare/overwrite choices, and autosave recovery.
+- [ ] Add first-class directory pickers, validated endpoint/host controls,
+  connection-test buttons, secret replacement flows, and visible restart
+  requirements throughout Configuration.
+- [ ] Continue replacing open text fields with selects only where the value is
+  truly finite. Retain validated custom entry for provider model names, URLs,
+  paths, prompts, secrets, and extensible integration identifiers.
+- [ ] Add role templates for administrator, standard human, trusted local
+  agent, hosted model, research agent, and untrusted external integration.
+- [ ] Verify owner scoping and policy inheritance under real multi-user use;
+  add cross-owner denial tests for vault reads, profiles, presets, activity,
+  messages, and external-agent tokens.
+- [ ] Accessibility and small-screen pass for the Agent Control Room, vault
+  tree, settings tabs, dropdowns, resizing, focus order, reduced motion, and
+  screen-reader status announcements.
+
+### Completed in the current pass
+
+- [x] Capability registry, availability checks, requirement recheck, and
+  settings-schema metadata.
+- [x] Collapsed-by-default capability panel and functional advanced-settings
+  navigation.
+- [x] Dropdowns/live inventories for finite endpoint, model, speech-provider,
+  and similar configuration values while preserving valid custom values.
+- [x] Markdown note migration and unified vault indexing.
+- [x] Folder-wide `public`, `private`, and `readonly` model policy with per-file
+  sensitivity overrides and fail-closed validation.
+- [x] Human vault explorer/editor with collapsed folders, readable hierarchy,
+  search, policy badges, and clear human-versus-model access language.
+- [x] Provider-neutral delegation, peer-agent messaging, capability-aware tool
+  exposure, and subscription-provider groundwork.
+- [x] Integrated Agent Control Room with concurrent monitoring, dock/expand
+  behavior, resizable fleet view, and persistent navigation ordering.
+- [x] Per-agent presets and enforceable controls for tools, skills, memory,
+  models, MCP/integrations, delegation, parallelism, approvals, and private
+  vault access.
+
 ## Refactor Targets
 - CSS cleanup. `static/style.css` basically Calypso's island atm.
 - Tour core helper. The onboarding tours have too much copy-pasted scaffolding; promote a shared `tour-core.js` helper before adding more tours.
