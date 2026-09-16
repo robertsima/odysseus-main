@@ -53,6 +53,11 @@ def env(tmp_path, monkeypatch):
     import core.database as db
     monkeypatch.setattr(db, "get_session_settings", lambda sid: {})
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: patch)
+    # Fake endpoints must not perform a real context-window probe while a
+    # worker/parent handoff is under its deterministic five-second test limit.
+    import src.model_context as model_context
+    monkeypatch.setattr(model_context, "get_context_length", lambda *args, **kwargs: 32_000)
+    monkeypatch.setattr(model_context, "budget_context_for_model", lambda *args, **kwargs: 32_000)
     router = ar.setup_agents_routes(mgr)
     eps = {(m, r.path): r.endpoint for r in router.routes for m in r.methods}
     yield mgr, eps
@@ -131,7 +136,7 @@ async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, mo
         "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "go"}],
         relevant_tools={"read_file"}, session_id="a1", _is_teacher_run=True)]
     assert any('"steer_applied"' in c for c in chunks)
-    assert seen["messages"][-1]["content"].endswith("focus on tests")
+    assert agent_loop._extract_last_user_message(seen["messages"]).endswith("focus on tests")
     assert agent_control.pending_steer("a1") == []
 
     # Leaving the queue is no longer the end of the story: the message reached

@@ -111,6 +111,13 @@ so it can only ever clear `low_signal`, never set it.
   word boundaries in both the index pass and the loop's fallback pass — these
   two had drifted, and a raw-substring match meant "local **pr**oject" pulled in
   the source-control toolset.
+- **Email context** is shared by retrieval, keyword fallback and domain
+  seeding. Generic "send/message/reply" wording does not buy the mailbox suite.
+  An email-subsystem audit routes as source work; genuine mailbox queries,
+  explicit recipient addresses and mixed audit-plus-email requests retain
+  their tools. Read-only mail discovery does not add mutation schemas merely
+  because they were nearby in the embedding index. Shared contact/UI tools and
+  explicitly named tools remain eligible.
 - **Domain seeding** adds each detected domain's tools from `_DOMAIN_TOOL_MAP`.
 - **Retained tools** carry over tools already used in this conversation, subject
   to the retention policy in
@@ -262,6 +269,21 @@ the ledger keeps their facts and a recall pointer. Automatic compaction is
 governed by [`specs/bounded-recursive-compaction.md`](../specs/bounded-recursive-compaction.md) —
 prior summaries are replaced by the consolidated one, never accumulated.
 
+### 4.4 Discovery and learning overhead
+
+`app_api` endpoint discovery is paged (default 25, maximum 50, with an additional
+serialized-size bound). `filter`, `offset` and `next_offset` let the model narrow
+or continue a result without receiving the entire API twice as prose and JSON.
+Loadout listing shows compact summaries; `get` returns a named profile's full
+policy and instructions. `capabilities` uses counts/examples by default and
+`detail=true` exposes the full tool ceiling.
+
+Automatic skill extraction uses recorded tool outcomes. Launch-only,
+approval-held, failed or duplicate-only turns skip the teacher request. Eligible
+turns include bounded outcome metadata (not raw tool output or arguments), so a
+promise to launch an audit is not mistaken for a proven audit procedure. Learned skills remain guidance to verify,
+not an assertion that their outcome has already been validated.
+
 ---
 
 ## 5. Guards in the round loop
@@ -336,6 +358,14 @@ Starting a worker (`agent_control.launch_worker`) creates a fresh chat, applies
 the profile via `session_patch`, and runs it headless and detached. Progress
 appears on the worker's own activity feed and on its parent's.
 
+Worker capacity counts queued as well as running Claude Code jobs, deduplicated
+against their activity records. An empty settings record still uses the default
+one-worker limit. Capacity gates new work; listing, polling and cancelling
+existing delegation remain possible at capacity. Blocked launches expose
+`blocked_reason=worker_capacity` and current limits so the caller can report what
+actually started. Provider acknowledgements without a trackable task are
+reported as unconfirmed, and provider failures cannot be reported as completion.
+
 An agent can author loadouts too (`manage_agent_loadout`). The rule that makes
 that safe is in `src/agent_loadouts.py`: **every capability in a loadout an
 agent creates is intersected with the calling chat's own policy**, and each
@@ -368,6 +398,20 @@ turn end would mean only "the turn ended" — the false assurance the states exi
 to remove. Transitions are published to the activity feed, so a message is
 inspectable long after the in-memory queue drained.
 
+The chat's temporary Steering chip tracks that record's ID. Live/resumed
+`steer_applied` events remove the pending badge immediately and promote the
+instruction to a normal user message; marked-as-poll status requests reconcile
+after a missed event. Cancellation/failure is surfaced honestly, and
+the durable Control Room history remains available. Late network responses do
+not insert a message into whichever chat the user opened next.
+
+A human steer also adds the tools its instruction names, within the turn's
+existing policy restrictions, without rebuilding the system prompt. Runtime,
+retrieval and peer-agent envelopes do not count as human turns or enter follow-up
+intent retrieval. Tail guidance preserves earlier unfinished requests unless the
+user changes or cancels them. `[agent-steer]` logs IDs, delivery state and added
+tool names without copying the instruction text.
+
 ---
 
 ## 7. Reading the logs
@@ -380,6 +424,7 @@ A turn's behaviour is reconstructable from these lines.
 | `[tool-routing]` | which source dominated, what was dropped and by which gate |
 | `[agent-debug]` | how many schemas were sent vs selected, which admin schemas were intentional, and which MCP servers were demoted |
 | `[agent-cache]` | whether the static prefix stayed stable and where request history first changed |
+| `[agent-steer]` | which queued message reached which round, and what tools its human instruction added |
 | `[context-profile]` | the profile, inline limit and trim target in force |
 | `[agent-timing]` | prep breakdown, per-round elapsed, time to first token |
 | `[agent-usage]` | input / cached / output tokens per round |

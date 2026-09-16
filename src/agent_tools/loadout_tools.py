@@ -101,27 +101,43 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     policy = agent_loadouts.caller_policy(session_id, owner)
 
     if action == "list":
-        rows = [agent_loadouts.summarize(p) for p in agent_profiles.load_profiles()]
-        return {"response": f"{len(rows)} loadout(s)", "loadouts": rows, "exit_code": 0}
+        rows = [agent_loadouts.discovery_summary(p) for p in agent_profiles.load_profiles()]
+        return {
+            "response": (
+                f"{len(rows)} loadout(s). Use action='get' with a name to inspect its full policy "
+                "and instructions."
+            ),
+            "loadouts": rows,
+            "exit_code": 0,
+        }
 
     if action == "capabilities":
         # What a loadout authored from this chat may contain at most. Without
         # it the agent has to discover the clamp by tripping over it.
+        detail = bool(args.get("detail"))
+        ceiling = {
+            # The tool schema already tells an agent callable names. Repeating
+            # every permitted name here costs a large tool result before it has
+            # picked a loadout; request detail=true only when authoring an
+            # explicit selected-tools policy.
+            "tool_count": len(policy["allowed_tools"]),
+            "tool_examples": sorted(policy["allowed_tools"])[:12],
+            "memory_access": policy["memory_access"],
+            "skill_access": policy["skill_access"],
+            "skills": sorted(policy["skill_names"]),
+            "model_access": policy["model_access"],
+            "allowed_models": sorted(policy["allowed_models"]),
+            "allowed_mcp_servers": list(policy["allowed_mcp_servers"]),
+            "private_vault_access": policy["private_vault_access"],
+            "delegation_policy": policy["delegation_policy"],
+            "max_parallel_workers": policy["max_parallel_workers"],
+            "approval_mode_floor": policy["approval_mode"],
+        }
+        if detail:
+            ceiling["tools"] = sorted(policy["allowed_tools"])
         return {
             "response": "Ceiling for loadouts created from this chat",
-            "ceiling": {
-                "tools": sorted(policy["allowed_tools"]),
-                "memory_access": policy["memory_access"],
-                "skill_access": policy["skill_access"],
-                "skills": sorted(policy["skill_names"]),
-                "model_access": policy["model_access"],
-                "allowed_models": sorted(policy["allowed_models"]),
-                "allowed_mcp_servers": list(policy["allowed_mcp_servers"]),
-                "private_vault_access": policy["private_vault_access"],
-                "delegation_policy": policy["delegation_policy"],
-                "max_parallel_workers": policy["max_parallel_workers"],
-                "approval_mode_floor": policy["approval_mode"],
-            },
+            "ceiling": ceiling,
             "exit_code": 0,
         }
 
@@ -178,8 +194,16 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     limit = policy["max_parallel_workers"]
     running = agent_control.live_children(session_id)
     if limit <= 0 or running >= limit:
-        return {"error": f"start: this chat's worker limit is {limit}; {running} already running",
-                "exit_code": 1}
+        return {
+            "error": (
+                f"Worker capacity reached: {running} active of this chat's limit {limit}. "
+                "Do not retry a start while capacity is unchanged."
+            ),
+            "blocked": True,
+            "blocked_reason": "worker_capacity",
+            "capacity": {"limit": limit, "active": running, "available": max(0, limit - running)},
+            "exit_code": 1,
+        }
     if name and agent_profiles.get_profile(name) is None:
         available = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined"
         return {"error": f"no loadout named {name!r}. Available: {available}", "exit_code": 1}

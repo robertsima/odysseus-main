@@ -178,6 +178,8 @@ async def test_create_then_list_then_delete(store):
 
     listed = await manage_agent_loadout('{"action": "list"}', "chat-1", owner="u")
     assert [row["name"] for row in listed["loadouts"]] == ["Reviewer"]
+    assert listed["loadouts"][0]["tool_count"] == 2
+    assert "tools" not in listed["loadouts"][0]
 
     removed = await manage_agent_loadout('{"action": "delete", "name": "Reviewer"}', "chat-1", owner="u")
     assert removed["exit_code"] == 0
@@ -197,7 +199,11 @@ async def test_create_refuses_to_overwrite_and_update_replaces(store):
 async def test_capabilities_reports_the_ceiling_before_the_agent_trips_over_it(store):
     result = await manage_agent_loadout('{"action": "capabilities"}', "c", owner="u")
     assert result["exit_code"] == 0
-    assert "bash" in result["ceiling"]["tools"]
+    assert "bash" in result["ceiling"]["tool_examples"]
+    assert result["ceiling"]["tool_count"] >= len(result["ceiling"]["tool_examples"])
+
+    detailed = await manage_agent_loadout('{"action": "capabilities", "detail": true}', "c", owner="u")
+    assert "bash" in detailed["ceiling"]["tools"]
     assert result["ceiling"]["max_parallel_workers"] == 8
 
 
@@ -231,7 +237,8 @@ async def test_start_respects_the_same_worker_limit_as_the_spawning_tools(monkey
                         lambda sid, owner: policy(max_parallel_workers=1))
     monkeypatch.setattr("src.agent_control.live_children", lambda sid: 1)
     result = await manage_agent_loadout('{"action": "start", "task": "go"}', "c", owner="u")
-    assert result["exit_code"] == 1 and "worker limit" in result["error"]
+    assert result["exit_code"] == 1 and result["blocked_reason"] == "worker_capacity"
+    assert result["capacity"] == {"limit": 1, "active": 1, "available": 0}
 
 
 async def test_start_launches_a_worker_reporting_to_the_calling_chat(monkeypatch, store):

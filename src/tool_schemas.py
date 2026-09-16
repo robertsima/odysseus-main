@@ -1234,7 +1234,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
+            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns a compact paginated OpenAPI discovery page: use `filter` first, then `limit` (1-50, default 25) and `offset` to page. action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1243,7 +1243,9 @@ FUNCTION_TOOL_SCHEMAS = [
                     "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method (default GET)"},
                     "body": {"type": "object", "description": "JSON request body for POST/PUT/PATCH"},
                     "query": {"type": "object", "description": "Querystring params as a key-value object"},
-                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery')"}
+                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery'); filter before paging"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 25, "description": "For action=endpoints: results per compact page (default 25, max 50)"},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "For action=endpoints: zero-based offset after filtering"}
                 },
                 "required": ["action"]
             }
@@ -1258,6 +1260,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name')."},
+                    "detail": {"type": "boolean", "description": "capabilities only: include the complete allowed tool-name list. Omit for the compact count/examples summary."},
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
                     "task": {"type": "string", "description": "start only: the whole task. The worker begins with no other context."},
                     "description": {"type": "string", "description": "One line explaining when to use this loadout."},

@@ -41,3 +41,29 @@ def test_prose_toolsets_resolve_to_real_tools(monkeypatch):
     )
     assert {"manage_calendar", "bash", "read_file", "edit_file", "grep"} <= tools
     assert unknown == {"interpretive dance"}
+
+
+def test_followup_retrieval_and_turn_count_ignore_synthetic_user_messages():
+    from src.agent_loop import _harness_directive, _recent_context_for_retrieval, _user_turn_count
+
+    messages = [
+        {"role": "user", "content": "read the notification documentation"},
+        {"role": "user", "content": "continue"},
+        {"role": "user", "content": "[Context — current date/time]\ncalendar event"},
+        untrusted_context_message("vault", "email inbox calendar"),
+        _harness_directive("try tools again"),
+        {"role": "user", "content": "[Message from agent session 'worker' -- a PEER AGENT, not your user. ] email"},
+    ]
+    assert _extract_last_user_message(messages) == "continue"
+    assert _recent_context_for_retrieval(messages) == "continue\nread the notification documentation"
+    assert _user_turn_count(messages) == 2
+
+
+def test_human_steering_remains_user_intent():
+    from src.agent_loop import _recent_context_for_retrieval, _user_turn_count
+
+    text = "[Mid-task instruction from the user] also check my next meeting"
+    messages = [{"role": "user", "content": text}]
+    assert _extract_last_user_message(messages) == text
+    assert _recent_context_for_retrieval(messages) == text
+    assert _user_turn_count(messages) == 1

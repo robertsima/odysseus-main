@@ -641,7 +641,13 @@ async def status_report() -> dict:
             "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
+    available_slots = max(0, _PROCESS_LIMIT_SIZE - len(active))
     return {
+        "response": (
+            f"Claude Code is {'ready' if ready else 'not ready'}; "
+            f"{len(active)} active of {_PROCESS_LIMIT_SIZE} configured task slot(s) "
+            f"({available_slots} available)."
+        ),
         "ready": ready,
         "binary": {k: info[k] for k in ("path", "available", "version", "flags", "error")},
         "auth": auth,
@@ -656,6 +662,7 @@ async def status_report() -> dict:
         "callback": callback_status,
         "max_concurrent_tasks": _PROCESS_LIMIT_SIZE,
         "active_tasks": len(active),
+        "available_task_slots": available_slots,
         "hints": hints,
         "exit_code": 0 if ready else 1,
     }

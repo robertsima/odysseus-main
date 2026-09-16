@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 SKILL_EXTRACT_PROMPT = (
     "You are analyzing an AI agent's work session. The agent took {rounds} rounds "
-    "and {tool_count} tool calls to complete the task.\n\n"
+    "and {tool_count} tool calls. These counts do not prove the task succeeded.\n\n"
     "Extract a reusable 'skill' ONLY IF the session contains a concrete, "
     "repeatable procedure the agent could follow to solve a similar problem "
     "ON THE COMPUTER next time (e.g. a sequence of shell commands, code, file "
@@ -28,7 +28,9 @@ SKILL_EXTRACT_PROMPT = (
     "- A one-off, personal, or context-specific task that won't recur "
     "(personal errands, a specific person/place/date, casual conversation).\n"
     "- A pure question/answer or explanation with no transferable method.\n"
-    "- The agent failed, gave up, or the approach is not worth repeating.\n\n"
+    "- The agent failed, gave up, or the approach is not worth repeating.\n"
+    "- The agent only launched or polled workers, listed capabilities, or promised work; "
+    "no completed, reusable procedure is demonstrated. A queued task is not a result.\n\n"
     "When (and only when) a genuine reusable procedure exists, return a JSON "
     "object with:\n"
     '- "title": short name (under 10 words)\n'
@@ -47,6 +49,50 @@ MIN_CONFIDENCE = 0.6
 
 # How many recent messages to include
 CONTEXT_WINDOW = 12
+
+_ORCHESTRATION_ONLY_TOOLS = frozenset({
+    "manage_agent_loadout", "delegate_to_agent", "delegate_to_claude_code",
+    "message_agent", "create_session", "send_to_session", "list_sessions",
+    "ask_user", "update_plan", "manage_skills",
+})
+
+
+def _has_procedure_evidence(tool_events: list) -> bool:
+    """Avoid a teacher call for a launch-only, blocked or failed turn."""
+    for event in tool_events:
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("tool") or "")
+        if not name or name in _ORCHESTRATION_ONLY_TOOLS or name.endswith("__run_pi_task"):
+            continue
+        if any(event.get(key) for key in ("error", "blocked", "approval_required", "duplicate_call")):
+            continue
+        if event.get("exit_code") not in (None, 0):
+            continue
+        if str(event.get("status") or "").lower() in {"queued", "running", "failed", "cancelled", "blocked"}:
+            continue
+        if event.get("output") or event.get("doc_id"):
+            return True
+    return False
+
+
+def _execution_evidence_metadata(tool_events: list) -> list:
+    """Bounded outcome metadata, never extra tool contents or arguments.
+
+    Background extraction can use a different model/provider from the running
+    agent. Do not widen its existing conversation payload with private file,
+    mailbox or MCP output (including output from failed calls).
+    """
+    return [
+        {
+            "tool": str(event.get("tool") or "")[:128],
+            "procedure_evidence": _has_procedure_evidence([event]),
+            "failed": bool(event.get("error") or event.get("exit_code") not in (None, 0)),
+            "blocked": bool(event.get("blocked") or event.get("approval_required")),
+            "duplicate": bool(event.get("duplicate_call")),
+        }
+        for event in tool_events[-12:] if isinstance(event, dict)
+    ]
 
 
 def _skill_dicts(skills):
@@ -156,6 +202,7 @@ async def maybe_extract_skill(
     tool_count: int,
     owner: Optional[str] = None,
     llm_candidates: Optional[list] = None,
+    tool_events: Optional[list] = None,
 ):
     """Extract a skill if the agent run was complex enough."""
     if not model:
@@ -169,6 +216,9 @@ async def maybe_extract_skill(
     )
     if round_count < 2 and tool_count < 2:
         logger.debug("[skill-extract] BELOW threshold (need rounds>=2 or tools>=2)")
+        return None
+    if tool_events is not None and not _has_procedure_evidence(tool_events):
+        logger.debug("[skill-extract] no completed procedure evidence; skipping teacher call")
         return None
 
     try:
@@ -210,6 +260,9 @@ async def maybe_extract_skill(
             conv_lines.append(f"[{role}] {content}")
 
         conversation = "\n".join(conv_lines)
+        if tool_events:
+            evidence = _execution_evidence_metadata(tool_events)
+            conversation += "\nExecution outcome metadata (not proof of task completion):\n" + json.dumps(evidence, ensure_ascii=False)
 
         prompt = SKILL_EXTRACT_PROMPT.format(rounds=round_count, tool_count=tool_count)
 

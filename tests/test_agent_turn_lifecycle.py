@@ -90,6 +90,42 @@ class TestSteerQueueLifecycle:
             agent_control.steer("s", "one too many")
 
 
+class TestLiveChildCapacity:
+    def test_queued_claude_task_counts_before_activity_run_exists(self, monkeypatch):
+        """Claude records a task before its semaphore permits `_run_claude`.
+        That queued interval must consume the same per-chat worker slot as a
+        published run, or several starts in one agent round all pass the gate.
+        """
+        from src import agent_activity, agent_control
+        from src.agent_tools import claude_code_tools
+
+        class Runner:
+            def summaries(self, *, limit):
+                assert limit == 400
+                return [
+                    {"task_id": "queued-task", "session_id": "chat-1", "status": "queued"},
+                    {"task_id": "other-chat", "session_id": "chat-2", "status": "queued"},
+                ]
+
+        monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [])
+        monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
+        assert agent_control.live_children("chat-1") == 1
+
+    def test_claude_task_already_in_activity_is_not_double_counted(self, monkeypatch):
+        from src import agent_activity, agent_control
+        from src.agent_tools import claude_code_tools
+
+        class Runner:
+            def summaries(self, *, limit):
+                return [{"task_id": "task-1", "session_id": "chat-1", "status": "running"}]
+
+        monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [
+            {"run_id": "task-1", "session_id": "chat-1", "status": "running", "source": "claude_code"},
+        ])
+        monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
+        assert agent_control.live_children("chat-1") == 1
+
+
 class TestSteerability:
     """Only an agent turn drains the queue, and only between rounds. Accepting a
     steer for anything else swallows the user's message outright."""
@@ -157,6 +193,23 @@ class TestClientTrustsTheServer:
         body = src[start:start + 2500]
         assert "/steer" in body, "a mid-run message should reach the running agent"
         assert "fallbackToQueue" in body, "and still queue when steering is not possible"
+
+    def test_mid_run_steer_chip_tracks_the_server_lifecycle(self):
+        """The optimistic composer chip used to have no steer id, so it could
+        not observe injection and stayed labelled `Steering` forever."""
+        src = self._chat_js()
+        submit = src[src.index("export function queueStreamingComposerRequest"):]
+        lifecycle = src[src.index("function _applySteeredBubbleState"):src.index("export function queueStreamingComposerRequest")]
+
+        assert "await res.json()" in submit
+        assert "steerRecord.id" in submit
+        assert "_trackSteeredBubble(sid, steerRecord.id, bubble)" in submit
+        assert "/steer?limit=50" in lifecycle
+        # Injection is terminal for this ephemeral composer chip, but it is
+        # not called completion: only the durable server history can say it
+        # reached the model, not that the agent acted on it.
+        assert "bubble.remove()" in lifecycle
+        assert "steerState === 'completed'" not in lifecycle
 
     def test_dashboard_polls_are_marked_as_polls(self):
         from pathlib import Path

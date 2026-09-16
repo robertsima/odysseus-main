@@ -45,6 +45,14 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  // A mid-turn steer is not a normal chat turn: it is an ephemeral composer
+  // affordance backed by the steering activity log.  Keep the server-issued
+  // id with its bubble so it can leave the pending UI once the loop has
+  // acknowledged, injected, cancelled, or failed it.  Without this map a
+  // green "Steering" chip survived forever even after its instruction had
+  // reached the model.
+  const _steeredBubbles = new Map(); // session id -> Map<steer id, element>
+  const _steerStatusTimers = new Map();
   let _contextHeaderSeq = 0;
   let _contextHeaderData = null;
   let _contextHeaderBound = false;
@@ -982,18 +990,175 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     return true;
   }
 
-  /** Render the "already handed to the running agent" form of a user bubble. */
-  function _createSteeredBubble(text) {
+  /** Render the pending, mid-turn form of a user instruction.
+   *
+   * The server persists an injected steer as a normal user message. Until that
+   * happens this temporary bubble lives in the pending host; injection promotes
+   * it into the regular transcript, while failed/cancelled steers disappear
+   * with an honest error and remain in the durable Agents lifecycle log.
+   */
+  function _createSteeredBubble(text, steerId) {
     const host = _ensureQueuedBubbleHost();
     if (!host) return null;
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-user msg-user-steered';
-    wrap.title = 'Delivered to the running agent — it lands before its next step';
+    if (steerId) wrap.dataset.steerId = steerId;
+    wrap.dataset.steerState = 'queued';
+    wrap.title = 'Waiting for the running agent to pick this up';
     wrap.innerHTML = `<div class="role">You <span class="steered-pill">Steering</span></div>` +
       `<div class="body">${_escapeQueueText(text)}</div>`;
     host.appendChild(wrap);
     uiModule.scrollHistory();
     return wrap;
+  }
+
+  function _trackedSteers(sessionId) {
+    const sid = String(sessionId || '');
+    let tracked = _steeredBubbles.get(sid);
+    if (!tracked) {
+      tracked = new Map();
+      _steeredBubbles.set(sid, tracked);
+    }
+    return tracked;
+  }
+
+  function _forgetSteeredBubble(sessionId, steerId) {
+    const sid = String(sessionId || '');
+    const tracked = _steeredBubbles.get(sid);
+    if (!tracked) return;
+    tracked.delete(String(steerId || ''));
+    if (!tracked.size) {
+      _steeredBubbles.delete(sid);
+      const timer = _steerStatusTimers.get(sid);
+      if (timer) clearTimeout(timer);
+      _steerStatusTimers.delete(sid);
+    }
+  }
+
+  function _promoteInjectedSteeredBubble(sessionId, steerId, bubble) {
+    // The route has persisted this exact text as a normal user turn before it
+    // forwards `steer_applied`. Move the optimistic DOM node out of the pending
+    // host and strip only the lifecycle affordance, so the user does not watch
+    // their instruction vanish until the next history refresh.
+    const host = bubble.parentNode;
+    const transcript = host && host.parentNode;
+    if (transcript && host.classList?.contains('chat-queued-bubble-host')) {
+      transcript.insertBefore(bubble, host);
+    }
+    bubble.classList.remove('msg-user-steered');
+    delete bubble.dataset.steerId;
+    delete bubble.dataset.steerState;
+    bubble.removeAttribute('title');
+    const role = bubble.querySelector('.role');
+    if (role) role.textContent = 'You';
+    _forgetSteeredBubble(sessionId, steerId);
+  }
+
+  function _applySteeredBubbleState(sessionId, steer) {
+    const steerId = String(steer && steer.id || '');
+    const bubble = _steeredBubbles.get(String(sessionId || ''))?.get(steerId);
+    if (!bubble) return;
+    // A session redraw or switch may have removed this ephemeral bubble. Its
+    // server-side history is still retained, so do not keep polling a dead DOM
+    // node just to recreate it.
+    if (!bubble.isConnected) {
+      _forgetSteeredBubble(sessionId, steerId);
+      return;
+    }
+    const steerState = String(steer.state || 'queued');
+    bubble.dataset.steerState = steerState;
+    const pill = bubble.querySelector('.steered-pill');
+    if (steerState === 'queued') {
+      if (steer.live === false) {
+        // The history knows about it but the in-memory queue was lost (for
+        // example, after a server restart). It is no longer pending work, so
+        // remove the chip without pretending the agent received it.
+        if (bubble.parentNode) bubble.remove();
+        _forgetSteeredBubble(sessionId, steerId);
+        try { uiModule.showError && uiModule.showError('Steering is no longer in the live queue. See Agent Control Room for the recorded message.'); } catch (_) {}
+        return;
+      }
+      bubble.title = 'Waiting for the running agent to pick this up';
+      if (pill) pill.textContent = 'Steering';
+      return;
+    }
+    if (steerState === 'acknowledged') {
+      // Acknowledgement means the loop owns it, not that the model has seen it.
+      bubble.title = 'The running turn picked this up; waiting for injection';
+      if (pill) pill.textContent = 'Picked up';
+      return;
+    }
+
+    if (steerState === 'injected') {
+      _promoteInjectedSteeredBubble(sessionId, steerId, bubble);
+      return;
+    }
+    if (!['cancelled', 'failed'].includes(steerState)) return;
+
+    // Cancellation and failure have no transcript user turn to promote. Remove
+    // their pending chip, retain their lifecycle record in the Control Room,
+    // and never rename either outcome to "completed".
+    if (bubble.parentNode) bubble.remove();
+    _forgetSteeredBubble(sessionId, steerId);
+    if (steerState === 'cancelled' || steerState === 'failed') {
+      const reason = steer.reason ? `: ${steer.reason}` : '';
+      try { uiModule.showError && uiModule.showError(`Steering ${steerState}${reason}. See Agent Control Room for the recorded message.`); } catch (_) {}
+    }
+  }
+
+  function _discardDisconnectedSteeredBubbles(sessionId) {
+    const sid = String(sessionId || '');
+    const tracked = _steeredBubbles.get(sid);
+    if (!tracked) return;
+    // A history redraw can remove these ephemeral nodes before the activity
+    // feed has produced a row. Clean them up independently of the response so
+    // an absent history row cannot leave a poller running forever.
+    for (const [steerId, bubble] of tracked) {
+      if (!bubble || !bubble.isConnected) _forgetSteeredBubble(sid, steerId);
+    }
+  }
+
+  function _handleSteerApplied(sessionId, event) {
+    const steerId = event && event.steer_id;
+    if (!steerId) return;
+    // The stream is the immediate confirmation path for the tab that sent the
+    // instruction. It means "injected into the model", not "completed".
+    _applySteeredBubbleState(sessionId, { id: steerId, state: 'injected', round: event.round });
+  }
+
+  function _scheduleSteerStatusCheck(sessionId, delay = 0) {
+    const sid = String(sessionId || '');
+    if (!sid || !_steeredBubbles.get(sid)?.size || _steerStatusTimers.has(sid)) return;
+    const timer = setTimeout(async () => {
+      _steerStatusTimers.delete(sid);
+      _discardDisconnectedSteeredBubbles(sid);
+      if (!_steeredBubbles.get(sid)?.size) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/agents/sessions/${encodeURIComponent(sid)}/steer?limit=50`, {
+          credentials: 'same-origin',
+          // This is a reconciliation timer, not user activity. Without the
+          // marker the foreground keepalive middleware can mistake it for a
+          // user interaction and interfere with detached work.
+          headers: { 'X-Odysseus-Poll': '1' },
+        });
+        if (res.ok) {
+          const status = await res.json();
+          const messages = Array.isArray(status && status.messages) ? status.messages : [];
+          messages.forEach((steer) => _applySteeredBubbleState(sid, steer));
+        }
+      } catch (_) {
+        // Keep the current pending state. The next short poll will reconcile it
+        // once the transient network failure clears.
+      }
+      if (_steeredBubbles.get(sid)?.size) _scheduleSteerStatusCheck(sid, 1200);
+    }, Math.max(0, delay));
+    _steerStatusTimers.set(sid, timer);
+  }
+
+  function _trackSteeredBubble(sessionId, steerId, bubble) {
+    if (!sessionId || !steerId || !bubble) return;
+    _trackedSteers(sessionId).set(String(steerId), bubble);
+    _scheduleSteerStatusCheck(sessionId);
   }
 
   /**
@@ -1028,7 +1193,8 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     if (!sid) { fallbackToQueue(); return true; }
 
     (async () => {
-      let steered = false;
+      let steerRecord = null;
+      let steerAccepted = false;
       try {
         const res = await fetch(`${API_BASE}/api/agents/sessions/${encodeURIComponent(sid)}/steer`, {
           method: 'POST',
@@ -1036,14 +1202,30 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: queuedText }),
         });
-        steered = res.ok;
+        if (res.ok) {
+          steerAccepted = true;
+          const data = await res.json();
+          // A successful steer must have the id returned by the route. Treat a
+          // malformed success as an observable server-side error rather than
+          // sending the instruction again as a normal turn (which would apply
+          // the same correction twice).
+          if (data && data.id) steerRecord = data;
+        }
       } catch (_) {
-        steered = false;
+        steerRecord = null;
       }
-      if (steered) {
-        _createSteeredBubble(queuedText);
-        try { uiModule.showToast && uiModule.showToast('Sent to the running agent'); } catch (_) {}
+      if (steerRecord) {
+        // The request is asynchronous. Never append a late result to whatever
+        // session the user opened while it was in flight.
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
+        const bubble = _createSteeredBubble(queuedText, steerRecord.id);
+        _trackSteeredBubble(sid, steerRecord.id, bubble);
+        try { uiModule.showToast && uiModule.showToast('Steering queued for the running agent'); } catch (_) {}
+      } else if (steerAccepted) {
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
+        try { uiModule.showError && uiModule.showError('Steering was accepted but could not be tracked. See Agent Control Room for the recorded message.'); } catch (_) {}
       } else {
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
         fallbackToQueue();
       }
     })();
@@ -2406,6 +2588,13 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
                 if (spinner && spinner.element) spinner.destroy();
                 typewriterInto(roundHolder.querySelector('.body'), errMsg);
                 break;
+              }
+              if (json.type === 'steer_applied') {
+                // This is the low-latency path for the foreground stream. The
+                // status poll remains the reconciliation fallback after an SSE
+                // reconnect or an event the browser did not receive.
+                _handleSteerApplied(streamSessionId, json);
+                continue;
               }
               if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
                 clearResponseTimeout();
@@ -4492,7 +4681,11 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
-          if (json.delta) {
+          if (json.type === 'steer_applied') {
+            // Resume replays the same event stream as the live reader, so it
+            // must settle a local steer chip the same way.
+            _handleSteerApplied(sessionId, json);
+          } else if (json.delta) {
             roundText += json.delta;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
               docFenceOpened = true;

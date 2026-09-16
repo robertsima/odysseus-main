@@ -274,3 +274,25 @@ def summarize(profile: Dict[str, Any]) -> Dict[str, Any]:
         "max_parallel_workers": profile["max_parallel_workers"],
         "max_rounds": profile["max_rounds"],
     }
+
+
+def discovery_summary(profile: Dict[str, Any]) -> Dict[str, Any]:
+    """Small row for loadout discovery.
+
+    ``tool_access=selected`` can contain a large allow-list. Repeating that
+    list for every saved loadout made the ordinary ``list`` call much larger
+    than the decision it supports (pick a name, then inspect it). ``get``
+    still returns :func:`summarize` and instructions for one chosen loadout.
+    """
+    selected = profile["enabled_tools"] if profile["tool_access"] == "selected" else []
+    return {
+        "name": profile["name"],
+        "description": profile["description"],
+        "model": profile["model"] or "inherit",
+        "tool_access": profile["tool_access"],
+        "tool_count": len(selected) if profile["tool_access"] == "selected" else None,
+        "memory_access": profile["memory_access"],
+        "delegation_policy": profile["delegation_policy"],
+        "max_parallel_workers": profile["max_parallel_workers"],
+        "max_rounds": profile["max_rounds"],
+    }

@@ -843,6 +843,54 @@ def _failure_detail(result: Any, limit: int = 200) -> str:
     return _redact_for_log(text) if text else ""
 
 
+_DELEGATION_INSPECTION_ACTIONS = frozenset({
+    "poll", "get", "cancel", "list", "status", "list_repositories", "repositories",
+})
+
+
+def _tool_action(content: Any, default: str = "") -> str:
+    """Read an action verb from a structured tool call without failing it."""
+    try:
+        args = json.loads(content) if isinstance(content, str) else content
+    except (TypeError, ValueError):
+        return default
+    if not isinstance(args, dict):
+        return default
+    return str(args.get("action") or default).strip().lower()
+
+
+def _capacity_limited_tool_call(tool: str, content: Any) -> bool:
+    """Whether this call may start new worker work.
+
+    ``delegate_*`` multiplexes inspection and lifecycle operations. Blocking a
+    poll/list/status behind a full worker limit traps the caller: it cannot
+    observe, cancel, or wait for the work occupying the slot.
+    """
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        return _tool_action(content, "run") not in _DELEGATION_INSPECTION_ACTIONS
+    return tool in {"send_to_session", "pipeline", "create_session"}
+
+
+def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any]:
+    available = max(0, limit - active)
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        next_step = (
+            f"inspect existing work with {tool} action='list' or action='poll', or cancel it if appropriate."
+        )
+    else:
+        next_step = "Wait for existing work to finish or cancel it before starting another worker."
+    return {
+        "error": (
+            f"Worker capacity reached: {active} active of this chat's limit {limit}. "
+            "Do not retry a start while capacity is unchanged; " + next_step
+        ),
+        "blocked": True,
+        "blocked_reason": "worker_capacity",
+        "capacity": {"limit": limit, "active": active, "available": available},
+        "exit_code": 1,
+    }
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -1092,16 +1140,24 @@ async def _execute_tool_block_impl(
                     "exit_code": 1,
                 }
 
-        if tool in {"delegate_to_agent", "delegate_to_claude_code", "send_to_session", "pipeline", "create_session"}:
-            _raw_limit = _agent_settings.get("max_parallel_workers")
+    # Capacity is a default policy, not an opt-in profile setting: an empty
+    # settings object still means one child at a time. Keep it outside the
+    # profile-only guards above, which intentionally do nothing for a plain
+    # chat, so that a missing settings row cannot bypass the limit.
+    if _capacity_limited_tool_call(tool, content):
+        _raw_limit = _agent_settings.get("max_parallel_workers")
+        try:
             _limit = int(1 if _raw_limit is None else _raw_limit)
-            from src import agent_control as _agent_control
-            _live_children = _agent_control.live_children(session_id)
-            if _limit <= 0 or _live_children >= _limit:
-                return f"{tool}: BLOCKED", {
-                    "error": f"This agent's worker limit is {_limit}; {_live_children} child process(es) are already running.",
-                    "exit_code": 1,
-                }
+        except (TypeError, ValueError):
+            _limit = 1
+        from src import agent_control as _agent_control
+        _live_children = _agent_control.live_children(session_id)
+        if _limit <= 0 or _live_children >= _limit:
+            logger.info(
+                "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
+                tool, _tool_action(content, "run"), _live_children, _limit,
+            )
+            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
@@ -1493,13 +1549,21 @@ _FORMATTER_HANDLED_KEYS = {
     "stdout", "stderr", "exit_code", "content", "size",
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
-    "error", "output",
+    "error", "output", "delegation_state", "delegation_note",
 }
 
 
 def format_tool_result(description: str, result: Dict) -> str:
     """Format a tool result into text for feeding back to the LLM."""
     parts = [f"### {description}"]
+
+    # Provider output is evidence, but it may be an optimistic or stale text
+    # payload. Put the normalized local outcome ahead of raw stdout/output so
+    # the next agent round cannot mistake "started" prose for a confirmation.
+    if result.get("delegation_state"):
+        state = str(result["delegation_state"])
+        note = str(result.get("delegation_note") or "")
+        parts.append(f"**delegation:** `{state}`" + (f" — {note}" if note else ""))
 
     if "stdout" in result:
         if result["stdout"]:

@@ -88,6 +88,147 @@ COLLECTION_NAME = "odysseus_tool_index"
 # while rejecting the weak tail observed from unrelated connected services.
 _MIN_RETRIEVAL_SIMILARITY = 0.18
 
+# Email tools are intentionally split by intent.  A bare word such as
+# ``send``/``message``/``reply`` is not enough to identify email work: those
+# words are also common in notification, agent-delegation, and chat requests.
+# Keep this vocabulary here (rather than adding one-off exclusions for each
+# integration) so retrieval can apply the same context gate to built-ins while
+# leaving explicitly matched MCP tools untouched.
+_EMAIL_READ_TOOLS = frozenset({
+    "list_email_accounts", "list_emails", "read_email", "audit_emails",
+    "scan_email_unsubscribes", "resolve_contact", "ui_control",
+})
+_EMAIL_MUTATION_TOOLS = frozenset({
+    "send_email", "reply_to_email", "bulk_email", "delete_email",
+    "archive_email", "mark_email_read", "unsubscribe_email",
+})
+# ``ui_control`` and ``resolve_contact`` are shared tools. They are useful for
+# unrelated UI/contact requests and must survive filtering of those requests.
+_EMAIL_TOOLS = (_EMAIL_READ_TOOLS - {"ui_control", "resolve_contact"}) | _EMAIL_MUTATION_TOOLS
+_EXPLICIT_EMAIL_TOOL_RE = re.compile(
+    r"\b(?:list_email_accounts|list_emails|read_email|audit_emails|"
+    r"scan_email_unsubscribes|unsubscribe_email|send_email|reply_to_email|"
+    r"bulk_email|delete_email|archive_email|mark_email_read)\b",
+    re.I,
+)
+
+# A mailbox noun is a useful positive signal, but only when it is not being
+# used as part of a software/code audit.  The latter is a frequent request for
+# this project and must not make mail mutation schemas compete with delegation
+# and source-inspection tools.  Code context is structural: a code noun must
+# occur alongside an audit/inspection-style operation.  Words like
+# ``security`` or ``tests`` alone are intentionally not enough, since users
+# often ask to read mail about those subjects.
+_EMAIL_CONTEXT_RE = re.compile(
+    r"\b(?:e-?mails?|mails?|mailbox(?:es)?|gmail|googlemail|inbox(?:es)?|unread)\b",
+    re.I,
+)
+_EMAIL_CODE_OPERATION_RE = re.compile(
+    r"\b(?:audit|review|inspect|debug|fix|implement|analy[sz]e|run)\b",
+    re.I,
+)
+_EMAIL_CODE_NOUN_RE = re.compile(
+    r"\b(?:e-?mail|mail)(?:[\s-]+(?:sync|delivery|processing|polling|account|server)){0,2}"
+    r"[\s-]+(?:subsystem|code|implementation|backend|pollers?|module|function|class|lifecycle|integration)\b"
+    r"|\b(?:implementation|source\s+code|code|module|backend)\s+(?:of|for)\s+(?:the\s+)?(?:e-?mail|mail)\b",
+    re.I,
+)
+_EMAIL_MUTATION_RE = re.compile(
+    r"(?:"
+    r"\bsend\b.{0,48}\b(?:e-?mails?|mails?)\b|"
+    r"\b(?:e-?mails?|mails?)\b.{0,48}\bsend\b|"
+    r"\breply\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?)\b|"
+    r"\b(?:delete|archive|mark|unsubscribe)\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b|"
+    r"\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b.{0,48}\b(?:delete|archive|mark|unsubscribe)\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_ADDRESS_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:send|message|reply)\b.{0,64}"
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|"
+    r"\b(?:e-?mail|mail)\s+[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_RESULT_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:e-?mail|mail)\b\s+(?:(?:me|us|him|her|them)\s+)?"
+    r"(?:(?:the|a|an)\s+)?(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:e-?mail|mail)\b.{0,48}"
+    r"\b(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:result|results|report|summary|findings|output)\b"
+    r".{0,24}\b(?:by|via|through)\s+(?:an?\s+)?(?:e-?mail|mail)\b"
+    r")",
+    re.I | re.S,
+)
+
+
+def email_intent(query: str) -> Dict[str, bool]:
+    """Classify the small amount of context needed for email tool routing.
+
+    This deliberately does not classify MCP tools.  It only identifies when
+    exact built-in email names are supported by the user's wording, allowing
+    callers such as the agent-loop fallback/domain seeding path to share the
+    same decision as embedding retrieval.
+    """
+    text = str(query or "")
+    email_context = bool(_EMAIL_CONTEXT_RE.search(text))
+    result_action = bool(_EMAIL_RESULT_ACTION_RE.search(text))
+    code_context = (
+        email_context
+        and bool(_EMAIL_CODE_OPERATION_RE.search(text))
+        and bool(_EMAIL_CODE_NOUN_RE.search(text))
+        and not result_action
+    )
+    mutation = bool(_EMAIL_MUTATION_RE.search(text)) or result_action
+    address_action = bool(_EMAIL_ADDRESS_ACTION_RE.search(text))
+    return {
+        "email_context": email_context,
+        "code_context": code_context,
+        "mutation": mutation,
+        "address_action": address_action,
+        "result_action": result_action,
+    }
+
+
+def filter_email_tools(query: str, selected: Set[str]) -> Set[str]:
+    """Filter/seed built-in email tools using contextual intent.
+
+    Exact built-in names are the only values removed or added. Namespaced MCP
+    tools (including explicit ``mcp__...__ntfy...`` matches) pass through.
+    """
+    tools = set(selected or ())
+    intent = email_intent(query)
+    # An exact built-in tool name is an explicit request and outranks the
+    # heuristic context filter (while still leaving namespaced MCP tools alone).
+    mentioned = {
+        match.casefold()
+        for match in _EXPLICIT_EMAIL_TOOL_RE.findall(str(query or ""))
+    }
+    explicit = {name for name in _EMAIL_TOOLS if name.casefold() in mentioned}
+    if intent["code_context"]:
+        tools.difference_update(_EMAIL_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["email_context"]:
+        tools.update(_EMAIL_READ_TOOLS)
+        if intent["mutation"] or intent["address_action"]:
+            tools.update(_EMAIL_MUTATION_TOOLS)
+        else:
+            # Retrieval can return destructive tools for a read-only mailbox
+            # query. Keep that request read-only unless the wording is explicit.
+            tools.difference_update(_EMAIL_MUTATION_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["address_action"]:
+        tools.update(_EMAIL_TOOLS)
+    else:
+        # Generic send/message/reply or notification wording is not email
+        # intent. Keep unrelated UI/MCP tools untouched.
+        tools.difference_update(_EMAIL_TOOLS)
+    tools.update(explicit)
+    return tools
 # ── Tool description registry ──
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
@@ -386,12 +527,14 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
-        # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
-        # request (e.g. "visit <url> and tell me the title"), force-including the
-        # whole email toolset and crowding out the relevant tools — the model then
-        # believed it had only email tools and refused web/other tasks (#1707).
-        frozenset({"email", "emails", "mail", "mails", "mailbox", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
-            {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
+        # Email retrieval is gated by contextual intent below.  In particular,
+        # generic verbs such as "send", "message", and "reply" must not
+        # force-load the entire mailbox suite for notification or agent-chat
+        # requests.  This hint only contributes the read-only/inspection set;
+        # mutation tools are added when an email action is explicit.
+        frozenset({"email", "emails", "mail", "mails", "mailbox", "mailboxes",
+                   "gmail", "googlemail", "inbox", "inboxes", "unread"}):
+            _EMAIL_READ_TOOLS,
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
         # Source-control work on Odysseus itself. Without this the retrieval step
@@ -644,6 +787,13 @@ class ToolIndex:
         for keywords, tools in self._KEYWORD_HINTS.items():
             if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
                 base.update(tools)
+
+        # Apply the shared email context gate after both keyword hints and
+        # embedding retrieval. Embeddings are intentionally broad and can
+        # return mail tools as the least-bad neighbours for an ntfy
+        # notification or a code audit; semantic similarity alone is not an
+        # authorization to expose those schemas.
+        base = filter_email_tools(query, base)
         # Structural scheduling-intent detection — typo-resilient (the literal
         # keyword "every day" misses "every dya"). Catches "every <word>",
         # daily/nightly/etc., or a clock time like "at 7:30 am" / "7am", which

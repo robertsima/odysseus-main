@@ -2999,13 +2999,17 @@ def setup_email_routes():
         preview_bytes = 384 * 1024
         _t_select = 0.0
         _t_fetch = 0.0
+        _t_acquire = 0.0
         try:
             with _imap(account_id, owner=owner) as conn:
+                _t_selected_start = _t.monotonic()
+                _t_acquire = _t_selected_start - _t0
                 conn.select(_q(folder), readonly=True)
-                _t_select = _t.monotonic() - _t0
+                _t_fetch_start = _t.monotonic()
+                _t_select = _t_fetch_start - _t_selected_start
                 fetch_query = "(BODY.PEEK[])" if full else f"(BODY.PEEK[HEADER] BODY.PEEK[TEXT]<0.{preview_bytes}>)"
                 status, msg_data = _imap_uid_fetch(conn, uid, fetch_query)
-                _t_fetch = _t.monotonic() - _t0
+                _t_fetch = _t.monotonic() - _t_fetch_start
                 if status != "OK":
                     return {"error": f"Email UID {uid} not found"}
                 if full:
@@ -3061,7 +3065,8 @@ def setup_email_routes():
             if _t_total > 2.0:
                 logger.warning(
                     f"Slow email read uid={uid} folder={folder} "
-                    f"select={_t_select*1000:.0f}ms fetch={_t_fetch*1000:.0f}ms "
+                    f"acquire={_t_acquire*1000:.0f}ms select={_t_select*1000:.0f}ms "
+                    f"fetch={_t_fetch*1000:.0f}ms "
                     f"size={len(raw)} full={full} total={_t_total*1000:.0f}ms"
                 )
 

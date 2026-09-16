@@ -38,19 +38,51 @@ def live_children(session_id: Optional[str]) -> int:
     spawning-tool gate in :mod:`src.tool_execution` and the loadout tool's
     ``start`` action — so the counting rule lives here rather than being
     written twice and drifting. ``odysseus`` runs are the chat's own turns, not
-    children, so they do not count against the limit.
+    children, so they do not count against the limit. Claude Code tasks are
+    registered with their runner before they enter ``_run_claude`` and publish
+    an activity run. Include those queued records as well: otherwise several
+    same-round starts can all pass this gate while they wait on Claude's
+    process semaphore. Once activity has the run, the task id/run id overlap
+    is de-duplicated.
     """
     if not session_id:
         return 0
+    sid = str(session_id)
     try:
-        return sum(
-            1 for rec in activity.list_runs(limit=400)
-            if rec.get("session_id") == session_id
+        active = [
+            rec for rec in activity.list_runs(limit=400)
+            if rec.get("session_id") == sid
             and rec.get("status") == "running"
             and rec.get("source") != "odysseus"
-        )
+        ]
     except Exception:
-        return 0
+        active = []
+
+    # ``task_id`` is the runner's id and is used as the activity run id by
+    # _run_claude. Keep both forms for old activity rows that only recorded one
+    # of them in their summary.
+    represented = set()
+    for rec in active:
+        if rec.get("run_id"):
+            represented.add(str(rec["run_id"]))
+        summary = rec.get("summary") or {}
+        if isinstance(summary, dict) and summary.get("task_id"):
+            represented.add(str(summary["task_id"]))
+
+    total = len(active)
+    try:
+        # Lazy to avoid importing the Claude integration (which imports the
+        # activity subsystem) on ordinary chat/delegation paths.
+        from src.agent_tools.claude_code_tools import get_task_runner
+
+        for task in get_task_runner().summaries(limit=400):
+            if (task.get("session_id") == sid
+                    and task.get("status") in {"queued", "running"}
+                    and str(task.get("task_id") or "") not in represented):
+                total += 1
+    except Exception:
+        logger.debug("Could not include queued Claude Code tasks in child count", exc_info=True)
+    return total
 
 
 # ── steering ──────────────────────────────────────────────────────────────

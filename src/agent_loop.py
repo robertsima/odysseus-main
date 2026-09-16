@@ -881,12 +881,12 @@ def keyword_fallback_tools(query: str) -> Set[str]:
     ql = str(query or "").lower()
     if not ql:
         return set()
-    from src.tool_index import ToolIndex
+    from src.tool_index import ToolIndex, filter_email_tools
     out: Set[str] = set()
     for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
         if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
             out.update(tools)
-    return out
+    return filter_email_tools(query, out)
 
 
 # The editor-document tools that cannot act without a target document.
@@ -1721,6 +1721,24 @@ def _explicit_delegation_requested(text: str) -> bool:
     return bool(_EXPLICIT_DELEGATION_RE.search(text)) or _orchestration_requested(text)
 
 
+def _user_intent_text(msg: Dict) -> Optional[str]:
+    """Separate human intent from user-role context and runtime envelopes."""
+    if msg.get("role") != "user":
+        return None
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    content = str(content or "")
+    if (
+        (msg.get("metadata") or {}).get("trusted") is False
+        or _is_untrusted_context_content(content)
+        or content.startswith(("[Context —", "[Tool execution results]",
+                               "[Harness directive —", "[Message from agent session "))
+    ):
+        return None
+    return content
+
+
 def _extract_last_user_message(messages: List[Dict]) -> str:
     """Return the most recent thing the USER said, as plain text.
 
@@ -1732,20 +1750,9 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
     invoked and pull in all of their dependencies.
     """
     for msg in reversed(messages):
-        if msg.get("role") != "user":
-            continue
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-        content = content or ""
-        if (
-            (msg.get("metadata") or {}).get("trusted") is False
-            or _is_untrusted_context_content(content)
-            or content.startswith("[Context —")
-            or content.startswith("[Tool execution results]")
-        ):
-            continue
-        return content
+        content = _user_intent_text(msg)
+        if content is not None:
+            return content
     return ""
 
 
@@ -1753,7 +1760,7 @@ def _user_turn_count(messages: List[Dict]) -> int:
     """Count real user turns in the message list."""
     count = 0
     for msg in messages or []:
-        if msg.get("role") == "user":
+        if _user_intent_text(msg) is not None:
             count += 1
     return count
 
@@ -2885,8 +2892,12 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            rf"\b(?:start|launch|stop|restart|pull|download|downloading)\b\W+(?:\w+\W+){{0,4}}(?:{_MODEL_WORDS})\b",
            r"\b(?:gpu|inference|llm|model|cookbook)\s+servers?\b"):
         domains.add("cookbook")
-    if has(r"\b(emails?|mails?|gmail|inbox|reply|forward|cc|bcc|send email|compose email|draft email|message chris|message him|message her)\b"):
+    from src.tool_index import email_intent
+    _mail_intent = email_intent(retrieval_query)
+    if (_mail_intent["email_context"] or _mail_intent["address_action"]) and not _mail_intent["code_context"]:
         domains.add("email")
+    if _mail_intent["code_context"]:
+        domains.add("files")
     # `todoist` is a distinct token from `todos?` (no word boundary after
     # "todo"), so "add milk to my todoist" matched no domain at all, went down
     # the low-signal path, and depended entirely on embedding retrieval to
@@ -3729,22 +3740,32 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
     surfaced. Newest-first, so the latest turn survives the length cap."""
     collected = []
     for msg in reversed(messages):
-        if msg.get("role") != "user":
+        content = _user_intent_text(msg)
+        if not content or not content.strip():
             continue
-        content = msg.get("content", "")
-        if isinstance(content, list):
-            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-        content = (content or "").strip()
-        # Skip injected envelopes — role=user but not human intent. Tool results
-        # are now wrapped via untrusted_context_message (metadata.trusted=False);
-        # keep the legacy "[Tool execution results]" prefix for older histories.
-        meta = msg.get("metadata") or {}
-        if not content or meta.get("trusted") is False or content.startswith("[Tool execution results]"):
-            continue
-        collected.append(content)
+        collected.append(content.strip())
         if len(collected) >= max_user:
             break
     return "\n".join(collected)[:max_chars]
+
+
+def _steering_tool_additions(text: str, messages: List[Dict], selected: Set[str],
+                            pool: Set[str], disabled: Set[str]) -> Set[str]:
+    """Re-select deterministic tools for a human steer within existing gates.
+
+    A calendar question arriving during a notification turn needs the calendar
+    schema immediately. Waiting for a missing-tool refusal costs another model
+    round and often sends the model down generic API discovery instead.
+    """
+    intent = _classify_agent_request(messages, text)
+    query = str(intent.get("retrieval_query") or text)
+    candidates = keyword_fallback_tools(query)
+    for domain in intent.get("domains") or ():
+        candidates.update(_DOMAIN_TOOL_MAP.get(domain, ()))
+    candidates.update(_targeted_rearm_tools(text, pool))
+    from src.tool_index import filter_email_tools
+    candidates = filter_email_tools(query, candidates)
+    return (candidates & pool) - disabled - selected
 
 def _build_system_prompt(
     messages: List[Dict],
@@ -4206,8 +4227,9 @@ def _build_system_prompt(
                         except Exception:
                             pass
                     lines.append("## Relevant skills for this request")
-                    lines.append("These skills are matched to your current request. Each is a "
-                                 "procedure proven to work. Follow them step by step. The "
+                    lines.append("These skills are matched to your current request. Treat them as "
+                                 "reusable guidance, check applicability and verify outcomes; "
+                                 "an automatically learned procedure is not proof of success. The "
                                  "procedure, pitfalls and verification below are the skill's "
                                  "full structured content — do NOT call `manage_skills` view "
                                  "for these skills again. Only a skill marked *(has additional "
@@ -5916,6 +5938,14 @@ async def stream_agent_loop(
                 )
             _relevant_tools |= set(_KNOWLEDGE_BASE_TOOLS)
 
+    # The domain map is deliberately broad (also used for prompt rule packs).
+    # Narrow its email family with the same contextual gate as retrieval so
+    # domain seeding cannot undo the index's ntfy/code-audit correction.
+    # Explicit/retained/skill tool choices below keep their separate contract.
+    if not guide_only and _relevant_tools is not None and not relevant_tools:
+        from src.tool_index import filter_email_tools
+        _relevant_tools = filter_email_tools(_retrieval_query or _last_user, _relevant_tools)
+
     # "Research X" / "do deep research on Y" is a deep-research JOB, and the
     # system prompt says so in as many words -- but the intent classifier files
     # those phrases under the `web` domain, which seeds only web_search and
@@ -6695,6 +6725,8 @@ async def stream_agent_loop(
         # the model. A record that falls into the `mark_failed` branch is the
         # case that used to disappear without trace — queued, drained, and then
         # never given to anyone.
+        _steer_user_updates = []
+        _steer_added_tools: Set[str] = set()
         for _steer_rec in _agent_control.drain_steer_records(session_id, round_num=round_num):
             _steer_text = _steer_rec.get("text") or ""
             if not _steer_text:
@@ -6704,8 +6736,46 @@ async def stream_agent_loop(
             _is_peer = str(_steer_rec.get("kind") or "user") == "peer"
             _steer_msg = _steer_text if _is_peer else f"[Mid-task instruction from the user] {_steer_text}"
             messages.append({"role": "user", "content": _steer_msg})
+            if not _is_peer:
+                _steer_user_updates.append(_steer_text)
+                _last_user = _steer_text
+                if _relevant_tools is not None and not guide_only and not _ody_qwen_finetune_model:
+                    _steer_pool = {
+                        s.get("function", {}).get("name")
+                        for s in list(FUNCTION_TOOL_SCHEMAS) + list(mcp_schemas or [])
+                        if s.get("function", {}).get("name")
+                    }
+                    _steer_admin = _detect_admin_tools([{"role": "user", "content": _steer_text}])
+                    if not _needs_admin:
+                        _steer_pool -= (_ADMIN_TOOLS - _steer_admin)
+                    if tool_policy:
+                        _steer_pool = {t for t in _steer_pool if not tool_policy.blocks(t)}
+                    _steer_new = _steering_tool_additions(
+                        _steer_text, messages, set(_relevant_tools), _steer_pool, disabled_tools,
+                    )
+                    _relevant_tools.update(_steer_new)
+                    _steer_added_tools.update(_steer_new)
+                    _admin_tools.update(_steer_admin & _relevant_tools)
+                    _needs_admin = bool(_admin_tools)
             _agent_control.mark_injected(_steer_rec, round_num=round_num, run_id=_activity_run_id)
+            logger.info(
+                "[agent-steer] round=%s steer_id=%s kind=%s state=injected chars=%s",
+                round_num, _steer_rec.get("id"), "peer" if _is_peer else "user", len(_steer_text),
+            )
             yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user", "steer_id": _steer_rec.get("id")})}\n\n'
+        if _steer_user_updates:
+            _verifier_instruction += "\nMid-task user updates:\n" + "\n".join(_steer_user_updates)
+            _steer_guidance = (
+                "Apply the user's mid-task updates to the current task. Keep earlier unfinished "
+                "requests in scope unless the user cancels or replaces them. A side question "
+                "does not by itself cancel pending work. Report any work still outstanding."
+            )
+            if _steer_added_tools:
+                _steer_guidance += "\nTools added for the update: " + _name_list(_steer_added_tools, 25) + "."
+                _steer_guidance += "\n" + "\n".join(_domain_rules_for_tools(_steer_added_tools))
+            messages.append(_harness_directive(_steer_guidance))
+            logger.info("[agent-steer] round=%s user_updates=%s added_tools=%s",
+                        round_num, len(_steer_user_updates), _name_list(_steer_added_tools, 25))
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         round_reasoning_items = []  # opaque Responses reasoning items, replayed next round
@@ -8222,6 +8292,11 @@ async def stream_agent_loop(
                 "output": output_text,
                 "exit_code": result.get("exit_code"),
             }
+            for _outcome_key in ("status", "blocked", "blocked_reason", "approval_required", "duplicate_call"):
+                if _outcome_key in result:
+                    tool_event[_outcome_key] = result[_outcome_key]
+            if result.get("error"):
+                tool_event["error"] = True
             if result.get("image_url"):
                 for ik in ("image_url", "image_prompt", "image_model", "image_size", "image_quality"):
                     if result.get(ik):

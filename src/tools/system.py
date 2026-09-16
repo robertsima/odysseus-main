@@ -690,11 +690,18 @@ async def do_app_api(
         # Fetch FastAPI's OpenAPI schema so the agent can discover any
         # endpoint without us pre-listing them. Filter by an optional
         # `filter` keyword (substring match on path or summary).
-        kw = (args.get("filter") or "").lower()
+        kw = str(args.get("filter") or "").strip().lower()
+        try:
+            limit = max(1, min(50, int(args.get("limit", 25))))
+            offset = max(0, int(args.get("offset", 0)))
+        except (TypeError, ValueError):
+            return {"error": "limit and offset must be integers", "exit_code": 1}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(f"{base}/openapi.json",
                                         headers=_internal_headers())
+                if getattr(resp, "status_code", 200) >= 400:
+                    return {"error": f"OpenAPI fetch failed: HTTP {resp.status_code}", "exit_code": 1}
                 data = resp.json()
         except Exception as e:
             return {"error": f"OpenAPI fetch failed: {e}", "exit_code": 1}
@@ -706,6 +713,8 @@ async def do_app_api(
                 continue
             for method, op in methods.items():
                 if method.lower() not in ("get", "post", "put", "patch", "delete"):
+                    continue
+                if not isinstance(op, dict):
                     continue
                 if any(method.upper() == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
                     continue
@@ -720,15 +729,34 @@ async def do_app_api(
         rows.sort(key=lambda r: (r["path"], r["method"]))
         if not rows:
             return {"output": f"No endpoints match filter {kw!r}." if kw else "No endpoints found.", "exit_code": 0}
-        lines = [f"{len(rows)} endpoint(s)" + (f" matching {kw!r}" if kw else "") + ":"]
-        for r in rows[:200]:
-            line = f"  {r['method']:6s} {r['path']}"
-            if r["summary"]:
-                line += f"  — {r['summary']}"
-            lines.append(line)
-        if len(rows) > 200:
-            lines.append(f"  ...({len(rows) - 200} more — filter to narrow)")
-        return {"output": "\n".join(lines), "endpoints": rows, "exit_code": 0}
+        page = []
+        for row in rows[offset:offset + limit]:
+            candidate = page + [row]
+            # The tool formatter caps structured data at 8k characters.
+            # End a page before that cap so it never cuts an endpoint in half
+            # while claiming the agent has received the entire page.
+            if page and len(json.dumps(candidate, indent=2, ensure_ascii=False)) > 6000:
+                break
+            page.append(row)
+        next_offset = offset + len(page) if offset + len(page) < len(rows) else None
+        # Keep the data in one representation. format_tool_result already
+        # renders structured fields; duplicating the table in `output` made
+        # discovery consume thousands of tokens before any real work started.
+        summary = f"Showing {len(page)} of {len(rows)} endpoint(s)"
+        if kw:
+            summary += f" matching {kw!r}"
+        summary += f" (offset {offset})."
+        if next_offset is not None:
+            summary += " Narrow with filter or request the next offset."
+        return {
+            "output": summary,
+            "endpoints": page,
+            "total": len(rows),
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset,
+            "exit_code": 0,
+        }
 
     # action == "call"
     path = args.get("path") or ""

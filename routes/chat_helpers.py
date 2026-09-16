@@ -1566,6 +1566,7 @@ def run_post_response_tasks(
                 agent_rounds, agent_tool_calls,
                 owner=owner,
                 llm_candidates=s_candidates,
+                tool_events=(last_metrics or {}).get("tool_events"),
             )))
 
     if _extraction_jobs:

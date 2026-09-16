@@ -17,3 +17,41 @@ Recent live chat logs showed a read-only Vault Mind request selecting 30 native 
 - Repeated absent legacy-collection checks produce one Chroma lookup within the TTL; connection failures retry.
 - Existing privacy protections continue to govern reads of private Journal paths.
 - Focused retrieval, embedding, context, and startup-import tests pass.
+
+## Post-redeployment exercise — 2026-09-16
+
+The 19:59–20:06 logs show preparation below one second and strong cache reuse
+within a turn, but 21–33 seconds before first response text across four/five
+model rounds. A notification request selected the email suite; repeated worker
+launches hit the one-worker limit; loadout listing and API discovery added large
+results; a launch-only audit produced an automatically learned skill. The final
+calendar answer may reflect a mid-turn steer, which the old logs did not identify.
+
+Implemented acceptance criteria:
+
+- Notification/agent-message wording cannot seed email schemas through generic
+  verbs. Email implementation audits select source tools, while reading mail
+  about software and explicit result delivery remain valid email requests.
+- Empty chat settings apply the existing worker limit. Queued CLI jobs count
+  immediately; polling and cancellation remain available at capacity. Provider
+  failures and unconfirmed starts remain distinguishable from completed work.
+- Discovery results are bounded and pageable, with no duplicate endpoint table.
+  Loadout discovery is compact and full configuration remains retrievable.
+- Steering badges disappear when delivered and instructions remain normal chat
+  messages. Cancelled/failed chips clear with durable history retained.
+  Stream resume and chat switches do not leave stale labels or
+  render a late response into another chat.
+- A human steer adds relevant permitted tools before the next model request and
+  retains unfinished user objectives unless superseded. Synthetic context and
+  peer messages do not become the human retrieval query.
+- Skill extraction skips launch-only or unsuccessful evidence and supplies
+  bounded outcome metadata to the teacher, without additional raw tool contents
+  or arguments. Learned guidance is not called proven.
+- Slow email-read logs separate connection acquisition, folder selection and
+  message fetch durations instead of labeling cumulative timings as phases.
+
+Deployment validation still requires replaying the same user flows against the
+configured providers. Unit and simulated-stream regressions verify routing,
+capacity, context bounds and delivery behavior; they do not establish a new live
+latency figure. The observed slow IMAP revalidations already run in the existing
+cache/revalidation path; no provider-latency reduction is claimed here.
