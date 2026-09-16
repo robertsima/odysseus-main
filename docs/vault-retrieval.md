@@ -155,29 +155,34 @@ These are two layers and they are often confused for alternatives:
 | | What it is | Configured by |
 |---|---|---|
 | **ChromaDB** | the vector **store**, an HTTP service (`:8100`) that holds the chunks and their vectors | `CHROMADB_HOST` / `CHROMADB_PORT` |
-| **Embedder** | what turns text into those vectors | an HTTP endpoint (`EMBEDDING_URL`, or the admin panel), else local FastEmbed |
+| **Embedder** | what turns text into those vectors | local FastEmbed only (`FASTEMBED_CACHE_DIR`) |
 
 Turning one off does not select the other. With Chroma unreachable there is no
 retrieval at all — `search_documents` says so explicitly, `get_rag_manager()`
 returns `None` and throttles its retries to once per 30s.
 
 Vectors from different models cannot share a collection (Chroma fixes a
-collection's dimension on first insert), so each embedder gets its own **lane**
-and its own collection: `custom` for the HTTP endpoint, `fastembed` for the
-local fallback. Both are searched, best-scoring lane wins.
+collection's dimension on first insert), so a collection is always named for
+the embedder that filled it — a **lane** — as `<base>_<lane>`
+(`src/embedding_lanes.py`).
 
-`ODYSSEUS_FASTEMBED_LANE` controls whether the fallback lane is maintained:
+**There is one supported lane: `fastembed`.** `build_embedding_lanes()` returns
+exactly that lane and nothing else, `get_embedding_client()` returns the local
+FastEmbed client only, and `migrate_legacy_collection()` is a documented no-op,
+so unsuffixed legacy collections are neither queried nor migrated. This is the
+behaviour [`specs/retrieval-runtime.md`](../specs/retrieval-runtime.md)
+requires.
 
-- `auto` (default) — always build it, so retrieval survives the endpoint going
-  down.
-- `off` — build it only when the custom lane failed to come up. Use this when
-  you run a real embedding model and do not want a second 384-dimension MiniLM
-  index maintained beside it. It still falls back rather than leaving the app
-  with no lanes: an unreachable endpoint must degrade retrieval, not delete it.
+Remote embedding endpoints are **not** part of the retrieval path. The
+`LANE_CUSTOM` constant, the `EMBEDDING_URL` / `EMBEDDING_MODEL` /
+`EMBEDDING_API_KEY` variables and the embedding-endpoint panel in Settings are
+all still present, but nothing consults them when building lanes or embedding a
+query. Setting one changes nothing about retrieval.
 
-Switching embedders re-embeds rather than corrupting: a lane whose fingerprint
-(model + url + dimension) no longer matches its collection is rebuilt from the
-stored documents.
+Switching FastEmbed models re-embeds rather than corrupting: collection
+metadata carries a fingerprint of model + url + dimension, and a lane whose
+fingerprint no longer matches its collection is rebuilt from the stored
+documents.
 
 ## Keeping the index current
 
@@ -207,7 +212,6 @@ All optional. See `.env.example` for the same list with defaults inline.
 | `ODYSSEUS_RAG_LINK_EXPANSION` | `1` | Follow `[[wikilinks]]`; `0` disables |
 | `ODYSSEUS_VAULT_DATE_ORDER` | `day` | Reading of an ambiguous filename date (`03-04-2026`) |
 | `ODYSSEUS_VAULT_SCAN_SECONDS` | `30` | Re-scan interval; `0` disables |
-| `ODYSSEUS_FASTEMBED_LANE` | `auto` | `off` skips the local fallback lane when an embedding endpoint is up |
 | `ODYSSEUS_TOOL_EXTRA_ROOTS` | *(empty)* | Extra directories the agent's file tools may touch |
 | `ODYSSEUS_PERSONAL_DIRS` | *(empty)* | `path:label` pairs to index at boot; an undeclared directory is public |
 
