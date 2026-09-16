@@ -429,3 +429,117 @@ def test_get_workspace_still_leads_with_the_active_workspace(checkout_roots, mon
     assert out["output"].startswith("/work/here")
     assert "confined to this folder" in out["output"]
     assert str(checkout_roots["main"]) in out["output"]
+
+
+# ── Spec 2b: every schema sent but not selected must be explainable ────────
+#
+# The Sept 15-16 self-audit measured 54-70 tools and 12,500-13,900 schema
+# tokens per round, with one request selecting 31 tools and sending 70; the
+# named surplus was Firecrawl, Penpot, notification and Context7 schemas.
+# Most of that has since been closed from the other end — `mcp_manager` now
+# demotes an oversized server (firecrawl: 27 tools) out of the always-bound
+# set, and admin tools follow the matched keyword instead of arriving as a
+# blanket seventeen.
+#
+# What is left is deliberate, and this pins it so nobody has to re-measure by
+# hand to find out. Re-measured on the 2026-09-16 inventory, an eleven-tool
+# turn is sent 21 schemas: the eleven, plus the four SMALL connected servers
+# whose always-bound guarantee is the fix for the vanishing-tool bug (see
+# `_tool_schemas_for_round`'s docstring and the budget note in mcp_manager).
+# Nothing else. If this test starts failing with an extra name, that name is
+# a new source of drift and needs its own justification here.
+
+# The inventory behind the audit: one scraped-API catalog, four purpose-built
+# servers, and the embedded catalogs that were always gated by identity.
+_SEPT_INVENTORY = {
+    "firecrawl": 27, "penpot": 5, "ntfy": 2, "context7": 2, "seqthink": 1,
+    "builtin_browser": 25, "github_read": 20, "todoist": 8,
+}
+_SEPT_CATALOGS = ("builtin_browser", "github_read", "todoist")
+
+
+def _sept_manager():
+    from src.mcp_manager import McpManager
+
+    mgr = McpManager()
+    mgr._tools, mgr._connections = {}, {}
+    for server_id, count in _SEPT_INVENTORY.items():
+        mgr._tools[server_id] = [
+            {"name": f"{server_id}_t{i}", "description": f"{server_id} {i}", "input_schema": {}}
+            for i in range(count)
+        ]
+        mgr._connections[server_id] = {"status": "connected", "name": server_id, "identity": ""}
+    return mgr
+
+
+_LOG_TURN_SELECTION = {
+    "read_app_logs", "ask_user", "update_plan", "manage_memory", "read_file",
+    "grep", "glob", "ls", "bash", "web_search", "web_fetch",
+}
+
+
+def _sent_names(relevant, **overrides):
+    mgr = _sept_manager()
+    kwargs = dict(
+        force_answer=False,
+        is_api_model=True,
+        relevant_tools=set(relevant),
+        needs_admin=False,
+        admin_tools=set(),
+        # From the manager, not hand-rolled: the payload and the gating
+        # decision then come from the same place they do in the loop.
+        mcp_schemas=mgr.get_all_openai_schemas(),
+        disabled_tools=set(),
+        ody_qwen_finetune_model=False,
+        last_user="",
+        mcp_gated_names=mgr.gated_tool_names(),
+    )
+    kwargs.update(overrides)
+    return {
+        s.get("function", {}).get("name")
+        for s in _tool_schemas_for_round(**kwargs)
+    }
+
+
+def test_the_only_unselected_schemas_are_the_small_connected_servers():
+    sent = _sent_names(_LOG_TURN_SELECTION)
+    surplus = sent - _LOG_TURN_SELECTION
+
+    # Four small servers, ten tools. Every one of them is a server the user
+    # connected on purpose that would otherwise vanish on "continue".
+    assert len(surplus) == 10, sorted(surplus)
+    assert {n.split("__")[1] for n in surplus} == {"penpot", "ntfy", "context7", "seqthink"}
+    # The audit's biggest single line item is gone from the payload entirely.
+    assert not any(n.startswith("mcp__firecrawl__") for n in sent)
+    # ...as are the embedded catalogs, which were gated all along.
+    for catalog in _SEPT_CATALOGS:
+        assert not any(n.startswith(f"mcp__{catalog}__") for n in sent), catalog
+
+
+def test_admin_intent_adds_only_the_tools_its_keywords_named():
+    # The other half of the surplus, and the one that used to be seventeen
+    # schemas on any turn that said "task" or "doc". Both live call sites pass
+    # the keyword breakdown, so the blanket `_ADMIN_TOOLS` union in
+    # `_tool_schemas_for_round` is a defensive default, not a live path.
+    named = _detect_admin_tools(_user("add a task to remind me tomorrow and check my settings"))
+    assert named == {"manage_tasks", "manage_settings"}
+
+    sent = _sent_names(_LOG_TURN_SELECTION, needs_admin=True, admin_tools=named)
+    builtin_surplus = {n for n in sent - _LOG_TURN_SELECTION if not n.startswith("mcp__")}
+    assert builtin_surplus == named
+
+    blanket = _sent_names(_LOG_TURN_SELECTION, needs_admin=True, admin_tools=None)
+    assert len({n for n in blanket - _LOG_TURN_SELECTION if not n.startswith("mcp__")}) > 10, (
+        "the blanket fallback is what the per-keyword breakdown replaced; if it "
+        "ever becomes reachable again from stream_agent_loop this is the cost"
+    )
+
+
+def test_both_call_sites_pass_the_keyword_breakdown():
+    import inspect
+
+    src = inspect.getsource(agent_loop.stream_agent_loop)
+    assert src.count("admin_tools=_admin_tools") == 2, (
+        "a call site that omits admin_tools falls back to the whole "
+        "_ADMIN_TOOLS set, silently, on every round of the turn"
+    )
