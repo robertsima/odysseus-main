@@ -160,6 +160,60 @@ def test_ordinary_tool_exception_is_not_retried_on_a_user_added_server():
     assert len(calls) == 1
 
 
+def _connected_builtin_manager(server_id="email", tool_names=("send_email",)):
+    mgr = McpManager()
+    mgr._sessions[server_id] = object()
+    mgr._connections[server_id] = {"status": "connected", "name": "Built-in: Email"}
+    mgr._tools[server_id] = [
+        {"name": name, "description": f"{name} tool.", "input_schema": {}}
+        for name in tool_names
+    ]
+    return mgr
+
+
+def test_builtin_mutating_tool_is_not_replayed_after_an_ambiguous_failure():
+    mgr = _connected_builtin_manager()
+    calls = []
+
+    async def fake_do_call(session, tool_name, arguments):
+        calls.append(session)
+        raise RuntimeError("SMTP handshake timed out")
+
+    async def fake_reconnect(server_id):
+        mgr._sessions[server_id] = object()
+        return True
+
+    with patch.object(McpManager, "_do_call", side_effect=fake_do_call), \
+         patch.object(McpManager, "_reconnect_server", side_effect=fake_reconnect):
+        result = asyncio.run(mgr.call_tool("mcp__email__send_email", {"to": "a@b.com"}))
+
+    assert result["exit_code"] == 1
+    assert "NOT retried automatically" in result["error"]
+    assert len(calls) == 1
+
+
+def test_builtin_read_only_tool_is_replayed_after_an_ambiguous_failure():
+    mgr = _connected_builtin_manager(tool_names=("list_emails",))
+    calls = []
+
+    async def fake_do_call(session, tool_name, arguments):
+        calls.append(session)
+        if len(calls) == 1:
+            raise RuntimeError("connection reset")
+        return {"stdout": "[]", "stderr": "", "exit_code": 0}
+
+    async def fake_reconnect(server_id):
+        mgr._sessions[server_id] = object()
+        return True
+
+    with patch.object(McpManager, "_do_call", side_effect=fake_do_call), \
+         patch.object(McpManager, "_reconnect_server", side_effect=fake_reconnect):
+        result = asyncio.run(mgr.call_tool("mcp__email__list_emails", {}))
+
+    assert result["exit_code"] == 0
+    assert len(calls) == 2
+
+
 def test_dead_transport_error_reported_to_the_agent_is_actionable():
     # The whole symptom was exit_code=1 with an empty error message. Whatever
     # else changes, the agent must get the server name and its command back.

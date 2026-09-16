@@ -807,6 +807,30 @@ class McpManager:
                 logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {detail}")
                 reconnected = await self._reconnect_server(server_id)
                 if reconnected:
+                    # Reconnecting and replaying are separate decisions. A dead
+                    # transport proves the call did not complete; otherwise only
+                    # read-only tools are safe to replay automatically.
+                    tool_meta = next(
+                        (t for t in self._tools.get(server_id, []) if t.get("name") == tool_name),
+                        None,
+                    )
+                    safe_to_replay = _is_dead_transport_error(e) or (
+                        tool_meta is not None and mcp_tool_is_readonly(tool_meta)
+                    )
+                    if not safe_to_replay:
+                        logger.error(
+                            f"MCP server {server_id} reconnected but '{tool_name}' was not "
+                            f"replayed (outcome of the failed call is unknown): {detail}"
+                        )
+                        return {
+                            "error": (
+                                f"MCP server '{server_id}' dropped the connection while running "
+                                f"'{tool_name}' ({detail}). The server has been reconnected, but this "
+                                "call was NOT retried automatically because it may have already taken "
+                                "effect. Check whether it already happened before calling it again."
+                            ),
+                            "exit_code": 1,
+                        }
                     session = self._sessions.get(server_id)
                     if session:
                         try:

@@ -2347,6 +2347,8 @@ function initMcpForm() {
   }
 
   el('adm-mcpAddBtn').addEventListener('click', async () => {
+    const addBtn = el('adm-mcpAddBtn');
+    if (addBtn.disabled) return;
     const name = el('adm-mcpName').value.trim();
     const transport = transportSel.value;
     const command = el('adm-mcpCommand').value.trim();
@@ -2374,6 +2376,7 @@ function initMcpForm() {
     if (_activeOauth) {
       fd.append('oauth_config', JSON.stringify(_activeOauth));
     }
+    addBtn.disabled = true;
     msg.textContent = 'Adding...'; msg.className = '';
     try {
       const res = await fetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
@@ -2388,6 +2391,7 @@ function initMcpForm() {
       _clearEnvFields(); helpBox.style.display = 'none'; _activeHelp = null; _activeOauthFile = null; _activeOauth = null;
       loadMcpServers();
     } catch (e) { msg.textContent = 'Failed: ' + e.message; msg.className = 'admin-error'; }
+    finally { addBtn.disabled = false; }
   });
 }
 
@@ -3200,6 +3204,30 @@ function initLogsView() {
   loadLogs(false);
 }
 
+async function loadRouteLatency() {
+  const list = el('adm-routeLatencyList');
+  if (!list) return;
+  list.innerHTML = '<span style="opacity:0.5;font-size:11px;">Loading...</span>';
+  try {
+    const res = await fetch('/api/diagnostics/route_latency', { credentials: 'same-origin' });
+    const data = await res.json();
+    const routes = data.routes || [];
+    if (!routes.length) { list.innerHTML = '<div class="admin-empty">No requests recorded yet</div>'; return; }
+    list.innerHTML = routes.slice(0, 25).map(r => `<div class="settings-row" style="font-size:11px;">
+      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(r.method)} ${esc(r.path)}"><strong>${esc(r.method)}</strong> ${esc(r.path)}</span>
+      <span style="opacity:0.7;white-space:nowrap;">avg ${r.avg_ms}ms · p95 ${r.p95_ms}ms · max ${r.max_ms}ms · n=${r.count}</span>
+    </div>`).join('');
+  } catch (e) {
+    list.innerHTML = `<div class="admin-error">Failed to load route latency: ${esc(e.message)}</div>`;
+  }
+}
+
+function initRouteLatencyView() {
+  const refreshBtn = el('adm-routeLatencyRefresh');
+  if (refreshBtn) refreshBtn.addEventListener('click', () => loadRouteLatency());
+  loadRouteLatency();
+}
+
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
@@ -3207,7 +3235,7 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRag,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRouteLatencyView, initRag,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
