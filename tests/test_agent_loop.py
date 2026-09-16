@@ -4,6 +4,8 @@ and _append_tool_results. Uses mock imports to avoid loading the full app stack.
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 _MOCKED_IMPORTS = [
     'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
@@ -297,6 +299,31 @@ class TestDetectAdminIntent:
 
     def test_general_question(self):
         assert _detect_admin_intent(self._msgs("what is the capital of France?")) is False
+
+    # "agent" and "worker" buy the delegation surface only inside an
+    # orchestration phrase. They are this app's own subject matter otherwise,
+    # and promoting every mention would ship delegation schemas on every turn
+    # that discusses the running harness.
+    @pytest.mark.parametrize("text", [
+        "why did the agent stop responding mid-answer",
+        "the worker process died again overnight",
+        "set the user agent header on that request",
+        "agentic workflows are overrated",
+        "how many workers does the pool start with",
+    ])
+    def test_agent_prose_is_not_admin_intent(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is False
+
+    @pytest.mark.parametrize("text", [
+        "ok just kick off a claude agent then and have it do it give it the logs and scope",
+        "delegate this to claude code",
+        "spin up a worker agent to fix the tool routing",
+        "hand this to a worker",
+        "run a sub-agent on this",
+        "show me the agent loadout",
+    ])
+    def test_orchestration_phrasing_is_admin_intent(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is True
 
     # --- Edge cases ---
 
