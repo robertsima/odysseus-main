@@ -882,11 +882,14 @@ def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any
     return {
         "error": (
             f"Worker capacity reached: {active} active of this chat's limit {limit}. "
+            "This is the parent chat's Child workers limit, not the provider-wide concurrent-jobs setting. "
             "Do not retry a start while capacity is unchanged; " + next_step
         ),
         "blocked": True,
         "blocked_reason": "worker_capacity",
         "capacity": {"limit": limit, "active": active, "available": available},
+        "capacity_scope": "parent_chat",
+        "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
         "exit_code": 1,
     }
 
@@ -1145,11 +1148,8 @@ async def _execute_tool_block_impl(
     # profile-only guards above, which intentionally do nothing for a plain
     # chat, so that a missing settings row cannot bypass the limit.
     if _capacity_limited_tool_call(tool, content):
-        _raw_limit = _agent_settings.get("max_parallel_workers")
-        try:
-            _limit = int(1 if _raw_limit is None else _raw_limit)
-        except (TypeError, ValueError):
-            _limit = 1
+        from src.session_settings import effective_worker_limit
+        _limit = effective_worker_limit(_agent_settings)
         from src import agent_control as _agent_control
         _live_children = _agent_control.live_children(session_id)
         if _limit <= 0 or _live_children >= _limit:

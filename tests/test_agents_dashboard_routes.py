@@ -105,6 +105,140 @@ async def test_overview_includes_the_current_open_chat_without_agent_history(env
     assert out["rows"][0]["config"]["delegation_policy"] == "explicit"
 
 
+async def test_archive_is_owner_scoped_recoverable_and_refuses_active_descendants(env, monkeypatch):
+    """Cleanup hides idle work only; it neither stops nor erases live work."""
+    mgr, eps = env
+    archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
+    from fastapi import HTTPException
+
+    # Bob's session is never addressable through Alice's dashboard.
+    with pytest.raises(HTTPException) as exc:
+        await archive(_req(), session_id="b1")
+    assert exc.value.status_code == 404
+
+    with agent_runs.track_external("a1", source="bg_job", owner="alice"):
+        with pytest.raises(HTTPException) as exc:
+            await archive(_req(), session_id="a1")
+        assert exc.value.status_code == 409
+        assert mgr.sessions["a1"].archived is False
+
+    out = await archive(_req(), session_id="a1")
+    assert out["archived"] is True and "history" in out["message"]
+    assert mgr.sessions["a1"].archived is True
+    # The normal fleet no longer lists cleanup-hidden sessions.
+    assert (await eps[("GET", "/api/agents/overview")](_req()))["rows"] == []
+
+
+async def test_archive_refuses_an_active_child_and_cleanup_hides_only_completed_runs(env, monkeypatch):
+    mgr, eps = env
+    mgr.sessions["a2"] = _Sess("a2", "Alice worker")
+    settings = {"a2": {"parent_session": "a1"}}
+    import core.database as db
+    monkeypatch.setattr(db, "get_session_settings", lambda sid: settings.get(sid, {}))
+    monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: settings.setdefault(sid, {}).update(patch) or settings[sid])
+    archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
+    cleanup = eps[("POST", "/api/agents/sessions/{session_id}/cleanup-runs")]
+    restore_runs = eps[("POST", "/api/agents/sessions/{session_id}/restore-runs")]
+    from fastapi import HTTPException
+
+    with agent_runs.track_external("a2", source="bg_job", owner="alice"):
+        with pytest.raises(HTTPException) as exc:
+            await archive(_req(), session_id="a1")
+        assert exc.value.status_code == 409 and "a2" in exc.value.detail
+
+    run_id = act.run_started("a1", "session", "finished child", owner="alice")
+    act.run_finished("a1", "session", run_id, "finished child", owner="alice")
+    result = await cleanup(_req({"run_ids": [run_id]}), session_id="a1")
+    assert result["history_preserved"] is True and settings["a1"]["hidden_agent_runs"] == [run_id]
+    # Cleanup is an affordance only: it does not delete the run or its events.
+    assert act.get_run(run_id)["status"] == "completed" and act.run_events(run_id)
+    restored = await restore_runs(_req({"run_ids": [run_id]}), session_id="a1")
+    assert restored["restored_run_ids"] == [run_id] and settings["a1"]["hidden_agent_runs"] == []
+
+
+async def test_archive_refuses_queued_cli_children_and_cleanup_is_owner_scoped(env, monkeypatch):
+    mgr, eps = env
+    mgr.sessions["a2"] = _Sess("a2", "Queued CLI child")
+    settings = {"a2": {"parent_session": "a1"}}
+    import core.database as db
+    monkeypatch.setattr(db, "get_session_settings", lambda sid: settings.get(sid, {}))
+    monkeypatch.setattr(agent_control, "live_children", lambda sid: 1 if sid == "a2" else 0)
+    archive = eps[("POST", "/api/agents/sessions/{session_id}/archive")]
+    cleanup = eps[("POST", "/api/agents/sessions/{session_id}/cleanup-runs")]
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await archive(_req(), session_id="a1")
+    assert exc.value.status_code == 409 and "a2" in exc.value.detail
+
+    # A foreign run cannot be hidden through Alice's parent chat endpoint.
+    foreign = act.run_started("b1", "session", "Bob child", owner="bob")
+    act.run_finished("b1", "session", foreign, "Bob child", owner="bob")
+    with pytest.raises(HTTPException) as exc:
+        await cleanup(_req({"run_ids": [foreign]}), session_id="a1")
+    assert exc.value.status_code == 404
+
+
+async def test_unarchive_checks_db_owner_before_restoring(env, monkeypatch):
+    """Archived sessions can be absent from the live manager after restart."""
+    _mgr, eps = env
+    restore = eps[("POST", "/api/agents/sessions/{session_id}/unarchive")]
+    import core.database as db
+    from fastapi import HTTPException
+
+    class _Field:
+        def __eq__(self, other):
+            return other
+
+    class _DbSession:
+        id = _Field()
+        owner = _Field()
+
+    row = SimpleNamespace(owner="alice", archived=True)
+    class _Query:
+        def filter(self, *_args): return self
+        def first(self): return row
+    class _Db:
+        def query(self, *_args): return _Query()
+        def commit(self): pass
+        def close(self): pass
+    monkeypatch.setattr(db, "Session", _DbSession)
+    monkeypatch.setattr(db, "SessionLocal", lambda: _Db())
+
+    out = await restore(_req(), session_id="a1")
+    assert out["archived"] is False and row.archived is False
+    row.owner, row.archived = "bob", True
+    with pytest.raises(HTTPException) as exc:
+        await restore(_req(), session_id="a1")
+    assert exc.value.status_code == 404 and row.archived is True
+
+
+async def test_archived_overview_uses_db_metadata_without_hydrating_transcripts(env, monkeypatch):
+    """A restart must list archive cards without loading each full history."""
+    mgr, eps = env
+    mgr.sessions.pop("a1")
+    import core.database as db
+
+    class _Field:
+        def __eq__(self, other): return other
+    class _DbSession:
+        id, owner, archived, name, model = _Field(), _Field(), _Field(), _Field(), _Field()
+    row = SimpleNamespace(id="old-agent", name="Old agent", model="m", owner="alice", archived=True)
+    class _Query:
+        def filter(self, *_args): return self
+        def all(self): return [row]
+    class _Db:
+        def query(self, *_args): return _Query()
+        def close(self): pass
+    monkeypatch.setattr(db, "Session", _DbSession)
+    monkeypatch.setattr(db, "SessionLocal", lambda: _Db())
+    monkeypatch.setattr(db, "get_session_settings", lambda _sid: {})
+    mgr.get_session = lambda _sid: (_ for _ in ()).throw(AssertionError("must not hydrate archive history"))
+
+    out = await eps[("GET", "/api/agents/overview")](_req(), archived=True)
+    assert [(item["session_id"], item["name"], item["archived"]) for item in out["rows"]] == [("old-agent", "Old agent", True)]
+
+
 async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, monkeypatch):
     mgr, eps = env
     steer = eps[("POST", "/api/agents/sessions/{session_id}/steer")]
@@ -116,6 +250,9 @@ async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, mo
     with pytest.raises(HTTPException):
         await steer(_req({"text": "x"}), session_id="b1")
 
+    # Detached work has a wrapper activity run; that stable id is the one a
+    # headless loop drains, not the loop's private telemetry id.
+    act.run_started("a1", "bg_job", "Background continuation", run_id="bg-wrapper", owner="alice")
     with agent_runs.track_external("a1", source="bg_job", owner="alice"):
         out = await steer(_req({"text": "focus on tests"}), session_id="a1")
     assert out["queued"] and agent_control.pending_steer("a1")[0]["text"] == "focus on tests"
@@ -134,7 +271,8 @@ async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, mo
     monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream, raising=False)
     chunks = [c async for c in agent_loop.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "go"}],
-        relevant_tools={"read_file"}, session_id="a1", _is_teacher_run=True)]
+        relevant_tools={"read_file"}, session_id="a1", _is_teacher_run=True,
+        steer_run_id="bg-wrapper")]
     assert any('"steer_applied"' in c for c in chunks)
     assert agent_loop._extract_last_user_message(seen["messages"]).endswith("focus on tests")
     assert agent_control.pending_steer("a1") == []
@@ -163,6 +301,7 @@ async def test_steer_lifecycle_is_visible_to_the_control_room(env, monkeypatch):
     assert refused["messages"][0]["state"] == "failed"
     assert "not queued" in refused["messages"][0]["reason"]
 
+    act.run_started("a1", "bg_job", "Background continuation", run_id="bg-lifecycle", owner="alice")
     with agent_runs.track_external("a1", source="bg_job", owner="alice"):
         queued = await steer(_req({"text": "use the staging database"}), session_id="a1")
         ov = await eps[("GET", "/api/agents/overview")](_req())
@@ -174,7 +313,7 @@ async def test_steer_lifecycle_is_visible_to_the_control_room(env, monkeypatch):
         assert newest["text"] == "use the staging database"
 
     # Nothing drained it before the turn ended.
-    agent_control.clear_steer("a1")
+    agent_control.clear_steer("a1", run_id="bg-lifecycle")
     after = await steer_log(_req(), session_id="a1")
     assert after["queued"] == 0
     assert after["messages"][0]["state"] == "cancelled"

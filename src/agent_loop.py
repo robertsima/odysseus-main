@@ -1524,6 +1524,12 @@ _AGENT_RUN_RE = re.compile(
     r"\brun(?:ning|s)?\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b" + _HEAD_NOUN_FOLLOWERS,
     re.IGNORECASE,
 )
+_USING_AGENTS_RE = re.compile(
+    r"\b(?:launch|start|run|perform|conduct|execute|complete|audit|review|"
+    r"investigate|analy[sz]e|check|do)\b.{0,180}?"
+    r"\busing\s+(?:\*{1,2})?(?:ai\s+)?agents?\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _orchestration_requested(text: str) -> bool:
@@ -1533,6 +1539,7 @@ def _orchestration_requested(text: str) -> bool:
         _AGENT_NOUN_RE.search(text)
         or _AGENT_ORCHESTRATION_RE.search(text)
         or _AGENT_RUN_RE.search(text)
+        or _USING_AGENTS_RE.search(text)
     )
 
 
@@ -4327,13 +4334,38 @@ def _build_system_prompt(
         else:
             merged.append(msg)
 
-    # Insert the document message right before the last user message so it's
-    # close to the user's request and survives context trimming independently.
+    # Dynamic retrieval is commonly appended to the conversation before this
+    # builder runs. Move only those synthetic user envelopes that trail the
+    # current human turn; assistant/tool ordering remains untouched.
+    _human_idx = next(
+        (i for i in range(len(merged) - 1, -1, -1)
+         if _user_intent_text(merged[i]) is not None),
+        None,
+    )
+    if _human_idx is not None:
+        _trailing_context = [
+            msg for msg in merged[_human_idx + 1:]
+            if msg.get("role") == "user" and _user_intent_text(msg) is None
+        ]
+        if _trailing_context:
+            _context_ids = {id(msg) for msg in _trailing_context}
+            merged = [msg for msg in merged if id(msg) not in _context_ids]
+            _human_idx = next(
+                i for i in range(len(merged) - 1, -1, -1)
+                if _user_intent_text(merged[i]) is not None
+            )
+            merged[_human_idx:_human_idx] = _trailing_context
+
+    # Insert context before the last human-intent message. Retrieval, skills,
+    # MCP descriptions and other untrusted data deliberately use role=user;
+    # treating the last raw user-role envelope as the request left synthetic
+    # context after the command, a plausible contributor to the generic
+    # acknowledgements observed in established chats but not fresh ones.
     # Same treatment for the matched-skills block — user-editable skill
     # content must never be in the system role (see _skills_message above).
     last_user_idx = len(merged) - 1
     for i in range(len(merged) - 1, -1, -1):
-        if merged[i].get("role") == "user":
+        if _user_intent_text(merged[i]) is not None:
             last_user_idx = i
             break
     if _doc_message:
@@ -5377,6 +5409,7 @@ async def stream_agent_loop(
     workload: str = "foreground",
     _is_teacher_run: bool = False,
     approval_mode: Optional[str] = None,
+    steer_run_id: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -5448,6 +5481,7 @@ async def stream_agent_loop(
     # the Claude Code jobs, sub-agents and shell jobs it may start. Closed at
     # the final metrics below, or by agent_runs when the stream is stopped.
     _activity_run_id = _activity.new_run_id("odysseus")
+    _steer_run_id = steer_run_id or _activity_run_id
     try:
         _turn_excerpt = " ".join(_extract_last_user_message(messages).split())[:100]
     except Exception:
@@ -6727,7 +6761,9 @@ async def stream_agent_loop(
         # never given to anyone.
         _steer_user_updates = []
         _steer_added_tools: Set[str] = set()
-        for _steer_rec in _agent_control.drain_steer_records(session_id, round_num=round_num):
+        for _steer_rec in _agent_control.drain_steer_records(
+            session_id, run_id=_steer_run_id, round_num=round_num
+        ):
             _steer_text = _steer_rec.get("text") or ""
             if not _steer_text:
                 _agent_control.mark_failed(_steer_rec, "empty after draining", round_num=round_num,
@@ -6762,7 +6798,12 @@ async def stream_agent_loop(
                 "[agent-steer] round=%s steer_id=%s kind=%s state=injected chars=%s",
                 round_num, _steer_rec.get("id"), "peer" if _is_peer else "user", len(_steer_text),
             )
-            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user", "steer_id": _steer_rec.get("id")})}\n\n'
+            _steer_event = {"type": "steer_applied", "text": _steer_text, "round": round_num,
+                            "kind": "peer" if _is_peer else "user", "steer_id": _steer_rec.get("id")}
+            if _is_peer:
+                _steer_event.update(from_session=_steer_rec.get("from_session"),
+                                    from_session_name=_steer_rec.get("from_session_name"))
+            yield f'data: {json.dumps(_steer_event)}\n\n'
         if _steer_user_updates:
             _verifier_instruction += "\nMid-task user updates:\n" + "\n".join(_steer_user_updates)
             _steer_guidance = (
@@ -7616,7 +7657,8 @@ async def stream_agent_loop(
             # much later). Loop once more so it is actually read — which is the
             # whole promise of steering. Bounded by max_rounds like everything
             # else, and _STEER_MAX caps how much can be pending.
-            if _agent_control.pending_steer(session_id) and round_num < max_rounds:
+            if (_agent_control.pending_steer(session_id, run_id=_steer_run_id)
+                    and round_num < max_rounds):
                 logger.info(
                     "[agent] round %d would end the turn but a steer is pending; continuing",
                     round_num,
@@ -8452,7 +8494,7 @@ async def stream_agent_loop(
     # still in it (a steer that raced the last round, or arrived after the round
     # cap) must not survive into a later turn, where it would read as a
     # correction to work the user has long since moved on from.
-    _dropped_steer = _agent_control.clear_steer(session_id)
+    _dropped_steer = _agent_control.clear_steer(session_id, run_id=_steer_run_id)
     if _dropped_steer:
         logger.warning(
             "[agent] turn ended with %d undrained steer message(s); dropping: %s",

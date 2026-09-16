@@ -38,8 +38,8 @@ def test_running_loop_delivers_steer_with_new_schema_and_preserves_task(monkeypa
     monkeypatch.setattr(model_context, "budget_context_for_model", lambda *args, **kwargs: 400_000)
     monkeypatch.setattr(al, "_build_system_prompt", lambda messages, *args, **kwargs: (list(messages), []))
     monkeypatch.setattr(agent_control, "mark_injected", lambda *args, **kwargs: None)
-    monkeypatch.setattr(agent_control, "pending_steer", lambda sid: [])
-    monkeypatch.setattr(agent_control, "drain_steer_records", lambda sid, round_num: [
+    monkeypatch.setattr(agent_control, "pending_steer", lambda sid, **kwargs: [])
+    monkeypatch.setattr(agent_control, "drain_steer_records", lambda sid, round_num, **kwargs: [
         {"id": "steer-1", "kind": "user", "text": "also check my next calendar event"}
     ] if round_num == 2 else [])
     requests = []

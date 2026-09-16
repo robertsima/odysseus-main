@@ -66,7 +66,7 @@ def _rank_down(value: str, ceiling: str, ranks: Dict[str, int], label: str, note
 
 def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, Any]:
     """The effective policy of the chat an agent is calling from."""
-    from src.session_settings import effective_approval_mode
+    from src.session_settings import effective_approval_mode, effective_worker_limit
     from src.tool_policy import known_tool_names
     from src.tool_security import owner_baseline_disabled_tools
 
@@ -91,7 +91,7 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
         "allowed_mcp_servers": list(settings.get("allowed_mcp_servers") or ["*"]),
         "private_vault_access": bool(settings.get("private_vault_access", False)),
         "delegation_policy": settings.get("delegation_policy") or _POLICY_DEFAULTS["delegation_policy"],
-        "max_parallel_workers": int(settings.get("max_parallel_workers", _POLICY_DEFAULTS["max_parallel_workers"])),
+        "max_parallel_workers": effective_worker_limit(settings),
         "approval_mode": effective_approval_mode(settings),
         "session_model": str(settings.get("_model") or ""),
     }

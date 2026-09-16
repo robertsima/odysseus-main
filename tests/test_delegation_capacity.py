@@ -19,6 +19,21 @@ def test_capacity_result_is_actionable_and_machine_readable():
     assert result["blocked_reason"] == "worker_capacity"
     assert result["capacity"] == {"limit": 1, "active": 1, "available": 0}
     assert "poll" in result["error"]
+    assert result["capacity_scope"] == "parent_chat"
+    assert "provider-wide" in result["error"]
+
+
+def test_parent_worker_limit_is_independent_of_provider_capacity(monkeypatch):
+    from src.session_settings import effective_worker_limit
+    from src.agent_tools import claude_code_tools
+
+    monkeypatch.setattr(claude_code_tools, "_setting", lambda key, default=None: 8)
+    assert claude_code_tools.configured_concurrency() == 8
+    assert effective_worker_limit({}) == 1
+    assert effective_worker_limit({"max_parallel_workers": 8}) == 8
+    assert effective_worker_limit({"max_parallel_workers": 0}) == 0
+    assert effective_worker_limit({"max_parallel_workers": None}) == 1
+    assert effective_worker_limit({"max_parallel_workers": "bad"}) == 1
 
 
 def test_normalized_delegation_state_precedes_conflicting_raw_provider_output():

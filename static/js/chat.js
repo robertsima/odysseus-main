@@ -1003,6 +1003,7 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     const wrap = document.createElement('div');
     wrap.className = 'msg msg-user msg-user-steered';
     if (steerId) wrap.dataset.steerId = steerId;
+    wrap.dataset.raw = String(text || '');
     wrap.dataset.steerState = 'queued';
     wrap.title = 'Waiting for the running agent to pick this up';
     wrap.innerHTML = `<div class="role">You <span class="steered-pill">Steering</span></div>` +
@@ -1046,12 +1047,32 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
       transcript.insertBefore(bubble, host);
     }
     bubble.classList.remove('msg-user-steered');
-    delete bubble.dataset.steerId;
     delete bubble.dataset.steerState;
     bubble.removeAttribute('title');
     const role = bubble.querySelector('.role');
     if (role) role.textContent = 'You';
     _forgetSteeredBubble(sessionId, steerId);
+  }
+
+  function _steerIsVisible(steerId) {
+    if (typeof document === 'undefined') return false;
+    const id = String(steerId || '');
+    return !!(id && Array.from(document.querySelectorAll('#chat-history .msg-user'))
+      .some((node) => String(node.dataset?.steerId || '') === id));
+  }
+
+  function _restoreInjectedSteerAfterRedraw(sessionId, steer) {
+    // A detached SSE can replay `steer_applied` after a session-history redraw
+    // removed its optimistic chip.  The route persisted the user message before
+    // publishing that event, but the redraw may have fetched just before that
+    // write.  Put back one ordinary user bubble unless the redraw already has
+    // it; otherwise an injected instruction visibly disappears until a later
+    // manual session reload.
+    if (sessionModule.getCurrentSessionId?.() !== String(sessionId || '')) return;
+    const text = String(steer?.text || '');
+    if (!text || _steerIsVisible(steer?.id)) return;
+    const bubble = _createSteeredBubble(text, steer?.id);
+    if (bubble) _promoteInjectedSteeredBubble(sessionId, steer?.id, bubble);
   }
 
   function _applySteeredBubbleState(sessionId, steer) {
@@ -1062,7 +1083,22 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     // server-side history is still retained, so do not keep polling a dead DOM
     // node just to recreate it.
     if (!bubble.isConnected) {
-      _forgetSteeredBubble(sessionId, steerId);
+      const detachedState = String(steer?.state || 'queued');
+      if (detachedState === 'injected') {
+        // Poll rows contain a bounded excerpt; the disconnected local chip
+        // retains the complete instruction, just like an ordinary user bubble.
+        _restoreInjectedSteerAfterRedraw(sessionId, { ...steer, text: bubble.dataset?.raw || steer.text });
+        _forgetSteeredBubble(sessionId, steerId);
+      } else if (['cancelled', 'failed'].includes(detachedState)) {
+        _forgetSteeredBubble(sessionId, steerId);
+        const reason = steer.reason ? `: ${steer.reason}` : '';
+        try { uiModule.showError && uiModule.showError(`Steering ${detachedState}${reason}. See Agent Control Room for the recorded message.`); } catch (_) {}
+      } else if (detachedState === 'queued' && steer.live === false) {
+        _forgetSteeredBubble(sessionId, steerId);
+        try { uiModule.showError && uiModule.showError('Steering is no longer in the live queue. See Agent Control Room for the recorded message.'); } catch (_) {}
+      } else if (sessionModule.getCurrentSessionId?.() !== String(sessionId || '')) {
+        _forgetSteeredBubble(sessionId, steerId);
+      }
       return;
     }
     const steerState = String(steer.state || 'queued');
@@ -1114,16 +1150,23 @@ import { wireArrowUpRecall, getUserMessagesFromChatHistory } from './composerArr
     // feed has produced a row. Clean them up independently of the response so
     // an absent history row cannot leave a poller running forever.
     for (const [steerId, bubble] of tracked) {
-      if (!bubble || !bubble.isConnected) _forgetSteeredBubble(sid, steerId);
+      if (!bubble || !bubble.isConnected) {
+        // Keep a redraw-detached chip through the next lifecycle poll: an
+        // injected row there can restore it exactly once. A session switch is
+        // different — never poll an invisible chat indefinitely.
+        if (sessionModule.getCurrentSessionId?.() !== sid) _forgetSteeredBubble(sid, steerId);
+      }
     }
   }
 
   function _handleSteerApplied(sessionId, event) {
     const steerId = event && event.steer_id;
-    if (!steerId) return;
+    if (!steerId || event?.kind === 'peer') return;
     // The stream is the immediate confirmation path for the tab that sent the
     // instruction. It means "injected into the model", not "completed".
-    _applySteeredBubbleState(sessionId, { id: steerId, state: 'injected', round: event.round });
+    _applySteeredBubbleState(sessionId, {
+      id: steerId, text: event.text, state: 'injected', round: event.round,
+    });
   }
 
   function _scheduleSteerStatusCheck(sessionId, delay = 0) {

@@ -467,6 +467,12 @@ function runCardHtml(run) {
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-changes" data-task="${esc(d.task_id)}">Changes</button>`);
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-transcript" data-task="${esc(d.task_id)}">Transcript</button>`);
   }
+  if (run.source === 'session' && d.target_session) {
+    actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-open-chat" data-run="${esc(run.run_id)}" title="Open this agent's chat">Open chat</button>`);
+  }
+  if (run.status === 'running') {
+    actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-stop" data-run="${esc(run.run_id)}" title="Stop this run; partial work remains available">Stop</button>`);
+  }
   const excerpt = d.error || d.result_excerpt;
   const focused = state.focusRun === run.run_id;
   return `<div class="wb-run${focused ? ' focused' : ''}" data-run="${esc(run.run_id)}" role="button" tabindex="0" aria-pressed="${focused}" title="${focused ? 'Show all events' : "Show only this run's events"}">
@@ -1128,6 +1134,8 @@ function onAction(b) {
     case 'leave-run': { const path = state.repoCtx.path || state.prefs.repo; state.repoCtx = { path: '', base: '', taskId: null, label: '' }; if (path) setRepo(path); else { renderChanges(); renderCommits(); } break; }
     case 'run-changes': loadTask(b.dataset.task, { tab: 'changes' }); break;
     case 'run-transcript': showTranscript(b.dataset.task); break;
+    case 'run-open-chat': openRunChat(b.dataset.run); break;
+    case 'run-stop': stopWorkbenchRun(b.dataset.run); break;
     case 'unfocus': state.focusRun = null; renderActivity(); break;
     case 'popout': popout(state.selectedFile || 'Diff', renderDiffText(state.diffText || '', { mode: state.prefs.mode, path: state.selectedFile })); break;
     case 'popout-commit': { const k = state.selectedCommit; if (k && k.selectedFile) popout(`${(k.sha || '').slice(0, 7)} · ${k.selectedFile}`, renderDiffText(k.diffText || '', { mode: state.prefs.mode, path: k.selectedFile })); break; }
@@ -1138,6 +1146,31 @@ function onAction(b) {
     case 'pr-to-agent': prToAgent(); break;
     case 'drop-pending': { const d = state.pr.detail; if (d) { d.pendingComments.splice(parseInt(b.dataset.i, 10), 1); renderPRs(); } break; }
     default: break;
+  }
+}
+
+function openRunChat(runId) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  const target = (run.data || {}).target_session;
+  if (!target || !window.sessionModule?.selectSession) {
+    showToast('This run has no chat to open', 'warning');
+    return;
+  }
+  window.sessionModule.selectSession(target);
+}
+
+async function stopWorkbenchRun(runId) {
+  const run = state.runs.get(runId);
+  if (!run || run.status !== 'running') return;
+  try {
+    const result = await post(`/api/workbench/runs/${encodeURIComponent(runId)}/stop`, {});
+    showToast(
+      result.stopped ? 'Stopping run; partial work remains available' : `Not stopped: ${result.reason || result.status || 'already finished'}`,
+      result.stopped ? 'success' : 'warning',
+    );
+  } catch (error) {
+    showToast(`Could not stop run: ${error.message}`, 'error');
   }
 }
 

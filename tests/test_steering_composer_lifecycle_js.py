@@ -30,7 +30,7 @@ def _run(script: str) -> dict:
 
 def _lifecycle_source() -> str:
     src = CHAT.read_text(encoding="utf-8")
-    start = src.index("function _trackedSteers")
+    start = src.index("function _createSteeredBubble")
     end = src.index("  /**\n   * Send a message typed while a turn is still running.", start)
     return src[start:end]
 
@@ -49,6 +49,7 @@ def test_lifecycle_poll_is_marked_and_terminal_events_remove_only_the_ephemeral_
 const _steeredBubbles = new Map();
 const _steerStatusTimers = new Map();
 const API_BASE = '';
+const sessionModule = { getCurrentSessionId: () => 'chat-1' };
 const errors = [];
 const uiModule = { showError: (message) => errors.push(message) };
 const timers = [];
@@ -86,18 +87,69 @@ streamBubble.classList.owner = streamBubble;
 _trackedSteers('chat-1').set('two', streamBubble);
 _handleSteerApplied('chat-1', { steer_id: 'two', round: 3 });
 
+// Peer steering is agent-to-agent context, not a user transcript bubble.
+const peerBubble = transcriptBubble();
+peerBubble.classList.owner = peerBubble;
+_trackedSteers('chat-1').set('peer', peerBubble);
+_handleSteerApplied('chat-1', { steer_id: 'peer', text: 'peer message', kind: 'peer', round: 3 });
+
 // A history redraw can remove a bubble before the server has emitted its row.
 // Cleanup must stop tracking it even when the poll response is empty.
 const detached = { isConnected: false };
 _trackedSteers('chat-2').set('gone', detached);
 _scheduleSteerStatusCheck('chat-2');
 await timers.shift().fn();
+
+// A detached stream can replay steer_applied after a history redraw removed
+// its optimistic chip.  If that redraw fetched just before the route wrote the
+// steer, restore one ordinary user bubble rather than leaving the instruction
+// absent until the user reloads the session again.
+const restored = [];
+const restoreTranscript = { insertBefore(node, before) { node.parentNode = this; restored.push(node); } };
+const restoreHost = {
+  parentNode: restoreTranscript,
+  classList: { contains: (name) => name === 'chat-queued-bubble-host' },
+  appendChild(node) { node.parentNode = this; },
+};
+globalThis._ensureQueuedBubbleHost = () => restoreHost;
+globalThis._escapeQueueText = (text) => text;
+globalThis.document = {
+  querySelectorAll: () => [],
+  createElement: () => {
+    const role = { textContent: '' };
+    const node = {
+      isConnected: true, parentNode: null, dataset: {}, title: '', innerHTML: '', role,
+      classList: { remove() {} }, removeAttribute() {},
+      querySelector: (selector) => selector === '.role' ? role : null,
+    };
+    return node;
+  },
+};
+uiModule.scrollHistory = () => {};
+const fullSteerText = 'complete instruction '.repeat(60);
+_trackedSteers('chat-1').set('redraw', { isConnected: false, dataset: { raw: fullSteerText } });
+_applySteeredBubbleState('chat-1', { id: 'redraw', state: 'queued', live: true });
+_applySteeredBubbleState('chat-1', { id: 'redraw', state: 'acknowledged' });
+const trackedThroughRedraw = _steeredBubbles.get('chat-1')?.has('redraw');
+_applySteeredBubbleState('chat-1', { id: 'redraw', text: 'persisted steer', state: 'injected' });
+// Queued/acknowledged redraw chips survive until injection; terminal failures
+// instead settle immediately and do not leave a permanent poller behind.
+_trackedSteers('chat-1').set('failed-redraw', { isConnected: false });
+_applySteeredBubbleState('chat-1', { id: 'failed-redraw', state: 'failed', reason: 'turn ended' });
+_trackedSteers('chat-1').set('lost-on-restart', { isConnected: false });
+_applySteeredBubbleState('chat-1', { id: 'lost-on-restart', state: 'queued', live: false });
 console.log(JSON.stringify({
   pollHeader: seenFetches[0].headers['X-Odysseus-Poll'],
   polledPromoted: bubble.parentNode === bubble.promotedBefore.parentNode && bubble.role.textContent === 'You' && bubble.removedClasses.includes('msg-user-steered'),
   streamPromoted: streamBubble.parentNode === streamBubble.promotedBefore.parentNode && streamBubble.role.textContent === 'You',
-  chat1Tracked: _steeredBubbles.has('chat-1'),
+  peerIgnored: peerBubble.role.textContent === '' && _steeredBubbles.get('chat-1')?.has('peer'),
+  chat1TrackedOnlyPeer: _steeredBubbles.get('chat-1')?.size === 1 && _steeredBubbles.get('chat-1')?.has('peer'),
   chat2Tracked: _steeredBubbles.has('chat-2'),
+  redrawRestored: restored.length === 1 && restored[0].role.textContent === 'You',
+  trackedThroughRedraw,
+  fullInstructionRestored: restored[0].dataset.raw === fullSteerText && restored[0].dataset.steerId === 'redraw',
+  restartSettled: !_steeredBubbles.get('chat-1')?.has('lost-on-restart'),
+  detachedFailedSettled: !_steeredBubbles.get('chat-1')?.has('failed-redraw') && errors.some((e) => e.includes('Steering failed')),
   errors,
 }));
 """.replace("LIFECYCLE", lifecycle)
@@ -105,9 +157,16 @@ console.log(JSON.stringify({
     assert out["pollHeader"] == "1"
     assert out["polledPromoted"] is True
     assert out["streamPromoted"] is True
-    assert out["chat1Tracked"] is False
+    assert out["peerIgnored"] is True
+    assert out["chat1TrackedOnlyPeer"] is True
     assert out["chat2Tracked"] is False
-    assert out["errors"] == []
+    assert out["redrawRestored"] is True
+    assert out["trackedThroughRedraw"] is True
+    assert out["fullInstructionRestored"] is True
+    assert out["restartSettled"] is True
+    assert out["detachedFailedSettled"] is True
+    assert len(out["errors"]) == 2 and "Steering failed" in out["errors"][0]
+    assert "no longer in the live queue" in out["errors"][1]
 
 
 def test_late_steer_post_cannot_draw_or_queue_into_a_newly_selected_chat():

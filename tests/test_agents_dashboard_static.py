@@ -170,10 +170,17 @@ def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():
 
 def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-card-avatar { min-height: 60px" in STYLE
-    assert "padding-top: 5px" in STYLE.split(".ag-bot {", 1)[1].split("}", 1)[0]
+    # Match the base selector, not a density-specific descendant override.
+    assert "padding-top: 5px" in STYLE.split("\n.ag-bot {", 1)[1].split("}", 1)[0]
     assert 'class="ag-console-robot-bay"' in AGENTS
     assert ".ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto" in STYLE
     assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE
+
+
+def test_archive_view_clears_active_only_filter():
+    action = AGENTS.split("act === 'archive-view'", 1)[1].split("else if", 1)[0]
+    assert "state.bucket = 'all'" in action
+    assert "state.filter = ''" in action
 
 
 def test_each_agent_has_a_dedicated_server_backed_capability_loadout():
@@ -205,6 +212,19 @@ def test_control_room_reply_keeps_the_window_open_while_switching_chat():
     send = AGENTS.split("async function sendToChat", 1)[1].split("async function selectChat", 1)[0]
     assert "close()" not in send
     assert "await selectChat(sid)" in send
+
+
+def test_agent_management_stays_bounded_and_cleanup_is_recoverable():
+    assert "const FLEET_PAGE_SIZE = 8" in AGENTS
+    assert 'data-ag="fleet-page"' in AGENTS
+    assert 'data-ag="detail-tab"' in AGENTS
+    assert "data-wb-scroll=\"detail-tab\"" in AGENTS
+    assert 'data-ag="archive-agent"' in AGENTS
+    assert "chat and run history stay preserved" in AGENTS
+    assert "/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive" in AGENTS
+    assert ".ag-detail-tabs" in STYLE and ".ag-fleet-pages" in STYLE
+    assert "ag-fleet-compact" in AGENTS and ".ag-fleet-compact .ag-bot-card" in STYLE
+    assert "aria-controls=\"ag-panel-${key}\"" in AGENTS
 
 
 def test_a_cut_off_worker_reads_as_partial_work_not_a_failure():

@@ -17,7 +17,7 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import _classify_agent_request, stream_agent_loop
-from src import agent_runs
+from src import agent_runs, agent_activity
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
@@ -1293,14 +1293,22 @@ def setup_chat_routes(
             except Exception:
                 logger.debug("chat settings snapshot failed", exc_info=True)
 
+        _steer_run_id = None
+
         async def stream_with_save() -> AsyncGenerator[str, None]:
+            nonlocal _steer_run_id
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
 
             # Register active stream for partial-save safety net
-            _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
+            # Allocate the steering identity before the loop begins.  A composer
+            # POST can arrive during preparation, before stream_agent_loop has
+            # published its telemetry run; binding here avoids accepting an
+            # unowned correction that no later loop may safely drain.
+            _steer_run_id = agent_activity.new_run_id("steer") if _effective_mode == "agent" else None
+            _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode, "steer_run_id": _steer_run_id}
 
             # The client sent a workspace the server refused to bind (deleted
             # folder, file path, sensitive dir, filesystem root). Tell it up
@@ -1724,6 +1732,15 @@ def setup_chat_routes(
                         session_manager.save_sessions()
                     raise
                 finally:
+                    # The loop normally clears this run's queue at its orderly
+                    # end. Preparation failures/cancellation never reach that
+                    # point, so close only this stream's steering bucket here.
+                    if _steer_run_id:
+                        try:
+                            from src import agent_control
+                            agent_control.clear_steer(session, run_id=_steer_run_id)
+                        except Exception:
+                            logger.debug("steer cleanup failed", exc_info=True)
                     _active_streams.pop(session, None)
             else:
                 # ── Agent mode: full agent loop with tools ──
@@ -1790,6 +1807,7 @@ def setup_chat_routes(
                         uploaded_files=ctx.uploaded_files,
                         allow_private=ctx.allow_private,
                         approval_mode=_approval_mode,
+                        steer_run_id=_steer_run_id,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1808,8 +1826,8 @@ def setup_chat_routes(
                                     # Keep the mid-task instruction in history so
                                     # the next turn (and the transcript) has it.
                                     try:
-                                        sess.add_message(ChatMessage("user", str(data.get("text") or ""),
-                                                                     {"source": "steer"}))
+                                        from src.agent_control import persist_applied_steer
+                                        persist_applied_steer(sess, data)
                                     except Exception:
                                         logger.debug("steer persist failed", exc_info=True)
                                     yield chunk
@@ -1922,6 +1940,12 @@ def setup_chat_routes(
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise
                 finally:
+                    if _steer_run_id:
+                        try:
+                            from src import agent_control
+                            agent_control.clear_steer(session, run_id=_steer_run_id)
+                        except Exception:
+                            logger.debug("steer cleanup failed", exc_info=True)
                     _active_streams.pop(session, None)
 
         async def _safe_stream() -> AsyncGenerator[str, None]:
@@ -1931,6 +1955,12 @@ def setup_chat_routes(
                 async for chunk in stream_with_save():
                     yield chunk
             finally:
+                if _steer_run_id:
+                    try:
+                        from src import agent_control
+                        agent_control.clear_steer(session, run_id=_steer_run_id)
+                    except Exception:
+                        logger.debug("steer cleanup failed", exc_info=True)
                 _active_streams.pop(session, None)
 
         # Compare panes are short-lived, single-shot generations whose sessions

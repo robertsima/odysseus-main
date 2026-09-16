@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 # run returns what it produced so far, which re-enters the parent as the tool
 # result (the partial work is not thrown away).
 _STOP_EVENTS: Dict[str, asyncio.Event] = {}
+# A wrapper run is the stable public steering target for a headless loop.  The
+# loop also creates its own activity telemetry run, which must not replace the
+# wrapper's source/summary merely to make steering work.
+_STEER_RUNS: Dict[str, Set[str]] = {}
 
 
 def request_stop(run_id: str) -> bool:
@@ -38,6 +42,17 @@ def request_stop(run_id: str) -> bool:
 
 def running_ids() -> Set[str]:
     return set(_STOP_EVENTS)
+
+
+def steering_run_id(session_id: Optional[str]) -> Optional[str]:
+    """Return the sole headless wrapper serving a session, if unambiguous."""
+    runs = _STEER_RUNS.get(str(session_id or ""), set())
+    return next(iter(runs)) if len(runs) == 1 else None
+
+
+def has_steering_runs(session_id: Optional[str]) -> bool:
+    """Whether a headless owner exists, including an ambiguous set of owners."""
+    return bool(_STEER_RUNS.get(str(session_id or "")))
 
 
 async def _resolve_context_length(sess) -> int:
@@ -158,6 +173,7 @@ async def run_headless(
     stop_event = asyncio.Event() if run_id else None
     if run_id and stop_event is not None:
         _STOP_EVENTS[run_id] = stop_event
+        _STEER_RUNS.setdefault(str(getattr(sess, "id", "")), set()).add(run_id)
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
@@ -189,8 +205,20 @@ async def run_headless(
         drain.cancel()
         raise
     finally:
+        if run_id:
+            try:
+                from src import agent_control
+                agent_control.clear_steer(getattr(sess, "id", None), run_id=run_id)
+            except Exception:
+                logger.debug("headless steer cleanup failed", exc_info=True)
         if run_id and _STOP_EVENTS.get(run_id) is stop_event:
             _STOP_EVENTS.pop(run_id, None)
+        if run_id:
+            session_runs = _STEER_RUNS.get(str(getattr(sess, "id", "")))
+            if session_runs is not None:
+                session_runs.discard(run_id)
+                if not session_runs:
+                    _STEER_RUNS.pop(str(getattr(sess, "id", "")), None)
     full = state["full"]
     if outcome is not None and outcome.get("stopped"):
         full = (full.rstrip() + "\n\n" if full.strip() else "") + "(stopped by the user before finishing)"
@@ -216,6 +244,10 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         headers=getattr(sess, "headers", None),
         context_length=await _resolve_context_length(sess),
         session_id=sess.id,
+        # Keep a headless worker's steering queue attached to its externally
+        # visible run.  Without this a foreground turn in the same session can
+        # drain or cancel the worker's correction (and vice versa).
+        steer_run_id=run_id,
         max_rounds=max_rounds,
         owner=owner,
         disabled_tools=blocked,
@@ -241,6 +273,15 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             delta = d.get("delta")
             if isinstance(delta, str) and not d.get("thinking"):
                 state["full"] += delta
+        elif d.get("type") == "steer_applied":
+            # Detached/headless loops do not pass through chat_routes' SSE
+            # persistence branch. Preserve the same human/peer attribution in
+            # both paths, so a resumed worker never renders peer mail as "You".
+            try:
+                from src.agent_control import persist_applied_steer
+                persist_applied_steer(sess, d)
+            except Exception:
+                logger.debug("headless steer persistence failed", exc_info=True)
         elif d.get("type") == "agent_step":
             round_num = d.get("round", round_num)
             state["round"] = round_num

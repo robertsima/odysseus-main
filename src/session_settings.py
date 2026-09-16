@@ -126,6 +126,15 @@ def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
         return tool_approvals.DEFAULT_MODE
 
 
+def effective_worker_limit(settings: Optional[Dict[str, Any]]) -> int:
+    """The parent chat's child limit, independent of provider-wide capacity."""
+    raw = (settings or {}).get("max_parallel_workers")
+    try:
+        return max(0, min(8, int(1 if raw is None else raw)))
+    except (TypeError, ValueError):
+        return 1
+
+
 def last_used_from_request(*, chat_mode: str, allow_web: Any, allow_bash: Any, plan_mode: bool,
                            use_rag: Any, workspace: Optional[str], preset_id: Optional[str]) -> Dict[str, Any]:
     """The ``toggles``/``workspace``/``preset_id`` patch describing one turn."""

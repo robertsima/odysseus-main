@@ -359,6 +359,22 @@ def active_turn(session_id: Optional[str]) -> Optional[str]:
         return _active_turns.get(str(session_id or ""))
 
 
+def has_active_run(session_id: Optional[str]) -> bool:
+    """Whether activity still records live work for this chat.
+
+    This is deliberately a small read-side helper for lifecycle operations
+    such as archiving.  A session may have work which was started outside the
+    chat-run registry (Claude Code, a background job, or a delegated session),
+    so checking only ``agent_runs.is_busy`` would let its history disappear
+    from the active workspace while it is still doing work.
+    """
+    sid = str(session_id or "")
+    with _lock:
+        _load_runs()
+        return any(rec.get("session_id") == sid and rec.get("status") == "running"
+                   for rec in _runs.values())
+
+
 def close_turn(session_id: Optional[str], *, status: str = "completed", title: Optional[str] = None) -> bool:
     """Finish the session's live chat turn if it never reported its own end.
 

@@ -192,6 +192,17 @@ def repository_roots() -> tuple[Path, ...]:
     return tuple(Path(root.strip()).expanduser().resolve() for root in roots)
 
 
+def configured_concurrency() -> int:
+    """Read the provider-wide ceiling without creating or resizing a gate."""
+    try:
+        # 0 (the settings default) means "use the environment/built-in value".
+        size = int(_setting("claude_code_max_concurrent_tasks", 0) or 0) or MAX_CONCURRENT_TASKS
+        size = max(1, min(16, size))
+    except (TypeError, ValueError):
+        size = MAX_CONCURRENT_TASKS
+    return size
+
+
 def _process_limit() -> asyncio.Semaphore:
     """The shared concurrency gate, resized when the setting changes.
 
@@ -199,12 +210,7 @@ def _process_limit() -> asyncio.Semaphore:
     new size, which is the safe direction for a live change.
     """
     global _PROCESS_LIMIT, _PROCESS_LIMIT_SIZE
-    try:
-        # 0 (the settings default) means "use the environment/built-in value".
-        size = int(_setting("claude_code_max_concurrent_tasks", 0) or 0) or MAX_CONCURRENT_TASKS
-        size = max(1, min(16, size))
-    except (TypeError, ValueError):
-        size = MAX_CONCURRENT_TASKS
+    size = configured_concurrency()
     if size != _PROCESS_LIMIT_SIZE:
         _PROCESS_LIMIT = asyncio.Semaphore(size)
         _PROCESS_LIMIT_SIZE = size

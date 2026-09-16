@@ -2608,8 +2608,8 @@
                 <input id="set-ccDefaultRepo" type="text" placeholder="auto" class="settings-select" style="width:320px;">
               </div>
               <div class="settings-row">
-                <label class="settings-label">Max concurrent jobs</label>
-                <input id="set-ccConcurrency" type="text" inputmode="numeric" placeholder="2" class="settings-select" style="width:120px;">
+                <label class="settings-label" title="Shared across all chats. Each parent chat also has its own Child workers limit in Agents > Loadout; raising this provider ceiling does not change that limit.">Provider-wide concurrent jobs</label>
+                <input id="set-ccConcurrency" type="number" min="0" max="16" step="1" placeholder="Default" class="settings-select" style="width:120px;" aria-label="Provider-wide concurrent jobs; zero uses deployment default">
               </div>
               <div class="settings-row">
                 <label class="settings-label" title="Claude model alias passed with --model, e.g. sonnet or opus. Empty = Claude Code's own default.">Model</label>

@@ -131,6 +131,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "private_vault_access": policy["private_vault_access"],
             "delegation_policy": policy["delegation_policy"],
             "max_parallel_workers": policy["max_parallel_workers"],
+            "worker_limit_scope": "parent_chat (separate from provider-wide concurrent jobs)",
             "approval_mode_floor": policy["approval_mode"],
         }
         if detail:
@@ -197,10 +198,13 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         return {
             "error": (
                 f"Worker capacity reached: {running} active of this chat's limit {limit}. "
+                "This is the parent chat's Child workers limit, separate from provider-wide concurrent jobs. "
                 "Do not retry a start while capacity is unchanged."
             ),
             "blocked": True,
             "blocked_reason": "worker_capacity",
+            "capacity_scope": "parent_chat",
+            "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
             "capacity": {"limit": limit, "active": running, "available": max(0, limit - running)},
             "exit_code": 1,
         }

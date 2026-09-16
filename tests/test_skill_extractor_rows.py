@@ -63,7 +63,7 @@ def test_execution_metadata_is_bounded_and_excludes_tool_contents():
                 "doc_id": "PRIVATE-DOC-ID", "status": "SECRET-STATUS", "exit_code": 1}]
     metadata = skill_extractor._execution_evidence_metadata(events)
     assert len(metadata) == 12
-    assert metadata[0]["procedure_evidence"] is True
+    assert metadata[0]["procedure_evidence"] is False  # mailbox lookup is not a learned procedure
     assert metadata[-1]["failed"] is True
     assert metadata[-1]["procedure_evidence"] is False
     serialized = json.dumps(metadata)
@@ -95,3 +95,17 @@ def test_extraction_request_never_appends_raw_tool_output(monkeypatch):
     assert len(captured) == 2
     assert "Execution outcome metadata" in captured[1]["content"]
     assert "PRIVATE-TOOL-OUTPUT" not in captured[1]["content"]
+
+
+def test_documentation_lookup_is_not_a_learned_procedure():
+    assert not skill_extractor._has_procedure_evidence([
+        {"tool": "web_search", "output": "official docs", "exit_code": 0},
+        {"tool": "web_fetch", "output": "curl example", "exit_code": 0},
+    ])
+
+
+def test_procedure_evidence_rejects_canceled_and_error_statuses():
+    for status in ("error", "canceled", "interrupted", "timed_out"):
+        assert not skill_extractor._has_procedure_evidence([
+            {"tool": "bash", "output": "partial output", "status": status},
+        ])

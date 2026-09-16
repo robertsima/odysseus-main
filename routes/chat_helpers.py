@@ -1463,6 +1463,51 @@ async def _run_extraction_jobs_sequentially(session_id: str, jobs: list, max_wai
             logger.warning("[bg-extract] %s extraction job failed for session %s", name, session_id, exc_info=True)
 
 
+def _session_allows_memory_writes(session_id: str) -> bool:
+    """Fail closed when the per-session memory permission is unavailable."""
+    try:
+        from core.database import get_session_settings
+        return str(
+            (get_session_settings(session_id) or {}).get("memory_access") or "write"
+        ) == "write"
+    except Exception:
+        logger.warning(
+            "[bg-extract] could not resolve memory access for session %s; "
+            "skipping automatic memory writes",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _snapshot_session_for_extraction(sess, *, limit: int = 12):
+    """Freeze only bounded, human-relevant evidence for delayed extractors."""
+    import copy
+    from services.memory.extraction_context import conversation_for_extraction
+
+    getter = getattr(sess, "get_context_messages", None)
+    if callable(getter):
+        raw = getter()
+    else:
+        raw = []
+        for message in list(getattr(sess, "history", []) or []):
+            if isinstance(message, dict):
+                raw.append(dict(message))
+            elif callable(getattr(message, "to_dict", None)):
+                raw.append(message.to_dict())
+    recent = conversation_for_extraction(raw, limit=limit)
+    snapshot = copy.copy(sess)
+    # Keep authoritative turn accounting and identity/ownership from the real
+    # session, but do not duplicate a potentially enormous mutable history.
+    snapshot.message_count = int(
+        getattr(sess, "message_count", 0) or len(getattr(sess, "history", []) or [])
+    )
+    snapshot.history = []
+    frozen = copy.deepcopy(recent)
+    snapshot.get_context_messages = lambda: copy.deepcopy(frozen)
+    return snapshot
+
+
 def run_post_response_tasks(
     sess,
     session_manager,
@@ -1504,7 +1549,31 @@ def run_post_response_tasks(
     # Memory extraction — only every 4th message pair to avoid excess LLM calls
     _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-    if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+    _memory_candidate = (allow_background_extraction and not incognito and not compare_mode
+                         and _should_extract and uprefs.get("auto_memory", True))
+    # Resolve session permissions only when memory extraction would otherwise
+    # dispatch; ordinary turns pay neither a DB lookup nor a snapshot cost.
+    _memory_eligible = bool(
+        _memory_candidate and _session_allows_memory_writes(session_id)
+    )
+
+    auto_skills_enabled = bool(uprefs.get("auto_skills", True))
+    _skill_eligible = bool(
+        extract_skills and allow_background_extraction and auto_skills_enabled
+        and not incognito and not compare_mode
+        and (agent_rounds >= 2 or agent_tool_calls >= 2)
+        and skills_manager is not None
+    )
+
+    # Extraction runs later. Snapshot only when at least one extractor will
+    # actually dispatch, and only after filtering so trailing runtime/tool
+    # envelopes cannot push real user turns outside the bounded window.
+    _extraction_sess = (
+        _snapshot_session_for_extraction(sess, limit=12)
+        if (_memory_eligible or _skill_eligible) else None
+    )
+
+    if _memory_eligible:
         from services.memory.memory_extractor import extract_and_store
         from src.task_endpoint import resolve_task_candidates
         t_candidates = resolve_task_candidates(
@@ -1516,7 +1585,7 @@ def run_post_response_tasks(
             else (sess.endpoint_url, sess.model, sess.headers)
         )
         _extraction_jobs.append(("memory", extract_and_store(
-            sess, memory_manager, memory_vector,
+            _extraction_sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
             llm_candidates=t_candidates,
         )))
@@ -1524,7 +1593,6 @@ def run_post_response_tasks(
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar
     # intent, and never in incognito/compare.
-    auto_skills_enabled = bool(uprefs.get("auto_skills", True))
     # Quiet by default — full gate/dispatch/start trace runs at DEBUG so
     # users can re-enable diagnostics with LOG_LEVEL=DEBUG when something
     # silently breaks. INFO-level only shows the outcome inside
@@ -1535,12 +1603,29 @@ def run_post_response_tasks(
         extract_skills, auto_skills_enabled, incognito, compare_mode,
         agent_rounds, agent_tool_calls, "set" if skills_manager else "MISSING",
     )
-    if (
-        extract_skills
-        and allow_background_extraction
-        and auto_skills_enabled
-        and not incognito
-        and not compare_mode
+    if _skill_eligible:
+        from services.memory.skill_extractor import maybe_extract_skill
+        from src.task_endpoint import resolve_task_candidates
+        s_candidates = resolve_task_candidates(
+            sess.endpoint_url, sess.model, sess.headers, owner=owner,
+        )
+        s_url, s_model, s_headers = (
+            s_candidates[0]
+            if s_candidates
+            else (sess.endpoint_url, sess.model, sess.headers)
+        )
+        logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
+        _extraction_jobs.append(("skill", maybe_extract_skill(
+            _extraction_sess, skills_manager,
+            s_url, s_model, s_headers,
+            agent_rounds, agent_tool_calls,
+            owner=owner,
+            llm_candidates=s_candidates,
+            tool_events=(last_metrics or {}).get("tool_events"),
+        )))
+    elif (
+        extract_skills and allow_background_extraction and auto_skills_enabled
+        and not incognito and not compare_mode
         and (agent_rounds >= 2 or agent_tool_calls >= 2)
     ):
         if skills_manager is None:
@@ -1548,26 +1633,6 @@ def run_post_response_tasks(
                 "[skill-extract] gate PASSED but skills_manager is None — "
                 "extraction skipped. (Bug: caller didn't pass skills_manager.)"
             )
-        else:
-            from services.memory.skill_extractor import maybe_extract_skill
-            from src.task_endpoint import resolve_task_candidates
-            s_candidates = resolve_task_candidates(
-                sess.endpoint_url, sess.model, sess.headers, owner=owner,
-            )
-            s_url, s_model, s_headers = (
-                s_candidates[0]
-                if s_candidates
-                else (sess.endpoint_url, sess.model, sess.headers)
-            )
-            logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
-            _extraction_jobs.append(("skill", maybe_extract_skill(
-                sess, skills_manager,
-                s_url, s_model, s_headers,
-                agent_rounds, agent_tool_calls,
-                owner=owner,
-                llm_candidates=s_candidates,
-                tool_events=(last_metrics or {}).get("tool_events"),
-            )))
 
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))

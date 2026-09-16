@@ -194,3 +194,13 @@ def test_ntfy_result_notification_is_not_email_delivery():
 def test_explicit_builtin_tool_name_survives_context_filter():
     selected = filter_email_tools("use send_email for this step", set())
     assert selected == {"send_email"}
+
+
+def test_delegated_source_audits_do_not_select_mailbox_tools():
+    query = (
+        "Launch two independent read-only source audits using agents: one covering email poller "
+        "lifecycle and one covering calendar synchronization error handling."
+    )
+    assert email_intent(query)["code_context"]
+    selected = filter_email_tools(query, {"read_file", "delegate_to_agent", "list_emails", "read_email"})
+    assert selected == {"read_file", "delegate_to_agent"}

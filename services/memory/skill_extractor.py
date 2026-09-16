@@ -10,6 +10,7 @@ import json
 import logging
 import re
 from typing import Optional
+from services.memory.extraction_context import conversation_for_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,15 @@ _ORCHESTRATION_ONLY_TOOLS = frozenset({
     "ask_user", "update_plan", "manage_skills",
 })
 
+# Ordinary discovery/Q&A is not evidence of an executed reusable procedure.
+# Users may still explicitly author skills from a research session.
+_LOOKUP_ONLY_TOOLS = frozenset({
+    "web_search", "web_fetch", "read_file", "ls", "glob", "grep", "get_workspace",
+    "search_documents", "recall_tool_output", "list_email_accounts", "list_emails",
+    "read_email", "resolve_contact", "list_sessions", "read_app_logs",
+    "list_cached_models", "list_cookbook_servers", "list_serve_presets",
+})
+
 
 def _has_procedure_evidence(tool_events: list) -> bool:
     """Avoid a teacher call for a launch-only, blocked or failed turn."""
@@ -63,13 +73,14 @@ def _has_procedure_evidence(tool_events: list) -> bool:
         if not isinstance(event, dict):
             continue
         name = str(event.get("tool") or "")
-        if not name or name in _ORCHESTRATION_ONLY_TOOLS or name.endswith("__run_pi_task"):
+        if (not name or name in _ORCHESTRATION_ONLY_TOOLS or name in _LOOKUP_ONLY_TOOLS
+                or name.endswith(("__run_pi_task", "__query-docs", "__resolve-library-id"))):
             continue
         if any(event.get(key) for key in ("error", "blocked", "approval_required", "duplicate_call")):
             continue
         if event.get("exit_code") not in (None, 0):
             continue
-        if str(event.get("status") or "").lower() in {"queued", "running", "failed", "cancelled", "blocked"}:
+        if str(event.get("status") or "").lower() in {"queued", "running", "failed", "error", "cancelled", "canceled", "blocked", "interrupted", "timed_out"}:
             continue
         if event.get("output") or event.get("doc_id"):
             return True
@@ -225,9 +236,8 @@ async def maybe_extract_skill(
         from src.llm_core import llm_call_async, llm_call_async_with_fallback
 
         # Get recent messages
-        history = session.get_context_messages()
-        recent = history[-CONTEXT_WINDOW:] if len(history) > CONTEXT_WINDOW else history
-        if not recent:
+        recent = conversation_for_extraction(session.get_context_messages(), limit=CONTEXT_WINDOW)
+        if not recent or not any(m["role"] == "user" for m in recent):
             logger.debug("[skill-extract] no recent messages, skipping")
             return None
 

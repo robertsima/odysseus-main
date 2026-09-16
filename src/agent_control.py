@@ -137,7 +137,15 @@ STEER_STATES = ("queued", "acknowledged", "injected", "cancelled", "failed")
 # Nothing moves out of these; a message that reaches one is history, not queue.
 STEER_TERMINAL = ("injected", "cancelled", "failed")
 
-_STEER: Dict[str, List[dict]] = {}
+# Queues are deliberately per (session, run), not merely per session.  A chat
+# can have a foreground turn while a detached continuation, worker hand-off,
+# or background follow-up is also winding down.  With a session-only key, the
+# first loop to reach a round would consume (or the first to finish would
+# cancel) a correction intended for the other one.
+#
+# ``None`` is the legacy/unbound bucket.  It remains for callers that cannot
+# identify a run yet, and is never drained by a run-specific loop.
+_STEER: Dict[tuple[str, Optional[str]], List[dict]] = {}
 _STEER_MAX = 10
 
 # Warning for the two states a human should notice unprompted (a correction is
@@ -199,6 +207,7 @@ def _steer_transition(rec: dict, state: str, *, reason: Optional[str] = None,
         # explicitly means a row lifted out of the feed (or read from the
         # global stream) still says which agent was being steered.
         "target_session": session_id or None,
+        "target_run": rec.get("run_id") or None,
         "queued_at": queued_at,
         "state_at": now,
         "age_s": round(now - queued_at, 3),
@@ -223,8 +232,68 @@ def _steer_transition(rec: dict, state: str, *, reason: Optional[str] = None,
     return rec
 
 
+def _steer_key(session_id: str, run_id: Optional[str]) -> tuple[str, Optional[str]]:
+    return str(session_id), str(run_id) if run_id else None
+
+
+def persist_applied_steer(session, event: dict) -> None:
+    """Keep delivered instructions in history with their real author identity."""
+    from core.models import ChatMessage
+
+    text = str(event.get("text") or "")
+    if not text:
+        return
+    peer = event.get("kind") == "peer"
+    metadata = {"source": "agent" if peer else "steer", "steer_id": event.get("steer_id")}
+    if peer:
+        metadata.update(kind="peer", trusted=False,
+                        from_session=event.get("from_session"),
+                        from_session_name=event.get("from_session_name"))
+    session.add_message(ChatMessage("user", text, metadata))
+
+
+def _live_run_id(session_id: str) -> Optional[str]:
+    """Best-effort live-turn binding without making steering depend on telemetry.
+
+    Normal foreground loops publish an ``odysseus`` active turn.  A headless
+    worker has an externally-owned activity record instead, so select that
+    record only when it is the *sole* running record for the session.  More
+    than one is deliberately ambiguous: an unbound correction is safer than
+    silently steering the wrong worker.
+    """
+    try:
+        # The route allocates this before loop preparation, so it covers the
+        # only interval where a foreground steer used to become unbound.
+        from routes import chat_routes
+        stream = (getattr(chat_routes, "_active_streams", {}) or {}).get(str(session_id))
+        if isinstance(stream, dict) and str(stream.get("mode") or "").lower() == "agent":
+            stream_run = stream.get("steer_run_id")
+            if stream_run:
+                return str(stream_run)
+        # Headless wrapper ids are the queue identity for detached workers;
+        # their loop telemetry has a separate odysseus run id.
+        from src.headless_agent import steering_run_id, has_steering_runs
+        wrapper_run = steering_run_id(session_id)
+        if wrapper_run:
+            return wrapper_run
+        # Do not fall through to whichever telemetry run happened to publish
+        # last when two detached wrappers share this session.
+        if has_steering_runs(session_id):
+            return None
+        active = activity.active_turn(session_id)
+        if active:
+            return active
+        running = activity.list_runs(session_id=str(session_id), active_only=True, limit=2)
+        if len(running) == 1:
+            return str(running[0].get("run_id") or "") or None
+    except Exception:
+        pass
+    return None
+
+
 def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
-          from_session: Optional[str] = None, from_session_name: Optional[str] = None) -> dict:
+          from_session: Optional[str] = None, from_session_name: Optional[str] = None,
+          run_id: Optional[str] = None) -> dict:
     """Queue a message for the next round of ``session_id``'s turn.
 
     ``kind``/``from_session``/``from_session_name`` are optional and default to
@@ -244,14 +313,18 @@ def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str 
         # Never a queued message, so there is nothing to give a lifecycle to;
         # the caller is told synchronously and shows its own error.
         raise ValueError("steer text is empty")
+    # Resolve once at acceptance.  Looking up the active turn later makes a
+    # queued correction drift into whichever run happens to be active then.
+    target_run = str(run_id) if run_id else _live_run_id(str(session_id))
     now = time.time()
     rec = {"id": _new_steer_id(), "session_id": str(session_id), "text": text, "ts": now,
-           "queued_at": now, "owner": owner, "kind": kind, "state": "queued", "timestamps": {}}
+           "queued_at": now, "owner": owner, "kind": kind, "state": "queued", "timestamps": {},
+           "run_id": target_run}
     if from_session:
         rec["from_session"] = from_session
     if from_session_name:
         rec["from_session_name"] = from_session_name
-    queue = _STEER.setdefault(str(session_id), [])
+    queue = _STEER.setdefault(_steer_key(str(session_id), target_run), [])
     if len(queue) >= _STEER_MAX:
         # A refusal is exactly the case the operator needs afterwards: the
         # sender believes it steered, and without this nothing would ever
@@ -283,17 +356,18 @@ def note_refused(session_id: str, text: str, reason: str, *, owner: Optional[str
     return _steer_transition(rec, "failed", reason=reason)
 
 
-def drain_steer(session_id: Optional[str]) -> List[str]:
+def drain_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
     """Messages queued since the last round, oldest first (and cleared).
 
     Delegates to ``drain_steer_records`` so a caller that only wants the text
     still moves the messages to ``acknowledged``: a drain that left no trace is
     the hole this whole lifecycle exists to close.
     """
-    return [rec["text"] for rec in drain_steer_records(session_id)]
+    return [rec["text"] for rec in drain_steer_records(session_id, run_id=run_id)]
 
 
-def drain_steer_records(session_id: Optional[str], *, round_num: Optional[int] = None) -> List[dict]:
+def drain_steer_records(session_id: Optional[str], *, run_id: Optional[str] = None,
+                        round_num: Optional[int] = None) -> List[dict]:
     """Like ``drain_steer``, but keeps each record's metadata instead of just its text.
 
     ``drain_steer`` returns bare strings because a caller that only appends
@@ -312,7 +386,7 @@ def drain_steer_records(session_id: Optional[str], *, round_num: Optional[int] =
     """
     if not session_id:
         return []
-    queue = _STEER.pop(str(session_id), None)
+    queue = _STEER.pop(_steer_key(str(session_id), run_id), None)
     if not queue:
         return []
     for rec in queue:
@@ -338,7 +412,7 @@ def mark_failed(rec: dict, reason: str, *, round_num: Optional[int] = None,
     return _steer_transition(rec, "failed", reason=reason, round_num=round_num, run_id=run_id)
 
 
-def pending_steer(session_id: str) -> List[dict]:
+def pending_steer(session_id: str, *, run_id: Optional[str] = None) -> List[dict]:
     """Records still waiting to be drained — the live queue, nothing else.
 
     This still backs the ``steer_queued`` count on the Agents overview, and the
@@ -349,23 +423,27 @@ def pending_steer(session_id: str) -> List[dict]:
     feed, so the count dropping to zero can be read against what became of each
     message instead of being the end of the story.
     """
-    return list(_STEER.get(str(session_id), ()))
+    if run_id is not None:
+        return list(_STEER.get(_steer_key(session_id, run_id), ()))
+    # Public overview callers historically ask by session.  Keep that useful
+    # aggregate while run loops must opt into their exact bucket above.
+    sid = str(session_id)
+    return [rec for (queued_session, _), queue in _STEER.items() if queued_session == sid for rec in queue]
 
 
-def clear_steer(session_id: Optional[str]) -> List[str]:
+def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
     """Drop anything still queued for a turn that has ended, returning it.
 
-    The queue is keyed only by session, so a steer nobody drained would sit
-    there until some *future* turn picked it up and answered a correction from
-    an hour ago with no idea what it referred to. The agent loop extends a turn
-    to absorb a late steer (see the round loop), so reaching here means the turn
-    really is over — each dropped message is marked ``cancelled`` with that
-    reason, so "it never landed" is on the record instead of only in a server
-    log line the operator never sees.
+    The queue is keyed by session and run, so a steer nobody drained would sit
+    in that run's bucket until an unsafe later adoption. The agent loop extends
+    a turn to absorb a late steer (see the round loop), so reaching here means
+    that run really is over — each dropped message is marked ``cancelled`` with
+    that reason, so "it never landed" is on the record instead of only in a
+    server log line the operator never sees.
     """
     if not session_id:
         return []
-    queue = _STEER.pop(str(session_id), None)
+    queue = _STEER.pop(_steer_key(str(session_id), run_id), None)
     if not queue:
         return []
     for rec in queue:
@@ -404,7 +482,7 @@ def steer_history(session_id: str, *, limit: int = 20) -> List[dict]:
             row["state"] = state
             row["timestamps"][state] = data.get("state_at") or ev.get("ts")
         for key in ("steer_kind", "queued_at", "text", "reason", "round", "from_session",
-                    "from_session_name", "target_session"):
+                    "from_session_name", "target_session", "target_run"):
             if data.get(key) not in (None, ""):
                 row["kind" if key == "steer_kind" else key] = data[key]
         row["updated_at"] = ev.get("ts")
@@ -452,11 +530,14 @@ def is_steerable(session_id: str) -> bool:
 
         streams = getattr(chat_routes, "_active_streams", {}) or {}
     except Exception:
-        return True
+        return False
     rec = streams.get(str(session_id))
-    if not isinstance(rec, dict) or "mode" not in rec:
-        return True
-    return str(rec.get("mode") or "").strip().lower() == "agent"
+    if isinstance(rec, dict) and "mode" in rec:
+        return (str(rec.get("mode") or "").strip().lower() == "agent"
+                and _live_run_id(str(session_id)) is not None)
+    # Detached work is steerable only when its wrapper identity is known. Do
+    # not accept an unbound correction that no named loop can drain.
+    return _live_run_id(str(session_id)) is not None
 
 
 # ── stop ──────────────────────────────────────────────────────────────────

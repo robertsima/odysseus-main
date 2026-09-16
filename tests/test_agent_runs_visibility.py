@@ -86,11 +86,13 @@ async def test_request_stop_ends_one_subagent_and_keeps_its_partial(monkeypatch)
         activity_session_id="parent", outcome=outcome))
     await started.wait()
     assert "session-abc" in headless_agent.running_ids()
+    assert headless_agent.steering_run_id("child") == "session-abc"
     assert headless_agent.request_stop("session-abc") is True
     text, _events = await asyncio.wait_for(task, 5)
     assert outcome == {"stopped": True}
     assert text.startswith("Checked a.py so far") and "stopped by the user" in text
     assert "session-abc" not in headless_agent.running_ids()
+    assert headless_agent.steering_run_id("child") is None
     assert headless_agent.request_stop("session-abc") is False
 
 
@@ -122,6 +124,80 @@ async def test_headless_children_get_the_global_disabled_tools(monkeypatch):
     # A chat continuing itself (disabled_tools=None) still honours the operator.
     await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
     assert set(seen["disabled_tools"]) == {"bash", "web_fetch"}
+
+
+async def test_headless_steer_id_does_not_overwrite_its_wrapper_activity_run(monkeypatch):
+    """The dashboard's worker record and the loop's telemetry are distinct.
+
+    Reusing the wrapper id for ``stream_agent_loop(... run_id=...)`` turns its
+    source into ``odysseus`` and replaces the wrapper summary.  Steering needs
+    the wrapper id for queue isolation, but activity accounting must retain
+    both records.
+    """
+    seen = {}
+
+    async def fake_loop(_url, _model, _messages, **kwargs):
+        seen.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    wrapper = act.run_started(
+        "child", "session", "Worker · audit", run_id="worker-run",
+        owner="alice", data={"target_session": "child", "mode": "agent"},
+    )
+    await headless_agent.run_headless(
+        _Sess(), [], run_id=wrapper, activity_session_id="child", source="session", owner="alice",
+    )
+    record = act.get_run(wrapper)
+    assert seen["steer_run_id"] == wrapper
+    assert record["source"] == "session"
+    assert record["summary"]["target_session"] == "child"
+
+
+async def test_dashboard_steer_binds_to_and_is_drained_by_headless_wrapper(monkeypatch):
+    """The loop's telemetry id is not the headless wrapper steering id."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    drained = []
+
+    async def fake_loop(_url, _model, _messages, **kwargs):
+        started.set()
+        await release.wait()
+        from src import agent_control
+        drained.extend(agent_control.drain_steer("child", run_id=kwargs["steer_run_id"]))
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    from src import agent_control
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    task = asyncio.create_task(headless_agent.run_headless(_Sess(), [], run_id="wrapper-run"))
+    await started.wait()
+    steer = agent_control.steer("child", "report only the findings")
+    assert steer["run_id"] == "wrapper-run"
+    release.set()
+    await task
+    assert drained == ["report only the findings"]
+
+
+async def test_headless_stop_cancels_only_its_undrained_steer(monkeypatch):
+    started = asyncio.Event()
+
+    async def slow_loop(_url, _model, _messages, **_kwargs):
+        started.set()
+        await asyncio.sleep(30)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    from src import agent_control
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", slow_loop)
+    task = asyncio.create_task(headless_agent.run_headless(_Sess(), [], run_id="stop-wrapper"))
+    await started.wait()
+    steer = agent_control.steer("child", "do not leak into a later run")
+    assert headless_agent.request_stop("stop-wrapper")
+    await task
+    row = next(row for row in agent_control.steer_history("child") if row["id"] == steer["id"])
+    assert row["state"] == "cancelled"
 
 
 async def test_a_non_admin_headless_child_is_denied_the_public_blocklist(monkeypatch):

@@ -120,11 +120,22 @@ def test_workbench_module_parses():
 
 
 def test_workbench_wired_into_page():
-    html = (_REPO / "static" / "index.html").read_text()
+    html = (_REPO / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="workbench-modal"' in html and 'id="rail-workbench"' in html and 'id="set-workbenchCard"' in html
-    app = (_REPO / "static" / "app.js").read_text()
+    app = (_REPO / "static" / "app.js").read_text(encoding="utf-8")
     assert "import workbenchModule from './js/workbench.js'" in app and "'rail-workbench': 'Workbench'" in app
     for name in ("chat.js", "chatRenderer.js"):
-        src = (_REPO / "static" / "js" / name).read_text()
+        src = (_REPO / "static" / "js" / name).read_text(encoding="utf-8")
         assert "renderDiffCard(" in src
         assert "line.startsWith('+++') || line.startsWith('---')" not in src, f"{name} still carries its own diff loop"
+
+
+def test_workbench_run_cards_keep_management_controls():
+    """Open/stop must remain available after the transient composer strip is gone."""
+    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
+    assert 'data-wb-act="run-open-chat"' in src
+    assert 'data-wb-act="run-stop"' in src
+    assert "case 'run-open-chat': openRunChat" in src
+    assert "case 'run-stop': stopWorkbenchRun" in src
+    assert "/api/workbench/runs/${encodeURIComponent(runId)}/stop" in src
+    assert "window.sessionModule.selectSession(target)" in src

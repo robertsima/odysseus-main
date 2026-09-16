@@ -55,3 +55,65 @@ configured providers. Unit and simulated-stream regressions verify routing,
 capacity, context bounds and delivery behavior; they do not establish a new live
 latency figure. The observed slow IMAP revalidations already run in the existing
 cache/revalidation path; no provider-latency reduction is claimed here.
+
+## Eight-concurrent-jobs exercise — 2026-09-16, 22:07–22:16
+
+The new logs contain established-chat requests answered only with "Understood"
+or "How can I help?", followed by successful repeats in fresh chats. They also
+show explicit "using agents" requests missing the delegation toolset, a parent
+worker limit of one despite provider capacity being configured to eight, and a
+documentation lookup becoming an automatically learned skill. Steering was
+logged as injected during a worker poll; that is evidence of delivery, not proof
+that another agent stole it or that the UI retained its message.
+
+Implemented regression coverage and acceptance criteria:
+
+- [x] Agent prompt construction places trailing synthetic retrieval/date
+  envelopes before the latest genuine human request, preserving assistant/tool
+  ordering. Test the actual chat-context builder's output, not just a hand-made
+  prompt. This removes one context-ordering failure path; it cannot guarantee
+  that a provider never returns a generic acknowledgement.
+- [x] Action-scoped "using agents" instructions select delegation tools.
+  Source audits of email implementations do not seed live-mailbox tools merely
+  because the subject contains "email". Existing execution-time permissions
+  remain authoritative.
+- [x] Steering has session-and-run isolation, stable preparation/headless
+  targets, durable human-message identity and redraw reconciliation. No peer
+  message may be promoted to a human instruction. No later run adopts a stale
+  or unbound correction.
+- [x] Per-agent worker ceilings and provider-wide capacity are labeled
+  separately and capacity responses identify the limiting scope. No existing
+  chat is silently granted additional delegation permission.
+- [x] Post-response extraction snapshots its originating conversation and
+  respects memory-write access. Peer/runtime/retrieval data are not treated as
+  human memory evidence; lookup-only or unsuccessful work is not automatically
+  learned as a procedure.
+- [x] Fleet monitoring is compact and paginated. Detail sections are separate
+  views; loadout editing does not share a long scrolling inspector with logs.
+  Open chat and Stop are directly available in Control Room and Workbench.
+- [x] Agent cleanup is recoverable archive/restore plus hiding terminal child
+  cards. It preserves history, rejects live/queued work and checks ownership.
+
+Deployment follow-up / TODO:
+
+Local validation: 866 regression tests passed; JavaScript syntax and diff checks
+passed. Browser QA used real UI assets with synthetic fleet data, including
+agent-switch draft preservation and a docked editor whose Behavior controls fit
+without scrolling. A separate provider-integration suite returned 119 passed,
+1 skipped and 15 failures; an isolated export of committed `4c4ce59` reproduced
+the same 15 Windows/POSIX environment failures. These are not live-provider
+results, and this change has not been pushed or deployed.
+
+- [ ] Repeat same-chat documentation → mailbox → source-audit flows with the
+  configured provider, then compare selected tools and actual results.
+- [ ] With provider capacity eight, explicitly set the test parent's child
+  allowance to eight. Start independent workers and steer the parent while a
+  worker poll is outstanding. Verify the ordinary human bubble survives both
+  a history refresh and switching away/back; inspect its recorded target/state.
+- [ ] Stop a run during preparation and while tools are active. Verify pending
+  steers become cancelled, not delivered to the next request.
+- [ ] Archive an idle test agent, restart, and restore it. Confirm active
+  descendants block archive and that child-card cleanup retains run history.
+- [ ] Compare first-response latency, tool/schema count and extraction traffic
+  with the same prompts. Local mocked-stream and synthetic browser checks do
+  not establish production performance or validate eight live provider jobs.

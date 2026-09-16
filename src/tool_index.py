@@ -124,7 +124,7 @@ _EMAIL_CONTEXT_RE = re.compile(
     re.I,
 )
 _EMAIL_CODE_OPERATION_RE = re.compile(
-    r"\b(?:audit|review|inspect|debug|fix|implement|analy[sz]e|run)\b",
+    r"\b(?:audits?|reviews?|inspect|debug|fix|implement|analy[sz]e|run)\b",
     re.I,
 )
 _EMAIL_CODE_NOUN_RE = re.compile(

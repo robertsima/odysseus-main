@@ -106,6 +106,8 @@ ORCHESTRATION_REQUESTS = [
     "hand this to a worker",
     "run a sub-agent on this",
     "launch an agent to do the migration",
+    "Launch two independent read-only source audits using agents",
+    "Launch two source audits **using agents**",
 ]
 
 AGENT_PROSE = [
@@ -114,6 +116,7 @@ AGENT_PROSE = [
     "set the user agent header on that request",
     "how many workers does the pool start with",
     "what's the weather like",
+    "explain the risks of using agents for source audits",
 ]
 
 
@@ -350,9 +353,15 @@ def test_skill_requires_toolsets_keeps_only_real_tool_names():
         {"name": "other", "requires_toolsets": ["bash", "write_file"]},
     ]
     tools, unknown = _skill_declared_tools(skills, disabled_tools=set())
-    assert tools == {"read_file", "manage_calendar", "bash", "write_file"}
-    assert "email" in unknown and "file search and edit" in unknown
-    assert "read_file" not in unknown
+    assert tools == {
+        "list_email_accounts", "list_emails", "read_email", "manage_calendar",
+        "read_file", "grep", "glob", "ls", "edit_file", "write_file", "apply_patch",
+        "read_app_logs", "manage_memory", "manage_skills", "bash",
+    }
+    # Friendly prose aliases expand to real schemas; only an unavailable
+    # integration alias remains unknown.
+    assert unknown == {"todoist"}
+    assert not ({"email", "file search and edit", "application-log access"} & tools)
 
 
 def test_skill_requires_toolsets_still_respects_disabled_tools():

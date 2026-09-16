@@ -53,16 +53,23 @@ const STEER_STATE_NOTE = {
 const SOURCE_LABEL = { odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
 const KIND_ICON = { run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←', file_change: '±', commit: '●', status: '·', error: '!', note: '~' };
 const MODAL_ID = 'agents-dashboard';
+const FLEET_PAGE_SIZE = 8;
 let returnFocus = null;
 
 const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
+  providerLimits: {},
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
   catalog: null, configOpen: false, configTab: 'general', configDrafts: new Map(),
   fleetWidth: Number(localStorage.getItem('odysseus-agents-fleet-width') || 380),
   error: '', refreshing: false, refreshQueued: false,
   // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
   bucket: 'all',
+  fleetPage: 0,
+  detailTab: 'overview',
+  archiveView: false,
+  detailDrafts: new Map(),
+  compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
 
 async function api(path, opts = {}) {
@@ -110,11 +117,12 @@ async function refresh() {
   state.refreshing = true;
   try {
     const current = window.sessionModule?.getCurrentSessionId?.() || '';
-    const overviewRequest = current
-      ? apiPoll(`/api/agents/overview?current_session=${encodeURIComponent(current)}`)
-      : apiPoll('/api/agents/overview');
+    const overviewArgs = new URLSearchParams();
+    if (current) overviewArgs.set('current_session', current);
+    if (state.archiveView) overviewArgs.set('archived', 'true');
+    const overviewRequest = apiPoll(`/api/agents/overview${overviewArgs.size ? `?${overviewArgs}` : ''}`);
     const [ov, ap] = await Promise.all([overviewRequest, apiPoll('/api/agents/approvals')]);
-    state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || [];
+    state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
     state.approvals = ap.approvals || [];
     state.error = '';
     if (state.selected && !state.rows.some((r) => r.session_id === state.selected)) state.selected = null;
@@ -276,6 +284,8 @@ function render() {
   if (!root || !state.open) return;
   const surface = $('agents-dashboard-body');
   if (!surface) return;
+  const archiveToggle = `<button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">${state.archiveView ? 'Back to fleet' : 'Archived'}</button>`;
+  const headActions = state.archiveView ? archiveToggle : `${archiveToggle}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
   // button doing exactly what the title bar's maximize button does.
@@ -286,14 +296,13 @@ function render() {
         : `<div class="ag-triage">${triageHtml()}</div>`}
       <div class="ag-head-actions">
         ${liveHtml()}
-        ${state.configOpen ? '' : `<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${
-          workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`}
+        ${state.configOpen ? '' : headActions}
       </div>
     </div>
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
     ${state.configOpen ? loadoutWorkspaceHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
-      <aside class="ag-fleet wb-card">
-        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
+      <aside class="ag-fleet wb-card ${state.compactFleet ? 'ag-fleet-compact' : 'ag-fleet-expanded'}">
+        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-density" aria-pressed="${state.compactFleet}" title="${state.compactFleet ? 'Use larger cards' : 'Use compact cards'}">${state.compactFleet ? 'Compact' : 'Large'}</button></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
       <div class="ag-pane-splitter" data-ag-splitter role="separator" aria-orientation="vertical" aria-label="Resize fleet and agent details" tabindex="0"><span></span></div>
@@ -301,7 +310,7 @@ function render() {
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
   if (!state.configOpen) renderDetail();
-  $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; renderFleetOnly(); });
+  $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; state.fleetPage = 0; renderFleetOnly(); });
 }
 function filteredRows() {
   const q = state.filter.trim().toLowerCase();
@@ -313,15 +322,22 @@ function fleetHtml() {
   // selection, so clicking "2 need approval" appeared to do nothing when the
   // first such chat was already selected.
   const shown = state.bucket === 'all' ? BUCKETS : BUCKETS.filter(([key]) => key === state.bucket);
+  // Do not turn the fleet into an unbounded scroll just because a user has a
+  // long history.  Filtering still searches every visible row, while paging
+  // limits the expensive, interactive cards that need to stay easy to scan.
+  const candidates = rows.filter((row) => shown.some(([, , match]) => match(row)));
+  const pages = Math.max(1, Math.ceil(candidates.length / FLEET_PAGE_SIZE));
+  state.fleetPage = Math.min(Math.max(0, state.fleetPage), pages - 1);
+  const pageRows = new Set(candidates.slice(state.fleetPage * FLEET_PAGE_SIZE, (state.fleetPage + 1) * FLEET_PAGE_SIZE).map((row) => row.session_id));
   const html = shown.map(([key, label, match]) => {
-    const items = rows.filter(match);
+    const items = rows.filter((row) => match(row) && pageRows.has(row.session_id));
     if (!items.length) return '';
     const solo = shown.length === 1;
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
       solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
     }<div class="ag-card-grid">${items.map(rowHtml).join('')}</div></div>`;
   }).join('');
-  if (html) return html;
+  if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
   if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
@@ -436,7 +452,7 @@ function configEditorHtml(row) {
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
       <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
-      <label class="ag-field"><span>Parallel workers</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8.</small></label>
+      <label class="ag-field"><span>Child workers for this agent</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8. Separate from the provider-wide Claude Code capacity (${esc(state.providerLimits.claude_code || catalog.provider_limits?.claude_code || 1)}).</small></label>
     </div>
   </div>`;
   const toolsPanel = `<div class="ag-config-panel" data-config-panel="tools">
@@ -507,6 +523,15 @@ function rowHtml(r) {
 function renderDetail() {
   const box = $('ag-detail');
   if (!box) return;
+  // Capture the outgoing agent before a selection changes.  renderDetail is
+  // also called after `state.selected` has already changed, so limiting this
+  // to the new selection would silently lose a half-written steer/reply.
+  const renderedSid = box.dataset.sessionId;
+  if (renderedSid) {
+    const outgoing = {};
+    box.querySelectorAll('textarea[id]').forEach((el) => { outgoing[el.id] = el.value; });
+    if (Object.keys(outgoing).length) state.detailDrafts.set(renderedSid, Object.assign({}, state.detailDrafts.get(renderedSid), outgoing));
+  }
   const active = box.contains(document.activeElement) ? document.activeElement : null;
   const activeId = active?.id || '';
   const selection = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
@@ -516,17 +541,32 @@ function renderDetail() {
   const r = state.rows.find((x) => x.session_id === state.selected);
   if (!r) { delete box.dataset.sessionId; box.innerHTML = '<div class="wb-empty">Select a chat to see what its agent is doing.</div>'; return; }
   box.dataset.sessionId = r.session_id;
-  const scroll = box.querySelector('[data-wb-scroll="events"]');
+  const scroll = box.querySelector('[data-wb-scroll="detail-tab"]');
   const keep = scroll ? scroll.scrollTop : null;
   const approvals = state.approvals.filter((a) => a.session_id === r.session_id);
   const running = r.status === 'running' || r.status === 'waiting_approval';
   const events = (state.events.get(r.session_id) || []).slice(-200).reverse();
   const children = r.children || [];
-  // One identity block, not two. The hero and the meta strip under it each
-  // introduced the same agent: the hero repeated the latest-step line already
-  // printed on the unit's fleet card and at the top of Live events, and the
-  // strip counted workers and events that the section headers below count
-  // again. What is left is the agent, what it is running on, and its controls.
+  const tab = ['overview', 'activity', 'steering'].includes(state.detailTab) ? state.detailTab : 'overview';
+  const tabs = [['overview', 'Overview'], ['activity', 'Activity'], ['steering', 'Steering']]
+    .map(([key, label]) => `<button type="button" id="ag-tab-${key}" class="ag-detail-tab${tab === key ? ' active' : ''}" data-ag="detail-tab" data-tab="${key}" role="tab" aria-label="${label} for ${esc(r.name)}" aria-controls="ag-panel-${key}" aria-selected="${tab === key}" tabindex="${tab === key ? '0' : '-1'}">${label}</button>`).join('');
+  const overview = `
+    ${loadoutSummaryHtml(r)}
+    ${(r.hidden_run_ids || []).length ? `<div class="ag-hidden-runs"><span>${r.hidden_run_ids.length} completed run card${r.hidden_run_ids.length === 1 ? '' : 's'} hidden</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-runs" data-sid="${esc(r.session_id)}">Restore cards</button></div>` : ''}
+    ${approvals.length || children.length ? `<div class="ag-detail-top">
+      ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
+      ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Child workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
+      ${!approvals.length && !children.length ? '<div class="wb-empty">No child workers or pending approvals.</div>' : ''}
+    </div>` : '<div class="wb-empty">No child workers or pending approvals.</div>'}`;
+  const activity = `<div class="ag-section ag-events"><div class="wb-group-h"><span class="wb-group-title">Live events</span><span class="wb-count">${events.length}</span></div><div class="wb-ev-list ag-ev-list">${events.map(eventHtml).join('') || '<div class="wb-empty">No events yet.</div>'}</div></div>`;
+  const steering = `<div class="ag-section ag-compose">
+      ${running
+        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} waiting to be picked up` : ''}</small></label><div class="ag-compose-row"><textarea id="ag-steer" class="wb-input ag-textarea" rows="2" placeholder="e.g. Skip the tests for now and focus on the migration"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="steer" data-sid="${esc(r.session_id)}">Steer</button></div>`
+        : `<label class="ag-compose-label" for="ag-reply">Send a message <small>opens the chat and sends it</small></label><div class="ag-compose-row"><textarea id="ag-reply" class="wb-input ag-textarea" rows="2" placeholder="Next task for this chat…"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="reply" data-sid="${esc(r.session_id)}">Send</button></div>`}
+      ${steerLogHtml(r)}
+    </div>`;
+  // The identity and primary actions deliberately stay outside the tab scroll.
+  // This keeps Stop/Archive available even when a child produced a long log.
   box.innerHTML = `
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
@@ -537,29 +577,16 @@ function renderDetail() {
       <div class="ag-console-status">
         <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
         <span class="ag-console-actions"><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>${
-          r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${
-          r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}</span>
+          r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="Parent agent: ${esc(r.parent_name || r.parent_session)}">↳ ${esc(r.parent_name || 'parent')}</button>` : ''}${
+          r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}${
+          r.archived ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-agent" data-sid="${esc(r.session_id)}">Restore</button>` : !running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="archive-agent" data-sid="${esc(r.session_id)}" title="Hide this idle chat; its chat and run history stay preserved">Archive</button>` : ''}</span>
       </div>
     </div>
-    ${loadoutSummaryHtml(r)}
-    ${approvals.length || children.length ? `<div class="ag-detail-top">
-      ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
-      ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
-    </div>` : ''}
-    <div class="ag-section ag-compose">
-      ${running
-        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} waiting to be picked up` : ''}</small></label>
-           <div class="ag-compose-row"><textarea id="ag-steer" class="wb-input ag-textarea" rows="2" placeholder="e.g. Skip the tests for now and focus on the migration"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="steer" data-sid="${esc(r.session_id)}">Steer</button></div>`
-        : `<label class="ag-compose-label" for="ag-reply">Send a message <small>opens the chat and sends it</small></label>
-           <div class="ag-compose-row"><textarea id="ag-reply" class="wb-input ag-textarea" rows="2" placeholder="Next task for this chat…"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="reply" data-sid="${esc(r.session_id)}">Send</button></div>`}
-    </div>
-    ${steerLogHtml(r)}
-    <div class="ag-section ag-events">
-      <div class="wb-group-h"><span class="wb-group-title">Live events</span><span class="wb-count">${events.length}</span></div>
-      <div class="wb-ev-list ag-ev-list" data-wb-scroll="events">${events.map(eventHtml).join('') || '<div class="wb-empty">No events yet.</div>'}</div>
-    </div>`;
-  if (keep != null) { const s2 = box.querySelector('[data-wb-scroll="events"]'); if (s2) s2.scrollTop = keep; }
+    <div class="ag-detail-tabs" role="tablist" aria-label="${esc(r.name)} details">${tabs}</div>
+    <div class="ag-detail-tab-panel" id="ag-panel-${tab}" role="tabpanel" aria-labelledby="ag-tab-${tab}" data-wb-scroll="detail-tab">${tab === 'overview' ? overview : tab === 'activity' ? activity : steering}</div>`;
+  if (keep != null) { const s2 = box.querySelector('[data-wb-scroll="detail-tab"]'); if (s2) s2.scrollTop = keep; }
   Object.entries(draft).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
+  Object.entries(state.detailDrafts.get(r.session_id) || {}).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
   if (sameSelection && activeId) {
     const next = $(activeId);
     if (next) {
@@ -621,7 +648,7 @@ function childHtml(c) {
   return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
     ${s.target_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="inspect-run" data-run="${esc(c.run_id)}" data-sid="${esc(state.selected || '')}">Inspect</button>
-    ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : ''}</div>`;
+    ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="hide-run" data-run="${esc(c.run_id)}" title="Hide this completed card; activity history remains">Hide</button>`}</div>`;
 }
 function eventHtml(ev) {
   const lvl = ev.level === 'error' || ev.kind === 'error' ? ' err' : ev.level === 'warning' ? ' warn' : '';
@@ -728,6 +755,7 @@ async function onClick(e) {
   try {
     if (act === 'select-agent') {
       state.selected = b.dataset.sid;
+      state.detailTab = 'overview';
       renderFleetOnly(); renderDetail();
       $('agents-dashboard')?.querySelector(`.ag-card-select[data-sid="${CSS.escape(state.selected)}"]`)?.focus({ preventScroll: true });
     }
@@ -737,6 +765,11 @@ async function onClick(e) {
       window.workbenchModule.open();
     }
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
+    else if (act === 'archive-view') {
+      state.archiveView = !state.archiveView;
+      state.selected = null; state.filter = ''; state.bucket = 'all'; state.fleetPage = 0;
+      await refresh();
+    }
     else if (act === 'launch') { state.launchOpen = true; render(); $('ag-task')?.focus(); }
     else if (act === 'launch-close') { state.launchOpen = false; render(); }
     else if (act === 'bucket') {
@@ -745,6 +778,7 @@ async function onClick(e) {
       const next = b.dataset.bucket;
       state.bucket = (next === 'all' || state.bucket === next) ? 'all' : next;
       state.filter = '';
+      state.fleetPage = 0;
       const input = $('ag-filter'); if (input) input.value = '';
       // Keep a selection that is still visible in the new bucket.
       const match = (BUCKETS.find(([k]) => k === state.bucket) || [])[2];
@@ -752,6 +786,19 @@ async function onClick(e) {
         state.selected = (state.rows.find(match) || {}).session_id || state.selected;
       }
       updateStats(); renderFleetOnly(); renderDetail();
+    }
+    else if (act === 'fleet-page') {
+      state.fleetPage = Math.max(0, Number(b.dataset.page || 0));
+      renderFleetOnly();
+    }
+    else if (act === 'fleet-density') {
+      state.compactFleet = !state.compactFleet;
+      localStorage.setItem('odysseus-agents-fleet-density', state.compactFleet ? 'compact' : 'expanded');
+      render();
+    }
+    else if (act === 'detail-tab') {
+      state.detailTab = b.dataset.tab || 'overview';
+      renderDetail();
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'config-toggle') {
@@ -798,6 +845,33 @@ async function onClick(e) {
       b.disabled = true;
       const r = await post(`/api/chat/stop/${encodeURIComponent(b.dataset.sid)}`);
       uiModule.showToast(r.stopped ? 'Stopping' : 'Nothing to stop'); scheduleRefresh();
+    } else if (act === 'archive-agent') {
+      const selected = state.rows.find((item) => item.session_id === b.dataset.sid);
+      if (!selected || !window.confirm(`Archive “${selected.name}”? Its chat and run history stay preserved. Active work cannot be archived.`)) return;
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive`);
+      state.events.delete(b.dataset.sid);
+      state.selected = null;
+      uiModule.showToast('Archived — chat and run history were preserved', 'success');
+      await refresh();
+    } else if (act === 'restore-agent') {
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/unarchive`);
+      state.events.delete(b.dataset.sid);
+      state.selected = null;
+      uiModule.showToast('Restored — available in chat history', 'success');
+      await refresh();
+    } else if (act === 'hide-run') {
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(state.selected || '')}/cleanup-runs`, { run_ids: [b.dataset.run] });
+      uiModule.showToast('Hidden from this overview — activity history remains', 'success');
+      await refresh();
+    } else if (act === 'restore-runs') {
+      b.disabled = true;
+      const row = state.rows.find((item) => item.session_id === b.dataset.sid);
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/restore-runs`, { run_ids: row?.hidden_run_ids || [] });
+      uiModule.showToast('Completed run cards restored', 'success');
+      await refresh();
     } else if (act === 'stop-run') {
       b.disabled = true; b.textContent = 'Stopping…';
       const r = await post(`/api/agents/runs/${encodeURIComponent(b.dataset.run)}/stop`);
@@ -978,6 +1052,16 @@ function init() {
   root.addEventListener('pointerdown', bringToFront, true);
   root.addEventListener('pointerdown', beginFleetResize);
   root.addEventListener('click', onClick);
+  root.addEventListener('keydown', (e) => {
+    const tab = e.target?.closest?.('[data-ag="detail-tab"]');
+    if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const tabs = [...root.querySelectorAll('[data-ag="detail-tab"]')];
+    const current = tabs.indexOf(tab);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+      : (current + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    e.preventDefault(); state.detailTab = tabs[next].dataset.tab || 'overview'; renderDetail();
+    root.querySelector(`[data-ag="detail-tab"][data-tab="${CSS.escape(state.detailTab)}"]`)?.focus({ preventScroll: true });
+  });
   root.addEventListener('change', onConfigChange);
   document.addEventListener('keydown', (e) => {
     if (state.open && e.target?.matches?.('[data-ag-splitter]') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {

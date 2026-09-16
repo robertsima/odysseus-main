@@ -366,6 +366,13 @@ existing delegation remain possible at capacity. Blocked launches expose
 actually started. Provider acknowledgements without a trackable task are
 reported as unconfirmed, and provider failures cannot be reported as completion.
 
+There are two independent concurrency controls. **Child workers for this agent**
+is the parent chat's permission ceiling (`max_parallel_workers`, default 1,
+range 0–8). **Provider-wide concurrent jobs** is Claude Code's shared process
+capacity. Increasing provider capacity to eight does not grant each parent
+permission to launch eight children. Capacity refusals name the parent-chat
+scope and its setting; monitoring and stopping remain available at capacity.
+
 An agent can author loadouts too (`manage_agent_loadout`). The rule that makes
 that safe is in `src/agent_loadouts.py`: **every capability in a loadout an
 agent creates is intersected with the calling chat's own policy**, and each
@@ -398,6 +405,12 @@ turn end would mean only "the turn ended" — the false assurance the states exi
 to remove. Transitions are published to the activity feed, so a message is
 inspectable long after the in-memory queue drained.
 
+Queues are bound to `(session_id, run_id)` when accepted. Foreground preparation
+and headless execution use stable steering identities separate from activity
+telemetry. A different run must neither drain nor cancel that queue, and a later
+turn must not adopt an unbound correction. Ending a run cancels its undelivered
+messages rather than leaving them queued for a future task.
+
 The chat's temporary Steering chip tracks that record's ID. Live/resumed
 `steer_applied` events remove the pending badge immediately and promote the
 instruction to a normal user message; marked-as-poll status requests reconcile
@@ -405,12 +418,41 @@ after a missed event. Cancellation/failure is surfaced honestly, and
 the durable Control Room history remains available. Late network responses do
 not insert a message into whichever chat the user opened next.
 
+Persisted human messages retain `steer_id` for redraw deduplication. Identical
+instructions sent twice have different IDs and remain two messages; peer events
+never become human bubbles. Injection confirms delivery to the model, not that
+the requested work succeeded.
+
 A human steer also adds the tools its instruction names, within the turn's
 existing policy restrictions, without rebuilding the system prompt. Runtime,
 retrieval and peer-agent envelopes do not count as human turns or enter follow-up
 intent retrieval. Tail guidance preserves earlier unfinished requests unless the
 user changes or cancels them. `[agent-steer]` logs IDs, delivery state and added
 tool names without copying the instruction text.
+
+### Fleet lifecycle and navigation
+
+The Control Room separates Overview, Activity and Steering, and opens loadouts
+in a dedicated editor. The default compact fleet is paginated, with persistent
+Open chat and Stop actions, a larger-card option, and per-agent steering drafts.
+The existing docking, maximize and resize controls remain available. Workbench
+run cards also expose Open chat and Stop without first opening the run log.
+
+Archive removes an idle agent chat from the normal fleet without deleting its
+transcript. The Archived view restores it, including after a server restart.
+Archiving is refused while the chat or its descendants have live or queued
+work. Completed child cards can be hidden and restored without removing their
+activity history. These operations are owner-scoped; cleanup is not a stop
+operation.
+
+### Background learning
+
+Memory and skill extraction use a turn-local conversation snapshot, not a
+mutable session that may already contain a later request. Retrieval envelopes,
+tool results and peer-agent messages are excluded before selecting the recent
+conversation window. A chat with read-only or disabled memory cannot write
+through post-response extraction. Simple documentation searches and other
+lookup-only turns do not automatically become reusable procedure skills.
 
 ---
 
