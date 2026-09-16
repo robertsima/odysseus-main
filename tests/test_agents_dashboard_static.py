@@ -91,4 +91,6 @@ def test_opening_chat_or_workbench_keeps_control_room_open():
 def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-card-avatar { min-height: 60px" in STYLE
     assert "padding-top: 5px" in STYLE.split(".ag-bot {", 1)[1].split("}", 1)[0]
-    assert ".ag-console-hero { position: relative; display: flex; align-items: center; min-height: 100px" in STYLE
+    assert 'class="ag-console-robot-bay"' in AGENTS
+    assert ".ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto" in STYLE
+    assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE

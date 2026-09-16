@@ -42225,15 +42225,15 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .ag-bot-idle { opacity: .68; filter: saturate(.55); }
 .ag-bot-mini { width: 28px; height: 32px; transform: scale(.56); margin: -5px -4px; }
 .ag-bot-micro { position: relative; width: 18px; height: 22px; transform: scale(.38); margin: -6px -5px; padding: 5px 3px 1px; border-radius: 50%; background: var(--panel); }
-.ag-bot-hero { width: 58px; height: 58px; transform: scale(1.22); margin: 14px 14px 0 10px; }
+.ag-bot-hero { width: 58px; height: 58px; transform: scale(1.16); margin: 0; }
 .ag-bot-mini.ag-bot-running, .ag-bot-micro.ag-bot-running,
 .ag-bot-mini.ag-bot-waiting_approval, .ag-bot-micro.ag-bot-waiting_approval { animation: none; }
 .ag-bot-hero.ag-bot-running { animation: ag-bot-work-hero 1.8s ease-in-out infinite; }
 .ag-bot-hero.ag-bot-waiting_approval { animation: ag-bot-wait-hero 1.2s ease-in-out infinite; }
 @keyframes ag-bot-work { 0%,100% { transform: translateY(0) rotate(-.5deg); } 50% { transform: translateY(-3px) rotate(.5deg); } }
-@keyframes ag-bot-work-hero { 0%,100% { transform: scale(1.22) translateY(0) rotate(-.5deg); } 50% { transform: scale(1.22) translateY(-3px) rotate(.5deg); } }
+@keyframes ag-bot-work-hero { 0%,100% { transform: scale(1.16) translateY(0) rotate(-.5deg); } 50% { transform: scale(1.16) translateY(-3px) rotate(.5deg); } }
 @keyframes ag-bot-wait { 0%,100% { transform: translateX(-1px); } 50% { transform: translateX(1px); } }
-@keyframes ag-bot-wait-hero { 0%,100% { transform: scale(1.22) translateX(-1px); } 50% { transform: scale(1.22) translateX(1px); } }
+@keyframes ag-bot-wait-hero { 0%,100% { transform: scale(1.16) translateX(-1px); } 50% { transform: scale(1.16) translateX(1px); } }
 @keyframes ag-beacon { 0%,100% { opacity: 1; } 50% { opacity: .28; } }
 @keyframes ag-card-scan { 0%,55% { transform: translateX(-120%); } 85%,100% { transform: translateX(120%); } }
 /* The pane itself no longer scrolls. It used to, which meant the Steer box —
@@ -42241,8 +42241,9 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
    event log grew. Now approvals/workers scroll in their own bounded region and
    the event log is the flexible one, so head + compose always stay put. */
 .ag-detail { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 12px 14px; gap: 10px; }
-.ag-console-hero { position: relative; display: flex; align-items: center; min-height: 100px; padding: 10px 12px 8px 8px; overflow: hidden; border: 1px solid var(--wb-line); border-radius: 10px; background: linear-gradient(120deg, color-mix(in srgb, var(--wb-run) 9%, var(--bg)), var(--bg) 60%); }
+.ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto; align-items: center; min-height: 100px; padding: 8px 12px 8px 6px; overflow: hidden; border: 1px solid var(--wb-line); border-radius: 10px; background: linear-gradient(120deg, color-mix(in srgb, var(--wb-run) 9%, var(--bg)), var(--bg) 60%); }
 .ag-console-hero::after { content: ''; position: absolute; right: -25px; top: -55px; width: 150px; height: 150px; border: 1px solid color-mix(in srgb, var(--wb-run) 13%, transparent); border-radius: 50%; box-shadow: 0 0 0 22px color-mix(in srgb, var(--wb-run) 3%, transparent), 0 0 0 48px color-mix(in srgb, var(--wb-run) 2%, transparent); }
+.ag-console-robot-bay { width: 86px; height: 82px; display: flex; align-items: center; justify-content: center; padding-top: 8px; box-sizing: border-box; overflow: visible; z-index: 1; }
 .ag-console-identity { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; z-index: 1; }
 .ag-console-identity > span:last-child { overflow: hidden; color: var(--wb-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .ag-console-eyebrow { color: var(--wb-run); font: 700 9px/1 var(--wb-mono); letter-spacing: .12em; text-transform: uppercase; }

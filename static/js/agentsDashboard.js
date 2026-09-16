@@ -364,7 +364,7 @@ function renderDetail() {
   const lastEvent = events[0];
   box.innerHTML = `
     <div class="ag-console-hero">
-      ${robotHtml(r, 'hero')}
+      <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
       <div class="ag-console-identity"><span class="ag-console-eyebrow">Selected unit</span><span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span><span>${esc(r.latest || lastEvent?.title || 'Standing by')}</span></div>
       <div class="ag-console-status">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</div>
     </div>
