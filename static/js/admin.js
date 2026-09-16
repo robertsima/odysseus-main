@@ -517,11 +517,9 @@ async function loadEndpoints() {
           : '<span class="admin-badge admin-badge-off">offline</span>';
       const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
       const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
-      // Editable rather than a static badge: `local` is what lets a session
-      // retrieve documents labelled private (model_context.is_local_endpoint),
-      // and an endpoint added through the API form defaults to `api`, which
-      // silently withholds them even from a LAN address. Without this control
-      // the only fix was a hand-written PATCH.
+      // Editable rather than a static badge so endpoint topology remains an
+      // explicit operator choice. Private-vault access is granted separately
+      // for each chat and is not inferred from this classification.
       const epKind = ep.endpoint_kind || 'auto';
       const kindSelect = ['auto', 'local', 'api', 'proxy']
         .map(k => `<option value="${k}"${epKind === k ? ' selected' : ''}>${k}</option>`)
@@ -536,7 +534,7 @@ async function loadEndpoints() {
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
-              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind. 'local' lets sessions on this endpoint retrieve documents marked private; 'api' and 'proxy' never do, even on a LAN address. 'auto' decides from the host.">${kindSelect}</select>
+              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind describes where the model runs. Private-vault access is granted separately for each chat. 'auto' decides from the host.">${kindSelect}</select>
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
@@ -2420,7 +2418,7 @@ async function loadRag() {
         const sel = ['public', 'private']
           .map(v => `<option value="${v}"${label === v ? ' selected' : ''}>${v}</option>`)
           .join('');
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is withheld from any session served by a non-local endpoint.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
+        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is hidden unless the current chat is explicitly granted private-vault reads.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
       }).join('');
       dirList.querySelectorAll('[data-adm-rag-sens]').forEach(sel => {
         const previous = sel.value;

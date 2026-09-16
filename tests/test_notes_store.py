@@ -2,8 +2,10 @@ import os
 
 import pytest
 
+import src.rag_sensitivity as sensitivity
 from src.notes_markdown import NoteRecord, markdown_to_note
 from src.notes_store import MarkdownNotesStore
+from src.rag_sensitivity import VaultReadOnlyError
 
 
 def _configure(monkeypatch, tmp_path):
@@ -84,3 +86,53 @@ def test_delete_uses_the_requested_owner_when_duplicate_ids_exist(monkeypatch, t
     assert store.delete("duplicate", "bob") is True
     assert (notes / "alice.md").exists()
     assert not (notes / "bob.md").exists()
+
+
+def test_readonly_notes_can_be_read_but_not_edited_or_deleted(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(sensitivity, "vault_root", lambda: str(tmp_path))
+    monkeypatch.setattr(
+        sensitivity,
+        "_safe_folder_policy_map",
+        lambda: ({"Notes": sensitivity.FolderPolicy(readonly=True)}, True),
+    )
+    notes = tmp_path / "Notes"
+    notes.mkdir()
+    path = notes / "locked.md"
+    path.write_text(
+        "---\nid: locked\ntitle: Locked\nowner: alice\n---\noriginal", encoding="utf-8"
+    )
+    store = MarkdownNotesStore()
+
+    loaded = store.find("locked", "alice")
+    assert loaded is not None and loaded.content == "original"
+    loaded.content = "changed"
+    with pytest.raises(VaultReadOnlyError):
+        store.save(loaded)
+    with pytest.raises(VaultReadOnlyError):
+        store.delete("locked", "alice")
+    assert path.read_text(encoding="utf-8").endswith("original")
+
+
+def test_archiving_checks_both_source_and_destination_policy(monkeypatch, tmp_path):
+    _configure(monkeypatch, tmp_path)
+    monkeypatch.setattr(sensitivity, "vault_root", lambda: str(tmp_path))
+    notes = tmp_path / "Notes"
+    notes.mkdir()
+    path = notes / "move.md"
+    path.write_text(
+        "---\nid: move\ntitle: Move\nowner: alice\n---\ncontent", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        sensitivity,
+        "_safe_folder_policy_map",
+        lambda: ({"Notes/Archive": sensitivity.FolderPolicy(readonly=True)}, True),
+    )
+    store = MarkdownNotesStore()
+    note = store.find("move", "alice")
+    assert note is not None
+    note.archived = True
+
+    with pytest.raises(VaultReadOnlyError):
+        store.save(note)
+    assert path.exists()

@@ -200,17 +200,42 @@ def env_locked(spec: SettingSpec) -> bool:
 
 def _validate_folder_sensitivity(value: Any) -> None:
     if not isinstance(value, dict):
-        raise ValueError("must be an object mapping a folder path to \"public\" or \"private\"")
-    for key, label in value.items():
-        if not isinstance(key, str) or not isinstance(label, str):
-            raise ValueError(f"every folder and label must be text (got {key!r}: {label!r})")
-        if str(label).strip().lower() not in {"public", "private"}:
-            raise ValueError(f"{key!r} has label {label!r}; expected \"public\" or \"private\"")
+        raise ValueError("must be an object mapping folder paths to privacy/access rules")
+    normalized_keys: set[str] = set()
+    for key, rule in value.items():
+        if not isinstance(key, str):
+            raise ValueError(f"every folder path must be text (got {key!r})")
         cleaned = key.replace("\\", "/").strip()
-        if cleaned.startswith("/") or ".." in cleaned.split("/") or ":" in cleaned:
+        is_root = key == ""
+        if ((not cleaned and not is_root) or cleaned.startswith("/")
+                or ".." in cleaned.split("/") or ":" in cleaned):
             raise ValueError(
                 f"{key!r} must be a folder inside the vault — no absolute paths, drive letters or '..'"
             )
+        parts = [part for part in cleaned.split("/") if part not in ("", ".")]
+        normalized = "/".join(parts).casefold()
+        if normalized in normalized_keys:
+            raise ValueError(f"{key!r} duplicates another folder rule after normalization")
+        normalized_keys.add(normalized)
+        if isinstance(rule, str):
+            if rule.strip().lower() not in {"public", "private", "readonly"}:
+                raise ValueError(
+                    f"{key!r} has rule {rule!r}; expected \"public\", \"private\" or \"readonly\""
+                )
+            continue
+        if not isinstance(rule, dict):
+            raise ValueError(f"{key!r} must be a text rule or an object")
+        unknown = set(rule) - {"sensitivity", "readonly"}
+        if unknown:
+            raise ValueError(f"{key!r} has unknown option(s): {', '.join(sorted(map(str, unknown)))}")
+        if not rule:
+            raise ValueError(f"{key!r} has an empty rule")
+        if "sensitivity" in rule:
+            sensitivity = rule["sensitivity"]
+            if not isinstance(sensitivity, str) or sensitivity.strip().lower() not in {"public", "private"}:
+                raise ValueError(f"{key!r}.sensitivity must be \"public\" or \"private\"")
+        if "readonly" in rule and not isinstance(rule["readonly"], bool):
+            raise ValueError(f"{key!r}.readonly must be true or false")
 
 
 VALIDATORS: Dict[str, Any] = {
@@ -333,9 +358,10 @@ register_all([
         label="Default sensitivity",
         help=(
             "Applied to a folder that declares nothing. Private content is "
-            "retrieved only when the session's model runs locally, so it never "
-            "reaches a hosted endpoint. An individual file can override this in "
-            "its own frontmatter."
+            "hidden from models and agents until that specific chat is explicitly "
+            "granted private-vault reads. Once granted, excerpts may be sent to "
+            "the selected model endpoint. An individual file can override this "
+            "in its own frontmatter."
         ),
         group="Knowledge",
         choices=("public", "private"),
@@ -343,11 +369,13 @@ register_all([
     SettingSpec(
         key="vault_folder_sensitivity",
         type="json",
-        label="Per-folder sensitivity",
+        label="Folder privacy & access",
         help=(
-            "Folder path to \"public\" or \"private\". A folder inherits from its "
-            "parent, and a file inherits from its folder — so labelling a tree "
-            "once covers everything added to it later."
+            "Map each vault-relative folder to \"public\", \"private\" or \"readonly\". "
+            "For both privacy and write protection, use an object such as "
+            "{\"Journal\": {\"sensitivity\": \"private\", \"readonly\": true}}. "
+            "Rules inherit into subfolders; {\"readonly\": false} creates a writable child exception. "
+            "Use an empty folder key to apply a rule to the vault root."
         ),
         group="Knowledge",
     ),

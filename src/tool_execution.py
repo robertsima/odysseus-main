@@ -119,7 +119,7 @@ _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _S
 _SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
 
 
-def _is_sensitive_path(resolved: str) -> bool:
+def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
 
@@ -128,7 +128,9 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    # Accept both separators so tests and model-supplied paths copied from a
+    # different platform cannot evade the deny-list on Windows.
+    parts = [p.casefold() for p in re.split(r"[\\\\/]", resolved)]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -141,12 +143,25 @@ def _is_sensitive_path(resolved: str) -> bool:
     # model could read a private note by absolute path and walk straight around
     # the RAG sensitivity filter. Blocking here covers the file tools only:
     # indexing and retrieval read from disk directly and never consult this
-    # function, so local models still search and cite private documents
-    # normally; they just cannot open them as files.
+    # function. An explicit per-chat grant is required for both retrieval and
+    # direct reads; merely using a local endpoint does not widen access.
     try:
-        from src.rag_sensitivity import path_is_under_private_directory
+        from src.rag_sensitivity import (
+            path_is_under_private_directory,
+            resolve_sensitivity,
+            vault_root,
+        )
 
-        if path_is_under_private_directory(resolved):
+        in_vault = False
+        try:
+            vault = os.path.realpath(vault_root())
+            in_vault = resolved == vault or os.path.commonpath([resolved, vault]) == vault
+        except (OSError, ValueError):
+            pass
+        if not allow_private and (
+            path_is_under_private_directory(resolved)
+            or (in_vault and resolve_sensitivity(resolved) == "private")
+        ):
             return True
     except Exception as e:  # never let a label lookup break file tools
         logger.warning("private-path check failed for %s: %s", resolved, e)
@@ -329,7 +344,7 @@ def _tool_path_roots() -> list[str]:
     return out
 
 
-def _resolve_tool_path(raw_path: str) -> str:
+def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
     """Resolve and confine a model-supplied path.
 
     Order of checks:
@@ -347,7 +362,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     ws = get_active_workspace()
     if ws:
         try:
-            return _resolve_tool_path_in_workspace(ws, raw_path)
+            return _resolve_tool_path_in_workspace(ws, raw_path, allow_private=allow_private)
         except ValueError:
             # The knowledge base is not "somewhere else on the host" — it is
             # the user's own indexed notes, reachable by these same tools when
@@ -358,13 +373,13 @@ def _resolve_tool_path(raw_path: str) -> str:
             # turn revoked everything else. Keep it reachable in both modes.
             # The sensitive/private deny-list below still applies, so a
             # directory the user labelled private stays closed either way.
-            return _resolve_personal_docs_path(raw_path)
+            return _resolve_personal_docs_path(raw_path, allow_private=allow_private)
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
     expanded = os.path.expanduser(str(raw_path).strip())
     resolved = os.path.realpath(expanded)
 
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -384,7 +399,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     )
 
 
-def _resolve_personal_docs_path(raw_path: str) -> str:
+def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> str:
     """Resolve a path that must land inside the personal-documents tree.
 
     Used as the second chance when a workspace is bound: the workspace is the
@@ -400,7 +415,7 @@ def _resolve_personal_docs_path(raw_path: str) -> str:
     if not os.path.isabs(candidate) and root:
         candidate = os.path.join(root, candidate)
     resolved = os.path.realpath(candidate)
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -413,7 +428,7 @@ def _resolve_personal_docs_path(raw_path: str) -> str:
     return resolved
 
 
-def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
+def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private: bool = False) -> str:
     """Confine a model-supplied path to the active workspace.
 
     Layered on top of upstream's path policy: the workspace is the allowed
@@ -428,7 +443,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     candidate = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
     resolved = os.path.realpath(candidate)
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -504,7 +519,7 @@ def get_mcp_manager():
 
 
 
-def _resolve_search_root(raw_path: str) -> str:
+def _resolve_search_root(raw_path: str, allow_private: bool = False) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
     With a workspace active, the workspace folder is the default root and a
@@ -517,11 +532,11 @@ def _resolve_search_root(raw_path: str) -> str:
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-        return os.path.realpath(ws) if not raw else _resolve_tool_path(raw)
+        return os.path.realpath(ws) if not raw else _resolve_tool_path(raw, allow_private=allow_private)
     if not raw:
         roots = _tool_path_roots()
         return roots[0] if roots else os.path.realpath(".")
-    return _resolve_tool_path(raw)
+    return _resolve_tool_path(raw, allow_private=allow_private)
 
 logger = logging.getLogger(__name__)
 
@@ -632,6 +647,23 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "manage_memory":  _parse_manage_memory,
 }
 
+# A user-configured MCP server can expose a filesystem or shell wrapper under
+# any server id.  Qualified calls do not pass through the legacy bare-tool
+# dispatch, so keep the obvious read-capable names behind the same explicit
+# per-chat grant.  This is intentionally conservative: a false positive is a
+# retryable tool error, while a false negative can disclose private vault data.
+_PRIVATE_READ_MCP_TOOL_NAMES = frozenset({
+    "bash", "python", "read_file", "write_file", "edit_file", "apply_patch",
+    "grep", "glob", "ls", "get_workspace", "search_documents", "manage_rag",
+})
+
+
+def _qualified_mcp_needs_private_grant(tool: str) -> bool:
+    if not isinstance(tool, str) or not tool.startswith("mcp__"):
+        return False
+    parts = tool.split("__", 2)
+    return len(parts) == 3 and parts[2].casefold() in _PRIVATE_READ_MCP_TOOL_NAMES
+
 
 # Primary argument key(s) for the legacy line-parsed tools. When a fenced
 # block's content is a JSON object carrying one of these keys, it's structured
@@ -677,11 +709,14 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    allow_private: bool = False,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -690,7 +725,7 @@ async def _call_mcp_tool(
 
     # If MCP server not connected, try direct fallback
     if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private)
         if fallback:
             return fallback
 
@@ -814,6 +849,7 @@ async def _direct_fallback(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    allow_private: bool = False,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -830,6 +866,7 @@ async def _direct_fallback(
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "allow_private": bool(allow_private),
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -847,10 +884,11 @@ async def _document_tool_dispatch(
     content: str,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    allow_private: bool = False,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
-    ctx = {"session_id": session_id, "owner": owner}
+    ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private)}
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
@@ -868,6 +906,7 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+    allow_private: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -884,6 +923,7 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
+            allow_private=allow_private,
         )
         return output
     finally:
@@ -897,6 +937,7 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
+    allow_private: bool = False,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1004,6 +1045,25 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    # Shell/Python are unrestricted subprocesses: unlike the dedicated file
+    # tools, they can read an absolute path (or walk the vault through a
+    # command substitution) before any local sensitivity resolver runs.  The
+    # per-chat private-vault grant is therefore a hard execution gate, not a
+    # prompt hint.  Keep this before the detached-background branch and before
+    # MCP dispatch so neither route can escape the same decision.
+    if tool in ("bash", "python") and allow_private is not True:
+        desc = f"{tool}: BLOCKED"
+        result = {
+            "error": (
+                f"Tool '{tool}' is disabled unless this chat explicitly enables "
+                "private vault access. Use the dedicated workspace/file tools "
+                "for public project files, or enable 'Allow private vault reads'."
+            ),
+            "exit_code": 1,
+        }
+        logger.info("Unrestricted subprocess blocked without private-vault grant: tool=%s session=%r", tool, session_id)
+        return desc, result
+
 
     # Background execution: a `bash` block whose first line is the `#!bg`
     # marker runs DETACHED — returns a job id immediately so the chat stream
@@ -1035,30 +1095,51 @@ async def _execute_tool_block_impl(
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    # Filesystem reads/writes have a local sensitivity policy and must not be
+    # handed to an arbitrary MCP server before that policy runs. The native
+    # handlers receive the explicit private-read context below.
+    if tool in ("read_file", "write_file"):
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            allow_private=allow_private,
+        ) or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool in _MCP_TOOL_MAP:
+        first_line = _command_preview(content)
+        desc = f"{tool}: {first_line}"
+        result = await _call_mcp_tool(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            allow_private=allow_private,
+        )
     elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
-        result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
+        result = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("apply_patch", "todowrite"):
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {_command_preview(content)}"
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": "manage_bg_jobs: execution failed", "exit_code": 1}
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
         desc = f"{tool}: {_command_preview(content)}"
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
             desc = f"{tool}: {result.get('title', '')}"
@@ -1073,7 +1154,7 @@ async def _execute_tool_block_impl(
         # src/agent_tools/model_interaction_tools.py.
         first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
         # Migrated to the agent_tools registry (#3629): dispatched through
@@ -1081,7 +1162,7 @@ async def _execute_tool_block_impl(
         # live in src/agent_tools/session_tools.py.
         first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
@@ -1099,11 +1180,11 @@ async def _execute_tool_block_impl(
     elif tool in ("manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "manage_settings"):
         # Registry-dispatched (agent_tools.admin_tools); owner threaded for ownership/admin checks.
         desc = tool
-        result = await _direct_fallback(tool, content, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_notes":
         desc = "manage_notes"
-        result = await do_manage_notes(content, owner=owner)
+        result = await do_manage_notes(content, owner=owner, allow_private=allow_private)
     elif tool == "manage_wellbeing":
         # Defense in depth. The agent loop already strips this tool from the
         # prompt and schema set for an endpoint scope the owner has denied (see
@@ -1150,7 +1231,11 @@ async def _execute_tool_block_impl(
         result = await do_list_cached_models(content, owner=owner)
     elif tool == "app_api":
         desc = "app_api"
-        result = await do_app_api(content, owner=owner)
+        result = await do_app_api(
+            content,
+            owner=owner,
+            allow_private=allow_private,
+        )
     elif tool == "list_serve_presets":
         desc = "list_serve_presets"
         result = await do_list_serve_presets(content, owner=owner)
@@ -1167,7 +1252,7 @@ async def _execute_tool_block_impl(
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
     elif tool == "edit_file":
-        result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
     elif tool == "trigger_research":
         desc = "trigger_research"
@@ -1183,7 +1268,7 @@ async def _execute_tool_block_impl(
         result = await do_manage_contact(content, owner=owner)
     elif tool in ("delegate_to_agent", "delegate_to_claude_code"):
         desc = tool
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "vault_search":
         desc = "vault_search"
@@ -1241,8 +1326,22 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
-        mcp = get_mcp_manager()
-        if mcp:
+        _mcp_private_blocked = _qualified_mcp_needs_private_grant(tool) and allow_private is not True
+        if _mcp_private_blocked:
+            desc = f"{tool}: BLOCKED"
+            result = {
+                "error": (
+                    f"MCP tool '{tool}' is disabled unless this chat explicitly "
+                    "enables private vault access."
+                ),
+                "exit_code": 1,
+            }
+            logger.info("Qualified MCP private-read tool blocked without grant: tool=%s session=%r", tool, session_id)
+        else:
+            mcp = get_mcp_manager()
+        if _mcp_private_blocked:
+            pass
+        elif mcp:
             desc = f"mcp: {tool}"
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:
@@ -1270,7 +1369,7 @@ async def _execute_tool_block_impl(
     elif tool in dynamic_handlers:
         first_line = _command_preview(content)
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        res = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private)
 
         if isinstance(res, tuple):
             desc, result = res

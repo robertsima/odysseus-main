@@ -268,7 +268,7 @@ def test_the_message_lists_blockers_and_stops_the_hunt(monkeypatch):
 
 def test_bash_tool_returns_the_redirect_instead_of_running_the_push(odysseus_repo):
     result = asyncio.run(
-        TOOL_HANDLERS["bash"](f"cd {odysseus_repo} && git push -u origin main", {})
+        TOOL_HANDLERS["bash"](f"cd {odysseus_repo} && git push -u origin main", {"allow_private": True})
     )
     assert result["exit_code"] == 1
     assert "manage_agent_worktree" in result["error"]
@@ -277,13 +277,13 @@ def test_bash_tool_returns_the_redirect_instead_of_running_the_push(odysseus_rep
 
 def test_bash_tool_blocks_a_credential_less_third_party_push_with_its_own_guidance(odysseus_repo, foreign_repo):
     result = asyncio.run(
-        TOOL_HANDLERS["bash"](f"cd {foreign_repo} && git push origin main", {})
+        TOOL_HANDLERS["bash"](f"cd {foreign_repo} && git push origin main", {"allow_private": True})
     )
     assert result["exit_code"] == 1
     assert result["blocked_reason"] == "publish_needs_repository_credential"
 
 
 def test_bash_tool_still_runs_ordinary_commands():
-    result = asyncio.run(TOOL_HANDLERS["bash"]("echo hello-from-bash", {}))
+    result = asyncio.run(TOOL_HANDLERS["bash"]("echo hello-from-bash", {"allow_private": True}))
     assert result["exit_code"] == 0
     assert "hello-from-bash" in result["output"]

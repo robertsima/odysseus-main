@@ -125,7 +125,31 @@ def setup_admin_wipe_routes(session_manager):
 
             if kind == "notes":
                 from src.notes_store import STORE as notes_store
-                file_notes = notes_store.list(None, archived=False) + notes_store.list(None, archived=True)
+                from src.rag_sensitivity import assert_vault_writable
+                try:
+                    active_notes = notes_store.list(
+                        None, archived=False, allow_private=True
+                    )
+                    archived_notes = notes_store.list(
+                        None, archived=True, allow_private=True
+                    )
+                except TypeError:
+                    # Preserve compatibility with small in-memory stores used by
+                    # extensions and older test fixtures. Human/admin callers
+                    # historically received the complete note collection.
+                    active_notes = notes_store.list(None, archived=False)
+                    archived_notes = notes_store.list(None, archived=True)
+                file_notes = active_notes + archived_notes
+                # Validate the complete batch before deleting anything. File
+                # changes cannot participate in the SQLite rollback below, so
+                # discovering a read-only note halfway through would otherwise
+                # leave a partial wipe on disk.
+                path_for = getattr(notes_store, "_path_for", None)
+                if callable(path_for):
+                    for note in file_notes:
+                        path = path_for(note.id, None)
+                        if path is not None:
+                            assert_vault_writable(path, operation="wipe note from")
                 for note in file_notes:
                     notes_store.delete(note.id, None)
                 legacy_count = db.query(Note).count()
@@ -175,6 +199,9 @@ def setup_admin_wipe_routes(session_manager):
             raise HTTPException(400, f"Unknown wipe kind: {kind!r}")
         except HTTPException:
             raise
+        except PermissionError as e:
+            db.rollback()
+            raise HTTPException(409, str(e))
         except Exception as e:
             db.rollback()
             logger.exception(f"Wipe {kind} failed")

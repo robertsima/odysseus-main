@@ -16,11 +16,10 @@ class TestRAGManagerSearchSignature(unittest.TestCase):
         manager.search("test query", k=3, owner="user1")
 
         # Verify that search was called on the underlying vector_rag with the
-        # correct parameters. allow_private defaults to True so existing callers
-        # keep their behaviour; only callers that know the endpoint is remote
-        # pass False.
+        # Omitted private-read privilege fails closed; callers must opt in
+        # explicitly for a private-vault search.
         mock_vector_rag.search.assert_called_once_with(
-            "test query", 3, owner="user1", allow_private=True
+            "test query", 3, owner="user1", allow_private=False
         )
 
     @patch('src.rag_manager.VectorRAG')

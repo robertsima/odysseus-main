@@ -17,7 +17,7 @@ from src.notes_markdown import (
     resolve_note_directory,
     safe_join,
 )
-from src.rag_sensitivity import vault_root
+from src.rag_sensitivity import assert_vault_writable, resolve_sensitivity, vault_root
 from src.settings import get_setting
 
 
@@ -76,10 +76,13 @@ class MarkdownNotesStore:
                     continue
 
     def list(self, owner: Optional[str] = None, *, archived: bool = False,
-             label: Optional[str] = None) -> List[NoteRecord]:
+             label: Optional[str] = None, allow_private: bool = True) -> List[NoteRecord]:
         notes = [
-            note for _path, note in self._iter()
+            note for path, note in self._iter()
             if note.archived == archived and _belongs(note, owner)
+            and (allow_private or resolve_sensitivity(
+                str(path), frontmatter=note.extra_frontmatter
+            ) != "private")
             and (not label or note.label == label)
         ]
         if archived:
@@ -89,11 +92,17 @@ class MarkdownNotesStore:
             key=lambda n: (not n.pinned, n.sort_order, -(n.updated_at or datetime.min).timestamp()),
         )
 
-    def find(self, note_id: str, owner: Optional[str] = None) -> Optional[NoteRecord]:
+    def find(self, note_id: str, owner: Optional[str] = None, *, allow_private: bool = True) -> Optional[NoteRecord]:
         note_id = str(note_id or "").strip()
         if not note_id:
             return None
-        matches = [note for _path, note in self._iter() if note.id.startswith(note_id) and _belongs(note, owner)]
+        matches = [
+            note for path, note in self._iter()
+            if note.id.startswith(note_id) and _belongs(note, owner)
+            and (allow_private or resolve_sensitivity(
+                str(path), frontmatter=note.extra_frontmatter
+            ) != "private")
+        ]
         return matches[0] if len(matches) == 1 else None
 
     def _path_for(self, note_id: str, owner: Optional[str] = None) -> Optional[Path]:
@@ -104,10 +113,6 @@ class MarkdownNotesStore:
 
     def save(self, note: NoteRecord) -> NoteRecord:
         root, _active, _archive = _paths()
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        if note.created_at is None:
-            note.created_at = now
-        note.updated_at = now
         relative_dir = resolve_note_directory(
             note.archived,
             str(get_setting("notes_directory", "Notes") or "Notes"),
@@ -116,11 +121,18 @@ class MarkdownNotesStore:
         target_dir = safe_join(root, relative_dir)
         if target_dir is None:
             raise ValueError("notes directory must stay inside the vault")
-        target_dir.mkdir(parents=True, exist_ok=True)
         current = self._path_for(note.id, note.owner)
         target = current if current and current.parent == target_dir else target_dir / note_filename(note.title, note.id)
         if target.exists() and (current is None or target.resolve() != current.resolve()):
             target = target_dir / f"{target.stem}-{note.id[:8]}.md"
+        assert_vault_writable(target, operation="save note to")
+        if current is not None and current.resolve() != target.resolve():
+            assert_vault_writable(current, operation="move note from")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        if note.created_at is None:
+            note.created_at = now
+        note.updated_at = now
         payload = note_to_markdown(note)
         fd, temp_name = tempfile.mkstemp(prefix=".note-", suffix=".tmp", dir=str(target_dir))
         try:
@@ -143,6 +155,7 @@ class MarkdownNotesStore:
         path = self._path_for(note.id, owner)
         if path is None:
             return False
+        assert_vault_writable(path, operation="delete note from")
         path.unlink()
         return True
 

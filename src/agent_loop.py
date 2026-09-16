@@ -4204,6 +4204,7 @@ async def stream_agent_loop(
     workspace: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
+    allow_private: bool = False,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
     approval_mode: Optional[str] = None,
@@ -6350,6 +6351,7 @@ async def stream_agent_loop(
                             disabled_tools=disabled_tools,
                             tool_policy=tool_policy,
                             owner=owner,
+                            allow_private=allow_private,
                             progress_cb=_push_progress,
                             workspace=workspace,
                         )

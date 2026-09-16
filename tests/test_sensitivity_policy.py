@@ -26,6 +26,9 @@ import src.rag_sensitivity as sensitivity
 from src.rag_sensitivity import (
     SENSITIVITY_PRIVATE,
     SENSITIVITY_PUBLIC,
+    VaultReadOnlyError,
+    assert_vault_writable,
+    path_is_readonly,
     path_is_under_private_directory,
     resolve_sensitivity,
     vault_root,
@@ -175,6 +178,66 @@ def test_deepest_folder_wins_private_subfolder_inside_public_tree(vault, fake_se
 
 
 # --------------------------------------------------------------------------- #
+# Folder write access (independent from sensitivity)
+# --------------------------------------------------------------------------- #
+
+
+def test_readonly_shorthand_inherits_privacy_and_blocks_writes(vault, fake_settings):
+    fake_settings["vault_default_sensitivity"] = SENSITIVITY_PRIVATE
+    fake_settings["vault_folder_sensitivity"] = {"Journal": "readonly"}
+
+    assert resolve_sensitivity("Journal/today.md") == SENSITIVITY_PRIVATE
+    assert path_is_readonly("Journal/today.md") is True
+    with pytest.raises(VaultReadOnlyError, match="configured readonly"):
+        assert_vault_writable(vault / "Journal" / "today.md", operation="edit")
+
+
+def test_combined_private_readonly_policy(vault, fake_settings):
+    fake_settings["vault_default_sensitivity"] = SENSITIVITY_PUBLIC
+    fake_settings["vault_folder_sensitivity"] = {
+        "Journal": {"sensitivity": "private", "readonly": True}
+    }
+
+    assert resolve_sensitivity("Journal/today.md") == SENSITIVITY_PRIVATE
+    assert path_is_readonly("Journal/today.md") is True
+
+
+def test_readonly_inherits_and_child_can_be_writable(vault, fake_settings):
+    fake_settings["vault_folder_sensitivity"] = {
+        "Journal": "readonly",
+        "Journal/Inbox": {"readonly": False},
+    }
+
+    assert path_is_readonly("Journal/2026/today.md") is True
+    assert path_is_readonly("Journal/Inbox/draft.md") is False
+    assert path_is_readonly("Journal2/not-a-match.md") is False
+
+
+def test_vault_root_can_be_readonly(vault, fake_settings):
+    fake_settings["vault_folder_sensitivity"] = {"": "readonly"}
+    assert path_is_readonly("any/depth/note.md") is True
+
+
+def test_duplicate_normalized_folder_rules_fail_closed(vault, fake_settings):
+    fake_settings["vault_folder_sensitivity"] = {
+        "Journal": "public",
+        "journal/": "readonly",
+    }
+    assert resolve_sensitivity("unrelated.md") == SENSITIVITY_PRIVATE
+    assert path_is_readonly("unrelated.md") is True
+
+
+def test_readonly_does_not_apply_outside_the_vault(vault, fake_settings, tmp_path):
+    fake_settings["vault_folder_sensitivity"] = {"Journal": "readonly"}
+    assert path_is_readonly(str(tmp_path / "outside.md")) is False
+
+
+def test_malformed_policy_fails_closed_for_vault_writes(vault, fake_settings):
+    fake_settings["vault_folder_sensitivity"] = {"Journal": {"readonly": "yes"}}
+    assert path_is_readonly("Anything/note.md") is True
+
+
+# --------------------------------------------------------------------------- #
 # Legacy directory_sensitivity.json (layer 3)
 # --------------------------------------------------------------------------- #
 
@@ -187,6 +250,23 @@ def test_legacy_json_declaration_still_honoured(vault, fake_settings):
 
     assert resolve_sensitivity(str(vault / "AI Mind" / "note.md")) == SENSITIVITY_PRIVATE
     assert resolve_sensitivity("AI Mind/note.md") == SENSITIVITY_PRIVATE
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["{not-json", json.dumps({"Journal": "secret"})],
+)
+def test_malformed_legacy_policy_fails_closed_on_first_load(
+    vault, fake_settings, payload
+):
+    state = vault / sensitivity.SENSITIVITY_STATE_FILENAME
+    state.write_text(payload, encoding="utf-8")
+    note = vault / "Journal" / "note.md"
+    note.parent.mkdir()
+    note.write_text("body", encoding="utf-8")
+
+    assert resolve_sensitivity(str(note)) == SENSITIVITY_PRIVATE
+    assert path_is_under_private_directory(str(note)) is True
 
 
 def test_folder_setting_takes_precedence_over_legacy_json(vault, fake_settings):

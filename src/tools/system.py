@@ -616,8 +616,44 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("DELETE", "/api/calendar/events"),
 )
 
+# These human-facing routes return note bodies or private filenames. The
+# generic API bridge runs inside the agent process, so normal browser auth is
+# not a private-vault capability boundary. Keep them undiscoverable and
+# unreachable unless the dispatcher carries the chat's explicit grant.
+_APP_API_PRIVATE_READ_PREFIXES = (
+    "/api/notes",
+    "/api/personal",
+)
 
-async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
+
+def _app_api_requires_private_grant(method: str, path: str) -> bool:
+    """Whether a loopback request could read or weaken the vault boundary."""
+    method = (method or "GET").upper()
+    if method == "GET" and any(path.startswith(p) for p in _APP_API_PRIVATE_READ_PREFIXES):
+        return True
+    # Personal-doc mutations can change directory labels or rebuild the index;
+    # deny those too so an unprivileged model cannot declassify then retrieve.
+    if method != "GET" and path.startswith("/api/personal"):
+        return True
+    # The generic settings endpoint can alter the global vault policy, while a
+    # chat-settings PATCH could grant this very chat private access. A model
+    # must never be able to mint its own capability through app_api.
+    if method != "GET" and path.startswith("/api/settings/schema"):
+        return True
+    if (
+        method != "GET"
+        and path.startswith("/api/session/")
+        and path.rstrip("/").endswith("/settings")
+    ):
+        return True
+    return False
+
+
+async def do_app_api(
+    content: str,
+    owner: Optional[str] = None,
+    allow_private: bool = False,
+) -> Dict:
     """Generic loopback to allowed internal Odysseus API endpoints. Lets the
     agent reach the full UI-button surface (cookbook, email, notes,
     calendar, skills, sessions, gallery, research, etc.) without us
@@ -673,6 +709,8 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
                     continue
                 if any(method.upper() == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
                     continue
+                if not allow_private and _app_api_requires_private_grant(method, path):
+                    continue
                 summary = (op or {}).get("summary") or (op or {}).get("description") or ""
                 if isinstance(summary, str):
                     summary = summary.strip().split("\n")[0][:140]
@@ -704,6 +742,15 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     method = (args.get("method") or "GET").upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return {"error": f"Unsupported method: {method}", "exit_code": 1}
+    if not allow_private and _app_api_requires_private_grant(method, path):
+        return {
+            "error": (
+                f"{method} {path} is blocked because this chat has not been "
+                "granted private-vault read access. Use the guarded notes/RAG "
+                "tools or explicitly enable private vault reads for this chat."
+            ),
+            "exit_code": 1,
+        }
     if any(method == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
         if "/api/email/accounts" in path:
             return {"error": "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email.", "exit_code": 1}

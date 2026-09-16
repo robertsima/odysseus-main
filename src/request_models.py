@@ -103,9 +103,9 @@ class DirectoryRequest(BaseModel):
     sensitivity: Optional[str] = Field(
         None,
         description=(
-            "'private' keeps this directory's content local-only — it is never "
-            "retrieved for a session served by a hosted API endpoint. "
-            "'public' (the default) allows any model to retrieve it."
+            "'private' hides this directory from models and agents until the "
+            "current chat is explicitly granted private-vault reads. "
+            "'public' (the default) allows retrieval without that grant."
         )
     )
 

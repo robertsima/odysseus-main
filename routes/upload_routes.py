@@ -126,7 +126,7 @@ def _collect_persisted_upload_references() -> tuple[set[str], set[str]]:
         # while reversible migration remains supported, but never rely on it
         # for references created or edited after migration.
         for archived in (False, True):
-            for note in NOTES_STORE.list(None, archived=archived):
+            for note in NOTES_STORE.list(None, archived=archived, allow_private=True):
                 values = (
                     note.image_url,
                     note.color,

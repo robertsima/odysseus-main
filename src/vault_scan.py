@@ -62,7 +62,11 @@ class VaultScanner:
     def __init__(self, personal_docs_manager, rag_manager):
         self.manager = personal_docs_manager
         self.rag = rag_manager
-        self._state_path = os.path.join(personal_docs_manager.personal_dir, STATE_FILENAME)
+        # A configured vault may be an external Obsidian volume.  Scanner
+        # bookkeeping belongs with app state, not inside that user-managed
+        # vault where it would become visible/indexable.
+        state_root = getattr(personal_docs_manager, "state_dir", personal_docs_manager.personal_dir)
+        self._state_path = os.path.join(state_root, STATE_FILENAME)
         self._state: Dict[str, list] = {}
         self._load_state()
 
@@ -241,6 +245,16 @@ def _interval_seconds() -> int:
 
 
 async def _scan_loop(scanner: VaultScanner, interval: int) -> None:
+    # Scan once as soon as the task starts.  This makes a newly configured
+    # external vault visible to retrieval immediately; waiting a full polling
+    # interval would make a successful migration look like missing notes.
+    try:
+        await asyncio.to_thread(scanner.scan)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        logger.warning("initial vault scan failed: %s", e)
+
     while True:
         await asyncio.sleep(interval)
         try:

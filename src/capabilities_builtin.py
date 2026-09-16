@@ -38,7 +38,7 @@ register(Capability(
     title="Vault",
     summary=(
         "One Markdown store for notes and documents, with folder-level privacy. "
-        "Private folders are retrieved only by a locally-run model."
+        "Private folders require an explicit private-read grant for each chat."
     ),
     feature_key="rag",
     default_enabled=True,

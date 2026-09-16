@@ -69,12 +69,12 @@ def test_the_operator_can_turn_the_guard_off(monkeypatch):
 
 
 def test_bash_tool_returns_the_redirect_instead_of_running_claude():
-    result = asyncio.run(TOOL_HANDLERS["bash"]("claude -p 'hello'", {}))
+    result = asyncio.run(TOOL_HANDLERS["bash"]("claude -p 'hello'", {"allow_private": True}))
     assert result["blocked_reason"] == "claude_code_requires_delegation_tool"
     assert "delegate_to_claude_code" in result["error"]
 
 
 def test_bash_tool_still_runs_ordinary_commands():
-    result = asyncio.run(TOOL_HANDLERS["bash"]("echo claude-ok", {}))
+    result = asyncio.run(TOOL_HANDLERS["bash"]("echo claude-ok", {"allow_private": True}))
     assert result.get("exit_code") == 0
     assert "claude-ok" in (result.get("output") or result.get("stdout") or "")

@@ -85,7 +85,11 @@ class EditFileTool:
             return {"error": "edit_file: path required", "exit_code": 1}
         try:
             path = _resolve_tool_path(raw_path)
+            from src.rag_sensitivity import assert_vault_writable
+            assert_vault_writable(path, operation="edit")
         except ValueError as e:
+            return {"error": f"edit_file: {e}", "exit_code": 1}
+        except PermissionError as e:
             return {"error": f"edit_file: {e}", "exit_code": 1}
         if old == "":
             return {"error": "edit_file: old_string required (use write_file to create a file)", "exit_code": 1}
@@ -163,6 +167,7 @@ def _personal_docs_hint(path: str, size: int) -> str:
 class ReadFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.private_access import context_allows_private
         raw_path, offset, limit = content.split("\n", 1)[0].strip(), 0, 0
         _stripped = content.strip()
         if _stripped.startswith("{"):
@@ -174,7 +179,10 @@ class ReadFileTool:
             except (json.JSONDecodeError, TypeError, ValueError):
                 pass
         try:
-            path = _resolve_tool_path(raw_path)
+            try:
+                path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx))
+            except TypeError:
+                path = _resolve_tool_path(raw_path)
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
         try:
@@ -236,7 +244,11 @@ class WriteFileTool:
                 pass
         try:
             path = _resolve_tool_path(raw_path)
+            from src.rag_sensitivity import assert_vault_writable
+            assert_vault_writable(path, operation="write")
         except ValueError as e:
+            return {"error": f"write_file: {e}", "exit_code": 1}
+        except PermissionError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
         try:
             def _write():
@@ -293,6 +305,8 @@ class ApplyPatchTool:
             prepared = []
             for op in ops:
                 path = _resolve_tool_path(op["path"])
+                from src.rag_sensitivity import assert_vault_writable
+                assert_vault_writable(path, operation=op["kind"])
                 kind = op["kind"]
                 if kind == "add":
                     if os.path.exists(path):
@@ -440,7 +454,9 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
 
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
+        from src.tool_execution import _is_sensitive_path, _resolve_tool_path, _resolve_search_root, _truncate
+        from src.private_access import context_allows_private
+        allow_private = context_allows_private(ctx)
         raw_path = ""
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -451,7 +467,7 @@ class LsTool:
         else:
             raw_path = _s.split("\n", 1)[0].strip()
         try:
-            root = _resolve_search_root(raw_path)
+            root = _resolve_search_root(raw_path, allow_private=allow_private)
         except ValueError as e:
             return {"error": f"ls: {e}", "exit_code": 1}
 
@@ -463,6 +479,14 @@ class LsTool:
                 with os.scandir(root) as it:
                     for entry in it:
                         if entry.name.startswith("."):
+                            continue
+                        try:
+                            if _is_sensitive_path(
+                                os.path.realpath(entry.path),
+                                allow_private=allow_private,
+                            ):
+                                continue
+                        except OSError:
                             continue
                         try:
                             is_dir = entry.is_dir(follow_symlinks=False)
@@ -496,6 +520,8 @@ class GlobTool:
             _resolve_search_root,
             _truncate,
         )
+        from src.private_access import context_allows_private
+        allow_private = context_allows_private(ctx)
         args = {}
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -509,7 +535,7 @@ class GlobTool:
         if not pattern:
             return {"error": "glob: pattern is required", "exit_code": 1}
         try:
-            root = _resolve_search_root(str(args.get("path", "")))
+            root = _resolve_search_root(str(args.get("path", "")), allow_private=allow_private)
         except ValueError as e:
             return {"error": f"glob: {e}", "exit_code": 1}
 
@@ -540,7 +566,7 @@ class GlobTool:
                 # .ssh/id_rsa, …) falls through to the walk, which skips it —
                 # otherwise glob would surface secret paths that read_file /
                 # grep already refuse to touch.
-                if inside and os.path.exists(cand) and not _is_sensitive_path(cand):
+                if inside and os.path.exists(cand) and not _is_sensitive_path(cand, allow_private=allow_private):
                     return [cand], None
                 # Literal not at exact path — fall through to walk so
                 # e.g. "foo.py" still matches at any depth (like rglob).
@@ -564,7 +590,7 @@ class GlobTool:
                         if regex.fullmatch(rel) or regex.fullmatch(name):
                             # Skip deny-listed sensitive files (.env, id_rsa,
                             # known_hosts, …) the same way grep does.
-                            if _is_sensitive_path(os.path.realpath(full)):
+                            if _is_sensitive_path(os.path.realpath(full), allow_private=allow_private):
                                 continue
                             try:
                                 mtime = os.stat(full).st_mtime
@@ -597,6 +623,8 @@ class GrepTool:
             _resolve_search_root,
             _truncate,
         )
+        from src.private_access import context_allows_private
+        allow_private = context_allows_private(ctx)
         args: Dict[str, Any] = {}
         _s = (content or "").strip()
         if _s.startswith("{"):
@@ -617,7 +645,7 @@ class GrepTool:
             max_hits = _CODENAV_MAX_HITS
         max_hits = max(1, min(max_hits, _CODENAV_MAX_HITS))
         try:
-            root = _resolve_search_root(str(args.get("path", "")))
+            root = _resolve_search_root(str(args.get("path", "")), allow_private=allow_private)
         except ValueError as e:
             return {"error": f"grep: {e}", "exit_code": 1}
 
@@ -625,7 +653,7 @@ class GrepTool:
             import re as _re
             import shutil
             rg = shutil.which("rg")
-            if rg:
+            if rg and allow_private:
                 cmd = [rg, "--line-number", "--no-heading", "--color=never",
                        "--max-count", str(max_hits)]
                 if ignore_case:
@@ -668,7 +696,7 @@ class GrepTool:
             for fp in file_iter:
                 if len(hits) >= max_hits:
                     break
-                if _is_sensitive_path(os.path.realpath(fp)):
+                if _is_sensitive_path(os.path.realpath(fp), allow_private=allow_private):
                     continue
                 try:
                     with open(fp, "r", encoding="utf-8", errors="strict") as f:

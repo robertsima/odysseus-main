@@ -132,8 +132,13 @@ def test_private_vault_directory_stays_closed_even_with_a_workspace(vault, bound
 
     journal = os.path.join(vault, "Journal")
     os.makedirs(journal, exist_ok=True)
+    journal_real = os.path.realpath(journal)
     monkeypatch.setattr(
-        "src.rag_sensitivity.private_directories", lambda: [os.path.realpath(journal)]
+        "src.rag_sensitivity.path_is_under_private_directory",
+        lambda path: (
+            os.path.realpath(path) == journal_real
+            or os.path.realpath(path).startswith(journal_real + os.sep)
+        ),
     )
     with pytest.raises(ValueError):
         _resolve_tool_path(os.path.join(journal, "2026-09-03.md"))

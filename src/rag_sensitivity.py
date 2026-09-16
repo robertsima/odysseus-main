@@ -7,9 +7,9 @@ same rule and cannot drift, the same way ``index_walk`` single-sources the
 directory-walk policy.
 
 The label answers exactly one question: *may this chunk leave the machine?*
-``private`` chunks are only ever retrieved for a session whose endpoint is
-local (see ``model_context.is_local_endpoint``); ``public`` chunks go to any
-model, including hosted APIs.
+``private`` chunks are only retrieved when the active chat or external agent
+has an explicit private-vault read grant; ``public`` chunks may go to any
+model, including hosted APIs. Endpoint location is not authorization.
 
 Unlabeled content is treated as ``public``. Chunks indexed before this feature
 existed were already being sent to whatever model the session used, so
@@ -27,6 +27,7 @@ agent through ``read_file``.
 import json
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ SENSITIVITY_PUBLIC = "public"
 SENSITIVITY_PRIVATE = "private"
 
 VALID_SENSITIVITIES = (SENSITIVITY_PUBLIC, SENSITIVITY_PRIVATE)
+ACCESS_READONLY = "readonly"
 
 # Metadata key used in Chroma chunk metadata and in PersonalDocsManager entries.
 SENSITIVITY_KEY = "sensitivity"
@@ -105,6 +107,13 @@ def private_directories() -> Tuple[str, ...]:
                 stored = json.load(handle)
             if not isinstance(stored, dict):
                 raise ValueError("directory sensitivity must be an object")
+            if any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or value.strip().lower() not in VALID_SENSITIVITIES
+                for key, value in stored.items()
+            ):
+                raise ValueError("directory sensitivity contains an invalid path or label")
             _private_dirs_cache["dirs"] = tuple(
                 os.path.abspath(key)
                 for key, value in stored.items()
@@ -114,6 +123,11 @@ def private_directories() -> Tuple[str, ...]:
         except Exception as e:
             # Keep the previous set; do not fall open on a partial/corrupt read.
             logger.warning("Could not read %s (%s); keeping previous private set", path, e)
+            if not _private_dirs_cache["dirs"]:
+                # On the first read there is no last-known-good policy to keep.
+                # Treat the active vault as private until the state file can be
+                # parsed instead of turning corruption into an authorization.
+                return (os.path.realpath(vault_root()),)
 
     return _private_dirs_cache["dirs"]
 
@@ -234,7 +248,13 @@ def _normalize_vault_relative(raw: str) -> Optional[str]:
     a traversal segment is exactly how it could be made to mean something
     else.
     """
-    if not isinstance(raw, str) or not raw:
+    if not isinstance(raw, str):
+        return None
+    # The empty JSON key is the vault root. Whitespace is not: accepting it
+    # would create an invisible-looking folder name rather than a root rule.
+    if raw == "":
+        return ""
+    if not raw.strip():
         return None
     if _looks_absolute(raw):
         return None
@@ -269,32 +289,45 @@ def _to_vault_relative(path: str, root: str) -> Optional[str]:
     return _normalize_vault_relative(path)
 
 
-def _deepest_folder_match(folder_map: Dict[str, str], vault_rel: str) -> Optional[str]:
-    """Label of the deepest folder in ``folder_map`` that contains
-    ``vault_rel``, or ``None`` if nothing matches.
+@dataclass(frozen=True)
+class FolderPolicy:
+    """Independent privacy and write-access rules for a vault folder.
 
-    Deepest (longest) match wins so a public subfolder can be carved out of
-    an otherwise private tree, or a private subfolder out of a public one,
-    without re-declaring every sibling.
+    ``None`` means that property is inherited from the closest ancestor (or
+    the vault default). Keeping the properties independent lets a folder be
+    both private and read-only without changing the existing sensitivity
+    vocabulary used by indexed chunks.
     """
+
+    sensitivity: Optional[str] = None
+    readonly: Optional[bool] = None
+
+
+def _deepest_policy_value(
+    folder_map: Dict[str, FolderPolicy], vault_rel: str, attribute: str
+) -> Any:
+    """Deepest explicitly declared value for one folder-policy property."""
     target = vault_rel.casefold()
-    best_label: Optional[str] = None
+    best_value: Any = None
     best_len = -1
-    for folder, label in folder_map.items():
+    for folder, policy in folder_map.items():
+        value = getattr(policy, attribute)
+        if value is None:
+            continue
         folder_cf = folder.casefold()
         matches = folder_cf == "" or target == folder_cf or target.startswith(folder_cf + "/")
         if matches and len(folder_cf) > best_len:
             best_len = len(folder_cf)
-            best_label = label
-    return best_label
+            best_value = value
+    return best_value
 
 
-def _safe_folder_sensitivity_map() -> Tuple[Dict[str, str], bool]:
-    """Validate the ``vault_folder_sensitivity`` setting as a whole.
+def _safe_folder_policy_map() -> Tuple[Dict[str, FolderPolicy], bool]:
+    """Validate the vault folder policy setting as a whole.
 
     This is admin-controlled security policy, not user content, so it is
     validated all-or-nothing: a wrong container type, a non-string key or
-    value, an unrecognised label, or a key that tries to escape the vault via
+    value, an unrecognised rule, or a key that tries to escape the vault via
     ``..`` makes the ENTIRE setting untrustworthy for this call rather than
     silently dropping just the one bad entry and matching everything else. A
     corrupt or hand-edited settings.json must not let some paths quietly fall
@@ -314,11 +347,12 @@ def _safe_folder_sensitivity_map() -> Tuple[Dict[str, str], bool]:
         )
         return {}, False
 
-    result: Dict[str, str] = {}
+    result: Dict[str, FolderPolicy] = {}
+    normalized_keys: set[str] = set()
     for key, value in raw.items():
-        if not isinstance(key, str) or not isinstance(value, str):
+        if not isinstance(key, str):
             logger.warning(
-                "vault_folder_sensitivity has a non-string key or value (%r: %r); "
+                "vault_folder_sensitivity has a non-string key (%r: %r); "
                 "failing closed to private",
                 key, value,
             )
@@ -330,17 +364,80 @@ def _safe_folder_sensitivity_map() -> Tuple[Dict[str, str], bool]:
                 key,
             )
             return {}, False
-        label = value.strip().lower()
-        if label not in VALID_SENSITIVITIES:
+        normalized_cf = normalized_key.casefold()
+        if normalized_cf in normalized_keys:
             logger.warning(
-                "vault_folder_sensitivity has an unrecognised label %r for %r; "
+                "vault_folder_sensitivity has duplicate normalized folder path %r; "
+                "failing closed to private",
+                key,
+            )
+            return {}, False
+        normalized_keys.add(normalized_cf)
+        policy: Optional[FolderPolicy] = None
+        if isinstance(value, str):
+            label = value.strip().lower()
+            if label in VALID_SENSITIVITIES:
+                policy = FolderPolicy(sensitivity=label)
+            elif label == ACCESS_READONLY:
+                policy = FolderPolicy(readonly=True)
+        elif isinstance(value, dict):
+            unknown = set(value) - {"sensitivity", "readonly"}
+            sensitivity = value.get("sensitivity")
+            readonly = value.get("readonly")
+            has_sensitivity = "sensitivity" in value
+            has_readonly = "readonly" in value
+            sensitivity_valid = (
+                not has_sensitivity
+                or (
+                    isinstance(sensitivity, str)
+                    and sensitivity.strip().lower() in VALID_SENSITIVITIES
+                )
+            )
+            readonly_valid = not has_readonly or isinstance(readonly, bool)
+            if not unknown and (has_sensitivity or has_readonly) and sensitivity_valid and readonly_valid:
+                policy = FolderPolicy(
+                    sensitivity=sensitivity.strip().lower() if has_sensitivity else None,
+                    readonly=readonly if has_readonly else None,
+                )
+        if policy is None:
+            logger.warning(
+                "vault_folder_sensitivity has an unrecognised policy %r for %r; "
                 "failing closed to private",
                 value, key,
             )
             return {}, False
-        result[normalized_key] = label
+        result[normalized_key] = policy
 
     return result, True
+
+
+def path_is_readonly(path: str) -> bool:
+    """Return whether ``path`` is inside a read-only vault folder.
+
+    Read-only rules inherit independently from sensitivity rules. A child can
+    explicitly opt back into writes with ``{"readonly": false}``. Paths
+    outside the configured vault are unaffected. As with privacy, malformed
+    admin policy fails closed for paths inside the vault.
+    """
+    vault_rel = _to_vault_relative(str(path), vault_root())
+    if vault_rel is None:
+        return False
+    folder_map, config_is_valid = _safe_folder_policy_map()
+    if not config_is_valid:
+        return True
+    return _deepest_policy_value(folder_map, vault_rel, "readonly") is True
+
+
+class VaultReadOnlyError(PermissionError):
+    """Raised when an application write targets a read-only vault path."""
+
+
+def assert_vault_writable(path: str, *, operation: str = "modify") -> None:
+    """Raise a clear error before changing a read-only vault path."""
+    if path_is_readonly(str(path)):
+        raise VaultReadOnlyError(
+            f"cannot {operation} {path}: its vault folder is configured readonly"
+        )
 
 
 # Second cache over the same legacy state file.  It retains public declarations
@@ -371,6 +468,13 @@ def _read_legacy_sensitivity_map() -> Dict[str, str]:
                 stored = json.load(handle)
             if not isinstance(stored, dict):
                 raise ValueError("directory sensitivity must be an object")
+            if any(
+                not isinstance(key, str)
+                or not isinstance(value, str)
+                or value.strip().lower() not in VALID_SENSITIVITIES
+                for key, value in stored.items()
+            ):
+                raise ValueError("directory sensitivity contains an invalid path or label")
             _legacy_state_cache["map"] = {
                 os.path.abspath(key): normalize_sensitivity(value)
                 for key, value in stored.items()
@@ -379,6 +483,10 @@ def _read_legacy_sensitivity_map() -> Dict[str, str]:
             _legacy_state_cache["mtime"] = mtime
         except Exception as e:
             logger.warning("Could not read %s (%s); keeping previous state", path, e)
+            if not _legacy_state_cache["map"]:
+                # No last-known-good declaration exists yet. A corrupt policy
+                # must not silently inherit the public default.
+                return {os.path.realpath(vault_root()): SENSITIVITY_PRIVATE}
 
     return _legacy_state_cache["map"]
 
@@ -455,13 +563,13 @@ def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = No
     if explicit is not None:
         return explicit
 
-    folder_map, config_is_valid = _safe_folder_sensitivity_map()
+    folder_map, config_is_valid = _safe_folder_policy_map()
     if not config_is_valid:
         return SENSITIVITY_PRIVATE
 
     vault_rel = _to_vault_relative(path, vault_root())
     if vault_rel is not None:
-        folder_label = _deepest_folder_match(folder_map, vault_rel)
+        folder_label = _deepest_policy_value(folder_map, vault_rel, "sensitivity")
         if folder_label is not None:
             return folder_label
 

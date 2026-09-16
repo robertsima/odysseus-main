@@ -1440,7 +1440,7 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
                 ev_q = owner_filter(ev_q, CalendarCal, owner, include_shared=_allow_null)
             events = ev_q.order_by(CalendarEvent.dtstart).all()
             # ----- Notes: file-backed vault notes, owner-scoped -----
-            notes = STORE.list(owner or None, archived=False)
+            notes = STORE.list(owner or None, archived=False, allow_private=True)
         finally:
             db.close()
 
@@ -1784,7 +1784,7 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
             cache = {}
 
         if True:
-            notes = [n for n in STORE.list(owner or None, archived=False) if n.due_date]
+            notes = [n for n in STORE.list(owner or None, archived=False, allow_private=True) if n.due_date]
             if not notes:
                 raise TaskNoop("no notes with due dates")
 

@@ -56,6 +56,7 @@ logger = logging.getLogger(__name__)
 # migration bookkeeping, not a note, and should not show up as a vault file
 # for the RAG indexer or Obsidian to trip over.
 DEFAULT_MANIFEST_PATH = Path(DATA_DIR) / "notes_vault_migration_manifest.json"
+STARTUP_MIGRATION_MARKER = Path(DATA_DIR) / "notes_vault_migration_startup.json"
 
 
 def _vault_paths() -> Tuple[Path, str, str]:
@@ -97,7 +98,7 @@ def _existing_ids_and_stems(dir_path: Path) -> Tuple[Dict[str, Path], Set[str]]:
     stems: Set[str] = set()
     if not dir_path.is_dir():
         return by_id, stems
-    for existing_file in sorted(dir_path.glob("*.md")):
+    for existing_file in sorted(dir_path.rglob("*.md")):
         try:
             # Do not let a symlink in a configured notes folder make the
             # migration inspect a file outside that folder/vault.
@@ -217,7 +218,7 @@ def plan(owner: Optional[str] = None) -> MigrationPlan:
             result.skipped.append(
                 SkippedNote(
                     note_id=record.id,
-                    relative_path=str(Path(rel_dir) / by_id[record.id].name),
+                    relative_path=str(by_id[record.id].relative_to(vault_dir)),
                     reason="already migrated",
                 )
             )
@@ -335,6 +336,17 @@ def apply(migration_plan: MigrationPlan, owner: Optional[str] = None, manifest_p
 
     records_by_id = {record.id: record for record in _load_note_records(owner=owner)}
 
+    # Validate every planned target before the first mutation. In particular,
+    # a later read-only target must not leave earlier files written while the
+    # migration aborts before its final manifest save.
+    from src.rag_sensitivity import assert_vault_writable
+    for write in migration_plan.writes:
+        target = safe_join(migration_plan.vault_dir, write.relative_path)
+        if target is not None and not (
+            write.relative_path in manifest.entries and target.exists()
+        ) and not target.exists():
+            assert_vault_writable(target, operation="migrate note to")
+
     for write in migration_plan.writes:
         target = safe_join(migration_plan.vault_dir, write.relative_path)
         if target is None:
@@ -375,6 +387,9 @@ def apply(migration_plan: MigrationPlan, owner: Optional[str] = None, manifest_p
             sha256=_sha256(content),
             written_at=datetime.now(timezone.utc).isoformat(),
         )
+        # Persist progress after every successful file. If a later filesystem
+        # operation fails, rollback still knows exactly what was created.
+        _save_manifest(manifest_path, manifest)
 
     _save_manifest(manifest_path, manifest)
     return manifest
@@ -428,6 +443,22 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
 
     remaining_entries: Dict[str, ManifestEntry] = {}
     for relative_path, entry in manifest.entries.items():
+        lexical_target = vault_dir / relative_path
+        cursor = vault_dir
+        has_symlink_component = False
+        for part in Path(relative_path).parts:
+            cursor = cursor / part
+            if cursor.is_symlink():
+                has_symlink_component = True
+                break
+        if has_symlink_component:
+            logger.warning(
+                "refusing to follow symlinked migration target during rollback: %s",
+                lexical_target,
+            )
+            result.kept_due_to_edits.append(relative_path)
+            remaining_entries[relative_path] = entry
+            continue
         target = safe_join(vault_dir, relative_path)
         if target is None:
             logger.warning("refusing to remove a manifest path outside the vault: %s", relative_path)
@@ -446,6 +477,8 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
             result.kept_due_to_edits.append(relative_path)
             remaining_entries[relative_path] = entry
             continue
+        from src.rag_sensitivity import assert_vault_writable
+        assert_vault_writable(target, operation="roll back note from")
         target.unlink()
         result.removed.append(relative_path)
 
@@ -458,6 +491,8 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
             continue
         try:
             if directory.is_dir() and not any(directory.iterdir()):
+                from src.rag_sensitivity import assert_vault_writable
+                assert_vault_writable(directory, operation="remove directory from")
                 directory.rmdir()
                 result.removed_dirs.append(rel_dir)
             elif directory.exists():
@@ -476,6 +511,57 @@ def rollback(manifest_path: Optional[Path] = None) -> RollbackResult:
             pass
 
     return result
+
+
+def migrate_legacy_notes(
+    owner: Optional[str] = None,
+    manifest_path: Optional[Path] = None,
+    *,
+    dry_run: bool = False,
+    startup: bool = False,
+) -> Tuple[MigrationPlan, Optional[Manifest]]:
+    """Synchronize legacy SQLite notes into the configured Markdown vault.
+
+    The operation is intentionally additive: source rows are never deleted or
+    modified, and :func:`apply` records every file it creates for a safe
+    rollback.  Startup uses the default (apply) mode so an existing install
+    does not appear to lose its notes when the Markdown store becomes active;
+    callers that need an explicit preview can pass ``dry_run=True``.
+    """
+    migration_plan = plan(owner=owner)
+    if startup and not dry_run:
+        try:
+            marker = json.loads(STARTUP_MIGRATION_MARKER.read_text(encoding="utf-8"))
+            if isinstance(marker, dict) and str(marker.get("vault_dir") or "") == str(migration_plan.vault_dir):
+                return migration_plan, None
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    if dry_run:
+        return migration_plan, None
+    manifest = apply(migration_plan, owner=owner, manifest_path=manifest_path)
+    # A startup marker is only a completion marker, never a record that an
+    # apply was attempted.  A plan can become stale between planning and
+    # apply (for example, Obsidian can create the target file in that
+    # window), and apply() deliberately skips such races rather than
+    # overwriting user data.  If any planned write is absent from the
+    # resulting manifest, leave the marker unset so a later startup can retry
+    # the still-unmigrated row.
+    fully_applied = True
+    for write in migration_plan.writes:
+        target = safe_join(migration_plan.vault_dir, write.relative_path)
+        if target is None or write.relative_path not in manifest.entries or not target.exists():
+            fully_applied = False
+            break
+    if startup and fully_applied:
+        try:
+            STARTUP_MIGRATION_MARKER.parent.mkdir(parents=True, exist_ok=True)
+            STARTUP_MIGRATION_MARKER.write_text(
+                json.dumps({"vault_dir": str(migration_plan.vault_dir), "completed_at": datetime.now(timezone.utc).isoformat()}),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("Could not record startup notes migration marker: %s", exc)
+    return migration_plan, manifest
 
 
 # ---------------------------------------------------------------------------

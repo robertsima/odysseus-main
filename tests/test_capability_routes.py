@@ -163,6 +163,28 @@ class TestSettingsValidation:
         assert exc.value.status_code == 400
         assert "vault_folder_sensitivity" in str(exc.value.detail)
 
+    def test_folder_policy_accepts_readonly_and_combined_rules(self):
+        from src import settings_schema
+
+        settings_schema.validate_value(
+            "vault_folder_sensitivity",
+            {
+                "Journal": "readonly",
+                "Secrets": {"sensitivity": "private", "readonly": True},
+                "Journal/Inbox": {"readonly": False},
+                "": {"readonly": True},
+            },
+        )
+        with pytest.raises(ValueError, match="true or false"):
+            settings_schema.validate_value(
+                "vault_folder_sensitivity", {"Journal": {"readonly": "yes"}}
+            )
+        with pytest.raises(ValueError, match="duplicates"):
+            settings_schema.validate_value(
+                "vault_folder_sensitivity",
+                {"Journal": "private", "journal/": "readonly"},
+            )
+
     def test_int_rejects_non_numeric(self):
         from routes.capability_routes import _coerce
         from src import settings_schema

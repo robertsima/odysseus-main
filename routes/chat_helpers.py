@@ -320,6 +320,9 @@ class ChatContext:
     # Uploads attached to this user turn, resolved and owner-checked for the
     # agent's private context. This is not emitted to the browser.
     uploaded_files: list = field(default_factory=list)
+    # Explicit per-chat grant for private vault retrieval/file reads. False is
+    # the fail-closed default and is carried into agent tool execution.
+    allow_private: bool = False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -877,6 +880,7 @@ async def build_chat_context(
     use_enhanced_message: bool = False,
     agent_mode: bool = False,
     allow_tool_preprocessing: bool = True,
+    allow_private: Optional[bool] = None,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -976,6 +980,15 @@ async def build_chat_context(
         incognito=incognito,
         use_skills=skills_enabled,
     )
+    if allow_private is None:
+        try:
+            from src.private_access import allows_private_vault
+
+            allow_private = allows_private_vault(session_id)
+        except Exception:
+            allow_private = False
+    allow_private = bool(allow_private)
+    _preface_kwargs["allow_private"] = allow_private
     if use_rag is not None or is_research_spinoff or casual_low_signal:
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
@@ -1079,6 +1092,7 @@ async def build_chat_context(
         context_diagnostics=_context_diagnostics,
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
+        allow_private=allow_private,
     )
 
 

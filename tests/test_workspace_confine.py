@@ -263,7 +263,13 @@ async def test_glob_skips_sensitive_files_in_workspace(ws, admin):
 @pytest.mark.asyncio
 async def test_subprocess_cwd_is_workspace_e2e(ws, admin):
     """python tool runs with cwd = workspace (OS-agnostic probe)."""
-    _, r = await execute_tool_block(_block("python", "import os; print(os.getcwd())"), owner="a", workspace=ws)
+    # Unrestricted Python is available only when the chat explicitly grants
+    # private-vault reads; without that grant it could open an absolute vault
+    # path outside the workspace before the file-tool policy runs.
+    _, r = await execute_tool_block(
+        _block("python", "import os; print(os.getcwd())"),
+        owner="a", workspace=ws, allow_private=True,
+    )
     assert r["exit_code"] == 0
     assert os.path.realpath(r["output"].strip()) == os.path.realpath(ws)
 

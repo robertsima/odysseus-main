@@ -19,6 +19,22 @@ from src.notes_store import STORE
 logger = logging.getLogger(__name__)
 
 
+def _list_visible_notes(owner, *, archived=False, label=None):
+    """Human/API callers are already owner-authenticated; keep old test-store
+    adapters working while explicitly opting into private vault notes."""
+    try:
+        return STORE.list(owner, archived=archived, label=label, allow_private=True)
+    except TypeError:
+        return STORE.list(owner, archived=archived, label=label)
+
+
+def _find_visible_note(note_id, owner):
+    try:
+        return STORE.find(note_id, owner, allow_private=True)
+    except TypeError:
+        return STORE.find(note_id, owner)
+
+
 # ---------------------------------------------------------------------------
 # Request models
 # ---------------------------------------------------------------------------
@@ -630,7 +646,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         label: Optional[str] = None,
     ):
         user = _owner(request)
-        notes = STORE.list(user, archived=bool(archived), label=label)
+        notes = _list_visible_notes(user, archived=bool(archived), label=label)
         return {"notes": [_note_to_dict(n) for n in notes]}
 
     # --- CREATE ---
@@ -671,7 +687,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.get("/{note_id}")
     def get_note(request: Request, note_id: str):
         user = _owner(request)
-        note = STORE.find(note_id, user)
+        note = _find_visible_note(note_id, user)
         if not note:
             raise HTTPException(404, "Note not found")
         return _note_to_dict(note)
@@ -680,7 +696,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.put("/{note_id}")
     def update_note(request: Request, note_id: str, body: NoteUpdate):
         user = _owner(request)
-        note = STORE.find(note_id, user)
+        note = _find_visible_note(note_id, user)
         if not note:
             raise HTTPException(404, "Note not found")
 
@@ -739,7 +755,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.post("/{note_id}/pin")
     def toggle_pin(request: Request, note_id: str):
         user = _owner(request)
-        note = STORE.find(note_id, user)
+        note = _find_visible_note(note_id, user)
         if not note:
             raise HTTPException(404, "Note not found")
         note.pinned = not note.pinned
@@ -750,7 +766,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.post("/{note_id}/archive")
     def toggle_archive(request: Request, note_id: str):
         user = _owner(request)
-        note = STORE.find(note_id, user)
+        note = _find_visible_note(note_id, user)
         if not note:
             raise HTTPException(404, "Note not found")
         note.archived = not note.archived
@@ -761,7 +777,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
     @router.post("/{note_id}/items/{index}/toggle")
     def toggle_item(request: Request, note_id: str, index: int):
         user = _owner(request)
-        note = STORE.find(note_id, user)
+        note = _find_visible_note(note_id, user)
         if not note:
             raise HTTPException(404, "Note not found")
         if not note.items:
@@ -813,7 +829,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             if "llm_persona" in body:
                 _override["reminder_llm_persona"] = str(body["llm_persona"] or "")
         else:
-            note = STORE.find(note_id, caller)
+            note = _find_visible_note(note_id, caller)
             if not note:
                 raise HTTPException(404, "Note not found")
             title, note_body = _reminder_text_from_note(note)
@@ -836,7 +852,7 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             raise HTTPException(400, "ids must be a list")
         count = 0
         for i, nid in enumerate(ids):
-            note = STORE.find(str(nid), user)
+            note = _find_visible_note(str(nid), user)
             if note:
                 note.sort_order = i
                 STORE.save(note)

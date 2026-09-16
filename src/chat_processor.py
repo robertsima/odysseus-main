@@ -10,7 +10,6 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
-from src.model_context import is_local_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +412,7 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        allow_private: Optional[bool] = None,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -520,14 +520,15 @@ class ChatProcessor:
                     except Exception as _e:
                         logger.debug("RAG: lazy rag_manager resolution failed: %s", _e)
                 if rag_manager:
-                    # Documents marked private are only retrieved when the turn
-                    # is being served by a local endpoint. On a hosted API the
-                    # retrieved text is pasted straight into the outbound
-                    # prompt, so the filter has to happen here, before
-                    # retrieval, not at render time.
-                    allow_private = is_local_endpoint(getattr(session, "endpoint_url", "") or "")
+                    # Private documents require an explicit per-chat grant.
+                    # Endpoint URL locality is not an authorization signal.
+                    if allow_private is None:
+                        from src.private_access import allows_private_vault
+
+                        allow_private = allows_private_vault(getattr(session, "id", None))
+                    allow_private = bool(allow_private)
                     if not allow_private:
-                        logger.debug("RAG: non-local endpoint — restricting retrieval to public documents")
+                        logger.debug("RAG: private-vault grant absent — restricting retrieval to public documents")
                     results = rag_manager.search(retrieval_query, k=5, owner=owner, allow_private=allow_private)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]

@@ -137,7 +137,7 @@ def load_personal_index(
     return files
 
 def retrieve_personal_keyword(
-    personal_index: List[Dict], query: str, k: int = 5, allow_private: bool = True
+    personal_index: List[Dict], query: str, k: int = 5, allow_private: bool = False
 ) -> List[str]:
     """
     Retrieve relevant documents using keyword search.
@@ -173,7 +173,7 @@ def retrieve_personal_keyword(
     return out
 
 def retrieve_personal(personal_index: List[Dict], query: str, k: int = 5,
-                     rag_manager=None, allow_private: bool = True) -> List[str]:
+                     rag_manager=None, allow_private: bool = False) -> List[str]:
     """
     Retrieve relevant personal documents using vector search first, falling back to keyword search.
 
@@ -225,8 +225,13 @@ def _string_list(values) -> list[str]:
 class PersonalDocsManager:
     """Manager class for personal document indexing and retrieval."""
 
-    def __init__(self, personal_dir: str, rag_manager=None):
-        self.personal_dir = personal_dir
+    def __init__(self, personal_dir: str, rag_manager=None, state_dir: str = None):
+        # ``personal_dir`` is the document/vault root.  Keep manager state in
+        # the app data directory when the operator points the vault at an
+        # external volume, so bookkeeping files never appear in Obsidian.
+        self.personal_dir = os.path.abspath(personal_dir)
+        self.state_dir = os.path.abspath(state_dir or personal_dir)
+        os.makedirs(self.state_dir, exist_ok=True)
         self.rag_manager = rag_manager
         self.index = []
         self.indexed_directories = []  # Track additional directories
@@ -235,9 +240,9 @@ class PersonalDocsManager:
         # indexed_directories.json stays the plain list every existing caller
         # (and on-disk state) expects.
         self.directory_sensitivity: Dict[str, str] = {}
-        self.directories_file = os.path.join(personal_dir, "indexed_directories.json")
-        self._excluded_file = os.path.join(personal_dir, "excluded_files.json")
-        self._sensitivity_file = os.path.join(personal_dir, "directory_sensitivity.json")
+        self.directories_file = os.path.join(self.state_dir, "indexed_directories.json")
+        self._excluded_file = os.path.join(self.state_dir, "excluded_files.json")
+        self._sensitivity_file = os.path.join(self.state_dir, "directory_sensitivity.json")
         self.load_directories()
         self._load_excluded()
         self._load_sensitivity()
@@ -492,7 +497,10 @@ class PersonalDocsManager:
         # leaving it in place would make it skip every file we just had to
         # rebuild by hand.
         try:
-            state = os.path.join(self.personal_dir, ".vault_scan_state.json")
+            state = os.path.join(
+                getattr(self, "state_dir", self.personal_dir),
+                ".vault_scan_state.json",
+            )
             if os.path.exists(state):
                 os.remove(state)
                 logger.info("Cleared vault scan state so the next pass re-walks every file")
@@ -622,13 +630,13 @@ class PersonalDocsManager:
 
         logger.info(f"Refreshed index: {len(self.index)} documents from {len(self.indexed_directories) + 1} directories")
 
-    def retrieve(self, query: str, k: int = 5, allow_private: bool = True) -> List[str]:
+    def retrieve(self, query: str, k: int = 5, allow_private: bool = False) -> List[str]:
         """Retrieve relevant documents for a query."""
         return retrieve_personal(
             self.index, query, k, self.rag_manager, allow_private=allow_private
         )
 
-    def get_file_list(self, allow_private: bool = True) -> List[Dict[str, Any]]:
+    def get_file_list(self, allow_private: bool = False) -> List[Dict[str, Any]]:
         """Get list of indexed files with metadata.
 
         ``allow_private=False`` drops privately-labelled files entirely — a
@@ -645,7 +653,7 @@ class PersonalDocsManager:
             if allow_private or f.get("sensitivity", SENSITIVITY_PUBLIC) != SENSITIVITY_PRIVATE
         ]
 
-    def get_indexed_directories_with_sensitivity(self, allow_private: bool = True) -> List[Dict[str, str]]:
+    def get_indexed_directories_with_sensitivity(self, allow_private: bool = False) -> List[Dict[str, str]]:
         """Tracked directories plus their labels, optionally public-only."""
         out = []
         for directory in self.indexed_directories:

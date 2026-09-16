@@ -20,6 +20,7 @@ from src import tool_approvals
 
 _TOGGLE_KEYS = ("web", "bash", "plan", "rag")
 MAX_DISABLED_TOOLS = 300
+PRIVATE_VAULT_ACCESS_KEY = "private_vault_access"
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -65,6 +66,10 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
+        elif key == PRIVATE_VAULT_ACCESS_KEY:
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} must be a boolean")
+            out[key] = value
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out

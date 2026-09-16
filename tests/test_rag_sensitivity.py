@@ -1,5 +1,5 @@
 """Public/private document sensitivity: private content must never be retrieved
-for, or listed to, a session served by a non-local endpoint.
+for, or listed to, a session without an explicit private-vault read grant.
 
 The guarantee has to hold on every read path, because they fail independently:
   1. the Chroma ``where`` filter in VectorRAG.search,
@@ -674,7 +674,7 @@ def _unconfigured_endpoints(monkeypatch):
     monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda url: None)
 
 
-def _allow_private_for(endpoint_url):
+def _allow_private_for(endpoint_url, *, allow_private=False):
     rag = _RecordingRag()
     processor = chat_processor.ChatProcessor(
         memory_manager=None, personal_docs_manager=_Docs(rag)
@@ -686,6 +686,7 @@ def _allow_private_for(endpoint_url):
         use_rag=True,
         use_memory=False,
         use_skills=False,
+        allow_private=allow_private,
     )
     assert len(rag.calls) == 1
     return rag.calls[0]
@@ -694,26 +695,30 @@ def _allow_private_for(endpoint_url):
 @pytest.mark.parametrize(
     "endpoint_url,expected_allow_private",
     [
-        ("http://localhost:8080/v1/chat/completions", True),
-        ("http://127.0.0.1:8080/v1/chat/completions", True),
-        # A model served elsewhere on the LAN is still local for this purpose:
-        # the request never leaves the user's network.
-        ("http://192.168.1.50:8080/v1/chat/completions", True),
-        ("http://10.0.0.7:8000/v1/chat/completions", True),
-        ("http://172.16.4.2:8080/v1/chat/completions", True),
-        # Tailscale CGNAT range, per model_context._TAILSCALE_CGNAT.
-        ("http://100.101.102.103:8080/v1/chat/completions", True),
-        # ...but 100.x outside 100.64/10 is public address space.
+        ("http://localhost:8080/v1/chat/completions", False),
+        ("http://127.0.0.1:8080/v1/chat/completions", False),
+        ("http://192.168.1.50:8080/v1/chat/completions", False),
+        ("http://10.0.0.7:8000/v1/chat/completions", False),
+        ("http://172.16.4.2:8080/v1/chat/completions", False),
+        ("http://100.101.102.103:8080/v1/chat/completions", False),
         ("http://100.20.30.40:8080/v1/chat/completions", False),
         ("https://api.anthropic.com/v1/messages", False),
         ("https://api.openai.com/v1/chat/completions", False),
         ("", False),
     ],
 )
-def test_chat_retrieval_gates_on_endpoint(
+def test_chat_retrieval_denies_private_without_explicit_grant(
     _unconfigured_endpoints, endpoint_url, expected_allow_private
 ):
     assert _allow_private_for(endpoint_url) is expected_allow_private
+
+
+@pytest.mark.parametrize("endpoint_url", [
+    "http://localhost:8080/v1/chat/completions",
+    "https://api.openai.com/v1/chat/completions",
+])
+def test_chat_retrieval_allows_private_with_explicit_grant(endpoint_url):
+    assert _allow_private_for(endpoint_url, allow_private=True) is True
 
 
 @pytest.mark.parametrize(
@@ -724,14 +729,10 @@ def test_chat_retrieval_gates_on_endpoint(
         "http://workstation:8080/v1/chat/completions",
     ],
 )
-def test_lan_host_by_name_is_not_local_without_configuration(
+def test_lan_host_by_name_still_denies_without_grant(
     _unconfigured_endpoints, endpoint_url
 ):
-    """A LAN box addressed by hostname cannot be classified from the URL alone —
-    the name could resolve anywhere. It fails closed, which means a private
-    vault would be invisible to the user's own model until the endpoint is
-    marked local (see the next test) or addressed by IP.
-    """
+    """Endpoint hostnames do not grant private-vault access."""
     assert _allow_private_for(endpoint_url) is False
 
 
@@ -742,18 +743,17 @@ def test_lan_host_by_name_is_not_local_without_configuration(
         "https://llm.example.com/v1/chat/completions",
     ],
 )
-def test_endpoint_kind_local_overrides_host_classification(monkeypatch, endpoint_url):
-    """Marking the endpoint `local` in its configuration is the supported way to
-    declare a LAN host that host-based classification cannot recognise."""
+def test_endpoint_kind_local_does_not_grant_private_access(monkeypatch, endpoint_url):
+    """Endpoint classification is not a private-read authorization signal."""
     monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda url: "local")
-    assert _allow_private_for(endpoint_url) is True
+    assert _allow_private_for(endpoint_url) is False
 
 
-def test_endpoint_kind_api_overrides_a_local_looking_url(monkeypatch):
-    """The inverse also has to hold: a proxy on localhost that forwards to a
-    hosted provider must not be treated as local."""
+def test_endpoint_kind_api_does_not_revoke_explicit_grant(monkeypatch):
+    """A grant is explicit and independent of URL classification."""
     monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda url: "api")
     assert _allow_private_for("http://localhost:8080/v1/chat/completions") is False
+    assert _allow_private_for("http://localhost:8080/v1/chat/completions", allow_private=True) is True
 
 
 # --------------------------------------------------------------------------- #
@@ -794,18 +794,18 @@ async def test_tool_list_hides_private_for_api_session(_unconfigured_endpoints, 
     assert "readme.md" in result["results"]
 
 
-async def test_tool_list_shows_private_for_local_session(_unconfigured_endpoints, monkeypatch):
+async def test_tool_list_shows_private_with_explicit_grant(_unconfigured_endpoints, monkeypatch):
     monkeypatch.setattr(ai, "_personal_docs_manager", _ToolDocs())
     monkeypatch.setattr(ai, "_session_manager", _SessionManager("http://localhost:8080/v1"))
 
-    result = await ai.do_manage_rag("list", session_id="s1")
+    result = await ai.do_manage_rag("list", session_id="s1", allow_private=True)
 
     assert "diary.md" in result["results"]
     assert "/a/vault" in result["results"]
 
 
 async def test_tool_list_fails_closed_without_a_session(monkeypatch):
-    """No session means no endpoint to classify — assume it is not local."""
+    """No execution grant means private listings remain hidden."""
     monkeypatch.setattr(ai, "_personal_docs_manager", _ToolDocs())
     monkeypatch.setattr(ai, "_session_manager", None)
 

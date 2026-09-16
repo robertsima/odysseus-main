@@ -143,6 +143,8 @@ function render() {
   if (s.workspace) items.push(`<span class="csl-item csl-workspace" title="${esc(`Workspace: ${s.workspace}`)}">${esc(basename(s.workspace))}</span>`);
   const off = (s.disabled_tools || []).length;
   items.push(`<button type="button" class="csl-item${off ? ' csl-attn' : ''}" data-csl="panel-tools" title="Choose which tools this chat may use">${off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools'}</button>`);
+  const privateVault = s.private_vault_access === true;
+  items.push(`<button type="button" class="csl-item${privateVault ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${privateVault ? 'Private vault excerpts may be sent to this chat\'s model endpoint. Click to review.' : 'Private vault access is off for this chat. Click to review.'}">${privateVault ? 'Private vault on' : 'Private vault off'}</button>`);
   const always = d.always_allowed_tools || [];
   if (always.length) items.push(`<button type="button" class="csl-item csl-attn" data-csl="revoke" title="${esc(`Always allowed here: ${always.join(', ')}. Click to ask again.`)}">${always.length} always allowed ×</button>`);
   if (d.parent_session && d.parent_session.id) {
@@ -163,6 +165,7 @@ async function onLineClick(e) {
   const act = b.dataset.csl;
   if (act === 'panel') togglePanel();
   else if (act === 'panel-tools') togglePanel('tools');
+  else if (act === 'panel-privacy') togglePanel('privacy');
   else if (act === 'mode-menu') toggleModeMenu(b);
   else if (act === 'context') document.getElementById('chat-context-pill')?.click();
   else if (act === 'fork') window.sessionModule?.selectSession?.(b.dataset.id);
@@ -237,6 +240,7 @@ async function togglePanel(section) {
   }
   renderPanel();
   if (section === 'tools') $('chat-settings-panel')?.querySelector('.csp-tools')?.scrollIntoView({ block: 'start' });
+  if (section === 'privacy') $('chat-settings-panel')?.querySelector('[data-csp="private-vault"]')?.scrollIntoView({ block: 'start' });
 }
 
 function renderPanel() {
@@ -246,6 +250,7 @@ function renderPanel() {
   const s = d.settings || {};
   const mode = (s.approval_mode) || '';
   const effective = d.approval_mode || 'auto';
+  const privateVault = s.private_vault_access === true;
   const off = new Set(s.disabled_tools || []);
   const globallyOff = new Set((state.tools || []).filter((t) => t.enabled === false).map((t) => t.id));
   const modeRows = ['', ...Object.keys(MODE_INFO)].map((key) => {
@@ -270,6 +275,13 @@ function renderPanel() {
   panel.innerHTML = `
     <div class="csp-head"><span class="csp-title">Chat settings</span><span class="csp-sub">Only this chat</span><button type="button" class="csp-close" data-csp="close" aria-label="Close">×</button></div>
     <section class="csp-section"><h4>Approvals</h4>${modeRows}</section>
+    <section class="csp-section csp-privacy">
+      <h4>Vault privacy</h4>
+      <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint.">
+        <input type="checkbox" data-csp="private-vault"${privateVault ? ' checked' : ''}>
+        <span><b>Allow private vault reads</b><small>${privateVault ? 'Private excerpts may leave this machine via the selected model endpoint.' : 'Private vault content is hidden by default.'}</small></span>
+      </label>
+    </section>
     <section class="csp-section">
       <h4>Tools <span class="csp-count">${names.length - off.size - globallyOff.size} of ${names.length} on</span></h4>
       <div class="csp-tools-actions"><button type="button" class="csp-link" data-csp="all-on">Turn all on</button></div>
@@ -279,6 +291,10 @@ function renderPanel() {
   panel.querySelectorAll('input[name="csp-mode"]').forEach((input) => input.addEventListener('change', async () => {
     await save({ approval_mode: input.value || null }, input.value ? `Approvals: ${MODE_INFO[input.value].label}` : 'Approvals follow the app default');
   }));
+  panel.querySelector('[data-csp="private-vault"]')?.addEventListener('change', (e) => {
+    const enabled = Boolean(e.target.checked);
+    save({ private_vault_access: enabled }, enabled ? 'Private vault reads enabled for this chat' : 'Private vault reads disabled for this chat');
+  });
   panel.querySelectorAll('input[data-tool]').forEach((input) => input.addEventListener('change', () => {
     const next = new Set((state.data?.settings?.disabled_tools) || []);
     if (input.checked) next.delete(input.dataset.tool); else next.add(input.dataset.tool);

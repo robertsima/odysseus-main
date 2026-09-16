@@ -16,7 +16,11 @@ from src.upload_handler import reserve_upload_references
 logger = logging.getLogger(__name__)
 
 
-async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
+async def do_manage_notes(
+    content: str,
+    owner: Optional[str] = None,
+    allow_private: bool = False,
+) -> Dict:
     """Handle manage_notes tool calls: CRUD on notes and checklists."""
     import uuid as _uuid
     from src.notes_markdown import NoteItem, NoteRecord
@@ -46,7 +50,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
         return re.sub(r"\s+", " ", text)
 
     def _note_by_prefix(note_id: str):
-        return STORE.find(note_id, owner)
+        return STORE.find(note_id, owner, allow_private=allow_private)
 
     def _format_note_list(notes) -> str:
         lines = []
@@ -71,7 +75,8 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
             if label_filter.lower() == "default":
                 label_filter = ""
             show_archived = args.get("archived", False)
-            notes = STORE.list(owner, archived=bool(show_archived), label=label_filter or None)
+            notes = STORE.list(owner, archived=bool(show_archived), label=label_filter or None,
+                               allow_private=allow_private)
             if action in ("search", "find"):
                 query = str(
                     args.get("query")
@@ -171,7 +176,7 @@ async def do_manage_notes(content: str, owner: Optional[str] = None) -> Dict:
                 # also creates a separate note reminder for the same title/time,
                 # keep the existing note so the user gets only one dispatch.
                 target_title = _norm_note_title(title)
-                for existing in STORE.list(owner, archived=False)[:25]:
+                for existing in STORE.list(owner, archived=False, allow_private=allow_private)[:25]:
                     if existing.due_date != due_iso:
                         continue
                     if _norm_note_title(existing.title or "") == target_title:

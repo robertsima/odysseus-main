@@ -390,6 +390,8 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         for upload in files:
             try:
                 file_path, stored_name, safe_name = _unique_personal_upload_path(upload_dir, upload.filename)
+                from src.rag_sensitivity import assert_vault_writable
+                assert_vault_writable(file_path, operation="upload to")
                 content_bytes = await upload.read(PERSONAL_UPLOAD_MAX_BYTES + 1)
                 if len(content_bytes) > PERSONAL_UPLOAD_MAX_BYTES:
                     logger.warning(f"Rejected oversized personal upload: {upload.filename!r}")
@@ -447,6 +449,23 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
     async def delete_file_from_rag(filepath: str = Query(...), owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Delete a specific file from RAG index and optionally from disk."""
         try:
+            # Resolve disk scope and enforce read-only policy before touching
+            # either the file or its index entries. Otherwise a refused delete
+            # could still make the document disappear from search.
+            try:
+                abs_target = os.path.realpath(filepath)
+                base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
+                in_uploads = (
+                    abs_target == base_abs
+                    or os.path.commonpath([abs_target, base_abs]) == base_abs
+                )
+            except ValueError:
+                # commonpath raises on mixed drives / non-comparable paths
+                in_uploads = False
+            if in_uploads and abs_target != base_abs:
+                from src.rag_sensitivity import assert_vault_writable
+                assert_vault_writable(abs_target, operation="delete")
+
             # Remove chunks from RAG vector store (best-effort)
             removed = 0
             rag = _rag()
@@ -460,16 +479,6 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             # Scope to the per-owner subdir, not the shared uploads root, so one
             # admin can't delete another user's personal files by path.
             deleted_from_disk = False
-            try:
-                abs_target = os.path.realpath(filepath)
-                base_abs = os.path.realpath(_personal_upload_dir_for_owner(owner, create=False))
-                in_uploads = (
-                    abs_target == base_abs
-                    or os.path.commonpath([abs_target, base_abs]) == base_abs
-                )
-            except ValueError:
-                # commonpath raises on mixed drives / non-comparable paths
-                in_uploads = False
             if in_uploads and abs_target != base_abs:
                 try:
                     os.remove(abs_target)
@@ -485,6 +494,9 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                 "removed_chunks": removed,
                 "deleted_from_disk": deleted_from_disk,
             }
+        except PermissionError as e:
+            logger.warning("Refused read-only vault file deletion %s: %s", filepath, e)
+            raise HTTPException(409, str(e))
         except Exception as e:
             logger.error(f"Failed to delete file {filepath}: {e}")
             raise HTTPException(500, f"Failed to delete file: {str(e)}")

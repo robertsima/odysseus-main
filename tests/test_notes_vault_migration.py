@@ -14,6 +14,7 @@ import json
 import hashlib
 import os
 import uuid
+from pathlib import Path
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 
@@ -22,7 +23,8 @@ import pytest
 import src.settings as settings
 from core.database import Note, SessionLocal
 from src.notes_markdown import markdown_to_note
-from src.notes_vault_migration import apply, plan, rollback
+import src.notes_vault_migration as migration
+from src.notes_vault_migration import apply, migrate_legacy_notes, plan, rollback
 
 
 # ---------------------------------------------------------------------------
@@ -108,12 +110,76 @@ def test_plan_writes_nothing_to_disk(vault, owner):
     assert not vault_dir.exists()
 
 
+def test_startup_migration_is_additive_but_does_not_repeat_after_rollback(vault, owner, monkeypatch):
+    vault_dir, manifest_path = vault
+    marker = vault_dir.parent / "startup-marker.json"
+    monkeypatch.setattr(migration, "STARTUP_MIGRATION_MARKER", marker)
+    _add_note(owner, title="Startup note")
+
+    first_plan, first_manifest = migrate_legacy_notes(
+        owner=owner, manifest_path=manifest_path, startup=True
+    )
+    assert len(first_plan.writes) == 1
+    assert first_manifest is not None
+    assert _all_files(vault_dir)
+
+    rollback(manifest_path=manifest_path)
+    assert _all_files(vault_dir) == []
+
+    second_plan, second_manifest = migrate_legacy_notes(
+        owner=owner, manifest_path=manifest_path, startup=True
+    )
+    assert len(second_plan.writes) == 1  # preview remains truthful
+    assert second_manifest is None       # startup marker prevents re-creation
+    assert _all_files(vault_dir) == []
+
+
+def test_startup_marker_is_not_written_when_apply_skips_a_race(vault, owner, monkeypatch):
+    """A skipped target must remain eligible for a later startup retry."""
+    vault_dir, manifest_path = vault
+    marker = vault_dir.parent / "startup-marker.json"
+    monkeypatch.setattr(migration, "STARTUP_MIGRATION_MARKER", marker)
+    _add_note(owner, title="Race during startup")
+
+    # Simulate apply() observing a target race and therefore writing no
+    # manifest entry.  The real apply() has the same return shape in that
+    # case, and migrate_legacy_notes must not hide the unfinished row behind
+    # a one-time startup marker.
+    monkeypatch.setattr(
+        migration,
+        "apply",
+        lambda *_args, **_kwargs: migration.Manifest(vault_dir=str(vault_dir)),
+    )
+
+    migration.migrate_legacy_notes(owner=owner, manifest_path=manifest_path, startup=True)
+
+    assert not marker.exists()
+
+
 def test_plan_lists_a_note_for_each_row(vault, owner):
     _add_note(owner, title="First")
     _add_note(owner, title="Second")
     result = plan(owner=owner)
     assert {w.title for w in result.writes} == {"First", "Second"}
     assert result.skipped == []
+
+
+def test_plan_finds_an_existing_note_id_in_a_nested_notes_folder(vault, owner):
+    vault_dir, _manifest_path = vault
+    note_id = _add_note(owner, title="Already nested")
+    nested = vault_dir / "Notes" / "Year" / "Month"
+    nested.mkdir(parents=True)
+    existing = nested / "existing.md"
+    existing.write_text(
+        f"---\nid: {note_id}\ntitle: Already nested\nowner: {owner}\n---\nbody",
+        encoding="utf-8",
+    )
+
+    result = plan(owner=owner)
+
+    assert result.writes == []
+    assert len(result.skipped) == 1
+    assert Path(result.skipped[0].relative_path) == Path("Notes/Year/Month/existing.md")
 
 
 def test_plan_render_is_human_readable_and_mentions_every_write(vault, owner):
@@ -240,6 +306,24 @@ def test_apply_is_idempotent_even_if_the_note_title_changed_after_first_migratio
     assert len(_all_files(vault_dir)) == 1
 
 
+def test_apply_preflights_all_readonly_targets_before_writing(vault, owner, monkeypatch):
+    vault_dir, manifest_path = vault
+    _add_note(owner, title="Writable first", archived=False)
+    _add_note(owner, title="Locked later", archived=True)
+    import src.rag_sensitivity as sensitivity
+
+    def _guard(path, *, operation="modify"):
+        if "Archive" in str(path):
+            raise sensitivity.VaultReadOnlyError("configured readonly")
+
+    monkeypatch.setattr(sensitivity, "assert_vault_writable", _guard)
+
+    with pytest.raises(sensitivity.VaultReadOnlyError):
+        apply(plan(owner=owner), owner=owner, manifest_path=manifest_path)
+    assert _all_files(vault_dir) == []
+    assert not manifest_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # Rollback: reversible, and safe against user edits
 # ---------------------------------------------------------------------------
@@ -328,6 +412,39 @@ def test_rollback_refuses_manifest_paths_outside_the_vault(vault):
 
     assert result.removed == []
     assert outside.exists()
+
+
+def test_rollback_refuses_a_symlinked_manifest_target(vault, tmp_path):
+    vault_dir, manifest_path = vault
+    vault_dir.mkdir()
+    protected = vault_dir / "protected.md"
+    protected.write_text("same content", encoding="utf-8")
+    link = vault_dir / "migration.md"
+    try:
+        os.symlink(protected, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks are unavailable on this platform")
+    manifest_path.write_text(
+        json.dumps({
+            "vault_dir": str(vault_dir),
+            "entries": {
+                "migration.md": {
+                    "note_id": "n1",
+                    "relative_path": "migration.md",
+                    "sha256": hashlib.sha256(b"same content").hexdigest(),
+                    "written_at": "now",
+                }
+            },
+            "created_dirs": [],
+        }),
+        encoding="utf-8",
+    )
+
+    result = rollback(manifest_path=manifest_path)
+
+    assert result.removed == []
+    assert result.kept_due_to_edits == ["migration.md"]
+    assert protected.exists()
 
 
 def test_apply_after_a_partial_rollback_recreates_only_the_removed_note(vault, owner):

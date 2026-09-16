@@ -537,27 +537,17 @@ async def do_manage_memory(content: str, session_id: Optional[str] = None, owner
 # ---------------------------------------------------------------------------
 
 def _session_allows_private_docs(session_id: Optional[str]) -> bool:
-    """Whether a tool call made in this session may see private documents.
+    """Compatibility helper for the explicit per-chat private-read grant."""
+    from src.private_access import allows_private_vault
 
-    A filename is disclosure on its own, so the RAG listing is filtered by the
-    same rule as retrieval: private content is visible only when the session is
-    being served by a local endpoint. Fails closed — if the session cannot be
-    resolved, we cannot show that the endpoint is local, so we assume it is not.
-    """
-    if not session_id or not _session_manager:
-        return False
-    try:
-        from src.model_context import is_local_endpoint
-
-        session = _session_manager.get_session(session_id)
-        if not session:
-            return False
-        return is_local_endpoint(getattr(session, "endpoint_url", "") or "")
-    except Exception:
-        return False
+    return allows_private_vault(session_id)
 
 
-async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
+async def do_manage_rag(
+    content: str,
+    session_id: Optional[str] = None,
+    allow_private: bool = False,
+) -> Dict:
     """Manage RAG indexed documents: list, add_directory, remove_directory.
 
     Content format:
@@ -574,7 +564,10 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
         if not _personal_docs_manager:
             return {"results": "Personal docs manager not available. RAG may not be configured."}
         try:
-            allow_private = _session_allows_private_docs(session_id)
+            # A listing discloses private filenames as well as content. The
+            # caller must carry the explicit grant; session lookup is retained
+            # only for compatibility with direct callers.
+            allow_private = bool(allow_private)
 
             files = []
             if hasattr(_personal_docs_manager, 'get_file_list'):
@@ -607,8 +600,8 @@ async def do_manage_rag(content: str, session_id: Optional[str] = None) -> Dict:
                     result_lines.append(f"  ... and {len(files) - 50} more")
             if not allow_private:
                 result_lines.append(
-                    "\n_(Private documents are hidden: this session is served by a "
-                    "non-local endpoint.)_"
+                    "\n_(Private documents are hidden: this chat has not been granted "
+                    "private-vault access.)_"
                 )
 
             if not result_lines:
