@@ -4348,6 +4348,32 @@ def _append_tool_results(
         for _m in _reasoning_turns[:-_replay_window]:
             _m.pop("reasoning_items", None)
 
+    # Execution ledger. The round just appended is the newest of a pile that is
+    # otherwise replayed verbatim for the rest of the turn — the audit's "tool
+    # results keep returning on subsequent rounds even when no longer relevant".
+    # Completed exchanges older than the keep window collapse to what is still
+    # true (the path read, the command run, the id produced, the outcome) plus a
+    # `toolout-...` ref that reopens the full text, so nothing is destroyed.
+    #
+    # Batched on purpose, exactly like the reasoning prune directly above: this
+    # rewrites messages in the middle of an already-cached prompt, so it fires
+    # once per window instead of a little every round. `compact_tool_exchanges`
+    # owns that gate and never raises; see the design note in context_compactor.
+    try:
+        from src.context_compactor import compact_tool_exchanges
+
+        _ledger_stats = compact_tool_exchanges(messages)
+        if _ledger_stats.get("entries"):
+            logger.info(
+                "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
+                "%s -> %s chars (round %s)",
+                _ledger_stats["entries"], _ledger_stats["groups"],
+                _ledger_stats["chars_before"], _ledger_stats["chars_after"],
+                round_num,
+            )
+    except Exception as _ledger_exc:
+        logger.warning("[agent] execution ledger skipped: %s", _ledger_exc)
+
 
 def _compute_final_metrics(
     messages: List[Dict],
