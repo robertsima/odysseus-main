@@ -49,7 +49,8 @@ from routes.email_helpers import (
     _load_settings, _save_settings, _get_email_config,
     _send_smtp_message, _smtp_security_mode,
     _IMAP_TIMEOUT_SECONDS, _open_imap_connection,
-    _get_valid_google_token, _xoauth2_bytes, _xoauth2_raw,
+    _get_valid_google_token_status, google_token_failure_message,
+    _xoauth2_bytes, _xoauth2_raw,
     make_oauth_state, verify_oauth_state,
     EmailNotConfiguredError,
     _imap_connect, _imap, _decode_header, _detect_sent_folder, _detect_drafts_folder,
@@ -328,12 +329,16 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
                 "message_key TEXT NOT NULL, first_seen_at TEXT NOT NULL, "
                 "PRIMARY KEY (owner, account_key, folder, message_key))"
             )
-            count = conn.execute(
-                "SELECT COUNT(*) FROM email_event_seen WHERE owner=? AND account_key=? AND folder=?",
+            # Only "has this folder ever been baselined?" is needed here, and
+            # this table holds one row per message ever seen — counting them
+            # all made every inbox poll scan the whole folder's history. A
+            # single-row probe answers the same question in constant time.
+            baselined = conn.execute(
+                "SELECT 1 FROM email_event_seen WHERE owner=? AND account_key=? AND folder=? LIMIT 1",
                 (owner, account_key, folder),
-            ).fetchone()[0]
+            ).fetchone() is not None
             existing = set()
-            if count:
+            if baselined:
                 placeholders = ",".join("?" * len(keys))
                 rows = conn.execute(
                     f"SELECT message_key FROM email_event_seen "
@@ -351,7 +356,7 @@ def _record_email_received_events(owner: str, account_id: str | None, folder: st
         finally:
             conn.close()
 
-        if count and new_keys:
+        if baselined and new_keys:
             for _ in new_keys[:50]:
                 fire_event("email_received", owner)
             logger.info("Fired email_received for %d new message(s)", min(len(new_keys), 50))
@@ -1473,26 +1478,49 @@ def setup_email_routes():
     # Three layers stacked because every cold click was hitting Dovecot
     # over a fresh TCP+TLS+LOGIN handshake plus a full RFC822 fetch.
     #   1. _LIST_CACHE: list-emails responses keyed by (account, folder, filter,
-    #      limit, offset). 8s TTL — short enough that flag changes show up
-    #      quickly but long enough to absorb burst polls and tab switches.
+    #      limit, offset). Two-stage: fresh for _LIST_FRESH_TTL, then served
+    #      stale while a background pass refreshes it (see _list_cache_entry).
     #   2. _READ_CACHE: per-(account, folder, uid) parsed email bodies.
     #      60s TTL — bodies don't change.
     #   3. _IMAP_POOL: per-account live IMAP connection reused across
-    #      requests. Recycled if NOOP fails or it's been idle >60s.
+    #      requests. Recycled if NOOP fails or it's been idle too long.
     #   4. Prefetch task: after a list load, kick off background reads of
     #      the top-N visible UIDs so clicks land in the read cache.
     import asyncio as _asyncio
     import time as _time
     import threading as _threading
 
-    _LIST_CACHE = {}  # key → (expires_at, response_dict)
-    _LIST_TTL = 45.0
+    _LIST_CACHE = {}  # key → (stale_until, fresh_until, response_dict)
+    # What reaches this cache is background polling and reopening the library;
+    # the explicit Refresh button sends `_=<now>` and skips it outright. The
+    # inbox widget re-polls `filter=unread&limit=10` once a minute, so the old
+    # flat 45s TTL had always expired by the time the next poll arrived — the
+    # cache was pure write amplification, never a hit, on a mailbox where the
+    # miss cost seconds. Splitting it means a poll is answered from memory and
+    # the IMAP pass that refreshes the entry (and fires `email_received`) runs
+    # behind the response instead of in front of it.
+    _LIST_FRESH_TTL = 20.0       # absorb bursts/tab switches without any IMAP
+    # How old a page may be when handed back. While the app is open the poll
+    # refreshes it every minute, so this only bites on a reopen after a quiet
+    # spell — and the library's `cached_only=1` first paint already shows the
+    # local index, which can be older still.
+    _LIST_STALE_TTL = 5 * 60.0
+    _LIST_REVALIDATING = set()    # keys with a background refresh in flight
     _FOLDER_CACHE = {}  # (account_id, owner) -> (expires_at, response_dict)
     _FOLDER_TTL = 5 * 60.0
+    _FOLDER_NAME_CACHE = {}  # (account_id, owner, requested) -> (expires_at, resolved)
+    _FOLDER_NAME_TTL = 10 * 60.0
     _READ_CACHE = {}  # key → (expires_at, response_dict)
     _READ_TTL = 30 * 60.0
     _IMAP_POOL = {}   # account_id → (conn, last_used_at)
-    _IMAP_IDLE_MAX = 60.0
+    # Longer than the once-a-minute inbox poll on purpose: at 60s the pooled
+    # socket was always a few seconds too old to reuse, so every poll paid a
+    # fresh TCP+TLS+LOGIN. Not raised further than it needs to be — reusing a
+    # socket the far end has quietly dropped costs a full socket timeout on
+    # the `noop()` below before we fall back to a fresh connection, and
+    # middleboxes drop idle connections long before the 30-minute autologout
+    # floor RFC 3501 puts on servers.
+    _IMAP_IDLE_MAX = 180.0
     _WARMING_READS = set()
     _WARM_READ_LIMIT = 6
     _WARM_MAX_BYTES = 192 * 1024
@@ -1552,20 +1580,57 @@ def setup_email_routes():
         # a cached message body.
         return (account_id or "", folder, str(uid), owner)
 
-    def _list_cache_get(key):
+    def _list_cache_entry(key):
+        """Return (response, is_fresh) or None once the entry is past reuse.
+
+        `is_fresh is False` means "safe to hand back, but ask IMAP again
+        behind the response" — see the TTL note above.
+        """
         v = _LIST_CACHE.get(key)
-        if not v: return None
-        if v[0] < _time.monotonic():
+        if not v:
+            return None
+        stale_until, fresh_until, value = v
+        now = _time.monotonic()
+        if stale_until < now:
             _LIST_CACHE.pop(key, None)
             return None
-        return v[1]
+        return value, fresh_until >= now
+
+    def _list_cache_get(key):
+        entry = _list_cache_entry(key)
+        return entry[0] if entry else None
 
     def _list_cache_put(key, value):
-        _LIST_CACHE[key] = (_time.monotonic() + _LIST_TTL, value)
+        now = _time.monotonic()
+        _LIST_CACHE[key] = (now + _LIST_STALE_TTL, now + _LIST_FRESH_TTL, value)
         # Cap size
         if len(_LIST_CACHE) > 64:
             for k in list(_LIST_CACHE.keys())[:-32]:
                 _LIST_CACHE.pop(k, None)
+
+    def _resolve_mail_folder_cached(conn, account_id, owner, preferred):
+        """`_resolve_mail_folder` without the per-request LIST round trip.
+
+        Folder naming is a property of the account, not of the request, but
+        the list path re-derived it on every poll — a full LIST of every
+        mailbox (every label, on Gmail) just to confirm INBOX still exists.
+        INBOX needs no lookup at all: RFC 3501 reserves the name and requires
+        it to be present. Everything else is memoised per (account, owner) so
+        a renamed or newly created folder is still picked up within a few
+        minutes.
+        """
+        if (preferred or "").upper() == "INBOX":
+            return preferred
+        key = (account_id or "", owner or "", preferred or "")
+        hit = _FOLDER_NAME_CACHE.get(key)
+        if hit and hit[0] >= _time.monotonic():
+            return hit[1]
+        resolved = _resolve_mail_folder(conn, preferred, _folder_role_from_name(preferred))
+        _FOLDER_NAME_CACHE[key] = (_time.monotonic() + _FOLDER_NAME_TTL, resolved)
+        if len(_FOLDER_NAME_CACHE) > 64:
+            for k in list(_FOLDER_NAME_CACHE.keys())[:-32]:
+                _FOLDER_NAME_CACHE.pop(k, None)
+        return resolved
 
     def _folder_cache_get(account_id, owner):
         key = (account_id or "", owner or "")
@@ -1591,8 +1656,9 @@ def setup_email_routes():
         """Drop list cache entries that the caller's mutation may have stale-ed.
 
         Called from flag-mutating endpoints (mark-read/unread/answered, archive,
-        delete, move) so the UI doesn't show stale read/unread counts for up to
-        the 8s TTL after a manual flag change. With no args, clears everything.
+        delete, move) so the UI doesn't show stale read/unread counts for the
+        rest of the entry's life after a manual flag change. With no args,
+        clears everything.
         """
         if account_id is None and folder is None:
             _LIST_CACHE.clear()
@@ -1606,7 +1672,7 @@ def setup_email_routes():
 
     def _update_list_cache_seen(account_id, folder, uid, seen: bool):
         uid_s = str(uid)
-        for key, (expires_at, value) in list(_LIST_CACHE.items()):
+        for key, (stale_until, fresh_until, value) in list(_LIST_CACHE.items()):
             if key[0] != (account_id or "") or key[1] != folder:
                 continue
             emails = list((value or {}).get("emails") or [])
@@ -1624,7 +1690,7 @@ def setup_email_routes():
                         e["is_read"] = bool(seen)
                         changed = True
             if changed:
-                _LIST_CACHE[key] = (expires_at, value)
+                _LIST_CACHE[key] = (stale_until, fresh_until, value)
 
     def _read_cache_get(key):
         v = _READ_CACHE.get(key)
@@ -1813,9 +1879,14 @@ def setup_email_routes():
         try:
             conn, _reused_conn = _pooled_connect(account_id, owner=owner)
             conn_ok = True
-            folder = _resolve_mail_folder(conn, folder, _folder_role_from_name(folder))
+            requested_folder = folder
+            folder = _resolve_mail_folder_cached(conn, account_id, owner, folder)
             select_status, _ = conn.select(_q(folder), readonly=True)
             if select_status != "OK":
+                # Self-correcting: a memoised name that no longer selects is
+                # dropped so the next request pays for a fresh LIST instead of
+                # failing for the rest of the TTL.
+                _FOLDER_NAME_CACHE.pop((account_id or "", owner or "", requested_folder or ""), None)
                 return {"emails": [], "total": 0, "folder": folder, "error": f"Folder not found: {folder}"}
 
             from_clause = ""
@@ -2292,8 +2363,9 @@ def setup_email_routes():
         cache_bust: str | None = Query(None, alias="_"),
         owner: str = Depends(require_owner),
     ):
-        """List emails. Uses an 8s in-memory cache + offloads blocking IMAP
-        calls to a worker thread so the event loop never stalls."""
+        """List emails. Uses the stale-while-revalidate list cache + offloads
+        blocking IMAP calls to a worker thread so the event loop never
+        stalls."""
         started_at = _time.monotonic()
         fixture_result = _fixture_email_list(folder, limit, offset, filter, from_addr, owner)
         if fixture_result is not None:
@@ -2329,13 +2401,66 @@ def setup_email_routes():
         # SECURITY: include `owner` in the cache key so two users with
         # different account scopes don't share a cached list.
         ck = _list_cache_key(account_id, folder, filter, limit, offset, from_addr or "") + (int(bool(has_attachments)), owner)
+
+        async def _run_list_pass(log_prefix: str):
+            """One IMAP list pass + the bookkeeping that depends on its result.
+
+            Shared by the blocking path and the background revalidation so
+            `email_received` fires from whichever of the two actually talked
+            to IMAP — new mail must not become invisible just because the
+            response in front of it came out of the cache.
+            """
+            pass_started = _time.monotonic()
+            passed = await _asyncio.to_thread(
+                _list_emails_sync, folder, limit, offset, filter, account_id, from_addr,
+                bool(has_attachments), owner,
+            )
+            if passed and not passed.get("error"):
+                if offset == 0 and not from_addr and not has_attachments and filter in ("all", "unread", "unanswered", "undone"):
+                    _record_email_received_events(owner, account_id, folder, passed.get("emails") or [])
+                    _schedule_recent_email_warm(passed.get("emails") or [], folder, account_id, owner)
+                _list_cache_put(ck, passed)
+            pass_ms = int((_time.monotonic() - pass_started) * 1000)
+            if pass_ms > 1500:
+                logger.warning(
+                    "%s owner=%s account=%s folder=%s filter=%s limit=%s offset=%s cache_bust=%s emails=%s total=%s elapsed=%sms",
+                    log_prefix, owner, account_id or "", folder, filter, limit, offset, bool(cache_bust),
+                    len((passed or {}).get("emails") or []), (passed or {}).get("total"), pass_ms,
+                )
+            return passed
+
+        def _schedule_list_revalidate():
+            # One refresh per key at a time: the inbox widget polls several
+            # folders/accounts a minute and a backlog of duplicate IMAP passes
+            # would cost more than the blocking fetch it replaced.
+            if ck in _LIST_REVALIDATING:
+                return
+            _LIST_REVALIDATING.add(ck)
+
+            async def _revalidate():
+                try:
+                    await _run_list_pass("Slow email list revalidate")
+                except Exception:
+                    logger.debug("email list revalidate skipped", exc_info=True)
+                finally:
+                    _LIST_REVALIDATING.discard(ck)
+
+            try:
+                _asyncio.create_task(_revalidate())
+            except RuntimeError:
+                _LIST_REVALIDATING.discard(ck)
+
         if not cache_bust:
-            cached = _list_cache_get(ck)
-            if cached is not None:
+            entry = _list_cache_entry(ck)
+            if entry is not None:
+                cached, is_fresh = entry
                 _schedule_recent_email_warm(cached.get("emails") or [], folder, account_id, owner)
+                if not is_fresh:
+                    _schedule_list_revalidate()
                 cached = dict(cached)
                 sync_meta = dict(cached.get("sync") or {})
                 sync_meta["source"] = "memory_cache"
+                sync_meta["revalidating"] = not is_fresh
                 cached["sync"] = sync_meta
                 elapsed_ms = int((_time.monotonic() - started_at) * 1000)
                 if elapsed_ms > 500:
@@ -2344,23 +2469,7 @@ def setup_email_routes():
                         owner, account_id or "", folder, filter, limit, offset, elapsed_ms,
                     )
                 return cached
-        result = await _asyncio.to_thread(
-            _list_emails_sync, folder, limit, offset, filter, account_id, from_addr,
-            bool(has_attachments), owner,
-        )
-        if result and not result.get("error"):
-            if offset == 0 and not from_addr and not has_attachments and filter in ("all", "unread", "unanswered", "undone"):
-                _record_email_received_events(owner, account_id, folder, result.get("emails") or [])
-                _schedule_recent_email_warm(result.get("emails") or [], folder, account_id, owner)
-            _list_cache_put(ck, result)
-        elapsed_ms = int((_time.monotonic() - started_at) * 1000)
-        if elapsed_ms > 1500:
-            logger.warning(
-                "Slow email list owner=%s account=%s folder=%s filter=%s limit=%s offset=%s cache_bust=%s emails=%s total=%s elapsed=%sms",
-                owner, account_id or "", folder, filter, limit, offset, bool(cache_bust),
-                len((result or {}).get("emails") or []), (result or {}).get("total"), elapsed_ms,
-            )
-        return result
+        return await _run_list_pass("Slow email list")
 
     @router.get("/unread-state")
     async def unread_state(
@@ -5753,13 +5862,18 @@ def setup_email_routes():
             else None
         )
 
+        google_token_failure = ""
+
         def _google_token():
-            nonlocal google_token, google_token_loaded
+            nonlocal google_token, google_token_loaded, google_token_failure
             if not google_token_loaded:
-                google_token = _get_valid_google_token(body.get("account_id"), body)
+                google_token, kind = _get_valid_google_token_status(body.get("account_id"), body)
+                google_token_failure = google_token_failure_message(kind)
                 google_token_loaded = True
             if not google_token:
-                raise RuntimeError("Google OAuth token unavailable — reconnect the account")
+                # "Test connection" is where a user goes to find out *why* mail
+                # stopped, so a network blip must not read as a revoked grant.
+                raise RuntimeError(google_token_failure)
             return google_token
 
         if imap_port_err:
