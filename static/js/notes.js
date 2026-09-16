@@ -600,7 +600,10 @@ function _vaultPolicyLabels(file) {
 
 function _vaultFileHtml(node, depth = 0, searchResult = false) {
   const active = _vaultFile?.path === node.path ? ' active' : '';
-  const policies = _vaultPolicyLabels(node);
+  // Public is the quiet default. Only exceptional access rules need a marker
+  // in the navigation tree; the selected file still shows its full policy in
+  // the editor header.
+  const policies = _vaultPolicyLabels(node).filter(policy => policy !== 'public');
   const policyTags = policies.map(policy => {
     const label = policy === 'readonly' ? 'Read only' : policy[0].toUpperCase() + policy.slice(1);
     return `<i class="vault-policy-dot ${_attrEsc(policy)}" role="img" title="LLM policy: ${_attrEsc(label)}" aria-label="${_attrEsc(label)}"></i>`;
@@ -621,6 +624,12 @@ function _vaultDescendantCount(node) {
 function _vaultTreeHtml(node, depth = 0) {
   if (!node || node.type === 'error') return '';
   if (node.type === 'file') return _vaultFileHtml(node, depth);
+  // The API root is a transport wrapper, not a useful navigation level. Show
+  // its children directly so users do not have to open "Vault" before they
+  // can reach the actual top-level folders.
+  if (depth === 0 && !node.path) {
+    return (node.children || []).map(child => _vaultTreeHtml(child, 0)).join('');
+  }
   const visible = (node.children || []).map(child => _vaultTreeHtml(child, depth + 1)).join('');
   if (!visible && depth > 0) return '';
   const folderIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
@@ -668,7 +677,7 @@ function _renderVault() {
         <div class="vault-tree-heading">
           <span><b>${_searchQuery ? 'Search results' : 'Vault files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
           <div class="vault-tree-actions">
-            <button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_searchQuery ? ' disabled' : ''}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>
+            ${!_searchQuery ? `<button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_vaultExpandedFolders.size ? '' : ' hidden'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>` : ''}
             <button type="button" id="vault-tree-refresh" title="Refresh vault tree" aria-label="Refresh vault tree"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
           </div>
         </div>
@@ -722,6 +731,8 @@ function _renderVault() {
       const path = folder.dataset.vaultFolder || '';
       if (folder.open) _vaultExpandedFolders.add(path);
       else _vaultExpandedFolders.delete(path);
+      const collapse = document.getElementById('vault-tree-collapse');
+      if (collapse) collapse.hidden = _vaultExpandedFolders.size === 0;
     });
   });
   body.querySelectorAll('[data-vault-file]').forEach(button => {

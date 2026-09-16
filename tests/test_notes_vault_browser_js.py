@@ -43,6 +43,16 @@ def test_vault_search_is_flat_and_does_not_auto_expand_folders():
     assert "matches.map(node => _vaultFileHtml(node, 0, true))" in search_renderer
 
 
+def test_vault_navigation_omits_redundant_root_and_default_public_markers():
+    tree_renderer = SRC.split("function _vaultTreeHtml", 1)[1].split("function _vaultSearchHtml", 1)[0]
+    file_renderer = SRC.split("function _vaultFileHtml", 1)[1].split("function _vaultDescendantCount", 1)[0]
+    assert "depth === 0 && !node.path" in tree_renderer
+    assert "_vaultTreeHtml(child, 0)" in tree_renderer
+    assert ".filter(policy => policy !== 'public')" in file_renderer
+    assert "!_searchQuery ? `<button" in SRC
+    assert "collapse.hidden = _vaultExpandedFolders.size === 0" in SRC
+
+
 def test_vault_explorer_uses_theme_semantic_colors_and_visible_focus():
     vault_css = STYLE.split(".vault-browser {", 1)[1].split(".note-card.note-card-sliding-out", 1)[0]
     assert "--vault-public: var(--color-success" in vault_css

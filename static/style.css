@@ -34718,16 +34718,16 @@ body.notes-drag-mode .note-card-pin svg {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .vault-tree-pane {
-  width: 31%;
-  min-width: 210px;
-  max-width: 340px;
+  width: 29%;
+  min-width: 200px;
+  max-width: 320px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel) 86%, var(--bg));
 }
 .vault-tree-heading {
-  min-height: 42px;
+  min-height: 38px;
   flex-shrink: 0;
   padding: 0 8px 0 11px;
   display: flex;
@@ -34754,33 +34754,21 @@ body.notes-drag-mode .note-card-pin svg {
 }
 .vault-tree-heading button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .vault-tree-heading button:hover { color: var(--fg); border-color: var(--border); background: color-mix(in srgb, var(--fg) 6%, transparent); }
-.vault-tree-heading button:disabled { opacity: .3; cursor: default; border-color: transparent; background: transparent; }
 .vault-tree {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 6px;
+  padding: 5px;
   scrollbar-width: thin;
 }
 .vault-tree-folder { margin: 0; }
-.vault-tree-folder[open] { position: relative; }
-.vault-tree-folder[open]::after {
-  content: '';
-  position: absolute;
-  left: calc(15px + var(--vault-indent, 0px));
-  top: 27px;
-  bottom: 3px;
-  width: 1px;
-  background: color-mix(in srgb, var(--border) 65%, transparent);
-  pointer-events: none;
-}
 .vault-tree-folder > summary,
 .vault-tree-file {
   width: 100%;
-  min-height: 27px;
+  min-height: 26px;
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   padding: 3px 6px 3px calc(6px + var(--vault-indent));
   color: color-mix(in srgb, var(--fg) 76%, transparent);
   border: 0;
@@ -34802,7 +34790,8 @@ body.notes-drag-mode .note-card-pin svg {
   opacity: .55;
 }
 .vault-tree-folder:not([open]) > summary::before { transform: rotate(0); }
-.vault-tree-folder > summary small { margin-left: auto; color: color-mix(in srgb, var(--fg) 35%, transparent); font: 8px/1 var(--mono, ui-monospace, monospace); }
+.vault-tree-folder > summary small { margin-left: auto; color: color-mix(in srgb, var(--fg) 30%, transparent); font: 8px/1 var(--mono, ui-monospace, monospace); transition: color .12s; }
+.vault-tree-folder > summary:hover small { color: color-mix(in srgb, var(--fg) 52%, transparent); }
 .vault-tree-file { position: relative; padding-left: calc(22px + var(--vault-indent)); z-index: 1; }
 .vault-tree-file:hover,
 .vault-tree-folder > summary:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
@@ -34824,6 +34813,8 @@ body.notes-drag-mode .note-card-pin svg {
   stroke: currentColor;
   stroke-width: 1.8;
 }
+.vault-tree-file > svg { opacity: .52; }
+.vault-tree-folder summary > svg { opacity: .68; }
 .vault-tree-file span,
 .vault-tree-folder summary span {
   overflow: hidden;
@@ -34845,6 +34836,7 @@ body.notes-drag-mode .note-card-pin svg {
   gap: 3px;
   margin-left: auto;
 }
+.vault-policy-dots:empty { display: none; }
 .vault-policy-dots .vault-policy-dot { margin-left: 0; }
 .vault-policy-dot.private { background: var(--vault-private); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-private) 24%, transparent); }
 .vault-policy-dot.readonly { background: var(--vault-readonly); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-readonly) 24%, transparent); }
