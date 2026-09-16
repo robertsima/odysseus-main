@@ -450,7 +450,7 @@ async function onClick(e) {
     else if (act === 'close') close();
     else if (act === 'workbench') {
       if (!window.workbenchModule?.open) throw new Error('Workbench is unavailable');
-      close(); window.workbenchModule.open();
+      window.workbenchModule.open();
     }
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
     else if (act === 'launch') { state.launchOpen = true; render(); $('ag-task')?.focus(); }
@@ -472,7 +472,6 @@ async function onClick(e) {
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'inspect-run') {
       if (!window.workbenchModule?.openRun) throw new Error('Workbench inspection is unavailable');
-      close();
       await selectChat(b.dataset.sid);
       await window.workbenchModule.openRun(b.dataset.run, b.dataset.sid);
     }
@@ -538,7 +537,6 @@ async function selectChat(sid) {
   if (current && current !== sid) throw new Error('Could not open the selected chat');
 }
 async function openChat(sid) {
-  close();
   await selectChat(sid);
 }
 

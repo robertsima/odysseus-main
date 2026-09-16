@@ -76,3 +76,19 @@ def test_fleet_selection_and_window_focus_are_keyboard_accessible():
     assert "root.focus({ preventScroll: true })" in AGENTS
     assert "returnFocus.focus({ preventScroll: true })" in AGENTS
     assert "const focusedUnit" in AGENTS
+
+
+def test_opening_chat_or_workbench_keeps_control_room_open():
+    actions = AGENTS.split("async function onClick(e)", 1)[1].split("async function sendToChat", 1)[0]
+    workbench = actions.split("act === 'workbench'", 1)[1].split("act === 'refresh'", 1)[0]
+    inspect_run = actions.split("act === 'inspect-run'", 1)[1].split("act === 'stop-chat'", 1)[0]
+    open_chat = AGENTS.split("async function openChat(sid)", 1)[1].split("// ── open / close", 1)[0]
+    assert "close()" not in workbench
+    assert "close()" not in inspect_run
+    assert "close()" not in open_chat
+
+
+def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
+    assert ".ag-card-avatar { min-height: 60px" in STYLE
+    assert "padding-top: 5px" in STYLE.split(".ag-bot {", 1)[1].split("}", 1)[0]
+    assert ".ag-console-hero { position: relative; display: flex; align-items: center; min-height: 100px" in STYLE

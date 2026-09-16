@@ -15975,6 +15975,46 @@ span[id$="-logo"] svg:not([width]) {
   flex-shrink: 0;
 }
 .admin-rag-item .admin-btn-delete { font-size: 10px; padding: 2px 6px; }
+.admin-rag-file-group {
+  margin-bottom: 5px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--panel) 72%, var(--bg));
+}
+.admin-rag-file-group > summary {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 8px;
+  box-sizing: border-box;
+  list-style: none;
+  color: color-mix(in srgb, var(--fg) 78%, transparent);
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  font-weight: 600;
+}
+.admin-rag-file-group > summary::-webkit-details-marker { display: none; }
+.admin-rag-file-group > summary::before {
+  content: '›';
+  width: 8px;
+  flex: 0 0 8px;
+  opacity: .55;
+  transform: rotate(0);
+  transition: transform .12s ease;
+}
+.admin-rag-file-group[open] > summary::before { transform: rotate(90deg); }
+.admin-rag-file-group > summary:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); color: var(--fg); }
+.admin-rag-file-group > summary:focus-visible { outline: 2px solid var(--accent, var(--red)); outline-offset: -2px; }
+.admin-rag-file-group > summary > svg,
+.admin-rag-file-row > svg { width: 13px; height: 13px; flex: 0 0 13px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.admin-rag-file-group > summary > span:not(.admin-badge) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.admin-rag-file-group > summary > small { flex-shrink: 0; color: color-mix(in srgb, var(--fg) 42%, transparent); font: 9px/1 var(--mono, ui-monospace, monospace); }
+.admin-rag-file-group-body { padding: 4px; border-top: 1px solid var(--border); }
+.admin-rag-file-group-body .admin-rag-item { margin: 0; border-radius: 5px; background: transparent; }
+.admin-rag-file-group-body .admin-rag-item:hover { background: color-mix(in srgb, var(--fg) 5%, transparent); }
 .admin-rag-status {
   font-size: 11px;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
@@ -42148,7 +42188,7 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .ag-bot-card::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, transparent 25%, color-mix(in srgb, var(--fg) 5%, transparent) 45%, transparent 65%); transform: translateX(-120%); }
 .ag-bot-card.ag-card-running::after { animation: ag-card-scan 3.4s ease-in-out infinite; }
 .ag-bot-card.active { border-color: color-mix(in srgb, var(--wb-accent) 65%, var(--border)); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--wb-accent) 35%, transparent), 0 8px 24px rgba(0,0,0,.14); }
-.ag-card-avatar { display: flex; justify-content: center; padding-top: 3px; }
+.ag-card-avatar { min-height: 60px; display: flex; justify-content: center; padding: 8px 3px 0; box-sizing: border-box; overflow: visible; }
 .ag-card-copy { display: flex; flex-direction: column; min-width: 0; gap: 5px; }
 .ag-card-select { border: 0; background: transparent; color: inherit; padding: 0; font: inherit; font-weight: 600; text-align: left; cursor: pointer; }
 .ag-card-select:focus-visible { outline: 2px solid var(--wb-accent); outline-offset: 2px; border-radius: 2px; }
@@ -42163,7 +42203,7 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .ag-crew-line { position: absolute; left: 0; right: 5px; top: 8px; height: 1px; background: color-mix(in srgb, var(--fg) 18%, transparent); }
 .ag-card-crew > b { position: relative; padding: 2px 4px; border-radius: 8px; background: var(--panel); color: var(--wb-muted); font-size: 8px; }
 
-.ag-bot { --bot-color: hsl(var(--ag-bot-h) 62% 58%); position: relative; display: inline-flex; flex-direction: column; align-items: center; width: 42px; height: 52px; flex: 0 0 auto; transform-origin: 50% 100%; }
+.ag-bot { --bot-color: hsl(var(--ag-bot-h) 62% 58%); position: relative; display: inline-flex; flex-direction: column; align-items: center; width: 42px; height: 52px; padding-top: 5px; flex: 0 0 auto; box-sizing: content-box; transform-origin: 50% 100%; }
 .ag-bot-antenna { position: relative; width: 2px; height: 8px; background: color-mix(in srgb, var(--bot-color) 70%, var(--fg)); }
 .ag-bot-antenna i { position: absolute; left: -3px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--bot-color); box-shadow: 0 0 9px var(--bot-color); }
 .ag-bot-head { position: relative; display: flex; align-items: center; justify-content: center; gap: 9px; width: 40px; height: 26px; border: 1px solid color-mix(in srgb, var(--bot-color) 58%, var(--border)); border-radius: 10px 10px 8px 8px; background: linear-gradient(155deg, color-mix(in srgb, var(--bot-color) 22%, var(--panel)), var(--bg)); box-shadow: inset 0 -6px 8px rgba(0,0,0,.11), 0 3px 8px rgba(0,0,0,.12); }
@@ -42183,17 +42223,17 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
 .ag-bot-failed .ag-bot-eye, .ag-bot-failed .ag-bot-antenna i { background: var(--wb-bad); box-shadow: 0 0 7px var(--wb-bad); }
 .ag-bot-finished .ag-bot-eye, .ag-bot-finished .ag-bot-antenna i { background: var(--wb-ok); box-shadow: 0 0 6px var(--wb-ok); }
 .ag-bot-idle { opacity: .68; filter: saturate(.55); }
-.ag-bot-mini { width: 24px; height: 30px; transform: scale(.56); margin: -6px -5px; }
-.ag-bot-micro { position: relative; width: 17px; height: 18px; transform: scale(.36); margin: -8px -6px; padding: 5px; border-radius: 50%; background: var(--panel); }
-.ag-bot-hero { width: 58px; height: 69px; transform: scale(1.28); margin: 8px 12px 0 7px; }
+.ag-bot-mini { width: 28px; height: 32px; transform: scale(.56); margin: -5px -4px; }
+.ag-bot-micro { position: relative; width: 18px; height: 22px; transform: scale(.38); margin: -6px -5px; padding: 5px 3px 1px; border-radius: 50%; background: var(--panel); }
+.ag-bot-hero { width: 58px; height: 58px; transform: scale(1.22); margin: 14px 14px 0 10px; }
 .ag-bot-mini.ag-bot-running, .ag-bot-micro.ag-bot-running,
 .ag-bot-mini.ag-bot-waiting_approval, .ag-bot-micro.ag-bot-waiting_approval { animation: none; }
 .ag-bot-hero.ag-bot-running { animation: ag-bot-work-hero 1.8s ease-in-out infinite; }
 .ag-bot-hero.ag-bot-waiting_approval { animation: ag-bot-wait-hero 1.2s ease-in-out infinite; }
 @keyframes ag-bot-work { 0%,100% { transform: translateY(0) rotate(-.5deg); } 50% { transform: translateY(-3px) rotate(.5deg); } }
-@keyframes ag-bot-work-hero { 0%,100% { transform: scale(1.28) translateY(0) rotate(-.5deg); } 50% { transform: scale(1.28) translateY(-3px) rotate(.5deg); } }
+@keyframes ag-bot-work-hero { 0%,100% { transform: scale(1.22) translateY(0) rotate(-.5deg); } 50% { transform: scale(1.22) translateY(-3px) rotate(.5deg); } }
 @keyframes ag-bot-wait { 0%,100% { transform: translateX(-1px); } 50% { transform: translateX(1px); } }
-@keyframes ag-bot-wait-hero { 0%,100% { transform: scale(1.28) translateX(-1px); } 50% { transform: scale(1.28) translateX(1px); } }
+@keyframes ag-bot-wait-hero { 0%,100% { transform: scale(1.22) translateX(-1px); } 50% { transform: scale(1.22) translateX(1px); } }
 @keyframes ag-beacon { 0%,100% { opacity: 1; } 50% { opacity: .28; } }
 @keyframes ag-card-scan { 0%,55% { transform: translateX(-120%); } 85%,100% { transform: translateX(120%); } }
 /* The pane itself no longer scrolls. It used to, which meant the Steer box —
@@ -42201,7 +42241,7 @@ button.csl-item:hover { color: var(--fg); background: var(--wb-hover); }
    event log grew. Now approvals/workers scroll in their own bounded region and
    the event log is the flexible one, so head + compose always stay put. */
 .ag-detail { display: flex; flex-direction: column; min-height: 0; overflow: hidden; padding: 12px 14px; gap: 10px; }
-.ag-console-hero { position: relative; display: flex; align-items: center; min-height: 84px; padding: 7px 12px 7px 6px; overflow: hidden; border: 1px solid var(--wb-line); border-radius: 10px; background: linear-gradient(120deg, color-mix(in srgb, var(--wb-run) 9%, var(--bg)), var(--bg) 60%); }
+.ag-console-hero { position: relative; display: flex; align-items: center; min-height: 100px; padding: 10px 12px 8px 8px; overflow: hidden; border: 1px solid var(--wb-line); border-radius: 10px; background: linear-gradient(120deg, color-mix(in srgb, var(--wb-run) 9%, var(--bg)), var(--bg) 60%); }
 .ag-console-hero::after { content: ''; position: absolute; right: -25px; top: -55px; width: 150px; height: 150px; border: 1px solid color-mix(in srgb, var(--wb-run) 13%, transparent); border-radius: 50%; box-shadow: 0 0 0 22px color-mix(in srgb, var(--wb-run) 3%, transparent), 0 0 0 48px color-mix(in srgb, var(--wb-run) 2%, transparent); }
 .ag-console-identity { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; z-index: 1; }
 .ag-console-identity > span:last-child { overflow: hidden; color: var(--wb-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
