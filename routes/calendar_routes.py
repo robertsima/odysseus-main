@@ -825,9 +825,16 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
                 "has_password": has_pw,
                 "oauth_provider": acc.get("oauth_provider") or "",
                 "google_email": acc.get("google_email", "") if is_google else "",
-                # A Google account with no refresh token stored (revoked, or the
-                # exchange never completed) can't sync until the user reconnects.
-                "needs_reconnect": is_google and not acc.get("oauth_refresh_token"),
+                # A Google account can't sync until the user reconnects when the
+                # refresh token is missing (the exchange never completed) *or*
+                # when it is present but Google has since rejected it with an
+                # invalid_grant — src.caldav_sync sets oauth_needs_reconnect on
+                # that verdict. Without the second half a revoked account kept
+                # rendering "✓ Connected via Google OAuth" indefinitely.
+                "needs_reconnect": is_google and (
+                    not acc.get("oauth_refresh_token")
+                    or bool(acc.get("oauth_needs_reconnect"))
+                ),
             })
         return {"accounts": safe}
 
@@ -1027,6 +1034,9 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             existing["oauth_refresh_token"] = _enc(refresh_token)
             existing["oauth_token_expiry"] = expiry
             existing["url"] = events_url
+            # Reconnecting is exactly the remedy for an invalid_grant, so a
+            # fresh refresh token clears the flag that was nagging about it.
+            existing.pop("oauth_needs_reconnect", None)
         else:
             import uuid as _uuid
             accounts.append({
@@ -1067,11 +1077,21 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             if acc is None and accounts:
                 acc = accounts[0]
             if acc and acc.get("oauth_provider") == "google":
-                from src.caldav_sync import _get_valid_google_caldav_token
+                from src.caldav_sync import (
+                    _google_caldav_token_status,
+                    google_token_error_message,
+                )
                 url = url or (acc.get("url") or "")
-                google_token = _get_valid_google_caldav_token(owner, acc) or ""
+                token, token_status = _google_caldav_token_status(owner, acc)
+                google_token = token or ""
                 if not google_token:
-                    return {"ok": False, "error": "Google Calendar needs reconnecting — sign in again from Settings"}
+                    # "Test" is the button a user presses when something looks
+                    # wrong, so it must not blame their credentials for what was
+                    # actually a momentary failure at Google's token endpoint.
+                    # The Settings card renders `error` verbatim; the durable
+                    # "needs reconnecting" state travels on the account listing
+                    # instead of being duplicated into this response.
+                    return {"ok": False, "error": google_token_error_message(token_status)}
             elif acc:
                 url = url or (acc.get("url") or "")
                 user = user or (acc.get("username") or "")
@@ -1165,7 +1185,13 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     async def sync_caldav_endpoint(request: Request, direction: str = "pull"):
         """Sync events with configured external calendar sources.
         Returns counts + any per-calendar errors. Called by the frontend
-        on calendar open and by the periodic scheduler loop."""
+        on calendar open and by the periodic scheduler loop.
+
+        ``errors`` collects everything that went wrong; ``auth_errors`` is the
+        subset caused by dead provider credentials, which retrying cannot fix.
+        The background sync in static/js/calendar.js reads ``auth_errors`` so it
+        can interrupt the user for a revoked Google grant without nagging about
+        a CalDAV server that was briefly unreachable."""
         owner = _require_user(request)
         from src.caldav_sync import sync_caldav_direction
         from src.todoist_calendar_sync import sync_todoist_calendar
@@ -1186,6 +1212,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             "events": caldav_result.get("events", 0) + todoist_result.get("events", 0),
             "deleted": caldav_result.get("deleted", 0) + todoist_result.get("deleted", 0),
             "errors": [*caldav_errors, *todoist_errors],
+            "auth_errors": list(caldav_result.get("auth_errors", [])),
             "sources": {"caldav": caldav_result, "todoist": todoist_result},
         }
 
