@@ -499,6 +499,26 @@ class ChatProcessor:
             # agent mode so chat mode and incognito stay clean.)
 
         # RAG: search if enabled and rag_manager available, inject only above threshold
+        #
+        # Contentless turns skip it. This search is two ChromaDB collections and
+        # four round trips, and it ran on every turn including "hey", "lol" and
+        # "thanks!" — spending that latency to inject whatever a greeting
+        # happens to sit nearest in embedding space. The test is deliberately
+        # the NARROW one (`_is_casual_low_signal`, the chit-chat check), not the
+        # broad `low_signal` flag that gates tool retrieval: that flag is true
+        # for "fix the failing test" too, and losing document context there is
+        # the opposite of the problem being fixed. The active document and
+        # memory injection are separate paths and are unaffected.
+        if use_rag and retrieval_query:
+            try:
+                from src.agent_loop import _is_casual_low_signal
+
+                if _is_casual_low_signal(retrieval_query):
+                    logger.debug("RAG: skipping document retrieval for a contentless turn")
+                    use_rag = False
+            except Exception as _e:
+                # Never let the gate itself cost us retrieval.
+                logger.debug("RAG: low-signal check unavailable: %s", _e)
         if use_rag:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
