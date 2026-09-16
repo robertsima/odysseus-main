@@ -156,6 +156,14 @@ DEFAULT_SETTINGS = {
     "research_planning_timeout_seconds": 90,
     "research_query_timeout_seconds": 90,
     "research_extraction_concurrency": 3,
+    # Scheduler execution lanes (src/task_scheduler.py). Each lane is its own
+    # bounded queue, so lightweight housekeeping no longer waits behind an
+    # LLM-heavy job. `model` stays at 1 — that is the box's real limit and the
+    # pre-lane behaviour — while the I/O-bound lanes allow a little overlap.
+    # Clamped to 1..8 when read.
+    "task_model_lane_concurrency": 1,
+    "task_external_lane_concurrency": 2,
+    "task_maintenance_lane_concurrency": 2,
     # Hard wall-clock cap on a single deep-research run. The previous 600s
     # (10 min) default cut off slow local / edge LLMs mid-synthesis; 1800s
     # (30 min) is comfortable for most local setups while still bounding
