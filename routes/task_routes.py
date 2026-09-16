@@ -1029,6 +1029,70 @@ def setup_task_routes(task_scheduler) -> APIRouter:
             if name not in _ADMIN_ONLY_ACTIONS or _is_admin(user)
         ]}
 
+    @router.get("/meta/queues")
+    async def queue_state(request: Request):
+        """Lane occupancy and tripped dependency breakers.
+
+        Scheduled work runs unattended, so "nothing happened" has to be
+        distinguishable from "something is waiting" without reading the server
+        log. Before the lane split there was one semaphore and no way to see it
+        at all: three tasks due at 07:45 looked identical to an idle scheduler.
+
+        Owner-scoped where it matters — the counts and caps are properties of
+        the host and are safe to show, but `task_ids` is filtered to the
+        caller's own tasks so one user cannot enumerate another's schedule.
+        """
+        user = _owner(request)
+        try:
+            lanes = task_scheduler.lane_status()
+        except Exception:
+            logger.debug("Lane status unavailable", exc_info=True)
+            lanes = {}
+        if not isinstance(lanes, dict):
+            lanes = {}
+
+        visible: set[str] = set()
+        ids = {tid for lane in lanes.values() for tid in lane.get("task_ids", [])}
+        if ids:
+            db = SessionLocal()
+            try:
+                q = db.query(ScheduledTask.id).filter(ScheduledTask.id.in_(ids))
+                if user:
+                    q = q.filter(ScheduledTask.owner == user)
+                visible = {row[0] for row in q.all()}
+            except Exception:
+                logger.debug("Lane task scoping failed", exc_info=True)
+                visible = set()
+            finally:
+                db.close()
+        for lane in lanes.values():
+            lane["task_ids"] = [t for t in lane.get("task_ids", []) if t in visible]
+
+        # An open circuit is exactly what a user needs to see to understand why
+        # their task said "cooldown active" instead of running, so everyone gets
+        # the state and the countdown. The per-key detail names hosts and
+        # carries raw upstream text — on a shared install that is another
+        # tenant's mail server — so a non-admin gets the summary only.
+        try:
+            from src.circuit_breaker import all_snapshots
+            raw = all_snapshots()
+        except Exception:
+            logger.debug("Breaker snapshot unavailable", exc_info=True)
+            raw = {}
+        if _is_admin(user):
+            breakers = raw
+        else:
+            breakers = {
+                name: {
+                    "open": any(e.get("state") == "open" for e in keys.values()),
+                    "retry_in_seconds": max(
+                        (e.get("retry_in_seconds") or 0) for e in keys.values()
+                    ),
+                }
+                for name, keys in raw.items() if keys
+            }
+        return {"lanes": lanes, "breakers": breakers}
+
     @router.get("/meta/events")
     async def list_events(request: Request):
         """List available event triggers."""
