@@ -27,7 +27,15 @@ from src import agent_activity as _activity
 from src import tool_approvals as _tool_approvals
 from src import agent_control as _agent_control
 from src.prompt_security import untrusted_context_message
-from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_security import (
+    blocked_tools_for_owner,
+    plan_mode_disabled_tools,
+    # Private by name, but it is the list this repo already maintains for the
+    # question "can this tool change the world?" (its own comment says keep it
+    # in sync). The duplicate-call guard below asks exactly that question, and
+    # a second copy of 40 tool names here would drift within a release.
+    _PLAN_MODE_KNOWN_MUTATORS as _KNOWN_MUTATING_TOOLS,
+)
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.tool_schemas import compact_function_tool_schemas
@@ -1738,6 +1746,26 @@ _MISSING_TOOL_RE = re.compile(
     r"(?:currently\s+|still\s+)?"
     r"(?:available|callable|offered|enabled|exposed|provided|accessible)\b"
     r"|no\s+access\s+to\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
+    # Every branch above negates AVAILABILITY ("tools are not available").
+    # A round on 2026-09-16 negated MEMBERSHIP instead — it agreed the tools
+    # it had were available and said they didn't contain what it needed:
+    # "The tools currently available to me do not include: Repository or
+    # filesystem access, Application-log access, …". Nothing matched, no
+    # self-unblock fired, the turn ended with zero tool calls and the user
+    # had to retype the request.
+    #
+    # Staying narrow matters more here than anywhere else in this pattern:
+    # "do not include" is ordinary English that a round reporting a REAL
+    # result says all the time ("I used the read_file tool but the output
+    # does not include that function"). So the gap between "tool(s)" and the
+    # negation is not a wildcard — it may only contain words that belong to
+    # the noun phrase "the tools <I have / currently available to me>".
+    # A conjunction or a new subject ("… tool BUT the output …") stops it.
+    r"|tool(?:s|ing|set|\s+list|\s+set)?\b(?:\s+(?:currently|now|still|"
+    r"available|accessible|offered|enabled|exposed|provided|here|in|this|"
+    r"turn|session|to|I|you|we|me|my|us|have|has|had|was|were|gave|given|"
+    r"handed|see|listed))*"
+    r"\s+do(?:es)?\s*(?:n'?t|\s+not)\s+(?:currently\s+)?include\b"
     r")",
     re.IGNORECASE,
 )
@@ -4055,6 +4083,98 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+# ── Duplicate-call guard ──
+# A call that repeats an earlier one in the same turn — same tool name AND the
+# same arguments — cannot return anything the model has not already been shown,
+# so executing it again buys nothing and costs a round.
+#
+# Repro (2026-09-16): the delegation tools were missing from the schema list, so
+# the turn latched onto the only "actiony" tools it had (a connected Penpot MCP
+# server) and spent rounds 3-6 on four identical `execute_code` calls and two
+# `penpot_api_info` calls — one call and 37-44 output tokens per round — before
+# giving up in prose on round 7. `_detect_runaway_call` only trips at 15
+# identical calls and `_stuck_rounds` needs a streak of 4 text-free repeats, so
+# neither existing detector saw a six-round burn.
+#
+# A false positive here is worse than a miss: it withholds a call the model
+# genuinely needed. Legitimate repeats are let through three ways.
+#
+#   1. Polling. Some tools exist to observe state that moves on its own —
+#      tailing a serve's output, listing downloads, checking a research job.
+#      The identical call IS the workflow, so those never dedupe.
+#   2. "Something changed since." Re-reading a file after editing it, or
+#      re-listing a directory after writing into it, is correct behaviour. So
+#      any call that can mutate the world drops the memo: every observation
+#      recorded before it may now be stale and is fair to take again.
+#   3. Retries. A first call that FAILED is worth another go — transient
+#      errors are real — so only successful results are memoised.
+#
+# The guard also never fires on a call held for approval: that contract asks
+# the model to re-issue byte-identical arguments once the user decides.
+_DEDUPE_POLLING_TOOLS = {
+    "tail_serve_output",
+    "list_served_models",
+    "list_downloads",
+    "manage_bg_jobs",
+    "manage_research",
+    "read_app_logs",
+    # Ends the turn and waits for a human; re-asking is the user's business.
+    "ask_user",
+}
+
+
+def _dedupe_signature(tool_type: str, content: str) -> str:
+    """Stable identity for "this is the same call, made again".
+
+    Uses the FULL arguments, not the 120-character prefix `_call_freq` keys on:
+    two long `bash` scripts that share a prefix and differ at the end are
+    different calls, and suppressing the second would be exactly the false
+    positive this guard must never make. JSON arguments are canonicalised so a
+    reordered key doesn't make the same call look new.
+    """
+    raw = str(content or "").strip()
+    if raw.startswith("{"):
+        try:
+            raw = json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return f"{tool_type}\x00{raw}"
+
+
+def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str]) -> bool:
+    """Whether this exact call already ran, successfully, with nothing in
+    between that could have changed its answer. See the guard notes above."""
+    return bool(sig in memo and tool_type not in _DEDUPE_POLLING_TOOLS)
+
+
+def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str]) -> None:
+    """Memoise a successful call's result, first clearing the memo when the
+    call could have changed the world (rule 2 above). Clearing BEFORE
+    recording matters: the mutating call's own signature must survive, or a
+    model that fires the same `bash` twice in a row is never caught."""
+    if tool_type in _KNOWN_MUTATING_TOOLS or tool_type in _VERIFIER_EFFECTFUL_TOOLS:
+        memo.clear()
+    memo[sig] = _truncate(str(output or "").strip() or "(no output)", 1500)
+
+
+def _name_list(names, limit: int) -> str:
+    """Render a set of tool names for a log line or a directive, with any
+    truncation stated *inside* the string.
+
+    The missing-tool re-arm line used to log ``re-armed 33 tool(s)`` next to a
+    bare ``sorted(...)[:25]``. That is the one line an operator greps to answer
+    "was the tool I needed re-armed?", and the 8 silently dropped names are
+    exactly the ones being looked for — the line answered the question
+    confidently and wrongly. The directive the *model* reads had the same clip
+    at 20. Anything clipped now says so.
+    """
+    ordered = sorted(names or ())
+    shown = ordered[:max(int(limit), 0)]
+    rest = len(ordered) - len(shown)
+    body = ", ".join(shown) if shown else "(none)"
+    return f"{body} … +{rest} more" if rest > 0 else body
+
+
 # Cumulative tool calls allowed in one agent run before we force a convergence
 # round. Deliberately generous — a legitimate heavy turn (a batch of calendar
 # events, a build→test→fix cycle) lands well under it — but low enough that an
@@ -5381,6 +5501,19 @@ async def stream_agent_loop(
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
+    # Duplicate-call guard (see _dedupe_signature and the notes above it).
+    # {exact call signature: the result that call already returned}. Turn-scoped
+    # on purpose — a repeat in a LATER turn is the user asking again, and the
+    # approval flow explicitly requires re-issuing an identical call next turn.
+    _call_memo: Dict[str, str] = {}
+    _dup_calls_skipped = 0
+    # Bounded like _MAX_TOOLSET_REARMS / _MAX_INTENT_NUDGES: the suppressed
+    # result itself tells the model on every repeat, but the sharper directive
+    # ("you already made this exact call — change approach") is worth saying
+    # twice at most. Past that it is nagging, and the loop-breaker takes over.
+    _dup_directive_count = 0
+    _MAX_DUP_CALL_DIRECTIVES = 2
+    _dup_pending_directive = None  # queued until this round's tool results land
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
     # Breadth budget (companion to the repeat-based loop-breaker below). The
     # stall detector only trips on REPEATED calls, so a model that explores
@@ -6092,8 +6225,8 @@ async def stream_agent_loop(
                         _toolset_rearm_count += 1
                     _relevant_tools |= _rearm_new
                     logger.warning(
-                        "[agent] missing-tool self-unblock on round %d (%s): re-armed %d tool(s) %s",
-                        round_num, _rearm_scope, len(_rearm_new), sorted(_rearm_new)[:25],
+                        "[agent] missing-tool self-unblock on round %d (%s): re-armed %d tool(s): %s",
+                        round_num, _rearm_scope, len(_rearm_new), _name_list(_rearm_new, 25),
                     )
                     _note = (
                         "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
@@ -6106,7 +6239,7 @@ async def stream_agent_loop(
                         "Correction: the tool list you were shown was filtered too "
                         "narrowly, which is why the tool you wanted was missing. It has "
                         "been widened — "
-                        + ("these tools were added: " + ", ".join(sorted(_rearm_new)[:20]) + ". "
+                        + ("these tools were added: " + _name_list(_rearm_new, 20) + ". "
                            if _rearm_scope == "targeted"
                            else "every tool you are permitted to use this turn is now in your schema list. ")
                         + "Re-read it, then DO the user's request "
@@ -6363,6 +6496,7 @@ async def stream_agent_loop(
                 _tool_approvals.approval_reason(block.tool_type, full_command, approval_mode)
                 if approval_mode and session_id else None
             )
+            _dup_sig = _dedupe_signature(block.tool_type, full_command)
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -6371,6 +6505,47 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
+            elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo):
+                # Exact repeat of a call that already succeeded this turn, with
+                # nothing mutating in between — running it again can only
+                # reproduce the same bytes at full price. Hand back what it
+                # returned the first time instead of executing. Ahead of the
+                # approval branch so a repeat never re-prompts the user for a
+                # decision they already made.
+                _dup_calls_skipped += 1
+                _prior = _call_memo.get(_dup_sig) or "(no output)"
+                desc = f"{block.tool_type}: DUPLICATE (not run)"
+                result = {
+                    "output": (
+                        "Not run — you already made this exact call this turn (same "
+                        "tool, same arguments) and nothing has changed since. It "
+                        "returned:\n\n" + _prior +
+                        "\n\nRepeating it cannot produce a different answer. Use this "
+                        "result, or take a different step."
+                    ),
+                    "exit_code": 0,
+                    "duplicate_call": True,
+                }
+                logger.warning(
+                    "[agent] duplicate-call guard on round %d: skipped repeat #%d of %s",
+                    round_num, _dup_calls_skipped, block.tool_type,
+                )
+                if _dup_directive_count < _MAX_DUP_CALL_DIRECTIVES:
+                    _dup_directive_count += 1
+                    # Queued, not appended: _append_tool_results has not run
+                    # yet, so appending here would put the correction BEFORE
+                    # the assistant turn and tool results it is about.
+                    _dup_pending_directive = (
+                        f"You just called `{block.tool_type}` with arguments identical to "
+                        "a call you already made earlier in this turn, so it was not run "
+                        "again — the earlier result is repeated in the tool output above "
+                        "and it has not changed. Repeating a call is not progress. Either "
+                        "act on the result you already have, call a DIFFERENT tool, or, if "
+                        "you are stuck because the tool you actually need is not in your "
+                        "schema list, say so plainly and name it instead of retrying. If "
+                        "you genuinely need this call again because something changed, "
+                        "explain what changed first."
+                    )
             elif _approval_why and not _tool_approvals.consume_grant(session_id, block.tool_type, full_command):
                 # Stop and ask. The call is recorded as pending; the card's
                 # decision becomes a grant, and the user's reply lets the agent
@@ -6846,6 +7021,20 @@ async def stream_agent_loop(
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
+            # Duplicate-call guard: memoise what this call returned so an
+            # identical one later in the turn can be answered from here instead
+            # of re-run. Only successful calls — a retry after a real failure is
+            # legitimate work — and never an approval hold, whose whole contract
+            # is that the model re-issues the same call once the user decides.
+            if (
+                not result.get("error")
+                and not result.get("blocked")
+                and not result.get("approval_required")
+                and not result.get("duplicate_call")
+                and result.get("exit_code", 0) in (0, None)
+            ):
+                _record_call_result(_dup_sig, block.tool_type, output_text, _call_memo)
+
             formatted = format_tool_result(desc, result)
             # A tool result is not paid for once: it is replayed to the model on
             # every remaining round of the turn, so a single 60k-character log
@@ -6936,6 +7125,14 @@ async def stream_agent_loop(
                                  _context_profile.get("reasoning_replay_rounds")
                                  or _MAX_REASONING_REPLAY_ROUNDS
                              ))
+
+        # Duplicate-call correction, delivered after the round's tool results so
+        # it reads as a reply to the repeat it is about. Capped by
+        # _MAX_DUP_CALL_DIRECTIVES; the suppressed result still says it on every
+        # repeat, this is only the sharper "change approach" nudge.
+        if _dup_pending_directive:
+            messages.append(_harness_directive(_dup_pending_directive))
+            _dup_pending_directive = None
 
         # Emit agent_step event
         yield (
