@@ -1974,10 +1974,172 @@ def _harness_directive(text: str) -> Dict:
     return {"role": "user", "content": "[Harness directive — from the runtime, not the user] " + str(text or "")}
 
 
-def _claims_missing_tools(text: str) -> bool:
-    """True when a finished round blames a missing/unavailable tool."""
+# \u2500\u2500 The structural signal \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+#
+# _MISSING_TOOL_RE above is a wording chase, and the chase is being lost: it
+# has now missed three distinct real refusals, each costing the user a whole
+# turn. The last one (2026-09-16 07:42:40, round 1, zero tool calls) was
+#
+#     "The issue is a capability mismatch in this session:
+#      - I do not have application-log access.
+#      - I do not have repository or filesystem access.
+#      - I do not have the agent-launcher, Git, or push tools."
+#
+# Every branch of the regex wants the word "tool(s)" near the negation. Two
+# of those three bullets never say it \u2014 they say "access" \u2014 so the round
+# matched nothing and the turn ended. The next refusal will say "permissions",
+# or "capability", and we will be back here.
+#
+# So stop matching the noun and match the SHAPE instead. What all three
+# failures share is not a wording, it is a structure: a round that made zero
+# tool calls whose text is an ENUMERATION of capabilities the model says it
+# lacks \u2014 two or more items, each negating possession or access. A genuine
+# answer to a user almost never takes that shape, whatever nouns it uses.
+#
+# This is additive. The regex is not deleted: it carries real precision on
+# single-sentence claims ("the email tools aren't available this turn") that
+# never reach an enumeration threshold, and it is the only signal that fires
+# when a round DID call tools.
+
+# Every item must name a capability. This is the precision hinge, and it is
+# what keeps the signal off a bulleted list of FINDINGS: "I don't have the
+# exact date" and "I don't have that information" are the same grammar as
+# "I do not have repository access", and only the object tells them apart.
+# Note this is a CLASS of nouns, not one noun \u2014 the whole point is that no
+# single word (least of all "tool") is load-bearing any more.
+_CAPABILITY_NOUN_RE = re.compile(
+    r"\b(?:access|tools?|tooling|toolset|permissions?|privileges?|rights|"
+    r"capabilit(?:y|ies)|credentials?|integrations?|connectors?|"
+    r"abilit(?:y|ies)|commands?|shell|terminal|sandbox|runner|launcher|"
+    r"apis?|endpoints?|scopes?|mcp)\b",
+    re.IGNORECASE,
+)
+
+# Item form A: the model, in the first person, negating possession. Anchored
+# near the start of the segment (at most four words of lead-in, so "In this
+# session I do not have \u2026" still counts) because that anchoring is what makes
+# it an ITEM rather than a subordinate clause buried in a real answer \u2014 "I
+# used the read_file tool but the output does not include that function" must
+# not count, and it does not, because the negation is not the segment's spine.
+#
+# First person is required. A list of what the USER lacks ("- You do not have
+# admin rights", "- Your account lacks the Gmail scope") is advice, not
+# self-blocking, and re-arming on it would burn a round for nothing.
+_LACKS_FIRST_PERSON_RE = re.compile(
+    r"^\W*(?:[a-z][\w'/-]*\s+){0,4}?(?:i|we)\s+(?:"
+    r"do(?:n't|\s+not)\s+(?:currently\s+|actually\s+)?have"
+    r"|have\s+no\b"
+    r"|lack(?:s|ing)?\b"
+    r"|(?:can't|cannot|can\s+not|am\s+not\s+able\s+to)\s+access"
+    r"|(?:wasn't|was\s+not|weren't|were\s+not)\s+given"
+    r")",
+    re.IGNORECASE,
+)
+
+# Item form B: the capability as subject, denied TO ME specifically. "to me"
+# is not decoration \u2014 it is what separates "the delegation tool is not exposed
+# to me here" (self-blocking) from "the Pi-hole admin API is unavailable right
+# now" (a real upstream failure, which must never re-arm; the tools were there
+# and they ran).
+_DENIED_TO_ME_RE = re.compile(
+    r"\b(?:is|are|was|were)\s*(?:n't|\s+not)\s+(?:currently\s+|still\s+)?"
+    r"(?:available|accessible|exposed|enabled|offered|provided|granted|"
+    r"present|surfaced)\b[^.\n]{0,40}?\bto\s+(?:me|us)\b"
+    r"|\b(?:unavailable|inaccessible)\s+to\s+(?:me|us)\b",
+    re.IGNORECASE,
+)
+
+# Item form C: the telegraphic bullet, no verb at all ("- No repository
+# access", "- No git tools"). This one has to be tight or it eats every
+# findings list in the product, so it must fill the WHOLE segment and END on
+# a capability noun: "No repository access" counts, "No errors in the log"
+# and "No matches found" do not.
+_BARE_NO_CAPABILITY_RE = re.compile(
+    r"^(?:no|zero)\s+[\w ,/&'-]{0,60}?"
+    r"(?:access|tools?|tooling|toolset|permissions?|privileges?|rights|"
+    r"capabilit(?:y|ies)|credentials?|integrations?|connectors?|commands?|"
+    r"shell|terminal|launcher|apis?|scopes?|mcp)\s*$",
+    re.IGNORECASE,
+)
+
+_BULLET_MARKER_RE = re.compile(r"^\s*(?:[-*\u2022\u00b7\u2013\u2014+>]+|\d+[.)]|[a-z][.)])\s+", re.IGNORECASE)
+
+# Sentence enders, plus a conjunction that starts a fresh first-person clause
+# ("\u2026shell access, and I do not have the credentials") \u2014 two claims run
+# together are still two claims. Splitting there costs no precision: each half
+# must independently pass an item pattern AND name a capability to be counted.
+_SEGMENT_SPLIT_RE = re.compile(
+    r"(?<=[.;!?])\s+|[,;]?\s+(?:and|or|but)\s+(?=(?:i|we)\s)",
+    re.IGNORECASE,
+)
+
+# Two, not one. One "I don't have X" line is ordinary prose and fires all the
+# time in honest answers; the enumeration is what says "capability mismatch
+# dump" rather than "sentence". That threshold is the second precision hinge
+# and the reason this can afford to ignore the noun "tool" entirely.
+_MIN_MISSING_CAPABILITY_ITEMS = 2
+
+
+def _missing_capability_items(text: str) -> List[str]:
+    """The distinct 'I lack X' items an enumeration-style refusal is made of.
+
+    Segments on newlines AND on sentence enders, so the same shape counts
+    whether the model bulleted it (all three real refusals did) or ran it
+    together in a paragraph. Duplicates collapse: a model repeating one line
+    verbatim is still making one claim, not two.
+    """
+    items: List[str] = []
+    seen: Set[str] = set()
+    for line in str(text or "").splitlines():
+        for raw in _SEGMENT_SPLIT_RE.split(line):
+            segment = _BULLET_MARKER_RE.sub("", raw).strip().strip("*_`").strip()
+            segment = segment.rstrip(".;!?,").strip()
+            if not segment:
+                continue
+            key = segment.casefold()
+            if key in seen:
+                continue
+            if not _CAPABILITY_NOUN_RE.search(segment):
+                continue
+            if (
+                _LACKS_FIRST_PERSON_RE.search(segment)
+                or _DENIED_TO_ME_RE.search(segment)
+                or _BARE_NO_CAPABILITY_RE.match(segment)
+            ):
+                seen.add(key)
+                items.append(segment)
+    return items
+
+
+def _enumerates_missing_capabilities(text: str) -> bool:
+    """True when a round is a list of capabilities it says it does not have."""
+    return len(_missing_capability_items(text)) >= _MIN_MISSING_CAPABILITY_ITEMS
+
+
+def _missing_tool_signal(text: str, *, made_tool_calls: bool = False) -> Optional[str]:
+    """Which signal says this round self-blocked: "regex", "structural", None.
+
+    The caller logs the answer so the next operator reading the self-unblock
+    line can tell a wording match from a shape match without re-deriving it.
+
+    ``made_tool_calls`` gates the structural signal only. A round that called
+    tools was not denied them, so an enumeration in its text is a report about
+    the world, not about its own schema list \u2014 and the regex, which is narrow
+    enough to survive that, stays in charge there.
+    """
     text = str(text or "").replace("\u2019", "'").replace("\u2018", "'")
-    return bool(text.strip() and _MISSING_TOOL_RE.search(text))
+    if not text.strip():
+        return None
+    if _MISSING_TOOL_RE.search(text):
+        return "regex"
+    if not made_tool_calls and _enumerates_missing_capabilities(text):
+        return "structural"
+    return None
+
+
+def _claims_missing_tools(text: str, *, made_tool_calls: bool = False) -> bool:
+    """True when a finished round blames a missing/unavailable tool."""
+    return _missing_tool_signal(text, made_tool_calls=made_tool_calls) is not None
 
 
 def _targeted_rearm_tools(text: str, pool: Set[str], tool_idx=None) -> Set[str]:
@@ -6391,7 +6553,17 @@ async def stream_agent_loop(
                 and _is_api_model
                 and _relevant_tools is not None
                 and _toolset_rearm_count < _MAX_TOOLSET_REARMS
-                and _claims_missing_tools(_blocked_text)
+                # One gate, two signals. `_missing_tool_signal` returns the
+                # wording match ("regex") or the shape match ("structural" —
+                # an enumeration of capabilities it says it lacks), and every
+                # cap, the targeted-first widening and the directive below
+                # apply identically to both. Zero tool calls is already
+                # guaranteed by the enclosing `if not tool_blocks`, but a
+                # native call that failed to convert leaves that empty while
+                # tools really did run, so say so explicitly.
+                and (_missing_signal := _missing_tool_signal(
+                    _blocked_text, made_tool_calls=bool(tool_blocks or native_tool_calls),
+                )) is not None
             ):
                 try:
                     from src.tool_policy import known_tool_names
@@ -6429,8 +6601,13 @@ async def stream_agent_loop(
                         _toolset_rearm_count += 1
                     _relevant_tools |= _rearm_new
                     logger.warning(
-                        "[agent] missing-tool self-unblock on round %d (%s): re-armed %d tool(s): %s",
-                        round_num, _rearm_scope, len(_rearm_new), _name_list(_rearm_new, 25),
+                        # `via %s` is the new field: which signal fired. When
+                        # this line reappears in a bug report, the operator
+                        # needs to know whether a wording matched or the shape
+                        # did — they are tuned in completely different places.
+                        "[agent] missing-tool self-unblock on round %d (%s, via %s): re-armed %d tool(s): %s",
+                        round_num, _rearm_scope, _missing_signal,
+                        len(_rearm_new), _name_list(_rearm_new, 25),
                     )
                     _note = (
                         "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
