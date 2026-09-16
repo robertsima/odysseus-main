@@ -29,11 +29,60 @@ _FIELDS = (
 )
 
 
-def _requested(args: Dict[str, Any]) -> Dict[str, Any]:
-    """The loadout definition, given either inline or under `loadout`."""
+# Numeric fields whose valid range starts at 1, so a supplied 0 is a provider
+# filling in a blank rather than a setting. `max_parallel_workers` is pointedly
+# NOT here: 0 is a real value there and means "this worker may start no
+# children of its own".
+_ZERO_MEANS_UNSET = frozenset({"max_rounds"})
+
+
+def _is_blank(key: str, value: Any) -> bool:
+    """Whether a supplied field carries no instruction from the caller.
+
+    Native function-calling providers fill every property they were shown, so a
+    real call arrives as `{"action": "update", "name": "X", "instructions": "",
+    "model": "", "tool_access": "", "max_rounds": 0, ...}` — one intended edit
+    and a dozen blanks. Treating those blanks as values is what made an update
+    destructive. `False` is a real setting and is never blank.
+    """
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (list, tuple, set, dict)):
+        return not value
+    if key in _ZERO_MEANS_UNSET and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value <= 0
+    return False
+
+
+def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """The loadout definition, given either inline or under `loadout`.
+
+    With `base` (an update), the result is that stored profile with only the
+    fields the caller actually supplied overridden. Without it (a create), it is
+    just the supplied fields, and `validate_profiles` fills the rest with
+    defaults.
+
+    Blanks are ignored rather than written, so an untouched field keeps its
+    stored value instead of resetting to a default — for `tool_access` that
+    default is "all", which turned "rename this loadout" into "re-grant it every
+    tool its author can use". A field is unset deliberately by naming it in
+    `clear`, never by sending it empty.
+    """
     nested = args.get("loadout")
     source = nested if isinstance(nested, dict) else args
-    return {key: source[key] for key in _FIELDS if key in source}
+    supplied = {key: source[key] for key in _FIELDS
+                if key in source and not _is_blank(key, source[key])}
+    if base is None:
+        return supplied
+    merged = {key: base[key] for key in _FIELDS if key in base}
+    merged.update(supplied)
+    raw_clear = args.get("clear")
+    for key in raw_clear if isinstance(raw_clear, (list, tuple)) else []:
+        if key in _FIELDS and key != "name":
+            merged.pop(str(key), None)
+    return merged
 
 
 async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
@@ -91,9 +140,18 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         return {"response": f"Deleted loadout {name!r}", "exit_code": 0}
 
     if action in ("create", "update"):
-        requested = _requested(args)
+        base = None
+        if action == "update":
+            base = agent_profiles.get_profile(name)
+            if base is None:
+                return {"error": f"no loadout named {name!r}; use action='create'", "exit_code": 1}
+        requested = _requested(args, base)
         if not requested.get("name"):
             return {"error": "name is required", "exit_code": 1}
+        # Keep the stored name's capitalisation rather than whatever the caller
+        # typed, so `update` never renames a loadout as a side effect.
+        if base is not None:
+            requested["name"] = base["name"]
         try:
             profile, narrowed = agent_loadouts.clamp(requested, policy)
             saved = agent_loadouts.save(profile, replace=(action == "update"))

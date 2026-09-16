@@ -359,3 +359,84 @@ async def test_start_can_be_asked_for_a_standalone_worker(launcher):
         '{"action": "start", "task": "go", "parent_session": ""}', "mine", owner="me")
     assert result["exit_code"] == 0
     assert launcher["parent_session"] is None
+
+
+# ── update must not wipe fields the caller never set ─────────────────────────
+#
+# Native function-calling providers fill every declared property. A real call
+# recorded in the logs came through as
+#   {"action": "capabilities", "name": "", "task": "", "instructions": "", ...}
+# — every property present, most of them blank. An `update` that rebuilt the
+# profile from that payload reset each untouched field to validate_profiles'
+# default, which for `tool_access` is "all": changing a description silently
+# re-granted a deliberately narrow loadout every tool its author could use.
+
+async def test_update_only_changes_the_fields_the_caller_supplied(store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reviewer", "description": "reads diffs",'
+        ' "instructions": "Be terse.", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "grep"], "memory_access": "none",'
+        ' "max_rounds": 5}', "c", owner="u")
+
+    # Exactly the shape a provider sends: one real edit, every other property blank.
+    await manage_agent_loadout(
+        '{"action": "update", "name": "Reviewer", "description": "reviews diffs",'
+        ' "instructions": "", "model": "", "tool_access": "", "enabled_tools": [],'
+        ' "memory_access": "", "skill_names": [], "max_rounds": 0}', "c", owner="u")
+
+    saved = store["profiles"][0]
+    assert saved["description"] == "reviews diffs"
+    assert saved["instructions"] == "Be terse."
+    assert saved["tool_access"] == "selected"
+    assert saved["enabled_tools"] == ["grep", "read_file"]
+    assert saved["memory_access"] == "none"
+    assert saved["max_rounds"] == 5
+
+
+async def test_update_does_not_re_widen_a_narrow_tool_policy(store):
+    """The sharp edge of the same bug: a blank tool_access defaulting to 'all'."""
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Narrow", "tool_access": "selected",'
+        ' "enabled_tools": ["grep"]}', "c", owner="u")
+    await manage_agent_loadout(
+        '{"action": "update", "name": "Narrow", "description": "now documented"}',
+        "c", owner="u")
+    assert store["profiles"][0]["enabled_tools"] == ["grep"]
+    assert store["profiles"][0]["tool_access"] == "selected"
+
+
+async def test_a_field_can_still_be_cleared_on_purpose(store):
+    """Ignoring blanks must not make a field impossible to unset."""
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reviewer", "instructions": "Be terse."}',
+        "c", owner="u")
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Reviewer", "clear": ["instructions"]}',
+        "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["instructions"] == ""
+
+
+async def test_update_of_an_unknown_loadout_is_refused(store):
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Ghost", "description": "x"}', "c", owner="u")
+    assert result["exit_code"] == 1 and "no loadout named" in result["error"]
+
+
+async def test_zero_parallel_workers_is_a_real_setting_not_a_blank(store):
+    """0 means 'this worker starts no children'. It must survive an update the
+    way an empty string must not."""
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Solo", "max_parallel_workers": 0}', "c", owner="u")
+    assert store["profiles"][0]["max_parallel_workers"] == 0
+    await manage_agent_loadout(
+        '{"action": "update", "name": "Solo", "description": "no children",'
+        ' "max_parallel_workers": 0}', "c", owner="u")
+    assert store["profiles"][0]["max_parallel_workers"] == 0
+
+
+async def test_update_does_not_rename_by_recapitalising(store):
+    await manage_agent_loadout('{"action": "create", "name": "Reviewer"}', "c", owner="u")
+    await manage_agent_loadout(
+        '{"action": "update", "name": "reviewer", "description": "x"}', "c", owner="u")
+    assert [p["name"] for p in store["profiles"]] == ["Reviewer"]

@@ -1279,7 +1279,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
                     "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
-                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."}
+                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."},
+                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."}
                 },
                 "required": ["action"]
             }

@@ -312,8 +312,17 @@ def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
     through that route (a ``send_to_session`` sub-agent, a background-job
     follow-up) used to skip both, so a sub-agent could run a tool the operator
     had switched off. This is the owner-level part of that merge, shared.
+
+    It also carries the public-user blocklist. ``is_public_blocked_tool`` has
+    always refused those tools at execution time, but nothing removed them from
+    the round's schema list, so a non-admin agent was shown ~40 tools it could
+    not call and learned that only by calling one — spending schema tokens
+    every round and, worse, picking a delegation tool it would then be refused
+    and burning rounds rediscovering that. Denying them here keeps the offer and
+    the enforcement in agreement, which is what the behaviour spec means by a
+    capability degrading honestly rather than failing later as a phantom tool.
     """
-    out: Set[str] = set()
+    out: Set[str] = set(blocked_tools_for_owner(owner))
     try:
         from src.settings import get_setting
 

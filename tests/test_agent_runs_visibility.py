@@ -107,12 +107,42 @@ async def test_headless_children_get_the_global_disabled_tools(monkeypatch):
     monkeypatch.setattr(settings, "get_setting",
                         lambda key, default=None: ["bash", "web_fetch"] if key == "disabled_tools" else default)
 
+    # The owner's admin status is pinned rather than resolved from the
+    # environment. owner_baseline_disabled_tools now also carries the public-user
+    # blocklist, and owner_is_admin_or_single_user fails closed, so without this
+    # the assertion below would be measuring whether the test runner happens to
+    # have a loadable auth manager instead of what this test is about: the
+    # operator's global `disabled_tools` reaching a headless child.
+    import src.tool_security as tool_security
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+
     await headless_agent.run_headless(_Sess(), [], run_id=None)
     assert {"bash", "web_fetch", "send_to_session"} <= set(seen["disabled_tools"])
 
     # A chat continuing itself (disabled_tools=None) still honours the operator.
     await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
     assert set(seen["disabled_tools"]) == {"bash", "web_fetch"}
+
+
+async def test_a_non_admin_headless_child_is_denied_the_public_blocklist(monkeypatch):
+    """The same merge point also has to stop a child being handed tools the
+    execution gate would refuse — see tests/test_non_admin_phantom_tools.py."""
+    seen = {}
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    import src.settings as settings
+    import src.tool_security as tool_security
+    from src.tool_security import NON_ADMIN_BLOCKED_TOOLS
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: [] if key == "disabled_tools" else default)
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: False)
+
+    await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
+    assert NON_ADMIN_BLOCKED_TOOLS <= set(seen["disabled_tools"])
 
 
 def test_bg_job_is_a_run_from_launch_and_kill_closes_it(monkeypatch, tmp_path):
