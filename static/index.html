@@ -248,8 +248,8 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260825ctxmeter1">
-  <link rel="modulepreload" href="/static/app.js?v=20260809ragtoggle1">
+  <link rel="stylesheet" href="/static/style.css?v=20260915controlroom1">
+  <link rel="modulepreload" href="/static/app.js?v=20260915controlroom1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260825ctxmeter1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
@@ -322,8 +322,27 @@
       </div>
     </div>
   </div>
-  <!-- Agents dashboard: full-page fleet view (js/agentsDashboard.js) -->
-  <div id="agents-dashboard" class="agents-dashboard" role="dialog" aria-label="Agents" hidden></div>
+  <!-- Agent Control Room: draggable/dockable fleet monitor (js/agentsDashboard.js) -->
+  <div id="agents-dashboard" class="modal agents-dashboard hidden" role="dialog" aria-labelledby="ag-window-title" aria-modal="false" tabindex="-1" hidden>
+    <div class="modal-content agents-modal-content">
+      <div class="modal-header agents-window-header">
+        <div class="ag-window-mark" aria-hidden="true">
+          <span class="ag-window-antenna"></span><i></i><i></i>
+        </div>
+        <div class="ag-window-title">
+          <h3 id="ag-window-title">Agent Control Room</h3>
+          <span id="ag-window-summary">Fleet telemetry and live controls</span>
+        </div>
+        <div class="ag-window-actions">
+          <button type="button" class="doc-action-icon-btn" id="ag-dock-left" title="Dock left" aria-label="Dock Agent Control Room left">&#9703;</button>
+          <button type="button" class="doc-action-icon-btn" id="ag-dock-right" title="Dock right" aria-label="Dock Agent Control Room right">&#9704;</button>
+          <button type="button" class="doc-action-icon-btn" id="ag-maximize" title="Fill workspace" aria-label="Maximize Agent Control Room">&#9635;</button>
+          <button type="button" class="modal-close" id="close-agents-dashboard" title="Close" aria-label="Close Agent Control Room">&times;</button>
+        </div>
+      </div>
+      <div id="agents-dashboard-body" class="agents-dashboard-body"></div>
+    </div>
+  </div>
   <div id="workbench-diff-modal" class="modal hidden">
     <div class="modal-content workbench-diff-content" role="dialog" aria-label="Diff" style="background:var(--bg)">
       <div class="modal-header"><h4 class="wb-popout-title">Diff</h4><button class="close-btn" id="close-workbench-diff-modal" aria-label="Close diff">✖</button></div>
@@ -2862,7 +2881,7 @@
 <script type="module" src="/static/js/settings.js?v=20260825ctxprofile1"></script>
 <script type="module" src="/static/js/capabilitiesPanel.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260809ragtoggle1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260915controlroom1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

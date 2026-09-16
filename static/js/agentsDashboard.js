@@ -14,6 +14,11 @@
  */
 
 import uiModule from './ui.js';
+import Modals from './modalManager.js';
+import { makeWindowDraggable } from './windowDrag.js';
+import { snapModalToZone } from './tileManager.js';
+import { applyEdgeDock } from './modalSnap.js';
+import { nextToolWindowZ } from './toolWindowZOrder.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -23,6 +28,8 @@ const STATUS = {
 };
 const SOURCE_LABEL = { odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
 const KIND_ICON = { run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←', file_change: '±', commit: '●', status: '·', error: '!', note: '~' };
+const MODAL_ID = 'agents-dashboard';
+let returnFocus = null;
 
 const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
@@ -54,6 +61,33 @@ function fmtDur(a, b) {
 function fmtTime(ts) { return ts ? new Date(ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }) : ''; }
 function pill(status) { const [label, cls] = STATUS[status] || [status, '']; return `<span class="wb-pill ${cls}"><i aria-hidden="true"></i>${esc(label)}</span>`; }
 function chip(source) { return `<span class="wb-chip wb-src-${esc(source)}">${esc(SOURCE_LABEL[source] || source)}</span>`; }
+
+function hashUnit(value) {
+  let hash = 2166136261;
+  for (const ch of String(value || 'agent')) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
+  return Math.abs(hash >>> 0);
+}
+function robotHtml(agent, size = '') {
+  const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
+  const hue = hashUnit(key) % 360;
+  const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
+  const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
+  return `<span class="ag-bot ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" style="--ag-bot-h:${hue}" aria-hidden="true">
+    <span class="ag-bot-antenna"><i></i></span>
+    <span class="ag-bot-head"><i class="ag-bot-eye"></i><i class="ag-bot-eye"></i><b></b></span>
+    <span class="ag-bot-body"><i></i><small>${unit}</small></span>
+  </span>`;
+}
+function telemetryHtml() {
+  const t = state.totals || {};
+  const stats = [
+    ['active', t.running || 0, 'Units active'],
+    ['attention', t.waiting_approval || 0, 'Need you'],
+    ['workers', t.workers_running || 0, 'Workers live'],
+    ['done', t.finished_24h || 0, 'Done today'],
+  ];
+  return stats.map(([kind, count, label]) => `<div class="ag-telemetry ag-telemetry-${kind}"><i></i><b>${count}</b><span>${label}</span></div>`).join('');
+}
 
 // ── data ──────────────────────────────────────────────────────────────────
 async function refresh() {
@@ -153,6 +187,8 @@ function updateBadges() {
   const dot = $('tool-agents-dot');
   if (dot) dot.style.display = attention ? 'inline-block' : 'none';
   $('rail-agents')?.classList.toggle('rail-notify', attention > 0);
+  const summary = $('ag-window-summary');
+  if (summary) summary.textContent = `${running} active · ${attention} waiting · ${state.totals.finished_24h || 0} completed today`;
 }
 
 // ── triage ────────────────────────────────────────────────────────────────
@@ -202,20 +238,22 @@ function triageHtml() {
 function render() {
   const root = $('agents-dashboard');
   if (!root || !state.open) return;
-  root.innerHTML = `
+  const surface = $('agents-dashboard-body');
+  if (!surface) return;
+  surface.innerHTML = `
     <div class="ag-head">
-      <div class="ag-title"><span class="ag-title-text">Agents</span>${liveHtml()}</div>
+      <div class="ag-title"><span class="ag-title-text">Mission floor</span>${liveHtml()}</div>
       <div class="ag-triage">${triageHtml()}</div>
       <div class="ag-head-actions">
         <button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>
         <button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs (admin)">Workbench</button>
-        <button type="button" class="wb-icon-btn" data-ag="close" aria-label="Close" title="Close (Esc)">✕</button>
       </div>
     </div>
+    <div class="ag-telemetry-strip" aria-label="Fleet summary">${telemetryHtml()}</div>
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
     <div class="ag-body">
       <aside class="ag-fleet wb-card">
-        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter chats…" value="${esc(state.filter)}" aria-label="Filter chats"></div>
+        <div class="ag-fleet-tools"><span><b>Robot fleet</b><small>select a unit to inspect</small></span><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
       <section class="ag-detail wb-card" id="ag-detail"></section>
@@ -240,7 +278,7 @@ function fleetHtml() {
     const solo = shown.length === 1;
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
       solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
-    }${items.map(rowHtml).join('')}</div>`;
+    }<div class="ag-card-grid">${items.map(rowHtml).join('')}</div></div>`;
   }).join('');
   if (html) return html;
   if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
@@ -254,14 +292,19 @@ function renderFleetOnly() {
   const list = $('agents-dashboard')?.querySelector('.ag-fleet-list');
   if (!list) return;
   const top = list.scrollTop;
+  const focusedUnit = list.contains(document.activeElement) && document.activeElement.matches('.ag-card-select')
+    ? document.activeElement.dataset.sid : null;
   list.innerHTML = fleetHtml();
   list.scrollTop = top;
+  if (focusedUnit) list.querySelector(`.ag-card-select[data-sid="${CSS.escape(focusedUnit)}"]`)?.focus({ preventScroll: true });
 }
 function updateStats() {
   const box = $('agents-dashboard')?.querySelector('.ag-triage');
   if (box) box.innerHTML = triageHtml();
   const live = $('agents-dashboard')?.querySelector('.ag-live');
   if (live) live.outerHTML = liveHtml();
+  const telemetry = $('agents-dashboard')?.querySelector('.ag-telemetry-strip');
+  if (telemetry) telemetry.innerHTML = telemetryHtml();
 }
 function updateOpenView() {
   if (!state.open || !$('agents-dashboard')?.querySelector('.ag-body')) return;
@@ -285,9 +328,19 @@ function rowHtml(r) {
   ].filter(Boolean).join(' · ');
   const blocked = r.pending_approvals
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
-  return `<div class="ag-row${sel ? ' active' : ''}${r.status === 'waiting_approval' ? ' attn' : ''}" data-sid="${esc(r.session_id)}" role="button" tabindex="0" aria-selected="${sel ? 'true' : 'false'}">
-    <div class="ag-row-top">${pill(r.status)}<span class="ag-row-name" title="${esc(r.name)}">${esc(r.name)}</span>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
-    <div class="ag-row-sub">${blocked}${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : ''}</div>
+  const children = (r.children || []).slice(0, 5);
+  const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
+  const status = r.status || 'idle';
+  return `<div class="ag-row ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${status === 'waiting_approval' ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
+    <div class="ag-card-beacon" aria-hidden="true"></div>
+    <div class="ag-card-avatar">${robotHtml(r)}</div>
+    <div class="ag-card-copy">
+      <div class="ag-row-top"><button type="button" class="ag-row-name ag-card-select" data-ag="select-agent" data-sid="${esc(r.session_id)}" aria-pressed="${sel ? 'true' : 'false'}" title="Inspect ${esc(r.name)}">${esc(r.name)}</button>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
+      <div class="ag-card-status">${pill(status)}${blocked}</div>
+      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
+      ${crew}
+    </div>
+    <div class="ag-card-actions"><button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
   </div>`;
 }
 function renderDetail() {
@@ -308,15 +361,18 @@ function renderDetail() {
   const running = r.status === 'running' || r.status === 'waiting_approval';
   const events = (state.events.get(r.session_id) || []).slice(-200).reverse();
   const children = r.children || [];
+  const lastEvent = events[0];
   box.innerHTML = `
-    <div class="ag-detail-head">
-      ${pill(r.status)}<span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span>
-      <span class="wb-spacer"></span>
-      <button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>
-      ${r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}
-      ${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
+    <div class="ag-console-hero">
+      ${robotHtml(r, 'hero')}
+      <div class="ag-console-identity"><span class="ag-console-eyebrow">Selected unit</span><span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span><span>${esc(r.latest || lastEvent?.title || 'Standing by')}</span></div>
+      <div class="ag-console-status">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</div>
     </div>
-    <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}</div>
+    <div class="ag-detail-head">
+      <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}<span class="wb-meta-item">${children.length} worker${children.length === 1 ? '' : 's'}</span><span class="wb-meta-item">${events.length} events</span></div>
+      <span class="wb-spacer"></span><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>
+      ${r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
+    </div>
     ${approvals.length || children.length ? `<div class="ag-detail-top">
       ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
       ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
@@ -352,7 +408,7 @@ function childHtml(c) {
   const live = c.status === 'running';
   const s = c.summary || {};
   const title = String(c.title || '').replace(/^(Sub-agent|Claude Code|Background job|Worker)\s*[·:]\s*/, '');
-  return `<div class="ag-child${live ? '' : ' done'}">${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
+  return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
     ${s.target_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="inspect-run" data-run="${esc(c.run_id)}" data-sid="${esc(state.selected || '')}">Inspect</button>
     ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : ''}</div>`;
@@ -386,7 +442,12 @@ async function onClick(e) {
   if (!b) return;
   const act = b.dataset.ag;
   try {
-    if (act === 'close') close();
+    if (act === 'select-agent') {
+      state.selected = b.dataset.sid;
+      renderFleetOnly(); renderDetail();
+      $('agents-dashboard')?.querySelector(`.ag-card-select[data-sid="${CSS.escape(state.selected)}"]`)?.focus({ preventScroll: true });
+    }
+    else if (act === 'close') close();
     else if (act === 'workbench') {
       if (!window.workbenchModule?.open) throw new Error('Workbench is unavailable');
       close(); window.workbenchModule.open();
@@ -482,13 +543,49 @@ async function openChat(sid) {
 }
 
 // ── open / close ──────────────────────────────────────────────────────────
+function registerWithManager() {
+  if (Modals.isRegistered(MODAL_ID)) return;
+  Modals.register(MODAL_ID, {
+    label: 'Agent Control Room',
+    railBtnId: 'rail-agents',
+    sidebarBtnId: 'tool-agents-btn',
+    restoreFn: () => open(),
+    closeFn: () => hideWindow(),
+  });
+}
+function hideWindow() {
+  const root = $(MODAL_ID); if (!root) return;
+  const restoreFocus = root.contains(document.activeElement);
+  state.open = false;
+  root.hidden = true;
+  root.classList.add('hidden');
+  if (state.tick) { clearInterval(state.tick); state.tick = null; }
+  if (restoreFocus && returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+}
+function workspaceRect() {
+  const css = getComputedStyle(document.documentElement);
+  const nav = (parseFloat(css.getPropertyValue('--icon-rail-w')) || 0)
+    + (parseFloat(css.getPropertyValue('--sidebar-w')) || 0);
+  return { left: nav + 4, top: 4, width: Math.max(320, window.innerWidth - nav - 8), height: Math.max(320, window.innerHeight - 8) };
+}
+function bringToFront() {
+  const root = $(MODAL_ID); if (!root) return;
+  root.style.zIndex = String(nextToolWindowZ({ exclude: root, current: root.style.zIndex }));
+}
 export function open() {
   const root = $('agents-dashboard'); if (!root) return;
-  state.open = true; root.hidden = false; document.body.classList.add('agents-dashboard-open');
+  registerWithManager();
+  if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }
+  if (!state.open) returnFocus = document.activeElement;
+  state.open = true;
+  root.hidden = false;
+  root.classList.remove('hidden');
+  bringToFront();
   if ('Notification' in window && Notification.permission === 'default') { try { Notification.requestPermission(); } catch (_) {} }
   const cur = window.sessionModule?.getCurrentSessionId?.();
   if (cur && state.rows.some((r) => r.session_id === cur)) state.selected = cur;
   render(); refresh(); connect();
+  root.focus({ preventScroll: true });
   if (!state.tick) state.tick = setInterval(() => {
     if (!state.open) return;
     root.querySelectorAll('.ag-row-dur[data-started]').forEach((el) => {
@@ -499,16 +596,36 @@ export function open() {
   }, 1000);
 }
 export function close() {
-  const root = $('agents-dashboard'); if (!root) return;
-  state.open = false; root.hidden = true; document.body.classList.remove('agents-dashboard-open');
-  if (state.tick) { clearInterval(state.tick); state.tick = null; }
+  if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
+  else hideWindow();
 }
-export function toggle() { state.open ? close() : open(); }
+export function toggle() {
+  if (Modals.toggle(MODAL_ID)) return;
+  state.open ? close() : open();
+}
 
 function init() {
   const root = $('agents-dashboard'); if (!root) return;
+  const content = root.querySelector('.agents-modal-content');
+  const header = root.querySelector('.agents-window-header');
+  makeWindowDraggable(root, {
+    content,
+    header,
+    skipSelector: 'button, input, select, label, textarea',
+    enableDock: true,
+    enableLeftDock: true,
+    minWidth: 520,
+    minHeight: 440,
+    resizeStorageKey: 'odysseus-agents-window-size',
+  });
+  registerWithManager();
+  Modals.injectMinimizeButton(root, MODAL_ID);
+  $('close-agents-dashboard')?.addEventListener('click', close);
+  $('ag-dock-left')?.addEventListener('click', () => applyEdgeDock(root, 'left'));
+  $('ag-dock-right')?.addEventListener('click', () => applyEdgeDock(root, 'right'));
+  $('ag-maximize')?.addEventListener('click', () => snapModalToZone(root, { name: 'maximize', rect: workspaceRect() }));
+  root.addEventListener('pointerdown', bringToFront, true);
   root.addEventListener('click', onClick);
-  root.addEventListener('keydown', (e) => { if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('ag-row')) { e.preventDefault(); e.target.click(); } });
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.open) { close(); return; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }

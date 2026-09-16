@@ -23,7 +23,9 @@ import workbenchModule from './js/workbench.js';
 // Per-chat settings + the status line under the composer (self-initialising).
 import './js/chatSettings.js';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).
-import './js/agentsDashboard.js';
+import './js/agentsDashboard.js?v=20260915controlroom1';
+// User-customizable tool order shared by the icon rail and sidebar Tools list.
+import './js/navOrder.js?v=20260915controlroom1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
