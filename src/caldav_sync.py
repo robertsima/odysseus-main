@@ -723,22 +723,14 @@ def _save_caldav_accounts(owner: str, accounts: list) -> None:
 # not cosmetic: a terminal failure will never fix itself, so it has to reach
 # the user, while a transient one must stay a quiet retry or every flaky
 # network minute turns into a "reconnect your calendar" scare.
-TOKEN_OK = "ok"
-TOKEN_UNCONFIGURED = "unconfigured"   # the server itself has no OAuth client set up
-TOKEN_TERMINAL = "terminal"           # grant is dead; only re-authorization fixes it
-TOKEN_TRANSIENT = "transient"         # blip; the next sync may well succeed
+# The verdict taxonomy is shared with the mail transport — see
+# src/oauth_errors.py for why it does not live in either subsystem.
+from src.oauth_errors import (  # noqa: E402
+    TOKEN_OK, TOKEN_UNCONFIGURED, TOKEN_TERMINAL, TOKEN_TRANSIENT,
+    GOOGLE_TERMINAL_TOKEN_ERRORS, classify_google_token_failure,
+)
 
-# RFC 6749 §5.2 error codes that mean the stored *grant* is gone, not that the
-# request was unlucky. Google answers a revoked or expired refresh token with
-# ``invalid_grant``; the others show up when the OAuth client itself has been
-# deleted or had the scope withdrawn. All of them survive a retry, so we stop
-# retrying and tell the user to reconnect.
-GOOGLE_TERMINAL_TOKEN_ERRORS = frozenset({
-    "invalid_grant",
-    "invalid_client",
-    "unauthorized_client",
-    "invalid_scope",
-})
+_classify_google_token_failure = classify_google_token_failure
 
 # User-facing text for each terminal-ish case. Kept here so the sync response,
 # the write-back path and the /test probe all say the same thing.
@@ -768,46 +760,6 @@ def google_token_error_message(status: str) -> str:
         return GOOGLE_OAUTH_UNCONFIGURED
     return GOOGLE_REAUTH_REQUIRED
 
-
-def _classify_google_token_failure(resp) -> tuple[str, str]:
-    """Classify a failed Google token-endpoint response as terminal or transient.
-
-    Returns ``(TOKEN_TERMINAL | TOKEN_TRANSIENT, oauth_error_code)``.
-
-    ``resp`` is None when the request never produced a response at all (DNS,
-    TLS, connect timeout) — always transient.
-
-    We read the OAuth error code out of the JSON body rather than trusting the
-    status alone, because Google answers *both* "your refresh token is dead"
-    and "you sent a malformed request" with a bare 400. The body can also be
-    missing or not JSON at all (a proxy's HTML error page), so we fall back to
-    the status: this endpoint only answers 400/401 over credentials, never as a
-    transient blip, while 429/5xx are retryable by definition.
-
-    Only the short error *code* is returned — never ``error_description``,
-    which is free-form upstream text, and never any part of the request, which
-    carries the client secret and the refresh token.
-    """
-    if resp is None:
-        return TOKEN_TRANSIENT, ""
-    status = getattr(resp, "status_code", 0) or 0
-    code = ""
-    try:
-        body = resp.json()
-        if isinstance(body, dict):
-            err = body.get("error")
-            # Google sends a bare string here; some proxies wrap it in an object.
-            if isinstance(err, str):
-                code = err.strip().lower()
-            elif isinstance(err, dict):
-                code = str(err.get("status") or err.get("code") or "").strip().lower()
-    except Exception:
-        code = ""
-    if code:
-        return (TOKEN_TERMINAL if code in GOOGLE_TERMINAL_TOKEN_ERRORS else TOKEN_TRANSIENT), code
-    # No usable body: 400/401 from a token endpoint is a credential verdict,
-    # anything else (429, 5xx, a stray 3xx) is worth retrying.
-    return (TOKEN_TERMINAL if status in (400, 401) else TOKEN_TRANSIENT), ""
 
 
 def _mark_google_caldav_account(owner: str, account_id: str, *, needs_reconnect: bool) -> None:

@@ -120,37 +120,19 @@ TOKEN_TRANSIENT = "transient"
 
 # What Google returns in the token endpoint's JSON `error` field when the grant
 # itself is unusable. Retrying cannot clear any of them.
-GOOGLE_TERMINAL_TOKEN_ERRORS = frozenset({
-    "invalid_grant",
-    "invalid_client",
-    "unauthorized_client",
-    "invalid_scope",
-})
+# Shared with the calendar sync — see src/oauth_errors.py. The local copy
+# had already drifted: it classified a parsed-but-unknown error code by the
+# HTTP status, so a 400 `invalid_request` (our malformed request) told the
+# user to re-authorize a working account.
+from src.oauth_errors import (  # noqa: E402
+    TOKEN_TERMINAL, TOKEN_TRANSIENT, GOOGLE_TERMINAL_TOKEN_ERRORS,
+    classify_google_token_failure,
+)
 
 
 def _classify_google_token_failure(resp=None) -> str:
-    """Terminal or transient? `resp` is the token endpoint's response, or None
-    when the request never produced one (DNS, TLS, timeout, reset).
-
-    No response is always transient — an unreachable Google says nothing about
-    whether the grant is still good.
-    """
-    if resp is None:
-        return TOKEN_TRANSIENT
-    try:
-        error_code = str((resp.json() or {}).get("error") or "").strip().lower()
-    except Exception:
-        error_code = ""
-    if error_code in GOOGLE_TERMINAL_TOKEN_ERRORS:
-        return TOKEN_TERMINAL
-    # Absent or unrecognised body: fall back to the status. Google answers a
-    # rejected grant with 400, and 401 means the client credentials themselves
-    # were refused; both need a human, not a retry.
-    try:
-        status = int(getattr(resp, "status_code", 0) or 0)
-    except (TypeError, ValueError):
-        status = 0
-    return TOKEN_TERMINAL if status in (400, 401) else TOKEN_TRANSIENT
+    """The verdict alone. Callers here never needed the error code."""
+    return classify_google_token_failure(resp)[0]
 
 
 def google_token_failure_message(kind: str) -> str:
