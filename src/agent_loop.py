@@ -4653,6 +4653,42 @@ _DEDUPE_POLLING_TOOLS = {
     "ask_user",
 }
 
+# The set above can only ever name BUILTIN tools, and an MCP tool's name carries
+# a per-server hash (`mcp__77d1a280__firecrawl_agent_status`), so no static list
+# can hold one. Polling an MCP job is the same workflow as polling a builtin
+# one: the identical call repeated until the answer changes. Without this, the
+# second poll of a running job is answered from the memo with the first poll's
+# "still running" — forever, so the job can never be observed finishing.
+#
+# Recognised by name shape instead. These stems are what a poll is called across
+# every server convention seen so far; matched as whole words within the bare
+# tool name so `firecrawl_check_crawl_status` and `firecrawl_monitor_check` hit
+# while `firecrawl_scrape` does not.
+_DEDUPE_POLLING_NAME_RE = re.compile(
+    r"(?:^|_)(?:status|state|poll|check|checks|wait|progress|tail|watch|monitor|"
+    r"pending|result|results)(?:_|$)",
+    re.IGNORECASE,
+)
+
+# Likewise for "this call could have changed something". _KNOWN_MUTATING_TOOLS
+# is builtin-only, so an MCP write followed by an identical MCP read would serve
+# the pre-write answer from the memo. The mutating call's OWN signature still
+# survives the clear (see _record_call_result), so a model repeating the same
+# write is still caught.
+_DEDUPE_MUTATING_NAME_RE = re.compile(
+    r"(?:^|_)(?:create|update|delete|remove|write|set|add|insert|import|export|"
+    r"execute|run|send|post|upload|modify|edit|rename|move|apply|install|start|"
+    r"stop|cancel|publish)(?:_|$)",
+    re.IGNORECASE,
+)
+
+_MCP_PREFIX_RE = re.compile(r"^mcp__[^_]+__")
+
+
+def _bare_tool_name(tool_type: str) -> str:
+    """An MCP tool's own name, without the `mcp__<server>__` routing prefix."""
+    return _MCP_PREFIX_RE.sub("", str(tool_type or ""))
+
 
 def _dedupe_signature(tool_type: str, content: str) -> str:
     """Stable identity for "this is the same call, made again".
@@ -4675,7 +4711,11 @@ def _dedupe_signature(tool_type: str, content: str) -> str:
 def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str]) -> bool:
     """Whether this exact call already ran, successfully, with nothing in
     between that could have changed its answer. See the guard notes above."""
-    return bool(sig in memo and tool_type not in _DEDUPE_POLLING_TOOLS)
+    if tool_type in _DEDUPE_POLLING_TOOLS:
+        return False
+    if _DEDUPE_POLLING_NAME_RE.search(_bare_tool_name(tool_type)):
+        return False
+    return bool(sig in memo)
 
 
 def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str]) -> None:
@@ -4683,7 +4723,11 @@ def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, s
     call could have changed the world (rule 2 above). Clearing BEFORE
     recording matters: the mutating call's own signature must survive, or a
     model that fires the same `bash` twice in a row is never caught."""
-    if tool_type in _KNOWN_MUTATING_TOOLS or tool_type in _VERIFIER_EFFECTFUL_TOOLS:
+    if (
+        tool_type in _KNOWN_MUTATING_TOOLS
+        or tool_type in _VERIFIER_EFFECTFUL_TOOLS
+        or _DEDUPE_MUTATING_NAME_RE.search(_bare_tool_name(tool_type))
+    ):
         memo.clear()
     memo[sig] = _truncate(str(output or "").strip() or "(no output)", 1500)
 

@@ -9,6 +9,8 @@ return, or moves the done-break, could silently flip this. See PR #1999 / #1997.
 import asyncio
 import json
 
+import pytest
+
 import src.agent_loop as al
 
 
@@ -283,3 +285,67 @@ def test_headless_hands_back_partial_work_when_rounds_run_out(monkeypatch):
 def test_headless_says_nothing_extra_when_the_run_finishes(monkeypatch):
     text, _events, outcome = _headless(monkeypatch, [{"delta": "All done."}])
     assert text == "All done." and outcome == {}
+
+
+# ── The duplicate-call guard and MCP tool names ─────────────────────────────
+#
+# _DEDUPE_POLLING_TOOLS can only name builtins, but an MCP tool's name carries
+# a per-server hash. Real names from the 2026-09-16 logs are used below: a
+# firecrawl research job is started and then polled with
+# `mcp__77d1a280__firecrawl_agent_status`. Answering the second poll from the
+# memo means the job can never be observed finishing.
+
+
+def _memo_with(name, args="{}", output="first result"):
+    memo = {}
+    signature = al._dedupe_signature(name, args)
+    al._record_call_result(signature, name, output, memo)
+    return signature, memo
+
+
+@pytest.mark.parametrize("name", [
+    "mcp__77d1a280__firecrawl_agent_status",
+    "mcp__77d1a280__firecrawl_check_crawl_status",
+    "mcp__77d1a280__firecrawl_monitor_check",
+    "mcp__77d1a280__firecrawl_agent_status",
+    "mcp__abc123__job_progress",
+    "mcp__abc123__wait_for_run",
+])
+def test_polling_an_mcp_job_is_never_answered_from_the_memo(name):
+    signature, memo = _memo_with(name)
+    assert not al._is_duplicate_call(signature, name, memo), name
+
+
+@pytest.mark.parametrize("name", [
+    "mcp__c5ec6d7a__high_level_overview",
+    "mcp__93c1b32d__query-docs",
+    "mcp__77d1a280__firecrawl_scrape",
+])
+def test_a_repeated_mcp_read_is_still_caught(name):
+    """The guard must keep doing its job — this shape is the original incident,
+    where a turn spent four rounds re-reading the same MCP overview."""
+    signature, memo = _memo_with(name)
+    assert al._is_duplicate_call(signature, name, memo), name
+
+
+def test_an_mcp_write_invalidates_an_earlier_identical_read():
+    """_KNOWN_MUTATING_TOOLS is builtin-only, so without name-shape detection an
+    MCP write followed by the same read would serve the pre-write answer."""
+    memo = {}
+    read = al._dedupe_signature("mcp__c5ec6d7a__high_level_overview", "{}")
+    al._record_call_result(read, "mcp__c5ec6d7a__high_level_overview", "before", memo)
+    write = al._dedupe_signature("mcp__c5ec6d7a__import_image", '{"f":"x.png"}')
+    al._record_call_result(write, "mcp__c5ec6d7a__import_image", "ok", memo)
+    assert not al._is_duplicate_call(read, "mcp__c5ec6d7a__high_level_overview", memo)
+
+
+def test_a_repeated_mcp_write_is_still_caught():
+    """Clearing happens before recording, so the write's own signature survives."""
+    name = "mcp__c5ec6d7a__execute_code"
+    signature, memo = _memo_with(name, '{"code":"1+1"}')
+    assert al._is_duplicate_call(signature, name, memo)
+
+
+def test_the_prefix_stripper_leaves_a_builtin_name_alone():
+    assert al._bare_tool_name("read_file") == "read_file"
+    assert al._bare_tool_name("mcp__77d1a280__firecrawl_scrape") == "firecrawl_scrape"
