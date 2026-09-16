@@ -10,6 +10,7 @@
   <a href="#quick-start">Quick Start</a> ·
   <a href="docs/setup.md">Setup Guide</a> ·
   <a href="docs/configuration.md">Configuration</a> ·
+  <a href="docs/">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="ROADMAP.md">Roadmap</a>
 </p>
@@ -57,6 +58,15 @@ A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/in
 ## Contributing
 
 Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
+
+To find your way around the code, start with [`docs/`](docs/README.md). Four
+documents cover the whole system: [architecture and runtime](docs/architecture-runtime.md)
+(what runs where, a request end to end, where state lives),
+[subsystems](docs/subsystems.md) (which files implement which feature),
+[the agent runtime](docs/agent-runtime.md) (how a turn picks its tools and
+keeps its context bounded), and [design patterns](docs/design-patterns.md)
+(why the code is written the way it is — worth reading before a refactor).
+`specs/` holds the behaviour rules the code has to satisfy.
 
 ## Security
 

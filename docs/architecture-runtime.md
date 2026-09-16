@@ -350,7 +350,7 @@ Top-level import lines between packages, counted over `*.py`:
 
 | Direction | Lines | Reading |
 |---|---|---|
-| `routes/` → `src/` | 465 | Expected — handlers calling domain logic |
+| `routes/` → `src/` | 466 | Expected — handlers calling domain logic |
 | `routes/` → `core/` | 144 | Expected — handlers touching models |
 | `src/` → `core/` | 133 | Expected |
 | `src/` → `routes/` | 39 | **Inverted** |
@@ -788,12 +788,12 @@ more `<script type="module">` line is the whole ceremony.
 Everything runs on uvicorn's asyncio loop. There is no process pool, no
 Celery, no separate worker. The two escape valves are:
 
-- **`asyncio.to_thread`** — 84 call sites, plus 8 `run_in_executor`.
+- **`asyncio.to_thread`** — 88 call sites, plus 8 `run_in_executor`.
   Used wherever a synchronous library would otherwise block the loop: SQLite
   work on hot paths (`_refresh_token_cache` in `app.py`), Chroma's
   synchronous client (`src/agent_tools/rag_tools.py`), the CalDAV library
   (`src/caldav_sync.py`), filesystem walks, IMAP.
-- **`asyncio.create_task`** — 53 sites. Fire-and-forget work: the token
+- **`asyncio.create_task`** — 58 sites. Fire-and-forget work: the token
   `last_used_at` touch, the foreground-gate's background-task sweep, post-
   response memory extraction, the scheduler's per-task dispatch.
 
