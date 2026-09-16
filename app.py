@@ -227,17 +227,12 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
         finally:
             elapsed = time.perf_counter() - start
             try:
-                from src.settings import get_setting_or_env
-
-                threshold = float(
-                    get_setting_or_env(
-                        "slow_request_log_seconds",
-                        "ODYSSEUS_SLOW_REQUEST_LOG_SECONDS",
-                        0.75,
-                    )
-                    or 0.75
-                )
-                threshold = max(0.0, threshold)
+                from src.route_latency import record as _record_route_latency
+                _record_route_latency(request.method, request.url.path, elapsed)
+            except Exception:
+                pass
+            try:
+                threshold = float(os.getenv("ODYSSEUS_SLOW_REQUEST_LOG_SECONDS", "0.75") or "0.75")
             except Exception:
                 threshold = 0.75
             if elapsed >= threshold:
