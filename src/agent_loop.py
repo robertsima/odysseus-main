@@ -5308,7 +5308,10 @@ async def stream_agent_loop(
         _relevant_tools = set(_relevant_tools) - disabled_tools
 
     if _relevant_tools is not None:
-        logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+        # Same silent-clip trap as the re-arm line: this is read to answer "was
+        # the tool I expected selected?", and a bare [:50] answers it wrongly on
+        # a wide turn (the incident turn selected 50 of 57).
+        logger.info("[agent-intent] selected_tools=%s", _name_list(_relevant_tools, 50))
         # Retrieval said these were what the request was about; selection threw
         # them away anyway. Name each one and the gate responsible -- a tool
         # the user asked for by name disappearing without a word is how the

@@ -438,7 +438,11 @@ function statusClass(status) {
   const s = status || 'running';
   if (s === 'running' || s === 'queued' || s === 'in_progress' || s === 'pending') return 'run';
   if (s === 'completed' || s === 'succeeded' || s === 'done' || s === 'success' || s === 'open' || s === 'merged') return 'ok';
-  if (s === 'cancelled' || s === 'draft' || s === 'interrupted') return 'warn';
+  // `incomplete` is a run that spent its round budget with the task
+  // unfinished (agent_control.launch_worker). That is a partial result to
+  // pick up, not a failure, so it reads amber like cancelled/interrupted
+  // rather than falling through to the red default.
+  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {

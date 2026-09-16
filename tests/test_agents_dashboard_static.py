@@ -181,3 +181,16 @@ def test_control_room_reply_keeps_the_window_open_while_switching_chat():
     send = AGENTS.split("async function sendToChat", 1)[1].split("async function selectChat", 1)[0]
     assert "close()" not in send
     assert "await selectChat(sid)" in send
+
+
+def test_a_cut_off_worker_reads_as_partial_work_not_a_failure():
+    """launch_worker records `incomplete` for a run that spent its round budget
+    mid-task. Neither status renderer knew the word: the dashboard fell through
+    to a classless pill showing the raw status, and the Workbench to the red
+    'bad' style, so a resumable partial result looked like a crash."""
+    control = (ROOT / "src/agent_control.py").read_text(encoding="utf-8")
+    assert '"incomplete"' in control, "precondition: the backend still emits this status"
+    assert "incomplete: ['Out of rounds', 'warn']" in AGENTS
+    assert "s === 'incomplete'" in WORKBENCH
+    workbench_class = WORKBENCH.split("function statusClass(status)", 1)[1].split("\n}", 1)[0]
+    assert "'incomplete'" in workbench_class.split("return 'warn'", 1)[0]
