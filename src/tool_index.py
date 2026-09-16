@@ -391,10 +391,25 @@ class ToolIndex:
                    "repository", "patch", "changeset", "diff"}):
             {"manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
         # Self-debugging: the app's own logs.
+        #
+        # Matching is `\b<hint>\b`, so the plural "logs" is already safe from
+        # "blogs", "catalogs" and "dialogues" — but the SINGULAR "log" is not
+        # safe from the verb in "log in", which is why it only ever appears
+        # here with a qualifier attached. Same hazard class as the stem guard
+        # documented at `_ADMIN_STEM_MIN_LEN` in agent_loop.
+        #
+        # The 2026-09-16 incident phrase was "analyze your own logs", which
+        # none of the original entries covered: the user addressed the app in
+        # the second person and this set only knew "the logs" / "app logs".
         frozenset({"app log", "app logs", "application log", "application logs",
                    "server log", "server logs", "the logs", "check the logs",
-                   "log output", "stack trace", "traceback", "error log",
-                   "why did it fail", "what went wrong"}):
+                   "log output", "log file", "log files", "stack trace",
+                   "traceback", "error log", "error logs", "error message",
+                   "your logs", "your own logs", "own logs", "odysseus logs",
+                   "exception", "crash", "crashed", "crashing",
+                   "debug this", "debug it", "debugging", "troubleshoot",
+                   "troubleshooting", "went wrong", "what went wrong",
+                   "why did it fail", "why it failed", "why did that fail"}):
             {"read_app_logs"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
         frozenset({"background job", "background jobs", "bg job", "bg jobs",

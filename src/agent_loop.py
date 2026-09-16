@@ -601,6 +601,13 @@ _DOMAIN_RULES = {
 - Never diagnose, never give clinical or psychological advice, and never speculate about causes. If the data suggests something worrying, describe the numbers and let the user draw the conclusion.
 - Private check-in notes are never available to you; do not ask for them and do not invent them.
 - Only use `action=log_checkin` when the user explicitly asks you to record how they feel.""",
+    "self_diagnosis": """\
+## Self-diagnosis rules
+- `read_app_logs` reads Odysseus's OWN application log files. Use it whenever the user asks you to look at the app's logs, or to explain an error, crash, traceback, or "why did X fail" in Odysseus itself.
+- Call `action=list` first to see which log files exist, then `action=tail` with a `level` or substring filter. Do not pull a whole log file into context when a filtered tail answers the question.
+- It is read-only and already redacted. Do not go hunting for log files with `bash`, `ls`, `glob`, or `read_file` first, and do not ask the user to paste their logs.
+- Never tell the user you have no access to the application logs while `read_app_logs` is in your toolset — read them.
+- The logs are evidence, not a diagnosis. Quote the lines you relied on before you say what went wrong.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -624,6 +631,18 @@ _DOMAIN_TOOL_MAP = {
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
     "wellbeing": {"manage_wellbeing"},
+    # Keyed on `read_app_logs` alone, for the same reason as knowledge_base
+    # above: `_domain_rules_for_tools` derives the rule packs from the FINAL
+    # tool names, so listing grep/ls/read_file here would staple the
+    # self-diagnosis rules onto every file turn in the app. The read-only
+    # inspection tools a debugging turn also wants are seeded alongside this
+    # domain in the request path instead, where they cost schemas but no prose.
+    #
+    # One consequence worth knowing: because this set is exactly one tool, a
+    # Terminus swap that drops `read_app_logs` leaves the domain with nothing
+    # and `repair_starved_domains` puts it straight back — which is the
+    # behaviour we want for "debug this crash in the repo".
+    "self_diagnosis": {"read_app_logs"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -737,6 +756,7 @@ _STARVED_DOMAIN_LABELS = {
     "contacts": "contacts",
     "integrations": "service integrations",
     "wellbeing": "wellbeing check-ins",
+    "self_diagnosis": "the application logs",
 }
 
 # "web" is excluded from the starvation check: it is the most over-triggered
@@ -795,6 +815,65 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
             starved,
         )
     return starved
+
+
+def keyword_fallback_tools(query: str) -> Set[str]:
+    """Deterministic tool selection for when the embedding index is unavailable.
+
+    The same keyword pass `ToolIndex.get_tools_for_query` runs, against the same
+    hint table, and it has to stay the same: this is what selects tools whenever
+    ChromaDB is down or retrieval times out, which is the moment tool selection
+    can least afford to disagree with itself.
+
+    It did disagree. This mirror was left matching raw substrings after the
+    ToolIndex copy was moved to word boundaries, so "look at the local project"
+    matched the source-control hint on the "pr" inside "project" and the turn
+    was handed manage_agent_worktree, apply_patch and edit_file with no
+    workspace bound at all. Short keys like "pr", "ty", "cc" and "no" sit in
+    several of those sets, and the ToolIndex comment lists the rest of the
+    hazard ("fix" in "prefix", "line" in "deadline", "serve" in "reserve").
+    """
+    ql = str(query or "").lower()
+    if not ql:
+        return set()
+    from src.tool_index import ToolIndex
+    out: Set[str] = set()
+    for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
+        if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
+            out.update(tools)
+    return out
+
+
+# The editor-document tools that cannot act without a target document.
+# `create_document` is deliberately NOT one of them — it stands on its own, and
+# the file/bash rules tell the model to reach for it on any kind of turn.
+_DOCUMENT_TARGET_TOOLS = frozenset({"edit_document", "update_document", "suggest_document"})
+
+
+def document_tools_to_drop(relevant_tools, *, active_document_relevant, domains,
+                           forced_tools=()):
+    """Return the open-document tools a turn that isn't about a document carries.
+
+    The mirror of the "active document turn removed file tools" prune. That one
+    exists because an open editor panel should not drag file/shell tools into a
+    document turn; this one exists because the reverse happened on 2026-09-16 —
+    the classifier logged `active_doc_relevant=False` for "analyze your own logs
+    and fix this issue" and all four document tools were selected anyway.
+
+    They came from a keyword hint whose keys include the bare verbs "fix",
+    "edit", "change", "update" and "replace" (`ToolIndex._KEYWORD_HINTS`). That
+    hint is right when a document is the subject of the turn and wrong the rest
+    of the time, and from inside the index it cannot tell which it is looking
+    at: it sees the query string and nothing else. `_turn_targets_active_document`
+    already made that judgement for this turn, so apply it in both directions
+    instead of only the one.
+
+    `forced_tools` are a deliberate per-request selection and outrank the
+    heuristic, the same way they outrank retrieval.
+    """
+    if active_document_relevant or "documents" in set(domains or ()):
+        return set()
+    return (set(relevant_tools or ()) & _DOCUMENT_TARGET_TOOLS) - set(forced_tools or ())
 
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -2174,6 +2253,93 @@ def _is_casual_low_signal(text: str) -> bool:
     return len(tail_words) <= 2
 
 
+# ── "Is this turn asking for something?" ──────────────────────────────────
+#
+# The mirror image of `_is_casual_low_signal`. That one answers "is this
+# chit-chat"; this one answers "is this work", and `_classify_agent_request`
+# needs both because a turn can be neither a recognised domain nor a greeting.
+#
+# Two signals, and a turn needs one of them:
+#   - an action verb (the user is telling Odysseus to do something), or
+#   - a question (wh-/auxiliary opener, or a literal "?").
+#
+# ...plus at least one CONTENT word. That second half is what keeps the terse
+# acknowledgements out: "yeah do that", "run it", "do it" all contain an action
+# verb, but every other token is a pronoun or filler, so there is nothing for
+# embedding retrieval to match against and the right handling is the
+# continuation path (which inherits the previous turn's query), not a retrieval
+# against the literal words. It is also what keeps "i like Umni" out — the
+# example the hints-only branch was originally added for — since "like" is not
+# an action verb and the message asks for nothing.
+#
+# Deliberately generous on the verb list and deliberately strict on content
+# words: a false positive costs eight tool schemas for one turn, a false
+# negative costs the whole turn ("I do not have application-log access").
+_REQUEST_ACTION_RE = re.compile(
+    r"\b(?:fix|debug|troubleshoot|diagnose|investigate|analy[sz]e|inspect|"
+    r"check|verify|test|reproduce|trace|explain|figure|find|look|search|"
+    r"read|write|create|make|build|generate|draft|compose|add|remove|delete|"
+    r"update|change|edit|rename|move|copy|convert|install|uninstall|run|"
+    r"execute|launch|start|stop|restart|deploy|push|pull|commit|merge|"
+    r"rebase|refactor|implement|scaffold|summari[sz]e|compare|list|show|"
+    r"open|close|send|reply|forward|fetch|download|upload|sort|handle|"
+    r"clean|review|audit|plan|schedule|help|tell|give|set|enable|disable|"
+    r"turn|switch|rewrite|proofread|translate|calculate|count)\b",
+    re.IGNORECASE,
+)
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(?:what|why|how|when|where|who|whom|whose|which|"
+    r"can|could|should|would|will|do|does|did|is|are|was|were|has|have|am)\b",
+    re.IGNORECASE,
+)
+# Pronouns, articles, auxiliaries, politeness and acknowledgement tokens. A
+# token outside this set is treated as content — a noun, an adjective, a name,
+# an error string, anything the tool index can actually embed against.
+_REQUEST_FILLER_WORDS = frozenset({
+    "i", "me", "my", "mine", "myself", "we", "us", "our", "ours",
+    "you", "your", "yours", "it", "its", "he", "him", "his", "she", "her",
+    "they", "them", "their", "this", "that", "these", "those", "there", "here",
+    "a", "an", "the", "and", "or", "but", "so", "if", "then", "than",
+    "to", "of", "for", "with", "on", "in", "at", "by", "from", "into", "as",
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "do", "does", "did", "done", "doing",
+    "can", "could", "should", "would", "will", "shall", "may", "might", "must",
+    "have", "has", "had", "get", "got",
+    "please", "just", "now", "also", "too", "very", "really", "actually",
+    "maybe", "again", "out", "up", "down", "off", "over", "back",
+    "ok", "okay", "yes", "yeah", "yep", "yup", "sure", "no", "nope",
+    "thanks", "thank", "thx", "great", "cool", "nice", "good", "fine",
+    "alright", "one", "some", "any", "all", "more", "most", "less",
+    "not", "dont", "doesnt", "didnt", "cant", "wont", "isnt", "arent",
+    # The interrogatives are function words too. Without them here "how are
+    # you" reads as a question with a content word ("how") and pulls eight tool
+    # schemas into a greeting; with them, it needs a real noun or verb to
+    # qualify, which "what went wrong" and "how do i wire this up" both have.
+    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+})
+
+
+def _looks_like_a_request(text: str) -> bool:
+    """True when the turn asks Odysseus to do or explain something."""
+    s = str(text or "").strip()
+    if not s or _is_casual_low_signal(s):
+        return False
+    lowered = s.lower()
+    if not (_REQUEST_ACTION_RE.search(lowered)
+            or "?" in s
+            or _QUESTION_OPENER_RE.match(lowered)):
+        return False
+    # The action verb itself does not count as content: "run it" and "yeah do
+    # that" would otherwise pass on the verb alone, and those are continuations
+    # whose real query lives in the previous turn, not in these two words.
+    words = re.findall(r"[a-z0-9_'-]+", lowered)
+    return any(
+        w.replace("'", "") not in _REQUEST_FILLER_WORDS
+        and not _REQUEST_ACTION_RE.fullmatch(w)
+        for w in words
+    )
+
+
 def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
     """Treat "try again / it failed" as a continuation whenever there's a
     real prior turn to inherit from.
@@ -2379,8 +2545,79 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\bplan (?:out )?my (?:day|week|schedule)\b",
            r"\b(?:feeling|felt|feelings)\b.{0,20}\b(?:lately|recently|this week|this month)\b"):
         domains.add("wellbeing")
+    # Self-diagnosis — reading Odysseus's own logs and explaining its own
+    # failures. 2026-09-16: "analyze your own logs and fix this issue" matched
+    # no domain at all, so `low_signal` was True, embedding retrieval was
+    # skipped in favour of keyword hints, `read_app_logs` was never offered,
+    # and the turn ended with "I do not have application-log access." A request
+    # to debug the running app is the opposite of a low-signal turn — it is the
+    # one shape of request that most needs the full selection.
+    #
+    # "log" is the hazard here, for exactly the reason documented at
+    # `_ADMIN_STEM_MIN_LEN`: as a stem it sits inside "login", "logo", "logic",
+    # "blog", "dialogue", "catalog" and "logistics", and as a bare word it is
+    # the verb in "log in". Word boundaries alone clear the compounds, but not
+    # "log in" and not "what did I write in my voice logs" (vault content). So
+    # the noun is only ever matched with a qualifier in front of it ("app log",
+    # "error log", "your own logs") or a reading verb leading into it ("check
+    # the logs") — never on its own.
+    if has(
+        # Odysseus's own log files.
+        r"\b(?:app|application|server|error|debug|crash|system|runtime|odysseus)\s+logs?\b",
+        r"\blogs?\s+(?:file|files|output|entries|entry)\b",
+        r"\b(?:your|its)\s+(?:own\s+)?logs?\b",
+        r"\b(?:read|check|tail|analy[sz]e|analy[sz]ing|inspect|examine|review|"
+        r"grep|scan|show|see|open|look\s+(?:at|in|through))\b"
+        r"(?:\s+(?:the|my|your|our|its|own|last|recent|latest|full|raw|app|"
+        r"application|server|error|debug|system|odysseus))*\s+logs\b",
+        # A concrete failure to explain.
+        r"\b(?:tracebacks?|stack\s?traces?|stacktraces?)\b",
+        r"\bcrash(?:e[ds]|ing)?\b",
+        r"\b(?:got|getting|seeing|saw|hit|hitting|throw(?:s|ing|n)?|threw|"
+        r"rais(?:e[ds]?|ing)|return(?:s|ed|ing)?)\b(?:\s+\w+){0,3}\s+"
+        r"\b(?:errors?|exceptions?)\b",
+        r"\b(?:errors?|exceptions?)\s+(?:message|messages|log|logs|output)\b",
+        r"\btrac(?:e|ed|ing)\b(?:\s+\w+){0,5}\s+"
+        r"\b(?:error|errors|exception|exceptions|bug|bugs|crash|failure|"
+        r"fail|issue|problem|regression)\b",
+        # "why did the export fail", "what went wrong", "the deploy is failing
+        # again", "this is broken" — a reported breakage, however phrased.
+        r"\bwhy\b(?:\s+\w+){0,6}\s+\b(?:fail(?:s|ed|ing)?|break|broke|broken|"
+        r"crash(?:e[ds])?|error(?:ed|s)?|hang(?:s|ing)?|hung|"
+        r"time[ds]?\s+out)\b",
+        r"\b(?:went|going)\s+wrong\b",
+        r"\b(?:is|are|was|were|keeps?|kept)\s+(?:\w+\s+){0,2}"
+        r"(?:fail(?:s|ed|ing)?|break(?:s|ing)?|broke|broken|crash(?:e[ds]|ing)?|"
+        r"erroring|hanging|stuck)\b",
+        r"\b(?:not working|isn'?t working|doesn'?t work|didn'?t work|"
+        r"stopped working|won'?t start)\b",
+        # Explicit debugging intent.
+        r"\bdebug(?:s|ged|ging)?\b",
+        r"\btroubleshoot(?:s|ed|ing)?\b",
+        r"\bdiagnostics?\b",
+        r"\bdiagnos(?:e|ed|ing)\b(?:\s+\w+){0,3}\s+"
+        r"\b(?:this|it|that|issue|issues|problem|problems|bug|bugs|error|"
+        r"errors|failure|failures|crash|crashes)\b",
+    ):
+        domains.add("self_diagnosis")
 
-    low_signal = not continuation and not domains
+    # Domain coverage used to be the ONLY gate on embedding retrieval, so any
+    # request phrased outside the enumerated regexes above landed in the same
+    # bucket as "hey" / "lol" / "thanks!" — it took the direct-reply path on a
+    # first turn, and the hints-only path afterwards. Measured over an
+    # 18-message corpus of realistic turns, 15 skipped retrieval; ten of those
+    # fifteen were substantive work requests ("fix the failing test", "this is
+    # broken, sort it out"). The tool index is built and paid for and then
+    # bypassed on the majority of turns.
+    #
+    # Adding one more domain fixes one more phrasing and leaves the hole open
+    # for the next one, so the gate itself moves: a turn with no domain is
+    # low-signal only when it ALSO carries no request signal. `_looks_like_a_request`
+    # is a positive test for chit-chat's opposite, which is what this flag was
+    # always reaching for — `_is_casual_low_signal` above is the positive test
+    # for chit-chat itself. The change is monotone: it can only ever clear
+    # `low_signal`, never set it, so no turn that retrieves today stops doing so.
+    low_signal = not continuation and not domains and not _looks_like_a_request(text)
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -4929,13 +5166,10 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+        from src.tool_index import ALWAYS_AVAILABLE
         _relevant_tools = set(ALWAYS_AVAILABLE)
         _tool_selection_source = "keyword"
-        ql = _retrieval_query.lower()
-        for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(kw in ql for kw in keywords):
-                _relevant_tools.update(tools)
+        _relevant_tools |= keyword_fallback_tools(_retrieval_query)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
     # Snapshot what retrieval (or the keyword fallback) matched for THIS query,
@@ -4979,6 +5213,32 @@ async def stream_agent_loop(
                 )
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
+        if "self_diagnosis" in (_intent.get("domains") or set()):
+            # `read_app_logs` arrives from _DOMAIN_TOOL_MAP. These are the
+            # read-only tools a "why did this break" turn needs next — find the
+            # code the log line names, read it, and say what happened. They are
+            # seeded here rather than in the map because the map also decides
+            # which rule packs get written into the prompt (see the comment on
+            # the `self_diagnosis` entry). Nothing that writes or executes is
+            # included: diagnosing is not the same permission as fixing, and a
+            # turn that goes on to ask for the fix picks those up on its own.
+            _relevant_tools.update({"read_file", "grep", "glob", "ls"})
+        if (
+            workspace
+            and not _existing_conversation
+            and not (_intent.get("domains") or set())
+            and not _active_document_relevant
+        ):
+            # An active workspace IS the file-work signal: a first-turn request
+            # that names no domain ("look at the local project") means explore
+            # this folder. The low-signal branch above already does this, but it
+            # only runs for turns it judged contentless — and now that a
+            # domainless REQUEST is no longer treated as contentless, this turn
+            # reaches retrieval instead and lands here. Same rule, same
+            # read-only intersection: the agent can investigate, while write and
+            # shell tools wait for a request that actually asks for them.
+            from src.tool_security import PLAN_MODE_READONLY_TOOLS
+            _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
         if (
             (
                 (
@@ -5287,6 +5547,32 @@ async def stream_agent_loop(
             logger.info(
                 "[agent-intent] active document turn removed file tools=%s",
                 _removed_doc_file_tools,
+            )
+
+    # The mirror of the block above — see `document_tools_to_drop`. This only
+    # ever corrects the harness's OWN selection, so every deliberate one is
+    # exempt: the fine-tune clamps a few lines up (the small toolset IS the
+    # behaviour under test), `forced_tools`, and a caller-provided
+    # `relevant_tools` — the scheduled-assistant path hands us
+    # ASSISTANT_ALWAYS_AVAILABLE with update_document in it on purpose, so a
+    # check-in can write back to a document without naming one first.
+    if (
+        _relevant_tools is not None
+        and not _ody_doc_finetune_mode
+        and not relevant_tools
+    ):
+        _removed_doc_tools = sorted(document_tools_to_drop(
+            _relevant_tools,
+            active_document_relevant=_active_document_relevant,
+            domains=_intent_domains,
+            forced_tools=forced_tools or (),
+        ))
+        if _removed_doc_tools:
+            _relevant_tools.difference_update(_removed_doc_tools)
+            _mark_dropped(_removed_doc_tools, "not-a-document-turn")
+            logger.info(
+                "[agent-intent] turn does not target a document; removed %s",
+                _removed_doc_tools,
             )
 
     # Last pass before the prompt is built: give back any domain the user's own
