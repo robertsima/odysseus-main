@@ -27,34 +27,10 @@ _CHAR_BUDGET = 6000
 
 
 def _resolve_allow_private(session_id: Optional[str]) -> bool:
-    """Whether chunks marked private may be returned for this session.
+    """Compatibility helper for callers that resolve a chat grant directly."""
+    from src.private_access import allows_private_vault
 
-    Same rule as the chat path: retrieved text is pasted into the outbound
-    prompt, so private notes may only travel to a local or LAN endpoint. This
-    fails closed — an unknown session yields public-only results rather than
-    leaking a private note to a hosted API.
-    """
-    if not session_id:
-        return False
-    try:
-        from src.database import SessionLocal, Session as DbSession
-        from src.model_context import is_local_endpoint
-
-        db = SessionLocal()
-        try:
-            row = db.query(DbSession).filter(DbSession.id == session_id).first()
-            if row is None:
-                return False
-            return is_local_endpoint(row.endpoint_url or "")
-        finally:
-            db.close()
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.warning(
-            "search_documents: could not classify endpoint scope (%s); "
-            "restricting to public documents",
-            exc,
-        )
-        return False
+    return allows_private_vault(session_id)
 
 
 def _parse_args(content: str) -> Dict[str, Any]:
@@ -114,7 +90,9 @@ class SearchDocumentsTool:
 
         k = _clamp_k(args.get("k") or args.get("limit"))
         owner = ctx.get("owner")
-        allow_private = _resolve_allow_private(ctx.get("session_id"))
+        # The dispatcher resolves the per-chat grant once and carries it in
+        # the execution context. Never infer it from endpoint URL locality.
+        allow_private = ctx.get("allow_private") is True
 
         try:
             from src.rag_singleton import get_rag_manager

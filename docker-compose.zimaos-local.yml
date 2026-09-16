@@ -34,12 +34,9 @@ services:
       FASTEMBED_CACHE_PATH: /app/data/fastembed_cache
       FASTEMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
       # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
-      # fills it. They are layers, not alternatives. "auto" (default) keeps the
-      # FastEmbed lane alongside a configured EMBEDDING_URL so retrieval
-      # survives that endpoint going down; "off" builds it only when the
-      # endpoint is unavailable, for deploys that run a real embedding model and
-      # do not want a second MiniLM index maintained beside it.
-      ODYSSEUS_FASTEMBED_LANE: ${ODYSSEUS_FASTEMBED_LANE:-auto}
+      # fills it. The lane policy is an optional deployment override; the
+      # application default is used when it is not supplied.
+      ODYSSEUS_FASTEMBED_LANE: ${ODYSSEUS_FASTEMBED_LANE:-}
       # Directories the agent's file tools may touch beyond /app/data. Declared
       # here rather than through the settings API so a mount and its permission
       # arrive together. Left empty by default: the vault is reachable at its
@@ -52,18 +49,14 @@ services:
       ODYSSEUS_INPROCESS_TASKS: "1"
       ODYSSEUS_SCRIPT_HOST: localhost
       ODYSSEUS_PI_WORKER_HOST: ${ODYSSEUS_PI_WORKER_HOST:-}
-      ODYSSEUS_PI_WORKER_SCRIPT: ${ODYSSEUS_PI_WORKER_SCRIPT:-D:/Development/Start-Pi-Worker.ps1}
-      ODYSSEUS_PI_WORKER_ROOT: ${ODYSSEUS_PI_WORKER_ROOT:-D:/Development}
       ODYSSEUS_PI_WORKER_IDENTITY_FILE: ${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
-      ODYSSEUS_PI_DOCUMENTATION_ROOT: ${ODYSSEUS_PI_DOCUMENTATION_ROOT:-/app/data/personal_docs/AI Mind}
       # Which vault trees are indexed, and under which sensitivity label.
       # Declared next to the mounts rather than left to post-boot admin state:
       # without it a fresh install came up with the vaults mounted, unindexed
       # and UNLABELLED -- and an unlabelled Journal is a public Journal, which
-      # both hosted models and `read_file` are then free to read. The label is
-      # what closes the Journal, not the :ro mount.
+      # hosted models and agent file tools are then free to read. The label is
+      # what closes the Journal to LLMs; it does not restrict the human UI.
       ODYSSEUS_PERSONAL_DIRS: ${ODYSSEUS_PERSONAL_DIRS:-Vault Mind:public,AI Mind:public,Journal:private}
-      ODYSSEUS_STARTUP_WARMUPS: "1"
       TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
       GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
       GITHUB_HOST: ${GITHUB_HOST:-}
@@ -73,25 +66,21 @@ services:
       LOTUS_DATA_DIR: /app/data/lotus/data
       LOTUS_IMPORT_ROOT: /app/data/lotus/imports
       LOTUS_TOOL_NAME_STYLE: underscore
-      ODYSSEUS_STT_ENABLED: ${ODYSSEUS_STT_ENABLED:-true}
-      ODYSSEUS_STT_DEFAULT_PROVIDER: ${ODYSSEUS_STT_DEFAULT_PROVIDER:-local}
-      ODYSSEUS_STT_MODEL: ${ODYSSEUS_STT_MODEL:-base}
+      # Hardware/resource placement only. STT enabled/provider/model/limits
+      # are settings.json choices and are intentionally not injected here.
       ODYSSEUS_STT_DEVICE: ${ODYSSEUS_STT_DEVICE:-cpu}
       ODYSSEUS_STT_COMPUTE_TYPE: ${ODYSSEUS_STT_COMPUTE_TYPE:-int8}
-      ODYSSEUS_STT_MAX_AUDIO_SECONDS: ${ODYSSEUS_STT_MAX_AUDIO_SECONDS:-300}
       ODYSSEUS_STT_CONCURRENCY: ${ODYSSEUS_STT_CONCURRENCY:-1}
-      ODYSSEUS_STT_BEAM_SIZE: ${ODYSSEUS_STT_BEAM_SIZE:-1}
-      PGID: "1000"
-      PUID: "1000"
-      # Honoured natively as of the chat_processor change; it was previously
-      # a hardcoded 0.35 and this variable did nothing.
-      RAG_SIMILARITY_THRESHOLD: "0.20"
+      # Match the host user that owns the bind-mounted AppData tree.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
       SEARXNG_INSTANCE: http://searxng:8080
       SECURE_COOKIES: "false"
     extra_hosts:
       # Reach a model served on the Docker host, e.g. Ollama at
       # http://host.docker.internal:11434. Classified local by
-      # model_context.is_local_endpoint, so private docs ARE retrievable.
+      # model_context.is_local_endpoint. Private docs still require the
+      # session's explicit private-read grant.
       - "host.docker.internal:host-gateway"
     ports:
       - "${APP_BIND:-127.0.0.1}:${APP_PORT:-7000}:7000"
@@ -116,16 +105,14 @@ services:
       # same file.
       #
       # Writability is a separate axis from the RAG public/private label:
-      #   Vault Mind — reference material the AI reads but does not edit, so :ro.
-      #   AI Mind    — the AI's own notes; readable AND updatable, so rw.
-      #   Journal    — :ro, and labelled `private` (ODYSSEUS_PERSONAL_DIRS), which
-      #                is what actually keeps it out of read_file: the tool path
-      #                resolver rejects anything under a private directory.
-      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind:ro
+      # All mounts are writable for the authenticated human vault editor.
+      # LLM/agent access is governed inside Odysseus by the folder policy:
+      # public/private controls reads and readonly controls model writes.
+      - ${ODY_VAULT:-./zima-local/Vault}/Vault Mind:/app/data/personal_docs/Vault Mind
       - ${ODY_VAULT:-./zima-local/Vault}/AI Mind:/app/data/personal_docs/AI Mind
       # On ZimaOS this was /app/journal via vault_watch.py into a separate,
       # ungated collection. Native indexing puts it under the sensitivity filter.
-      - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal:ro
+      - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal
 
   chromadb:
     image: docker.io/chromadb/chroma:latest
@@ -189,3 +176,26 @@ services:
     restart: unless-stopped
     volumes:
       - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/ntfy:/var/cache/ntfy
+
+# ZimaOS/CasaOS app-store manifest metadata. Read only by CasaOS's app-store
+# tooling (ignored by plain `docker compose`), so it belongs on the
+# ZimaOS-named overlay rather than the generic base compose file.
+x-casaos:
+    architectures:
+        - amd64
+    author: robertsima
+    category: AI
+    description:
+        en_us: Self-hosted AI workspace running on ZimaOS.
+    developer: Odysseus
+    hostname: odysseus.nas
+    icon: https://raw.githubusercontent.com/odysseus-dev/odysseus/main/static/icons/icon-512.png
+    index: /
+    is_uncontrolled: false
+    main: odysseus
+    port_map: "7000"
+    scheme: http
+    store_app_id: odysseus
+    title:
+        custom: Odysseus
+        en_us: Odysseus

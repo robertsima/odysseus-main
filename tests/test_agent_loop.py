@@ -4,6 +4,8 @@ and _append_tool_results. Uses mock imports to avoid loading the full app stack.
 import sys
 from unittest.mock import MagicMock
 
+import pytest
+
 _MOCKED_IMPORTS = [
     'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
     'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
@@ -297,6 +299,31 @@ class TestDetectAdminIntent:
 
     def test_general_question(self):
         assert _detect_admin_intent(self._msgs("what is the capital of France?")) is False
+
+    # "agent" and "worker" buy the delegation surface only inside an
+    # orchestration phrase. They are this app's own subject matter otherwise,
+    # and promoting every mention would ship delegation schemas on every turn
+    # that discusses the running harness.
+    @pytest.mark.parametrize("text", [
+        "why did the agent stop responding mid-answer",
+        "the worker process died again overnight",
+        "set the user agent header on that request",
+        "agentic workflows are overrated",
+        "how many workers does the pool start with",
+    ])
+    def test_agent_prose_is_not_admin_intent(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is False
+
+    @pytest.mark.parametrize("text", [
+        "ok just kick off a claude agent then and have it do it give it the logs and scope",
+        "delegate this to claude code",
+        "spin up a worker agent to fix the tool routing",
+        "hand this to a worker",
+        "run a sub-agent on this",
+        "show me the agent loadout",
+    ])
+    def test_orchestration_phrasing_is_admin_intent(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is True
 
     # --- Edge cases ---
 
@@ -626,3 +653,58 @@ class TestWebSearchSourcesKeyLookup:
         src_text = result.get("output") or result.get("results") or result.get("stdout") or ""
         assert src_text != ""
         assert "SOURCES" in src_text
+
+
+class TestRunAnAgentPhrasing:
+    """"run some agents" is the same request as "kick off some agents".
+
+    Reported from a live deployment: that wording left the delegation tools
+    hidden and the model said it had none. `run` cannot simply join
+    _ORCHESTRATION_VERB, though — it is far too common. The separator is
+    whether the agent noun heads its phrase (you run *an agent*) or modifies
+    the next one (you run *agent tests*).
+    """
+
+    @pytest.mark.parametrize("text", [
+        "run some agents",
+        "run a few agents",
+        "run an agent to fix this",
+        "run some agents that solve the tool execution issues",
+        "run a worker on this",
+        "run a couple of agents, please",
+        "run 3 agents on the failing tests",
+    ])
+    def test_asking_to_run_agents_is_orchestration(self, text):
+        from src.agent_loop import _orchestration_requested
+        assert _orchestration_requested(text), text
+
+    @pytest.mark.parametrize("text", [
+        "run the agent tests",
+        "run the tests for the agent module",
+        "running the agent loop locally",
+        "the test run for the agent package failed",
+        "run this by the agent owner first",
+        "run a query on the worker table",
+        "we run several worker threads",
+        "run the linter over agent_loop.py",
+    ])
+    def test_running_something_agent_shaped_is_not(self, text):
+        """Each of these unlocks the delegation toolset under a bare
+        `run|running|runs` alternative."""
+        from src.agent_loop import _orchestration_requested
+        assert not _orchestration_requested(text), text
+
+    def test_the_existing_verbs_keep_a_two_noun_phrase(self):
+        """The head-noun rule is scoped to `run` on purpose: applied to every
+        verb it would break this, where the matched noun is followed by another."""
+        from src.agent_loop import _orchestration_requested
+        assert _orchestration_requested("spin up a worker agent to fix the routing")
+
+    def test_run_phrasing_reaches_the_delegation_tools_end_to_end(self):
+        from src.agent_loop import _detect_admin_tools, _explicit_delegation_requested
+        text = "run some agents that solve the tool execution issues"
+        tools = _detect_admin_tools([{"role": "user", "content": text}])
+        assert {"delegate_to_agent", "delegate_to_claude_code"} <= tools
+        # ...and it must also clear the per-chat delegation-policy gate, or the
+        # tools are selected and then disabled again.
+        assert _explicit_delegation_requested(text)

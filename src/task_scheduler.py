@@ -712,21 +712,17 @@ class TaskScheduler:
         rows could get the browser reminder while the backend email/ntfy
         scanner never ran for that owner.
         """
-        from core.database import SessionLocal, ScheduledTask, Note
+        from core.database import SessionLocal, ScheduledTask
+        from src.notes_store import STORE
         db = SessionLocal()
         try:
             owners = set()
             for r in db.query(ScheduledTask.owner).distinct().all():
                 if r[0]:
                     owners.add(r[0])
-            note_q = db.query(Note.owner).filter(
-                Note.due_date.isnot(None),
-                Note.due_date != "",
-                Note.archived == False,  # noqa: E712
-            ).distinct()
-            for r in note_q.all():
-                if r[0]:
-                    owners.add(r[0])
+            for note in STORE.list(None, archived=False):
+                if note.owner and note.due_date:
+                    owners.add(note.owner)
             return sorted(owners)
         except Exception:
             return []
@@ -1205,7 +1201,19 @@ class TaskScheduler:
                 task.next_run = None
 
             db.commit()
-            logger.info(f"Task '{task.name}' completed (run {run_id})")
+            # Report what actually happened. `run.status` is already correct
+            # here ("error" when the action returned success=False), but this
+            # line used to say "completed" unconditionally, so a failed run read
+            # as a clean one in the logs:
+            #   ERROR audit_skills action failed: No model configured
+            #   INFO  Task 'Skills Audit' completed (run …)
+            if run.status == "success":
+                logger.info(f"Task '{task.name}' completed (run {run_id})")
+            else:
+                logger.warning(
+                    "Task '%s' finished with status=%s (run %s): %s",
+                    task.name, run.status, run_id, (run.error or run.result or "no detail"),
+                )
             output = task.output_target or "session"
             # Per-task notification gate. Default True (notifications_enabled
             # defaults to True at column level), but skip when the user has
@@ -1573,7 +1581,6 @@ class TaskScheduler:
                 now = _utcnow()
             time_str = now.strftime("%A, %B %d %Y, %H:%M")
         except Exception:
-            from datetime import timedelta
             now = _utcnow()
             time_str = now.strftime("%H:%M UTC")
 
@@ -1582,7 +1589,7 @@ class TaskScheduler:
         # Calendar: today+tomorrow, this week, month ahead
         # Pull directly from DB so we can include event_type and importance.
         try:
-            from core.database import SessionLocal as _SL, CalendarEvent as _CE
+            from core.database import SessionLocal as _SL
             _db = _SL()
             try:
                 for label, start, end in _digest_windows(now):
@@ -1737,7 +1744,7 @@ class TaskScheduler:
 
     async def _execute_llm_task(self, task, db) -> str:
         """Execute an LLM task with full tool access via the agent loop."""
-        from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.database import Session as DbSession, CrewMember
 
         # If this task is wired to a CrewMember (personal assistant, custom
         # crew), prefer the crew member's persona/model/endpoint as overrides.
@@ -2239,7 +2246,7 @@ class TaskScheduler:
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""
-        from core.database import Session as DbSession, ChatMessage
+        from core.database import Session as DbSession
         from src.deep_research import DeepResearcher
         from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
         from src.research_utils import strip_thinking
@@ -2775,7 +2782,7 @@ class TaskScheduler:
         if not owner or owner in RESERVED_USERNAMES:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
-        from core.database import SessionLocal, CrewMember, ScheduledTask
+        from core.database import SessionLocal, CrewMember
         from core.database import Session as DbSession
 
         db = SessionLocal()

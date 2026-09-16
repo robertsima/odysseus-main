@@ -657,6 +657,29 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             "agent_max_tool_calls": (0, 2000),  # 0 = unlimited
             "chat_tool_fold_after": (0, 500),  # 0 = never fold
             "claude_code_max_concurrent_tasks": (0, 16),  # 0 = env default
+            "agent_approval_ttl_seconds": (60, 3600),
+            "stt_beam_size": (1, 64),
+            "stt_max_audio_seconds": (1, 86400),
+            "chat_upload_max_bytes": (1, 10**12),
+            "gallery_upload_max_bytes": (1, 10**12),
+            "gallery_transform_upload_max_bytes": (1, 10**12),
+            "memory_import_max_bytes": (1, 10**12),
+            "personal_upload_max_bytes": (1, 10**12),
+            "email_compose_upload_max_bytes": (1, 10**12),
+            "stt_max_audio_bytes": (1, 10**12),
+            "ics_import_max_bytes": (1, 10**12),
+            "tts_cache_max_bytes": (1, 10**12),
+            "imap_timeout_seconds": (5, 300),
+            "rag_max_chunks_per_doc": (0, 50),
+            "rag_focused_cap_multiplier": (1, 10),
+            "vault_scan_seconds": (0, 86400),
+        }
+        _FLOAT_RANGES = {
+            "slow_request_log_seconds": (0.0, 3600.0),
+            "rag_recency_halflife_days": (1.0, 36500.0),
+            "rag_temporal_weight": (0.0, 0.9),
+            "rag_temporal_intent_weight": (0.0, 0.9),
+            "rag_tag_credit": (0.0, 1.0),
         }
         # Filesystem-path settings: absolute paths only (or empty = unset),
         # so a settings write can't point the delegation at a relative or
@@ -732,6 +755,13 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     val = int(val)
                 except (TypeError, ValueError):
                     raise HTTPException(400, f"{key} must be an integer")
+                val = max(lo, min(val, hi))
+            elif key in _FLOAT_RANGES:
+                lo, hi = _FLOAT_RANGES[key]
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    raise HTTPException(400, f"{key} must be a number")
                 val = max(lo, min(val, hi))
             current[key] = val
         _save_settings(current)

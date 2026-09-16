@@ -74,6 +74,31 @@ def test_first_scan_indexes_everything(tmp_path):
     assert str(note) in [os.path.abspath(p) for p in rag.indexed]
 
 
+def test_configured_vault_root_uses_app_state_for_scan_bookkeeping(tmp_path):
+    """An external Obsidian vault must not receive the scanner's state file."""
+    vault = tmp_path / "ObsidianVault"
+    state = tmp_path / "app-state"
+    vault.mkdir()
+    note = vault / "existing.md"
+    note.write_text("existing vault note", encoding="utf-8")
+
+    rag = _FakeRag()
+    manager = personal_docs.PersonalDocsManager(
+        str(vault), rag_manager=rag, state_dir=str(state)
+    )
+    scanner = vault_scan.VaultScanner(manager, rag)
+    result = scanner.scan()
+
+    assert manager.personal_dir == os.path.abspath(str(vault))
+    assert result["reindexed"] == 1
+    assert os.path.abspath(str(note)) in [os.path.abspath(p) for p in rag.indexed]
+    assert scanner._state_path == os.path.join(
+        os.path.abspath(str(state)), vault_scan.STATE_FILENAME
+    )
+    assert os.path.exists(scanner._state_path)
+    assert not (vault / vault_scan.STATE_FILENAME).exists()
+
+
 def test_unchanged_files_are_not_reindexed(tmp_path):
     """The point of mtime tracking: a scan over a quiet vault must not
     re-embed anything."""

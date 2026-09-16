@@ -28,6 +28,8 @@ secrets.env.*
 data/
 !services/hwfit/data/
 !services/hwfit/data/hf_models.json
+# Disposable local ZimaOS compose fixture, including its mounted vault.
+zima-local/
 logs/
 *.log
 *.db

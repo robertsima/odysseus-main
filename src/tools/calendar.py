@@ -19,7 +19,9 @@ logger = logging.getLogger(__name__)
 async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_calendar tool calls: list/create/update/delete calendar events (local SQLite)."""
     from datetime import datetime, timedelta
-    from core.database import SessionLocal, CalendarCal, CalendarEvent, Note
+    from core.database import SessionLocal, CalendarCal, CalendarEvent
+    from src.notes_markdown import NoteItem, NoteRecord
+    from src.notes_store import STORE
     from routes.calendar_routes import (
         _ensure_default_calendar,
         _parse_dt,
@@ -169,28 +171,23 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
         text = f"{summary}{loc} — {start_fmt}"
         due_date = remind_at.isoformat() + ("Z" if is_utc else "")
         expected_title = f"Reminder: {summary}"
-        existing_q = db.query(Note).filter(
-            Note.archived == False,  # noqa: E712
-            Note.due_date == due_date,
-        )
-        if owner is not None:
-            existing_q = existing_q.filter(Note.owner == owner)
         target_title = re.sub(r"^\s*reminder\s*:\s*", "", expected_title.strip().lower())
-        for existing in existing_q.limit(25).all():
+        for existing in STORE.list(owner, archived=False)[:25]:
+            if existing.due_date != due_date:
+                continue
             existing_title = re.sub(r"^\s*reminder\s*:\s*", "", (existing.title or "").strip().lower())
             if existing_title == target_title:
                 return existing.id, "duplicate reminder already exists"
-        note = Note(
+        note = NoteRecord(
             id=str(_uuid.uuid4()),
             owner=owner,
             title=expected_title,
-            items=json.dumps([{"text": text, "done": False, "checked": False}]),
-            note_type="todo",
+            items=[NoteItem(text=text, done=False, extra={"checked": False})],
             label="calendar",
             due_date=due_date,
             source="calendar",
         )
-        db.add(note)
+        STORE.save(note)
         return note.id, None
 
     try:

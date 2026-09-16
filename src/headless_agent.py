@@ -39,10 +39,71 @@ def request_stop(run_id: str) -> bool:
 def running_ids() -> Set[str]:
     return set(_STOP_EVENTS)
 
+
+async def _resolve_context_length(sess) -> int:
+    """The model's context window for a headless run, resolved like a chat's.
+
+    A chat turn learns its window in ``routes/chat_helpers.py`` (``maybe_compact``
+    asks :func:`src.model_context.get_context_length` for the session's model).
+    Headless runs skip that step, and ``core.models.Session`` has no
+    ``context_length`` field at all, so the old ``getattr(sess, "context_length",
+    0)`` here read 0 for *every* worker and sub-agent. The loop then resolved the
+    "balanced" context profile for a 400k model (half the tool-output inline
+    limit a chat on the same model gets) and reported ``context_length=0`` /
+    ``context_percent=0``, so a worker's context use was unobservable.
+
+    An explicitly attached window wins — ``agent_tools/session_tools.py`` builds a
+    runner namespace for a profile's model and may carry one. Otherwise ask the
+    model, off the event loop because that probe does network I/O. On probe
+    failure fall back to :data:`~src.model_context.DEFAULT_CONTEXT`, the same
+    documented fallback ``get_context_length`` itself returns when a window can't
+    be discovered — a 0 here is worse than a stated default. Scaling the input
+    budget stays safe either way: the loop re-derives it through
+    ``budget_context_for_model``, which returns 0 for an *unproven* window and so
+    never budgets off this fallback.
+    """
+    from src.model_context import DEFAULT_CONTEXT, get_context_length
+
+    try:
+        attached = int(getattr(sess, "context_length", 0) or 0)
+    except (TypeError, ValueError):
+        attached = 0
+    if attached > 0:
+        return attached
+    try:
+        return int(await asyncio.to_thread(
+            get_context_length, sess.endpoint_url, sess.model,
+        ) or 0) or DEFAULT_CONTEXT
+    except Exception:
+        logger.debug("headless context-length probe failed for %s; using the default window",
+                     getattr(sess, "model", "?"), exc_info=True)
+        return DEFAULT_CONTEXT
+
+
+def _rounds_exhausted_note(state: Dict[str, Any]) -> str:
+    """The line a cut-off run hands back instead of looking finished.
+
+    A headless caller only sees ``(prose, tool_events)``: the loop's
+    ``rounds_exhausted`` frame is invisible to it. So a worker that spent its
+    whole round budget mid-task returned exactly the shape of one that answered
+    — and usually empty prose, because a cut-off final round is all tool calls
+    and no text. The parent then saved "(no reply)" as the finished result and
+    moved on without knowing there was anything left to do. Say what happened,
+    and how far the run got, in the text itself.
+    """
+    events = state.get("tool_events") or []
+    rounds = int(state.get("exhausted_rounds") or 0)
+    last = next((ev.get("tool") for ev in reversed(events) if ev.get("tool")), "")
+    done = (f"{len(events)} tool call{'' if len(events) == 1 else 's'} completed"
+            f"{f', the last was {last}' if last else ''}") if events else "no tool calls completed"
+    return (f"(ran out of rounds: the budget of {rounds} agent round{'' if rounds == 1 else 's'} was spent "
+            f"with the task unfinished — {done}. Everything above is partial work, not a final answer; "
+            "continue from there rather than starting over.)")
+
 # Tools a headless child must never get: each one starts *another* agent, so
 # without this a sub-agent could fan out sub-sub-agents without bound.
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
-    "send_to_session", "create_session", "pipeline", "delegate_to_claude_code",
+    "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
     "manage_session", "manage_agent_worktree",
 })
 
@@ -73,10 +134,19 @@ async def run_headless(
     applies — these turns never pass through the chat route that enforces it.
 
     With a ``run_id``, :func:`request_stop` ends the run early; ``outcome``
-    (when given) receives ``{"stopped": True}`` in that case.
+    (when given) receives ``{"stopped": True}`` in that case. A run that instead
+    burns through ``max_rounds`` while still working sets
+    ``{"rounds_exhausted": True, "rounds": n}`` there, and says so in the prose
+    it returns, so the caller can report a cut-off run as such rather than as a
+    finished one.
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
     from src.tool_security import owner_baseline_disabled_tools
+    try:
+        from core.database import get_session_settings
+        allow_private = bool((get_session_settings(sess.id) or {}).get("private_vault_access", False))
+    except Exception:
+        allow_private = False
 
     baseline = owner_baseline_disabled_tools(effective_owner)
     if disabled_tools is None:
@@ -90,7 +160,8 @@ async def run_headless(
         _STOP_EVENTS[run_id] = stop_event
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
-                                         run_id=run_id, source=source, on_event=on_event))
+                                         run_id=run_id, source=source, on_event=on_event,
+                                         allow_private=allow_private))
     try:
         if stop_event is None:
             await drain
@@ -123,12 +194,19 @@ async def run_headless(
     full = state["full"]
     if outcome is not None and outcome.get("stopped"):
         full = (full.rstrip() + "\n\n" if full.strip() else "") + "(stopped by the user before finishing)"
+    elif state.get("exhausted"):
+        # A stop wins when both could apply — the user ending a run is the more
+        # specific fact, and a cancelled drain never sees the loop's frame anyway.
+        if outcome is not None:
+            outcome["rounds_exhausted"] = True
+            outcome["rounds"] = int(state.get("exhausted_rounds") or 0)
+        full = (full.rstrip() + "\n\n" if full.strip() else "") + _rounds_exhausted_note(state)
     return full, state["tool_events"]
 
 
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
-                 source: str, on_event) -> None:
+                 source: str, on_event, allow_private: bool = False) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -136,11 +214,12 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
     async for chunk in stream_agent_loop(
         sess.endpoint_url, sess.model, messages,
         headers=getattr(sess, "headers", None),
-        context_length=getattr(sess, "context_length", 0) or 0,
+        context_length=await _resolve_context_length(sess),
         session_id=sess.id,
         max_rounds=max_rounds,
         owner=owner,
         disabled_tools=blocked,
+        allow_private=allow_private,
     ):
         if not chunk.startswith("data: "):
             continue
@@ -165,6 +244,22 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         elif d.get("type") == "agent_step":
             round_num = d.get("round", round_num)
             state["round"] = round_num
+        elif d.get("type") == "rounds_exhausted":
+            # The loop hit its round cap while still working. A live chat turns
+            # this into a "Continue" button; a headless run has nobody to press
+            # it, so record it for the hand-back note run_headless appends.
+            state["exhausted"] = True
+            state["exhausted_rounds"] = int(d.get("rounds") or 0)
+            if activity_session_id:
+                # A note, not a `status` event: the caller decides the run's
+                # final status, and a status event here would be overwritten by
+                # the run_finished that follows anyway.
+                activity.publish(activity_session_id, "note",
+                                 f"Ran out of rounds after {state['exhausted_rounds']} — handing back partial work",
+                                 source=source, run_id=run_id, owner=owner,
+                                 data={"rounds": state["exhausted_rounds"],
+                                       "tool_calls": d.get("tool_calls")},
+                                 level="warning")
         elif d.get("type") == "tool_start" and activity_session_id:
             activity.publish(activity_session_id, "tool_start",
                              f"{d.get('tool')} {str(d.get('command') or '')[:120]}".strip(),

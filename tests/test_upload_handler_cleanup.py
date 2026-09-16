@@ -21,6 +21,7 @@ from core.database import (
     Note,
     Session as DbSession,
 )
+from src.notes_markdown import NoteRecord
 from src.upload_handler import (
     UploadCleanupSafetyError,
     UploadHandler,
@@ -29,6 +30,7 @@ from src.upload_handler import (
     reserve_upload_references,
 )
 from tests.helpers.sqlite_db import make_temp_sqlite
+from tests.helpers.fake_notes_store import FakeNotesStore
 
 
 OLD_TIMESTAMP = "2000-01-01T00:00:00"
@@ -477,6 +479,7 @@ def test_reference_discovery_covers_all_durable_upload_stores(
     version_id = "1" * 32 + ".pdf"
     note_upload_id = "3" * 32 + ".png"
     note_color_id = "2" * 32 + ".png"
+    markdown_note_id = "9" * 32 + ".png"
     calendar_upload_id = "4" * 32 + ".png"
     event_upload_id = "5" * 32 + ".png"
     event_description_id = "7" * 32 + ".txt"
@@ -542,6 +545,12 @@ def test_reference_discovery_covers_all_durable_upload_stores(
         db.close()
 
     monkeypatch.setattr(upload_routes, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(upload_routes, "NOTES_STORE", FakeNotesStore(
+        NoteRecord(
+            id="markdown-note", owner="alice", title="Live note",
+            content=f"odysseus://attachment/{markdown_note_id}",
+        )
+    ))
     try:
         referenced_ids, referenced_hashes = (
             upload_routes._collect_persisted_upload_references()
@@ -559,6 +568,7 @@ def test_reference_discovery_covers_all_durable_upload_stores(
         version_id,
         note_upload_id,
         note_color_id,
+        markdown_note_id,
         calendar_upload_id,
         event_upload_id,
         event_description_id,

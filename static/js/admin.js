@@ -517,11 +517,9 @@ async function loadEndpoints() {
           : '<span class="admin-badge admin-badge-off">offline</span>';
       const justAddedClass = (_recentlyAddedEpId && String(ep.id) === _recentlyAddedEpId) ? ' adm-ep-just-added' : '';
       const category = ep.category || (_isLocalEndpoint(ep.base_url) ? 'local' : 'api');
-      // Editable rather than a static badge: `local` is what lets a session
-      // retrieve documents labelled private (model_context.is_local_endpoint),
-      // and an endpoint added through the API form defaults to `api`, which
-      // silently withholds them even from a LAN address. Without this control
-      // the only fix was a hand-written PATCH.
+      // Editable rather than a static badge so endpoint topology remains an
+      // explicit operator choice. Private-vault access is granted separately
+      // for each chat and is not inferred from this classification.
       const epKind = ep.endpoint_kind || 'auto';
       const kindSelect = ['auto', 'local', 'api', 'proxy']
         .map(k => `<option value="${k}"${epKind === k ? ' selected' : ''}>${k}</option>`)
@@ -536,7 +534,7 @@ async function loadEndpoints() {
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
-              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind. 'local' lets sessions on this endpoint retrieve documents marked private; 'api' and 'proxy' never do, even on a LAN address. 'auto' decides from the host.">${kindSelect}</select>
+              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind describes where the model runs. Private-vault access is granted separately for each chat. 'auto' decides from the host.">${kindSelect}</select>
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
@@ -2402,6 +2400,41 @@ function initMcpForm() {
    EMBEDDING_URL env vars if you really need to override it. */
 
 /* ── RAG ── */
+function _ragFileGroups(files) {
+  const groups = new Map();
+  for (const file of files || []) {
+    const displayPath = String(file.name || file.path || 'Untitled').replace(/\\/g, '/');
+    const slash = displayPath.lastIndexOf('/');
+    const directory = slash > 0 ? displayPath.slice(0, slash) : 'Personal uploads';
+    const filename = slash >= 0 ? displayPath.slice(slash + 1) : displayPath;
+    if (!groups.has(directory)) groups.set(directory, []);
+    groups.get(directory).push({ ...file, displayPath, filename });
+  }
+  return Array.from(groups, ([directory, items]) => ({
+    directory,
+    items: items.sort((a, b) => a.filename.localeCompare(b.filename, undefined, { sensitivity: 'base' })),
+  })).sort((a, b) => a.directory.localeCompare(b.directory, undefined, { sensitivity: 'base' }));
+}
+
+function _renderRagFileGroups(files) {
+  const folderIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
+  const fileIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>';
+  return _ragFileGroups(files).map(group => {
+    const privateCount = group.items.filter(file => file.sensitivity === 'private').length;
+    const rows = group.items.map(file => {
+      const size = file.size ? (file.size > 1024 ? (file.size / 1024).toFixed(1) + ' KB' : file.size + ' B') : '';
+      const priv = file.sensitivity === 'private'
+        ? '<span class="admin-badge" title="Withheld unless this chat has private-vault read access">private</span>'
+        : '';
+      return `<div class="admin-rag-item admin-rag-file-row">${fileIcon}<span class="admin-rag-item-name" title="${esc(file.displayPath)}">${esc(file.filename)}</span>${priv}<span class="admin-rag-item-meta">${size}</span><button class="admin-btn-delete" data-adm-rag-file="${esc(file.path || file.name)}">Delete</button></div>`;
+    }).join('');
+    return `<details class="admin-rag-file-group">
+      <summary>${folderIcon}<span title="${esc(group.directory)}">${esc(group.directory)}</span>${privateCount ? `<span class="admin-badge">${privateCount} private</span>` : ''}<small>${group.items.length} file${group.items.length === 1 ? '' : 's'}</small></summary>
+      <div class="admin-rag-file-group-body">${rows}</div>
+    </details>`;
+  }).join('');
+}
+
 async function loadRag() {
   if (!el('adm-ragDirList')) return;
   try {
@@ -2424,7 +2457,7 @@ async function loadRag() {
         const sel = ['public', 'private']
           .map(v => `<option value="${v}"${label === v ? ' selected' : ''}>${v}</option>`)
           .join('');
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is withheld from any session served by a non-local endpoint.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
+        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is hidden unless the current chat is explicitly granted private-vault reads.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
       }).join('');
       dirList.querySelectorAll('[data-adm-rag-sens]').forEach(sel => {
         const previous = sel.value;
@@ -2465,16 +2498,9 @@ async function loadRag() {
     const files = data.files || [];
     if (files.length === 0) { fileList.innerHTML = '<div class="admin-empty">No files indexed</div>'; }
     else {
-      fileList.innerHTML = files.map(f => {
-        const size = f.size ? (f.size > 1024 ? (f.size / 1024).toFixed(1) + ' KB' : f.size + ' B') : '';
-        // Per-file label is inherited from its directory and read-only here —
-        // shown so a misfiled private note is visible without opening the
-        // folder it came from.
-        const priv = f.sensitivity === 'private'
-          ? '<span class="admin-badge" title="Withheld from hosted models">private</span>'
-          : '';
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(f.path || f.name)}">${esc(f.name)}</span>${priv}<span class="admin-rag-item-meta">${size}</span><button class="admin-btn-delete" data-adm-rag-file="${esc(f.path || f.name)}">Delete</button></div>`;
-      }).join('');
+      // Match the Vault explorer: directory groups are compact and closed by
+      // default. Native <details> keeps expansion entirely user-driven.
+      fileList.innerHTML = _renderRagFileGroups(files);
       fileList.querySelectorAll('[data-adm-rag-file]').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!await uiModule.styledConfirm(`Delete "${btn.dataset.admRagFile}" from RAG?`, { confirmText: 'Delete', danger: true })) return;

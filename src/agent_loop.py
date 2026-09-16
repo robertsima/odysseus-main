@@ -27,7 +27,15 @@ from src import agent_activity as _activity
 from src import tool_approvals as _tool_approvals
 from src import agent_control as _agent_control
 from src.prompt_security import untrusted_context_message
-from src.tool_security import blocked_tools_for_owner, plan_mode_disabled_tools
+from src.tool_security import (
+    blocked_tools_for_owner,
+    plan_mode_disabled_tools,
+    # Private by name, but it is the list this repo already maintains for the
+    # question "can this tool change the world?" (its own comment says keep it
+    # in sync). The duplicate-call guard below asks exactly that question, and
+    # a second copy of 40 tool names here would drift within a release.
+    _PLAN_MODE_KNOWN_MUTATORS as _KNOWN_MUTATING_TOOLS,
+)
 from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
 from src.tool_utils import _truncate, get_mcp_manager
 from src.tool_schemas import compact_function_tool_schemas
@@ -593,6 +601,13 @@ _DOMAIN_RULES = {
 - Never diagnose, never give clinical or psychological advice, and never speculate about causes. If the data suggests something worrying, describe the numbers and let the user draw the conclusion.
 - Private check-in notes are never available to you; do not ask for them and do not invent them.
 - Only use `action=log_checkin` when the user explicitly asks you to record how they feel.""",
+    "self_diagnosis": """\
+## Self-diagnosis rules
+- `read_app_logs` reads Odysseus's OWN application log files. Use it whenever the user asks you to look at the app's logs, or to explain an error, crash, traceback, or "why did X fail" in Odysseus itself.
+- Call `action=list` first to see which log files exist, then `action=tail` with a `level` or substring filter. Do not pull a whole log file into context when a filtered tail answers the question.
+- It is read-only and already redacted. Do not go hunting for log files with `bash`, `ls`, `glob`, or `read_file` first, and do not ask the user to paste their logs.
+- Never tell the user you have no access to the application logs while `read_app_logs` is in your toolset — read them.
+- The logs are evidence, not a diagnosis. Quote the lines you relied on before you say what went wrong.""",
 }
 
 _DOMAIN_TOOL_MAP = {
@@ -610,12 +625,24 @@ _DOMAIN_TOOL_MAP = {
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
-    "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
+    "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "message_agent", "search_chats"},
     "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
     "wellbeing": {"manage_wellbeing"},
+    # Keyed on `read_app_logs` alone, for the same reason as knowledge_base
+    # above: `_domain_rules_for_tools` derives the rule packs from the FINAL
+    # tool names, so listing grep/ls/read_file here would staple the
+    # self-diagnosis rules onto every file turn in the app. The read-only
+    # inspection tools a debugging turn also wants are seeded alongside this
+    # domain in the request path instead, where they cost schemas but no prose.
+    #
+    # One consequence worth knowing: because this set is exactly one tool, a
+    # Terminus swap that drops `read_app_logs` leaves the domain with nothing
+    # and `repair_starved_domains` puts it straight back — which is the
+    # behaviour we want for "debug this crash in the repo".
+    "self_diagnosis": {"read_app_logs"},
 }
 
 _WORKSPACE_TERMINUS_TOOLS = (
@@ -729,6 +756,7 @@ _STARVED_DOMAIN_LABELS = {
     "contacts": "contacts",
     "integrations": "service integrations",
     "wellbeing": "wellbeing check-ins",
+    "self_diagnosis": "the application logs",
 }
 
 # "web" is excluded from the starvation check: it is the most over-triggered
@@ -787,6 +815,65 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
             starved,
         )
     return starved
+
+
+def keyword_fallback_tools(query: str) -> Set[str]:
+    """Deterministic tool selection for when the embedding index is unavailable.
+
+    The same keyword pass `ToolIndex.get_tools_for_query` runs, against the same
+    hint table, and it has to stay the same: this is what selects tools whenever
+    ChromaDB is down or retrieval times out, which is the moment tool selection
+    can least afford to disagree with itself.
+
+    It did disagree. This mirror was left matching raw substrings after the
+    ToolIndex copy was moved to word boundaries, so "look at the local project"
+    matched the source-control hint on the "pr" inside "project" and the turn
+    was handed manage_agent_worktree, apply_patch and edit_file with no
+    workspace bound at all. Short keys like "pr", "ty", "cc" and "no" sit in
+    several of those sets, and the ToolIndex comment lists the rest of the
+    hazard ("fix" in "prefix", "line" in "deadline", "serve" in "reserve").
+    """
+    ql = str(query or "").lower()
+    if not ql:
+        return set()
+    from src.tool_index import ToolIndex
+    out: Set[str] = set()
+    for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
+        if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
+            out.update(tools)
+    return out
+
+
+# The editor-document tools that cannot act without a target document.
+# `create_document` is deliberately NOT one of them — it stands on its own, and
+# the file/bash rules tell the model to reach for it on any kind of turn.
+_DOCUMENT_TARGET_TOOLS = frozenset({"edit_document", "update_document", "suggest_document"})
+
+
+def document_tools_to_drop(relevant_tools, *, active_document_relevant, domains,
+                           forced_tools=()):
+    """Return the open-document tools a turn that isn't about a document carries.
+
+    The mirror of the "active document turn removed file tools" prune. That one
+    exists because an open editor panel should not drag file/shell tools into a
+    document turn; this one exists because the reverse happened on 2026-09-16 —
+    the classifier logged `active_doc_relevant=False` for "analyze your own logs
+    and fix this issue" and all four document tools were selected anyway.
+
+    They came from a keyword hint whose keys include the bare verbs "fix",
+    "edit", "change", "update" and "replace" (`ToolIndex._KEYWORD_HINTS`). That
+    hint is right when a document is the subject of the turn and wrong the rest
+    of the time, and from inside the index it cannot tell which it is looking
+    at: it sees the query string and nothing else. `_turn_targets_active_document`
+    already made that judgement for this turn, so apply it in both directions
+    instead of only the one.
+
+    `forced_tools` are a deliberate per-request selection and outrank the
+    heuristic, the same way they outrank retrieval.
+    """
+    if active_document_relevant or "documents" in set(domains or ()):
+        return set()
+    return (set(relevant_tools or ()) & _DOCUMENT_TARGET_TOOLS) - set(forced_tools or ())
 
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -1289,6 +1376,17 @@ _ADMIN_KEYWORDS = [
     # agent flails (curl, bash) instead of using the right tool.
     "document", "documents", "doc", "docs", "library", "tidy",
     "note", "notes", "todo", "todos", "reminder", "reminders",
+    # Orchestration — "kick off a claude agent", "spin up a worker",
+    # "delegate this to claude code", "agent loadout". Without these the
+    # delegation surface was unreachable by plain language: the 2026-09-1x
+    # logs show retrieval finding delegate_to_agent/delegate_to_claude_code
+    # and the harness then telling the user no delegation tool existed.
+    # "agent" and "worker" are ordinary words in this app's own prose ("the
+    # agent said", "the worker process"), so they are guarded below rather
+    # than trusted on sight — same shape as the "fork" guard.
+    "agent", "agents", "worker", "workers",
+    "sub-agent", "subagent", "loadout", "loadouts",
+    "delegate", "claude code",
 ]
 
 # Admin intent unions _ADMIN_TOOLS into BOTH the prompt sections and the schema
@@ -1318,15 +1416,87 @@ _ADMIN_KEYWORD_RE = re.compile(
 )
 
 
+# ── Orchestration phrasing ────────────────────────────────────────────────
+#
+# People ask for a second agent verb-first — "kick off a claude agent", "spin
+# up a worker to do X", "hand this to a worker" — and whatever article or
+# adjective they choose sits between the verb and the noun. A contiguous
+# multi-word entry in _ADMIN_KEYWORDS (the "api key" / "list models" style)
+# cannot span that gap, and the bare nouns "agent" and "worker" are far too
+# common in this app's own subject matter to promote on sight: "why did the
+# agent stop", "the worker process died", "user agent header". So the nouns
+# ride in _ADMIN_KEYWORDS only as a cheap prefilter and these two regexes
+# decide whether an occurrence is really an orchestration request.
+#
+# Splitting it this way also means admin-intent routing and the delegation
+# policy gate (_explicit_delegation_requested) read the SAME recogniser. They
+# used to disagree — retrieval surfaced the delegation tools, admin intent
+# never fired, and the policy gate disabled them anyway, so a user asking in
+# plain English could not reach them from either side.
+
+# Nouns that already mean "some other agent" without a verb in front.
+_AGENT_NOUN_RE = re.compile(
+    r"\b(?:sub[\s-]?agents?|another\s+agent|other\s+agents?|worker\s+agents?|"
+    r"agent\s+loadouts?|loadouts?|claude\s*code|claude\s+agent|"
+    r"coding\s+agent|coding\s+harness)\b",
+    re.IGNORECASE,
+)
+
+# A start/hand-off verb followed, within a few words, by a bare agent noun.
+# The filler is capped at three words so "the agent asked me to start the
+# server" cannot pair a distant verb with an unrelated "agent".
+_ORCHESTRATION_VERB = (
+    r"(?:kick(?:ing|ed|s)?\s+off|spin(?:ning|s)?\s+up|fir(?:e|es|ing)\s+up|"
+    r"stand(?:ing|s)?\s+up|boot(?:ing|s)?\s+up|set(?:ting|s)?\s+up|"
+    r"start(?:ing|ed|s)?|creat(?:e|es|ing|ed)\s+an?|mak(?:e|es|ing)\s+an?|"
+    r"launch(?:ing|ed|es)?|spawn(?:ing|ed|s)?|dispatch(?:ing|ed|es)?|"
+    r"deleg\w+|farm(?:ing|ed|s)?\s+out|assign(?:ing|ed|s)?|"
+    r"hand(?:ing|ed|s)?(?:\s+\w+){0,3}?\s+(?:to|off)|"
+    r"have\s+an?|ask\s+an?|get\s+an?|give\s+(?:it|this|that)\s+to\s+an?)"
+)
+_AGENT_ORCHESTRATION_RE = re.compile(
+    r"\b" + _ORCHESTRATION_VERB + r"\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b",
+    re.IGNORECASE,
+)
+
+# "run some agents" is the same request as "kick off some agents", but `run` is
+# far too common to sit in _ORCHESTRATION_VERB: "run the agent tests", "running
+# the agent loop", "we run several worker threads" would all unlock the
+# delegation toolset. What separates the two is whether the agent noun is the
+# HEAD of its phrase or a MODIFIER of the next one — you run *an agent*, but you
+# run *agent tests*. So `run` gets its own pattern requiring the noun to be
+# followed by a clause boundary or a function word, never by another noun.
+#
+# This is deliberately a separate regex rather than another alternative in
+# _ORCHESTRATION_VERB: applying the head-noun lookahead to the existing verbs
+# would break "spin up a worker agent", where the first noun matched ("worker")
+# is legitimately followed by another ("agent").
+_HEAD_NOUN_FOLLOWERS = (
+    r"(?=\s*(?:$|[,.;:!?)\]]|\b(?:that|which|who|to|on|for|with|and|or|in|at|"
+    r"so|then|about|from|until|while|please|now|here|again|instead)\b))"
+)
+_AGENT_RUN_RE = re.compile(
+    r"\brun(?:ning|s)?\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b" + _HEAD_NOUN_FOLLOWERS,
+    re.IGNORECASE,
+)
+
+
+def _orchestration_requested(text: str) -> bool:
+    """True when the words name another agent, or ask for one to be started."""
+    text = str(text or "")
+    return bool(
+        _AGENT_NOUN_RE.search(text)
+        or _AGENT_ORCHESTRATION_RE.search(text)
+        or _AGENT_RUN_RE.search(text)
+    )
+
+
 def _detect_admin_intent(messages: List[Dict]) -> bool:
     """Check if the last user message suggests admin/management tool usage."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            return bool(_ADMIN_KEYWORD_RE.search(content))
-    return False
+    # Prompt context is also carried in role=user envelopes. Looking at the
+    # last raw user-role item let injected MCP/skill prose containing words
+    # such as "settings" or "server" unlock the management tool surface.
+    return bool(_detect_admin_tools(messages))
 
 
 # Which admin tools each admin keyword actually points at. The blanket union
@@ -1387,20 +1557,38 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
     "todos": {"manage_tasks"},
     "reminder": {"manage_tasks"},
     "reminders": {"manage_tasks"},
+    # Orchestration. "agent"/"worker" only count in an orchestration context
+    # (see the _AGENT_ORCHESTRATION_RE guard in _detect_admin_tools); the rest
+    # name another agent outright and need no guard.
+    "agent": {"delegate_to_agent", "delegate_to_claude_code",
+              "manage_agent_loadout", "message_agent"},
+    "agents": {"delegate_to_agent", "delegate_to_claude_code",
+               "manage_agent_loadout", "message_agent"},
+    "worker": {"delegate_to_agent", "manage_agent_loadout", "message_agent"},
+    "workers": {"delegate_to_agent", "manage_agent_loadout", "message_agent"},
+    "sub-agent": {"delegate_to_agent", "delegate_to_claude_code"},
+    "subagent": {"delegate_to_agent", "delegate_to_claude_code"},
+    # A loadout is a named worker policy, not a running agent — authoring it
+    # is manage_agent_loadout's whole job.
+    "loadout": {"manage_agent_loadout"},
+    "loadouts": {"manage_agent_loadout"},
+    # Claude Code is a coding CLI run as a subprocess. delegate_to_agent rides
+    # along because the administrator may have pointed delegation at a
+    # different provider, and the user should not have to know which.
+    "claude code": {"delegate_to_claude_code", "delegate_to_agent"},
+    "delegate": {"delegate_to_agent", "delegate_to_claude_code",
+                 "send_to_session", "message_agent"},
 }
+
+# Admin keywords whose bare noun is ordinary English here, and which therefore
+# only count inside an orchestration phrase.
+_ORCHESTRATION_GUARDED_KEYWORDS = frozenset({"agent", "agents", "worker", "workers"})
 
 
 def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
     """Admin tools the last user message actually points at (see
     _ADMIN_KEYWORD_TOOLS). Empty when no admin keyword matches."""
-    text = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            text = str(content or "")
-            break
+    text = _extract_last_user_message(messages)
     if not text or not _ADMIN_KEYWORD_RE.search(text):
         return set()
     found: Set[str] = set()
@@ -1408,8 +1596,52 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
         return set(_ADMIN_TOOLS)
     for keyword, tools in _ADMIN_KEYWORD_TOOLS.items():
         if re.search(r"\b" + _admin_keyword_pattern(keyword) + r"\b", text, re.IGNORECASE):
+            # "fork" is overwhelmingly a repository/license word unless the
+            # user actually names a chat/session/conversation. Treating any
+            # occurrence as chat management caused license questions about a
+            # software fork to receive cross-chat and delegation schemas.
+            if keyword == "fork" and not re.search(
+                r"\b(?:fork\s+(?:this\s+)?(?:chat|session|conversation)|(?:chat|session|conversation)\s+fork)\b",
+                text,
+                re.IGNORECASE,
+            ):
+                continue
+            # "agent"/"worker" on their own are this app's own vocabulary --
+            # the running harness, a background process, a user-agent header.
+            # Only an orchestration phrase ("kick off an agent", "hand this
+            # to a worker") means the user wants a SECOND one.
+            if keyword in _ORCHESTRATION_GUARDED_KEYWORDS and not _orchestration_requested(text):
+                continue
             found.update(tools)
     return found
+
+
+_DELEGATION_TOOLS = frozenset({
+    "delegate_to_agent", "delegate_to_claude_code", "send_to_session",
+    "message_agent", "pipeline", "create_session",
+})
+_EXPLICIT_DELEGATION_RE = re.compile(
+    r"\b(?:delegate|hand\s+off|sub[ -]?agent|another\s+agent|other\s+agent|"
+    r"ask\s+(?:claude\s+code|a\s+worker|another\s+agent)|"
+    r"have\s+(?:claude\s+code|an?\s+agent|a\s+worker)|"
+    r"send\s+(?:this|it)\s+to\s+(?:another\s+chat|an?\s+agent))\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_delegation_requested(text: str) -> bool:
+    """True only when the human asked to hand work to another agent.
+
+    The literal-phrase list above was written for the hand-off wordings and
+    missed the start-an-agent ones entirely: "ok just kick off a claude agent
+    then and have it do it" read as no delegation request, so the default
+    `explicit` policy disabled all of _DELEGATION_TOOLS -- after retrieval had
+    already found them -- and the turn answered that it could not launch an
+    agent. _orchestration_requested is the same recogniser admin routing uses,
+    so the two gates can no longer disagree about the same sentence.
+    """
+    text = str(text or "")
+    return bool(_EXPLICIT_DELEGATION_RE.search(text)) or _orchestration_requested(text)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -1720,6 +1952,26 @@ _MISSING_TOOL_RE = re.compile(
     r"(?:currently\s+|still\s+)?"
     r"(?:available|callable|offered|enabled|exposed|provided|accessible)\b"
     r"|no\s+access\s+to\s+(?:the\s+|any\s+)?(?:\w+[\s\-/]+){0,4}?tools?\b"
+    # Every branch above negates AVAILABILITY ("tools are not available").
+    # A round on 2026-09-16 negated MEMBERSHIP instead — it agreed the tools
+    # it had were available and said they didn't contain what it needed:
+    # "The tools currently available to me do not include: Repository or
+    # filesystem access, Application-log access, …". Nothing matched, no
+    # self-unblock fired, the turn ended with zero tool calls and the user
+    # had to retype the request.
+    #
+    # Staying narrow matters more here than anywhere else in this pattern:
+    # "do not include" is ordinary English that a round reporting a REAL
+    # result says all the time ("I used the read_file tool but the output
+    # does not include that function"). So the gap between "tool(s)" and the
+    # negation is not a wildcard — it may only contain words that belong to
+    # the noun phrase "the tools <I have / currently available to me>".
+    # A conjunction or a new subject ("… tool BUT the output …") stops it.
+    r"|tool(?:s|ing|set|\s+list|\s+set)?\b(?:\s+(?:currently|now|still|"
+    r"available|accessible|offered|enabled|exposed|provided|here|in|this|"
+    r"turn|session|to|I|you|we|me|my|us|have|has|had|was|were|gave|given|"
+    r"handed|see|listed))*"
+    r"\s+do(?:es)?\s*(?:n'?t|\s+not)\s+(?:currently\s+)?include\b"
     r")",
     re.IGNORECASE,
 )
@@ -1801,10 +2053,172 @@ def _harness_directive(text: str) -> Dict:
     return {"role": "user", "content": "[Harness directive — from the runtime, not the user] " + str(text or "")}
 
 
-def _claims_missing_tools(text: str) -> bool:
-    """True when a finished round blames a missing/unavailable tool."""
+# \u2500\u2500 The structural signal \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+#
+# _MISSING_TOOL_RE above is a wording chase, and the chase is being lost: it
+# has now missed three distinct real refusals, each costing the user a whole
+# turn. The last one (2026-09-16 07:42:40, round 1, zero tool calls) was
+#
+#     "The issue is a capability mismatch in this session:
+#      - I do not have application-log access.
+#      - I do not have repository or filesystem access.
+#      - I do not have the agent-launcher, Git, or push tools."
+#
+# Every branch of the regex wants the word "tool(s)" near the negation. Two
+# of those three bullets never say it \u2014 they say "access" \u2014 so the round
+# matched nothing and the turn ended. The next refusal will say "permissions",
+# or "capability", and we will be back here.
+#
+# So stop matching the noun and match the SHAPE instead. What all three
+# failures share is not a wording, it is a structure: a round that made zero
+# tool calls whose text is an ENUMERATION of capabilities the model says it
+# lacks \u2014 two or more items, each negating possession or access. A genuine
+# answer to a user almost never takes that shape, whatever nouns it uses.
+#
+# This is additive. The regex is not deleted: it carries real precision on
+# single-sentence claims ("the email tools aren't available this turn") that
+# never reach an enumeration threshold, and it is the only signal that fires
+# when a round DID call tools.
+
+# Every item must name a capability. This is the precision hinge, and it is
+# what keeps the signal off a bulleted list of FINDINGS: "I don't have the
+# exact date" and "I don't have that information" are the same grammar as
+# "I do not have repository access", and only the object tells them apart.
+# Note this is a CLASS of nouns, not one noun \u2014 the whole point is that no
+# single word (least of all "tool") is load-bearing any more.
+_CAPABILITY_NOUN_RE = re.compile(
+    r"\b(?:access|tools?|tooling|toolset|permissions?|privileges?|rights|"
+    r"capabilit(?:y|ies)|credentials?|integrations?|connectors?|"
+    r"abilit(?:y|ies)|commands?|shell|terminal|sandbox|runner|launcher|"
+    r"apis?|endpoints?|scopes?|mcp)\b",
+    re.IGNORECASE,
+)
+
+# Item form A: the model, in the first person, negating possession. Anchored
+# near the start of the segment (at most four words of lead-in, so "In this
+# session I do not have \u2026" still counts) because that anchoring is what makes
+# it an ITEM rather than a subordinate clause buried in a real answer \u2014 "I
+# used the read_file tool but the output does not include that function" must
+# not count, and it does not, because the negation is not the segment's spine.
+#
+# First person is required. A list of what the USER lacks ("- You do not have
+# admin rights", "- Your account lacks the Gmail scope") is advice, not
+# self-blocking, and re-arming on it would burn a round for nothing.
+_LACKS_FIRST_PERSON_RE = re.compile(
+    r"^\W*(?:[a-z][\w'/-]*\s+){0,4}?(?:i|we)\s+(?:"
+    r"do(?:n't|\s+not)\s+(?:currently\s+|actually\s+)?have"
+    r"|have\s+no\b"
+    r"|lack(?:s|ing)?\b"
+    r"|(?:can't|cannot|can\s+not|am\s+not\s+able\s+to)\s+access"
+    r"|(?:wasn't|was\s+not|weren't|were\s+not)\s+given"
+    r")",
+    re.IGNORECASE,
+)
+
+# Item form B: the capability as subject, denied TO ME specifically. "to me"
+# is not decoration \u2014 it is what separates "the delegation tool is not exposed
+# to me here" (self-blocking) from "the Pi-hole admin API is unavailable right
+# now" (a real upstream failure, which must never re-arm; the tools were there
+# and they ran).
+_DENIED_TO_ME_RE = re.compile(
+    r"\b(?:is|are|was|were)\s*(?:n't|\s+not)\s+(?:currently\s+|still\s+)?"
+    r"(?:available|accessible|exposed|enabled|offered|provided|granted|"
+    r"present|surfaced)\b[^.\n]{0,40}?\bto\s+(?:me|us)\b"
+    r"|\b(?:unavailable|inaccessible)\s+to\s+(?:me|us)\b",
+    re.IGNORECASE,
+)
+
+# Item form C: the telegraphic bullet, no verb at all ("- No repository
+# access", "- No git tools"). This one has to be tight or it eats every
+# findings list in the product, so it must fill the WHOLE segment and END on
+# a capability noun: "No repository access" counts, "No errors in the log"
+# and "No matches found" do not.
+_BARE_NO_CAPABILITY_RE = re.compile(
+    r"^(?:no|zero)\s+[\w ,/&'-]{0,60}?"
+    r"(?:access|tools?|tooling|toolset|permissions?|privileges?|rights|"
+    r"capabilit(?:y|ies)|credentials?|integrations?|connectors?|commands?|"
+    r"shell|terminal|launcher|apis?|scopes?|mcp)\s*$",
+    re.IGNORECASE,
+)
+
+_BULLET_MARKER_RE = re.compile(r"^\s*(?:[-*\u2022\u00b7\u2013\u2014+>]+|\d+[.)]|[a-z][.)])\s+", re.IGNORECASE)
+
+# Sentence enders, plus a conjunction that starts a fresh first-person clause
+# ("\u2026shell access, and I do not have the credentials") \u2014 two claims run
+# together are still two claims. Splitting there costs no precision: each half
+# must independently pass an item pattern AND name a capability to be counted.
+_SEGMENT_SPLIT_RE = re.compile(
+    r"(?<=[.;!?])\s+|[,;]?\s+(?:and|or|but)\s+(?=(?:i|we)\s)",
+    re.IGNORECASE,
+)
+
+# Two, not one. One "I don't have X" line is ordinary prose and fires all the
+# time in honest answers; the enumeration is what says "capability mismatch
+# dump" rather than "sentence". That threshold is the second precision hinge
+# and the reason this can afford to ignore the noun "tool" entirely.
+_MIN_MISSING_CAPABILITY_ITEMS = 2
+
+
+def _missing_capability_items(text: str) -> List[str]:
+    """The distinct 'I lack X' items an enumeration-style refusal is made of.
+
+    Segments on newlines AND on sentence enders, so the same shape counts
+    whether the model bulleted it (all three real refusals did) or ran it
+    together in a paragraph. Duplicates collapse: a model repeating one line
+    verbatim is still making one claim, not two.
+    """
+    items: List[str] = []
+    seen: Set[str] = set()
+    for line in str(text or "").splitlines():
+        for raw in _SEGMENT_SPLIT_RE.split(line):
+            segment = _BULLET_MARKER_RE.sub("", raw).strip().strip("*_`").strip()
+            segment = segment.rstrip(".;!?,").strip()
+            if not segment:
+                continue
+            key = segment.casefold()
+            if key in seen:
+                continue
+            if not _CAPABILITY_NOUN_RE.search(segment):
+                continue
+            if (
+                _LACKS_FIRST_PERSON_RE.search(segment)
+                or _DENIED_TO_ME_RE.search(segment)
+                or _BARE_NO_CAPABILITY_RE.match(segment)
+            ):
+                seen.add(key)
+                items.append(segment)
+    return items
+
+
+def _enumerates_missing_capabilities(text: str) -> bool:
+    """True when a round is a list of capabilities it says it does not have."""
+    return len(_missing_capability_items(text)) >= _MIN_MISSING_CAPABILITY_ITEMS
+
+
+def _missing_tool_signal(text: str, *, made_tool_calls: bool = False) -> Optional[str]:
+    """Which signal says this round self-blocked: "regex", "structural", None.
+
+    The caller logs the answer so the next operator reading the self-unblock
+    line can tell a wording match from a shape match without re-deriving it.
+
+    ``made_tool_calls`` gates the structural signal only. A round that called
+    tools was not denied them, so an enumeration in its text is a report about
+    the world, not about its own schema list \u2014 and the regex, which is narrow
+    enough to survive that, stays in charge there.
+    """
     text = str(text or "").replace("\u2019", "'").replace("\u2018", "'")
-    return bool(text.strip() and _MISSING_TOOL_RE.search(text))
+    if not text.strip():
+        return None
+    if _MISSING_TOOL_RE.search(text):
+        return "regex"
+    if not made_tool_calls and _enumerates_missing_capabilities(text):
+        return "structural"
+    return None
+
+
+def _claims_missing_tools(text: str, *, made_tool_calls: bool = False) -> bool:
+    """True when a finished round blames a missing/unavailable tool."""
+    return _missing_tool_signal(text, made_tool_calls=made_tool_calls) is not None
 
 
 def _targeted_rearm_tools(text: str, pool: Set[str], tool_idx=None) -> Set[str]:
@@ -2026,6 +2440,93 @@ def _is_casual_low_signal(text: str) -> bool:
     return len(tail_words) <= 2
 
 
+# ── "Is this turn asking for something?" ──────────────────────────────────
+#
+# The mirror image of `_is_casual_low_signal`. That one answers "is this
+# chit-chat"; this one answers "is this work", and `_classify_agent_request`
+# needs both because a turn can be neither a recognised domain nor a greeting.
+#
+# Two signals, and a turn needs one of them:
+#   - an action verb (the user is telling Odysseus to do something), or
+#   - a question (wh-/auxiliary opener, or a literal "?").
+#
+# ...plus at least one CONTENT word. That second half is what keeps the terse
+# acknowledgements out: "yeah do that", "run it", "do it" all contain an action
+# verb, but every other token is a pronoun or filler, so there is nothing for
+# embedding retrieval to match against and the right handling is the
+# continuation path (which inherits the previous turn's query), not a retrieval
+# against the literal words. It is also what keeps "i like Umni" out — the
+# example the hints-only branch was originally added for — since "like" is not
+# an action verb and the message asks for nothing.
+#
+# Deliberately generous on the verb list and deliberately strict on content
+# words: a false positive costs eight tool schemas for one turn, a false
+# negative costs the whole turn ("I do not have application-log access").
+_REQUEST_ACTION_RE = re.compile(
+    r"\b(?:fix|debug|troubleshoot|diagnose|investigate|analy[sz]e|inspect|"
+    r"check|verify|test|reproduce|trace|explain|figure|find|look|search|"
+    r"read|write|create|make|build|generate|draft|compose|add|remove|delete|"
+    r"update|change|edit|rename|move|copy|convert|install|uninstall|run|"
+    r"execute|launch|start|stop|restart|deploy|push|pull|commit|merge|"
+    r"rebase|refactor|implement|scaffold|summari[sz]e|compare|list|show|"
+    r"open|close|send|reply|forward|fetch|download|upload|sort|handle|"
+    r"clean|review|audit|plan|schedule|help|tell|give|set|enable|disable|"
+    r"turn|switch|rewrite|proofread|translate|calculate|count)\b",
+    re.IGNORECASE,
+)
+_QUESTION_OPENER_RE = re.compile(
+    r"^\s*(?:what|why|how|when|where|who|whom|whose|which|"
+    r"can|could|should|would|will|do|does|did|is|are|was|were|has|have|am)\b",
+    re.IGNORECASE,
+)
+# Pronouns, articles, auxiliaries, politeness and acknowledgement tokens. A
+# token outside this set is treated as content — a noun, an adjective, a name,
+# an error string, anything the tool index can actually embed against.
+_REQUEST_FILLER_WORDS = frozenset({
+    "i", "me", "my", "mine", "myself", "we", "us", "our", "ours",
+    "you", "your", "yours", "it", "its", "he", "him", "his", "she", "her",
+    "they", "them", "their", "this", "that", "these", "those", "there", "here",
+    "a", "an", "the", "and", "or", "but", "so", "if", "then", "than",
+    "to", "of", "for", "with", "on", "in", "at", "by", "from", "into", "as",
+    "is", "are", "was", "were", "be", "been", "being", "am",
+    "do", "does", "did", "done", "doing",
+    "can", "could", "should", "would", "will", "shall", "may", "might", "must",
+    "have", "has", "had", "get", "got",
+    "please", "just", "now", "also", "too", "very", "really", "actually",
+    "maybe", "again", "out", "up", "down", "off", "over", "back",
+    "ok", "okay", "yes", "yeah", "yep", "yup", "sure", "no", "nope",
+    "thanks", "thank", "thx", "great", "cool", "nice", "good", "fine",
+    "alright", "one", "some", "any", "all", "more", "most", "less",
+    "not", "dont", "doesnt", "didnt", "cant", "wont", "isnt", "arent",
+    # The interrogatives are function words too. Without them here "how are
+    # you" reads as a question with a content word ("how") and pulls eight tool
+    # schemas into a greeting; with them, it needs a real noun or verb to
+    # qualify, which "what went wrong" and "how do i wire this up" both have.
+    "what", "why", "how", "when", "where", "who", "whom", "whose", "which",
+})
+
+
+def _looks_like_a_request(text: str) -> bool:
+    """True when the turn asks Odysseus to do or explain something."""
+    s = str(text or "").strip()
+    if not s or _is_casual_low_signal(s):
+        return False
+    lowered = s.lower()
+    if not (_REQUEST_ACTION_RE.search(lowered)
+            or "?" in s
+            or _QUESTION_OPENER_RE.match(lowered)):
+        return False
+    # The action verb itself does not count as content: "run it" and "yeah do
+    # that" would otherwise pass on the verb alone, and those are continuations
+    # whose real query lives in the previous turn, not in these two words.
+    words = re.findall(r"[a-z0-9_'-]+", lowered)
+    return any(
+        w.replace("'", "") not in _REQUEST_FILLER_WORDS
+        and not _REQUEST_ACTION_RE.fullmatch(w)
+        for w in words
+    )
+
+
 def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
     """Treat "try again / it failed" as a continuation whenever there's a
     real prior turn to inherit from.
@@ -2231,8 +2732,79 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
            r"\bplan (?:out )?my (?:day|week|schedule)\b",
            r"\b(?:feeling|felt|feelings)\b.{0,20}\b(?:lately|recently|this week|this month)\b"):
         domains.add("wellbeing")
+    # Self-diagnosis — reading Odysseus's own logs and explaining its own
+    # failures. 2026-09-16: "analyze your own logs and fix this issue" matched
+    # no domain at all, so `low_signal` was True, embedding retrieval was
+    # skipped in favour of keyword hints, `read_app_logs` was never offered,
+    # and the turn ended with "I do not have application-log access." A request
+    # to debug the running app is the opposite of a low-signal turn — it is the
+    # one shape of request that most needs the full selection.
+    #
+    # "log" is the hazard here, for exactly the reason documented at
+    # `_ADMIN_STEM_MIN_LEN`: as a stem it sits inside "login", "logo", "logic",
+    # "blog", "dialogue", "catalog" and "logistics", and as a bare word it is
+    # the verb in "log in". Word boundaries alone clear the compounds, but not
+    # "log in" and not "what did I write in my voice logs" (vault content). So
+    # the noun is only ever matched with a qualifier in front of it ("app log",
+    # "error log", "your own logs") or a reading verb leading into it ("check
+    # the logs") — never on its own.
+    if has(
+        # Odysseus's own log files.
+        r"\b(?:app|application|server|error|debug|crash|system|runtime|odysseus)\s+logs?\b",
+        r"\blogs?\s+(?:file|files|output|entries|entry)\b",
+        r"\b(?:your|its)\s+(?:own\s+)?logs?\b",
+        r"\b(?:read|check|tail|analy[sz]e|analy[sz]ing|inspect|examine|review|"
+        r"grep|scan|show|see|open|look\s+(?:at|in|through))\b"
+        r"(?:\s+(?:the|my|your|our|its|own|last|recent|latest|full|raw|app|"
+        r"application|server|error|debug|system|odysseus))*\s+logs\b",
+        # A concrete failure to explain.
+        r"\b(?:tracebacks?|stack\s?traces?|stacktraces?)\b",
+        r"\bcrash(?:e[ds]|ing)?\b",
+        r"\b(?:got|getting|seeing|saw|hit|hitting|throw(?:s|ing|n)?|threw|"
+        r"rais(?:e[ds]?|ing)|return(?:s|ed|ing)?)\b(?:\s+\w+){0,3}\s+"
+        r"\b(?:errors?|exceptions?)\b",
+        r"\b(?:errors?|exceptions?)\s+(?:message|messages|log|logs|output)\b",
+        r"\btrac(?:e|ed|ing)\b(?:\s+\w+){0,5}\s+"
+        r"\b(?:error|errors|exception|exceptions|bug|bugs|crash|failure|"
+        r"fail|issue|problem|regression)\b",
+        # "why did the export fail", "what went wrong", "the deploy is failing
+        # again", "this is broken" — a reported breakage, however phrased.
+        r"\bwhy\b(?:\s+\w+){0,6}\s+\b(?:fail(?:s|ed|ing)?|break|broke|broken|"
+        r"crash(?:e[ds])?|error(?:ed|s)?|hang(?:s|ing)?|hung|"
+        r"time[ds]?\s+out)\b",
+        r"\b(?:went|going)\s+wrong\b",
+        r"\b(?:is|are|was|were|keeps?|kept)\s+(?:\w+\s+){0,2}"
+        r"(?:fail(?:s|ed|ing)?|break(?:s|ing)?|broke|broken|crash(?:e[ds]|ing)?|"
+        r"erroring|hanging|stuck)\b",
+        r"\b(?:not working|isn'?t working|doesn'?t work|didn'?t work|"
+        r"stopped working|won'?t start)\b",
+        # Explicit debugging intent.
+        r"\bdebug(?:s|ged|ging)?\b",
+        r"\btroubleshoot(?:s|ed|ing)?\b",
+        r"\bdiagnostics?\b",
+        r"\bdiagnos(?:e|ed|ing)\b(?:\s+\w+){0,3}\s+"
+        r"\b(?:this|it|that|issue|issues|problem|problems|bug|bugs|error|"
+        r"errors|failure|failures|crash|crashes)\b",
+    ):
+        domains.add("self_diagnosis")
 
-    low_signal = not continuation and not domains
+    # Domain coverage used to be the ONLY gate on embedding retrieval, so any
+    # request phrased outside the enumerated regexes above landed in the same
+    # bucket as "hey" / "lol" / "thanks!" — it took the direct-reply path on a
+    # first turn, and the hints-only path afterwards. Measured over an
+    # 18-message corpus of realistic turns, 15 skipped retrieval; ten of those
+    # fifteen were substantive work requests ("fix the failing test", "this is
+    # broken, sort it out"). The tool index is built and paid for and then
+    # bypassed on the majority of turns.
+    #
+    # Adding one more domain fixes one more phrasing and leaves the hole open
+    # for the next one, so the gate itself moves: a turn with no domain is
+    # low-signal only when it ALSO carries no request signal. `_looks_like_a_request`
+    # is a positive test for chit-chat's opposite, which is what this flag was
+    # always reaching for — `_is_casual_low_signal` above is the positive test
+    # for chit-chat itself. The change is monotone: it can only ever clear
+    # `low_signal`, never set it, so no turn that retrieves today stops doing so.
+    low_signal = not continuation and not domains and not _looks_like_a_request(text)
     return {
         "low_signal": low_signal,
         "continuation": continuation,
@@ -2925,6 +3497,7 @@ def _build_system_prompt(
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
     suppress_skills: bool = False,
+    allowed_skill_names: Optional[Set[str]] = None,
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
 ) -> List[Dict]:
@@ -2943,7 +3516,8 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
+    _skill_key = frozenset(allowed_skill_names) if allowed_skill_names is not None else None
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills, _skill_key)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -2954,6 +3528,7 @@ def _build_system_prompt(
             mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            allowed_skill_names=allowed_skill_names,
         )
     else:
         agent_prompt, _skill_index_block = _build_base_prompt(
@@ -2966,6 +3541,7 @@ def _build_system_prompt(
             owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            allowed_skill_names=allowed_skill_names,
         )
         if not active_document:
             _cached_base_prompt = agent_prompt
@@ -3344,9 +3920,15 @@ def _build_system_prompt(
                 except (TypeError, ValueError):
                     _skill_max_injected = 3
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
+                _available_skills = sm.load(owner=owner)
+                if allowed_skill_names is not None:
+                    _available_skills = [
+                        skill for skill in _available_skills
+                        if str(skill.get("name") or "") in allowed_skill_names
+                    ]
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=sm.load(owner=owner),
+                    skills=_available_skills,
                     threshold=0.25,
                     max_items=_skill_max_injected,
                     min_confidence=_skill_min_conf,
@@ -3498,7 +4080,7 @@ _ADMIN_TOOLS = {
     "manage_session", "manage_skills", "manage_tasks",
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
     "manage_documents", "manage_settings", "create_session", "list_sessions",
-    "send_to_session", "pipeline", "ask_teacher", "list_models",
+    "send_to_session", "message_agent", "pipeline", "ask_teacher", "list_models", "delegate_to_agent",
 }
 
 def _build_base_prompt(
@@ -3511,6 +4093,7 @@ def _build_base_prompt(
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
     suppress_skills: bool = False,
+    allowed_skill_names: Optional[Set[str]] = None,
 ):
     """Build the agent prompt with only relevant tools included.
 
@@ -3570,6 +4153,8 @@ def _build_base_prompt(
             _sm = SkillsManager(DATA_DIR)
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
+            if allowed_skill_names is not None:
+                skill_idx = [s for s in skill_idx if str(s.get("name") or "") in allowed_skill_names]
             if skill_idx:
                 lines = ["## Available skills",
                          "Procedures the assistant should consult before doing domain work. "
@@ -3614,7 +4199,12 @@ def _resolve_tool_blocks(
             if block:
                 tool_blocks.append(block)
                 converted_calls.append(tc)
-                logger.info(f"  -> converted: {tc_name} -> {block.tool_type}")
+                # A real rename is worth seeing at INFO; the identity mapping
+                # (`read_file -> read_file`) is one line per call per round that
+                # says nothing, and buries the rounds that matter. Same line,
+                # demoted to DEBUG when nothing changed.
+                _log_converted = logger.info if tc_name != block.tool_type else logger.debug
+                _log_converted(f"  -> converted: {tc_name} -> {block.tool_type}")
             else:
                 logger.warning(f"  -> FAILED to convert native call: {tc_name} args={tc_args[:200]}")
         if tool_blocks:
@@ -4024,6 +4614,142 @@ def _detect_runaway_call(call_freq, threshold=15):
     return sig.split(":", 1)[0] if sig else None
 
 
+# ── Duplicate-call guard ──
+# A call that repeats an earlier one in the same turn — same tool name AND the
+# same arguments — cannot return anything the model has not already been shown,
+# so executing it again buys nothing and costs a round.
+#
+# Repro (2026-09-16): the delegation tools were missing from the schema list, so
+# the turn latched onto the only "actiony" tools it had (a connected Penpot MCP
+# server) and spent rounds 3-6 on four identical `execute_code` calls and two
+# `penpot_api_info` calls — one call and 37-44 output tokens per round — before
+# giving up in prose on round 7. `_detect_runaway_call` only trips at 15
+# identical calls and `_stuck_rounds` needs a streak of 4 text-free repeats, so
+# neither existing detector saw a six-round burn.
+#
+# A false positive here is worse than a miss: it withholds a call the model
+# genuinely needed. Legitimate repeats are let through three ways.
+#
+#   1. Polling. Some tools exist to observe state that moves on its own —
+#      tailing a serve's output, listing downloads, checking a research job.
+#      The identical call IS the workflow, so those never dedupe.
+#   2. "Something changed since." Re-reading a file after editing it, or
+#      re-listing a directory after writing into it, is correct behaviour. So
+#      any call that can mutate the world drops the memo: every observation
+#      recorded before it may now be stale and is fair to take again.
+#   3. Retries. A first call that FAILED is worth another go — transient
+#      errors are real — so only successful results are memoised.
+#
+# The guard also never fires on a call held for approval: that contract asks
+# the model to re-issue byte-identical arguments once the user decides.
+_DEDUPE_POLLING_TOOLS = {
+    "tail_serve_output",
+    "list_served_models",
+    "list_downloads",
+    "manage_bg_jobs",
+    "manage_research",
+    "read_app_logs",
+    # Ends the turn and waits for a human; re-asking is the user's business.
+    "ask_user",
+}
+
+# The set above can only ever name BUILTIN tools, and an MCP tool's name carries
+# a per-server hash (`mcp__77d1a280__firecrawl_agent_status`), so no static list
+# can hold one. Polling an MCP job is the same workflow as polling a builtin
+# one: the identical call repeated until the answer changes. Without this, the
+# second poll of a running job is answered from the memo with the first poll's
+# "still running" — forever, so the job can never be observed finishing.
+#
+# Recognised by name shape instead. These stems are what a poll is called across
+# every server convention seen so far; matched as whole words within the bare
+# tool name so `firecrawl_check_crawl_status` and `firecrawl_monitor_check` hit
+# while `firecrawl_scrape` does not.
+_DEDUPE_POLLING_NAME_RE = re.compile(
+    r"(?:^|_)(?:status|state|poll|check|checks|wait|progress|tail|watch|monitor|"
+    r"pending|result|results)(?:_|$)",
+    re.IGNORECASE,
+)
+
+# Likewise for "this call could have changed something". _KNOWN_MUTATING_TOOLS
+# is builtin-only, so an MCP write followed by an identical MCP read would serve
+# the pre-write answer from the memo. The mutating call's OWN signature still
+# survives the clear (see _record_call_result), so a model repeating the same
+# write is still caught.
+_DEDUPE_MUTATING_NAME_RE = re.compile(
+    r"(?:^|_)(?:create|update|delete|remove|write|set|add|insert|import|export|"
+    r"execute|run|send|post|upload|modify|edit|rename|move|apply|install|start|"
+    r"stop|cancel|publish)(?:_|$)",
+    re.IGNORECASE,
+)
+
+_MCP_PREFIX_RE = re.compile(r"^mcp__[^_]+__")
+
+
+def _bare_tool_name(tool_type: str) -> str:
+    """An MCP tool's own name, without the `mcp__<server>__` routing prefix."""
+    return _MCP_PREFIX_RE.sub("", str(tool_type or ""))
+
+
+def _dedupe_signature(tool_type: str, content: str) -> str:
+    """Stable identity for "this is the same call, made again".
+
+    Uses the FULL arguments, not the 120-character prefix `_call_freq` keys on:
+    two long `bash` scripts that share a prefix and differ at the end are
+    different calls, and suppressing the second would be exactly the false
+    positive this guard must never make. JSON arguments are canonicalised so a
+    reordered key doesn't make the same call look new.
+    """
+    raw = str(content or "").strip()
+    if raw.startswith("{"):
+        try:
+            raw = json.dumps(json.loads(raw), sort_keys=True, separators=(",", ":"))
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pass
+    return f"{tool_type}\x00{raw}"
+
+
+def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str]) -> bool:
+    """Whether this exact call already ran, successfully, with nothing in
+    between that could have changed its answer. See the guard notes above."""
+    if tool_type in _DEDUPE_POLLING_TOOLS:
+        return False
+    if _DEDUPE_POLLING_NAME_RE.search(_bare_tool_name(tool_type)):
+        return False
+    return bool(sig in memo)
+
+
+def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str]) -> None:
+    """Memoise a successful call's result, first clearing the memo when the
+    call could have changed the world (rule 2 above). Clearing BEFORE
+    recording matters: the mutating call's own signature must survive, or a
+    model that fires the same `bash` twice in a row is never caught."""
+    if (
+        tool_type in _KNOWN_MUTATING_TOOLS
+        or tool_type in _VERIFIER_EFFECTFUL_TOOLS
+        or _DEDUPE_MUTATING_NAME_RE.search(_bare_tool_name(tool_type))
+    ):
+        memo.clear()
+    memo[sig] = _truncate(str(output or "").strip() or "(no output)", 1500)
+
+
+def _name_list(names, limit: int) -> str:
+    """Render a set of tool names for a log line or a directive, with any
+    truncation stated *inside* the string.
+
+    The missing-tool re-arm line used to log ``re-armed 33 tool(s)`` next to a
+    bare ``sorted(...)[:25]``. That is the one line an operator greps to answer
+    "was the tool I needed re-armed?", and the 8 silently dropped names are
+    exactly the ones being looked for — the line answered the question
+    confidently and wrongly. The directive the *model* reads had the same clip
+    at 20. Anything clipped now says so.
+    """
+    ordered = sorted(names or ())
+    shown = ordered[:max(int(limit), 0)]
+    rest = len(ordered) - len(shown)
+    body = ", ".join(shown) if shown else "(none)"
+    return f"{body} … +{rest} more" if rest > 0 else body
+
+
 # Cumulative tool calls allowed in one agent run before we force a convergence
 # round. Deliberately generous — a legitimate heavy turn (a batch of calendar
 # events, a build→test→fix cycle) lands well under it — but low enough that an
@@ -4033,6 +4759,106 @@ def _detect_runaway_call(call_freq, threshold=15):
 # legitimately makes hundreds of calls; the repeat/stall detectors above still
 # stop a loop that is not making progress.
 DEFAULT_MAX_TOOL_CALLS_PER_RUN = 500
+
+
+# The withheld-tool line is worth INFO the first time and whenever the set
+# changes (a binary installed, a capability switched on); repeating the same
+# names on all 21 rounds of a turn is the noise that buries the round that
+# actually failed. Same idea as `_last_tool_debug_sig` in the round loop.
+_last_withheld_sig: Optional[Tuple[str, ...]] = None
+
+
+def _withhold_unavailable_tools(selected: List[Dict]) -> List[Dict]:
+    """Drop schemas for tools this host cannot actually run.
+
+    The worst failure mode a fresh install had was an honest-looking schema: the
+    model picked `delegate_to_claude_code`, the binary was not there, and the
+    call failed at the far end — after which the model retried, apologised, or
+    invented a workaround. Withholding the schema turns that into a capability
+    the model never claims to have.
+
+    Deliberately narrow:
+
+    * A tool belonging to no registered capability is never withheld, so this
+      cannot hide anything by omission (see `capabilities.unavailable_tools`).
+    * Only exact tool names are matched, so connected external MCP tools — which
+      bind independently of RAG selection — are untouched unless a capability
+      declares one by name.
+    * If it would empty the list, it does nothing. A model with no tools at all
+      fails far worse than one holding a tool that errors, so that case is
+      logged loudly and the unfiltered list is sent.
+    """
+    global _last_withheld_sig
+    try:
+        # Importing the declarations is what populates the registry; the
+        # mechanism module alone knows nothing.
+        import src.capabilities_builtin  # noqa: F401  (registers the declarations)
+        from src.capabilities import capability_for_tool, unavailable_tools
+
+        withheld = unavailable_tools()
+    except Exception:
+        # Never let capability bookkeeping cost the turn its tools.
+        logger.debug("[capabilities] tool gating skipped", exc_info=True)
+        return selected
+    if not withheld:
+        return selected
+
+    def _name(schema: Dict) -> str:
+        return schema.get("function", {}).get("name") or schema.get("name") or ""
+
+    kept = [schema for schema in selected if _name(schema) not in withheld]
+    if selected and not kept:
+        logger.error(
+            "[capabilities] refusing to send an empty tool list: every tool in this "
+            "round (%s) belongs to an unavailable capability — sending unfiltered. "
+            "Check Settings › Capabilities; something is disabled that should not be.",
+            len(selected),
+        )
+        return selected
+    removed = tuple(sorted({_name(s) for s in selected} - {_name(s) for s in kept}))
+    if removed:
+        _log = logger.info if removed != _last_withheld_sig else logger.debug
+        _last_withheld_sig = removed
+        # Name the owning capability: "withheld delegate_to_claude_code" alone
+        # sends the reader hunting for which switch or missing binary did it.
+        _owners = []
+        for _tool in removed:
+            _cap = capability_for_tool(_tool)
+            _owners.append(f"{_tool} ({_cap.name if _cap else '?'})")
+        _log("[capabilities] withheld %d tool(s) from the model: %s", len(removed), ", ".join(_owners))
+    return kept
+
+
+# A [tool-routing] line has to stay one readable line in a log tail, so cap the
+# drop list and say how many were elided rather than letting a clamped turn
+# print forty pairs.
+_MAX_LOGGED_DROPPED_MATCHES = 8
+
+
+def _explain_dropped_matches(
+    query_matched: Set[str],
+    selected: Optional[Set[str]],
+    drop_reasons: Dict[str, str],
+    disabled_tools: Set[str],
+    limit: int = _MAX_LOGGED_DROPPED_MATCHES,
+) -> List[tuple]:
+    """(tool, why) for every retrieved tool that selection then discarded.
+
+    ``drop_reasons`` carries the gates that pruned on purpose. Anything else
+    landing in ``disabled_tools`` is reported generically; a tool that is in
+    neither was simply not carried forward by a clamp or a re-selection, which
+    is a different bug class and worth telling apart at a glance.
+    """
+    dropped = sorted(set(query_matched or ()) - set(selected or ()))
+    explained: List[tuple] = []
+    for name in dropped[:limit]:
+        reason = (drop_reasons or {}).get(name)
+        if not reason:
+            reason = "disabled" if name in (disabled_tools or ()) else "deselected"
+        explained.append((name, reason))
+    if len(dropped) > limit:
+        explained.append((f"+{len(dropped) - limit} more", "truncated"))
+    return explained
 
 
 def _tool_schemas_for_round(
@@ -4046,12 +4872,32 @@ def _tool_schemas_for_round(
     ody_qwen_finetune_model: bool,
     last_user: str,
     admin_tools: Optional[Set[str]] = None,
+    mcp_gated_names: Optional[Set[str]] = None,
 ) -> List[Dict]:
     """Return the exact schema list sent for one model round.
 
     Centralising this keeps the schema token reserve/accounting in lockstep
     with the payload. Previously the schema decision lived only inside the
     round loop, after context trimming had already decided the request fit.
+
+    ``mcp_gated_names`` is the set of qualified MCP tool names that must still
+    win RAG/intent-based tool selection like a builtin tool would: the large
+    embedded catalogs (browser, GitHub, Todoist, ...) plus any user-added
+    server that outgrew the always-bound budget. Every other MCP schema is a
+    server the user explicitly connected via MCP settings and stays bound once
+    connected -- root cause of the issue where a connected server's tools
+    vanished from the schema on any turn whose wording did not happen to score
+    well against the RAG tool index.
+
+    Both halves of that are load-bearing and pull in opposite directions, so
+    neither side of the rule may be "simplified" away. Bind a small server
+    unconditionally or a follow-up like "continue" loses it. Bind a big one
+    unconditionally and the turn drowns: on 2026-09-16 a turn that selected 11
+    tools was sent 48, and because its OWN tools had not been selected, the 37
+    always-bound strangers were the only actionable things it could see -- it
+    spent six rounds in a design tool and a docs lookup on a request to read
+    application logs. The size cut-off lives in
+    :func:`src.mcp_manager._always_bound_limits`, with the reasoning.
     """
     if force_answer:
         return []
@@ -4067,9 +4913,11 @@ def _tool_schemas_for_round(
                 schema for schema in FUNCTION_TOOL_SCHEMAS
                 if schema.get("function", {}).get("name") in schema_names
             ]
+            _gated = mcp_gated_names or set()
             mcp_filtered = [
                 schema for schema in mcp_schemas
                 if schema.get("function", {}).get("name") in relevant_tools
+                or schema.get("function", {}).get("name") not in _gated
             ]
             selected = base_schemas + mcp_filtered
         else:
@@ -4090,6 +4938,12 @@ def _tool_schemas_for_round(
             if schema.get("function", {}).get("name") not in disabled_tools
             and schema.get("name") not in disabled_tools
         ]
+    # Last gate before the payload: a tool whose capability is unavailable on
+    # this host is not offered at all. Applied here, next to `disabled_tools`,
+    # because this function is the single place both the round payload and the
+    # schema token reserve read their list from — filtering anywhere earlier
+    # would leave the two disagreeing about what was sent.
+    selected = _withhold_unavailable_tools(selected)
     # Canonical schemas remain the execution contract. Native provider payloads
     # omit repeated parameter prose while preserving every JSON constraint.
     return compact_function_tool_schemas(selected) if is_api_model else selected
@@ -4119,6 +4973,7 @@ async def stream_agent_loop(
     workspace: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
     uploaded_files: Optional[List[Dict]] = None,
+    allow_private: bool = False,
     workload: str = "foreground",
     _is_teacher_run: bool = False,
     approval_mode: Optional[str] = None,
@@ -4142,6 +4997,21 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    # Why a tool that retrieval matched never made it into the selection. Each
+    # gate below that prunes on purpose records itself here, and the
+    # [tool-routing] line names the gate for every dropped match. Without it
+    # the only trace was the count delta -- `query_matched_count=3
+    # selected_count=8` in the 2026-09-1x delegation incident, which says
+    # nothing about which three or why two of them vanished, so the drop was
+    # invisible until someone re-read the whole selection path by hand.
+    _drop_reasons: Dict[str, str] = {}
+
+    def _mark_dropped(names, reason: str) -> None:
+        # First gate to touch a tool owns the explanation: later ones are
+        # re-stating a decision already made.
+        for _n in names or ():
+            _drop_reasons.setdefault(str(_n), reason)
+
     # Image generation is a setting, not a tool toggle. With it off the prompt
     # builder already hides `generate_image`, but the selection still carried
     # it — `selected_without_schema=['generate_image']` on every round of the
@@ -4165,7 +5035,9 @@ async def stream_agent_loop(
         # route also unions the read-only-disabled set, but enforce here too so
         # the loop is safe regardless of caller. MCP stays available but is
         # filtered to read-only tools below (after the disabled map is loaded).
-        disabled_tools.update(plan_mode_disabled_tools())
+        _plan_disabled = plan_mode_disabled_tools()
+        disabled_tools.update(_plan_disabled)
+        _mark_dropped(_plan_disabled, "plan-mode")
 
     uploaded_files = uploaded_files or []
     _upload_msg = _uploaded_files_context_message(uploaded_files)
@@ -4191,6 +5063,41 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _admin_tools = _detect_admin_tools(messages) if _needs_admin else set()
     _last_user = _extract_last_user_message(messages)
+    # Per-agent orchestration policy. The safe default is explicit delegation:
+    # an ordinary information request stays with the current open chat even if
+    # embedding retrieval considers a coding-agent tool semantically nearby.
+    _agent_settings: Dict[str, Any] = {}
+    try:
+        from core.database import get_session_settings
+        _agent_settings = get_session_settings(session_id) or {}
+    except Exception:
+        pass
+    _agent_disabled = _agent_settings.get("disabled_tools") or []
+    disabled_tools.update(_agent_disabled)
+    _mark_dropped(_agent_disabled, "agent-setting")
+    _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
+    if _delegation_policy == "never" or (
+        _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
+    ):
+        disabled_tools.update(_DELEGATION_TOOLS)
+        _mark_dropped(_DELEGATION_TOOLS, f"delegation-policy:{_delegation_policy}")
+    _model_access = str(_agent_settings.get("model_access") or "all")
+    if _model_access == "current":
+        _model_tools = {"chat_with_model", "ask_teacher", "list_models"}
+        disabled_tools.update(_model_tools)
+        _mark_dropped(_model_tools, "model-access")
+    _memory_access = str(_agent_settings.get("memory_access") or "write")
+    if _memory_access == "none":
+        _memory_tools = {"manage_memory", "mcp__memory__manage_memory"}
+        disabled_tools.update(_memory_tools)
+        _mark_dropped(_memory_tools, "memory-access")
+    _skill_access = str(_agent_settings.get("skill_access") or "all")
+    _allowed_skill_names = (
+        set(_agent_settings.get("skill_names") or []) if _skill_access == "selected" else None
+    )
+    if _skill_access == "none":
+        disabled_tools.add("manage_skills")
+        _mark_dropped({"manage_skills"}, "skill-access")
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     if _ody_qwen_finetune_model:
         try:
@@ -4204,9 +5111,12 @@ async def stream_agent_loop(
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
         from routes.prefs_routes import _load_for_user as _load_prefs
-        if (_load_prefs(owner) or {}).get("skills_enabled", True):
+        if _skill_access != "none" and (_load_prefs(owner) or {}).get("skills_enabled", True):
+            _profile_skills = SkillsManager(DATA_DIR).load(owner=owner)
+            if _allowed_skill_names is not None:
+                _profile_skills = [s for s in _profile_skills if s.get("name") in _allowed_skill_names]
             _explicit_skills = _explicitly_named_skills(
-                _last_user, SkillsManager(DATA_DIR).load(owner=owner)
+                _last_user, _profile_skills
             )
     except Exception as _skill_err:
         logger.debug("Explicit skill lookup skipped: %s", _skill_err)
@@ -4275,6 +5185,17 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
+    _allowed_mcp_servers = _agent_settings.get("allowed_mcp_servers")
+    if mcp_mgr and isinstance(_allowed_mcp_servers, list) and "*" not in _allowed_mcp_servers:
+        _allowed_mcp = set(_allowed_mcp_servers)
+        for _mcp_tool in mcp_mgr.get_all_tools():
+            _server_id = str(_mcp_tool.get("server_id") or "")
+            if _server_id not in _allowed_mcp:
+                _tool_name = str(_mcp_tool.get("name") or "")
+                _mcp_disabled_map.setdefault(_server_id, set()).add(_tool_name)
+                _qualified = str(_mcp_tool.get("qualified_name") or "")
+                if _qualified:
+                    disabled_tools.add(_qualified)
     # Runs unconditionally: the native wellbeing tool needs the same gate as
     # the Lotus MCP tools, and it exists whether or not an MCP manager does.
     _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools, owner=owner)
@@ -4487,13 +5408,10 @@ async def stream_agent_loop(
     # Fallback: if RAG unavailable, use keyword-based tool selection
     # instead of sending ALL tools (which overwhelms the model).
     if not guide_only and not _relevant_tools and _retrieval_query:
-        from src.tool_index import ALWAYS_AVAILABLE, ToolIndex
+        from src.tool_index import ALWAYS_AVAILABLE
         _relevant_tools = set(ALWAYS_AVAILABLE)
         _tool_selection_source = "keyword"
-        ql = _retrieval_query.lower()
-        for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(kw in ql for kw in keywords):
-                _relevant_tools.update(tools)
+        _relevant_tools |= keyword_fallback_tools(_retrieval_query)
         logger.info(f"[tool-rag] Keyword fallback selected: {sorted(_relevant_tools - ALWAYS_AVAILABLE)}")
 
     # Snapshot what retrieval (or the keyword fallback) matched for THIS query,
@@ -4537,6 +5455,32 @@ async def stream_agent_loop(
                 )
         if "ui" in (_intent.get("domains") or set()):
             _relevant_tools.add("ui_control")
+        if "self_diagnosis" in (_intent.get("domains") or set()):
+            # `read_app_logs` arrives from _DOMAIN_TOOL_MAP. These are the
+            # read-only tools a "why did this break" turn needs next — find the
+            # code the log line names, read it, and say what happened. They are
+            # seeded here rather than in the map because the map also decides
+            # which rule packs get written into the prompt (see the comment on
+            # the `self_diagnosis` entry). Nothing that writes or executes is
+            # included: diagnosing is not the same permission as fixing, and a
+            # turn that goes on to ask for the fix picks those up on its own.
+            _relevant_tools.update({"read_file", "grep", "glob", "ls"})
+        if (
+            workspace
+            and not _existing_conversation
+            and not (_intent.get("domains") or set())
+            and not _active_document_relevant
+        ):
+            # An active workspace IS the file-work signal: a first-turn request
+            # that names no domain ("look at the local project") means explore
+            # this folder. The low-signal branch above already does this, but it
+            # only runs for turns it judged contentless — and now that a
+            # domainless REQUEST is no longer treated as contentless, this turn
+            # reaches retrieval instead and lands here. Same rule, same
+            # read-only intersection: the agent can investigate, while write and
+            # shell tools wait for a request that actually asks for them.
+            from src.tool_security import PLAN_MODE_READONLY_TOOLS
+            _relevant_tools |= (_DOMAIN_TOOL_MAP["files"] & PLAN_MODE_READONLY_TOOLS)
         if (
             (
                 (
@@ -4662,6 +5606,7 @@ async def stream_agent_loop(
             removed = sorted(_relevant_tools & _email_fetch_tools)
             if removed:
                 _relevant_tools.difference_update(_email_fetch_tools)
+                _mark_dropped(removed, "email-draft-open")
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
 
     # Current-turn chat uploads are real files under the upload/data root. Make
@@ -4743,6 +5688,8 @@ async def stream_agent_loop(
                 pass
             _sm = SkillsManager(DATA_DIR)
             _owner_skills = _sm.load(owner=owner) if _skills_on else []
+            if _allowed_skill_names is not None:
+                _owner_skills = [s for s in _owner_skills if s.get("name") in _allowed_skill_names]
             if _owner_skills:
                 _relevant_tools.add("manage_skills")
                 if _retrieval_query:
@@ -4838,9 +5785,36 @@ async def stream_agent_loop(
         _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
         if _removed_doc_file_tools:
             _relevant_tools.difference_update(_doc_irrelevant_file_tools)
+            _mark_dropped(_removed_doc_file_tools, "document-turn")
             logger.info(
                 "[agent-intent] active document turn removed file tools=%s",
                 _removed_doc_file_tools,
+            )
+
+    # The mirror of the block above — see `document_tools_to_drop`. This only
+    # ever corrects the harness's OWN selection, so every deliberate one is
+    # exempt: the fine-tune clamps a few lines up (the small toolset IS the
+    # behaviour under test), `forced_tools`, and a caller-provided
+    # `relevant_tools` — the scheduled-assistant path hands us
+    # ASSISTANT_ALWAYS_AVAILABLE with update_document in it on purpose, so a
+    # check-in can write back to a document without naming one first.
+    if (
+        _relevant_tools is not None
+        and not _ody_doc_finetune_mode
+        and not relevant_tools
+    ):
+        _removed_doc_tools = sorted(document_tools_to_drop(
+            _relevant_tools,
+            active_document_relevant=_active_document_relevant,
+            domains=_intent_domains,
+            forced_tools=forced_tools or (),
+        ))
+        if _removed_doc_tools:
+            _relevant_tools.difference_update(_removed_doc_tools)
+            _mark_dropped(_removed_doc_tools, "not-a-document-turn")
+            logger.info(
+                "[agent-intent] turn does not target a document; removed %s",
+                _removed_doc_tools,
             )
 
     # Last pass before the prompt is built: give back any domain the user's own
@@ -4862,10 +5836,22 @@ async def stream_agent_loop(
         _relevant_tools = set(_relevant_tools) - disabled_tools
 
     if _relevant_tools is not None:
-        logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+        # Same silent-clip trap as the re-arm line: this is read to answer "was
+        # the tool I expected selected?", and a bare [:50] answers it wrongly on
+        # a wide turn (the incident turn selected 50 of 57).
+        logger.info("[agent-intent] selected_tools=%s", _name_list(_relevant_tools, 50))
+        # Retrieval said these were what the request was about; selection threw
+        # them away anyway. Name each one and the gate responsible -- a tool
+        # the user asked for by name disappearing without a word is how the
+        # harness ended up insisting delegation was unavailable while its own
+        # retrieval log listed both delegation tools one line earlier.
+        _dropped_query_matches = _explain_dropped_matches(
+            _query_matched_tools, _relevant_tools, _drop_reasons, disabled_tools,
+        )
         logger.info(
             "[tool-routing] source=%s domains=%s query_matched_count=%d selected_count=%d "
-            "retained_count=%d suppressed_retained=%s disabled_count=%d admin_tools=%s",
+            "retained_count=%d suppressed_retained=%s disabled_count=%d admin_tools=%s "
+            "dropped_query_matches=%s",
             _tool_selection_source,
             sorted(_intent.get("domains") or set()),
             len(_query_matched_tools),
@@ -4877,6 +5863,7 @@ async def stream_agent_loop(
             # `schema_without_selection` list in the next log explains itself
             # instead of needing another code read.
             sorted(_admin_tools) if _needs_admin else [],
+            _dropped_query_matches,
         )
 
     prep_timings["tool_selection"] = time.time() - _t1
@@ -4960,7 +5947,8 @@ async def stream_agent_loop(
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
-        suppress_skills=_low_signal_turn,
+        suppress_skills=_low_signal_turn or _skill_access == "none",
+        allowed_skill_names=_allowed_skill_names,
         active_email=active_email,
         workspace=workspace,
     )
@@ -5070,6 +6058,10 @@ async def stream_agent_loop(
         disabled_tools=disabled_tools,
         ody_qwen_finetune_model=_ody_qwen_finetune_model,
         last_user=_last_user,
+        # The disabled map sharpens the always-bound size budget: a server whose
+        # tools are mostly switched off costs little and should keep binding
+        # unconditionally, even if its raw discovered-tool count is large.
+        mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
     )
     _initial_schema_tokens = _estimate_tool_schema_tokens(_initial_tool_schemas)
 
@@ -5141,6 +6133,7 @@ async def stream_agent_loop(
                 ctx_for_budget,
                 budget_is_explicit,
                 hard_max=hard_max,
+                reserve=reserve_tokens,
             )
             _soft_trim_budget = effective_budget
             _soft_trim_reserve = reserve_tokens
@@ -5218,6 +6211,19 @@ async def stream_agent_loop(
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
+    # Duplicate-call guard (see _dedupe_signature and the notes above it).
+    # {exact call signature: the result that call already returned}. Turn-scoped
+    # on purpose — a repeat in a LATER turn is the user asking again, and the
+    # approval flow explicitly requires re-issuing an identical call next turn.
+    _call_memo: Dict[str, str] = {}
+    _dup_calls_skipped = 0
+    # Bounded like _MAX_TOOLSET_REARMS / _MAX_INTENT_NUDGES: the suppressed
+    # result itself tells the model on every repeat, but the sharper directive
+    # ("you already made this exact call — change approach") is worth saying
+    # twice at most. Past that it is nagging, and the loop-breaker takes over.
+    _dup_directive_count = 0
+    _MAX_DUP_CALL_DIRECTIVES = 2
+    _dup_pending_directive = None  # queued until this round's tool results land
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
     # Breadth budget (companion to the repeat-based loop-breaker below). The
     # stall detector only trips on REPEATED calls, so a model that explores
@@ -5277,14 +6283,29 @@ async def stream_agent_loop(
     _last_tool_debug_sig = None
 
     for round_num in range(1, max_rounds + 1):
-        # A steer from the Agents dashboard lands here, between rounds, as a
-        # user message — the correction reaches the model mid-task instead of
-        # after the turn. The route persists it when it sees steer_applied.
-        for _steer_text in _agent_control.drain_steer(session_id):
-            _steer_msg = f"[Mid-task instruction from the user] {_steer_text}"
+        # A steer lands here, between rounds, so a correction reaches the model
+        # mid-task instead of after the turn. Three senders share this queue: the
+        # Agents dashboard, the chat composer, and another agent via
+        # agent_mailbox. The route persists it when it sees steer_applied.
+        #
+        # The wrapper is chosen per record rather than fixed, because it tells
+        # the model WHO is talking. Labelling a peer agent's message "from the
+        # user" would be a lie with consequences — a model that thinks a peer is
+        # the person it works for changes whose instructions it prioritises. A
+        # peer message already carries its own attribution from agent_mailbox
+        # (which bakes it into the text so attribution survives any drain path),
+        # so it is passed through rather than wrapped twice and contradicted.
+        for _steer_rec in _agent_control.drain_steer_records(session_id):
+            _steer_text = _steer_rec.get("text") or ""
+            if not _steer_text:
+                continue
+            _is_peer = str(_steer_rec.get("kind") or "user") == "peer"
+            _steer_msg = _steer_text if _is_peer else f"[Mid-task instruction from the user] {_steer_text}"
             messages.append({"role": "user", "content": _steer_msg})
-            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num})}\n\n'
-            _activity.publish(session_id, "status", f"Steer applied: {_steer_text[:160]}", source="odysseus",
+            yield f'data: {json.dumps({"type": "steer_applied", "text": _steer_text, "round": round_num, "kind": "peer" if _is_peer else "user"})}\n\n'
+            _activity.publish(session_id, "status",
+                              f"{'Peer message' if _is_peer else 'Steer'} applied: {_steer_text[:160]}",
+                              source="odysseus",
                               run_id=_activity_run_id, owner=owner, detail=_steer_text)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -5337,6 +6358,12 @@ async def stream_agent_loop(
             disabled_tools=disabled_tools,
             ody_qwen_finetune_model=_ody_qwen_finetune_model,
             last_user=_last_user,
+            # Recomputed each round (not just once) so a mid-loop MCP
+            # reconnect (crashed server auto-restart, see
+            # McpManager._reconnect_server) is reflected immediately instead
+            # of the round after it, and a server that dropped/re-added tools
+            # mid-stream doesn't leave stale gating decisions in place.
+            mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
         )
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
@@ -5351,15 +6378,34 @@ async def stream_agent_loop(
             sorted(_selected_set - _sent_set - set(disabled_tools or ())) if _relevant_tools else []
         )
         _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
-        _tool_debug_sig = (tuple(sorted(_sent_set)), tuple(sorted(_selected_set)))
+        # Which MCP servers lost their always-bound status, and how big they
+        # were. Without this the budget is an invisible decision: the operator
+        # sees a server's tools missing from `schema_without_selection` and has
+        # no way to tell "demoted for size" from "disconnected", "disabled", or
+        # a routing bug. Rendered as name:count ("firecrawl:27") so the line
+        # answers "why is my server not bound?" on its own.
+        try:
+            _mcp_demoted = (
+                [f"{_name}:{_n}" for _sid, _name, _n in mcp_mgr.demoted_servers(_mcp_disabled_map)]
+                if mcp_mgr else []
+            )
+        except Exception:
+            # Observability must never cost the turn a round: a manager shape
+            # that can't answer still gets its schemas resolved above.
+            _mcp_demoted = []
+        _tool_debug_sig = (
+            tuple(sorted(_sent_set)), tuple(sorted(_selected_set)), tuple(_mcp_demoted),
+        )
         _tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug
         _last_tool_debug_sig = _tool_debug_sig
         _tool_debug_log(
             "[agent-debug] round=%s model=%s _is_api_model=%s tools_sent=%s "
-            "selected=%s selected_without_schema=%s schema_without_selection=%s",
+            "selected=%s selected_without_schema=%s schema_without_selection=%s "
+            "mcp_demoted=%s",
             round_num, model, _is_api_model, len(_sent_set),
             len(_selected_set) if _relevant_tools else "ALL",
             _selected_not_sent or "-", _sent_not_selected or "-",
+            _mcp_demoted or "-",
         )
         logger.debug("[agent-debug] round=%s tool_names=%s", round_num, sorted(_sent_set))
 
@@ -5870,7 +6916,17 @@ async def stream_agent_loop(
                 and _is_api_model
                 and _relevant_tools is not None
                 and _toolset_rearm_count < _MAX_TOOLSET_REARMS
-                and _claims_missing_tools(_blocked_text)
+                # One gate, two signals. `_missing_tool_signal` returns the
+                # wording match ("regex") or the shape match ("structural" —
+                # an enumeration of capabilities it says it lacks), and every
+                # cap, the targeted-first widening and the directive below
+                # apply identically to both. Zero tool calls is already
+                # guaranteed by the enclosing `if not tool_blocks`, but a
+                # native call that failed to convert leaves that empty while
+                # tools really did run, so say so explicitly.
+                and (_missing_signal := _missing_tool_signal(
+                    _blocked_text, made_tool_calls=bool(tool_blocks or native_tool_calls),
+                )) is not None
             ):
                 try:
                     from src.tool_policy import known_tool_names
@@ -5908,8 +6964,13 @@ async def stream_agent_loop(
                         _toolset_rearm_count += 1
                     _relevant_tools |= _rearm_new
                     logger.warning(
-                        "[agent] missing-tool self-unblock on round %d (%s): re-armed %d tool(s) %s",
-                        round_num, _rearm_scope, len(_rearm_new), sorted(_rearm_new)[:25],
+                        # `via %s` is the new field: which signal fired. When
+                        # this line reappears in a bug report, the operator
+                        # needs to know whether a wording matched or the shape
+                        # did — they are tuned in completely different places.
+                        "[agent] missing-tool self-unblock on round %d (%s, via %s): re-armed %d tool(s): %s",
+                        round_num, _rearm_scope, _missing_signal,
+                        len(_rearm_new), _name_list(_rearm_new, 25),
                     )
                     _note = (
                         "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
@@ -5922,7 +6983,7 @@ async def stream_agent_loop(
                         "Correction: the tool list you were shown was filtered too "
                         "narrowly, which is why the tool you wanted was missing. It has "
                         "been widened — "
-                        + ("these tools were added: " + ", ".join(sorted(_rearm_new)[:20]) + ". "
+                        + ("these tools were added: " + _name_list(_rearm_new, 20) + ". "
                            if _rearm_scope == "targeted"
                            else "every tool you are permitted to use this turn is now in your schema list. ")
                         + "Re-read it, then DO the user's request "
@@ -6010,6 +7071,19 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # A steer that landed *during* this round would otherwise be
+            # orphaned: the drain runs at the top of a round, and this is the
+            # turn ending. Leaving it queued means the user's message is
+            # silently dropped (or, worse, surfaces inside an unrelated turn
+            # much later). Loop once more so it is actually read — which is the
+            # whole promise of steering. Bounded by max_rounds like everything
+            # else, and _STEER_MAX caps how much can be pending.
+            if _agent_control.pending_steer(session_id) and round_num < max_rounds:
+                logger.info(
+                    "[agent] round %d would end the turn but a steer is pending; continuing",
+                    round_num,
+                )
+                continue
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -6166,6 +7240,7 @@ async def stream_agent_loop(
                 _tool_approvals.approval_reason(block.tool_type, full_command, approval_mode)
                 if approval_mode and session_id else None
             )
+            _dup_sig = _dedupe_signature(block.tool_type, full_command)
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
                 desc = f"{block.tool_type}: BLOCKED"
                 result = {
@@ -6174,6 +7249,47 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
+            elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo):
+                # Exact repeat of a call that already succeeded this turn, with
+                # nothing mutating in between — running it again can only
+                # reproduce the same bytes at full price. Hand back what it
+                # returned the first time instead of executing. Ahead of the
+                # approval branch so a repeat never re-prompts the user for a
+                # decision they already made.
+                _dup_calls_skipped += 1
+                _prior = _call_memo.get(_dup_sig) or "(no output)"
+                desc = f"{block.tool_type}: DUPLICATE (not run)"
+                result = {
+                    "output": (
+                        "Not run — you already made this exact call this turn (same "
+                        "tool, same arguments) and nothing has changed since. It "
+                        "returned:\n\n" + _prior +
+                        "\n\nRepeating it cannot produce a different answer. Use this "
+                        "result, or take a different step."
+                    ),
+                    "exit_code": 0,
+                    "duplicate_call": True,
+                }
+                logger.warning(
+                    "[agent] duplicate-call guard on round %d: skipped repeat #%d of %s",
+                    round_num, _dup_calls_skipped, block.tool_type,
+                )
+                if _dup_directive_count < _MAX_DUP_CALL_DIRECTIVES:
+                    _dup_directive_count += 1
+                    # Queued, not appended: _append_tool_results has not run
+                    # yet, so appending here would put the correction BEFORE
+                    # the assistant turn and tool results it is about.
+                    _dup_pending_directive = (
+                        f"You just called `{block.tool_type}` with arguments identical to "
+                        "a call you already made earlier in this turn, so it was not run "
+                        "again — the earlier result is repeated in the tool output above "
+                        "and it has not changed. Repeating a call is not progress. Either "
+                        "act on the result you already have, call a DIFFERENT tool, or, if "
+                        "you are stuck because the tool you actually need is not in your "
+                        "schema list, say so plainly and name it instead of retrying. If "
+                        "you genuinely need this call again because something changed, "
+                        "explain what changed first."
+                    )
             elif _approval_why and not _tool_approvals.consume_grant(session_id, block.tool_type, full_command):
                 # Stop and ask. The call is recorded as pending; the card's
                 # decision becomes a grant, and the user's reply lets the agent
@@ -6229,6 +7345,7 @@ async def stream_agent_loop(
                             disabled_tools=disabled_tools,
                             tool_policy=tool_policy,
                             owner=owner,
+                            allow_private=allow_private,
                             progress_cb=_push_progress,
                             workspace=workspace,
                         )
@@ -6648,6 +7765,20 @@ async def stream_agent_loop(
             if block.tool_type in _VERIFIER_EFFECTFUL_TOOLS:
                 _effectful_used = True
 
+            # Duplicate-call guard: memoise what this call returned so an
+            # identical one later in the turn can be answered from here instead
+            # of re-run. Only successful calls — a retry after a real failure is
+            # legitimate work — and never an approval hold, whose whole contract
+            # is that the model re-issues the same call once the user decides.
+            if (
+                not result.get("error")
+                and not result.get("blocked")
+                and not result.get("approval_required")
+                and not result.get("duplicate_call")
+                and result.get("exit_code", 0) in (0, None)
+            ):
+                _record_call_result(_dup_sig, block.tool_type, output_text, _call_memo)
+
             formatted = format_tool_result(desc, result)
             # A tool result is not paid for once: it is replayed to the model on
             # every remaining round of the turn, so a single 60k-character log
@@ -6739,6 +7870,14 @@ async def stream_agent_loop(
                                  or _MAX_REASONING_REPLAY_ROUNDS
                              ))
 
+        # Duplicate-call correction, delivered after the round's tool results so
+        # it reads as a reply to the repeat it is about. Capped by
+        # _MAX_DUP_CALL_DIRECTIVES; the suppressed result still says it on every
+        # repeat, this is only the sharper "change approach" nudge.
+        if _dup_pending_directive:
+            messages.append(_harness_directive(_dup_pending_directive))
+            _dup_pending_directive = None
+
         # Emit agent_step event
         yield (
             f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
@@ -6755,11 +7894,30 @@ async def stream_agent_loop(
         # bottom-of-loop flag missed those).
         _exhausted_rounds = True
 
+    # The turn is over, so nothing will drain the steer queue again. Anything
+    # still in it (a steer that raced the last round, or arrived after the round
+    # cap) must not survive into a later turn, where it would read as a
+    # correction to work the user has long since moved on from.
+    _dropped_steer = _agent_control.clear_steer(session_id)
+    if _dropped_steer:
+        logger.warning(
+            "[agent] turn ended with %d undrained steer message(s); dropping: %s",
+            len(_dropped_steer), "; ".join(text[:120] for text in _dropped_steer),
+        )
+        yield f'data: {json.dumps({"type": "steer_dropped", "messages": _dropped_steer})}\n\n'
+
     # If the loop hit the round cap while still working, tell the client so it
     # can show a "Continue" affordance instead of the turn just stopping.
     if _exhausted_rounds:
-        logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
-        yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
+        # Carry how far the turn got, not just that it was cut off. A chat has
+        # the transcript in front of it, but a headless caller (worker,
+        # sub-agent, background follow-up) sees only this frame and the prose,
+        # and has to tell its parent where to resume from — see
+        # `headless_agent._rounds_exhausted_note`.
+        logger.info("[agent] round cap (%d) reached mid-task after %d tool call(s) — emitting rounds_exhausted",
+                    max_rounds, len(tool_events))
+        yield (f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds, "tool_calls": len(tool_events)})}'
+               "\n\n")
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.

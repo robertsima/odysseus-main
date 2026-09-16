@@ -107,12 +107,42 @@ async def test_headless_children_get_the_global_disabled_tools(monkeypatch):
     monkeypatch.setattr(settings, "get_setting",
                         lambda key, default=None: ["bash", "web_fetch"] if key == "disabled_tools" else default)
 
+    # The owner's admin status is pinned rather than resolved from the
+    # environment. owner_baseline_disabled_tools now also carries the public-user
+    # blocklist, and owner_is_admin_or_single_user fails closed, so without this
+    # the assertion below would be measuring whether the test runner happens to
+    # have a loadable auth manager instead of what this test is about: the
+    # operator's global `disabled_tools` reaching a headless child.
+    import src.tool_security as tool_security
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+
     await headless_agent.run_headless(_Sess(), [], run_id=None)
     assert {"bash", "web_fetch", "send_to_session"} <= set(seen["disabled_tools"])
 
     # A chat continuing itself (disabled_tools=None) still honours the operator.
     await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
     assert set(seen["disabled_tools"]) == {"bash", "web_fetch"}
+
+
+async def test_a_non_admin_headless_child_is_denied_the_public_blocklist(monkeypatch):
+    """The same merge point also has to stop a child being handed tools the
+    execution gate would refuse — see tests/test_non_admin_phantom_tools.py."""
+    seen = {}
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    import src.settings as settings
+    import src.tool_security as tool_security
+    from src.tool_security import NON_ADMIN_BLOCKED_TOOLS
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    monkeypatch.setattr(settings, "get_setting", lambda key, default=None: [] if key == "disabled_tools" else default)
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: False)
+
+    await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
+    assert NON_ADMIN_BLOCKED_TOOLS <= set(seen["disabled_tools"])
 
 
 def test_bg_job_is_a_run_from_launch_and_kill_closes_it(monkeypatch, tmp_path):
@@ -130,3 +160,96 @@ def test_bg_job_is_a_run_from_launch_and_kill_closes_it(monkeypatch, tmp_path):
     assert run["status"] == "running" and run["summary"]["job_id"] == rec["id"]
     bg_jobs.kill(rec["id"])
     assert act.get_run(f"bg_job-{rec['id']}")["status"] == "cancelled"
+
+
+# ── a worker that ran out of rounds is not a worker that finished ─────────
+#
+# The round cap is a budget, and spending it mid-task is a normal outcome: the
+# worker did real work and simply stopped. Reporting that as `completed` told
+# the dashboard it was fine and handed the parent chat a result with nothing in
+# it to act on.
+
+
+class _Worker:
+    id, name = "w-1", "Runner"
+
+
+def _manager(sessions):
+    class _M:
+        def get_session(self, sid):
+            return sessions.get(sid)
+
+        def save_sessions(self):
+            pass
+    return _M()
+
+
+class _Chat:
+    def __init__(self, sid):
+        self.id, self.name, self.model = sid, sid, "m"
+        self.messages = []
+
+    def add_message(self, message):
+        self.messages.append(message)
+
+    def get_context_messages(self):
+        return []
+
+
+async def test_a_cut_off_worker_is_reported_incomplete_not_completed(monkeypatch):
+    from src import agent_control
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    worker_chat = _Chat("w-1")
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager({"w-1": worker_chat}))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+
+    async def fake_headless(sess, messages, **kwargs):
+        kwargs["outcome"]["rounds_exhausted"] = True
+        kwargs["outcome"]["rounds"] = 6
+        return "Read five files.\n\n(ran out of rounds: ...)", [{"tool": "read_file"}]
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+
+    rec = await agent_control.launch_worker(owner="alice", task="audit the handler")
+    await agent_control._WORKERS[rec["run_id"]]
+
+    assert act.get_run(rec["run_id"])["status"] == "incomplete"
+    # The partial work is still what gets saved — the status is the warning.
+    assert worker_chat.messages[-1].content.startswith("Read five files.")
+    # The budget the run was cut off by is reported with it, so "ran out of
+    # rounds" can be read against a number without reopening the loadout.
+    from src.agent_profiles import DEFAULT_ROUNDS
+
+    assert rec["max_rounds"] == DEFAULT_ROUNDS
+
+
+async def test_the_parent_is_told_the_worker_was_cut_off(monkeypatch):
+    from src import agent_control
+
+    parent = _Chat("parent")
+    # Mid-turn, so the hand-off stops at persisting the message for the next
+    # turn — which is exactly the text under test.
+    monkeypatch.setattr(agent_runs, "is_busy", lambda sid: True)
+
+    await agent_control._hand_off(_manager({"parent": parent}), "parent", _Worker(),
+                                  "audit the handler", "Read five files.", "incomplete", "alice")
+
+    inject = parent.messages[-1].content
+    assert "[Worker Runner ran out of rounds]" in inject
+    assert "partial" in inject and "pick the task up from where it stopped" in inject
+
+
+async def test_a_finished_worker_hand_off_is_unchanged(monkeypatch):
+    from src import agent_control
+
+    parent = _Chat("parent")
+    monkeypatch.setattr(agent_runs, "is_busy", lambda sid: True)
+
+    await agent_control._hand_off(_manager({"parent": parent}), "parent", _Worker(),
+                                  "audit the handler", "All five files are clean.", "completed", "alice")
+
+    inject = parent.messages[-1].content
+    assert "[Worker Runner finished]" in inject and "cut off" not in inject

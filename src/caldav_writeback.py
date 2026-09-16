@@ -297,10 +297,27 @@ async def writeback_event(owner: str, calendar_source: str, calendar_id: str,
         acc_id = acc.get("id") or ""
         token = ""
         if acc.get("oauth_provider") == "google":
-            from src.caldav_sync import _get_valid_google_caldav_token
-            token = _get_valid_google_caldav_token(owner, acc)
+            from src.caldav_sync import (
+                TOKEN_TERMINAL,
+                _google_caldav_token_status,
+                google_token_error_message,
+            )
+            token, token_status = _google_caldav_token_status(owner, acc)
             if not token:
-                return {"ok": False, "error": "Google Calendar needs reconnecting — sign in again from Settings"}
+                # Same split as the pull path: only a revoked grant carries the
+                # auth_error marker that push_pending_events hoists to the user.
+                # A token-endpoint blip is just this attempt failing, and the
+                # event stays flagged pending so the next push retries it.
+                message = google_token_error_message(token_status)
+                out = {"ok": False, "error": message}
+                if token_status == TOKEN_TERMINAL:
+                    out["auth_error"] = {
+                        "account_id": acc_id,
+                        "label": acc.get("label") or acc_id,
+                        "provider": "google",
+                        "message": message,
+                    }
+                return out
             user = ""
             pw = ""
         else:

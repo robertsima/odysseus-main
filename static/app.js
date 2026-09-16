@@ -23,16 +23,18 @@ import workbenchModule from './js/workbench.js';
 // Per-chat settings + the status line under the composer (self-initialising).
 import './js/chatSettings.js';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).
-import './js/agentsDashboard.js';
+import './js/agentsDashboard.js?v=20260916accountprefs1';
+// User-customizable tool order shared by the icon rail and sidebar Tools list.
+import './js/navOrder.js?v=20260916accountprefs1';
 import voiceRecorderModule from './js/voiceRecorder.js';
 import censorModule from './js/censor.js';
 import galleryModule from './js/gallery.js';
 import tasksModule from './js/tasks.js?v=20260826assistanttab1';
 import calendarModule from './js/calendar.js';
-import notesModule from './js/notes.js';
+import notesModule from './js/notes.js?v=20260915vaulttree3';
 import lotusModule from './js/lotus.js';
-import adminModule from './js/admin.js?v=20260716openrouter3';
-import settingsModule from './js/settings.js?v=20260722emailfastindex1';
+import adminModule from './js/admin.js?v=20260915ragfolders1';
+import settingsModule from './js/settings.js?v=20260916workspace2';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.

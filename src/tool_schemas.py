@@ -1252,6 +1252,65 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_agent_loadout",
+            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name')."},
+                    "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
+                    "task": {"type": "string", "description": "start only: the whole task. The worker begins with no other context."},
+                    "description": {"type": "string", "description": "One line explaining when to use this loadout."},
+                    "instructions": {"type": "string", "description": "System instructions the worker starts with."},
+                    "model": {"type": "string", "description": "Model for the worker. Omit to inherit."},
+                    "model_fallbacks": {"type": "array", "items": {"type": "string"}},
+                    "model_access": {"type": "string", "enum": ["current", "selected", "all"], "description": "Whether the worker may switch model."},
+                    "allowed_models": {"type": "array", "items": {"type": "string"}},
+                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names when tool_access=selected."},
+                    "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
+                    "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
+                    "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "skill_names": {"type": "array", "items": {"type": "string"}},
+                    "mcp_access": {"type": "string", "enum": ["all", "selected", "none"]},
+                    "allowed_mcp_servers": {"type": "array", "items": {"type": "string"}},
+                    "private_vault_access": {"type": "boolean", "description": "Granted only if this chat already has it."},
+                    "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
+                    "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
+                    "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
+                    "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
+                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."},
+                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delegate_to_agent",
+            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories"]},
+                    "repository": {"type": "string", "description": "Repository or worktree understood by the selected provider."},
+                    "prompt": {"type": "string", "description": "Bounded coding task instructions."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}},
+                    "timeout_seconds": {"type": "integer"},
+                    "model": {"type": "string"},
+                    "task_id": {"type": "string"},
+                    "wait_seconds": {"type": "integer"},
+                    "label": {"type": "string"}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_claude_code",
             "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel); to wait for it, poll with wait_seconds instead of sleeping in bash.",
             "parameters": {
@@ -1544,6 +1603,21 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "message_agent",
+            "description": "Tell another RUNNING agent something now, without waiting for a reply — the opposite of send_to_session. send_to_session blocks your turn until the target produces one response and the target can only ever answer, never speak first; message_agent queues the message and returns immediately, and it lands before the target's next round, tagged as coming from you (not from its user, so it won't be mistaken for a user instruction). Use it to steer, warn, or hand off a status update to a peer doing its own independent work ('don't also fix that, I'm on it', 'done, here's the result') — not to delegate a task and wait for the outcome (use send_to_session for that). A peer that wants to answer calls message_agent right back naming your session, so a back-and-forth is possible with neither side blocked. Limited to a few sends per turn and to sessions you own; refused with a reason (not an error) when the limit is hit or the target belongs to someone else.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "session_id": {"type": "string", "description": "The id of the running agent session to message"},
+                    "message": {"type": "string", "description": "The message to deliver now"}
+                },
+                "required": ["session_id", "message"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_bg_jobs",
             "description": "Inspect and control detached background `bash` jobs (started with the `#!bg` marker). action='list' shows this chat's jobs with id/status/age/command; action='output' returns a job's captured output so far (use for a still-running job, or to re-read a finished one); action='kill' terminates a runaway job's process tree instead of waiting out its max-runtime. output and kill need job_id from list.",
             "parameters": {
@@ -1761,6 +1835,8 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(payload)
         else:
             content = args.get("session_id", "") + "\n" + args.get("message", "")
+    elif tool_type == "message_agent":
+        content = json.dumps({"session_id": args.get("session_id", ""), "message": args.get("message", "")})
     elif tool_type == "pipeline":
         # Pass as JSON for the pipeline parser
         content = json.dumps({"steps": args.get("steps", [])})

@@ -37,7 +37,7 @@ class RAGManager:
         query: str,
         k: int = 5,
         owner: Optional[str] = None,
-        allow_private: bool = True,
+        allow_private: bool = False,
     ) -> List[Dict[str, Any]]:
         """Search for documents - delegates to VectorRAG."""
         return self.vector_rag.search(query, k, owner=owner, allow_private=allow_private)

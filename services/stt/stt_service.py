@@ -47,6 +47,12 @@ class STTService:
             "true",
             "yes",
         }
+        from src.settings import get_setting_or_env
+
+        beam_size = get_setting_or_env("stt_beam_size", "ODYSSEUS_STT_BEAM_SIZE", 1)
+        max_audio_seconds = get_setting_or_env(
+            "stt_max_audio_seconds", "ODYSSEUS_STT_MAX_AUDIO_SECONDS", 300
+        )
         return {
             "stt_enabled": bool(get_user_setting("stt_enabled", owner, env_enabled)),
             "stt_provider": str(
@@ -68,9 +74,9 @@ class STTService:
             ).strip(),
             "stt_device": os.getenv("ODYSSEUS_STT_DEVICE", "cpu").strip().lower(),
             "stt_compute_type": os.getenv("ODYSSEUS_STT_COMPUTE_TYPE", "int8").strip(),
-            "stt_beam_size": max(1, int(os.getenv("ODYSSEUS_STT_BEAM_SIZE", "1") or 1)),
+            "stt_beam_size": max(1, int(beam_size or 1)),
             "stt_max_audio_seconds": max(
-                1, int(os.getenv("ODYSSEUS_STT_MAX_AUDIO_SECONDS", "300") or 300)
+                1, int(max_audio_seconds or 300)
             ),
         }
 

@@ -438,7 +438,11 @@ function statusClass(status) {
   const s = status || 'running';
   if (s === 'running' || s === 'queued' || s === 'in_progress' || s === 'pending') return 'run';
   if (s === 'completed' || s === 'succeeded' || s === 'done' || s === 'success' || s === 'open' || s === 'merged') return 'ok';
-  if (s === 'cancelled' || s === 'draft' || s === 'interrupted') return 'warn';
+  // `incomplete` is a run that spent its round budget with the task
+  // unfinished (agent_control.launch_worker). That is a partial result to
+  // pick up, not a failure, so it reads amber like cancelled/interrupted
+  // rather than falling through to the red default.
+  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {
@@ -1197,5 +1201,20 @@ export async function init() {
 }
 
 export function refreshSettings() { return probeSettings(); }
+/** Open one run from the Agents dashboard. Align the Workbench stream with
+ * the selected chat before focusing so its history is available immediately,
+ * rather than waiting for the session watcher to notice the navigation. */
+export async function openRun(runId, sessionId) {
+  if (!state.enabled) throw new Error('Workbench is disabled');
+  open();
+  if (sessionId && sessionId !== state.sessionId) {
+    state.sessionId = sessionId;
+    state.prefs.scope = 'session';
+    savePrefs();
+    await connect(true);
+  }
+  state.focusRun = runId || null;
+  setTab('activity');
+}
 export const _state = state;
-export default { init, open, close, toggle, refreshSettings };
+export default { init, open, close, toggle, refreshSettings, openRun };

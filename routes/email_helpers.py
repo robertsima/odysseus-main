@@ -34,6 +34,8 @@ from fastapi import Query, HTTPException, Request
 from pydantic import BaseModel
 from typing import Optional, List
 
+from src.settings import get_setting_or_env
+
 from src.auth_helpers import _auth_disabled, get_current_user
 from src.secret_storage import decrypt as _decrypt
 
@@ -99,23 +101,69 @@ def verify_oauth_state(state: str) -> dict | None:
         return None
 
 
-def _refresh_google_token(account_id: str) -> str | None:
-    """Exchange the stored refresh token for a new access token and persist it."""
+# ── Google OAuth token health ────────────────────────────────────
+#
+# A refresh can fail two ways that call for opposite responses: the grant is
+# dead (revoked, client reconfigured, scopes withdrawn) and only the user
+# re-authorizing fixes it, or Google was briefly unreachable and the next
+# attempt will succeed. Collapsing both into a bare `None` told the user to
+# reconnect on every network hiccup while saying nothing different about a
+# mailbox that had permanently stopped syncing.
+#
+# `src/caldav_sync.py` classifies Google token failures with this same
+# taxonomy. It is mirrored rather than imported because that module owns
+# CalDAV sync state and sits above the mail transport layer — importing it
+# from here to reach four constants would invert the dependency.
+TOKEN_OK = "ok"
+TOKEN_TERMINAL = "terminal"
+TOKEN_TRANSIENT = "transient"
+
+# What Google returns in the token endpoint's JSON `error` field when the grant
+# itself is unusable. Retrying cannot clear any of them.
+# Shared with the calendar sync — see src/oauth_errors.py. The local copy
+# had already drifted: it classified a parsed-but-unknown error code by the
+# HTTP status, so a 400 `invalid_request` (our malformed request) told the
+# user to re-authorize a working account.
+from src.oauth_errors import (  # noqa: E402
+    TOKEN_TERMINAL, TOKEN_TRANSIENT, GOOGLE_TERMINAL_TOKEN_ERRORS,
+    classify_google_token_failure,
+)
+
+
+def _classify_google_token_failure(resp=None) -> str:
+    """The verdict alone. Callers here never needed the error code."""
+    return classify_google_token_failure(resp)[0]
+
+
+def google_token_failure_message(kind: str) -> str:
+    """User-facing text for a token failure. Carries only what the reader
+    should do — never the access token, refresh token or client secret."""
+    if kind == TOKEN_TERMINAL:
+        return ("Google sign-in for this mailbox is no longer valid — "
+                "reconnect the account in Settings → Integrations")
+    return ("Could not reach Google to refresh this mailbox's sign-in — "
+            "this is usually temporary and the next attempt will retry")
+
+
+def _refresh_google_token_status(account_id: str) -> tuple[str | None, str]:
+    """`_refresh_google_token`, plus why it failed. Returns (token, kind)."""
     import httpx
     from core.database import SessionLocal as _SL, EmailAccount as _EA
     from src.secret_storage import encrypt as _enc, decrypt as _dec
     client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
     if not client_id or not client_secret:
-        return None
+        # Nothing to retry against — the deployment has no OAuth client at all.
+        return None, TOKEN_TERMINAL
     db = _SL()
+    resp = None
     try:
         row = db.get(_EA, account_id)
         if not row or not row.oauth_refresh_token:
-            return None
+            return None, TOKEN_TERMINAL
         refresh_token = _dec(row.oauth_refresh_token or "")
         if not refresh_token:
-            return None
+            return None, TOKEN_TERMINAL
         resp = httpx.post("https://oauth2.googleapis.com/token", data={
             "client_id": client_id,
             "client_secret": client_secret,
@@ -128,16 +176,29 @@ def _refresh_google_token(account_id: str) -> str | None:
         row.oauth_access_token = _enc(access_token)
         row.oauth_token_expiry = str(int(time.time()) + data.get("expires_in", 3600))
         db.commit()
-        return access_token
+        return access_token, TOKEN_OK
     except Exception:
-        logger.warning(f"Google token refresh failed for account {account_id}")
-        return None
+        kind = _classify_google_token_failure(resp)
+        # Terminal failures log at error: they will not clear on their own and
+        # the mailbox stays dark until someone re-authorizes.
+        log = logger.error if kind == TOKEN_TERMINAL else logger.warning
+        log("Google token refresh failed (%s) for account %s", kind, account_id)
+        return None, kind
     finally:
         db.close()
 
 
-def _get_valid_google_token(account_id: str, cfg: dict) -> str | None:
-    """Return a valid Google access token, refreshing if expired or missing."""
+def _refresh_google_token(account_id: str) -> str | None:
+    """Exchange the stored refresh token for a new access token and persist it.
+
+    Returns None on any failure and never raises; callers that need to know
+    whether retrying is worthwhile use `_refresh_google_token_status`.
+    """
+    return _refresh_google_token_status(account_id)[0]
+
+
+def _cached_google_access_token(cfg: dict) -> str | None:
+    """The stored access token, if it is still comfortably in date."""
     from src.secret_storage import decrypt as _dec
     access_token = _dec(cfg.get("oauth_access_token") or "")
     expiry_str = cfg.get("oauth_token_expiry") or ""
@@ -147,6 +208,22 @@ def _get_valid_google_token(account_id: str, cfg: dict) -> str | None:
                 return access_token
         except (ValueError, TypeError):
             pass
+    return None
+
+
+def _get_valid_google_token_status(account_id: str, cfg: dict) -> tuple[str | None, str]:
+    """`_get_valid_google_token`, plus why it failed. Returns (token, kind)."""
+    cached = _cached_google_access_token(cfg)
+    if cached:
+        return cached, TOKEN_OK
+    return _refresh_google_token_status(account_id)
+
+
+def _get_valid_google_token(account_id: str, cfg: dict) -> str | None:
+    """Return a valid Google access token, refreshing if expired or missing."""
+    cached = _cached_google_access_token(cfg)
+    if cached:
+        return cached
     return _refresh_google_token(account_id)
 
 
@@ -169,9 +246,9 @@ def _send_smtp_message(cfg: dict, from_addr: str, recipients: list[str], message
 
     def _auth_smtp(smtp):
         if cfg.get("oauth_provider") == "google":
-            token = _get_valid_google_token(cfg.get("account_id"), cfg)
+            token, kind = _get_valid_google_token_status(cfg.get("account_id"), cfg)
             if not token:
-                raise RuntimeError("Google OAuth token unavailable — reconnect the account")
+                raise RuntimeError(google_token_failure_message(kind))
             smtp.ehlo()
             smtp.auth("XOAUTH2", lambda challenge=None: _xoauth2_raw(user, token), initial_response_ok=True)
         elif user and password:
@@ -1154,7 +1231,9 @@ def _coerce_imap_timeout_seconds(raw: str | None) -> int:
     return max(5, min(value, 300))
 
 
-_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(os.environ.get("ODYSSEUS_IMAP_TIMEOUT_SECONDS"))
+_IMAP_TIMEOUT_SECONDS = _coerce_imap_timeout_seconds(
+    str(get_setting_or_env("imap_timeout_seconds", "ODYSSEUS_IMAP_TIMEOUT_SECONDS", 30))
+)
 
 
 def _open_imap_connection(
@@ -1229,9 +1308,12 @@ def _imap_connect(account_id: str | None = None, owner: str = "",
     )
     try:
         if cfg.get("oauth_provider") == "google":
-            token = _get_valid_google_token(cfg.get("account_id"), cfg)
+            # This message is what the email library's error banner shows, so
+            # it has to distinguish "reconnect me" from "Google blipped" —
+            # otherwise a dropped packet reads as a dead mailbox.
+            token, kind = _get_valid_google_token_status(cfg.get("account_id"), cfg)
             if not token:
-                raise RuntimeError("Google OAuth token unavailable — reconnect the account in Settings → Integrations")
+                raise RuntimeError(google_token_failure_message(kind))
             conn.authenticate("XOAUTH2", lambda x: _xoauth2_bytes(cfg["imap_user"], token))
         else:
             conn.login(cfg["imap_user"], cfg["imap_password"])

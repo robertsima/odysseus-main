@@ -30,6 +30,19 @@ class TestDetectProviderRealHosts:
     def test_unknown_host_defaults_to_openai(self):
         assert llm_core._detect_provider("https://api.example.com/v1") == "openai"
 
+    def test_registered_subscription_provider_is_used(self, monkeypatch):
+        class _Provider:
+            provider_id = "registered-subscription"
+
+            def owns_base_url(self, url):
+                return url == "https://subscription.example/v1"
+
+        monkeypatch.setattr(
+            "src.subscription.provider_for_url",
+            lambda url: _Provider() if url == "https://subscription.example/v1" else None,
+        )
+        assert llm_core._detect_provider("https://subscription.example/v1") == "registered-subscription"
+
 
 class TestDetectProviderRejectsSubstringFalsePositives:
     """The regression that motivated #768: substring matching mislabeled these."""

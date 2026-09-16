@@ -38,6 +38,8 @@ from src.agent_loop import (
     _WORKSPACE_TERMINUS_TOOLS,
     _claims_missing_tools,
     _classify_agent_request,
+    _missing_capability_items,
+    _missing_tool_signal,
     _explicitly_named_skills,
     _is_explicit_continuation,
     _looks_like_local_computer_request,
@@ -652,3 +654,218 @@ def test_gapped_tool_claims_are_caught(claim):
 def test_a_real_upstream_failure_still_does_not_re_arm(not_a_claim):
     """Re-arming on a genuine failure would loop the turn, not unblock it."""
     assert not _claims_missing_tools(not_a_claim)
+
+
+# ── "available, but they don't include what I need" ────────────────────
+#
+# Repro (2026-09-16, 05:47:01). Round 1, zero tool calls, turn over:
+#
+#     "I can't do that from this session. The tools currently available to me
+#      do not include: Repository or filesystem access, Application-log access,
+#      Git checkout/edit commands…"
+#
+# The user's next message was "Didnt work just do it yourself."
+#
+# Every branch of _MISSING_TOOL_RE negates AVAILABILITY ("tools are not
+# available", "tooling is unavailable"). This round agreed its tools were
+# available and negated MEMBERSHIP instead, so it matched nothing, the
+# self-unblock never ran, and the model was never told the list had been
+# filtered. That was the only failing precondition: the same session re-armed
+# fine on the next turn, so _is_api_model and _relevant_tools were both good.
+
+TURN_A = (
+    "I can't do that from this session. The tools currently available to me do "
+    "not include:\n- Repository or filesystem access\n- Application-log access\n"
+    "- Git checkout/edit commands"
+)
+
+
+def test_the_turn_a_refusal_is_detected():
+    assert _claims_missing_tools(TURN_A)
+
+
+@pytest.mark.parametrize("text", [
+    "The tools available to me don't include repository access.",
+    "My available tools do not include anything that can start an agent.",
+    "The tool list I have does not include a delegation tool.",
+    "The tools you gave me do not include anything that can push a branch.",
+    "The tool set I see here does not include a git tool.",
+    "The tools I have in this turn do not include file editing.",
+])
+def test_membership_phrasings_are_detected(text):
+    assert _claims_missing_tools(text), text
+
+
+@pytest.mark.parametrize("text", [
+    # "do not include" is ordinary English about a RESULT, and a round saying
+    # this ran its tools fine. Re-arming here would burn a round for nothing,
+    # which is exactly what the narrowness comment on the regex protects.
+    "I used the read_file tool but the output does not include that function.",
+    "I called the grep tool and the results do not include any match in src/.",
+    "Gmail returned Too many simultaneous connections, so the sync did not "
+    "include the last 3 messages.",
+    "I ran the tests and the report does not include the flaky suite.",
+    "The tools ran, but the summary does not include last week.",
+])
+def test_a_result_that_merely_omits_something_does_not_re_arm(text):
+    assert not _claims_missing_tools(text), text
+
+
+# ── 7. the structural signal: a capability-mismatch dump ───────────────
+#
+# Repro (2026-09-16, 07:42:40). Round 1, 628 chars, 0 native calls, 0 tool
+# blocks, no `missing-tool self-unblock` line, turn over:
+#
+#     "The issue is a capability mismatch in this session:
+#      - I do not have application-log access.
+#      - I do not have repository or filesystem access.
+#      - I do not have the agent-launcher, Git, or push tools."
+#
+# That is the third distinct real refusal _MISSING_TOOL_RE has missed, and
+# the reason is the same each time: every branch of it requires the word
+# "tool(s)" next to the negation, and two of those three bullets say
+# "access" instead. Chasing a fourth wording would only buy the fourth miss.
+#
+# So the loop now also matches the SHAPE — a round with zero tool calls whose
+# text enumerates two or more capabilities it says it lacks. The tests below
+# pin both directions: the shape must fire on all three real refusals, and it
+# must stay off findings, advice and genuine upstream failures.
+
+TURN_B = (
+    "I can't launch the Claude agent from this session. The Claude/Pi "
+    "delegation tool is not exposed to me here..."
+)
+
+TURN_C = (
+    "The issue is a capability mismatch in this session:\n\n"
+    "- I do not have application-log access.\n"
+    "- I do not have repository or filesystem access.\n"
+    "- I do not have the agent-launcher, Git, or push tools.\n"
+    "- ..."
+)
+
+
+@pytest.mark.parametrize("text", [TURN_A, TURN_B, TURN_C])
+def test_all_three_real_refusals_are_detected(text):
+    """The corpus of what actually shipped to users. None may regress."""
+    assert _claims_missing_tools(text), text
+
+
+def test_the_third_refusal_is_caught_by_the_structural_signal():
+    """TURN_C says "access" where the regex wants "tools", so only the shape
+    can catch it — and the caller logs which signal fired for exactly this
+    reason."""
+    assert _missing_tool_signal(TURN_C) == "structural"
+
+
+def test_the_first_two_refusals_still_come_from_the_regex():
+    """The regex is not dead weight: it carries the single-sentence claims
+    that never reach an enumeration threshold, and it is the only signal
+    allowed to fire on a round that called tools."""
+    assert _missing_tool_signal(TURN_A) == "regex"
+    assert _missing_tool_signal(TURN_B) == "regex"
+
+
+@pytest.mark.parametrize("text", [
+    "- I do not have repository access.\n- I do not have log access.",
+    "I lack filesystem access. I lack any git commands.",
+    "Blocked here:\n- No repository access\n- No agent-launcher tool",
+    "1. Application-log access is not available to me.\n"
+    "2. Repository and filesystem access is not exposed to me here.",
+    # Run together in prose rather than bulleted, and with a lead-in before
+    # the subject — same two claims, same shape.
+    "In this session I do not have shell access, and I do not have the "
+    "deploy credentials.",
+])
+def test_an_enumeration_of_lacked_capabilities_is_detected(text):
+    """Possession ("I do not have X"), bare bullets ("- No X") and
+    denied-to-me ("X is not available to me") are all the same shape."""
+    assert _missing_tool_signal(text) == "structural", text
+
+
+# ── negative tests: what the shape must NOT fire on ────────────────────
+#
+# The comment on _MISSING_TOOL_RE is explicit that a round reporting a REAL
+# upstream failure must not re-arm — the tools were there and they ran — and
+# a structural signal is far easier to make trigger-happy than a regex. Each
+# case below is a distinct way this could have gone wrong.
+
+def test_one_lacking_sentence_is_below_the_enumeration_threshold():
+    """A single "I don't have X" line is ordinary prose. Two is a dump.
+    The threshold is the whole reason the noun can be ignored."""
+    assert _missing_tool_signal("I do not have repository access.") is None
+    assert _missing_tool_signal("I don't have that information.") is None
+
+
+def test_information_the_model_lacks_is_not_a_capability_it_lacks():
+    """Same grammar as the refusal, different object. Only the capability
+    noun class tells "I don't have the date" from "I don't have access"."""
+    text = "I don't have the exact date. I don't have the sender's name either."
+    assert _missing_tool_signal(text) is None
+
+
+def test_a_bulleted_list_of_findings_does_not_re_arm():
+    """The commonest shape in the product. `No errors in the log` must not
+    read as `No repository access` just because both start with "No"."""
+    text = (
+        "Findings:\n"
+        "- No errors in the application log for that hour\n"
+        "- No matches for `retry` anywhere in src/\n"
+        "- No access log entries after 04:00"
+    )
+    assert _missing_tool_signal(text) is None
+
+
+def test_a_list_of_real_results_does_not_re_arm():
+    text = "Here is the audit:\n- 12 applications\n- 5 rejections\n- 3 ghosted"
+    assert _missing_tool_signal(text) is None
+
+
+def test_a_list_of_what_the_USER_lacks_does_not_re_arm():
+    """Advice, not self-blocking. Re-arming here burns a round and re-runs a
+    turn that was already correct — which is why the item patterns demand a
+    first-person subject."""
+    text = (
+        "You'll need to fix a few things first:\n"
+        "- You do not have admin rights on the repo\n"
+        "- You do not have the Gmail scope granted\n"
+        "- Your service account lacks push permissions"
+    )
+    assert _missing_tool_signal(text) is None
+
+
+def test_a_round_that_called_tools_does_not_use_the_structural_signal():
+    """If tools ran, the model was not denied them; an enumeration in that
+    round's text is a report about the world. The regex still applies."""
+    assert _missing_tool_signal(TURN_C, made_tool_calls=True) is None
+    assert _missing_tool_signal(TURN_A, made_tool_calls=True) == "regex"
+
+
+@pytest.mark.parametrize("text", [
+    "Gmail returned Too many simultaneous connections, so the fetch failed. "
+    "The Pi-hole admin API is unavailable right now (connection refused).",
+    "I ran the tool and it returned an empty list. I ran it again and the "
+    "second attempt also returned nothing.",
+    "The deploy API is not available right now and the status endpoint is "
+    "not responding either.",
+])
+def test_multiple_real_upstream_failures_still_do_not_re_arm(text):
+    """Two failures in one round is still two failures, not a capability
+    dump: nothing here says the model was denied anything."""
+    assert _missing_tool_signal(text) is None, text
+
+
+def test_a_repeated_line_is_one_claim_not_an_enumeration():
+    text = "I do not have repository access.\nI do not have repository access."
+    assert _missing_tool_signal(text) is None
+
+
+def test_the_structural_items_are_the_ones_we_think_they_are():
+    """Guard the extractor itself: a threshold is only as good as what it
+    counts, and a silently over-matching item pattern would pass every test
+    above while firing on the next findings list."""
+    assert _missing_capability_items(TURN_C) == [
+        "I do not have application-log access",
+        "I do not have repository or filesystem access",
+        "I do not have the agent-launcher, Git, or push tools",
+    ]

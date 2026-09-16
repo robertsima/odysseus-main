@@ -100,6 +100,8 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
     "manage_agent_worktree": "Work on this codebase in an isolated, persistent git worktree on an agent/odysseus/* branch, then publish it as a DRAFT pull request once a human approves. Use for any 'change the code / fix this bug / open a PR / push a branch' request about Odysseus itself. Actions: start, status, diff, commit, request_publish, publish, list_requests, show_request, remove. This is the ONLY way to push: git commands run through bash have no credentials and will fail to authenticate.",
     "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working. Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
+    "manage_agent_loadout": "Define reusable worker loadouts (named policies: instructions, model, tools, skills, memory, MCP, delegation, approvals, worker limit) and start workers with them. Use for \u2018set up a researcher/reviewer/builder agent\u2019, \u2018make a worker that can only read files\u2019, \u2018spin up an agent to do X\u2019. A loadout you create is intersected with this chat\u2019s own policy, so it can never grant more than you already have; action=capabilities reports that ceiling.",
+    "delegate_to_agent": "Delegate a bounded coding task through the administrator-selected provider: a local subscription-backed CLI or a connected remote coding-agent MCP tool. Provider-neutral; use instead of assuming Claude is installed.",
     "read_app_logs": "Read Odysseus's own application logs to debug or troubleshoot the running app. Use when something in the app failed, errored, or behaved unexpectedly and you need to see what it recorded. action=list to enumerate log files, action=tail for the last N lines with optional substring or minimum-level filters. Read-only; credentials are redacted.",
     "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
@@ -125,6 +127,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "create_session": "Create a new chat with a name and model.",
     "list_sessions": "List all chats with their metadata (the UI calls these 'chats'). Use for 'list my chats', 'rename all my chats' (list first, then manage_session to rename each).",
     "send_to_session": "Send a message to another chat. Cross-chat communication.",
+    "message_agent": "Tell a running agent something now, without waiting for its reply. Peer-to-peer agent messaging; lands between its rounds.",
     "recall_tool_output": "Read back a large tool result that was moved out of the conversation. Oversized tool output (long logs, whole files, big API responses) is kept only as a head/tail excerpt naming a `toolout-...` reference; this searches or pages through the full stored text. Use for \"the rest of that output\", \"what did the log say about X\", \"show me more of that file\" — never re-run the command to see what was trimmed.",
     "search_documents": "Semantic/vector search over the user's personal documents, vault, notes, journal entries, voice logs, and uploaded files using the ChromaDB embedding index. Answers questions ABOUT the content of the user's own documents — what did I write about X, find my notes on Y, what does my vault say about Z. Returns the relevant excerpts and their file paths. This is the correct tool instead of read_file/bash/cat over the personal documents directory, which floods context with whole files.",
     "search_chats": "Search past session transcripts across chats.",
@@ -388,10 +391,25 @@ class ToolIndex:
                    "repository", "patch", "changeset", "diff"}):
             {"manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
         # Self-debugging: the app's own logs.
+        #
+        # Matching is `\b<hint>\b`, so the plural "logs" is already safe from
+        # "blogs", "catalogs" and "dialogues" — but the SINGULAR "log" is not
+        # safe from the verb in "log in", which is why it only ever appears
+        # here with a qualifier attached. Same hazard class as the stem guard
+        # documented at `_ADMIN_STEM_MIN_LEN` in agent_loop.
+        #
+        # The 2026-09-16 incident phrase was "analyze your own logs", which
+        # none of the original entries covered: the user addressed the app in
+        # the second person and this set only knew "the logs" / "app logs".
         frozenset({"app log", "app logs", "application log", "application logs",
                    "server log", "server logs", "the logs", "check the logs",
-                   "log output", "stack trace", "traceback", "error log",
-                   "why did it fail", "what went wrong"}):
+                   "log output", "log file", "log files", "stack trace",
+                   "traceback", "error log", "error logs", "error message",
+                   "your logs", "your own logs", "own logs", "odysseus logs",
+                   "exception", "crash", "crashed", "crashing",
+                   "debug this", "debug it", "debugging", "troubleshoot",
+                   "troubleshooting", "went wrong", "what went wrong",
+                   "why did it fail", "why it failed", "why did that fail"}):
             {"read_app_logs"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
         frozenset({"background job", "background jobs", "bg job", "bg jobs",
@@ -468,7 +486,13 @@ class ToolIndex:
                    "delegate to claude", "have claude", "let claude", "ask claude code",
                    "coding agent", "coding harness", "hand off to claude", "hand this to claude",
                    "claude integration", "delegate coding", "delegate this coding"}):
-            {"delegate_to_claude_code", "read_app_logs"},
+            {"delegate_to_agent", "delegate_to_claude_code", "read_app_logs"},
+        # "Set up / spin up an agent" is loadout authoring, not a chat relay.
+        frozenset({"agent loadout", "loadout", "worker profile", "agent profile",
+                   "set up an agent", "create an agent", "make an agent",
+                   "spin up an agent", "start a worker", "launch a worker",
+                   "new worker", "worker agent", "sub-agent profile"}):
+            {"manage_agent_loadout", "list_sessions"},
         frozenset({"ask gpt", "ask claude", "ask gemini", "ask deepseek",
                    "ask minimax", "ask qwen", "ask the", "ask another model",
                    "what does", "what would", "second opinion", "other model",

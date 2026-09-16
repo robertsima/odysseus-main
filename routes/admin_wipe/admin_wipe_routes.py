@@ -124,10 +124,35 @@ def setup_admin_wipe_routes(session_manager):
                 return {"status": "deleted", "kind": kind, "count": count}
 
             if kind == "notes":
-                count = db.query(Note).count()
+                from src.notes_store import STORE as notes_store
+                try:
+                    active_notes = notes_store.list(
+                        None, archived=False, allow_private=True
+                    )
+                    archived_notes = notes_store.list(
+                        None, archived=True, allow_private=True
+                    )
+                except TypeError:
+                    # Preserve compatibility with small in-memory stores used by
+                    # extensions and older test fixtures. Human/admin callers
+                    # historically received the complete note collection.
+                    active_notes = notes_store.list(None, archived=False)
+                    archived_notes = notes_store.list(None, archived=True)
+                file_notes = active_notes + archived_notes
+                for note in file_notes:
+                    try:
+                        notes_store.delete(note.id, None, enforce_readonly=False)
+                    except TypeError:
+                        notes_store.delete(note.id, None)
+                legacy_count = db.query(Note).count()
                 db.query(Note).delete()
                 db.commit()
-                return {"status": "deleted", "kind": kind, "count": count}
+                return {
+                    "status": "deleted",
+                    "kind": kind,
+                    "count": len(file_notes),
+                    "legacy_rows_deleted": legacy_count,
+                }
 
             if kind == "tasks":
                 # TaskRun rows reference tasks via FK — clear them first.
@@ -166,6 +191,9 @@ def setup_admin_wipe_routes(session_manager):
             raise HTTPException(400, f"Unknown wipe kind: {kind!r}")
         except HTTPException:
             raise
+        except PermissionError as e:
+            db.rollback()
+            raise HTTPException(409, str(e))
         except Exception as e:
             db.rollback()
             logger.exception(f"Wipe {kind} failed")

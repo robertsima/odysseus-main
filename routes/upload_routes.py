@@ -24,6 +24,7 @@ from core.database import (
 from src.auth_helpers import effective_user
 from src.attachment_refs import attachment_refs_from_metadata
 from src.constants import GENERATED_IMAGES_DIR
+from src.notes_store import STORE as NOTES_STORE
 from src.upload_handler import (
     UploadCleanupSafetyError,
     count_recent_uploads,
@@ -120,6 +121,23 @@ def _collect_persisted_upload_references() -> tuple[set[str], set[str]]:
         ).yield_per(500):
             for value in (image_url, color, content, items):
                 referenced_ids.update(_upload_ids_from_persisted_text(value))
+
+        # Markdown is the live notes store.  Keep the legacy table scan above
+        # while reversible migration remains supported, but never rely on it
+        # for references created or edited after migration.
+        for archived in (False, True):
+            for note in NOTES_STORE.list(None, archived=archived, allow_private=True):
+                values = (
+                    note.image_url,
+                    note.color,
+                    note.content,
+                    json.dumps([
+                        {"text": item.text, "done": item.done, **item.extra}
+                        for item in (note.items or [])
+                    ]),
+                )
+                for value in values:
+                    referenced_ids.update(_upload_ids_from_persisted_text(value))
 
         for (color,) in db.query(CalendarCal.color).yield_per(500):
             referenced_ids.update(_upload_ids_from_persisted_text(color))

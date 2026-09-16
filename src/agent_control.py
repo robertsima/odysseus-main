@@ -24,22 +24,62 @@ from src import agent_activity as activity
 
 logger = logging.getLogger(__name__)
 
+
+def live_children(session_id: Optional[str]) -> int:
+    """Child runs currently in flight for ``session_id``.
+
+    The per-chat ``max_parallel_workers`` limit is checked in two places — the
+    spawning-tool gate in :mod:`src.tool_execution` and the loadout tool's
+    ``start`` action — so the counting rule lives here rather than being
+    written twice and drifting. ``odysseus`` runs are the chat's own turns, not
+    children, so they do not count against the limit.
+    """
+    if not session_id:
+        return 0
+    try:
+        return sum(
+            1 for rec in activity.list_runs(limit=400)
+            if rec.get("session_id") == session_id
+            and rec.get("status") == "running"
+            and rec.get("source") != "odysseus"
+        )
+    except Exception:
+        return 0
+
+
 # ── steering ──────────────────────────────────────────────────────────────
 
 _STEER: Dict[str, List[dict]] = {}
 _STEER_MAX = 10
 
 
-def steer(session_id: str, text: str, *, owner: Optional[str] = None) -> dict:
+def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
+          from_session: Optional[str] = None, from_session_name: Optional[str] = None) -> dict:
+    """Queue a message for the next round of ``session_id``'s turn.
+
+    ``kind``/``from_session``/``from_session_name`` are new, optional, and
+    default to the original human-steer shape (``kind="user"``, no sender) so
+    every existing caller — the Agents dashboard, the chat composer — is
+    unaffected. ``agent_mailbox.send()`` is the other caller: it passes
+    ``kind="peer"`` and the sending session so a peer message can be told
+    apart from a human's steer (see ``pending_steer``/``agent_mailbox.inbox``)
+    even though both live in this same queue and drain through the same
+    ``drain_steer``.
+    """
     text = " ".join(str(text or "").split())[:4000]
     if not text:
         raise ValueError("steer text is empty")
-    rec = {"text": text, "ts": time.time(), "owner": owner}
+    rec = {"text": text, "ts": time.time(), "owner": owner, "kind": kind}
+    if from_session:
+        rec["from_session"] = from_session
+    if from_session_name:
+        rec["from_session_name"] = from_session_name
     queue = _STEER.setdefault(str(session_id), [])
     if len(queue) >= _STEER_MAX:
         raise ValueError("too many queued steer messages")
     queue.append(rec)
-    activity.publish(session_id, "note", f"Steer queued: {text[:160]}", source="odysseus",
+    label = "Peer message" if kind == "peer" else "Steer"
+    activity.publish(session_id, "note", f"{label} queued: {text[:160]}", source="odysseus",
                      run_id=activity.active_turn(session_id), owner=owner, detail=text, level="warning")
     return rec
 
@@ -52,8 +92,70 @@ def drain_steer(session_id: Optional[str]) -> List[str]:
     return [rec["text"] for rec in queue] if queue else []
 
 
+def drain_steer_records(session_id: Optional[str]) -> List[dict]:
+    """Like ``drain_steer``, but keeps each record's metadata instead of just its text.
+
+    ``drain_steer`` returns bare strings because the agent loop's round-boundary
+    drain (agent_loop.py, near the top of the round loop) wraps every one of
+    them the same way: ``"[Mid-task instruction from the user] " + text``. That
+    is correct for a human steer and wrong for a peer's — see
+    ``agent_mailbox.send()``, which works around it today by baking its own
+    "this is a peer, not your user" tag into the text itself so it survives
+    that wrapper. The proper fix is for the loop to call this instead and pick
+    the wrapper from ``rec.get("kind")`` (``"peer"`` vs the default ``"user"``)
+    rather than hard-coding "the user"; this function exists so that switch is
+    a small change there whenever that lands, not a new queue here.
+    """
+    if not session_id:
+        return []
+    queue = _STEER.pop(str(session_id), None)
+    return list(queue) if queue else []
+
+
 def pending_steer(session_id: str) -> List[dict]:
     return list(_STEER.get(str(session_id), ()))
+
+
+def clear_steer(session_id: Optional[str]) -> List[str]:
+    """Drop anything still queued for a turn that has ended, returning it.
+
+    The queue is keyed only by session, so a steer nobody drained would sit
+    there until some *future* turn picked it up and answered a correction from
+    an hour ago with no idea what it referred to. The agent loop extends a turn
+    to absorb a late steer (see the round loop), so reaching here means the turn
+    really is over — the caller logs what it dropped instead of leaking it.
+    """
+    if not session_id:
+        return []
+    queue = _STEER.pop(str(session_id), None)
+    return [rec["text"] for rec in queue] if queue else []
+
+
+def is_steerable(session_id: str) -> bool:
+    """True unless we know the running turn has no rounds to land between.
+
+    Only the agent loop drains the queue, and only between rounds. Everything
+    that runs through it is steerable — chat agent turns, but equally the
+    detached worker / background-job / pipeline runs tracked via
+    ``agent_runs.track_external``, which have no ``_active_streams`` entry at
+    all. The one case to refuse is a plain single-shot chat reply: it is "busy"
+    but never reaches the loop, so a steer would sit in the queue unread and
+    then surface inside some unrelated later turn.
+
+    So this reads as "reject what is positively known to be non-agent", not
+    "accept only what is positively known to be an agent turn" — the latter
+    silently broke steering for workers.
+    """
+    try:
+        from routes import chat_routes
+
+        streams = getattr(chat_routes, "_active_streams", {}) or {}
+    except Exception:
+        return True
+    rec = streams.get(str(session_id))
+    if not isinstance(rec, dict) or "mode" not in rec:
+        return True
+    return str(rec.get("mode") or "").strip().lower() == "agent"
 
 
 # ── stop ──────────────────────────────────────────────────────────────────
@@ -138,10 +240,16 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         context.append({"role": "system", "content": profile["instructions"]})
     context.append({"role": "user", "content": task})
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
+    # The loadout's own round budget (validate_profiles clamps it to 1..40, and
+    # defaults it to DEFAULT_ROUNDS). Recorded on the run and returned to the
+    # caller because it is the number a "ran out of rounds" result has to be read
+    # against — otherwise the cap that ended a worker is invisible until someone
+    # reopens the loadout in Settings.
+    rounds = int(profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS)
     run_id = activity.run_started(
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
-              "mode": "agent", "launched_from": "dashboard",
+              "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
               **({"profile": profile["name"]} if profile and profile.get("name") else {})},
         detail=task[:1500],
     )
@@ -158,12 +266,18 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             with agent_runs.track_external(sess.id, source="worker", owner=owner):
                 text, events = await run_headless(
                     sess, context,
-                    max_rounds=profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS,
+                    max_rounds=rounds,
                     disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
                     activity_session_id=sess.id, run_id=run_id, source="session", owner=owner, outcome=outcome,
                 )
             if outcome.get("stopped"):
                 status = "cancelled"
+            elif outcome.get("rounds_exhausted"):
+                # It did real work and then ran out of rounds. Reporting that as
+                # "completed" is what let a cut-off worker hand the parent an
+                # empty result that read like a finished one; `run_headless` has
+                # already appended the "here is where I got to" line to `text`.
+                status = "incomplete"
         except asyncio.CancelledError:
             status = "cancelled"
         except Exception as exc:
@@ -192,7 +306,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         _WORKERS.pop(run_id, None)
 
     _WORKERS[run_id] = asyncio.create_task(_run())
-    return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model}
+    return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
+            "max_rounds": rounds}
 
 
 _HANDOFF_MAX_ROUNDS = 12
@@ -214,9 +329,11 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     parent = manager.get_session(parent_id)
     if parent is None:
         return
-    headline = "finished" if status == "completed" else status
+    headline = {"completed": "finished", "incomplete": "ran out of rounds"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
-              "Continue the task using this result. Don't repeat work the worker already did. "
+              + ("The worker was cut off by its round budget, so the result above is partial — "
+                 "pick the task up from where it stopped. " if status == "incomplete" else "")
+              + "Continue the task using this result. Don't repeat work the worker already did. "
               "If the task is now complete, give the user the final result.")
     parent.add_message(ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
                                                     "from_session_name": worker.name, "direction": "inbound"}))
@@ -230,12 +347,15 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})
     reply, events = "", []
+    # The continuation is itself a bounded agent run, so it can be cut off the
+    # same way the worker was — report that rather than closing the run green.
+    followup: Dict[str, Any] = {}
     try:
         with agent_runs.track_external(parent_id, source="worker", owner=owner):
             reply, events = await run_headless(parent, parent.get_context_messages(), max_rounds=_HANDOFF_MAX_ROUNDS,
                                                disabled_tools=None, activity_session_id=parent_id, run_id=run_id,
-                                               source="session", owner=owner)
-        status = "completed"
+                                               source="session", owner=owner, outcome=followup)
+        status = "incomplete" if followup.get("rounds_exhausted") else "completed"
     except Exception as exc:
         reply, status = f"Could not continue after the worker: {exc}", "failed"
     meta: Dict[str, Any] = {"model": parent.model, "source": "worker_followup", "worker_session": worker.id}

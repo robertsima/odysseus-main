@@ -9,6 +9,7 @@ gaps without depending on the container's real paths or binary.
 """
 import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -477,6 +478,26 @@ def test_task_summaries_are_owner_scoped_and_bounded(tmp_path):
     assert [r["task_id"] for r in runner.summaries(owner="alice")] == ["a"]
 
 
+async def test_chat_task_lifecycle_is_owner_scoped(tmp_path, monkeypatch):
+    import src.agent_tools.claude_code_tools as tools
+
+    runner = ClaudeCodeTaskRunner(store_path=str(tmp_path / "tasks.json"))
+    runner.tasks["alice-task"] = {
+        "task_id": "alice-task", "owner": "alice", "status": "completed",
+        "exit_code": 0, "result": "private output",
+    }
+    monkeypatch.setattr(tools, "get_task_runner", lambda: runner)
+
+    for action in ("poll", "cancel"):
+        result = await ClaudeCodeTool().execute(
+            json.dumps({"action": action, "task_id": "alice-task"}), {"owner": "bob"}
+        )
+        assert result["exit_code"] == 1
+        assert "not found" in result["error"]
+    result = await ClaudeCodeTool().execute('{"action":"list"}', {"owner": "bob"})
+    assert result["tasks"] == []
+
+
 # ── send_to_session tags agent-originated messages ──
 
 def test_send_to_session_source_tagging_helper(monkeypatch):
@@ -525,6 +546,8 @@ def test_claude_code_delegation_skill_is_bundled_and_parseable():
 async def test_status_flags_bad_callback_token_file(roots, settings, monkeypatch, tmp_path):
     """A loose token file blocks every delegation (see _claude_environment),
     so status must say so and report not-ready instead of a silent flag."""
+    if os.name == "nt":
+        pytest.skip("Windows ACLs are not represented by POSIX chmod mode bits")
     token = tmp_path / "token"
     token.write_text("ody_x", encoding="utf-8")
     token.chmod(0o644)

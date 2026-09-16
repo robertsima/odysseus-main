@@ -31,12 +31,13 @@ than assembling those strings by hand.
 from __future__ import annotations
 
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+
+from src.settings import get_setting_or_env
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,10 @@ def _date_order() -> str:
     is what recency ranking is actually sensitive to, so this is a precision
     knob rather than a correctness one.
     """
-    raw = (os.environ.get("ODYSSEUS_VAULT_DATE_ORDER") or "day").strip().lower()
+    raw = str(
+        get_setting_or_env("vault_date_order", "ODYSSEUS_VAULT_DATE_ORDER", "day")
+        or "day"
+    ).strip().lower()
     return "month" if raw.startswith("m") else "day"
 
 

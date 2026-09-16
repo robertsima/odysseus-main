@@ -277,12 +277,15 @@ def _find_browser_executable() -> str:
 
 def _browser_mcp_args(args: list[str]) -> list[str]:
     """Return Playwright MCP args with a concrete browser executable when found."""
+    from src.settings import get_setting_or_env
+
     out = list(args or [])
     if "--executable-path" not in out:
         browser = _find_browser_executable()
         if browser:
             out.extend(["--executable-path", browser])
-    if os.environ.get("ODYSSEUS_BROWSER_ISOLATED", "1").lower() not in ("0", "false", "no"):
+    isolated = get_setting_or_env("browser_isolated", "ODYSSEUS_BROWSER_ISOLATED", True)
+    if str(isolated).lower() not in ("0", "false", "no"):
         if "--isolated" not in out and "--user-data-dir" not in out:
             out.append("--isolated")
     if os.environ.get("ODYSSEUS_BROWSER_NO_SANDBOX", "1").lower() not in ("0", "false", "no"):

@@ -26,12 +26,12 @@ built before this existed keeps ranking exactly as it did.
 from __future__ import annotations
 
 import logging
-import os
 import re
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from src.vault_markdown import decode_list, list_contains
+from src.settings import get_setting_or_env
 
 logger = logging.getLogger(__name__)
 
@@ -90,19 +90,30 @@ _EXPLICIT_TAG_CREDIT = 1.0
 _BARE_TAG_CREDIT = 0.7
 
 
-def _env_float(name: str, default: float, low: float, high: float) -> float:
-    raw = os.environ.get(name)
+def _setting_float(
+    key: str, env_name: str, default: float, low: float, high: float
+) -> float:
+    raw = get_setting_or_env(key, env_name, default)
     if raw is None or not str(raw).strip():
         return default
     try:
         value = float(raw)
     except (TypeError, ValueError):
-        logger.warning("Ignoring non-numeric %s=%r; using %s", name, raw, default)
+        logger.warning("Ignoring non-numeric %s=%r; using %s", key, raw, default)
         return default
     if not (low <= value <= high):
-        logger.warning("Ignoring out-of-range %s=%r; using %s", name, raw, default)
+        logger.warning("Ignoring out-of-range %s=%r; using %s", key, raw, default)
         return default
     return value
+
+
+def _setting_int(key: str, env_name: str, default: int, low: int, high: int) -> int:
+    return int(_setting_float(key, env_name, float(default), float(low), float(high)))
+
+
+def _env_float(name: str, default: float, low: float, high: float) -> float:
+    """Compatibility helper for callers that still pass only an env name."""
+    return _setting_float(name, name, default, low, high)
 
 
 def _env_int(name: str, default: int, low: int, high: int) -> int:
@@ -110,15 +121,27 @@ def _env_int(name: str, default: int, low: int, high: int) -> int:
 
 
 def halflife_days() -> float:
-    return _env_float("ODYSSEUS_RAG_RECENCY_HALFLIFE_DAYS", DEFAULT_HALFLIFE_DAYS, 1.0, 36500.0)
+    return _setting_float(
+        "rag_recency_halflife_days",
+        "ODYSSEUS_RAG_RECENCY_HALFLIFE_DAYS",
+        DEFAULT_HALFLIFE_DAYS,
+        1.0,
+        36500.0,
+    )
 
 
 def temporal_weight(intent: bool = False) -> float:
     if intent:
-        return _env_float(
-            "ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT", DEFAULT_TEMPORAL_INTENT_WEIGHT, 0.0, 0.9
+        return _setting_float(
+            "rag_temporal_intent_weight",
+            "ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT",
+            DEFAULT_TEMPORAL_INTENT_WEIGHT,
+            0.0,
+            0.9,
         )
-    return _env_float("ODYSSEUS_RAG_TEMPORAL_WEIGHT", DEFAULT_TEMPORAL_WEIGHT, 0.0, 0.9)
+    return _setting_float(
+        "rag_temporal_weight", "ODYSSEUS_RAG_TEMPORAL_WEIGHT", DEFAULT_TEMPORAL_WEIGHT, 0.0, 0.9
+    )
 
 
 def max_chunks_per_document(focused: bool = False) -> int:
@@ -134,7 +157,13 @@ def max_chunks_per_document(focused: bool = False) -> int:
     the named note for three scoring 0.37-0.40; doubling it cost one swap
     instead of three, while leaving open questions on the tighter cap.
     """
-    base = _env_int("ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC", DEFAULT_MAX_CHUNKS_PER_DOC, 0, 50)
+    base = _setting_int(
+        "rag_max_chunks_per_doc",
+        "ODYSSEUS_RAG_MAX_CHUNKS_PER_DOC",
+        DEFAULT_MAX_CHUNKS_PER_DOC,
+        0,
+        50,
+    )
     if base <= 0:
         return 0
     return base * focused_cap_multiplier() if focused else base
@@ -147,8 +176,12 @@ def focused_cap_multiplier() -> int:
     which is the only way to measure this signal on its own — setting the cap
     to ``0`` would remove both at once.
     """
-    return _env_int(
-        "ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER", DEFAULT_FOCUSED_CAP_MULTIPLIER, 1, 10
+    return _setting_int(
+        "rag_focused_cap_multiplier",
+        "ODYSSEUS_RAG_FOCUSED_CAP_MULTIPLIER",
+        DEFAULT_FOCUSED_CAP_MULTIPLIER,
+        1,
+        10,
     )
 
 
@@ -160,11 +193,11 @@ def tag_credit_scale() -> float:
     scripts/rag_ab_compare.py). Without it, "retrieval with the new ranking
     turned off" would still be running one of the new rankers.
     """
-    return _env_float("ODYSSEUS_RAG_TAG_CREDIT", 1.0, 0.0, 1.0)
+    return _setting_float("rag_tag_credit", "ODYSSEUS_RAG_TAG_CREDIT", 1.0, 0.0, 1.0)
 
 
 def link_expansion_enabled() -> bool:
-    raw = os.environ.get("ODYSSEUS_RAG_LINK_EXPANSION")
+    raw = get_setting_or_env("rag_link_expansion", "ODYSSEUS_RAG_LINK_EXPANSION", True)
     if raw is None or not str(raw).strip():
         return True
     return str(raw).strip().lower() not in {"0", "false", "no", "off"}

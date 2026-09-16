@@ -6,7 +6,7 @@ and every cached prefix was lost. The claim named what it needed; widening
 should too, and only fall back to the whole registry when nothing specific
 can be identified.
 """
-from src.agent_loop import _claims_missing_tools, _targeted_rearm_tools
+from src.agent_loop import _claims_missing_tools, _name_list, _targeted_rearm_tools
 
 POOL = {
     "manage_agent_worktree", "read_file", "write_file", "bash", "web_search", "web_fetch",
@@ -56,3 +56,31 @@ def test_nothing_specific_means_empty_so_the_caller_widens_fully():
 def test_short_names_do_not_match_inside_words():
     # "bash" must not fire on "bashful"; "ls"-length names are ignored entirely.
     assert "bash" not in _targeted_rearm_tools("I feel bashful about tools not available", POOL)
+
+
+# ── The re-arm log has to agree with itself ─────────────────────────────
+#
+# The line was `"re-armed %d tool(s) %s" % (len(_rearm_new), sorted(_rearm_new)[:25])`,
+# which printed `re-armed 33 tool(s) [...25 names...]` with no marker. It is the
+# one line an operator greps to answer "was the tool I needed re-armed?", and
+# the 8 dropped names are exactly the ones being looked for — so it answered
+# that question confidently and wrongly. Same clip, at 20, in the directive the
+# MODEL reads.
+
+
+def test_a_clipped_list_says_that_it_was_clipped():
+    rendered = _name_list({f"tool_{i:02d}" for i in range(33)}, 25)
+    assert rendered.count(",") == 24, "still shows 25 names"
+    assert "+8 more" in rendered, f"the other 8 vanished without a trace: {rendered}"
+
+
+def test_a_short_list_gains_no_marker():
+    assert _name_list({"bash", "read_file"}, 25) == "bash, read_file"
+
+
+def test_an_exactly_full_list_gains_no_marker():
+    assert "more" not in _name_list({f"t{i}" for i in range(25)}, 25)
+
+
+def test_an_empty_set_is_stated_not_rendered_blank():
+    assert _name_list(set(), 25) == "(none)"

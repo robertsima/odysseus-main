@@ -9,14 +9,50 @@ from typing import Dict, Any, Optional
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
-from core.database import SessionLocal, Note
 from core.middleware import INTERNAL_TOOL_USER
 from src.auth_helpers import require_user
 from src.constants import DATA_DIR
 from src.upload_handler import reserve_upload_references
-from sqlalchemy.orm.attributes import flag_modified
+from src.notes_markdown import NoteItem, NoteRecord
+from src.notes_store import STORE
 
 logger = logging.getLogger(__name__)
+
+
+def _list_visible_notes(owner, *, archived=False, label=None):
+    """Human callers see private notes; agent loopback callers do not."""
+    allow_private = owner != INTERNAL_TOOL_USER
+    try:
+        return STORE.list(owner, archived=archived, label=label, allow_private=allow_private)
+    except TypeError:
+        return STORE.list(owner, archived=archived, label=label)
+
+
+def _find_visible_note(note_id, owner):
+    allow_private = owner != INTERNAL_TOOL_USER
+    try:
+        return STORE.find(note_id, owner, allow_private=allow_private)
+    except TypeError:
+        return STORE.find(note_id, owner)
+
+
+def _save_authenticated_note(note, owner):
+    """Bypass readonly for humans, but never for agent loopback requests."""
+    try:
+        return STORE.save(note, enforce_readonly=owner == INTERNAL_TOOL_USER)
+    except TypeError:
+        return STORE.save(note)
+
+
+def _delete_authenticated_note(note_id, owner):
+    try:
+        return STORE.delete(
+            note_id,
+            owner,
+            enforce_readonly=owner == INTERNAL_TOOL_USER,
+        )
+    except TypeError:
+        return STORE.delete(note_id, owner)
 
 
 # ---------------------------------------------------------------------------
@@ -59,13 +95,10 @@ class NoteUpdate(BaseModel):
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _note_to_dict(note: Note) -> Dict[str, Any]:
+def _note_to_dict(note: NoteRecord) -> Dict[str, Any]:
     items = None
-    if note.items:
-        try:
-            items = json.loads(note.items)
-        except (json.JSONDecodeError, TypeError):
-            items = None
+    if note.items is not None:
+        items = [{"text": item.text, "done": item.done, **item.extra} for item in note.items]
     ai_cls = None
     raw_ai = getattr(note, "ai_classification", None)
     if raw_ai:
@@ -98,22 +131,17 @@ def _note_to_dict(note: Note) -> Dict[str, Any]:
     }
 
 
-def _reminder_text_from_note(note: Note) -> tuple[str, str]:
-    """Return the reminder title/body from a stored note row."""
+def _reminder_text_from_note(note: NoteRecord) -> tuple[str, str]:
+    """Return the reminder title/body from a stored Markdown note."""
     title = (note.title or "Note reminder").strip() or "Note reminder"
     if note.items:
-        try:
-            items = json.loads(note.items)
-        except (json.JSONDecodeError, TypeError):
-            items = None
+        items = note.items
         if isinstance(items, list):
             pending: list[str] = []
             for item in items:
-                if not isinstance(item, dict):
+                if item.done:
                     continue
-                if item.get("done") or item.get("checked"):
-                    continue
-                text = str(item.get("text") or "").strip()
+                text = str(item.text or "").strip()
                 if text:
                     pending.append(text)
             if pending:
@@ -638,25 +666,8 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         label: Optional[str] = None,
     ):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            q = db.query(Note)
-            if user is not None:
-                q = q.filter(Note.owner == user)
-            if archived is not None:
-                q = q.filter(Note.archived == archived)
-            else:
-                q = q.filter(Note.archived == False)
-            if label:
-                q = q.filter(Note.label == label)
-            # Archived view: most recently archived first. Active view: pin + manual order.
-            if archived is True:
-                notes = q.order_by(Note.updated_at.desc()).all()
-            else:
-                notes = q.order_by(Note.pinned.desc(), Note.sort_order.asc(), Note.updated_at.desc()).all()
-            return {"notes": [_note_to_dict(n) for n in notes]}
-        finally:
-            db.close()
+        notes = _list_visible_notes(user, archived=bool(archived), label=label)
+        return {"notes": [_note_to_dict(n) for n in notes]}
 
     # --- CREATE ---
     @router.post("")
@@ -669,15 +680,16 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             body.content,
             json.dumps(body.items) if body.items is not None else None,
         )
-        db = SessionLocal()
-        try:
-            note = Note(
+        note = NoteRecord(
                 id=str(uuid.uuid4()),
                 owner=user,
                 title=body.title,
                 content=body.content,
-                items=json.dumps(body.items) if body.items is not None else None,
-                note_type=body.note_type,
+                items=[NoteItem(text=str(item.get("text") or ""),
+                                done=bool(item.get("done") or item.get("checked")),
+                                extra={k: v for k, v in item.items() if k not in {"text", "done", "checked"}})
+                       for item in (body.items or [])]
+                if body.note_type == "checklist" or body.items is not None else None,
                 color=body.color,
                 label=body.label,
                 pinned=body.pinned,
@@ -687,168 +699,115 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
                 image_url=body.image_url,
                 repeat=body.repeat or "none",
                 sort_order=body.sort_order if body.sort_order is not None else 0,
-            )
-            db.add(note)
-            db.commit()
-            db.refresh(note)
-            return _note_to_dict(note)
-        finally:
-            db.close()
+        )
+        _save_authenticated_note(note, user)
+        return _note_to_dict(note)
 
     # --- GET ONE ---
     @router.get("/{note_id}")
     def get_note(request: Request, note_id: str):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            return _note_to_dict(note)
-        finally:
-            db.close()
+        note = _find_visible_note(note_id, user)
+        if not note:
+            raise HTTPException(404, "Note not found")
+        return _note_to_dict(note)
 
     # --- UPDATE ---
     @router.put("/{note_id}")
     def update_note(request: Request, note_id: str, body: NoteUpdate):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
+        note = _find_visible_note(note_id, user)
+        if not note:
+            raise HTTPException(404, "Note not found")
 
-            _reserve_note_uploads(
-                user,
-                body.image_url,
-                body.color,
-                body.content,
-                json.dumps(body.items) if body.items is not None else None,
-            )
-            if body.title is not None:
-                note.title = body.title
-            if body.content is not None:
-                note.content = body.content
-            if body.items is not None:
-                note.items = json.dumps(body.items)
-                flag_modified(note, "items")
-            if body.note_type is not None:
-                note.note_type = body.note_type
-            if body.color is not None:
-                note.color = body.color
-            if body.label is not None:
-                note.label = body.label
-            if body.pinned is not None:
-                note.pinned = body.pinned
-            if body.archived is not None:
-                note.archived = body.archived
-            if body.due_date is not None:
-                note.due_date = body.due_date
-            if body.image_url is not None:
-                note.image_url = body.image_url
-            if body.repeat is not None:
-                note.repeat = body.repeat
-            if body.sort_order is not None:
-                note.sort_order = body.sort_order
-            if body.agent_session_id is not None:
-                note.agent_session_id = body.agent_session_id
+        _reserve_note_uploads(
+            user,
+            body.image_url,
+            body.color,
+            body.content,
+            json.dumps(body.items) if body.items is not None else None,
+        )
+        if body.title is not None:
+            note.title = body.title
+        if body.content is not None:
+            note.content = body.content
+        if body.items is not None:
+            note.items = [NoteItem(text=str(item.get("text") or ""),
+                                   done=bool(item.get("done") or item.get("checked")),
+                                   extra={k: v for k, v in item.items() if k not in {"text", "done", "checked"}})
+                          for item in body.items]
+        if body.note_type is not None:
+            if body.note_type == "note":
+                note.items = None
+            elif note.items is None:
+                note.items = []
+        if body.color is not None:
+            note.color = body.color
+        if body.label is not None:
+            note.label = body.label
+        if body.pinned is not None:
+            note.pinned = body.pinned
+        if body.archived is not None:
+            note.archived = body.archived
+        if body.due_date is not None:
+            note.due_date = body.due_date
+        if body.image_url is not None:
+            note.image_url = body.image_url
+        if body.repeat is not None:
+            note.repeat = body.repeat
+        if body.sort_order is not None:
+            note.sort_order = body.sort_order
+        if body.agent_session_id is not None:
+            note.agent_session_id = body.agent_session_id
 
-            db.commit()
-            db.refresh(note)
-            return _note_to_dict(note)
-        finally:
-            db.close()
+        _save_authenticated_note(note, user)
+        return _note_to_dict(note)
 
     # --- DELETE ---
     @router.delete("/{note_id}")
     def delete_note(request: Request, note_id: str):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            db.delete(note)
-            db.commit()
-            return {"ok": True}
-        finally:
-            db.close()
+        if not _delete_authenticated_note(note_id, user):
+            raise HTTPException(404, "Note not found")
+        return {"ok": True}
 
     # --- TOGGLE PIN ---
     @router.post("/{note_id}/pin")
     def toggle_pin(request: Request, note_id: str):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            note.pinned = not note.pinned
-            db.commit()
-            return {"ok": True, "pinned": note.pinned}
-        finally:
-            db.close()
+        note = _find_visible_note(note_id, user)
+        if not note:
+            raise HTTPException(404, "Note not found")
+        note.pinned = not note.pinned
+        _save_authenticated_note(note, user)
+        return {"ok": True, "pinned": note.pinned}
 
     # --- TOGGLE ARCHIVE ---
     @router.post("/{note_id}/archive")
     def toggle_archive(request: Request, note_id: str):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            note.archived = not note.archived
-            db.commit()
-            return {"ok": True, "archived": note.archived}
-        finally:
-            db.close()
+        note = _find_visible_note(note_id, user)
+        if not note:
+            raise HTTPException(404, "Note not found")
+        note.archived = not note.archived
+        _save_authenticated_note(note, user)
+        return {"ok": True, "archived": note.archived}
 
     # --- TOGGLE CHECKLIST ITEM ---
     @router.post("/{note_id}/items/{index}/toggle")
     def toggle_item(request: Request, note_id: str, index: int):
         user = _owner(request)
-        db = SessionLocal()
-        try:
-            note = db.query(Note).filter(Note.id == note_id).first()
-            if not note:
-                raise HTTPException(404, "Note not found")
-            # SECURITY: strict ownership — previously `note.owner and note.owner != user`
-            # let any user touch a row whose owner field was null/empty.
-            if user is not None and note.owner != user:
-                raise HTTPException(404, "Note not found")
-            if not note.items:
-                raise HTTPException(400, "Note has no checklist items")
-            items = json.loads(note.items)
-            if index < 0 or index >= len(items):
-                raise HTTPException(400, f"Item index {index} out of range")
-            items[index]["done"] = not items[index].get("done", False)
-            note.items = json.dumps(items)
-            flag_modified(note, "items")
-            db.commit()
-            return {"ok": True, "items": items}
-        finally:
-            db.close()
+        note = _find_visible_note(note_id, user)
+        if not note:
+            raise HTTPException(404, "Note not found")
+        if not note.items:
+            raise HTTPException(400, "Note has no checklist items")
+        items = note.items
+        if index < 0 or index >= len(items):
+            raise HTTPException(400, f"Item index {index} out of range")
+        items[index].done = not items[index].done
+        _save_authenticated_note(note, user)
+        return {"ok": True, "items": [{"text": item.text, "done": item.done, **item.extra} for item in items]}
 
     # --- FIRE REMINDER ---
     @router.post("/fire-reminder")
@@ -890,16 +849,10 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
             if "llm_persona" in body:
                 _override["reminder_llm_persona"] = str(body["llm_persona"] or "")
         else:
-            db = SessionLocal()
-            try:
-                note = db.query(Note).filter(Note.id == note_id).first()
-                if not note:
-                    raise HTTPException(404, "Note not found")
-                if caller is not None and note.owner != caller:
-                    raise HTTPException(404, "Note not found")
-                title, note_body = _reminder_text_from_note(note)
-            finally:
-                db.close()
+            note = _find_visible_note(note_id, caller)
+            if not note:
+                raise HTTPException(404, "Note not found")
+            title, note_body = _reminder_text_from_note(note)
 
         return await dispatch_reminder(
             title=title, note_body=note_body, note_id=note_id,
@@ -917,32 +870,13 @@ def setup_note_routes(task_scheduler=None, upload_handler=None):
         ids = body.get("ids", [])
         if not isinstance(ids, list):
             raise HTTPException(400, "ids must be a list")
-        # v2 review HIGH-12: drop the legacy `(owner == user) | (owner ==
-        # None)` OR which let an authenticated user silently reorder
-        # every legacy-null-owner note belonging to other accounts. In
-        # an unconfigured (single-user) auth deploy the OR is still safe
-        # because there's no second user to attack; we keep that branch
-        # explicit and gated on AuthManager.is_configured.
-        try:
-            from core.auth import AuthManager
-            _allow_null = not AuthManager().is_configured
-        except Exception:
-            _allow_null = False
-        db = SessionLocal()
-        try:
-            for i, nid in enumerate(ids):
-                q = db.query(Note).filter(Note.id == nid)
-                if user is not None:
-                    if _allow_null:
-                        q = q.filter((Note.owner == user) | (Note.owner == None))  # noqa: E711
-                    else:
-                        q = q.filter(Note.owner == user)
-                note = q.first()
-                if note:
-                    note.sort_order = i
-            db.commit()
-            return {"ok": True, "count": len(ids)}
-        finally:
-            db.close()
+        count = 0
+        for i, nid in enumerate(ids):
+            note = _find_visible_note(str(nid), user)
+            if note:
+                note.sort_order = i
+                _save_authenticated_note(note, user)
+                count += 1
+        return {"ok": True, "count": count}
 
     return router

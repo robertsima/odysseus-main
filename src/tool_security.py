@@ -66,11 +66,17 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "manage_tokens",
     "manage_documents",
     "manage_settings",
+    # Writes the shared `agent_profiles` setting and starts detached
+    # workers. src.agent_loadouts already stops an agent authoring a
+    # loadout wider than its own chat; this keeps the shared loadout
+    # namespace itself an administrator surface, like manage_settings.
+    "manage_agent_loadout",
     "api_call",
     "app_api",
     "resolve_contact",
     "manage_contact",
     # Delegates repository mutation to an external coding agent; admin-only.
+    "delegate_to_agent",
     "delegate_to_claude_code",
     "manage_calendar",
     "vault_search",
@@ -155,12 +161,13 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     # Creates worktrees, commits, and (with human approval) pushes.
     "manage_agent_worktree",
     # Runs an external coding agent that can edit/commit inside an approved repo.
-    "delegate_to_claude_code",
+    "delegate_to_agent", "delegate_to_claude_code",
     "create_document", "edit_document", "update_document",
     "suggest_document", "manage_documents", "create_session", "manage_session",
-    "send_to_session", "pipeline", "manage_memory", "manage_skills",
+    "send_to_session", "message_agent", "pipeline", "manage_memory", "manage_skills",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
     "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
+    "manage_agent_loadout",
     "manage_calendar", "api_call", "app_api", "ui_control",
     # manage_wellbeing is read-mostly, but log_checkin writes a check-in.
     "manage_wellbeing",
@@ -305,8 +312,17 @@ def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
     through that route (a ``send_to_session`` sub-agent, a background-job
     follow-up) used to skip both, so a sub-agent could run a tool the operator
     had switched off. This is the owner-level part of that merge, shared.
+
+    It also carries the public-user blocklist. ``is_public_blocked_tool`` has
+    always refused those tools at execution time, but nothing removed them from
+    the round's schema list, so a non-admin agent was shown ~40 tools it could
+    not call and learned that only by calling one — spending schema tokens
+    every round and, worse, picking a delegation tool it would then be refused
+    and burning rounds rediscovering that. Denying them here keeps the offer and
+    the enforcement in agreement, which is what the behaviour spec means by a
+    capability degrading honestly rather than failing later as a phantom tool.
     """
-    out: Set[str] = set()
+    out: Set[str] = set(blocked_tools_for_owner(owner))
     try:
         from src.settings import get_setting
 

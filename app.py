@@ -204,7 +204,7 @@ class _InteractiveActivityMiddleware(_BaseHTTPMiddleware):
         from src.interactive_gate import should_track_interactive_request, track_interactive_request
 
         path = request.url.path or ""
-        if not should_track_interactive_request(path, request.method):
+        if not should_track_interactive_request(path, request.method, request.headers):
             return await call_next(request)
         async def _stop_background():
             try:
@@ -672,6 +672,13 @@ app.include_router(setup_session_routes(
 from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager))
 
+# Capability registry + declared settings schema. Importing capabilities_builtin
+# registers the declarations; without it the registry is empty and every
+# capability reads as available, which would defeat the point of gating.
+import src.capabilities_builtin  # noqa: F401
+from routes.capability_routes import setup_capability_routes
+app.include_router(setup_capability_routes())
+
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
 memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
@@ -1091,7 +1098,11 @@ async def _startup_event():
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy
     # machines. Default to clear/idle startup and let requests warm what they use.
-    _startup_warmups_enabled = str(os.getenv("ODYSSEUS_STARTUP_WARMUPS", "")).lower() in {"1", "true", "yes", "on"}
+    from src.settings import get_setting_or_env
+
+    _startup_warmups_enabled = str(
+        get_setting_or_env("startup_warmups_enabled", "ODYSSEUS_STARTUP_WARMUPS", False)
+    ).lower() in {"1", "true", "yes", "on"}
     if _startup_warmups_enabled:
         async def _warmup_tool_index():
             try:
@@ -1124,12 +1135,14 @@ async def _startup_event():
 
         _startup_tasks.append(asyncio.create_task(_warmup_endpoints()))
     else:
-        logger.info("Startup warmups disabled (set ODYSSEUS_STARTUP_WARMUPS=1 to enable)")
+        logger.info("Startup warmups disabled (enable startup_warmups_enabled in Settings)")
 
     # Keep-alive is opt-in. The ping path performs model discovery, and when
     # stale LAN endpoints are configured it can add periodic backend pressure
     # that delays unrelated UI requests such as Notes/Documents.
-    _keepalive_enabled = str(os.getenv("ODYSSEUS_MODEL_KEEPALIVE", "")).lower() in {"1", "true", "yes", "on"}
+    _keepalive_enabled = str(
+        get_setting_or_env("model_keepalive_enabled", "ODYSSEUS_MODEL_KEEPALIVE", False)
+    ).lower() in {"1", "true", "yes", "on"}
     if _keepalive_enabled:
         async def _keepalive_loop():
             while True:

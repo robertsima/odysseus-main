@@ -116,9 +116,19 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
     api_key = getattr(ep, "api_key", None)
     auth_id = getattr(ep, "provider_auth_id", None)
     if auth_id:
-        from src.chatgpt_subscription import resolve_runtime_credentials
+        # The stored auth-session provider is authoritative. URL matching is
+        # only a compatibility fallback for legacy/test rows without a record.
+        auth_owner = owner if owner is not None else getattr(ep, "owner", None)
+        from src.subscription import provider_for_auth_id, provider_for_url
 
-        creds = resolve_runtime_credentials(auth_id, owner=owner)
+        provider = provider_for_auth_id(auth_id, owner=auth_owner)
+        if provider is None:
+            provider = provider_for_url(base)
+        if provider is None:
+            raise RuntimeError(
+                "Subscription endpoint has no installed provider for its auth session"
+            )
+        creds = provider.resolve_runtime_credentials(auth_id, owner=auth_owner)
         base = normalize_base(creds.get("base_url") or base)
         api_key = creds.get("api_key")
     return base, api_key
@@ -144,6 +154,24 @@ def endpoint_runtime_headers(ep, owner: Optional[str] = None) -> Dict[str, str]:
         api_key = resolved_key
     except Exception as e:
         logger.warning("Could not resolve runtime credentials for %s: %s", base, e)
+    auth_id = getattr(ep, "provider_auth_id", None)
+    if auth_id:
+        auth_owner = owner if owner is not None else getattr(ep, "owner", None)
+        try:
+            from src.subscription import provider_for_auth_id, provider_for_url
+
+            provider = provider_for_auth_id(auth_id, owner=auth_owner)
+            if provider is None:
+                provider = provider_for_url(base)
+            if provider is not None:
+                return provider.headers(api_key)
+        except Exception as e:
+            logger.warning("Could not resolve subscription headers for %s: %s", base, e)
+        # A row carrying provider_auth_id is not a static-key endpoint. Do not
+        # silently reinterpret a missing/unknown subscription provider as a
+        # generic bearer endpoint; that can send a credential to the wrong
+        # billing surface. Legacy ChatGPT rows are handled by provider_for_url.
+        return {}
     return build_headers(api_key, base)
 
 
@@ -312,6 +340,14 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     if provider == "copilot":
         from src.copilot import copilot_headers
         return copilot_headers(api_key)
+    try:
+        from src.subscription import get as get_subscription_provider
+
+        subscription_provider = get_subscription_provider(provider)
+        if subscription_provider is not None:
+            return subscription_provider.headers(api_key)
+    except Exception:
+        pass
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import chatgpt_headers
         return chatgpt_headers(api_key)

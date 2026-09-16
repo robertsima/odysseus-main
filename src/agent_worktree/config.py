@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from src import constants
+from src.settings import get_setting_or_env
 from src.agent_worktree.validation import (
     is_valid_repo_slug,
     normalize_branch,
@@ -45,7 +46,9 @@ def _text(name: str) -> str:
 
 
 def _approval_ttl() -> int:
-    raw = _text("ODYSSEUS_AGENT_APPROVAL_TTL_SECONDS")
+    raw = get_setting_or_env(
+        "agent_approval_ttl_seconds", "ODYSSEUS_AGENT_APPROVAL_TTL_SECONDS", DEFAULT_APPROVAL_TTL_S
+    )
     if not raw:
         return DEFAULT_APPROVAL_TTL_S
     try:
@@ -116,7 +119,9 @@ def load_config() -> WorktreeConfig:
     )
     state_dir = os.path.realpath(os.path.expanduser(state_dir))
 
-    base_branch = normalize_branch(_text("ODYSSEUS_AGENT_BASE_BRANCH")) or "dev"
+    base_branch = normalize_branch(str(get_setting_or_env(
+        "agent_base_branch", "ODYSSEUS_AGENT_BASE_BRANCH", "dev"
+    ) or "")) or "dev"
 
     fallback_env = "ODYSSEUS_AGENT_GITHUB_TOKEN"
 

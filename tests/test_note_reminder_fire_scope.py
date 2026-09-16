@@ -3,6 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from src.notes_markdown import NoteItem, NoteRecord
+from tests.helpers.fake_notes_store import FakeNotesStore
 
 
 class _AuthManager:
@@ -55,13 +57,13 @@ def _endpoint(monkeypatch, note=None):
     import routes.note_routes as note_routes
 
     calls = []
-    db = _Db(note)
+    store = FakeNotesStore(*(note,) if note is not None else ())
 
     async def fake_dispatch_reminder(**kwargs):
         calls.append(kwargs)
         return {"ok": True}
 
-    monkeypatch.setattr(note_routes, "SessionLocal", lambda: db)
+    monkeypatch.setattr(note_routes, "STORE", store)
     monkeypatch.setattr(note_routes, "dispatch_reminder", fake_dispatch_reminder)
 
     router = note_routes.setup_note_routes()
@@ -69,7 +71,7 @@ def _endpoint(monkeypatch, note=None):
         route.endpoint for route in router.routes
         if route.path == "/api/notes/fire-reminder" and "POST" in route.methods
     )
-    return endpoint, calls, db
+    return endpoint, calls, store
 
 
 def _note(**overrides):
@@ -81,7 +83,7 @@ def _note(**overrides):
         "items": None,
     }
     data.update(overrides)
-    return SimpleNamespace(**data)
+    return NoteRecord(**data)
 
 
 def test_real_reminder_requires_owned_note(monkeypatch):
@@ -95,7 +97,7 @@ def test_real_reminder_requires_owned_note(monkeypatch):
 
 
 def test_real_reminder_uses_stored_note_and_ignores_overrides(monkeypatch):
-    endpoint, calls, db = _endpoint(monkeypatch, _note())
+    endpoint, calls, store = _endpoint(monkeypatch, _note())
 
     result = asyncio.run(endpoint(_Request({
         "note_id": "note-1",
@@ -107,7 +109,7 @@ def test_real_reminder_uses_stored_note_and_ignores_overrides(monkeypatch):
     }, user="alice")))
 
     assert result == {"ok": True}
-    assert db.closed is True
+    assert store.saved == 0
     assert calls == [{
         "title": "Stored title",
         "note_body": "Stored body",
@@ -119,11 +121,11 @@ def test_real_reminder_uses_stored_note_and_ignores_overrides(monkeypatch):
 
 
 def test_real_checklist_reminder_body_is_built_from_stored_items(monkeypatch):
-    endpoint, calls, _db = _endpoint(monkeypatch, _note(items=(
-        '[{"text":"first","done":false},'
-        '{"text":"finished","done":true},'
-        '{"text":"second","checked":false}]'
-    )))
+    endpoint, calls, _store = _endpoint(monkeypatch, _note(items=[
+        NoteItem(text="first", done=False),
+        NoteItem(text="finished", done=True),
+        NoteItem(text="second", done=False),
+    ]))
 
     asyncio.run(endpoint(_Request({"note_id": "note-1"}, user="alice")))
 

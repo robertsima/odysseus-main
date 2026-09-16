@@ -200,6 +200,11 @@ async function _fetchCalendars() {
   }
 }
 
+// Terminal auth failures are reported once per page load. Without this a
+// revoked Google grant would re-toast on every calendar open, and the toast
+// is only actionable once anyway — the fix lives in Settings.
+let _caldavAuthErrorShown = false;
+
 // Trigger a CalDAV pull. `interactive=true` waits for the result and
 // refreshes the UI; false fires-and-forgets (used on first open). Both
 // no-op silently if CalDAV isn't configured.
@@ -209,6 +214,24 @@ async function _syncCaldav(interactive) {
       method: 'POST', credentials: 'same-origin',
     });
     const data = await res.json().catch(() => ({}));
+    // A dead refresh token is not a sync hiccup — it will fail identically
+    // forever until the user reconnects, so it has to be said out loud even on
+    // the background path, which otherwise only looks at the counts and would
+    // leave the user believing the calendar is up to date. Transient errors
+    // stay in `errors` and are left to the explicit "Sync now" button.
+    const authErrors = data.auth_errors || [];
+    if (authErrors.length && !_caldavAuthErrorShown) {
+      _caldavAuthErrorShown = true;
+      const first = authErrors[0];
+      const label = first.label || first.account_id || 'Calendar account';
+      const message = first.message || 'needs reconnecting';
+      const extra = authErrors.length > 1 ? ` (+${authErrors.length - 1} more)` : '';
+      // Name the account, never the credential. The label is dropped when the
+      // message already opens with it, so a single Google account doesn't read
+      // "Google Calendar: Google Calendar access has expired".
+      const text = message.startsWith(label) ? message : `${label}: ${message}`;
+      uiModule.showError?.(`${text}${extra}`);
+    }
     if (interactive) return data;
     // Background path: if the pull actually changed anything, drop
     // local caches and re-render so new events appear.

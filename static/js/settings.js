@@ -22,7 +22,7 @@ function safeRasterDataUrl(raw) {
 }
 
 /* ── Tab switching ── */
-const ADMIN_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system']);
+const ADMIN_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system', 'capabilities']);
 
 function initTabs() {
   modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
@@ -2763,12 +2763,26 @@ function initAgentProfilesEditor(initial) {
         var v = p[key];
         inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
         inp.addEventListener('input', function () {
-          p[key] = key === 'max_rounds' ? inp.value : (key === 'disabled_tools'
-            ? inp.value.split(/[\s,]+/).filter(Boolean) : inp.value);
+          var listKeys = ['disabled_tools', 'enabled_tools', 'skill_names', 'allowed_mcp_servers', 'allowed_models', 'model_fallbacks'];
+          p[key] = (key === 'max_rounds' || key === 'max_parallel_workers') ? inp.value : (listKeys.indexOf(key) >= 0
+            ? inp.value.split(/[\n,]+/).map(function (v) { return v.trim(); }).filter(Boolean) : inp.value);
           note.textContent = 'Unsaved changes';
           note.style.color = 'var(--fg)';
         });
         return inp;
+      };
+      var choice = function (key, options, hint) {
+        var sel = document.createElement('select');
+        sel.className = 'settings-select';
+        var current = p[key] == null ? options[0][0] : p[key];
+        (options || []).forEach(function (pair) {
+          var opt = document.createElement('option'); opt.value = pair[0]; opt.textContent = pair[1];
+          if (String(current) === String(pair[0])) opt.selected = true;
+          sel.appendChild(opt);
+        });
+        sel.title = hint || '';
+        sel.addEventListener('change', function () { p[key] = sel.value; note.textContent = 'Unsaved changes'; note.style.color = 'var(--fg)'; });
+        return sel;
       };
       var head = document.createElement('div');
       head.className = 'agent-profile-head';
@@ -2783,13 +2797,39 @@ function initAgentProfilesEditor(initial) {
       head.appendChild(remove);
       card.appendChild(head);
       card.appendChild(field('Description', mk('input', 'description', { placeholder: 'What this worker is for (shown to the agent)', maxlength: '300' })));
-      card.appendChild(field('Tools it may not use', mk('input', 'disabled_tools', { placeholder: 'e.g. bash, send_email, write_file' })));
       card.appendChild(field('Instructions', mk('textarea', 'instructions', { rows: '3', placeholder: 'System instructions for this worker' })));
+      var policies = document.createElement('div'); policies.className = 'agent-profile-policy-grid';
+      policies.appendChild(field('Delegation', choice('delegation_policy', [['explicit','Only when asked'],['never','Never'],['auto','Agent decides']]), 'When this worker may create or hand off to other agents.'));
+      policies.appendChild(field('Approvals', choice('approval_mode', [['inherit','Global default'],['ask_risky','Ask for risky'],['ask_all','Ask for every change'],['auto','Automatic']])));
+      policies.appendChild(field('Memory', choice('memory_access', [['read','Read only'],['none','Off'],['write','Read + write']])));
+      policies.appendChild(field('Models', choice('model_access', [['current','Current only'],['selected','Selected models'],['all','All configured']])));
+      policies.appendChild(field('Skills', choice('skill_access', [['all','All skills'],['selected','Selected skills'],['none','No skills']])));
+      policies.appendChild(field('Tools', choice('tool_access', [['all','All tools'],['selected','Selected tools'],['none','No action tools']])));
+      policies.appendChild(field('MCP / integrations', choice('mcp_access', [['all','All connected'],['selected','Selected servers'],['none','None']])));
+      policies.appendChild(field('Parallel workers', mk('input', 'max_parallel_workers', { type: 'number', min: '0', max: '8', placeholder: '1' })));
+      card.appendChild(policies);
+      var vault = document.createElement('label'); vault.className = 'agent-profile-private';
+      var vaultCheck = document.createElement('input'); vaultCheck.type = 'checkbox'; vaultCheck.checked = !!p.private_vault_access;
+      vaultCheck.addEventListener('change', function () { p.private_vault_access = vaultCheck.checked; note.textContent = 'Unsaved changes'; });
+      vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads'; vault.appendChild(vaultText); card.appendChild(vault);
+      var advanced = document.createElement('details'); advanced.className = 'agent-profile-capabilities';
+      var summary = document.createElement('summary'); summary.textContent = 'Capability allowlists'; advanced.appendChild(summary);
+      var advancedGrid = document.createElement('div'); advancedGrid.className = 'agent-profile-cap-grid';
+      advancedGrid.appendChild(field('Enabled tools', mk('textarea', 'enabled_tools', { rows: '2', placeholder: 'One or comma-separated tool names; used when Tools = Selected' })));
+      advancedGrid.appendChild(field('Extra denied tools', mk('textarea', 'disabled_tools', { rows: '2', placeholder: 'Always denied, e.g. bash, send_email' })));
+      advancedGrid.appendChild(field('Selected skills', mk('textarea', 'skill_names', { rows: '2', placeholder: 'Skill names; used when Skills = Selected' })));
+      advancedGrid.appendChild(field('Selected MCP servers', mk('textarea', 'allowed_mcp_servers', { rows: '2', placeholder: 'Server IDs; used when MCP = Selected' })));
+      advancedGrid.appendChild(field('Allowed models', mk('textarea', 'allowed_models', { rows: '2', placeholder: 'model or model@endpoint; used when Models = Selected' })));
+      advancedGrid.appendChild(field('Model fallbacks', mk('textarea', 'model_fallbacks', { rows: '2', placeholder: 'Try in order if the primary model is unavailable' })));
+      advanced.appendChild(advancedGrid); card.appendChild(advanced);
       list.appendChild(card);
     });
   }
   addBtn && addBtn.addEventListener('click', function () {
-    profiles.push({ name: '', description: '', model: '', max_rounds: 12, disabled_tools: [], instructions: '' });
+    profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
+      max_rounds: 12, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
+      memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
+      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '' });
     render();
     var inputs = list.querySelectorAll('.agent-profile:last-child input');
     if (inputs[0]) inputs[0].focus();
