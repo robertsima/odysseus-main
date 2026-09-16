@@ -2221,28 +2221,97 @@ def _claims_missing_tools(text: str, *, made_tool_calls: bool = False) -> bool:
     return _missing_tool_signal(text, made_tool_calls=made_tool_calls) is not None
 
 
+def _flatten_capability_phrase(text: str) -> str:
+    """Lowercase ``text`` with compound punctuation flattened to single spaces.
+
+    Every phrase table in this app spells its multi-word entries with spaces
+    ("application log", "file search and edit", "pull request"), and every
+    one of them is matched with ``\\b<phrase>\\b``. Prose does not cooperate:
+    a model writing about what it lacks hyphenates the compound the moment it
+    becomes a modifier — "application-log access", "file-editing tools",
+    "read-only access" — and ``\\bapplication log\\b`` does not match
+    "application-log".
+
+    That one character is what cost the 2026-09-16 turn its targeted re-arm:
+    the log keyword set already carried "application log", the alias table
+    already carried "application-log access", and the round still fell all
+    the way through to the full-registry widening. Flattening the separators
+    on both sides is one rule; adding a hyphenated twin for every entry in
+    two growing tables is a rule nobody would keep up with.
+    """
+    # ASCII hyphen, underscore and slash, plus U+2010..U+2015 — the typographic
+    # dashes ("application‑log") that arrive whenever text has been through a
+    # smart-quote pass on its way here.
+    flat = re.sub("[-_/‐-―]+", " ", str(text or "").lower())
+    return re.sub(r"\s+", " ", flat).strip()
+
+
+def _phrase_present(phrase: str, flat_text: str) -> bool:
+    """``phrase`` (already flattened) appears as a whole phrase in ``flat_text``."""
+    if not phrase:
+        return False
+    return re.search(
+        rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", flat_text
+    ) is not None
+
+
+# The prose→tool vocabulary, keyed by flattened phrase. `_SKILL_TOOLSET_ALIASES`
+# already exists for skill front matter, where an operator writes "file search
+# and edit" instead of naming five tools. A model describing the capability it
+# was NOT given reaches for exactly the same words — the 2026-09-16 refusal
+# said "application-log access", which is a verbatim key in that table — but
+# the table was only ever wired into `_skill_declared_tools`. The one place in
+# the app that knew "application-log access" means `read_app_logs` was not
+# asked by the code whose whole job is to answer that question.
+_REARM_ALIAS_PHRASES: Dict[str, Tuple[str, ...]] = {
+    _flatten_capability_phrase(phrase): tools
+    for phrase, tools in _SKILL_TOOLSET_ALIASES.items()
+}
+
+
 def _targeted_rearm_tools(text: str, pool: Set[str], tool_idx=None) -> Set[str]:
     """Tools the model most likely meant when it claimed one was missing.
 
-    Re-arming the whole registry (observed: 90 extra schemas, 14k schema
-    tokens on the next round, every cached prefix gone) is the blunt fallback.
-    First try to name the gap: tool names the round mentioned verbatim, the
-    keyword intents its text triggers (a "push"/"pull request" claim surfaces
-    manage_agent_worktree), and the index's nearest tools for that text.
-    Returns a subset of ``pool``; empty means "nothing specific — widen fully".
+    Widening beyond this is expensive and misleading in equal measure (see the
+    self-unblock block in `stream_agent_loop`), so this is the path that has to
+    work. Four sources, cheapest first:
+
+      * tool names the round mentioned verbatim — including qualified MCP
+        names, which is how a demoted server's prompt note tells the model to
+        ask for a schema back;
+      * the app's own prose→tool aliases (`_SKILL_TOOLSET_ALIASES`), because a
+        refusal names capabilities, not functions;
+      * the keyword intents the text triggers (a "push"/"pull request" claim
+        surfaces manage_agent_worktree);
+      * the index's nearest tools for that text.
+
+    Phrase sources are matched against the flattened text so a hyphenated
+    compound resolves like the spaced spelling it is (see
+    `_flatten_capability_phrase`).
+
+    Returns a subset of ``pool``; empty means "nothing specific was named".
     """
     text = str(text or "")
     if not text.strip() or not pool:
         return set()
     lowered = text.lower()
+    # Tool names carry underscores, so they are matched against the raw
+    # lowercase text; flattening would turn `read_app_logs` into three words.
+    flat = _flatten_capability_phrase(text)
     found: Set[str] = set()
     for name in pool:
         if len(name) >= 4 and re.search(rf"(?<![a-z0-9_]){re.escape(name.lower())}(?![a-z0-9_])", lowered):
             found.add(name)
+    for phrase, tools in _REARM_ALIAS_PHRASES.items():
+        if _phrase_present(phrase, flat):
+            found.update(tools)
     try:
         from src.tool_index import ToolIndex
         for keywords, tools in ToolIndex._KEYWORD_HINTS.items():
-            if any(re.search(rf"\b{re.escape(kw)}\b", lowered) for kw in keywords):
+            # Hints are flattened too: a few of them ("pull-request",
+            # "sub-agent", "well-being") are themselves hyphenated, and would
+            # stop matching against flattened text otherwise.
+            if any(_phrase_present(_flatten_capability_phrase(kw), flat) for kw in keywords):
                 found.update(tools)
         if getattr(ToolIndex, "_WEB_RE", None) is not None and ToolIndex._WEB_RE.search(lowered):
             found.update({"web_search", "web_fetch"})
@@ -2254,6 +2323,81 @@ def _targeted_rearm_tools(text: str, pool: Set[str], tool_idx=None) -> Set[str]:
         except Exception:
             pass
     return {t for t in found if t in pool}
+
+
+def _rearm_domain_closure(
+    seeds: Set[str],
+    text: str,
+    pool: Set[str],
+    *,
+    already_selected: Optional[Set[str]] = None,
+) -> Tuple[Set[str], List[str]]:
+    """The bounded last resort that replaced the full-registry re-arm.
+
+    Returns ``(tools, domain labels)``. A "domain" here is one
+    `_DOMAIN_TOOL_MAP` group or one connected MCP server — the two groupings
+    this app already reasons in, so the scope printed in the ``[agent]``
+    self-unblock line names a bound an operator recognises without a code read.
+
+    Three ways a domain comes into scope, all of them evidence from this turn:
+
+      * the targeted pass landed a tool in it. Group membership is the "plus
+        prerequisites" half of recovery: a round handed only `apply_patch`
+        blocks again on `read_file`, and the prompt's rule packs are keyed on
+        these same groups (`_domain_rules_for_tools`), so a half-armed domain
+        is a half-explained one too.
+      * the round's text names an MCP server outright ("the firecrawl tools
+        aren't attached"), which is the shape the demoted-server prompt note
+        invites and the only way a gated catalog gets back in without the
+        model spelling a qualified tool name.
+      * retrieval had already put PART of the domain in the turn. That is the
+        honest reading of "I can't do it with these": the turn is about that
+        domain and the selection stopped short. It is also what keeps this
+        tier useful when the text resolves to nothing at all.
+
+    Deliberately blind to domains with no evidence behind them. Arming those
+    is what the full re-arm did, and it neither creates a capability the host
+    lacks nor tells the model anything true about the turn.
+    """
+    if not pool:
+        return set(), []
+    flat = _flatten_capability_phrase(text)
+    # A tool that is in EVERY turn is not evidence about this one. Without
+    # this subtraction the ambient `search_documents` would put the whole
+    # documents domain into the scope of every domain re-arm in the app —
+    # same reasoning, and the same base set, as `_query_matched_tools`.
+    try:
+        from src.tool_index import ALWAYS_AVAILABLE as _ambient
+    except Exception:
+        _ambient = frozenset()
+    selected = set(already_selected or ()) - set(_ambient)
+    domains: Set[str] = set()
+    for domain, domain_tools in _DOMAIN_TOOL_MAP.items():
+        if (seeds & domain_tools) or (selected & domain_tools):
+            domains.add(domain)
+
+    tools: Set[str] = set()
+    for domain in domains:
+        tools |= _DOMAIN_TOOL_MAP[domain]
+
+    # MCP servers, matched on the server id embedded in every qualified name.
+    # Cheap and exact: the pool already carries `mcp__<server>__<tool>`, so
+    # there is no second registry to consult and no way for the two to drift.
+    servers: Dict[str, Set[str]] = {}
+    for name in pool:
+        if not name.startswith("mcp__"):
+            continue
+        parts = name.split("__", 2)
+        if len(parts) == 3 and parts[1]:
+            servers.setdefault(parts[1], set()).add(name)
+    for server_id, server_tools in servers.items():
+        if (seeds & server_tools) or _phrase_present(
+            _flatten_capability_phrase(server_id), flat
+        ):
+            domains.add(f"mcp:{server_id}")
+            tools |= server_tools
+
+    return {t for t in tools if t in pool}, sorted(domains)
 
 
 def _explicitly_named_skills(text: str, skills: List[Dict]) -> List[Dict]:
@@ -4927,6 +5071,33 @@ def _tool_schemas_for_round(
     spent six rounds in a design tool and a docs lookup on a request to read
     application logs. The size cut-off lives in
     :func:`src.mcp_manager._always_bound_limits`, with the reasoning.
+
+    Re-measured against that same inventory after the size budget landed
+    (firecrawl 27, penpot 5, ntfy 2, context7 2, sequentialthinking 1, plus
+    the embedded browser/GitHub/Todoist catalogs — 143 schemas in total). An
+    eleven-tool turn is now sent 21 schemas, ~1.5k schema tokens, against the
+    audit's 54-70 tools and 12,500-13,900 tokens. Exactly three things can put
+    a schema in the payload that selection did not ask for, and all three are
+    deliberate:
+
+      * the ten tools of the four small connected servers, above;
+      * the admin tools the request's own keywords named — a handful, since
+        `_detect_admin_tools` replaced the blanket seventeen-tool union. The
+        `_ADMIN_TOOLS` fallback below is a defensive default for a caller with
+        no breakdown; both live call sites pass one;
+      * the ``relevant_tools`` falsy branch, which sends the whole registry —
+        every gated catalog included. That reads like the flood this function
+        exists to prevent, and it is kept anyway: the branch means retrieval
+        itself was unavailable, gating's entire premise is that retrieval can
+        surface the tool later, and the self-unblock re-arm is disabled on
+        this path too (it requires a non-None selection). Gating here would
+        make a connected server unreachable for the turn with no way back,
+        which is the vanishing-tool bug again, and for once "send everything"
+        really is the only honest answer.
+
+    Anything a future reader finds beyond those three is drift and wants
+    closing, not documenting. `tests/test_harness_efficiency_specs.py` pins
+    the first two so the arithmetic does not have to be redone by hand.
     """
     if force_answer:
         return []
@@ -6268,10 +6439,11 @@ async def stream_agent_loop(
     _MAX_INTENT_NUDGES = 2
     # Missing-tool self-unblock: how many times we've re-armed the toolset
     # after the model ended a turn claiming it had no tool for the job. Once
-    # is enough — after a full re-arm there is nothing left to widen to.
+    # is enough — a model still claiming after its own domains were completed
+    # is telling us something the schema list cannot fix.
     _toolset_rearm_count = 0
-    # A targeted widening (just the tools the claim points at) is free; the
-    # full-registry widening counts against _MAX_TOOLSET_REARMS.
+    # A targeted widening (just the tools the claim points at) is cheap enough
+    # to be free; the domain widening counts against _MAX_TOOLSET_REARMS.
     _targeted_rearm_done = False
     _MAX_TOOLSET_REARMS = 1
 
@@ -6979,24 +7151,59 @@ async def stream_agent_loop(
                 if not _needs_admin:
                     _rearm_pool -= _ADMIN_TOOLS
                 _rearm_pool = {t for t in _rearm_pool if t and t not in disabled_tools}
-                # Targeted first: the tools the claim actually points at. Only
-                # when nothing specific can be named (or a targeted widening
-                # already happened and the model still claims) fall back to
-                # the whole registry. The full re-arm costs ~14k schema tokens
-                # per remaining round and invalidates the cached prefix.
-                _rearm_scope = "full"
+                # Two tiers, both bounded. There is deliberately no third.
+                #
+                # Tier 1, targeted: the tools the claim actually points at, by
+                # name, by the app's own capability vocabulary, by keyword
+                # intent or by index neighbourhood (`_targeted_rearm_tools`).
+                #
+                # Tier 2, domain: the groups this turn has evidence for —
+                # what tier 1 hit, an MCP server the round named, and any
+                # domain retrieval had already half-selected. Bounded, and the
+                # label list says exactly how far it went.
+                #
+                # What used to sit under these was `_rearm_pool -
+                # _relevant_tools`: the entire registry, ~12k schema tokens on
+                # THIS install for every remaining round, with the cached
+                # prompt prefix thrown away to deliver it. It is removed, for
+                # two reasons and not only the token one. A round whose
+                # enumerated capabilities resolve to no tool name, no alias,
+                # no keyword, no index neighbour, no named server and no
+                # domain already in play is a round that is very likely
+                # right — and 142 schemas do not conjure a capability this
+                # host lacks. Worse, they are not neutral ballast: per the
+                # budget note in `mcp_manager`, an unselected tool in the list
+                # is an active suggestion about what the turn is for, and the
+                # 2026-09-16 turn spent six rounds in a design tool and a docs
+                # lookup precisely because strangers were the only actionable
+                # things it could see. The "nothing left to re-arm" branch
+                # below is the correct end for that round, and it already
+                # exists. Tier 1 is what has to be good, so fixes go there.
+                _rearm_scope = ""
                 _rearm_new: Set[str] = set()
+                _targeted_hits: Set[str] = set()
                 if not _targeted_rearm_done:
-                    _targeted = _targeted_rearm_tools(
+                    _targeted_hits = _targeted_rearm_tools(
                         _blocked_text, _rearm_pool, tool_idx=locals().get("tool_idx")
-                    ) - _relevant_tools
+                    )
+                    _targeted = _targeted_hits - _relevant_tools
                     if _targeted:
                         _rearm_new, _rearm_scope = _targeted, "targeted"
                         _targeted_rearm_done = True
                 if not _rearm_new:
-                    _rearm_new = _rearm_pool - _relevant_tools
+                    # Tier 1 found nothing NEW — either it named nothing, or
+                    # everything it named was already in the schema list, which
+                    # is its own diagnosis: the model is not short of tools, it
+                    # is short of the right group around them.
+                    _domain_tools, _domain_labels = _rearm_domain_closure(
+                        _targeted_hits, _blocked_text, _rearm_pool,
+                        already_selected=_relevant_tools,
+                    )
+                    _rearm_new = _domain_tools - _relevant_tools
+                    if _rearm_new:
+                        _rearm_scope = "domain:" + (",".join(_domain_labels) or "?")
                 if _rearm_new:
-                    if _rearm_scope == "full":
+                    if _rearm_scope.startswith("domain"):
                         _toolset_rearm_count += 1
                     _relevant_tools |= _rearm_new
                     logger.warning(
@@ -7008,20 +7215,21 @@ async def stream_agent_loop(
                         round_num, _rearm_scope, _missing_signal,
                         len(_rearm_new), _name_list(_rearm_new, 25),
                     )
-                    _note = (
-                        "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
-                        if _rearm_scope == "targeted"
-                        else "\n\n_That toolset was too narrow — retrying with the full set._\n\n"
-                    )
+                    # The user-visible line no longer promises "the full set",
+                    # because nothing promises that any more. Both tiers say
+                    # the same true thing: the list was too narrow and grew.
+                    _note = "\n\n_That toolset was too narrow — retrying with the tools it needs._\n\n"
                     yield f'data: {json.dumps({"delta": _note})}\n\n'
                     full_response += _note
                     messages.append(_harness_directive(
                         "Correction: the tool list you were shown was filtered too "
                         "narrowly, which is why the tool you wanted was missing. It has "
-                        "been widened — "
-                        + ("these tools were added: " + _name_list(_rearm_new, 20) + ". "
-                           if _rearm_scope == "targeted"
-                           else "every tool you are permitted to use this turn is now in your schema list. ")
+                        "been widened — these tools were added: "
+                        # Naming the additions beats "everything is there now":
+                        # the model has to re-read the schema list either way,
+                        # and a list it can check against its own claim is what
+                        # stops the next round repeating the claim verbatim.
+                        + _name_list(_rearm_new, 20) + ". "
                         + "Re-read it, then DO the user's request "
                         "with real tool calls. Do not tell the user you lack tools again. "
                         "If something is still genuinely unavailable after checking, name "
