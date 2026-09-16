@@ -1289,6 +1289,17 @@ _ADMIN_KEYWORDS = [
     # agent flails (curl, bash) instead of using the right tool.
     "document", "documents", "doc", "docs", "library", "tidy",
     "note", "notes", "todo", "todos", "reminder", "reminders",
+    # Orchestration — "kick off a claude agent", "spin up a worker",
+    # "delegate this to claude code", "agent loadout". Without these the
+    # delegation surface was unreachable by plain language: the 2026-09-1x
+    # logs show retrieval finding delegate_to_agent/delegate_to_claude_code
+    # and the harness then telling the user no delegation tool existed.
+    # "agent" and "worker" are ordinary words in this app's own prose ("the
+    # agent said", "the worker process"), so they are guarded below rather
+    # than trusted on sight — same shape as the "fork" guard.
+    "agent", "agents", "worker", "workers",
+    "sub-agent", "subagent", "loadout", "loadouts",
+    "delegate", "claude code",
 ]
 
 # Admin intent unions _ADMIN_TOOLS into BOTH the prompt sections and the schema
@@ -1316,6 +1327,56 @@ _ADMIN_KEYWORD_RE = re.compile(
     r"\b(?:" + "|".join(_admin_keyword_pattern(k) for k in _ADMIN_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
+
+
+# ── Orchestration phrasing ────────────────────────────────────────────────
+#
+# People ask for a second agent verb-first — "kick off a claude agent", "spin
+# up a worker to do X", "hand this to a worker" — and whatever article or
+# adjective they choose sits between the verb and the noun. A contiguous
+# multi-word entry in _ADMIN_KEYWORDS (the "api key" / "list models" style)
+# cannot span that gap, and the bare nouns "agent" and "worker" are far too
+# common in this app's own subject matter to promote on sight: "why did the
+# agent stop", "the worker process died", "user agent header". So the nouns
+# ride in _ADMIN_KEYWORDS only as a cheap prefilter and these two regexes
+# decide whether an occurrence is really an orchestration request.
+#
+# Splitting it this way also means admin-intent routing and the delegation
+# policy gate (_explicit_delegation_requested) read the SAME recogniser. They
+# used to disagree — retrieval surfaced the delegation tools, admin intent
+# never fired, and the policy gate disabled them anyway, so a user asking in
+# plain English could not reach them from either side.
+
+# Nouns that already mean "some other agent" without a verb in front.
+_AGENT_NOUN_RE = re.compile(
+    r"\b(?:sub[\s-]?agents?|another\s+agent|other\s+agents?|worker\s+agents?|"
+    r"agent\s+loadouts?|loadouts?|claude\s*code|claude\s+agent|"
+    r"coding\s+agent|coding\s+harness)\b",
+    re.IGNORECASE,
+)
+
+# A start/hand-off verb followed, within a few words, by a bare agent noun.
+# The filler is capped at three words so "the agent asked me to start the
+# server" cannot pair a distant verb with an unrelated "agent".
+_ORCHESTRATION_VERB = (
+    r"(?:kick(?:ing|ed|s)?\s+off|spin(?:ning|s)?\s+up|fir(?:e|es|ing)\s+up|"
+    r"stand(?:ing|s)?\s+up|boot(?:ing|s)?\s+up|set(?:ting|s)?\s+up|"
+    r"start(?:ing|ed|s)?|creat(?:e|es|ing|ed)\s+an?|mak(?:e|es|ing)\s+an?|"
+    r"launch(?:ing|ed|es)?|spawn(?:ing|ed|s)?|dispatch(?:ing|ed|es)?|"
+    r"deleg\w+|farm(?:ing|ed|s)?\s+out|assign(?:ing|ed|s)?|"
+    r"hand(?:ing|ed|s)?(?:\s+\w+){0,3}?\s+(?:to|off)|"
+    r"have\s+an?|ask\s+an?|get\s+an?|give\s+(?:it|this|that)\s+to\s+an?)"
+)
+_AGENT_ORCHESTRATION_RE = re.compile(
+    r"\b" + _ORCHESTRATION_VERB + r"\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b",
+    re.IGNORECASE,
+)
+
+
+def _orchestration_requested(text: str) -> bool:
+    """True when the words name another agent, or ask for one to be started."""
+    text = str(text or "")
+    return bool(_AGENT_NOUN_RE.search(text) or _AGENT_ORCHESTRATION_RE.search(text))
 
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
@@ -1384,7 +1445,32 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
     "todos": {"manage_tasks"},
     "reminder": {"manage_tasks"},
     "reminders": {"manage_tasks"},
+    # Orchestration. "agent"/"worker" only count in an orchestration context
+    # (see the _AGENT_ORCHESTRATION_RE guard in _detect_admin_tools); the rest
+    # name another agent outright and need no guard.
+    "agent": {"delegate_to_agent", "delegate_to_claude_code",
+              "manage_agent_loadout", "message_agent"},
+    "agents": {"delegate_to_agent", "delegate_to_claude_code",
+               "manage_agent_loadout", "message_agent"},
+    "worker": {"delegate_to_agent", "manage_agent_loadout", "message_agent"},
+    "workers": {"delegate_to_agent", "manage_agent_loadout", "message_agent"},
+    "sub-agent": {"delegate_to_agent", "delegate_to_claude_code"},
+    "subagent": {"delegate_to_agent", "delegate_to_claude_code"},
+    # A loadout is a named worker policy, not a running agent — authoring it
+    # is manage_agent_loadout's whole job.
+    "loadout": {"manage_agent_loadout"},
+    "loadouts": {"manage_agent_loadout"},
+    # Claude Code is a coding CLI run as a subprocess. delegate_to_agent rides
+    # along because the administrator may have pointed delegation at a
+    # different provider, and the user should not have to know which.
+    "claude code": {"delegate_to_claude_code", "delegate_to_agent"},
+    "delegate": {"delegate_to_agent", "delegate_to_claude_code",
+                 "send_to_session", "message_agent"},
 }
+
+# Admin keywords whose bare noun is ordinary English here, and which therefore
+# only count inside an orchestration phrase.
+_ORCHESTRATION_GUARDED_KEYWORDS = frozenset({"agent", "agents", "worker", "workers"})
 
 
 def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
@@ -1408,6 +1494,12 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
                 re.IGNORECASE,
             ):
                 continue
+            # "agent"/"worker" on their own are this app's own vocabulary --
+            # the running harness, a background process, a user-agent header.
+            # Only an orchestration phrase ("kick off an agent", "hand this
+            # to a worker") means the user wants a SECOND one.
+            if keyword in _ORCHESTRATION_GUARDED_KEYWORDS and not _orchestration_requested(text):
+                continue
             found.update(tools)
     return found
 
@@ -1426,8 +1518,18 @@ _EXPLICIT_DELEGATION_RE = re.compile(
 
 
 def _explicit_delegation_requested(text: str) -> bool:
-    """True only when the human asked to hand work to another agent."""
-    return bool(_EXPLICIT_DELEGATION_RE.search(str(text or "")))
+    """True only when the human asked to hand work to another agent.
+
+    The literal-phrase list above was written for the hand-off wordings and
+    missed the start-an-agent ones entirely: "ok just kick off a claude agent
+    then and have it do it" read as no delegation request, so the default
+    `explicit` policy disabled all of _DELEGATION_TOOLS -- after retrieval had
+    already found them -- and the turn answered that it could not launch an
+    agent. _orchestration_requested is the same recogniser admin routing uses,
+    so the two gates can no longer disagree about the same sentence.
+    """
+    text = str(text or "")
+    return bool(_EXPLICIT_DELEGATION_RE.search(text)) or _orchestration_requested(text)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -4134,6 +4236,38 @@ def _withhold_unavailable_tools(selected: List[Dict]) -> List[Dict]:
     return kept
 
 
+# A [tool-routing] line has to stay one readable line in a log tail, so cap the
+# drop list and say how many were elided rather than letting a clamped turn
+# print forty pairs.
+_MAX_LOGGED_DROPPED_MATCHES = 8
+
+
+def _explain_dropped_matches(
+    query_matched: Set[str],
+    selected: Optional[Set[str]],
+    drop_reasons: Dict[str, str],
+    disabled_tools: Set[str],
+    limit: int = _MAX_LOGGED_DROPPED_MATCHES,
+) -> List[tuple]:
+    """(tool, why) for every retrieved tool that selection then discarded.
+
+    ``drop_reasons`` carries the gates that pruned on purpose. Anything else
+    landing in ``disabled_tools`` is reported generically; a tool that is in
+    neither was simply not carried forward by a clamp or a re-selection, which
+    is a different bug class and worth telling apart at a glance.
+    """
+    dropped = sorted(set(query_matched or ()) - set(selected or ()))
+    explained: List[tuple] = []
+    for name in dropped[:limit]:
+        reason = (drop_reasons or {}).get(name)
+        if not reason:
+            reason = "disabled" if name in (disabled_tools or ()) else "deselected"
+        explained.append((name, reason))
+    if len(dropped) > limit:
+        explained.append((f"+{len(dropped) - limit} more", "truncated"))
+    return explained
+
+
 def _tool_schemas_for_round(
     *,
     force_answer: bool,
@@ -4259,6 +4393,21 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    # Why a tool that retrieval matched never made it into the selection. Each
+    # gate below that prunes on purpose records itself here, and the
+    # [tool-routing] line names the gate for every dropped match. Without it
+    # the only trace was the count delta -- `query_matched_count=3
+    # selected_count=8` in the 2026-09-1x delegation incident, which says
+    # nothing about which three or why two of them vanished, so the drop was
+    # invisible until someone re-read the whole selection path by hand.
+    _drop_reasons: Dict[str, str] = {}
+
+    def _mark_dropped(names, reason: str) -> None:
+        # First gate to touch a tool owns the explanation: later ones are
+        # re-stating a decision already made.
+        for _n in names or ():
+            _drop_reasons.setdefault(str(_n), reason)
+
     # Image generation is a setting, not a tool toggle. With it off the prompt
     # builder already hides `generate_image`, but the selection still carried
     # it — `selected_without_schema=['generate_image']` on every round of the
@@ -4282,7 +4431,9 @@ async def stream_agent_loop(
         # route also unions the read-only-disabled set, but enforce here too so
         # the loop is safe regardless of caller. MCP stays available but is
         # filtered to read-only tools below (after the disabled map is loaded).
-        disabled_tools.update(plan_mode_disabled_tools())
+        _plan_disabled = plan_mode_disabled_tools()
+        disabled_tools.update(_plan_disabled)
+        _mark_dropped(_plan_disabled, "plan-mode")
 
     uploaded_files = uploaded_files or []
     _upload_msg = _uploaded_files_context_message(uploaded_files)
@@ -4317,24 +4468,32 @@ async def stream_agent_loop(
         _agent_settings = get_session_settings(session_id) or {}
     except Exception:
         pass
-    disabled_tools.update(_agent_settings.get("disabled_tools") or [])
+    _agent_disabled = _agent_settings.get("disabled_tools") or []
+    disabled_tools.update(_agent_disabled)
+    _mark_dropped(_agent_disabled, "agent-setting")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
     if _delegation_policy == "never" or (
         _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
     ):
         disabled_tools.update(_DELEGATION_TOOLS)
+        _mark_dropped(_DELEGATION_TOOLS, f"delegation-policy:{_delegation_policy}")
     _model_access = str(_agent_settings.get("model_access") or "all")
     if _model_access == "current":
-        disabled_tools.update({"chat_with_model", "ask_teacher", "list_models"})
+        _model_tools = {"chat_with_model", "ask_teacher", "list_models"}
+        disabled_tools.update(_model_tools)
+        _mark_dropped(_model_tools, "model-access")
     _memory_access = str(_agent_settings.get("memory_access") or "write")
     if _memory_access == "none":
-        disabled_tools.update({"manage_memory", "mcp__memory__manage_memory"})
+        _memory_tools = {"manage_memory", "mcp__memory__manage_memory"}
+        disabled_tools.update(_memory_tools)
+        _mark_dropped(_memory_tools, "memory-access")
     _skill_access = str(_agent_settings.get("skill_access") or "all")
     _allowed_skill_names = (
         set(_agent_settings.get("skill_names") or []) if _skill_access == "selected" else None
     )
     if _skill_access == "none":
         disabled_tools.add("manage_skills")
+        _mark_dropped({"manage_skills"}, "skill-access")
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     if _ody_qwen_finetune_model:
         try:
@@ -4820,6 +4979,7 @@ async def stream_agent_loop(
             removed = sorted(_relevant_tools & _email_fetch_tools)
             if removed:
                 _relevant_tools.difference_update(_email_fetch_tools)
+                _mark_dropped(removed, "email-draft-open")
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
 
     # Current-turn chat uploads are real files under the upload/data root. Make
@@ -4998,6 +5158,7 @@ async def stream_agent_loop(
         _removed_doc_file_tools = sorted(_relevant_tools & _doc_irrelevant_file_tools)
         if _removed_doc_file_tools:
             _relevant_tools.difference_update(_doc_irrelevant_file_tools)
+            _mark_dropped(_removed_doc_file_tools, "document-turn")
             logger.info(
                 "[agent-intent] active document turn removed file tools=%s",
                 _removed_doc_file_tools,
@@ -5023,9 +5184,18 @@ async def stream_agent_loop(
 
     if _relevant_tools is not None:
         logger.info("[agent-intent] selected_tools=%s", sorted(_relevant_tools)[:50])
+        # Retrieval said these were what the request was about; selection threw
+        # them away anyway. Name each one and the gate responsible -- a tool
+        # the user asked for by name disappearing without a word is how the
+        # harness ended up insisting delegation was unavailable while its own
+        # retrieval log listed both delegation tools one line earlier.
+        _dropped_query_matches = _explain_dropped_matches(
+            _query_matched_tools, _relevant_tools, _drop_reasons, disabled_tools,
+        )
         logger.info(
             "[tool-routing] source=%s domains=%s query_matched_count=%d selected_count=%d "
-            "retained_count=%d suppressed_retained=%s disabled_count=%d admin_tools=%s",
+            "retained_count=%d suppressed_retained=%s disabled_count=%d admin_tools=%s "
+            "dropped_query_matches=%s",
             _tool_selection_source,
             sorted(_intent.get("domains") or set()),
             len(_query_matched_tools),
@@ -5037,6 +5207,7 @@ async def stream_agent_loop(
             # `schema_without_selection` list in the next log explains itself
             # instead of needing another code read.
             sorted(_admin_tools) if _needs_admin else [],
+            _dropped_query_matches,
         )
 
     prep_timings["tool_selection"] = time.time() - _t1

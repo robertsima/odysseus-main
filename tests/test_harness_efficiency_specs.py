@@ -16,7 +16,15 @@ list mail never reaches calendar extraction.
 import pytest
 
 from src import agent_loop
-from src.agent_loop import _detect_admin_tools, _harness_directive, _tool_schemas_for_round, _ADMIN_TOOLS
+from src.agent_loop import (
+    _detect_admin_tools,
+    _explain_dropped_matches,
+    _explicit_delegation_requested,
+    _harness_directive,
+    _tool_schemas_for_round,
+    _ADMIN_TOOLS,
+    _DELEGATION_TOOLS,
+)
 from src.llm_core import _build_chatgpt_responses_payload
 from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
 
@@ -83,6 +91,109 @@ def test_schema_builder_ships_only_the_matched_admin_tools():
     # An empty matched set means no admin schemas at all.
     none = {s["function"]["name"] for s in _tool_schemas_for_round(admin_tools=set(), **kwargs)}
     assert none == {"read_file"}
+
+
+# Orchestration routing. A user who says, in plain language, to start another
+# agent must reach the delegation tools. Two independent gates used to refuse
+# the same sentence: admin keywords had no orchestration entry, and the
+# `explicit` delegation policy disabled every delegation tool because its
+# recogniser only knew hand-off wordings.
+
+ORCHESTRATION_REQUESTS = [
+    "ok just kick off a claude agent then and have it do it give it the logs and scope",
+    "delegate this to claude code",
+    "spin up a worker agent to fix the tool routing",
+    "hand this to a worker",
+    "run a sub-agent on this",
+    "launch an agent to do the migration",
+]
+
+AGENT_PROSE = [
+    "why did the agent stop responding mid-answer",
+    "the worker process died again overnight",
+    "set the user agent header on that request",
+    "how many workers does the pool start with",
+    "what's the weather like",
+]
+
+
+@pytest.mark.parametrize("text", ORCHESTRATION_REQUESTS)
+def test_orchestration_requests_select_delegation_tools(text):
+    selected = _detect_admin_tools(_user(text))
+    assert selected & {"delegate_to_agent", "delegate_to_claude_code"}, selected
+
+
+def test_agent_loadout_request_selects_the_loadout_tool():
+    assert "manage_agent_loadout" in _detect_admin_tools(_user("show me the agent loadout"))
+    assert "manage_agent_loadout" in _detect_admin_tools(_user("set up a worker to review PRs"))
+
+
+@pytest.mark.parametrize("text", AGENT_PROSE)
+def test_agent_prose_does_not_widen_admin_intent(text):
+    """The keyword additions must not turn ordinary talk about the running
+    harness into a management turn -- that is the token bloat Spec 2 exists to
+    stop, and `agent`/`worker` are among the most common words here."""
+    assert _detect_admin_tools(_user(text)) == set()
+
+
+@pytest.mark.parametrize("text", ORCHESTRATION_REQUESTS)
+def test_orchestration_requests_pass_the_explicit_delegation_gate(text):
+    """`delegation_policy=explicit` (the default) disables _DELEGATION_TOOLS
+    unless the human asked for a hand-off, so this predicate decides whether
+    the tools admin routing just selected survive to the schema list."""
+    assert _explicit_delegation_requested(text) is True
+
+
+@pytest.mark.parametrize("text", AGENT_PROSE)
+def test_ordinary_prose_still_keeps_delegation_off(text):
+    assert _explicit_delegation_requested(text) is False
+
+
+def test_selected_delegation_tools_reach_the_round_schemas():
+    """End of the pipeline: what admin routing picked for the incident phrase
+    is what the model is actually offered."""
+    text = ORCHESTRATION_REQUESTS[0]
+    admin = _detect_admin_tools(_user(text))
+    disabled = set() if _explicit_delegation_requested(text) else set(_DELEGATION_TOOLS)
+    names = {
+        s["function"]["name"]
+        for s in _tool_schemas_for_round(
+            force_answer=False, is_api_model=True, relevant_tools={"read_app_logs"},
+            needs_admin=True, mcp_schemas=[], disabled_tools=disabled,
+            ody_qwen_finetune_model=False, last_user=text, admin_tools=admin,
+        )
+    }
+    assert {"delegate_to_agent", "delegate_to_claude_code", "read_app_logs"} <= names
+
+
+def test_dropped_query_matches_name_the_gate_that_dropped_them():
+    """A retrieved tool that selection discards must say why. The delegation
+    incident logged only `query_matched_count=3 selected_count=8`."""
+    explained = dict(_explain_dropped_matches(
+        {"delegate_to_agent", "delegate_to_claude_code", "read_app_logs"},
+        {"read_app_logs"},
+        {"delegate_to_agent": "delegation-policy:explicit",
+         "delegate_to_claude_code": "delegation-policy:explicit"},
+        set(),
+    ))
+    assert explained == {
+        "delegate_to_agent": "delegation-policy:explicit",
+        "delegate_to_claude_code": "delegation-policy:explicit",
+    }
+    # No gate claimed it, but it is off for this turn -> generic; neither ->
+    # it was simply not carried forward, which is a different bug class.
+    assert dict(_explain_dropped_matches({"a", "b"}, set(), {}, {"a"})) == {
+        "a": "disabled", "b": "deselected",
+    }
+    # Nothing dropped, nothing logged.
+    assert _explain_dropped_matches({"x"}, {"x"}, {}, set()) == []
+
+
+def test_dropped_query_matches_stay_bounded():
+    many = {f"tool_{i}" for i in range(30)}
+    explained = _explain_dropped_matches(many, set(), {}, set(), limit=4)
+    assert len(explained) == 5
+    assert explained[-1] == ("+26 more", "truncated")
 
 
 def test_low_signal_selection_skips_embedding_retrieval():
