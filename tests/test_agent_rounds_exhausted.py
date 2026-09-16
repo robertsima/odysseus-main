@@ -349,3 +349,61 @@ def test_a_repeated_mcp_write_is_still_caught():
 def test_the_prefix_stripper_leaves_a_builtin_name_alone():
     assert al._bare_tool_name("read_file") == "read_file"
     assert al._bare_tool_name("mcp__77d1a280__firecrawl_scrape") == "firecrawl_scrape"
+
+
+# ── A multiplexed tool carries its verb in the arguments ────────────────────
+#
+# `delegate_to_claude_code {"action": "poll", "task_id": ...}` polls a running
+# job under a name with nothing poll-shaped in it, so the name-shape check that
+# fixed this for MCP tools could not see it. The second poll of a task was
+# answered from the memo with the first one's "still running" — a delegated
+# coding job could never be observed finishing. The harness's own audit reports
+# exactly this shape: "delegate_to_claude_code was called repeatedly, including
+# back-to-back calls and recurring two-minute polls."
+
+
+@pytest.mark.parametrize("name, args", [
+    ("delegate_to_claude_code", '{"action": "poll", "task_id": "t-1"}'),
+    ("delegate_to_claude_code", '{"action": "status"}'),
+    ("delegate_to_agent", '{"action": "poll", "task_id": "t-1"}'),
+    ("manage_agent_worktree", '{"action": "status"}'),
+    ("manage_agent_worktree", '{"action": "list_requests"}'),
+])
+def test_a_poll_action_is_never_answered_from_the_memo(name, args):
+    memo = {}
+    signature = al._dedupe_signature(name, args)
+    al._record_call_result(signature, name, "still running", memo, args)
+    assert not al._is_duplicate_call(signature, name, memo, args), f"{name} {args}"
+
+
+@pytest.mark.parametrize("name, args", [
+    ("delegate_to_claude_code", '{"action": "run", "prompt": "fix the bug"}'),
+    ("read_file", '{"path": "/a/b.py"}'),
+])
+def test_real_work_is_still_caught_repeating(name, args):
+    memo = {}
+    signature = al._dedupe_signature(name, args)
+    al._record_call_result(signature, name, "done", memo, args)
+    assert al._is_duplicate_call(signature, name, memo, args)
+
+
+def test_a_mutating_action_invalidates_an_earlier_read():
+    """`manage_agent_worktree {"action": "commit"}` changes the world under a
+    name that says nothing about it, so the name-shape mutation check missed it
+    too and a later identical diff would have served the pre-commit answer."""
+    memo = {}
+    diff_args = '{"action": "diff"}'
+    diff = al._dedupe_signature("manage_agent_worktree", diff_args)
+    al._record_call_result(diff, "manage_agent_worktree", "before", memo, diff_args)
+    commit_args = '{"action": "commit", "message": "wip"}'
+    al._record_call_result(al._dedupe_signature("manage_agent_worktree", commit_args),
+                           "manage_agent_worktree", "ok", memo, commit_args)
+    assert not al._is_duplicate_call(diff, "manage_agent_worktree", memo, diff_args)
+
+
+def test_a_non_json_argument_does_not_break_the_check():
+    """bash takes a raw command string, not JSON."""
+    memo = {}
+    signature = al._dedupe_signature("bash", "ls -la")
+    al._record_call_result(signature, "bash", "…", memo, "ls -la")
+    assert al._dedupe_action("ls -la") == ""

@@ -4690,6 +4690,30 @@ def _bare_tool_name(tool_type: str) -> str:
     return _MCP_PREFIX_RE.sub("", str(tool_type or ""))
 
 
+# A multiplexed tool carries the verb in its arguments, not its name:
+# `delegate_to_claude_code {"action": "poll", "task_id": ...}` polls a running
+# job under a name with nothing poll-shaped in it. Checking only the name
+# suppressed the second poll of a task and handed back the first one's "still
+# running" — so a delegated coding job could never be seen to finish, which is
+# the same failure the name-shape check was added to fix for MCP tools.
+_DEDUPE_POLLING_ACTIONS = frozenset({
+    "poll", "status", "check", "wait", "progress", "tail", "watch", "list",
+    "list_requests", "show_request", "peek", "state",
+})
+
+
+def _dedupe_action(content: str) -> str:
+    """The `action` a multiplexed tool call selects, lowercased ('' if none)."""
+    raw = str(content or "").strip()
+    if not raw.startswith("{"):
+        return ""
+    try:
+        args = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return ""
+    return str(args.get("action") or "").strip().lower() if isinstance(args, dict) else ""
+
+
 def _dedupe_signature(tool_type: str, content: str) -> str:
     """Stable identity for "this is the same call, made again".
 
@@ -4708,17 +4732,21 @@ def _dedupe_signature(tool_type: str, content: str) -> str:
     return f"{tool_type}\x00{raw}"
 
 
-def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str]) -> bool:
+def _is_duplicate_call(sig: str, tool_type: str, memo: Dict[str, str],
+                      content: str = "") -> bool:
     """Whether this exact call already ran, successfully, with nothing in
     between that could have changed its answer. See the guard notes above."""
     if tool_type in _DEDUPE_POLLING_TOOLS:
         return False
     if _DEDUPE_POLLING_NAME_RE.search(_bare_tool_name(tool_type)):
         return False
+    if _dedupe_action(content) in _DEDUPE_POLLING_ACTIONS:
+        return False
     return bool(sig in memo)
 
 
-def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str]) -> None:
+def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, str],
+                       content: str = "") -> None:
     """Memoise a successful call's result, first clearing the memo when the
     call could have changed the world (rule 2 above). Clearing BEFORE
     recording matters: the mutating call's own signature must survive, or a
@@ -4727,6 +4755,7 @@ def _record_call_result(sig: str, tool_type: str, output: str, memo: Dict[str, s
         tool_type in _KNOWN_MUTATING_TOOLS
         or tool_type in _VERIFIER_EFFECTFUL_TOOLS
         or _DEDUPE_MUTATING_NAME_RE.search(_bare_tool_name(tool_type))
+        or _DEDUPE_MUTATING_NAME_RE.search(_dedupe_action(content))
     ):
         memo.clear()
     memo[sig] = _truncate(str(output or "").strip() or "(no output)", 1500)
@@ -7249,7 +7278,7 @@ async def stream_agent_loop(
                     "blocked": True,
                 }
                 logger.info("Tool blocked before start by policy: %s", block.tool_type)
-            elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo):
+            elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo, block.content):
                 # Exact repeat of a call that already succeeded this turn, with
                 # nothing mutating in between — running it again can only
                 # reproduce the same bytes at full price. Hand back what it
@@ -7777,7 +7806,7 @@ async def stream_agent_loop(
                 and not result.get("duplicate_call")
                 and result.get("exit_code", 0) in (0, None)
             ):
-                _record_call_result(_dup_sig, block.tool_type, output_text, _call_memo)
+                _record_call_result(_dup_sig, block.tool_type, output_text, _call_memo, block.content)
 
             formatted = format_tool_result(desc, result)
             # A tool result is not paid for once: it is replayed to the model on
