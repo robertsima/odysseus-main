@@ -652,3 +652,58 @@ def test_gapped_tool_claims_are_caught(claim):
 def test_a_real_upstream_failure_still_does_not_re_arm(not_a_claim):
     """Re-arming on a genuine failure would loop the turn, not unblock it."""
     assert not _claims_missing_tools(not_a_claim)
+
+
+# ── "available, but they don't include what I need" ────────────────────
+#
+# Repro (2026-09-16, 05:47:01). Round 1, zero tool calls, turn over:
+#
+#     "I can't do that from this session. The tools currently available to me
+#      do not include: Repository or filesystem access, Application-log access,
+#      Git checkout/edit commands…"
+#
+# The user's next message was "Didnt work just do it yourself."
+#
+# Every branch of _MISSING_TOOL_RE negates AVAILABILITY ("tools are not
+# available", "tooling is unavailable"). This round agreed its tools were
+# available and negated MEMBERSHIP instead, so it matched nothing, the
+# self-unblock never ran, and the model was never told the list had been
+# filtered. That was the only failing precondition: the same session re-armed
+# fine on the next turn, so _is_api_model and _relevant_tools were both good.
+
+TURN_A = (
+    "I can't do that from this session. The tools currently available to me do "
+    "not include:\n- Repository or filesystem access\n- Application-log access\n"
+    "- Git checkout/edit commands"
+)
+
+
+def test_the_turn_a_refusal_is_detected():
+    assert _claims_missing_tools(TURN_A)
+
+
+@pytest.mark.parametrize("text", [
+    "The tools available to me don't include repository access.",
+    "My available tools do not include anything that can start an agent.",
+    "The tool list I have does not include a delegation tool.",
+    "The tools you gave me do not include anything that can push a branch.",
+    "The tool set I see here does not include a git tool.",
+    "The tools I have in this turn do not include file editing.",
+])
+def test_membership_phrasings_are_detected(text):
+    assert _claims_missing_tools(text), text
+
+
+@pytest.mark.parametrize("text", [
+    # "do not include" is ordinary English about a RESULT, and a round saying
+    # this ran its tools fine. Re-arming here would burn a round for nothing,
+    # which is exactly what the narrowness comment on the regex protects.
+    "I used the read_file tool but the output does not include that function.",
+    "I called the grep tool and the results do not include any match in src/.",
+    "Gmail returned Too many simultaneous connections, so the sync did not "
+    "include the last 3 messages.",
+    "I ran the tests and the report does not include the flaky suite.",
+    "The tools ran, but the summary does not include last week.",
+])
+def test_a_result_that_merely_omits_something_does_not_re_arm(text):
+    assert not _claims_missing_tools(text), text
