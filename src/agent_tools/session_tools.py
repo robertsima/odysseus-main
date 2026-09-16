@@ -48,10 +48,17 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
     """
     parent = manager.get_session(parent_id) if parent_id else None
     if profile and profile.get("model"):
-        try:
-            url, model, headers = _resolve_model(profile["model"], owner=owner)
-        except ValueError as exc:
-            return None, f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}"
+        resolved = None
+        failures = []
+        for candidate in [profile["model"], *(profile.get("model_fallbacks") or [])]:
+            try:
+                resolved = _resolve_model(candidate, owner=owner)
+                break
+            except ValueError as exc:
+                failures.append(f"{candidate}: {exc}")
+        if resolved is None:
+            return None, f"Profile {profile['name']!r} has no available model: {'; '.join(failures)}"
+        url, model, headers = resolved
     elif parent is not None:
         url, model, headers = parent.endpoint_url, parent.model, getattr(parent, "headers", None)
     else:
@@ -67,9 +74,8 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
 
         patch = {"parent_session": parent_id} if parent_id else {}
         if profile:
-            patch["agent_profile"] = profile["name"]
-            if profile.get("disabled_tools"):
-                patch["disabled_tools"] = profile["disabled_tools"]
+            from src.agent_profiles import session_patch
+            patch.update(session_patch(profile))
         if patch:
             update_session_settings(sid, patch)
     except Exception:
@@ -335,7 +341,17 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                 try:
                     from types import SimpleNamespace
 
-                    url, model_id, headers = await asyncio.to_thread(_resolve_model, profile["model"], owner=owner)
+                    resolved = None
+                    failures = []
+                    for candidate in [profile["model"], *(profile.get("model_fallbacks") or [])]:
+                        try:
+                            resolved = await asyncio.to_thread(_resolve_model, candidate, owner=owner)
+                            break
+                        except ValueError as exc:
+                            failures.append(f"{candidate}: {exc}")
+                    if resolved is None:
+                        raise ValueError("; ".join(failures))
+                    url, model_id, headers = resolved
                     runner = SimpleNamespace(id=sess.id, endpoint_url=url, model=model_id, headers=headers,
                                              owner=getattr(sess, "owner", None),
                                              context_length=getattr(sess, "context_length", 0))

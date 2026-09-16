@@ -77,6 +77,11 @@ async def run_headless(
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
     from src.tool_security import owner_baseline_disabled_tools
+    try:
+        from core.database import get_session_settings
+        allow_private = bool((get_session_settings(sess.id) or {}).get("private_vault_access", False))
+    except Exception:
+        allow_private = False
 
     baseline = owner_baseline_disabled_tools(effective_owner)
     if disabled_tools is None:
@@ -90,7 +95,8 @@ async def run_headless(
         _STOP_EVENTS[run_id] = stop_event
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
-                                         run_id=run_id, source=source, on_event=on_event))
+                                         run_id=run_id, source=source, on_event=on_event,
+                                         allow_private=allow_private))
     try:
         if stop_event is None:
             await drain
@@ -128,7 +134,7 @@ async def run_headless(
 
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
-                 source: str, on_event) -> None:
+                 source: str, on_event, allow_private: bool = False) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -141,6 +147,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         max_rounds=max_rounds,
         owner=owner,
         disabled_tools=blocked,
+        allow_private=allow_private,
     ):
         if not chunk.startswith("data: "):
             continue

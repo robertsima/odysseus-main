@@ -1018,6 +1018,95 @@ async def _execute_tool_block_impl(
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
 
+    # Defense-in-depth for per-agent capability profiles. The prompt/schema
+    # layer hides disallowed capabilities; these checks also reject a stale or
+    # hand-written tool call so a running agent cannot bypass a profile change.
+    _agent_settings = {}
+    if session_id:
+        try:
+            from core.database import get_session_settings
+            _agent_settings = get_session_settings(session_id) or {}
+        except Exception:
+            pass
+    if _agent_settings:
+        _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
+        if tool.startswith("mcp__") and isinstance(_allowed_mcp, list) and "*" not in _allowed_mcp:
+            _parts = tool.split("__", 2)
+            if len(_parts) == 3 and _parts[1] not in set(_allowed_mcp):
+                return f"{tool}: BLOCKED", {
+                    "error": f"MCP server '{_parts[1]}' is not enabled for this agent.",
+                    "exit_code": 1,
+                }
+
+        _memory_tool = tool == "manage_memory" or tool == "mcp__memory__manage_memory"
+        if _memory_tool:
+            _memory_access = str(_agent_settings.get("memory_access") or "write")
+            _memory_action = ""
+            try:
+                _memory_args = json.loads(content) if str(content).lstrip().startswith("{") else None
+                if isinstance(_memory_args, dict):
+                    _memory_action = str(_memory_args.get("action") or "").lower()
+            except Exception:
+                pass
+            if not _memory_action:
+                _memory_action = str(content or "").strip().split("\n", 1)[0].lower()
+            if _memory_access == "none" or (_memory_access == "read" and _memory_action not in {"list", "search"}):
+                return f"{tool}: BLOCKED", {
+                    "error": "This agent has read-only memory access; only list and search are allowed."
+                    if _memory_access == "read" else "Memory is disabled for this agent.",
+                    "exit_code": 1,
+                }
+
+        if tool in {"chat_with_model", "ask_teacher"} and _agent_settings.get("model_access") == "selected":
+            _allowed_models = {str(v).casefold() for v in (_agent_settings.get("allowed_models") or [])}
+            _requested_model = str(content or "").strip().split("\n", 1)[0]
+            try:
+                _model_args = json.loads(content) if str(content).lstrip().startswith("{") else None
+                if isinstance(_model_args, dict):
+                    _requested_model = str(_model_args.get("model") or _model_args.get("name") or _requested_model)
+            except Exception:
+                pass
+            if _requested_model.casefold() not in _allowed_models:
+                return f"{tool}: BLOCKED", {
+                    "error": f"Model '{_requested_model}' is not in this agent's model allowlist.",
+                    "exit_code": 1,
+                }
+
+        if tool == "manage_skills" and _agent_settings.get("skill_access") == "selected":
+            _allowed_skills = {str(v).casefold() for v in (_agent_settings.get("skill_names") or [])}
+            try:
+                _skill_args = json.loads(content) if str(content).lstrip().startswith("{") else {}
+            except Exception:
+                _skill_args = {}
+            _requested_skills = []
+            if isinstance(_skill_args, dict):
+                _requested_skills = _skill_args.get("names") or [_skill_args.get("name")]
+            _requested_skills = {str(v).casefold() for v in _requested_skills if v}
+            if not _requested_skills or not _requested_skills.issubset(_allowed_skills):
+                return f"{tool}: BLOCKED", {
+                    "error": "This agent may only load the skills selected in its capability profile.",
+                    "exit_code": 1,
+                }
+
+        if tool in {"delegate_to_agent", "delegate_to_claude_code", "send_to_session", "pipeline", "create_session"}:
+            _raw_limit = _agent_settings.get("max_parallel_workers")
+            _limit = int(1 if _raw_limit is None else _raw_limit)
+            try:
+                from src import agent_activity as _agent_activity
+                _live_children = sum(
+                    1 for rec in _agent_activity.list_runs(limit=400)
+                    if rec.get("session_id") == session_id
+                    and rec.get("status") == "running"
+                    and rec.get("source") != "odysseus"
+                )
+            except Exception:
+                _live_children = 0
+            if _limit <= 0 or _live_children >= _limit:
+                return f"{tool}: BLOCKED", {
+                    "error": f"This agent's worker limit is {_limit}; {_live_children} child process(es) are already running.",
+                    "exit_code": 1,
+                }
+
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
         result = {

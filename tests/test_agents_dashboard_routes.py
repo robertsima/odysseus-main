@@ -65,6 +65,18 @@ def _req(body=None):
     return SimpleNamespace(json=_json)
 
 
+def test_agent_routing_uses_the_human_request_not_injected_context():
+    messages = [
+        {"role": "user", "content": "Can I redistribute this fork under its license?"},
+        {"role": "user", "content": "UNTRUSTED SOURCE DATA: manage settings, servers and agents",
+         "metadata": {"trusted": False}},
+    ]
+    assert agent_loop._detect_admin_intent(messages) is False
+    assert agent_loop._detect_admin_tools(messages) == set()
+    assert agent_loop._explicit_delegation_requested(messages[0]["content"]) is False
+    assert agent_loop._explicit_delegation_requested("Have Claude Code inspect this repository") is True
+
+
 async def test_overview_is_owner_scoped_and_grouped(env):
     mgr, eps = env
     with agent_runs.track_external("a1", source="subagent", owner="alice"):
@@ -78,6 +90,14 @@ async def test_overview_is_owner_scoped_and_grouped(env):
     assert out["totals"]["waiting_approval"] == 1 and out["totals"]["workers_running"] == 1
     approvals = await eps[("GET", "/api/agents/approvals")](_req())
     assert [a["session_id"] for a in approvals["approvals"]] == ["a1"]
+
+
+async def test_overview_includes_the_current_open_chat_without_agent_history(env):
+    _mgr, eps = env
+    out = await eps[("GET", "/api/agents/overview")](_req(), current_session="a1")
+    assert [row["session_id"] for row in out["rows"]] == ["a1"]
+    assert out["rows"][0]["is_current"] is True
+    assert out["rows"][0]["config"]["delegation_policy"] == "explicit"
 
 
 async def test_steer_requires_a_running_chat_and_lands_in_the_next_round(env, monkeypatch):

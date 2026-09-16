@@ -163,3 +163,33 @@ def test_profile_validation_normalises_and_rejects():
     for bad in ([{"name": ""}], [{"name": "a"}, {"name": "A"}], "nope", [{"name": "x", "max_rounds": "lots"}]):
         with pytest.raises(ValueError):
             agent_profiles.validate_profiles(bad)
+
+
+def test_profile_validation_normalises_capability_loadouts():
+    out = agent_profiles.validate_profiles([{
+        "name": "researcher", "memory_access": "read", "skill_access": "selected",
+        "skill_names": "web-research, citations", "tool_access": "selected",
+        "enabled_tools": "web_search,web_fetch", "mcp_access": "selected",
+        "allowed_mcp_servers": ["builtin_browser"], "model_access": "selected",
+        "allowed_models": ["fast", "strong"], "delegation_policy": "never",
+        "private_vault_access": True, "max_parallel_workers": 99,
+    }])[0]
+    assert out["skill_names"] == ["citations", "web-research"]
+    assert out["enabled_tools"] == ["web_fetch", "web_search"]
+    assert out["allowed_mcp_servers"] == ["builtin_browser"]
+    assert out["max_parallel_workers"] == 8
+    patch = agent_profiles.session_patch(out)
+    assert patch["delegation_policy"] == "never" and patch["private_vault_access"] is True
+    assert patch["allowed_mcp_servers"] == ["builtin_browser"]
+
+
+def test_per_chat_capability_patch_validation():
+    patch = session_settings.validate_patch({
+        "memory_access": "read", "skill_access": "selected", "skill_names": ["citations"],
+        "model_access": "current", "allowed_models": [], "delegation_policy": "explicit",
+        "allowed_mcp_servers": ["rag"], "max_parallel_workers": 99,
+    })
+    assert patch["max_parallel_workers"] == 8
+    assert patch["delegation_policy"] == "explicit"
+    with pytest.raises(ValueError):
+        session_settings.validate_patch({"delegation_policy": "always"})

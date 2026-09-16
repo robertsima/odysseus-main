@@ -248,8 +248,8 @@
       }, { once: true });
     })();
   </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260915vaultscale1">
-  <link rel="modulepreload" href="/static/app.js?v=20260915vaultscale1">
+  <link rel="stylesheet" href="/static/style.css?v=20260916agentloadout1">
+  <link rel="modulepreload" href="/static/app.js?v=20260916agentloadout1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260825ctxmeter1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
@@ -2578,7 +2578,7 @@
               <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
             </div>
             <h3 class="agent-profiles-title">Agent profiles</h3>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Named workers the agent can delegate to with <code>send_to_session</code> (<code>session_id: "new"</code>, <code>profile: "name"</code>). Each runs in its own chat with these instructions, an optional cheaper or stronger model (<code>model</code> or <code>model@endpoint</code>; empty = the calling chat's model), tools it may not use, and a round budget. Live workers show above the composer with Open and Stop.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. A preset can choose instructions, primary and fallback models, tool and skill allowlists, MCP/integration access, memory permissions, private-vault access, approval behavior, delegation policy, and worker limits. Apply one from the Agent Control Room; the selected agent receives its own editable copy.</div>
             <div id="set-agentProfiles" class="agent-profiles"></div>
             <div class="agent-profiles-actions">
               <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
@@ -2878,10 +2878,10 @@
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260825ctxprofile1"></script>
+<script type="module" src="/static/js/settings.js?v=20260916agentloadout1"></script>
 <script type="module" src="/static/js/capabilitiesPanel.js"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260915vaultscale1"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260916agentloadout1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

@@ -1320,13 +1320,10 @@ _ADMIN_KEYWORD_RE = re.compile(
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
     """Check if the last user message suggests admin/management tool usage."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            return bool(_ADMIN_KEYWORD_RE.search(content))
-    return False
+    # Prompt context is also carried in role=user envelopes. Looking at the
+    # last raw user-role item let injected MCP/skill prose containing words
+    # such as "settings" or "server" unlock the management tool surface.
+    return bool(_detect_admin_tools(messages))
 
 
 # Which admin tools each admin keyword actually points at. The blanket union
@@ -1393,14 +1390,7 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
 def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
     """Admin tools the last user message actually points at (see
     _ADMIN_KEYWORD_TOOLS). Empty when no admin keyword matches."""
-    text = ""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            text = str(content or "")
-            break
+    text = _extract_last_user_message(messages)
     if not text or not _ADMIN_KEYWORD_RE.search(text):
         return set()
     found: Set[str] = set()
@@ -1408,8 +1398,36 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
         return set(_ADMIN_TOOLS)
     for keyword, tools in _ADMIN_KEYWORD_TOOLS.items():
         if re.search(r"\b" + _admin_keyword_pattern(keyword) + r"\b", text, re.IGNORECASE):
+            # "fork" is overwhelmingly a repository/license word unless the
+            # user actually names a chat/session/conversation. Treating any
+            # occurrence as chat management caused license questions about a
+            # software fork to receive cross-chat and delegation schemas.
+            if keyword == "fork" and not re.search(
+                r"\b(?:fork\s+(?:this\s+)?(?:chat|session|conversation)|(?:chat|session|conversation)\s+fork)\b",
+                text,
+                re.IGNORECASE,
+            ):
+                continue
             found.update(tools)
     return found
+
+
+_DELEGATION_TOOLS = frozenset({
+    "delegate_to_agent", "delegate_to_claude_code", "send_to_session",
+    "message_agent", "pipeline", "create_session",
+})
+_EXPLICIT_DELEGATION_RE = re.compile(
+    r"\b(?:delegate|hand\s+off|sub[ -]?agent|another\s+agent|other\s+agent|"
+    r"ask\s+(?:claude\s+code|a\s+worker|another\s+agent)|"
+    r"have\s+(?:claude\s+code|an?\s+agent|a\s+worker)|"
+    r"send\s+(?:this|it)\s+to\s+(?:another\s+chat|an?\s+agent))\b",
+    re.IGNORECASE,
+)
+
+
+def _explicit_delegation_requested(text: str) -> bool:
+    """True only when the human asked to hand work to another agent."""
+    return bool(_EXPLICIT_DELEGATION_RE.search(str(text or "")))
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -2925,6 +2943,7 @@ def _build_system_prompt(
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
     suppress_skills: bool = False,
+    allowed_skill_names: Optional[Set[str]] = None,
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
 ) -> List[Dict]:
@@ -2943,7 +2962,8 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
+    _skill_key = frozenset(allowed_skill_names) if allowed_skill_names is not None else None
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills, _skill_key)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -2954,6 +2974,7 @@ def _build_system_prompt(
             mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            allowed_skill_names=allowed_skill_names,
         )
     else:
         agent_prompt, _skill_index_block = _build_base_prompt(
@@ -2966,6 +2987,7 @@ def _build_system_prompt(
             owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            allowed_skill_names=allowed_skill_names,
         )
         if not active_document:
             _cached_base_prompt = agent_prompt
@@ -3344,9 +3366,15 @@ def _build_system_prompt(
                 except (TypeError, ValueError):
                     _skill_max_injected = 3
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
+                _available_skills = sm.load(owner=owner)
+                if allowed_skill_names is not None:
+                    _available_skills = [
+                        skill for skill in _available_skills
+                        if str(skill.get("name") or "") in allowed_skill_names
+                    ]
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=sm.load(owner=owner),
+                    skills=_available_skills,
                     threshold=0.25,
                     max_items=_skill_max_injected,
                     min_confidence=_skill_min_conf,
@@ -3511,6 +3539,7 @@ def _build_base_prompt(
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
     suppress_skills: bool = False,
+    allowed_skill_names: Optional[Set[str]] = None,
 ):
     """Build the agent prompt with only relevant tools included.
 
@@ -3570,6 +3599,8 @@ def _build_base_prompt(
             _sm = SkillsManager(DATA_DIR)
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
             skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
+            if allowed_skill_names is not None:
+                skill_idx = [s for s in skill_idx if str(s.get("name") or "") in allowed_skill_names]
             if skill_idx:
                 lines = ["## Available skills",
                          "Procedures the assistant should consult before doing domain work. "
@@ -4277,6 +4308,33 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _admin_tools = _detect_admin_tools(messages) if _needs_admin else set()
     _last_user = _extract_last_user_message(messages)
+    # Per-agent orchestration policy. The safe default is explicit delegation:
+    # an ordinary information request stays with the current open chat even if
+    # embedding retrieval considers a coding-agent tool semantically nearby.
+    _agent_settings: Dict[str, Any] = {}
+    try:
+        from core.database import get_session_settings
+        _agent_settings = get_session_settings(session_id) or {}
+    except Exception:
+        pass
+    disabled_tools.update(_agent_settings.get("disabled_tools") or [])
+    _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
+    if _delegation_policy == "never" or (
+        _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
+    ):
+        disabled_tools.update(_DELEGATION_TOOLS)
+    _model_access = str(_agent_settings.get("model_access") or "all")
+    if _model_access == "current":
+        disabled_tools.update({"chat_with_model", "ask_teacher", "list_models"})
+    _memory_access = str(_agent_settings.get("memory_access") or "write")
+    if _memory_access == "none":
+        disabled_tools.update({"manage_memory", "mcp__memory__manage_memory"})
+    _skill_access = str(_agent_settings.get("skill_access") or "all")
+    _allowed_skill_names = (
+        set(_agent_settings.get("skill_names") or []) if _skill_access == "selected" else None
+    )
+    if _skill_access == "none":
+        disabled_tools.add("manage_skills")
     _ody_qwen_finetune_model = (model or "").lower().startswith("odysseus-qwen3")
     if _ody_qwen_finetune_model:
         try:
@@ -4290,9 +4348,12 @@ async def stream_agent_loop(
         from services.memory.skills import SkillsManager
         from src.constants import DATA_DIR
         from routes.prefs_routes import _load_for_user as _load_prefs
-        if (_load_prefs(owner) or {}).get("skills_enabled", True):
+        if _skill_access != "none" and (_load_prefs(owner) or {}).get("skills_enabled", True):
+            _profile_skills = SkillsManager(DATA_DIR).load(owner=owner)
+            if _allowed_skill_names is not None:
+                _profile_skills = [s for s in _profile_skills if s.get("name") in _allowed_skill_names]
             _explicit_skills = _explicitly_named_skills(
-                _last_user, SkillsManager(DATA_DIR).load(owner=owner)
+                _last_user, _profile_skills
             )
     except Exception as _skill_err:
         logger.debug("Explicit skill lookup skipped: %s", _skill_err)
@@ -4361,6 +4422,17 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
+    _allowed_mcp_servers = _agent_settings.get("allowed_mcp_servers")
+    if mcp_mgr and isinstance(_allowed_mcp_servers, list) and "*" not in _allowed_mcp_servers:
+        _allowed_mcp = set(_allowed_mcp_servers)
+        for _mcp_tool in mcp_mgr.get_all_tools():
+            _server_id = str(_mcp_tool.get("server_id") or "")
+            if _server_id not in _allowed_mcp:
+                _tool_name = str(_mcp_tool.get("name") or "")
+                _mcp_disabled_map.setdefault(_server_id, set()).add(_tool_name)
+                _qualified = str(_mcp_tool.get("qualified_name") or "")
+                if _qualified:
+                    disabled_tools.add(_qualified)
     # Runs unconditionally: the native wellbeing tool needs the same gate as
     # the Lotus MCP tools, and it exists whether or not an MCP manager does.
     _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools, owner=owner)
@@ -4829,6 +4901,8 @@ async def stream_agent_loop(
                 pass
             _sm = SkillsManager(DATA_DIR)
             _owner_skills = _sm.load(owner=owner) if _skills_on else []
+            if _allowed_skill_names is not None:
+                _owner_skills = [s for s in _owner_skills if s.get("name") in _allowed_skill_names]
             if _owner_skills:
                 _relevant_tools.add("manage_skills")
                 if _retrieval_query:
@@ -5046,7 +5120,8 @@ async def stream_agent_loop(
         compact=_compact_agent_prompt,
         owner=owner,
         suppress_local_context=guide_only,
-        suppress_skills=_low_signal_turn,
+        suppress_skills=_low_signal_turn or _skill_access == "none",
+        allowed_skill_names=_allowed_skill_names,
         active_email=active_email,
         workspace=workspace,
     )

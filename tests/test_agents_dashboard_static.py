@@ -94,3 +94,19 @@ def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert 'class="ag-console-robot-bay"' in AGENTS
     assert ".ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto" in STYLE
     assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE
+
+
+def test_each_agent_has_a_collapsed_server_backed_capability_loadout():
+    for token in ("Agent loadout", "delegation_policy", "memory_access", "skill_access",
+                  "model_access", "allowed_mcp_servers", "private_vault_access", "save-config"):
+        assert token in AGENTS
+    assert "'/api/agents/catalog'" in AGENTS
+    assert "method: 'PATCH'" in AGENTS
+    assert ".ag-cap-group, .ag-cap-group[open]" in STYLE
+    assert '<details class="ag-cap-group">' in AGENTS
+
+
+def test_control_room_reply_keeps_the_window_open_while_switching_chat():
+    send = AGENTS.split("async function sendToChat", 1)[1].split("async function selectChat", 1)[0]
+    assert "close()" not in send
+    assert "await selectChat(sid)" in send

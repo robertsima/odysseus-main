@@ -51,7 +51,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
         return user
 
     @router.get("/overview")
-    async def overview(request: Request):
+    async def overview(request: Request, current_session: Optional[str] = Query(default=None)):
         user, owned = _owned(request)
         now = time.time()
         chat_runs = {r["session_id"]: r for r in agent_runs.list_runs(set(owned))}
@@ -70,7 +70,10 @@ def setup_agents_routes(session_manager) -> APIRouter:
         from core.database import get_session_settings
 
         rows = []
-        for sid in set(chat_runs) | set(by_session) | set(pending):
+        visible_ids = set(chat_runs) | set(by_session) | set(pending)
+        if current_session in owned:
+            visible_ids.add(current_session)
+        for sid in visible_ids:
             sess = owned.get(sid)
             if sess is None:
                 continue
@@ -109,6 +112,21 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "profile": settings.get("agent_profile"),
                 "parent_session": settings.get("parent_session"),
                 "approval_mode": settings.get("approval_mode"),
+                "is_current": sid == current_session,
+                "config": {
+                    "agent_profile": settings.get("agent_profile"),
+                    "approval_mode": settings.get("approval_mode"),
+                    "disabled_tools": settings.get("disabled_tools") or [],
+                    "memory_access": settings.get("memory_access", "write"),
+                    "skill_access": settings.get("skill_access", "all"),
+                    "skill_names": settings.get("skill_names") or [],
+                    "model_access": settings.get("model_access", "all"),
+                    "allowed_models": settings.get("allowed_models") or [],
+                    "delegation_policy": settings.get("delegation_policy", "explicit"),
+                    "max_parallel_workers": settings.get("max_parallel_workers", 1),
+                    "allowed_mcp_servers": settings.get("allowed_mcp_servers", ["*"]),
+                    "private_vault_access": bool(settings.get("private_vault_access", False)),
+                },
             })
         order = {"waiting_approval": 0, "running": 1, "failed": 2, "finished": 3, "stopped": 4, "idle": 5}
         rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("latest_ts") or r.get("started_at") or 0)))
@@ -124,6 +142,59 @@ def setup_agents_routes(session_manager) -> APIRouter:
         return {"now": now, "rows": rows, "totals": totals, "profiles": agent_profiles.load_profiles(),
                 "chats": [{"id": s.id, "name": getattr(s, "name", "") or s.id} for s in owned.values()
                           if not getattr(s, "archived", False)][:200]}
+
+    @router.get("/catalog")
+    async def catalog(request: Request):
+        """Safe capability inventory used by the per-agent loadout editor."""
+        user, owned = _owned(request)
+        from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
+        from src.tool_security import owner_baseline_disabled_tools, blocked_tools_for_owner
+
+        def tool_group(name: str) -> str:
+            if name.startswith(("read_", "write_", "edit_", "apply_", "grep", "glob", "ls", "get_workspace")):
+                return "Files & code"
+            if "email" in name or "calendar" in name or "contact" in name:
+                return "Communication"
+            if name.startswith(("web_", "trigger_research", "manage_research")):
+                return "Research"
+            if "memory" in name or "skill" in name or "document" in name or "vault" in name:
+                return "Knowledge"
+            if "session" in name or "delegate" in name or name in {"pipeline", "ask_teacher", "chat_with_model", "message_agent"}:
+                return "Agents & models"
+            return "Workspace"
+
+        owner_blocked = owner_baseline_disabled_tools(user)
+        tools = [{"name": name, "group": tool_group(name), "description": str(desc).split("\n", 1)[0][:240]}
+                 for name, desc in sorted(BUILTIN_TOOL_DESCRIPTIONS.items()) if name not in owner_blocked]
+        skills = []
+        try:
+            from services.memory.skills import SkillsManager
+            from src.constants import DATA_DIR
+            skills = [{"name": item.get("name"), "category": item.get("category") or "general",
+                       "description": item.get("description") or ""}
+                      for item in SkillsManager(DATA_DIR).index_for(owner=user)]
+        except Exception:
+            pass
+        mcp_servers: Dict[str, Dict[str, Any]] = {}
+        try:
+            from src.tool_utils import get_mcp_manager
+            manager = None if blocked_tools_for_owner(user) else get_mcp_manager()
+            for item in manager.get_all_tools() if manager else []:
+                sid = str(item.get("server_id") or "")
+                row = mcp_servers.setdefault(sid, {"id": sid, "name": item.get("server_name") or sid, "tools": []})
+                row["tools"].append({"name": item.get("name"), "description": item.get("description") or ""})
+        except Exception:
+            pass
+        models = sorted({str(getattr(sess, "model", "") or "") for sess in owned.values() if getattr(sess, "model", None)})
+        try:
+            from src import agent_profiles
+            for profile in agent_profiles.load_profiles():
+                models.extend([profile.get("model"), *(profile.get("model_fallbacks") or []),
+                               *(profile.get("allowed_models") or [])])
+        except Exception:
+            pass
+        return {"tools": tools, "skills": skills, "mcp_servers": list(mcp_servers.values()),
+                "models": sorted({str(model) for model in models if model}, key=str.casefold)}
 
     @router.get("/stream")
     async def stream(request: Request, since: int = Query(default=0)):

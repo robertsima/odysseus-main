@@ -34,6 +34,7 @@ let returnFocus = null;
 const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
+  catalog: null, configOpen: false, configDrafts: new Map(),
   error: '', refreshing: false, refreshQueued: false,
   // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
   bucket: 'all',
@@ -94,7 +95,11 @@ async function refresh() {
   if (state.refreshing) { state.refreshQueued = true; return; }
   state.refreshing = true;
   try {
-    const [ov, ap] = await Promise.all([apiPoll('/api/agents/overview'), apiPoll('/api/agents/approvals')]);
+    const current = window.sessionModule?.getCurrentSessionId?.() || '';
+    const overviewRequest = current
+      ? apiPoll(`/api/agents/overview?current_session=${encodeURIComponent(current)}`)
+      : apiPoll('/api/agents/overview');
+    const [ov, ap] = await Promise.all([overviewRequest, apiPoll('/api/agents/approvals')]);
     state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || [];
     state.approvals = ap.approvals || [];
     state.error = '';
@@ -189,6 +194,11 @@ function updateBadges() {
   $('rail-agents')?.classList.toggle('rail-notify', attention > 0);
   const summary = $('ag-window-summary');
   if (summary) summary.textContent = `${running} active · ${attention} waiting · ${state.totals.finished_24h || 0} completed today`;
+}
+async function loadCatalog() {
+  if (state.catalog) return state.catalog;
+  state.catalog = await api('/api/agents/catalog');
+  return state.catalog;
 }
 
 // ── triage ────────────────────────────────────────────────────────────────
@@ -314,6 +324,93 @@ function updateOpenView() {
   const error = $('ag-refresh-error');
   if (error) { error.textContent = state.error; error.hidden = !state.error; }
 }
+function configFor(row) {
+  if (state.configDrafts.has(row.session_id)) {
+    const existing = state.configDrafts.get(row.session_id);
+    if (state.catalog && !existing._catalogReady) {
+      const disabled = new Set(existing.disabled_tools || []);
+      const names = state.catalog.tools.map((tool) => tool.name);
+      existing.tool_access = !disabled.size ? 'all' : disabled.size >= names.length ? 'none' : 'selected';
+      existing.enabled_tools = names.filter((name) => !disabled.has(name));
+      existing.mcp_access = existing.allowed_mcp_servers?.includes('*') ? 'all' : existing.allowed_mcp_servers?.length ? 'selected' : 'none';
+      existing._catalogReady = true;
+    }
+    return existing;
+  }
+  const base = Object.assign({
+    agent_profile: '', approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
+    model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
+    allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
+  }, row.config || {});
+  const totalTools = state.catalog?.tools?.length || 0;
+  base.tool_access = !base.disabled_tools?.length ? 'all'
+    : (totalTools && base.disabled_tools.length >= totalTools ? 'none' : 'selected');
+  base.enabled_tools = state.catalog ? state.catalog.tools.filter((tool) => !(base.disabled_tools || []).includes(tool.name)).map((tool) => tool.name) : [];
+  base.mcp_access = base.allowed_mcp_servers?.includes('*') ? 'all' : base.allowed_mcp_servers?.length ? 'selected' : 'none';
+  base._catalogReady = !!state.catalog;
+  state.configDrafts.set(row.session_id, base);
+  return base;
+}
+function option(value, label, current) {
+  return `<option value="${esc(value)}"${String(value) === String(current) ? ' selected' : ''}>${esc(label)}</option>`;
+}
+function capabilityChecks(items, selected, key, labelKey = 'name') {
+  const enabled = new Set(selected || []);
+  return (items || []).map((item) => {
+    const value = String(item.name || item.id || '');
+    const label = String(item[labelKey] || value);
+    return `<label class="ag-cap-check" title="${esc(item.description || '')}"><input type="checkbox" data-config-list="${key}" value="${esc(value)}"${enabled.has(value) ? ' checked' : ''}><span>${esc(label)}</span></label>`;
+  }).join('');
+}
+function profileConfig(profile) {
+  const mcp = profile.mcp_access === 'none' ? [] : profile.mcp_access === 'selected' ? (profile.allowed_mcp_servers || []) : ['*'];
+  return {
+    agent_profile: profile.name || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
+    memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
+    model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
+    delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
+    allowed_mcp_servers: mcp, private_vault_access: !!profile.private_vault_access,
+    disabled_tools: [...(profile.disabled_tools || [])], tool_access: profile.tool_access || 'all',
+    enabled_tools: [...(profile.enabled_tools || [])],
+    _catalogReady: true,
+  };
+}
+function loadoutSummaryHtml(row) {
+  const c = configFor(row);
+  const mcp = c.allowed_mcp_servers?.includes('*') ? 'all connections' : `${c.allowed_mcp_servers?.length || 0} connections`;
+  return `<button type="button" class="ag-loadout-summary" data-ag="config-toggle" aria-expanded="${state.configOpen ? 'true' : 'false'}">
+    <span class="ag-loadout-glyph" aria-hidden="true">⌬</span><span><b>Agent loadout</b><small>${esc(c.agent_profile || 'custom')} · ${esc(c.delegation_policy)} delegation · ${esc(c.memory_access)} memory · ${esc(mcp)}</small></span><i>${state.configOpen ? 'Close' : 'Configure'}</i>
+  </button>`;
+}
+function configEditorHtml(row) {
+  const c = configFor(row);
+  const catalog = state.catalog;
+  if (!catalog) return '<div class="ag-loadout-editor"><div class="wb-empty">Loading capabilities…</div></div>';
+  const profileOptions = state.profiles.map((p) => option(p.name, `${p.name}${p.description ? ` — ${p.description}` : ''}`, c.agent_profile)).join('');
+  const disabled = new Set(c.disabled_tools || []);
+  const toolSelected = c.tool_access === 'all' ? catalog.tools.map((t) => t.name)
+    : c.tool_access === 'none' ? [] : (c.enabled_tools || catalog.tools.filter((t) => !disabled.has(t.name)).map((t) => t.name));
+  const toolGroups = new Map();
+  catalog.tools.forEach((tool) => { const group = tool.group || 'Other'; if (!toolGroups.has(group)) toolGroups.set(group, []); toolGroups.get(group).push(tool); });
+  const groupedTools = [...toolGroups.entries()].map(([group, tools]) => `<fieldset class="ag-cap-subgroup"><legend>${esc(group)}</legend>${capabilityChecks(tools, toolSelected, 'enabled_tools')}</fieldset>`).join('');
+  const mcpSelected = c.allowed_mcp_servers?.includes('*') ? catalog.mcp_servers.map((m) => m.id) : (c.allowed_mcp_servers || []);
+  return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
+    <div class="ag-loadout-intro"><div><b>Runtime controls</b><span>Changes apply to this agent's next step. Denied capabilities are enforced server-side.</span></div><span class="ag-policy-shield">Policy active</span></div>
+    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+    <div class="ag-policy-grid">
+      <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
+      <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
+      <label class="ag-field"><span>Memory</span><select class="wb-select" data-config="memory_access">${option('none','No memory',c.memory_access)}${option('read','Read only',c.memory_access)}${option('write','Read and write',c.memory_access)}</select><small>Read-only blocks add, edit and delete.</small></label>
+      <label class="ag-field"><span>Parallel workers</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8.</small></label>
+    </div>
+    <label class="ag-switch-card"><input type="checkbox" data-config="private_vault_access"${c.private_vault_access ? ' checked' : ''}><span><b>Private vault reads</b><small>Allow this agent to retrieve private notes. Human access is unaffected.</small></span></label>
+    <details class="ag-cap-group"><summary><span>Tools</span><small>${c.tool_access === 'all' ? 'All available' : `${toolSelected.length} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="tool_access">${option('all','All tools',c.tool_access)}${option('selected','Selected tools',c.tool_access)}${option('none','No action tools',c.tool_access)}</select></label><div class="ag-cap-grid" data-show-when="tool_access:selected"${c.tool_access === 'selected' ? '' : ' hidden'}>${groupedTools}</div></div></details>
+    <details class="ag-cap-group"><summary><span>Skills</span><small>${c.skill_access === 'all' ? 'All skills' : c.skill_access === 'none' ? 'Disabled' : `${c.skill_names?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="skill_access">${option('all','All skills',c.skill_access)}${option('selected','Selected skills',c.skill_access)}${option('none','No skills',c.skill_access)}</select></label><div class="ag-cap-grid" data-show-when="skill_access:selected"${c.skill_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.skills, c.skill_names, 'skill_names')}</div></div></details>
+    <details class="ag-cap-group"><summary><span>Models</span><small>${c.model_access === 'current' ? 'Current model only' : c.model_access === 'all' ? 'All configured' : `${c.allowed_models?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="model_access">${option('current','Current model only',c.model_access)}${option('selected','Selected models',c.model_access)}${option('all','All configured models',c.model_access)}</select></label><div class="ag-cap-grid" data-show-when="model_access:selected"${c.model_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.models.map((name) => ({name})), c.allowed_models, 'allowed_models')}</div></div></details>
+    <details class="ag-cap-group"><summary><span>MCP & integrations</span><small>${c.allowed_mcp_servers?.includes('*') ? 'All connected' : `${c.allowed_mcp_servers?.length || 0} selected`}</small></summary><div class="ag-cap-body"><label class="ag-inline-field">Access<select class="wb-select" data-config="mcp_access">${option('all','All connected',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('selected','Selected connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('none','No connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}</select></label><div class="ag-cap-grid" data-show-when="mcp_access:selected"${!c.allowed_mcp_servers?.includes('*') && c.allowed_mcp_servers?.length ? '' : ' hidden'}>${capabilityChecks(catalog.mcp_servers, mcpSelected, 'allowed_mcp_servers', 'name')}</div></div></details>
+    <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
+  </div>`;
+}
 function rowHtml(r) {
   const sel = r.session_id === state.selected;
   const dur = r.status === 'running' && r.started_at ? fmtDur(r.started_at) : '';
@@ -365,7 +462,7 @@ function renderDetail() {
   box.innerHTML = `
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
-      <div class="ag-console-identity"><span class="ag-console-eyebrow">Selected unit</span><span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span><span>${esc(r.latest || lastEvent?.title || 'Standing by')}</span></div>
+      <div class="ag-console-identity"><span class="ag-console-eyebrow">Selected unit${r.is_current ? ' · open chat' : ''}</span><span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span><span>${esc(r.latest || lastEvent?.title || 'Standing by')}</span></div>
       <div class="ag-console-status">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</div>
     </div>
     <div class="ag-detail-head">
@@ -373,6 +470,8 @@ function renderDetail() {
       <span class="wb-spacer"></span><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>
       ${r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}
     </div>
+    ${loadoutSummaryHtml(r)}
+    ${state.configOpen ? configEditorHtml(r) : ''}
     ${approvals.length || children.length ? `<div class="ag-detail-top">
       ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
       ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
@@ -429,6 +528,74 @@ function launchHtml() {
     ${state.profiles.length ? '' : '<p class="wb-hint">No profiles yet — define workers under Settings › Workbench › Agent profiles.</p>'}`;
 }
 
+function syncConfigVisibility(editor, draft) {
+  editor?.querySelectorAll('[data-show-when]').forEach((node) => {
+    const [key, expected] = String(node.dataset.showWhen || '').split(':');
+    node.hidden = String(draft[key] || '') !== expected;
+  });
+}
+function onConfigChange(e) {
+  const editor = e.target.closest('.ag-loadout-editor');
+  const row = state.rows.find((item) => item.session_id === state.selected);
+  if (!editor || !row) return;
+  const draft = configFor(row);
+  const field = e.target.dataset.config;
+  if (field) {
+    draft[field] = e.target.type === 'checkbox' ? !!e.target.checked
+      : e.target.type === 'number' ? Number(e.target.value || 0) : e.target.value;
+    if (field === 'mcp_access') {
+      if (e.target.value === 'all') draft.allowed_mcp_servers = ['*'];
+      else if (e.target.value === 'none') draft.allowed_mcp_servers = [];
+      else if (draft.allowed_mcp_servers?.includes('*')) draft.allowed_mcp_servers = (state.catalog?.mcp_servers || []).map((item) => item.id);
+    }
+  }
+  const list = e.target.dataset.configList;
+  if (list) {
+    const values = new Set(draft[list] || []);
+    e.target.checked ? values.add(e.target.value) : values.delete(e.target.value);
+    draft[list] = [...values];
+  }
+  syncConfigVisibility(editor, draft);
+  const msg = $('ag-config-msg');
+  if (msg) msg.textContent = 'Unsaved changes';
+}
+async function saveAgentConfig(row) {
+  const draft = configFor(row);
+  const allTools = (state.catalog?.tools || []).map((tool) => tool.name);
+  let disabledTools = [];
+  if (draft.tool_access === 'none') disabledTools = allTools;
+  else if (draft.tool_access === 'selected') {
+    const enabled = new Set(draft.enabled_tools || []);
+    disabledTools = allTools.filter((name) => !enabled.has(name));
+  }
+  let allowedMcp = ['*'];
+  if (draft.mcp_access === 'none') allowedMcp = [];
+  else if (draft.mcp_access === 'selected') allowedMcp = [...(draft.allowed_mcp_servers || [])];
+  const payload = {
+    agent_profile: draft.agent_profile || null,
+    approval_mode: draft.approval_mode || null,
+    disabled_tools: disabledTools,
+    memory_access: draft.memory_access,
+    skill_access: draft.skill_access,
+    skill_names: draft.skill_access === 'selected' ? (draft.skill_names || []) : [],
+    model_access: draft.model_access,
+    allowed_models: draft.model_access === 'selected' ? (draft.allowed_models || []) : [],
+    delegation_policy: draft.delegation_policy,
+    max_parallel_workers: draft.max_parallel_workers,
+    allowed_mcp_servers: allowedMcp,
+    private_vault_access: !!draft.private_vault_access,
+  };
+  const result = await api(`/api/session/${encodeURIComponent(row.session_id)}/settings`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+  });
+  row.config = Object.assign({}, result.settings || payload);
+  row.approval_mode = result.approval_mode;
+  state.configDrafts.set(row.session_id, Object.assign({}, draft, row.config, {
+    tool_access: draft.tool_access, enabled_tools: draft.enabled_tools || [], mcp_access: draft.mcp_access,
+  }));
+  return result;
+}
+
 // ── actions ───────────────────────────────────────────────────────────────
 async function onClick(e) {
   const row = e.target.closest('.ag-row[data-sid]');
@@ -470,6 +637,33 @@ async function onClick(e) {
       updateStats(); renderFleetOnly(); renderDetail();
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
+    else if (act === 'config-toggle') {
+      state.configOpen = !state.configOpen;
+      if (state.configOpen) {
+        renderDetail();
+        try { await loadCatalog(); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+      }
+      renderDetail();
+      if (state.configOpen) syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
+    }
+    else if (act === 'apply-profile') {
+      const row = state.rows.find((item) => item.session_id === state.selected);
+      const selectedName = document.querySelector('.ag-loadout-editor [data-config="agent_profile"]')?.value || '';
+      const profile = state.profiles.find((item) => item.name === selectedName);
+      if (!row || !profile) { uiModule.showToast('Choose a preset first', 'warning'); return; }
+      state.configDrafts.set(row.session_id, profileConfig(profile));
+      renderDetail();
+      uiModule.showToast(`Loaded ${profile.name}; save to apply it to this agent`);
+    }
+    else if (act === 'save-config') {
+      const row = state.rows.find((item) => item.session_id === state.selected);
+      if (!row) return;
+      b.disabled = true;
+      const msg = $('ag-config-msg'); if (msg) msg.textContent = 'Saving…';
+      await saveAgentConfig(row);
+      uiModule.showToast(`Loadout saved for ${row.name}`, 'success');
+      renderDetail();
+    }
     else if (act === 'inspect-run') {
       if (!window.workbenchModule?.openRun) throw new Error('Workbench inspection is unavailable');
       await selectChat(b.dataset.sid);
@@ -520,8 +714,7 @@ async function onClick(e) {
 /** Deliver a message to a chat: open it and send through the composer, so it
  *  becomes a normal turn with the chat's own settings. */
 async function sendToChat(sid, text, { open = true } = {}) {
-  if (open) close();
-  await selectChat(sid);
+  if (open) await selectChat(sid);
   const ta = $('message');
   if (!ta) throw new Error('Chat composer is unavailable');
   ta.value = text;
@@ -624,6 +817,7 @@ function init() {
   $('ag-maximize')?.addEventListener('click', () => snapModalToZone(root, { name: 'maximize', rect: workspaceRect() }));
   root.addEventListener('pointerdown', bringToFront, true);
   root.addEventListener('click', onClick);
+  root.addEventListener('change', onConfigChange);
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && state.open) { close(); return; }
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }
