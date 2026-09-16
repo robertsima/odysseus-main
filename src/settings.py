@@ -228,6 +228,17 @@ DEFAULT_SETTINGS = {
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
     "agent_stream_timeout_seconds": 300,
+    # How much MCP may stay bound on every turn without winning tool retrieval.
+    # A connected server small enough to fit these caps is attached to every
+    # round, so a vague follow-up ("continue") can never make it vanish; a
+    # server that exceeds them is gated behind RAG/intent selection like the
+    # builtin browser/GitHub catalogs, and stays retrievable and listed in the
+    # prompt. Per-server cap first, then the total, trimmed largest-first. Set
+    # either to 0 for "no cap on this dimension". Raise them on a large-context
+    # host with a deliberately MCP-centric setup; see the reasoning behind the
+    # defaults in `src.mcp_manager._always_bound_limits`.
+    "mcp_always_bound_server_max_tools": 8,
+    "mcp_always_bound_total_max_tools": 24,
     # Extra directory roots that read_file / write_file may access, in
     # addition to the built-in project data/ and system temp dirs. Each
     # entry is an absolute path. Sensitive subpaths (.ssh, .gnupg, shell

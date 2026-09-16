@@ -111,6 +111,9 @@ def test_gated_tool_names_excludes_user_added_external_servers():
     # in the hardcoded embedded-catalog set) must not be gated behind RAG/
     # intent tool selection -- it's a handful of tools the user explicitly
     # connected, not a large ambient catalog like the browser/GitHub ones.
+    # "A handful" is now enforced rather than assumed: a server that outgrows
+    # the always-bound budget IS gated. See the size-budget cases in
+    # tests/test_mcp_tool_binding.py; three tools is comfortably under it.
     mgr = _connected("penpot", "Penpot", ["execute_code", "get_page", "list_boards"])
     assert mgr.gated_tool_names() == set()
 
