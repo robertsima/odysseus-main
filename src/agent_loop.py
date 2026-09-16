@@ -4412,13 +4412,24 @@ def _tool_schemas_for_round(
     with the payload. Previously the schema decision lived only inside the
     round loop, after context trimming had already decided the request fit.
 
-    ``mcp_gated_names`` is the (small) set of qualified MCP tool names that
-    belong to a large embedded catalog (browser, GitHub, Todoist, ...) and
-    must still win RAG/intent-based tool selection like a builtin tool would.
-    Every other MCP schema is a server the user explicitly connected via MCP
-    settings and stays bound once connected -- root cause of issue where a
-    connected server's tools vanished from the schema on any turn whose
-    wording did not happen to score well against the RAG tool index.
+    ``mcp_gated_names`` is the set of qualified MCP tool names that must still
+    win RAG/intent-based tool selection like a builtin tool would: the large
+    embedded catalogs (browser, GitHub, Todoist, ...) plus any user-added
+    server that outgrew the always-bound budget. Every other MCP schema is a
+    server the user explicitly connected via MCP settings and stays bound once
+    connected -- root cause of the issue where a connected server's tools
+    vanished from the schema on any turn whose wording did not happen to score
+    well against the RAG tool index.
+
+    Both halves of that are load-bearing and pull in opposite directions, so
+    neither side of the rule may be "simplified" away. Bind a small server
+    unconditionally or a follow-up like "continue" loses it. Bind a big one
+    unconditionally and the turn drowns: on 2026-09-16 a turn that selected 11
+    tools was sent 48, and because its OWN tools had not been selected, the 37
+    always-bound strangers were the only actionable things it could see -- it
+    spent six rounds in a design tool and a docs lookup on a request to read
+    application logs. The size cut-off lives in
+    :func:`src.mcp_manager._always_bound_limits`, with the reasoning.
     """
     if force_answer:
         return []
@@ -5530,7 +5541,10 @@ async def stream_agent_loop(
         disabled_tools=disabled_tools,
         ody_qwen_finetune_model=_ody_qwen_finetune_model,
         last_user=_last_user,
-        mcp_gated_names=mcp_mgr.gated_tool_names() if mcp_mgr else None,
+        # The disabled map sharpens the always-bound size budget: a server whose
+        # tools are mostly switched off costs little and should keep binding
+        # unconditionally, even if its raw discovered-tool count is large.
+        mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
     )
     _initial_schema_tokens = _estimate_tool_schema_tokens(_initial_tool_schemas)
 
@@ -5832,7 +5846,7 @@ async def stream_agent_loop(
             # McpManager._reconnect_server) is reflected immediately instead
             # of the round after it, and a server that dropped/re-added tools
             # mid-stream doesn't leave stale gating decisions in place.
-            mcp_gated_names=mcp_mgr.gated_tool_names() if mcp_mgr else None,
+            mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
         )
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
@@ -5847,15 +5861,34 @@ async def stream_agent_loop(
             sorted(_selected_set - _sent_set - set(disabled_tools or ())) if _relevant_tools else []
         )
         _sent_not_selected = sorted(_sent_set - _selected_set) if _relevant_tools else []
-        _tool_debug_sig = (tuple(sorted(_sent_set)), tuple(sorted(_selected_set)))
+        # Which MCP servers lost their always-bound status, and how big they
+        # were. Without this the budget is an invisible decision: the operator
+        # sees a server's tools missing from `schema_without_selection` and has
+        # no way to tell "demoted for size" from "disconnected", "disabled", or
+        # a routing bug. Rendered as name:count ("firecrawl:27") so the line
+        # answers "why is my server not bound?" on its own.
+        try:
+            _mcp_demoted = (
+                [f"{_name}:{_n}" for _sid, _name, _n in mcp_mgr.demoted_servers(_mcp_disabled_map)]
+                if mcp_mgr else []
+            )
+        except Exception:
+            # Observability must never cost the turn a round: a manager shape
+            # that can't answer still gets its schemas resolved above.
+            _mcp_demoted = []
+        _tool_debug_sig = (
+            tuple(sorted(_sent_set)), tuple(sorted(_selected_set)), tuple(_mcp_demoted),
+        )
         _tool_debug_log = logger.info if _tool_debug_sig != _last_tool_debug_sig else logger.debug
         _last_tool_debug_sig = _tool_debug_sig
         _tool_debug_log(
             "[agent-debug] round=%s model=%s _is_api_model=%s tools_sent=%s "
-            "selected=%s selected_without_schema=%s schema_without_selection=%s",
+            "selected=%s selected_without_schema=%s schema_without_selection=%s "
+            "mcp_demoted=%s",
             round_num, model, _is_api_model, len(_sent_set),
             len(_selected_set) if _relevant_tools else "ALL",
             _selected_not_sent or "-", _sent_not_selected or "-",
+            _mcp_demoted or "-",
         )
         logger.debug("[agent-debug] round=%s tool_names=%s", round_num, sorted(_sent_set))
 
