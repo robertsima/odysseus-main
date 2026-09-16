@@ -27,6 +27,22 @@ docker compose up -d --build
 ```
 To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
 
+The image bundles Node.js **22.23.2** (Node 22 LTS, above the 22.6 minimum),
+including npm and npx for MCP integrations and the Todoist CLI. Docker and CI
+use the same pinned release; `.nvmrc` records it for local development too.
+This does not change Node installed on your host. After pulling an update,
+rebuild and recreate the application container to apply runtime changes:
+
+```bash
+docker compose build --pull odysseus
+docker compose up -d --no-deps odysseus
+docker compose exec odysseus node --version
+docker compose exec odysseus npx --version
+```
+
+For a lightweight runtime check without building the full Python application:
+`docker build --target node-runtime -t odysseus-node-runtime .`.
+
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set
 `APP_PORT=7001` in `.env` and recreate the container. Set `APP_BIND=0.0.0.0`
