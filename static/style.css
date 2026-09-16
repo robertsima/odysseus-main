@@ -34673,8 +34673,8 @@ body.notes-drag-mode .note-card-pin svg {
 .notes-mode-tabs {
   display: flex;
   align-items: center;
-  gap: 4px;
-  padding: 6px 8px 0;
+  gap: 6px;
+  padding: 7px 8px 1px;
   flex-shrink: 0;
 }
 .notes-mode-tabs button {
@@ -34682,9 +34682,9 @@ body.notes-drag-mode .note-card-pin svg {
   border-radius: 7px;
   background: var(--bg);
   color: color-mix(in srgb, var(--fg) 66%, transparent);
-  padding: 5px 10px;
+  padding: 7px 12px;
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 .notes-mode-tabs button.active {
@@ -34695,7 +34695,7 @@ body.notes-drag-mode .note-card-pin svg {
 .notes-mode-tabs > span {
   margin-left: auto;
   color: color-mix(in srgb, var(--fg) 45%, transparent);
-  font-size: 9px;
+  font-size: 10px;
 }
 .notes-pane.notes-vault-mode .notes-pane-body {
   display: block !important;
@@ -34718,18 +34718,18 @@ body.notes-drag-mode .note-card-pin svg {
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--fg) 4%, transparent);
 }
 .vault-tree-pane {
-  width: 29%;
-  min-width: 200px;
-  max-width: 320px;
+  width: 36%;
+  min-width: 280px;
+  max-width: 440px;
   display: flex;
   flex-direction: column;
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel) 86%, var(--bg));
 }
 .vault-tree-heading {
-  min-height: 38px;
+  min-height: 44px;
   flex-shrink: 0;
-  padding: 0 8px 0 11px;
+  padding: 0 10px 0 13px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -34737,12 +34737,12 @@ body.notes-drag-mode .note-card-pin svg {
   color: color-mix(in srgb, var(--fg) 72%, transparent);
 }
 .vault-tree-heading > span { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
-.vault-tree-heading > span b { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .055em; }
-.vault-tree-heading > span small { color: color-mix(in srgb, var(--fg) 42%, transparent); font-size: 8.5px; font-weight: 500; }
+.vault-tree-heading > span b { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .045em; }
+.vault-tree-heading > span small { color: color-mix(in srgb, var(--fg) 46%, transparent); font-size: 10px; font-weight: 500; }
 .vault-tree-actions { display: flex; gap: 2px; }
 .vault-tree-heading button {
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -34752,30 +34752,40 @@ body.notes-drag-mode .note-card-pin svg {
   color: color-mix(in srgb, var(--fg) 62%, transparent);
   cursor: pointer;
 }
-.vault-tree-heading button svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.vault-tree-heading button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .vault-tree-heading button:hover { color: var(--fg); border-color: var(--border); background: color-mix(in srgb, var(--fg) 6%, transparent); }
 .vault-tree {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 5px;
+  padding: 8px;
   scrollbar-width: thin;
 }
-.vault-tree-folder { margin: 0; }
+.vault-tree-folder,
+.vault-tree-folder[open] {
+  margin: 0;
+  padding: 0;
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  transition: none;
+}
+.vault-tree-folder[open] > :not(summary) { animation: none; }
 .vault-tree-folder > summary,
 .vault-tree-file {
   width: 100%;
-  min-height: 26px;
+  min-height: 33px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 3px 6px 3px calc(6px + var(--vault-indent));
-  color: color-mix(in srgb, var(--fg) 76%, transparent);
+  gap: 8px;
+  padding: 5px 8px 5px calc(8px + var(--vault-indent));
+  color: color-mix(in srgb, var(--fg) 82%, transparent);
   border: 0;
   border-radius: 6px;
   background: transparent;
   font: inherit;
-  font-size: 10.5px;
+  font-size: 12px;
   text-align: left;
   cursor: pointer;
   box-sizing: border-box;
@@ -34784,15 +34794,18 @@ body.notes-drag-mode .note-card-pin svg {
 .vault-tree-folder > summary::-webkit-details-marker { display: none; }
 .vault-tree-folder > summary::before {
   content: '›';
-  width: 9px;
+  width: 11px;
+  flex: 0 0 11px;
+  font-size: 16px;
+  line-height: 1;
   transform: rotate(90deg);
   transition: transform .12s ease;
   opacity: .55;
 }
 .vault-tree-folder:not([open]) > summary::before { transform: rotate(0); }
-.vault-tree-folder > summary small { margin-left: auto; color: color-mix(in srgb, var(--fg) 30%, transparent); font: 8px/1 var(--mono, ui-monospace, monospace); transition: color .12s; }
+.vault-tree-folder > summary small { margin-left: auto; color: color-mix(in srgb, var(--fg) 34%, transparent); font: 10px/1 var(--mono, ui-monospace, monospace); transition: color .12s; }
 .vault-tree-folder > summary:hover small { color: color-mix(in srgb, var(--fg) 52%, transparent); }
-.vault-tree-file { position: relative; padding-left: calc(22px + var(--vault-indent)); z-index: 1; }
+.vault-tree-file { position: relative; padding-left: calc(29px + var(--vault-indent)); z-index: 1; }
 .vault-tree-file:hover,
 .vault-tree-folder > summary:hover { background: color-mix(in srgb, var(--fg) 7%, transparent); }
 .vault-tree-file.active {
@@ -34806,9 +34819,9 @@ body.notes-drag-mode .note-card-pin svg {
 .vault-save-btn:focus-visible { outline: 2px solid var(--vault-active); outline-offset: -2px; }
 .vault-tree-file svg,
 .vault-tree-folder summary svg {
-  width: 13px;
-  height: 13px;
-  flex: 0 0 13px;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.8;
@@ -34822,10 +34835,10 @@ body.notes-drag-mode .note-card-pin svg {
   text-overflow: ellipsis;
 }
 .vault-policy-dot {
-  width: 5px;
-  height: 5px;
+  width: 6px;
+  height: 6px;
   margin-left: auto;
-  flex: 0 0 5px;
+  flex: 0 0 6px;
   border-radius: 50%;
   background: var(--vault-public);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-public) 24%, transparent);
@@ -34840,12 +34853,12 @@ body.notes-drag-mode .note-card-pin svg {
 .vault-policy-dots .vault-policy-dot { margin-left: 0; }
 .vault-policy-dot.private { background: var(--vault-private); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-private) 24%, transparent); }
 .vault-policy-dot.readonly { background: var(--vault-readonly); box-shadow: 0 0 0 1px color-mix(in srgb, var(--vault-readonly) 24%, transparent); }
-.vault-search-result { min-height: 38px; padding-left: 8px; }
+.vault-search-result { min-height: 44px; padding-left: 9px; }
 .vault-search-file-name { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 1px; }
 .vault-search-file-name b,
 .vault-search-file-name small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.vault-search-file-name b { font-size: 10.5px; }
-.vault-search-file-name small { color: color-mix(in srgb, var(--fg) 42%, transparent); font-size: 8px; }
+.vault-search-file-name b { font-size: 12px; }
+.vault-search-file-name small { color: color-mix(in srgb, var(--fg) 46%, transparent); font-size: 9.5px; }
 .vault-tree-empty,
 .vault-loading {
   padding: 22px 12px;
@@ -34942,9 +34955,9 @@ body.notes-drag-mode .note-card-pin svg {
   padding: 24px;
   color: color-mix(in srgb, var(--fg) 50%, transparent);
   text-align: center;
-  font-size: 11px;
+  font-size: 12.5px;
 }
-.vault-editor-empty svg { width: 30px; fill: none; stroke: currentColor; stroke-width: 1.5; }
+.vault-editor-empty svg { width: 36px; fill: none; stroke: currentColor; stroke-width: 1.5; }
 .vault-editor-empty span { max-width: 330px; line-height: 1.45; }
 @media (max-width: 768px) {
   .notes-mode-tabs > span { display: none; }
@@ -34953,8 +34966,8 @@ body.notes-drag-mode .note-card-pin svg {
     width: 100%;
     min-width: 0;
     max-width: none;
-    height: 34%;
-    min-height: 150px;
+    height: 40%;
+    min-height: 190px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
@@ -36277,6 +36290,11 @@ body.notes-mobile-mode.notes-drag-mode .note-card-pin.active {
 }
 .notes-search-bar .memory-search-input:focus {
   border-color: var(--red);
+}
+.notes-pane.notes-vault-mode .notes-search-bar .memory-search-input {
+  height: 34px;
+  min-height: 34px;
+  font-size: 12px;
 }
 /* Bulk-bar appears under the search bar — inset its sides to match the
    search bar's own 8px horizontal padding so the two visually align. */

@@ -612,7 +612,7 @@ function _vaultFileHtml(node, depth = 0, searchResult = false) {
   const name = searchResult
     ? `<span class="vault-search-file-name"><b>${_esc(node.name)}</b><small>${_esc(node.path)}</small></span>`
     : `<span>${_esc(node.name)}</span>`;
-  return `<button type="button" class="vault-tree-file${searchResult ? ' vault-search-result' : ''}${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 13}px" title="${_attrEsc(node.path)}">${icon}${name}<span class="vault-policy-dots">${policyTags}</span></button>`;
+  return `<button type="button" class="vault-tree-file${searchResult ? ' vault-search-result' : ''}${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 20}px" title="${_attrEsc(node.path)}">${icon}${name}<span class="vault-policy-dots">${policyTags}</span></button>`;
 }
 
 function _vaultDescendantCount(node) {
@@ -636,7 +636,7 @@ function _vaultTreeHtml(node, depth = 0) {
   const folderPath = node.path || '';
   const open = _vaultExpandedFolders.has(folderPath) ? ' open' : '';
   const count = _vaultDescendantCount(node);
-  return `<details class="vault-tree-folder" data-vault-folder="${_attrEsc(folderPath)}" style="--vault-indent:${depth * 13}px"${open}><summary title="${_attrEsc(folderPath || node.name || 'Vault')}">${folderIcon}<span>${_esc(node.name || 'Vault')}</span><small>${count}</small></summary>${visible}</details>`;
+  return `<details class="vault-tree-folder" data-vault-folder="${_attrEsc(folderPath)}" style="--vault-indent:${depth * 20}px"${open}><summary title="${_attrEsc(folderPath || node.name || 'Vault')}">${folderIcon}<span>${_esc(node.name || 'Vault')}</span><small>${count}</small></summary>${visible}</details>`;
 }
 
 function _vaultSearchHtml(root) {

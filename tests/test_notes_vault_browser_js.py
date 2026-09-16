@@ -53,6 +53,19 @@ def test_vault_navigation_omits_redundant_root_and_default_public_markers():
     assert "collapse.hidden = _vaultExpandedFolders.size === 0" in SRC
 
 
+def test_vault_tree_has_readable_scale_and_does_not_inherit_research_cards():
+    assert "--vault-indent:${depth * 20}px" in SRC
+    vault_css = STYLE.split(".vault-tree-pane {", 1)[1].split(".vault-policy-dot {", 1)[0]
+    assert "min-width: 280px" in vault_css
+    assert "min-height: 33px" in vault_css
+    assert "font-size: 12px" in vault_css
+    reset = vault_css.split(".vault-tree-folder[open] {", 1)[1].split("}", 1)[0]
+    assert "border: 0" in reset
+    assert "background: transparent" in reset
+    assert "overflow: visible" in reset
+    assert ".vault-tree-folder[open] > :not(summary) { animation: none; }" in vault_css
+
+
 def test_vault_explorer_uses_theme_semantic_colors_and_visible_focus():
     vault_css = STYLE.split(".vault-browser {", 1)[1].split(".note-card.note-card-sliding-out", 1)[0]
     assert "--vault-public: var(--color-success" in vault_css
