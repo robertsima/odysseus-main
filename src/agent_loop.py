@@ -1380,11 +1380,36 @@ _AGENT_ORCHESTRATION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "run some agents" is the same request as "kick off some agents", but `run` is
+# far too common to sit in _ORCHESTRATION_VERB: "run the agent tests", "running
+# the agent loop", "we run several worker threads" would all unlock the
+# delegation toolset. What separates the two is whether the agent noun is the
+# HEAD of its phrase or a MODIFIER of the next one — you run *an agent*, but you
+# run *agent tests*. So `run` gets its own pattern requiring the noun to be
+# followed by a clause boundary or a function word, never by another noun.
+#
+# This is deliberately a separate regex rather than another alternative in
+# _ORCHESTRATION_VERB: applying the head-noun lookahead to the existing verbs
+# would break "spin up a worker agent", where the first noun matched ("worker")
+# is legitimately followed by another ("agent").
+_HEAD_NOUN_FOLLOWERS = (
+    r"(?=\s*(?:$|[,.;:!?)\]]|\b(?:that|which|who|to|on|for|with|and|or|in|at|"
+    r"so|then|about|from|until|while|please|now|here|again|instead)\b))"
+)
+_AGENT_RUN_RE = re.compile(
+    r"\brun(?:ning|s)?\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b" + _HEAD_NOUN_FOLLOWERS,
+    re.IGNORECASE,
+)
+
 
 def _orchestration_requested(text: str) -> bool:
     """True when the words name another agent, or ask for one to be started."""
     text = str(text or "")
-    return bool(_AGENT_NOUN_RE.search(text) or _AGENT_ORCHESTRATION_RE.search(text))
+    return bool(
+        _AGENT_NOUN_RE.search(text)
+        or _AGENT_ORCHESTRATION_RE.search(text)
+        or _AGENT_RUN_RE.search(text)
+    )
 
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
