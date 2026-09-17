@@ -500,6 +500,15 @@ Follow-up actions may omit the ID when there is one unambiguous running workflow
 in the same chat. Named loadouts are not workflow IDs; explicit IDs always use
 the `workflow-...` value returned by `start`.
 
+Research branches are required by default. Synthesis starts only after every
+required branch has a completed, evidence-backed handoff. A caller may explicitly
+set `allow_partial_synthesis=true`; that run remains partial and its synthesis is
+instructed to label itself provisional and enumerate missing branches. Workflow
+results separately report launched child runs, completed/incomplete/failed
+research, usable handoffs, failed attempts, and synthesis status. A terminal
+partial result uses exit code 2; a failed/cancelled/timed-out result uses exit
+code 1, while launch/running and fully completed results use 0.
+
 Workers remain normal chats and Workbench runs. Parent/child IDs, models, attached
 tools, actual tool calls, attempts, handoff artifact IDs and synthesis status are
 recorded. Child capacity comes from the parent policy; a limit of one queues the
@@ -511,6 +520,9 @@ Named profiles used with `send_to_session` require a fresh child (`session_id=ne
 ordinary messages to an existing chat keep that chat's own permissions.
 Synthesis receives bounded, explicitly untrusted handoffs, and the parent gets one
 durable report rather than one competing auto-continuation per child.
+Detached workers refresh session-backed credentials before starting and promote
+terminal SSE provider errors into failed worker outcomes. Those failures can use
+the workflow's bounded retry instead of being mistaken for successful empty runs.
 
 Loading `manage_skills` returns `loaded_not_run`; relevant research procedures
 include an executable capability preflight. Batch-loaded skills now promote all

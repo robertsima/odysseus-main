@@ -35,11 +35,15 @@ def test_prose_toolsets_resolve_to_real_tools(monkeypatch):
     import src.tool_policy as tool_policy
 
     monkeypatch.setattr(tool_policy, "known_tool_names",
-                        lambda: {"manage_calendar", "bash", "read_file", "edit_file", "grep"})
+                        lambda: {"manage_calendar", "bash", "read_file", "edit_file", "grep",
+                                 "web_search", "web_fetch", "search_documents"})
     tools, unknown = _skill_declared_tools(
-        [{"requires_toolsets": ["calendar", "git", "File editing", "interpretive dance", "grep"]}], set()
+        [{"requires_toolsets": ["calendar", "git", "File editing", "web search or retrieval",
+                                "search_documents when internal context is relevant",
+                                "interpretive dance", "grep"]}], set()
     )
-    assert {"manage_calendar", "bash", "read_file", "edit_file", "grep"} <= tools
+    assert {"manage_calendar", "bash", "read_file", "edit_file", "grep", "web_search", "web_fetch",
+            "search_documents"} <= tools
     assert unknown == {"interpretive dance"}
 
 

@@ -33,7 +33,7 @@ class OrchestrateAgentsTool:
                 )
                 return {**result, "action": "start", "response": (
                     f"Workflow {result['workflow_id']}: {result['launched_agents']} of "
-                    f"{result['requested_agents']} agents launched; status {result['status']}. "
+                    f"{result['requested_agents']} child runs launched; status {result['status']}. "
                     "Use wait/status to collect actual results; queued or running is not completed."
                 )}
             if action not in {"status", "wait", "cancel"}:

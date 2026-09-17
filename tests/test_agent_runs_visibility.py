@@ -126,6 +126,38 @@ async def test_headless_children_get_the_global_disabled_tools(monkeypatch):
     assert set(seen["disabled_tools"]) == {"bash", "web_fetch"}
 
 
+@pytest.mark.parametrize("frame", [
+    'event: error\ndata: {"status": 401, "text": "credentials expired"}\n\n',
+    'data: {"type": "stream_error", "status": 503, "error": "provider unavailable"}\n\n',
+])
+async def test_headless_promotes_terminal_stream_errors(monkeypatch, frame):
+    async def failed_loop(url, model, messages, **kwargs):
+        yield frame
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", failed_loop)
+    with pytest.raises(headless_agent.HeadlessStreamError) as raised:
+        await headless_agent.run_headless(_Sess(), [], run_id="failed-worker")
+    assert raised.value.status in {401, 503}
+    assert "failed" in str(raised.value).lower()
+    assert "failed-worker" not in headless_agent.running_ids()
+
+
+async def test_headless_refreshes_session_auth_before_streaming(monkeypatch):
+    seen = {}
+    async def healthy_loop(url, model, messages, **kwargs):
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    import routes.chat_helpers as chat_helpers
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", healthy_loop)
+    monkeypatch.setattr(chat_helpers, "resolve_session_auth",
+                        lambda sess, session_id, owner=None: seen.update(
+                            session_id=session_id, owner=owner))
+    await headless_agent.run_headless(_Sess(), [])
+    assert seen == {"session_id": "child", "owner": "alice"}
+
+
 async def test_headless_steer_id_does_not_overwrite_its_wrapper_activity_run(monkeypatch):
     """The dashboard's worker record and the loop's telemetry are distinct.
 

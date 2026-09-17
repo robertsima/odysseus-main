@@ -1379,6 +1379,7 @@ FUNCTION_TOOL_SCHEMAS = [
                             "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only native or mcp__serverId__tool bindings; e.g. web_search, web_fetch and the discovered Bluesky read tools. No posting tools."},
                             "skills": {"type": "array", "items": {"type": "string"}},
                             "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
+                            "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},
                             "max_rounds": {"type": "integer", "minimum": 1, "maximum": 40}
                         }, "required": ["name", "task", "tools"]
                     }},
@@ -1389,6 +1390,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "workflow_id": {"type": "string", "description": "Returned by start; required for status/wait/cancel."},
                     "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+                    "allow_partial_synthesis": {"type": "boolean", "description": "start only. Defaults false. When true, synthesis may run with missing required branches but must label its result provisional and identify the gaps."},
                     "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."}
                 }, "required": ["action"]
             }

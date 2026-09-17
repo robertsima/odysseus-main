@@ -2201,6 +2201,10 @@ _SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
     "workspace file tools": ("get_workspace",) + _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
     "application-log access": ("read_app_logs",),
     "logs": ("read_app_logs",),
+    "web search or retrieval": ("web_search", "web_fetch", "search_documents"),
+    "web research": ("web_search", "web_fetch"),
+    "internal context search": ("search_documents",),
+    "search_documents when internal context is relevant": ("search_documents",),
     # Refusal prose says "capability" where a skill normally says "toolset".
     # Keep the same vocabulary available to targeted self-unblock recovery.
     "delegation": ("orchestrate_agents", "delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
@@ -6981,11 +6985,19 @@ async def stream_agent_loop(
                        and row.get("owner") == owner and row.get("parent_session") == session_id]
         if _saved_rows:
             _saved = max(_saved_rows, key=lambda row: row.get("started_at", 0))
+            _saved_children = _saved.get("children") or []
+            _saved_research = [c for c in _saved_children if c.get("stage") == "research"]
             record_execution(_workflow_receipts, "orchestrate_agents", {
                 "workflow_id": _saved.get("workflow_id"), "status": _saved.get("status"),
-                "requested_agents": len(_saved.get("children") or []),
-                "launched_agents": sum(bool(c.get("run_id")) for c in (_saved.get("children") or [])),
-                "synthesis_status": next((c.get("status") for c in (_saved.get("children") or [])
+                "requested_agents": len(_saved_children),
+                "launched_agents": sum(bool(c.get("run_id")) for c in _saved_children),
+                "research_requested": len(_saved_research),
+                "research_completed": sum(c.get("status") == "completed" for c in _saved_research),
+                "research_failed": sum(c.get("status") in {"failed", "cancelled", "interrupted", "timed_out", "not_started", "stopping"}
+                                       for c in _saved_research),
+                "usable_handoffs": sum(c.get("status") == "completed" and bool(c.get("run_id"))
+                                        for c in _saved_research),
+                "synthesis_status": next((c.get("status") for c in _saved_children
                                           if c.get("stage") == "synthesis"), "not_requested"),
             })
     round_texts = []   # Cleaned text per round for history reload
@@ -7618,7 +7630,7 @@ async def stream_agent_loop(
                     elif data.get("error"):
                         err_msg = data.get("error", "unknown")
                         logger.error(f"Agent round {round_num}: stream error: {err_msg}")
-                        yield f'data: {json.dumps({"delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})}\n\n'
+                        yield f'data: {json.dumps({"type": "stream_error", "error": str(err_msg), "status": data.get("status"), "retryable": bool(data.get("retryable")), "delta": chr(10) + chr(10) + "*[Stream error: " + str(err_msg) + "]*"})}\n\n'
                 except json.JSONDecodeError:
                     if round_num == 1:
                         yield chunk
@@ -8813,7 +8825,8 @@ async def stream_agent_loop(
                 if _outcome_key in result:
                     tool_event[_outcome_key] = result[_outcome_key]
             if block.tool_type == "orchestrate_agents":
-                for _key in ("workflow_id", "requested_agents", "launched_agents", "synthesis_status"):
+                for _key in ("workflow_id", "requested_agents", "launched_agents", "research_requested",
+                             "research_completed", "research_failed", "usable_handoffs", "synthesis_status"):
                     if _key in result:
                         tool_event[_key] = result[_key]
             if result.get("error"):

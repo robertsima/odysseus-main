@@ -169,11 +169,32 @@ async def test_partial_failure_remains_visible_to_synthesis(runtime, monkeypatch
         runtime.observed.append((sess.name, messages, kwargs))
         return "Findings", [{"tool": name, "exit_code": 0} for name in runtime.settings[sess.id]["enabled_tools"]]
     monkeypatch.setattr(headless_agent, "run_headless", headless)
-    result = await start_and_wait()
+    result = await start_and_wait(request(allow_partial_synthesis=True))
     assert result["status"] == "partial" and result["synthesis_status"] == "completed"
     assert result["children"][1]["status"] == "failed"
     assert '"status": "failed"' in runtime.observed[-1][1][-1]["content"]
     assert result["failures"]
+    assert result["exit_code"] == 2 and result["degraded"] is True and result["ok"] is False
+    assert result["research_completed"] == result["usable_handoffs"] == 2
+    assert result["research_failed"] == 1
+    assert "handoff" not in result["children"][1]
+    assert "PARTIAL SYNTHESIS" in runtime.observed[-1][1][-1]["content"]
+
+
+async def test_required_research_failure_blocks_synthesis_by_default(runtime, monkeypatch):
+    from src import headless_agent
+    async def headless(sess, messages, **kwargs):
+        if sess.name == "Competitors":
+            raise RuntimeError("provider failed")
+        return "Findings", [{"tool": name, "exit_code": 0}
+                             for name in runtime.settings[sess.id]["enabled_tools"]]
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    result = await start_and_wait()
+    assert result["status"] == "partial"
+    assert result["synthesis_status"] == "not_started"
+    assert result["exit_code"] == 2
+    synthesis = next(row for row in result["children"] if row["stage"] == "synthesis")
+    assert "Required research did not produce usable evidence" in synthesis["reason"]
 
 
 async def test_optional_retry_is_bounded_and_retains_failed_attempt_trace(runtime, monkeypatch):
@@ -189,6 +210,7 @@ async def test_optional_retry_is_bounded_and_retains_failed_attempt_trace(runtim
     assert result["status"] == "completed"
     assert result["children"][0]["attempt"] == 2
     assert [row["status"] for row in result["children"][0]["attempts"]] == ["failed", "completed"]
+    assert "transient model failure" in result["children"][0]["attempts"][0]["reason"]
     assert counts["Buyers"] == 2
 
 

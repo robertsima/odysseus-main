@@ -285,7 +285,7 @@ async def test_running_workflow_receipt_cannot_be_presented_as_completed(loop_ru
 
     assert len(loop_runtime.executions) == 1
     assert "workflow is not complete" in visible_text(events)
-    assert "workflow-1: running; 3/4 agents launched" in visible_text(events)
+    assert "workflow-1: running; 3/4 child runs launched" in visible_text(events)
     assert "I launched three" not in visible_text(events)
     metrics = next(event["data"] for event in events if event.get("type") == "metrics")
     assert metrics["orchestration"][0]["status"] == "running"

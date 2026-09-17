@@ -31,6 +31,47 @@ _STOP_EVENTS: Dict[str, asyncio.Event] = {}
 _STEER_RUNS: Dict[str, Set[str]] = {}
 
 
+class HeadlessStreamError(RuntimeError):
+    """Terminal upstream stream failure that a detached caller must not lose."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None, retryable: bool = False):
+        self.status = status
+        self.retryable = bool(retryable)
+        prefix = f"Upstream model request failed with HTTP {status}" if status else "Upstream model request failed"
+        super().__init__(f"{prefix}: {str(message or 'unknown error')[:1000]}")
+
+
+def _stream_error(payload: Dict[str, Any]) -> HeadlessStreamError:
+    raw_status = payload.get("status")
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    message = payload.get("text") or payload.get("error") or payload.get("message") or "unknown error"
+    if isinstance(message, (dict, list)):
+        message = json.dumps(message, ensure_ascii=False)
+    return HeadlessStreamError(str(message), status=status, retryable=bool(payload.get("retryable")))
+
+
+def _sse_error_payload(chunk: str) -> Optional[Dict[str, Any]]:
+    """Extract a terminal ``event: error`` frame from an SSE chunk."""
+    event = ""
+    data_lines = []
+    for line in str(chunk or "").splitlines():
+        if line.startswith("event:"):
+            event = line[6:].strip().lower()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+    if event != "error":
+        return None
+    raw = "\n".join(data_lines).strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        payload = {"error": raw or "unknown stream error"}
+    return payload if isinstance(payload, dict) else {"error": str(payload)}
+
+
 def request_stop(run_id: str) -> bool:
     """Ask a running headless run to stop. Returns False if none is running."""
     event = _STOP_EVENTS.get(run_id)
@@ -156,6 +197,16 @@ async def run_headless(
     finished one.
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
+    # Foreground requests refresh session-backed provider credentials in the
+    # chat route. Detached workers bypass that route, so perform the same
+    # request-local refresh before fan-out rather than copying a stale bearer
+    # into every child.
+    try:
+        from routes.chat_helpers import resolve_session_auth
+        await asyncio.to_thread(resolve_session_auth, sess, str(getattr(sess, "id", "")), effective_owner)
+    except Exception:
+        logger.warning("headless provider credential preflight failed for %s",
+                       getattr(sess, "id", "?"), exc_info=True)
     from src.tool_security import owner_baseline_disabled_tools
     try:
         from core.database import get_session_settings
@@ -253,6 +304,19 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         disabled_tools=blocked,
         allow_private=allow_private,
     ):
+        event_error = _sse_error_payload(chunk)
+        if event_error is not None:
+            error = _stream_error(event_error)
+            state["stream_error"] = {
+                "message": str(error), "status": error.status, "retryable": error.retryable,
+            }
+            if activity_session_id:
+                activity.publish(activity_session_id, "status", "Upstream model request failed",
+                                 source=source, run_id=run_id, owner=owner,
+                                 detail=str(error)[:2000],
+                                 data={"status": "failed", "http_status": error.status,
+                                       "retryable": error.retryable}, level="error")
+            raise error
         if not chunk.startswith("data: "):
             continue
         body = chunk[6:].strip()
@@ -264,6 +328,12 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             continue
         if not isinstance(d, dict):
             continue
+        if d.get("type") == "stream_error":
+            error = _stream_error(d)
+            state["stream_error"] = {
+                "message": str(error), "status": error.status, "retryable": error.retryable,
+            }
+            raise error
         if on_event is not None:
             try:
                 await on_event(d)

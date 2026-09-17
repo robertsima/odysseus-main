@@ -665,7 +665,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         from core.models import ChatMessage
 
         outcome: Dict[str, Any] = {}
-        status, text, events = "completed", "", []
+        status, text, events, error_detail = "completed", "", [], ""
         try:
             with agent_runs.track_external(sess.id, source="worker", owner=owner):
                 text, events = await run_headless(
@@ -686,11 +686,14 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             status = "cancelled"
         except Exception as exc:
             status, text = "failed", f"Worker failed: {exc}"
+            error_detail = str(exc)[:2000]
             logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
         try:
             sess.add_message(ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
+            if error_detail:
+                meta["error"] = error_detail
             if events:
                 meta["tool_events"] = events
             sess.add_message(ChatMessage("assistant", text or "(no reply)", meta))
@@ -699,7 +702,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             logger.debug("worker persist failed", exc_info=True)
         activity.run_finished(sess.id, "session", run_id,
                               f"Worker · {label}{sess.name} {status}", status=status, owner=owner,
-                              data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400]})
+                              data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400],
+                                    **({"error": error_detail} if error_detail else {})})
         if parent_session:
             activity.publish(parent_session, "message", f"← worker {sess.name}: {text[:160]}", source="session",
                              run_id=run_id, owner=owner, detail=text[:2000],
@@ -776,6 +780,8 @@ def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Opti
                 # durable child chat. Only an exact message run-id match can
                 # recover its artifact and terminal status after eviction.
                 result["status"] = meta.get("status") or "unknown"
+            if meta.get("error"):
+                result["error"] = str(meta["error"])[:2000]
             text = str(message.get("content") or "")
             result["result"] = "" if text == "(no reply)" else text[:20000]
             result["result_truncated"] = len(text) > 20000
