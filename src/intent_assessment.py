@@ -165,6 +165,64 @@ _METHOD_CAPABILITY_RE = re.compile(
     r"(?:(?:mcp|native|built[ -]?in)\s+)?(?:tools?|capabilit(?:y|ies)|functions?)\b",
     re.I,
 )
+_UNRESOLVED_ASSISTANT_RE = re.compile(
+    r"\b(?:can(?:not|'t)|unable|could(?: not|n't)|do(?: not|n't) have|no access)\b|"
+    r"\b(?:need(?: the| a| your)?|provide|send|share|give me|which|what)\b"
+    r"[^.!?\n]{0,50}\b(?:url|link|path|folder|director(?:y|ies)|repo(?:sitory)?|slug|target)\b",
+    re.I,
+)
+_LOCATOR_ONLY_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:"
+    r"https?://[^\s]+|"
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|"
+    r"(?:[A-Za-z]:[\\/]|/)[^\r\n]+?"
+    r")(?:\s+please)?\s*[.!?]*\s*$",
+    re.I,
+)
+_LOCATOR_PRIOR_ACTION_RE = re.compile(
+    r"\b(?:git\s+)?(?:pull|fetch|clone|checkout|rebase)\b",
+    re.I,
+)
+
+
+def _locator_grounding_continuation(
+    messages: Sequence[Mapping[str, Any]], text: str
+) -> bool:
+    """Recognize a locator supplied to unblock the immediately prior task.
+
+    A bare URL normally means "open this page", so it is not intrinsically a
+    continuation.  It inherits context only for the narrow conversational
+    shape where an assistant has just left an actionable human request
+    unresolved.  Runtime envelopes and tool output cannot satisfy either side
+    of that shape.
+    """
+    if not _LOCATOR_ONLY_RE.fullmatch(str(text or "").strip()):
+        return False
+
+    latest_human_index = next(
+        (i for i in range(len(messages) - 1, -1, -1)
+         if human_user_text(messages[i]) is not None),
+        None,
+    )
+    if latest_human_index is None:
+        return False
+
+    assistant_index = latest_human_index - 1
+    if assistant_index < 0 or messages[assistant_index].get("role") != "assistant":
+        return False
+    assistant_text = plain_text(messages[assistant_index].get("content", "")).strip()
+    if not assistant_text or not _UNRESOLVED_ASSISTANT_RE.search(assistant_text):
+        return False
+
+    prior_human = next(
+        (human_user_text(messages[i]) for i in range(assistant_index - 1, -1, -1)
+         if human_user_text(messages[i]) is not None),
+        None,
+    )
+    return bool(
+        prior_human
+        and (looks_like_request(prior_human) or _LOCATOR_PRIOR_ACTION_RE.search(prior_human))
+    )
 
 
 def is_contextual_reference(messages: Sequence[Mapping[str, Any]], text: str) -> bool:
@@ -235,6 +293,7 @@ def assess_request(messages: Sequence[Mapping[str, Any]], latest_text: Optional[
         or is_retry_continuation(messages, text)
         or is_work_continuation(messages, text)
         or is_contextual_reference(messages, text)
+        or _locator_grounding_continuation(messages, text)
     )
     domain_set = frozenset(domains)
     retrieval_query = recent_human_context(messages) if continuation else text

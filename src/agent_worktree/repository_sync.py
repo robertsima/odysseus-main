@@ -1,0 +1,759 @@
+"""Narrow, non-shell Git status/fetch/fast-forward service.
+
+This deliberately supports only ordinary physical GitHub HTTPS checkouts.  It
+never runs Git, hooks, credential helpers, filters, merges, or submodules.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import stat
+import json
+import unicodedata
+import uuid
+from typing import Any, Callable
+from pathlib import Path
+from urllib.parse import urlparse, urlunparse
+
+from dulwich.client import get_transport_and_path_from_url
+from dulwich.diff_tree import tree_changes
+from dulwich.index import (
+    update_working_tree,
+    validate_path_element_default,
+    validate_path_element_hfs,
+    validate_path_element_ntfs,
+)
+from dulwich.ignore import IgnoreFilterManager
+from dulwich.objects import Commit
+from dulwich.objects import S_ISGITLINK
+from dulwich.object_store import iter_commit_contents
+from dulwich.porcelain import get_tree_changes, get_unstaged_changes
+from dulwich.repo import Repo
+
+from src.agent_tools.claude_code_tools import repository_roots
+from src.constants import DATA_DIR, PERSONAL_DIR
+from src.rag_sensitivity import vault_root
+
+import urllib3
+
+_LOCKS: dict[str, asyncio.Lock] = {}
+_SCP_GITHUB = re.compile(
+    r"^git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)$"
+)
+
+
+class RepositorySyncError(RuntimeError):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+
+    def as_dict(self):
+        return {"ok": False, "code": self.code, "error": str(self)}
+
+
+def _fail(code, message):
+    raise RepositorySyncError(code, message)
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_path(raw) -> Path:
+    if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
+        _fail("invalid_path", "repository is required")
+    given = Path(raw).expanduser()
+    if not given.is_absolute():
+        _fail("invalid_path", "repository must be an absolute path")
+    absolute = Path(os.path.abspath(given))
+    roots = tuple(r.resolve(strict=False) for r in repository_roots())
+    lexical_root = next((root for root in roots if _inside(absolute, root)), None)
+    if lexical_root is None:
+        _fail("outside_roots", "repository is outside configured repository roots")
+    cursor = lexical_root
+    for part in absolute.relative_to(lexical_root).parts:
+        cursor /= part
+        if cursor.is_symlink() or (
+            hasattr(os.path, "isjunction") and os.path.isjunction(cursor)
+        ):
+            _fail(
+                "symlink_path", "repository paths may not contain symlinks or junctions"
+            )
+    try:
+        resolved = absolute.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        _fail("invalid_path", "repository path does not exist or cannot be inspected")
+    if not _inside(resolved, lexical_root):
+        _fail("outside_roots", "repository resolves outside its configured root")
+    personal = Path(PERSONAL_DIR).resolve(strict=False)
+    configured_vault = Path(vault_root()).expanduser().resolve(strict=False)
+    if (
+        resolved == Path(DATA_DIR).resolve(strict=False)
+        or _inside(resolved, personal)
+        or resolved == configured_vault
+        or _inside(resolved, configured_vault)
+    ):
+        _fail("private_path", "data, vault, and private paths cannot be synchronized")
+    gitdir = resolved / ".git"
+    if not gitdir.is_dir():
+        _fail(
+            "unsupported_checkout",
+            "only physical checkouts with a .git directory are supported",
+        )
+    if gitdir.is_symlink() or (
+        hasattr(os.path, "isjunction") and os.path.isjunction(gitdir)
+    ):
+        _fail("unsafe_metadata", "linked Git metadata is not supported")
+    for item in (
+        gitdir / "config",
+        gitdir / "HEAD",
+        gitdir / "index",
+        gitdir / "refs",
+        gitdir / "packed-refs",
+        gitdir / "objects",
+    ):
+        if item.is_symlink():
+            _fail("unsafe_metadata", "symlinked Git metadata is not supported")
+    for base, dirs, files in os.walk(gitdir, followlinks=False):
+        for name in [*dirs, *files]:
+            item = Path(base) / name
+            if item.is_symlink() or (
+                hasattr(os.path, "isjunction") and os.path.isjunction(item)
+            ):
+                _fail(
+                    "unsafe_metadata",
+                    "symlinked or junction Git metadata is not supported",
+                )
+            if (
+                item.is_file()
+                and not _inside(item, gitdir / "objects")
+                and item.stat().st_nlink > 1
+            ):
+                _fail(
+                    "unsafe_metadata",
+                    "hard-linked mutable Git metadata is not supported",
+                )
+    if (gitdir / "objects" / "info" / "alternates").exists():
+        _fail("unsafe_metadata", "Git object alternates are not supported")
+    if (gitdir / "commondir").exists() or (gitdir / "config.worktree").exists():
+        _fail("unsafe_metadata", "shared or redirected Git metadata is not supported")
+    if (gitdir / "info" / "sparse-checkout").exists():
+        _fail("unsafe_metadata", "sparse checkout is not supported")
+    cfg = (gitdir / "config").read_text("utf-8", errors="replace")
+    lowered = cfg.casefold()
+    if (
+        re.search(r"\[\s*include(?:if)?\b", lowered)
+        or "hookspath" in lowered
+        or re.search(r"\[\s*filter\s", lowered)
+        or re.search(
+            r"^\s*(?:worktree|sparsecheckout(?:cone)?|sparseindex)\s*=",
+            lowered,
+            re.MULTILINE,
+        )
+    ):
+        _fail(
+            "unsafe_config",
+            "includes, alternate worktrees, sparse checkout, hooks, and filters are not supported",
+        )
+    return resolved
+
+
+def _branch_upstream(repo: Repo):
+    raw = repo.refs.read_ref(b"HEAD")
+    if not raw or not raw.startswith(b"ref: refs/heads/"):
+        _fail("detached_head", "checkout must be on an attached branch")
+    local_ref = raw[5:]
+    branch = local_ref[len(b"refs/heads/") :]
+    cfg = repo.get_config()
+    try:
+        remote = cfg.get((b"branch", branch), b"remote")
+        merge_ref = cfg.get((b"branch", branch), b"merge")
+        remote_url = cfg.get((b"remote", remote), b"url").decode()
+    except KeyError:
+        _fail("missing_upstream", "current branch has no configured upstream")
+    if not merge_ref.startswith(b"refs/heads/"):
+        _fail("invalid_upstream", "upstream must be a branch ref")
+    return local_ref, branch.decode(), remote.decode(), merge_ref, remote_url
+
+
+def _https_url(raw: str) -> str:
+    m = _SCP_GITHUB.fullmatch(raw.strip())
+    if m:
+        raw = "https://github.com/" + m.group(1)
+    p = urlparse(raw)
+    if (
+        p.scheme != "https"
+        or (p.hostname or "").casefold() != "github.com"
+        or p.username
+        or p.password
+        or p.query
+        or p.fragment
+        or p.port not in (None, 443)
+    ):
+        _fail(
+            "unsupported_remote",
+            "only credential-free https://github.com remotes are supported",
+        )
+    if not re.fullmatch(r"/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", p.path):
+        _fail("unsupported_remote", "GitHub remote path must be owner/repository")
+    owner, repository = p.path.strip("/").split("/", 1)
+    repository = repository[:-4] if repository.endswith(".git") else repository
+    if owner in {".", ".."} or repository in {".", ".."}:
+        _fail(
+            "unsupported_remote", "GitHub owner and repository names must be explicit"
+        )
+    return urlunparse(("https", "github.com", p.path, "", "", ""))
+
+
+def _status(repo: Repo):
+    index = repo.open_index(config=repo.get_config())
+    if getattr(index, "is_sparse", lambda: False)():
+        _fail("unsupported_sparse_checkout", "sparse indexes are not supported")
+    if len(index) > 100_000:
+        _fail("worktree_too_large", "repository index is too large to inspect safely")
+    tracked = {os.fsdecode(path).replace("/", os.sep) for path in index}
+    for raw in index:
+        relative = os.fsdecode(raw).replace("/", os.sep)
+        parts = raw.replace(b"\\", b"/").split(b"/")
+        _validate_raw_parts(parts)
+        target = Path(repo.path) / relative
+        cursor = Path(repo.path)
+        for part in Path(relative).parts[:-1]:
+            cursor /= part
+            if cursor.exists() and (
+                cursor.is_symlink()
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(cursor))
+            ):
+                _fail(
+                    "unsafe_worktree",
+                    "tracked paths may not traverse linked directories",
+                )
+        if target.exists() and (
+            target.is_symlink()
+            or (hasattr(os.path, "isjunction") and os.path.isjunction(target))
+            or (target.is_file() and target.stat().st_nlink > 1)
+        ):
+            _fail("unsafe_worktree", "tracked worktree paths may not be linked")
+    staged_map = get_tree_changes(repo, index)
+    staged = sorted(os.fsdecode(p) for values in staged_map.values() for p in values)
+    unstaged = sorted(
+        os.fsdecode(p) for p in get_unstaged_changes(index, repo.path, None)
+    )
+    untracked = []
+    # IgnoreFilterManager lazily reads repository .gitignore files. Validate
+    # every possible input before constructing it so ignores cannot be links
+    # to content outside the checkout.
+    ignore_count = 0
+    for base, dirs, files in os.walk(repo.path, followlinks=False):
+        for name in dirs:
+            candidate = Path(base) / name
+            if name != ".git" and (
+                candidate.is_symlink()
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(candidate))
+            ):
+                _fail("unsafe_worktree", "worktree directories may not be linked")
+        dirs[:] = [name for name in dirs if name != ".git"]
+        if ".gitignore" in files:
+            ignore_count += 1
+            ignore_file = Path(base) / ".gitignore"
+            info = ignore_file.lstat()
+            if (
+                ignore_count > 1000
+                or info.st_size > 1024 * 1024
+                or info.st_nlink > 1
+                or stat.S_ISLNK(info.st_mode)
+            ):
+                _fail(
+                    "unsafe_ignore",
+                    "repository ignore files must be bounded regular files",
+                )
+    ignores = IgnoreFilterManager(
+        repo.path, global_filters=[], ignorecase=os.name == "nt"
+    )
+    visited = 0
+    for base, dirs, files in os.walk(repo.path, followlinks=False):
+        for name in dirs:
+            candidate = Path(base) / name
+            if name != ".git" and (
+                candidate.is_symlink()
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(candidate))
+            ):
+                _fail("unsafe_worktree", "worktree directories may not be linked")
+        kept_dirs = []
+        for name in dirs:
+            if name == ".git":
+                continue
+            relative_dir = (
+                os.path.relpath(os.path.join(base, name), repo.path).replace(
+                    os.sep, "/"
+                )
+                + "/"
+            )
+            if not ignores.is_ignored(relative_dir):
+                kept_dirs.append(name)
+        dirs[:] = kept_dirs
+        for name in files:
+            relative = os.path.relpath(os.path.join(base, name), repo.path)
+            visited += 1
+            if visited > 100_000:
+                _fail(
+                    "worktree_too_large", "working tree is too large to inspect safely"
+                )
+            portable = relative.replace(os.sep, "/")
+            if relative not in tracked and not ignores.is_ignored(portable):
+                untracked.append(portable)
+            if len(untracked) > 10_000:
+                _fail(
+                    "worktree_too_large",
+                    "working tree has too many untracked files to inspect safely",
+                )
+    untracked.sort()
+    return {
+        "staged": staged,
+        "unstaged": unstaged,
+        "untracked": untracked,
+        "clean": not (staged or unstaged or untracked),
+    }
+
+
+def _validate_tree(repo: Repo, commit_id: bytes) -> None:
+    seen = set()
+    for entry in iter_commit_contents(repo.object_store, commit_id):
+        parts = entry.path.replace(b"\\", b"/").split(b"/")
+        _validate_raw_parts(parts)
+        portable = "/".join(
+            unicodedata.normalize("NFC", os.fsdecode(p)).casefold().rstrip(". ")
+            for p in parts
+        )
+        if portable in seen:
+            _fail("unsafe_tree_path", "repository contains colliding portable paths")
+        seen.add(portable)
+        if S_ISGITLINK(entry.mode):
+            _fail(
+                "unsupported_submodule",
+                "repositories containing submodules are not supported",
+            )
+        if stat.S_ISLNK(entry.mode):
+            _fail("unsafe_tree", "repositories containing symlinks are not supported")
+        if entry.path == b".gitattributes" or entry.path.endswith(b"/.gitattributes"):
+            data = repo[entry.sha].data
+            if re.search(
+                rb"(?:^|\s)(?:filter|diff|merge)\s*=",
+                data,
+                re.MULTILINE | re.IGNORECASE,
+            ):
+                _fail(
+                    "unsafe_attributes",
+                    "Git attributes that invoke filters or drivers are not supported",
+                )
+
+
+def _status_sync(path):
+    path = _validate_path(path)
+    with Repo(str(path)) as repo:
+        raw_head = repo.refs.read_ref(b"HEAD")
+        if not raw_head or not raw_head.startswith(b"ref: refs/heads/"):
+            _fail("detached_head", "checkout must be on an attached branch")
+        local_ref = raw_head[5:]
+        branch = local_ref[len(b"refs/heads/") :].decode()
+        _validate_tree(repo, repo.refs[local_ref])
+        result = {
+            "ok": True,
+            "repository": str(path),
+            "branch": branch,
+            "remote": None,
+            "remote_url": None,
+            "upstream": None,
+            "head": repo.refs[local_ref].decode(),
+            "dirty": _status(repo),
+        }
+        try:
+            _, _, remote, merge_ref, remote_url = _branch_upstream(repo)
+            result.update(
+                remote=remote,
+                remote_url=_https_url(remote_url),
+                upstream=merge_ref.decode(),
+            )
+        except RepositorySyncError as exc:
+            if exc.code != "missing_upstream":
+                raise
+        return result
+
+
+async def list_repositories():
+    def scan():
+        out = []
+        for root in repository_roots():
+            candidates = (
+                [root, *(p for p in root.iterdir() if p.is_dir())]
+                if root.is_dir()
+                else []
+            )
+            for candidate in candidates[: 100 - len(out)]:
+                marker = candidate / ".git"
+                if not marker.exists():
+                    continue
+                try:
+                    out.append(_status_sync(candidate))
+                except RepositorySyncError as exc:
+                    out.append({"repository": str(candidate), **exc.as_dict()})
+                except Exception:
+                    out.append(
+                        {
+                            "repository": str(candidate),
+                            "ok": False,
+                            "code": "invalid_repository",
+                            "error": "repository could not be inspected safely",
+                        }
+                    )
+        return out[:100]
+
+    return await asyncio.to_thread(scan)
+
+
+async def repository_status(repository):
+    try:
+        return await asyncio.to_thread(_status_sync, repository)
+    except RepositorySyncError:
+        raise
+    except Exception:
+        raise RepositorySyncError(
+            "invalid_repository", "repository could not be inspected safely"
+        ) from None
+
+
+async def run_repository_operation(repository, callback: Callable[[Path], Any]) -> Any:
+    """Run one validated repository operation under its canonical lock.
+
+    Cancellation is delivered only after the non-cancellable worker thread
+    exits, so a second operation can never overlap a cancelled caller's work.
+    """
+    try:
+        path = await asyncio.to_thread(_validate_path, repository)
+    except RepositorySyncError:
+        raise
+    except Exception:
+        raise RepositorySyncError(
+            "invalid_repository", "repository could not be inspected safely"
+        ) from None
+    lock = _LOCKS.setdefault(os.path.normcase(str(path)), asyncio.Lock())
+    async with lock:
+        worker = asyncio.create_task(asyncio.to_thread(callback, path))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            try:
+                await worker
+            finally:
+                raise
+
+
+class _NoRedirectPool(urllib3.PoolManager):
+    """HTTP pool that never follows redirects (especially with credentials)."""
+
+    def request(self, method, url, *args, **kwargs):
+        kwargs["redirect"] = False
+        return super().request(method, url, *args, **kwargs)
+
+
+def _http_pool():
+    return _NoRedirectPool(
+        timeout=urllib3.Timeout(connect=10.0, read=60.0),
+        retries=urllib3.Retry(
+            total=0, connect=0, read=0, redirect=0, raise_on_redirect=True
+        ),
+        cert_reqs="CERT_REQUIRED",
+    )
+
+
+def _safe_changes(path: Path, changes) -> None:
+    """Reject writes through existing parent links immediately before checkout."""
+    for change in changes:
+        for side in (change.old, change.new):
+            if side is None:
+                continue
+            rel = Path(os.fsdecode(side.path))
+            if rel.is_absolute() or ".." in rel.parts or ".git" in rel.parts:
+                _fail("unsafe_tree_path", "upstream contains an unsafe path")
+            raw_parts = side.path.replace(b"\\", b"/").split(b"/")
+            _validate_raw_parts(raw_parts)
+            cursor = path
+            for part in rel.parts[:-1]:
+                cursor /= part
+                if cursor.exists() and (
+                    cursor.is_symlink()
+                    or (hasattr(os.path, "isjunction") and os.path.isjunction(cursor))
+                ):
+                    _fail(
+                        "unsafe_worktree", "working tree contains a linked parent path"
+                    )
+            target = path / rel
+            if change.old is None and side is change.new and os.path.lexists(target):
+                _fail(
+                    "untracked_collision",
+                    "upstream path collides with an existing untracked path",
+                )
+            if os.path.lexists(target) and (
+                target.is_symlink()
+                or (hasattr(os.path, "isjunction") and os.path.isjunction(target))
+                or (target.is_file() and target.stat().st_nlink > 1)
+            ):
+                _fail("unsafe_worktree", "working tree contains a linked update target")
+
+
+def _validate_raw_parts(raw_parts) -> None:
+    if not raw_parts or any(
+        not part
+        or not validate_path_element_default(part)
+        or not validate_path_element_hfs(part)
+        or not validate_path_element_ntfs(part)
+        or os.fsdecode(part).endswith((".", " "))
+        for part in raw_parts
+    ):
+        _fail("unsafe_tree_path", "repository contains a platform-unsafe path")
+
+
+def checkout_commit(
+    path: Path,
+    repo: Repo,
+    old_id: bytes,
+    new_id: bytes,
+    *,
+    update_ref: bytes | None = None,
+    new_symbolic_head: bytes | None = None,
+) -> None:
+    """Safely materialize a commit, with bounded rollback and CAS ref update."""
+    old_commit, new_commit = repo[old_id], repo[new_id]
+    if not isinstance(old_commit, Commit) or not isinstance(new_commit, Commit):
+        _fail("invalid_commit", "checkout targets must be commits")
+    _validate_tree(repo, new_id)
+    changes = list(tree_changes(repo.object_store, old_commit.tree, new_commit.tree))
+    if len(changes) > 1000:
+        _fail(
+            "update_too_large",
+            "update changes too many paths for a transactional checkout",
+        )
+    _safe_changes(path, changes)
+    snapshots, expected, total = {}, {}, 0
+    expected_total = 0
+    for change in changes:
+        for side in (change.old, change.new):
+            if side is None:
+                continue
+            target = path / os.fsdecode(side.path)
+            if (
+                target not in expected
+                and change.new is not None
+                and side.path == change.new.path
+                and stat.S_ISREG(change.new.mode)
+            ):
+                expected_total += repo[change.new.sha].raw_length()
+                if expected_total > 64 * 1024 * 1024:
+                    _fail(
+                        "update_too_large",
+                        "update content is too large for a transactional checkout",
+                    )
+                expected[target] = repo[change.new.sha].data
+            if target in snapshots:
+                continue
+            if target.is_file():
+                info = target.stat()
+                if total + info.st_size > 64 * 1024 * 1024:
+                    _fail(
+                        "update_too_large",
+                        "update is too large for a transactional checkout",
+                    )
+                data = target.read_bytes()
+                total += len(data)
+                if len(snapshots) >= 1000 or total > 64 * 1024 * 1024:
+                    _fail(
+                        "update_too_large",
+                        "update is too large for a transactional checkout",
+                    )
+                snapshots[target] = (
+                    data,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_atime_ns,
+                    info.st_mtime_ns,
+                )
+            else:
+                snapshots[target] = None
+    index_path = path / ".git" / "index"
+    index_snapshot = index_path.read_bytes() if index_path.exists() else None
+    original_head = repo.refs.read_ref(b"HEAD")
+    if new_symbolic_head is not None:
+        try:
+            if repo.refs[new_symbolic_head] != new_id:
+                _fail("changed_during_update", "target branch changed before checkout")
+        except KeyError:
+            _fail("changed_during_update", "target branch disappeared before checkout")
+    if update_ref is not None and not repo.refs.set_if_equals(
+        update_ref, old_id, old_id
+    ):
+        _fail("changed_during_update", "branch changed during checkout")
+    try:
+        update_working_tree(
+            repo,
+            old_commit.tree,
+            new_commit.tree,
+            change_iterator=iter(changes),
+            blob_normalizer=None,
+            allow_overwrite_modified=False,
+            config=repo.get_config(),
+        )
+        if update_ref is not None and not repo.refs.set_if_equals(
+            update_ref, old_id, new_id
+        ):
+            _fail("changed_during_update", "branch changed during checkout")
+        if new_symbolic_head is not None:
+            if (
+                repo.refs.read_ref(b"HEAD") != original_head
+                or repo.refs[new_symbolic_head] != new_id
+            ):
+                _fail("changed_during_update", "branch state changed during checkout")
+            repo.refs.set_symbolic_ref(b"HEAD", new_symbolic_head)
+    except Exception:
+        current_index = index_path.read_bytes() if index_path.exists() else None
+        refs_unchanged = repo.refs.read_ref(b"HEAD") == original_head
+        if update_ref is not None:
+            try:
+                current_update_ref = repo.refs[update_ref]
+            except KeyError:
+                current_update_ref = None
+            refs_unchanged = refs_unchanged and current_update_ref in {old_id, new_id}
+        safe_to_restore = (
+            all(
+                (target.read_bytes() if target.is_file() else None)
+                in (snapshot[0] if snapshot is not None else None, expected.get(target))
+                for target, snapshot in snapshots.items()
+            )
+            and current_index == index_snapshot
+            and refs_unchanged
+        )
+        if not safe_to_restore:
+            recovery = path / ".git" / "odysseus-recovery" / uuid.uuid4().hex
+            recovery.mkdir(parents=True)
+            manifest = []
+            for target, snapshot in snapshots.items():
+                relative = target.relative_to(path)
+                manifest.append(
+                    {"path": relative.as_posix(), "existed": snapshot is not None}
+                )
+                if snapshot is not None:
+                    backup = recovery / "files" / relative
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    backup.write_bytes(snapshot[0])
+            if index_snapshot is not None:
+                (recovery / "index").write_bytes(index_snapshot)
+            (recovery / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            raise RepositorySyncError(
+                "recovery_required",
+                f"checkout stopped after concurrent or unexpected changes; recovery backup: {recovery}",
+            ) from None
+        for target, snapshot in snapshots.items():
+            if snapshot is None:
+                if target.is_file():
+                    target.unlink()
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(snapshot[0])
+                os.chmod(target, snapshot[1])
+                os.utime(target, ns=(snapshot[2], snapshot[3]))
+        if index_snapshot is None:
+            if index_path.exists():
+                index_path.unlink()
+        else:
+            index_path.write_bytes(index_snapshot)
+        if update_ref is not None:
+            repo.refs.set_if_equals(update_ref, new_id, old_id)
+        raise RepositorySyncError(
+            "checkout_failed", "checkout failed; prior checkout was restored"
+        ) from None
+
+
+def _pull_sync(repository, token=None):
+    path = _validate_path(repository)
+    with Repo(str(path)) as repo:
+        local_ref, branch, remote, merge_ref, raw_url = _branch_upstream(repo)
+        url = _https_url(raw_url)
+        dirty = _status(repo)
+        if not dirty["clean"]:
+            _fail("dirty_tree", "working tree must be completely clean before pull")
+        before = repo.refs[local_ref]
+        _validate_tree(repo, before)
+        client, remote_path = get_transport_and_path_from_url(
+            url,
+            config=None,
+            username="x-access-token" if token else None,
+            password=token,
+            pool_manager=_http_pool(),
+        )
+
+        def wants(refs, depth=None):
+            if merge_ref not in refs:
+                _fail(
+                    "missing_remote_branch", "configured upstream branch was not found"
+                )
+            return [] if refs[merge_ref] in repo.object_store else [refs[merge_ref]]
+
+        try:
+            result = client.fetch(remote_path.encode(), repo, determine_wants=wants)
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        after = result.refs.get(merge_ref)
+        if not after:
+            _fail("missing_remote_branch", "configured upstream branch was not found")
+        if after == before:
+            return {
+                **_status_sync(path),
+                "before": before.decode(),
+                "after": after.decode(),
+                "updated": False,
+            }
+        if (
+            not repo.object_store.contains_loose(after)
+            and after not in repo.object_store
+        ):
+            _fail("fetch_failed", "upstream commit was not fetched")
+        from dulwich.graph import can_fast_forward
+
+        if not can_fast_forward(repo, before, after):
+            _fail(
+                "diverged",
+                "local and upstream branches have diverged; refusing to merge",
+            )
+        _validate_tree(repo, after)
+        if not _status(repo)["clean"] or repo.refs[local_ref] != before:
+            _fail("changed_during_fetch", "repository changed during fetch")
+        checkout_commit(path, repo, before, after, update_ref=local_ref)
+        upstream_suffix = merge_ref[len(b"refs/heads/") :]
+        repo.refs[b"refs/remotes/" + remote.encode() + b"/" + upstream_suffix] = after
+        return {
+            **_status_sync(path),
+            "before": before.decode(),
+            "after": after.decode(),
+            "updated": True,
+        }
+
+
+async def pull_repository(repository, token=None):
+    try:
+        return await run_repository_operation(
+            repository, lambda path: _pull_sync(path, token)
+        )
+    except RepositorySyncError:
+        raise
+    except Exception:
+        raise RepositorySyncError(
+            "sync_failed", "repository synchronization failed safely"
+        ) from None

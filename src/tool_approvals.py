@@ -81,11 +81,36 @@ def normalize_mode(value: Optional[str]) -> str:
 
 def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
     """Why this call needs approval under ``mode``, or None to let it run."""
+    if tool == "manage_git":
+        try:
+            action = str(json.loads(content).get("action", "repositories")).strip().lower()
+        except (ValueError, TypeError, AttributeError):
+            return "contains an invalid Git request"
+        # Repository publication/history changes always require an exact-call
+        # confirmation, including chats otherwise configured for automatic tools.
+        mandatory = {
+            "push": "publishes the displayed commit to GitHub",
+            "merge": "merges the displayed revision into the current branch (fast-forward only)",
+            "delete_branch": "deletes the displayed local branch",
+        }
+        if action in mandatory:
+            return mandatory[action]
+        if action in {"repositories", "status", "log", "diff", "branches", "remotes"}:
+            return None
     mode = normalize_mode(mode)
     if mode == "auto":
         return None
     tool = str(tool or "")
     text = str(content or "")
+    if tool == "manage_agent_worktree":
+        try:
+            action = str(json.loads(text).get("action", "status")).strip().lower()
+        except (ValueError, TypeError, AttributeError):
+            action = ""
+        if action in {"repo_list", "repo_status"}:
+            return None
+        if action == "repo_pull":
+            return "fast-forwards local repository files from their configured upstream"
     if tool == "orchestrate_agents":
         try:
             action = json.loads(text).get("action", "status")
@@ -111,7 +136,13 @@ def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
 
 
 def _key(tool: str, content: str) -> str:
-    normalized = " ".join(str(content or "").split())
+    if tool == "manage_git":
+        try:
+            normalized = json.dumps(json.loads(content), sort_keys=True, separators=(",", ":"))
+        except (ValueError, TypeError):
+            normalized = str(content or "")
+    else:
+        normalized = " ".join(str(content or "").split())
     return hashlib.sha256(f"{tool}\x00{normalized}".encode("utf-8", "replace")).hexdigest()[:32]
 
 
@@ -159,6 +190,10 @@ def decide(session_id: str, pid: str, decision: str) -> Optional[dict]:
         return None
     if decision not in ("once", "always", "deny"):
         raise ValueError("decision must be once, always or deny")
+    if rec["tool"] == "manage_git" and decision == "always":
+        # This tool mixes inspection with publication. A broad tool-wide grant
+        # must not authorize future pushes or different commit/ref targets.
+        decision = "once"
     rec["decision"] = decision
     grants = _GRANTS.setdefault(session_id, {"once": {}, "tools": set()})
     if decision == "once":
@@ -182,6 +217,19 @@ def consume_grant(session_id: str, tool: str, content: str) -> bool:
         grants["once"].pop(key, None)
         return True
     return False
+
+
+def has_once_grant(session_id: str, tool: str, content: str) -> bool:
+    grants = _GRANTS.get(session_id or "") or {}
+    return (grants.get("once") or {}).get(_key(tool, content), 0) >= time.time()
+
+
+def consume_once_grant(session_id: str, tool: str, content: str) -> bool:
+    """Exact one-use confirmation; never accepts a tool-wide 'always' grant."""
+    if not has_once_grant(session_id, tool, content):
+        return False
+    _GRANTS[session_id]["once"].pop(_key(tool, content), None)
+    return True
 
 
 def chat_grants(session_id: str) -> list:

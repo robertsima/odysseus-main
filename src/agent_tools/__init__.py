@@ -24,6 +24,7 @@ from .coding_tools import TodoWriteTool
 from .claude_code_tools import ClaudeCodeTool
 from .delegation_tools import DelegationTool
 from .worktree_tools import AgentWorktreeTool, ReadAppLogsTool
+from .git_tools import GitTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
@@ -49,6 +50,7 @@ TOOL_HANDLERS = {
     "apply_patch": ApplyPatchTool().execute,
     "todowrite": TodoWriteTool().execute,
     "manage_agent_worktree": AgentWorktreeTool().execute,
+    "manage_git": GitTool().execute,
     "read_app_logs": ReadAppLogsTool().execute,
     "ls": LsTool().execute,
     "glob": GlobTool().execute,

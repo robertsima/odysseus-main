@@ -1,5 +1,68 @@
 # Agent worktree and gated publishing
 
+## Updating an existing checkout (scoped Git)
+
+`manage_git` supports ordinary Git workflows, separate from Odysseus's own
+publishing worktree. Use `repositories` first; then supply the returned absolute
+`repository` path. Roots come from **Settings → Claude Code repository roots**
+(`claude_code_repository_roots` / `CLAUDE_CODE_REPOSITORY_ROOTS`), defaulting to
+`/app/data/development` and `/app/data/agent_worktrees` in the container.
+
+| Workflow | Actions | Safeguard |
+| --- | --- | --- |
+| Inspect | `repositories`, `status`, `diff`, `log`, `branches`, `remotes` | Read-only, bounded output |
+| Prepare changes | `stage`, `unstage`, `commit` | Explicit relative file paths; local/supplied author identity; no amend |
+| Local branches | `branch`, `tag`, `switch` | No ref overwrite; switching requires a clean checkout |
+| Synchronize | `fetch`, `pull`, `set_upstream` | Configured GitHub remotes only; pull is fast-forward only; upstream binding cannot replace an existing one |
+| Publish/integrate | `push`, `merge`, `delete_branch` | Fresh exact-call human confirmation; no force; merge is fast-forward only; only fully merged, noncurrent local branches may be deleted |
+
+For a new local branch, make an explicit first push to `remote_branch`, then
+use `set_upstream` to bind that already-fetched/pushed branch. An existing
+upstream is never silently changed. A URL in chat identifies a repository;
+it does not override its configured remote. Dirty/diverged checkouts require
+an operator decision, not an automatic reset or stash.
+
+This admin-only tool uses pinned Dulwich directly, not a shell or external Git
+process. It does **not** require private-vault reads. Existing tool bindings,
+disables and plan mode remain binding. Routine changes run directly in `auto`;
+`ask_all` can require confirmation for them too. Push, merge and branch deletion
+**always** require a single-use confirmation, even in `auto`. An “always” UI
+choice is intentionally reduced to one use for this mixed-capability tool.
+Confirmations include `expected_head`, plus `expected_target` for merge/deletion;
+stale commit IDs refuse the operation. The tool is withheld entirely in plan
+mode because it also exposes write actions.
+
+The initial supported scope is ordinary physical checkouts with a `.git`
+directory; network operations require a configured `https://github.com/owner/repo`
+remote. Standard
+`git@github.com:owner/repo.git` URLs are normalized in memory; saved config is
+unchanged. Linked worktrees, vault directories, symlinks, submodules,
+filter-dependent checkouts and other remote hosts are refused. This is **not**
+a general Git/test sandbox. It does not execute hooks or credential helpers.
+Clone/init, stash, reset, rebase, force-push, remote deletion and conflict-resolving
+merges are not yet exposed; they cannot be smuggled through arbitrary arguments.
+
+Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
+current chat permits the `github_read` integration; sessionless calls are
+anonymous. Push also requires `ODYSSEUS_GITHUB_MCP_WRITE=true`, permission for
+`github_write` in that agent's loadout, and a token with repository write access.
+Odysseus self-publishing still requires the host-reviewed publishing flow below;
+the generic Git tool cannot bypass it. Its publishing token is not borrowed. Tokens stay
+in memory and HTTPS redirects are refused. If an upstream branch was removed,
+the tool reports that instead of silently pulling `main` or `dev`.
+
+Rebuild/redeploy the image to install the new dependency. Smoke test with:
+“List my approved local repositories and show the branch, upstream and changes
+for Umni. Do not modify anything.” Then, if the reported checkout/upstream is
+correct and clean: “Pull that checkout from its configured upstream.” Check
+the result's before/after commit IDs; GitHub CI/API results alone do not prove
+local files were updated.
+
+The legacy `manage_agent_worktree` actions `repo_list`, `repo_status`, and
+`repo_pull` remain aliases for the original narrow sync service.
+
+## Human-gated publishing
+
 The agent gets one persistent Git worktree it can edit and test in. Nothing
 leaves the machine until a human, at the host, approves that exact commit.
 

@@ -15,6 +15,12 @@ from __future__ import annotations
 from src.capabilities import Capability, Requirement, any_of, binary_on_path, env_flag, register
 
 
+def _git_library_available() -> tuple[bool, str]:
+    import importlib.util
+    available = importlib.util.find_spec("dulwich") is not None
+    return available, "Dulwich installed" if available else "Rebuild the image to install Git support"
+
+
 def _has_configured_remote_hosts() -> tuple[bool, str]:
     from src.settings import get_setting
 
@@ -207,4 +213,15 @@ register(Capability(
     # default install, which is a capability regression dressed up as caution.
     default_enabled=True,
     tools=("manage_agent_worktree",),
+))
+
+register(Capability(
+    name="repository_git",
+    title="Repository Git",
+    summary="Scoped local Git workflows; risky changes require explicit confirmation, without granting private-vault access.",
+    requirements=(Requirement(name="Git library", check=_git_library_available,
+                              hint="Rebuild the image or install requirements.txt."),),
+    default_enabled=True,
+    tools=("manage_git",),
+    docs_url="docs/agent-worktree.md",
 ))

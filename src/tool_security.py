@@ -47,6 +47,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     # Runs git against the operator's checkout and can reach the publishing
     # flow; log reading can expose internal hostnames and stack traces.
     "manage_agent_worktree",
+    "manage_git",
     "read_app_logs",
     "read_file",
     "write_file",
@@ -162,6 +163,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "edit_file", "apply_patch", "todowrite",
     # Creates worktrees, commits, and (with human approval) pushes.
     "manage_agent_worktree",
+    "manage_git",
     # Runs an external coding agent that can edit/commit inside an approved repo.
     "delegate_to_agent", "delegate_to_claude_code",
     "create_document", "edit_document", "update_document",

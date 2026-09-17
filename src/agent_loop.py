@@ -2037,6 +2037,16 @@ def _looks_like_workspace_coding_request(text: str) -> bool:
     return bool(_WORKSPACE_CODE_ACTION_RE.search(text) and _WORKSPACE_CODE_TARGET_RE.search(text))
 
 
+def _looks_like_local_git_sync_request(text: str) -> bool:
+    """An advisory capability hint, never authorization to mutate a checkout."""
+    return bool(re.search(
+        r"\bgit\s+(?:pull|fetch|status|diff|log|branch|switch|checkout|add|commit|push|merge|tag)\b|"
+        r"\b(?:pull|sync|update|commit|push|merge|stage)\b[^\n.!?]{0,90}\b(?:repo(?:sitory)?|checkout|branch|changes)\b|"
+        r"\b(?:repo(?:sitory)?|checkout)\b[^\n.!?]{0,90}\b(?:pull|sync|commit|push|branches)\b",
+        str(text or ""), re.I,
+    ))
+
+
 def _looks_like_local_computer_request(text: str) -> bool:
     text = str(text or "")
     return bool(text.strip() and _LOCAL_COMPUTER_REFERENCE_RE.search(text))
@@ -6442,7 +6452,10 @@ async def stream_agent_loop(
     # on embedding retrieval. Large-server demotion only limits unsolicited
     # schemas; it must not suppress a requested read tool.
     _mcp_requested_tools = set()
+    _local_git_requested = _looks_like_local_git_sync_request(_retrieval_query or _last_user)
+    _local_git_tools = {"manage_git"} if _local_git_requested else set()
     if not guide_only and _relevant_tools is not None:
+        _relevant_tools.update(_local_git_tools - disabled_tools)
         if _selected_bindings is not None:
             _relevant_tools.update(_selected_bindings - disabled_tools)
         if mcp_mgr and hasattr(mcp_mgr, "discover_requested_tools"):
@@ -6526,7 +6539,7 @@ async def stream_agent_loop(
                 "profile": _selected_bindings or (),
                 "caller": relevant_tools or (),
                 "forced": forced_tools or (),
-                "explicit": _named_tools | _mcp_requested_tools,
+                "explicit": _named_tools | _mcp_requested_tools | _local_git_tools,
                 "skill": _explicit_skill_tools,
                 "context": _eager_hints - _query_matched_tools - _retained_tool_names,
                 "semantic": _query_matched_tools,
@@ -6789,9 +6802,26 @@ async def stream_agent_loop(
             "wrappers are unavailable because this chat has no effective private-vault grant. "
             "A known repository path or working directory is not a sandbox. Dedicated file "
             "tools may still read/edit permitted public files. Do not report this as a missing "
-            "workspace or claim shell/Git ran. Only the user can enable 'Allow private vault "
+            "workspace or claim an operation ran without a successful tool result. "
+            "The separately scoped manage_git tool, when available, does not need a private-vault grant. "
+            "Only the user can enable 'Allow private vault "
             "reads'; explain that it grants access to private vault content, not just the repo. "
             "Do not retry denied operations through another unconfined tool."
+        )})
+    if _local_git_requested and not guide_only:
+        messages.append({"role": "system", "content": (
+            "Local Git task: use manage_git repositories/status to identify the existing "
+            "checkout and its real remote/upstream. The typed tool covers history/diffs, "
+            "staging/commits, branches/tags, switching, fetching/pulling and approved publishing. "
+            "Routine local changes can run directly; push, merge and branch deletion always "
+            "require a fresh approval card with exact commit IDs from status/branches. "
+            "Do not infer repository identity from its folder name. A supplied GitHub "
+            "URL identifies the requested repo; it does not override the checkout's upstream. "
+            "GitHub Actions, PR metadata, and web fetches cannot update a local checkout. "
+            "If a Git operation is unavailable or refuses dirty/diverged/unsupported state, "
+            "report that specific reason and ask for direction. Do not bypass it with shell, "
+            "change permissions, switch branches without authorization, stash/reset, "
+            "or claim success without the actual tool result."
         )})
     prep_timings["prompt_build"] = time.time() - _t2
 
@@ -8230,7 +8260,7 @@ async def stream_agent_loop(
             )
             _approval_why = (
                 _tool_approvals.approval_reason(block.tool_type, full_command, approval_mode)
-                if approval_mode and session_id else None
+                if session_id and (approval_mode or block.tool_type == "manage_git") else None
             )
             _dup_sig = _dedupe_signature(block.tool_type, full_command)
             if tool_policy and tool_policy.blocks(block.tool_type) and not _ody_clamped_tool_allowed:
@@ -8291,7 +8321,11 @@ async def stream_agent_loop(
                         "explain what changed first."
                         + _failure_instruction
                     )
-            elif _approval_why and not _tool_approvals.consume_grant(session_id, block.tool_type, full_command):
+            elif _approval_why and not (
+                _tool_approvals.has_once_grant(session_id, block.tool_type, full_command)
+                if block.tool_type == "manage_git"
+                else _tool_approvals.consume_grant(session_id, block.tool_type, full_command)
+            ):
                 # Stop and ask. The call is recorded as pending; the card's
                 # decision becomes a grant, and the user's reply lets the agent
                 # re-issue exactly this call, which the grant then lets through.

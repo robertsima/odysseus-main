@@ -291,9 +291,53 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "manage_git",
+            "description": (
+                "Git workflows in approved local checkouts: repositories, status, diff, log, "
+                "branches, remotes, stage, unstage, commit, branch, tag, switch, fetch, pull, "
+                "push, merge, delete_branch, set_upstream. No shell/private-vault grant needed. "
+                "Use absolute repository paths from repositories. Stage explicit relative files; "
+                "commit uses local identity or supplied author. Pull/merge fast-forward only. "
+                "After first push, set_upstream can bind the current branch to its fetched/pushed "
+                "remote_branch on an existing configured remote; never replaces an upstream. "
+                "Push/merge/delete_branch require a fresh user confirmation and exact expected_head "
+                "from status; merge/deletion also require expected_target from branches/log. "
+                "No force, reset, rebase, arbitrary commands or remote URL overrides. "
+                "Odysseus self-publishing still uses manage_agent_worktree."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "pull", "push", "merge", "delete_branch", "set_upstream"]},
+                    "repository": {"type": "string", "description": "Absolute local checkout path, not a URL"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "Exact relative file paths to stage/unstage; no globs"},
+                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},
+                    "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
+                    "message": {"type": "string", "description": "Commit message"},
+                    "author_name": {"type": "string"},
+                    "author_email": {"type": "string"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
+                    "staged": {"type": "boolean", "description": "Diff index versus HEAD instead of worktree versus index"},
+                    "remote_branch": {"type": "string", "description": "Push destination branch on the configured remote"},
+                    "remote": {"type": "string", "description": "Existing configured remote name (set_upstream only)"},
+                    "expected_head": {"type": "string", "description": "Exact HEAD commit being confirmed (push/merge/delete_branch)"},
+                    "expected_target": {"type": "string", "description": "Exact target commit being confirmed (merge/delete_branch)"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "manage_agent_worktree",
             "description": (
-                "Work in an isolated, persistent git worktree on an agent/odysseus/* branch, "
+                "List/status/fast-forward pull approved local Git repositories (repo_list, "
+                "repo_status, repo_pull), or manage a human-gated publishing worktree. "
+                "repo_status/repo_pull require an absolute repository path from repo_list; "
+                "repo_pull uses ONLY its configured GitHub upstream and refuses dirty or "
+                "diverged checkouts. No shell or private-vault grant is needed. "
+                "For publishing, work in an isolated persistent worktree on an agent/odysseus/* branch, "
                 "and publish it only with explicit human approval. Actions: 'start' (create or "
                 "reuse the worktree for a task name), 'status', 'diff' (changed files plus which "
                 "of them are sensitive), 'commit', 'request_publish' (freeze the change and ask a "
@@ -308,9 +352,11 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "remove"],
+                                 "publish", "list_requests", "show_request", "remove",
+                                 "repo_list", "repo_status", "repo_pull"],
                         "description": "Operation to perform (default: status)"
                     },
+                    "repository": {"type": "string", "description": "Absolute local checkout path from repo_list (repo_status/repo_pull only); not a URL"},
                     "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>"},
                     "branch": {"type": "string", "description": "Full agent branch, when it already exists"},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},

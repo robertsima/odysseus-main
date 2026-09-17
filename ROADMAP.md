@@ -7,11 +7,22 @@ the codebase, you are probably right to stay away.
 
 ## High Priority
 
+- [x] Add scoped Git inspection, staging/commits, branches/tags, switching,
+  fetch/pull/upstream configuration and confirmation-bound push/merge/deletion
+  without a private-vault grant; preserve unresolved URL follow-ups.
+  See [local repository sync](docs/agent-worktree.md#updating-an-existing-checkout-scoped-git).
+- [ ] After rebuild, verify local Git sync against the deployed Umni checkout:
+  exact configured upstream, clean fast-forward, dirty/missing-branch refusal,
+  and revoked GitHub-read/tool permissions. Do not assume the checkout directory
+  name is the GitHub repository name.
+- [ ] Extend typed Git coverage to clone/init, stash and reviewed history-rewrite
+  workflows. General resets/rebase/force-push and conflict-resolving merge remain
+  unavailable until their recovery and confirmation paths are implemented.
 - [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
   administration, defer irrelevant connected tools, and align advertised tools
   with private-vault execution permission. See
   [September 17 log follow-up](docs/harness-log-review-2026-09-17.md).
-- [ ] Design genuinely isolated repository execution so Git/tests can run
+- [ ] Design genuinely isolated general repository execution so builds/tests can run
   without granting access to the mounted private vault. A working directory
   or prompt restriction is not an isolation boundary.
 - [ ] Measure cross-turn cache reuse and large-tool-output growth in production;

@@ -195,6 +195,96 @@ def test_initial_selection_is_stably_ordered_and_schema_token_bounded():
     assert set(first.deferred) == {"manage_calendar", "read_file"}
 
 
+@pytest.mark.parametrize("followup", [False, True])
+def test_local_git_sync_is_bound_without_semantic_hit_or_private_grant(monkeypatch, admin_owner, followup):
+    _patch_basics(monkeypatch)
+    monkeypatch.setattr("core.database.get_session_settings", lambda *a, **kw: {})
+    calls = []
+
+    async def stream(_candidates, messages, **kwargs):
+        calls.append((copy.deepcopy(messages), kwargs.get("tools") or []))
+        yield _delta("Ready to inspect the configured checkout.")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    messages = [{"role": "user", "content": "git pull!!"}]
+    if followup:
+        messages += [
+            {"role": "assistant", "content": "I cannot run git pull; which repository is this?"},
+            {"role": "user", "content": "https://github.com/robertsima/Umni PLEASE"},
+        ]
+    _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test", messages,
+        session_id="git-chat", owner=admin_owner, allow_private=False,
+        relevant_tools={"read_file"}, max_rounds=1, _is_teacher_run=True,
+    ))
+    assert calls
+    names = {_name(s) for s in calls[0][1]}
+    assert "manage_git" in names
+    assert not {"bash", "python"} & names
+    prompt = "\n".join(str(m.get("content") or "") for m in calls[0][0])
+    assert "manage_git" in prompt
+    assert "cannot update a local checkout" in prompt
+    schema = next(s for s in calls[0][1] if _name(s) == "manage_git")
+    assert "pull" in schema["function"]["description"]
+    assert "repository" in schema["function"]["parameters"]["properties"]
+
+
+@pytest.mark.parametrize("settings,disabled,plan", [
+    ({}, {"manage_git"}, False),
+    ({"tool_access": "selected", "enabled_tools": ["read_file"]}, set(), False),
+    ({"tool_access": "none"}, set(), False),
+    ({}, set(), True),
+])
+def test_local_git_hint_never_overrides_tool_policy(monkeypatch, admin_owner, settings, disabled, plan):
+    _patch_basics(monkeypatch)
+    monkeypatch.setattr("core.database.get_session_settings", lambda *a, **kw: settings)
+    sent = []
+
+    async def stream(_candidates, messages, **kwargs):
+        sent.extend(kwargs.get("tools") or [])
+        yield _delta("No repository operation was run.")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test", [{"role": "user", "content": "git pull!!"}],
+        session_id="git-chat", owner=admin_owner, disabled_tools=disabled,
+        relevant_tools={"read_file"}, plan_mode=plan, max_rounds=1, _is_teacher_run=True,
+    ))
+    assert "manage_git" not in {_name(s) for s in sent}
+
+
+@pytest.mark.parametrize("mode", ["auto", None])
+def test_git_push_emits_confirmation_before_execution_even_in_auto(monkeypatch, admin_owner, mode):
+    from src import tool_approvals
+
+    _patch_basics(monkeypatch)
+    tool_approvals._reset_for_tests()
+    monkeypatch.setattr("core.database.get_session_settings", lambda *a, **kw: {})
+    executed = _install_dispatch_spy(monkeypatch)
+
+    async def stream(_candidates, messages, **kwargs):
+        yield _native_call("manage_git", {
+            "action": "push", "repository": "/repos/project", "expected_head": "a" * 40,
+        }, "push-1")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    chunks = _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test", [{"role": "user", "content": "git push"}],
+        session_id="push-chat", owner=admin_owner, relevant_tools={"manage_git"},
+        approval_mode=mode, max_rounds=1, _is_teacher_run=True,
+    ))
+    assert not executed
+    assert "approval" in "".join(chunks)
+    pending = tool_approvals.pending_for(["push-chat"])
+    assert len(pending) == 1
+    assert pending[0]["tool"] == "manage_git"
+    assert json.loads(pending[0]["command"])["expected_head"] == "a" * 40
+    tool_approvals._reset_for_tests()
+
+
 def test_complete_round_selection_is_exact_and_stably_sorted(monkeypatch):
     monkeypatch.setattr(agent_loop, "_withhold_unavailable_tools", lambda schemas: schemas)
     external = {

@@ -547,6 +547,7 @@ _ADMIN_TOOLS = {
     # Touches the operator's git checkout and the publishing flow; log content
     # is operator-facing diagnostic data.
     "manage_agent_worktree",
+    "manage_git",
     "read_app_logs",
     # Runs an external coding agent against an approved repo checkout.
     "delegate_to_agent", "delegate_to_claude_code",

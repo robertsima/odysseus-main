@@ -12,6 +12,7 @@ status) is local and side-effect-free outside the worktree directory.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict
 
 from src.tool_utils import _parse_tool_args
@@ -19,11 +20,36 @@ from src.tool_utils import _parse_tool_args
 logger = logging.getLogger(__name__)
 
 _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request", "remove")
+            "publish", "list_requests", "show_request", "remove",
+            "repo_list", "repo_status", "repo_pull")
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
     return {"error": message, "exit_code": 1, **extra}
+
+
+def _repository_read_token(ctx: dict) -> str | None:
+    """Borrow GitHub's read credential only within the live integration ceiling.
+
+    The token never comes from model arguments, a repository config, or the
+    separate human-gated publishing credential. Sessionless calls are anonymous.
+    """
+    session_id = ctx.get("session_id")
+    if not session_id:
+        return None
+    from core.database import get_session_settings
+
+    settings = get_session_settings(session_id, strict=True) or {}
+    allowed = settings.get("allowed_mcp_servers")
+    if allowed is not None and (
+        not isinstance(allowed, list) or not {"*", "github_read"}.intersection(allowed)
+    ):
+        return None
+    if os.environ.get("GITHUB_HOST", "").strip().lower().rstrip("/") not in {
+        "", "github.com", "https://github.com",
+    }:
+        return None
+    return os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip() or None
 
 
 class AgentWorktreeTool:
@@ -41,6 +67,9 @@ class AgentWorktreeTool:
                 f"manage_agent_worktree: unknown action {action!r}. "
                 f"Valid actions: {', '.join(_ACTIONS)}"
             )
+
+        if action.startswith("repo_"):
+            return await self._repo_execute(dict(args, action=action), ctx)
 
         from src.agent_worktree import approval as approval_mod
         from src.agent_worktree import service
@@ -115,6 +144,48 @@ class AgentWorktreeTool:
             return _err(f"manage_agent_worktree {action}: {exc}")
 
         return _err("manage_agent_worktree: unreachable action")
+
+    async def _repo_execute(self, args: dict, ctx: dict) -> dict:
+        """Separate scoped checkout sync from the app's publishing worktree."""
+        from src.tool_security import owner_is_admin_or_single_user
+
+        if not owner_is_admin_or_single_user(ctx.get("owner")):
+            return _err("Repository operations require an admin user.", code="admin_required")
+        action = args["action"]
+        accepted = {"action"} if action == "repo_list" else {"action", "repository"}
+        if set(args) - accepted:
+            return _err(
+                "Repository sync accepts only action and repository; the configured upstream "
+                "cannot be overridden with a branch, remote, URL, or command.", code="invalid_arguments",
+            )
+        if action != "repo_list" and (
+            not isinstance(args.get("repository"), str) or not args["repository"].strip()
+        ):
+            return _err("Use repo_list, then pass its absolute repository path.", code="invalid_path")
+        try:
+            from src.agent_worktree import repository_sync
+        except ImportError:
+            return _err("Repository sync dependency is missing; rebuild the app image.", code="dependency_missing")
+        try:
+            if action == "repo_list":
+                return {"exit_code": 0, "repositories": await repository_sync.list_repositories()}
+            if action == "repo_status":
+                result = await repository_sync.repository_status(args["repository"])
+            else:
+                result = await repository_sync.pull_repository(
+                    args["repository"], token=_repository_read_token(ctx),
+                )
+            return {"exit_code": 0, "result": result}
+        except repository_sync.RepositorySyncError as exc:
+            return _err(str(exc), code=exc.code)
+        except Exception:
+            # Transport/config exceptions can contain auth headers or embedded
+            # credentials. Never emit their text or traceback to the model/log.
+            logger.warning("Scoped repository operation failed: action=%s", action)
+            return _err(
+                "Repository operation failed; check checkout access and the GitHub read "
+                "integration. No shell fallback was attempted.", code="repository_sync_failed",
+            )
 
 
 class ReadAppLogsTool:

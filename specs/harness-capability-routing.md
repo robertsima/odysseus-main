@@ -129,7 +129,33 @@ and state that enabling private reads grants private-vault access, not just Git.
 
 See [log evidence and remaining validation](../docs/harness-log-review-2026-09-17.md).
 
-### Earlier offline measurement
+### September 17 local repository sync
+
+The 07:02 deployment run confirmed successful AI Mind writes but exposed a
+capability gap: GitHub metadata tools cannot perform a local `git pull`, and
+unrestricted shell access correctly remained gated. `manage_git` now exposes
+typed inspection, staging, commits, branches/tags, switching, fetch/pull,
+upstream configuration and confirmed push/fast-forward merge/branch deletion.
+Legacy `manage_agent_worktree` repo-list/status/pull aliases remain. Explicit
+local Git requests bind the general capability before
+semantic retrieval, still intersected with the same policy ceiling/budget.
+The task note distinguishes local synchronization from GitHub Actions and
+does not implicitly authorize an operation merely by selecting its schema.
+
+A bare repository URL/slug/path can ground the immediately unresolved human
+Git task; unrelated/completed tasks and untrusted runtime messages cannot.
+Pure reads and model suggestions never authorize an automatic pull.
+The service uses only approved checkouts and configured GitHub remotes, requires
+clean fast-forward checkouts, and excludes vault roots and unsupported
+execution-inducing configuration. GitHub credentials obey the live integration
+ceiling; writes additionally require deployment write opt-in. Push/merge/deletion
+always use exact-call single-use confirmation and revision checks, independent
+of automatic approval mode. Routine changes remain direct unless ask_all applies.
+History rewrites, arbitrary commands and conflict-resolving merges are not exposed. This deliberately
+does not widen unrestricted Bash/Python access. See
+[supported scope and deployment checks](../docs/agent-worktree.md).
+
+### Earlier offline measurement (baseline)
 
 An offline diagnostic candidate fixture on this checkout selected eight compact
 definitions costing approximately 782 tokens, versus 9,796 tokens for all 83
@@ -156,6 +182,16 @@ they cannot enter automatic retrieval while unreviewed. See the
 [extension workflow and limitations](../docs/agent-extensions.md).
 
 ## Validation record
+
+For the scoped Git expansion, **621 tests passed, 6 platform-specific tests
+skipped** across repository operations, approval/routing, worktree publishing,
+privacy and tool-policy suites. Three existing Windows/environment tests were
+excluded from that green run and independently reproduced on clean unchanged
+HEAD `fd0e238`: worktree-policy temp-root allowance, private-key mode diagnostic,
+and MAC-key POSIX mode assertion. No production checkout or network write was
+used by the Git tests; remote transport is mocked around real temporary Git
+repositories. Docker rebuild and live provider/deployment acceptance remain
+operator checks, not claimed test coverage.
 
 On Windows / Python 3.14, the combined 46-file regression selection finished
 with **928 passed, 2 deselected**. Compilation and `git diff --check` passed.
