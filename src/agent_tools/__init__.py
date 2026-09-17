@@ -86,7 +86,13 @@ TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
 # Constants (re-exported for backward compatibility — single source of truth
 # is src.constants; always prefer importing from there for new code)
 # ---------------------------------------------------------------------------
-MAX_AGENT_ROUNDS = 100
+# 0 = no round ceiling. The orchestrator chat and the workers it starts are held
+# to the same rule; a worker was previously capped at 12 rounds while this chat
+# had 100, which is why workers kept stopping mid-task on work the chat itself
+# would have finished. A turn is still bounded by the per-run tool-call ceiling
+# (`agent_max_tool_calls`, default 500), the request timeout, tool policy and
+# the stop control -- none of which a round counter was adding to.
+MAX_AGENT_ROUNDS = 0
 SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 

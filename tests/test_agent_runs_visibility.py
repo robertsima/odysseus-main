@@ -329,9 +329,12 @@ async def test_a_cut_off_worker_is_reported_incomplete_not_completed(monkeypatch
     assert worker_chat.messages[-1].content.startswith("Read five files.")
     # The budget the run was cut off by is reported with it, so "ran out of
     # rounds" can be read against a number without reopening the loadout.
+    # 0 is "no round ceiling", which is the default for a worker now: a round
+    # counter only ever ended real work mid-task, and what actually bounds a run
+    # (tool-call ceiling, timeout, tool policy, the stop control) is unchanged.
     from src.agent_profiles import DEFAULT_ROUNDS
 
-    assert rec["max_rounds"] == DEFAULT_ROUNDS
+    assert rec["max_rounds"] == DEFAULT_ROUNDS == 0
 
 
 async def test_the_parent_is_told_the_worker_was_cut_off(monkeypatch):
@@ -399,10 +402,75 @@ async def test_the_chat_that_started_a_worker_sees_it_start_and_finish(monkeypat
     closing = next(ev for ev in parent_events if ev["kind"] == "status")
     assert closing["data"]["status"] == "incomplete"
     assert closing["data"]["rounds_exhausted"] is True
-    assert f"{rec['max_rounds']}-round budget" in closing["title"]
+    assert "work outstanding" in closing["title"]
 
     # And the parent can list the run, which is what stops the strip's
     # reconcile pass from deciding the run it could not find was interrupted.
     listed = act.list_runs(session_id="parent")
     assert [r["run_id"] for r in listed] == [rec["run_id"]]
     assert listed[0]["status"] == "incomplete"
+
+
+async def test_a_worker_that_runs_out_of_rounds_is_continued_rather_than_abandoned(monkeypatch):
+    """An explicit round budget is a safety stop, not a deadline for the work.
+
+    A worker still executing tools when it hits its budget used to just stop
+    with the task unfinished. It now earns another budget, carrying what it
+    already did, for as long as it keeps making progress.
+    """
+    from src import agent_control
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    worker_chat = _Chat("w-3")
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager({"w-3": worker_chat}))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+    legs = []
+
+    async def fake_headless(sess, messages, **kwargs):
+        legs.append(list(messages))
+        if len(legs) < 3:
+            kwargs["outcome"]["rounds_exhausted"] = True
+            return f"leg {len(legs)} partial", [{"tool": "read_file"}]
+        return "Finished the audit.", [{"tool": "read_file"}]
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+
+    rec = await agent_control.launch_worker(
+        owner="alice", task="audit the handler", model=None, profile_name=None)
+    # An explicit budget, so exhaustion is reachable at all.
+    await agent_control._WORKERS[rec["run_id"]]
+
+    assert len(legs) == 3, "the worker should have been continued twice"
+    # Each continuation carries the previous leg's work and an explicit
+    # instruction not to redo it.
+    assert legs[1][-1]["content"] == agent_control._CONTINUE_NOTE
+    assert "leg 1 partial" in legs[1][-2]["content"]
+    assert act.get_run(rec["run_id"])["status"] == "completed"
+    assert worker_chat.messages[-1].content == "Finished the audit."
+
+
+async def test_a_worker_making_no_progress_is_not_handed_another_budget(monkeypatch):
+    from src import agent_control
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    worker_chat = _Chat("w-4")
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager({"w-4": worker_chat}))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+    calls = []
+
+    async def spinning(sess, messages, **kwargs):
+        calls.append(1)
+        kwargs["outcome"]["rounds_exhausted"] = True
+        return "still thinking", []          # no tool calls == no progress
+
+    monkeypatch.setattr(headless, "run_headless", spinning)
+
+    rec = await agent_control.launch_worker(owner="alice", task="spin")
+    await agent_control._WORKERS[rec["run_id"]]
+
+    assert len(calls) == 1
+    assert act.get_run(rec["run_id"])["status"] == "incomplete"

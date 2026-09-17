@@ -24,21 +24,31 @@ POLL_SECONDS = 1.0
 STOP_GRACE_SECONDS = 5.0
 _TASKS: dict[str, asyncio.Task] = {}
 _LIVE: dict[str, dict] = {}
-# The native tools a read-only research worker may be bound to. Everything here
-# is in tool_security.PLAN_MODE_READONLY_TOOLS or is a read-only vault/skill
-# accessor; nothing here can write, send, publish or delegate.
-#
-# `get_workspace` belongs with the file readers rather than outside them: an
-# agent handed read_file/grep/glob/ls but no way to learn the workspace root
-# cannot use them, and rejecting it (as the 2026-09-17 logs show) killed a
-# whole restart over a tool that mutates nothing. `search_documents` is the
-# read side of the local corpus, and the skill-toolset aliases already point
-# "internal context search" at it.
-_READ_TOOLS = frozenset({
-    "web_search", "web_fetch", "read_file", "grep", "glob", "ls", "search_chats",
-    "vault_get", "vault_search", "manage_skills", "read_app_logs",
-    "get_workspace", "search_documents",
+# A research specialist is read-only by design (that is this tool's contract),
+# but it must not be read-only AND arbitrarily smaller than the chat that
+# started it. This used to be a hand-maintained list of 13 names, so a
+# specialist could be refused `get_workspace` or `list_emails` while the
+# orchestrator used them freely, and every omission read to the model as "that
+# capability does not exist". The source of truth is now the harness's own
+# read-only classification, plus the read-side accessors that classification
+# does not cover, intersected with the parent's policy by `_prepare`.
+_EXTRA_READ_TOOLS = frozenset({
+    # Read-only, but not part of plan mode's allowlist.
+    "vault_get", "vault_search", "manage_skills", "search_documents", "glob",
 })
+
+
+def _read_tools() -> frozenset:
+    try:
+        from src.tool_security import PLAN_MODE_READONLY_TOOLS
+    except Exception:  # pragma: no cover - tool_security always imports in the app
+        logger.warning("[agent-workflow] read-only tool classification unavailable", exc_info=True)
+        return _EXTRA_READ_TOOLS
+    return frozenset(PLAN_MODE_READONLY_TOOLS) | _EXTRA_READ_TOOLS
+
+
+# Kept as a module attribute so tests and callers can read the effective set.
+_READ_TOOLS = _read_tools()
 _HANDOFF = (
     "Return a JSON handoff with findings, evidence (source URLs and what each supports), "
     "assumptions, open_questions, validation_actions, and drafts when requested. "
@@ -494,10 +504,22 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
         raise ValueError("This chat forbids delegation")
     if policy["delegation_policy"] == "explicit":
         if delegation_authorized is None:
-            from src.agent_loop import _explicit_delegation_requested, _extract_last_user_message
-            delegation_authorized = _explicit_delegation_requested(_extract_last_user_message(parent.get_context_messages()))
+            # Same standing grant the loop uses: a chat whose user has asked for
+            # agents stays authorized until they say otherwise.
+            from core.database import get_session_settings
+            from src.agent_loop import _delegation_intent_text, _explicit_delegation_requested
+
+            delegation_authorized = bool(
+                (get_session_settings(session_id) or {}).get("delegation_granted")
+            ) or _explicit_delegation_requested(
+                _delegation_intent_text(parent.get_context_messages())
+            )
         if not delegation_authorized:
-            raise ValueError("The user must explicitly request specialist agents before starting this workflow")
+            raise ValueError(
+                "This chat has not been authorized to start specialist agents. Ask the user to confirm "
+                "in plain words (for example \"yes, run specialist agents for this\") and start the "
+                "workflow on their reply — do not launch workers through any other route."
+            )
     policy["private_vault_access"] = bool(policy["private_vault_access"] and allow_private)
     if policy["max_parallel_workers"] <= 0:
         raise ValueError("This chat's Child workers limit is zero; only the user may raise it")

@@ -505,7 +505,7 @@ def test_scoped_workers_do_not_warn_about_domains_they_were_never_given(caplog):
 def test_delegation_recognisers_stay_linear_on_hostile_text(payload):
     """These run against arbitrary user text on every turn.
 
-    An earlier clause splitter used a leading `\s+` before the contrast words,
+    An earlier clause splitter used a leading whitespace class before the contrast words,
     which made the engine rescan a whitespace run from every position inside it:
     20k spaces took 5.7 seconds.
     """
@@ -514,3 +514,42 @@ def test_delegation_recognisers_stay_linear_on_hostile_text(payload):
     started = time.perf_counter()
     agent_loop._explicit_delegation_requested(payload)
     assert time.perf_counter() - started < 1.0
+
+
+def test_delegation_authorization_is_standing_for_the_chat_not_per_message(monkeypatch):
+    """A chat the user authorized stays authorized on ordinary follow-ups.
+
+    Re-deriving authorization from the latest sentence refused a user who had
+    asked for agents two messages earlier, and the model's response to being
+    refused was to POST /api/agents/launch through the generic API bridge —
+    bypassing this gate completely. Authorization belongs to the chat.
+    """
+    stored = {}
+    monkeypatch.setattr("core.database.update_session_settings",
+                        lambda sid, patch: stored.update(patch) or dict(stored))
+
+    granted = agent_loop._resolve_standing_delegation(
+        "chat-1", {}, granted=True, revoked=False)
+    assert granted and stored == {"delegation_granted": True}
+
+    # An ordinary follow-up that mentions no agents at all keeps the grant.
+    assert agent_loop._resolve_standing_delegation(
+        "chat-1", dict(stored), granted=False, revoked=False)
+
+    # Only an explicit human prohibition takes it away.
+    assert not agent_loop._resolve_standing_delegation(
+        "chat-1", dict(stored), granted=False, revoked=True)
+    assert stored == {"delegation_granted": False}
+
+
+def test_a_chat_that_never_asked_for_agents_is_still_refused(monkeypatch):
+    monkeypatch.setattr("core.database.update_session_settings", lambda sid, patch: dict(patch))
+    assert not agent_loop._resolve_standing_delegation("chat-2", {}, granted=False, revoked=False)
+
+
+def test_failing_to_persist_the_grant_does_not_refuse_the_turn(monkeypatch):
+    def boom(sid, patch):
+        raise RuntimeError("settings store down")
+
+    monkeypatch.setattr("core.database.update_session_settings", boom)
+    assert agent_loop._resolve_standing_delegation("chat-3", {}, granted=True, revoked=False)

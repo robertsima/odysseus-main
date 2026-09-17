@@ -31,6 +31,23 @@ from src import agent_activity as activity
 logger = logging.getLogger(__name__)
 
 
+# How many extra round budgets a worker may earn by still making progress.
+# The ceiling that matters is not this number but the progress rule below: a
+# leg that executes no tools does not buy another one, so a worker that is
+# looping or stuck stops immediately, while one that is genuinely working gets
+# room to finish. Worst case is bounded at max_rounds x (1 + CONTINUATION_LEGS)
+# and the run stays stoppable from the chat and the Workbench throughout.
+CONTINUATION_LEGS = 4
+
+_CONTINUE_NOTE = (
+    "You have not finished. Your previous round budget was spent and you have been given a fresh one; "
+    "the work above is yours and is already done, so do not repeat it. Continue from exactly where you "
+    "stopped, finish the task you were given, and then report the result. If the task is genuinely "
+    "complete, say so plainly instead of doing more work. If you are blocked, say what is blocking you "
+    "rather than retrying the same failing call."
+)
+
+
 def live_children(session_id: Optional[str]) -> int:
     """Child runs currently in flight for ``session_id``.
 
@@ -642,11 +659,10 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     # cannot be duplicated or drift from the saved agent configuration.
     context: List[Dict[str, Any]] = [{"role": "user", "content": task}]
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
-    # The loadout's own round budget (validate_profiles clamps it to 1..40, and
-    # defaults it to DEFAULT_ROUNDS). Recorded on the run and returned to the
-    # caller because it is the number a "ran out of rounds" result has to be read
-    # against — otherwise the cap that ended a worker is invisible until someone
-    # reopens the loadout in Settings.
+    # The loadout's own round budget, or 0 for no ceiling (the default). It is
+    # recorded on the run and returned to the caller because it is the number a
+    # "ran out of rounds" result has to be read against — otherwise a cap that
+    # ended a worker is invisible until someone reopens the loadout in Settings.
     rounds = int(profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS)
     run_id = activity.run_started(
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
@@ -666,19 +682,56 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
 
         outcome: Dict[str, Any] = {}
         status, text, events, error_detail = "completed", "", [], ""
+        legs = 0
         try:
             with agent_runs.track_external(sess.id, source="worker", owner=owner):
-                text, events = await run_headless(
-                    sess, context,
-                    max_rounds=rounds,
-                    disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
-                    activity_session_id=sess.id, run_id=run_id, source="session", owner=owner, outcome=outcome,
-                )
+                # A round budget is a safety stop, not a deadline for the work.
+                # A worker that is still making progress when it hits the cap
+                # used to just stop mid-task and hand back partial work, so the
+                # task never got done -- the 2026-09-17 logs have workers cut
+                # off after 12 and 29 tool calls with nothing finished. Give it
+                # another leg instead: same chat, same tools, carrying what it
+                # already did, up to CONTINUATION_LEGS extra budgets. The hard
+                # ceiling is still bounded (rounds x (1 + legs)), and a worker
+                # that finishes early never uses it.
+                leg_context = list(context)
+                while True:
+                    outcome.clear()
+                    text, leg_events = await run_headless(
+                        sess, leg_context,
+                        max_rounds=rounds,
+                        disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
+                        activity_session_id=sess.id, run_id=run_id, source="session", owner=owner,
+                        outcome=outcome,
+                    )
+                    events.extend(leg_events)
+                    if not outcome.get("rounds_exhausted") or outcome.get("stopped"):
+                        break
+                    if legs >= CONTINUATION_LEGS:
+                        break
+                    if not leg_events:
+                        # It burned a whole budget without executing a single
+                        # tool. Another budget buys more of the same, so this
+                        # is where continuation stops being progress.
+                        logger.info("[agent-worker] not continuing run=%s: leg %s executed no tools",
+                                    run_id, legs + 1)
+                        break
+                    legs += 1
+                    logger.info("[agent-worker] continuing run=%s leg=%s/%s after %s rounds with the task unfinished",
+                                run_id, legs, CONTINUATION_LEGS, rounds)
+                    activity.publish(sess.id, "status",
+                                     f"Round budget spent; continuing (leg {legs} of {CONTINUATION_LEGS})",
+                                     source="session", run_id=run_id, owner=owner,
+                                     data={"status": "running", "leg": legs, "max_rounds": rounds})
+                    leg_context = list(context) + [
+                        {"role": "assistant", "content": text or "(no summary of the previous leg)"},
+                        {"role": "user", "content": _CONTINUE_NOTE},
+                    ]
             if outcome.get("stopped"):
                 status = "cancelled"
             elif outcome.get("rounds_exhausted"):
-                # It did real work and then ran out of rounds. Reporting that as
-                # "completed" is what let a cut-off worker hand the parent an
+                # Every leg was spent and it is still not done. Reporting that
+                # as "completed" is what let a cut-off worker hand the parent an
                 # empty result that read like a finished one; `run_headless` has
                 # already appended the "here is where I got to" line to `text`.
                 status = "incomplete"
@@ -701,10 +754,12 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         except Exception:
             logger.debug("worker persist failed", exc_info=True)
         exhausted = bool(outcome.get("rounds_exhausted"))
+        total_rounds = rounds * (legs + 1) if rounds else 0  # 0 = unlimited
         activity.run_finished(sess.id, "session", run_id,
                               f"Worker · {label}{sess.name} {status}", status=status, owner=owner,
                               data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400],
-                                    "max_rounds": rounds, "rounds_exhausted": exhausted,
+                                    "max_rounds": total_rounds, "rounds_exhausted": exhausted,
+                                    "continuation_legs": legs,
                                     **({"error": error_detail} if error_detail else {})})
         if parent_session:
             # Two events, because they answer different questions. The message
@@ -713,7 +768,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             # agent strip kept a row at "running" forever and then, on the next
             # reconcile, decided the run it could not find had been interrupted
             # -- which is why sub-agents stopped appearing above the composer.
-            cut = (f" (stopped at its {rounds}-round budget with work outstanding)" if exhausted else "")
+            cut = ((f" (stopped after {total_rounds} rounds with work outstanding)" if total_rounds
+                    else " (stopped with work outstanding)") if exhausted else "")
             activity.publish(parent_session, "message", f"← worker {sess.name}: {text[:160]}", source="session",
                              run_id=run_id, owner=owner, detail=text[:2000],
                              level="error" if status == "failed" else "info")
@@ -721,7 +777,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                              run_id=run_id, owner=owner,
                              level="error" if status == "failed" else "info",
                              data={"status": status, "target_session": sess.id, "parent_session": parent_session,
-                                   "max_rounds": rounds, "rounds_exhausted": exhausted,
+                                   "max_rounds": total_rounds, "rounds_exhausted": exhausted,
+                                   "continuation_legs": legs,
                                    **({"error": error_detail} if error_detail else {})})
             if handoff:
                 try:

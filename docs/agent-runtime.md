@@ -53,14 +53,23 @@ the execution of whatever tools it asked for.
 The loop ends when a round produces an answer with no tool calls, when a guard
 stops it (§5), or when the round budget runs out.
 
-**Round budget.** A chat turn uses the `agent_max_rounds` setting (default
-100, clamped 1–500). A worker launched from a loadout uses that profile's
-`max_rounds` instead — `agent_profiles.py` defaults to 12 and clamps to 1–40.
-The gap is deliberate and worth knowing: a worker that stops at round 12 is
-usually at its loadout's budget, not at a bug. Hitting the cap mid-task emits
-`rounds_exhausted`; a live chat turns that into a Continue button, and a
-headless worker returns its partial work and records the run `incomplete`
-rather than `completed` (`src/agent_control.py::launch_worker`).
+**Round budget.** There is no round ceiling by default, for a chat turn or for
+a worker (`MAX_AGENT_ROUNDS = 0`, `agent_profiles.DEFAULT_ROUNDS = 0`; `0` means
+unlimited everywhere). Counting rounds was never what kept a run bounded, and a
+worker capped at 12 rounds while the chat that started it had 100 was simply
+gated more than its orchestrator — which is how tasks ended mid-flight with
+nothing finished. What actually bounds a run is unchanged: the per-run tool-call
+ceiling (`agent_max_tool_calls`, default 500), the request timeout, each tool's
+own policy, and the user's stop control.
+
+An explicit positive `max_rounds` is still honoured, up to `MAX_ROUNDS_CAP`
+(200). When one is set and a worker spends it while still executing tools, it is
+handed another budget rather than abandoned — up to `agent_control.CONTINUATION_LEGS`
+times, carrying its previous leg's work plus an instruction not to redo it. A leg
+that executes no tools does not earn another one, so a stuck or looping worker
+stops immediately. Only after that does the run record `incomplete` with
+`rounds_exhausted`; a live chat still turns the same signal into a Continue
+button.
 
 ---
 
@@ -565,8 +574,17 @@ Only actual launch receipts establish execution. Explicit research-orchestration
 requests with no launcher call get one bounded nudge, then a truthful non-execution
 answer. Running/partial workflows cannot be presented as completed research.
 Ordinary questions, negated delegation requests and untrusted worker/skill text
-do not authorize launching agents. A human `continue` can resume an existing
-authorized workflow without starting it again. Negation and question forms are
+do not authorize launching agents, and authorization is a property of the CHAT
+rather than of its latest sentence: a human request grants it for that chat
+(`delegation_granted` in the chat's settings), an explicit human prohibition
+takes it away, and ordinary follow-ups in between are not re-interrogated. Only
+a human message moves it — the recogniser reads `_delegation_intent_text`, which
+already excludes worker output and injected role=user envelopes. Re-deriving it
+every turn refused users who had asked two messages earlier, and the model's
+response to being refused was to POST `/api/agents/launch` through the generic
+API bridge, bypassing the gate completely; that route is now refused by
+`app_api` and points at the real tools. A human `continue` can resume an
+existing authorized workflow without starting it again. Negation and question forms are
 scoped to their own clause: a report of what failed ("no agents ran") no longer
 cancels a request made in the same message ("relaunch the two specialists"), and
 restart/relaunch/retry phrasings count as orchestration requests.

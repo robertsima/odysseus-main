@@ -160,9 +160,15 @@ def test_last_used_snapshot_and_effective_mode(monkeypatch):
 
 def test_profile_validation_normalises_and_rejects():
     out = agent_profiles.validate_profiles([
-        {"name": "researcher", "model": "qwen", "disabled_tools": "bash, send_email", "max_rounds": 99},
+        {"name": "researcher", "model": "qwen", "disabled_tools": "bash, send_email",
+         "max_rounds": agent_profiles.MAX_ROUNDS_CAP + 1},
     ])
     assert out[0]["disabled_tools"] == ["bash", "send_email"] and out[0]["max_rounds"] == agent_profiles.MAX_ROUNDS_CAP
+    # An explicit budget under the cap is kept as asked.
+    assert agent_profiles.validate_profiles([{"name": "r", "max_rounds": 99}])[0]["max_rounds"] == 99
+    # No budget, or 0, means no round ceiling — the default for a worker.
+    for unlimited in ({"name": "r"}, {"name": "r", "max_rounds": 0}, {"name": "r", "max_rounds": -5}):
+        assert agent_profiles.validate_profiles([unlimited])[0]["max_rounds"] == 0
     for bad in ([{"name": ""}], [{"name": "a"}, {"name": "A"}], "nope", [{"name": "x", "max_rounds": "lots"}]):
         with pytest.raises(ValueError):
             agent_profiles.validate_profiles(bad)

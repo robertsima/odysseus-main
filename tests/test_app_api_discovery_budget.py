@@ -75,3 +75,22 @@ async def test_malformed_pagination_is_a_tool_error():
     result = await do_app_api('{"action":"endpoints","limit":"many"}')
     assert result["exit_code"] == 1
     assert "must be integers" in result["error"]
+
+
+async def test_launching_an_agent_through_the_raw_api_is_refused_with_the_real_tool():
+    """The generic bridge must not be a second, unpoliced way to start workers.
+
+    POSTing /api/agents/launch skips the chat's delegation policy, skips the
+    loadout preflight, and (because the caller has to remember `parent_session`)
+    orphans the worker so it never appears in the agent strip or in
+    `manage_agent_loadout action=status`.
+    """
+    result = await do_app_api(
+        json.dumps({"method": "POST", "path": "/api/agents/launch",
+                    "body": {"task": "audit the repo", "profile": "Reader"}}),
+        owner="alice",
+    )
+
+    assert result["exit_code"] == 1
+    assert "manage_agent_loadout" in result["error"]
+    assert "orchestrate_agents" in result["error"]

@@ -136,7 +136,7 @@ async def test_unsafe_or_unknown_tools_launch_nothing(runtime, tool):
 async def test_parent_ownership_authorization_and_private_policy(runtime):
     with pytest.raises(LookupError):
         await workflows.start(session_id="parent", owner="bob", args=request(), delegation_authorized=True)
-    with pytest.raises(ValueError, match="explicitly"):
+    with pytest.raises(ValueError, match="not been authorized"):
         await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=False)
     runtime.policy["private_vault_access"] = True
     result = await start_and_wait()
@@ -258,7 +258,7 @@ async def test_tool_wrapper_errors_are_truthful(runtime):
     tool = OrchestrateAgentsTool()
     result = await tool.execute(json.dumps(request()), {"session_id": "parent", "owner": "alice", "delegation_authorized": False})
     assert result["exit_code"] == 1 and result["launched_agents"] == 0
-    assert "explicitly" in result["error"]
+    assert "not been authorized" in result["error"]
 
 
 @pytest.mark.parametrize("action", [None, "status"])
@@ -522,13 +522,30 @@ async def test_rejected_binding_names_every_supported_tool_so_the_retry_can_be_c
     assert not agent_control._WORKERS and len(runtime.sessions) == 1
 
 
-def test_schema_advertises_exactly_the_bindings_the_workflow_accepts():
+def test_research_bindings_track_the_harness_read_only_classification():
+    """A specialist must not be read-only AND arbitrarily narrower than its parent.
+
+    The accepted set used to be a hand-maintained list of 13 names, so a
+    specialist could be refused `get_workspace` while the chat that started it
+    used it freely. It now derives from the harness's own read-only
+    classification, so a newly classified read-only tool is available to
+    research without a second list to remember.
+    """
+    from src.tool_security import PLAN_MODE_READONLY_TOOLS, _PLAN_MODE_KNOWN_MUTATORS
+
+    assert PLAN_MODE_READONLY_TOOLS <= workflows._READ_TOOLS
+    # `manage_skills` is the one deliberate exception: a specialist loads the
+    # procedures it was given with it, and `_prepare` attaches it whenever
+    # skills are requested. Nothing else that can change the world is here.
+    assert (workflows._READ_TOOLS & _PLAN_MODE_KNOWN_MUTATORS) == {"manage_skills"}
+
+
+def test_schema_points_at_the_rejection_rather_than_a_stale_list():
     from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
     schema = next(entry["function"] for entry in FUNCTION_TOOL_SCHEMAS
                   if entry.get("function", {}).get("name") == "orchestrate_agents")
     described = schema["parameters"]["properties"]["specialists"]["items"]["properties"]["tools"]["description"]
-    advertised = {word.strip(" .,") for word in described.replace(":", " ").split()}
-    assert workflows._READ_TOOLS <= advertised, sorted(workflows._READ_TOOLS - advertised)
+    assert "read-only" in described and "rejection lists the full supported set" in described
 
 
 async def test_preflight_reports_model_bindings_and_mcp_health_per_agent(runtime, monkeypatch):

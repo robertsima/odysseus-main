@@ -651,6 +651,14 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     # sidebar surfaces the session. Raw start works but the agent
     # fumbles the payload + the session doesn't reliably show up.
     ("POST",   "/api/research/start"),
+    # Use manage_agent_loadout / orchestrate_agents. The raw endpoint skips
+    # the delegation policy, skips the loadout preflight, and — because the
+    # model has to remember to pass `parent_session` — usually produces a
+    # worker with no link back to the chat that started it. That worker then
+    # never appears in the agent strip above the composer and cannot be found
+    # by `manage_agent_loadout action=status`, which is exactly how the
+    # 2026-09-17 run ended up with invisible agents and four HTTP 400s.
+    ("POST",   "/api/agents/launch"),
     # Use web_search — the HTTP search route is UI-shaped and generic
     # app_api calls can return empty/poorly formatted results compared with the
     # named tool's source-aware output.
@@ -844,6 +852,15 @@ async def do_app_api(
             return {"error": "Don't POST /api/model/download directly — use the `download_model` tool (it resolves the server name, sets the venv env_prefix, and registers the task so it shows in the UI).", "exit_code": 1}
         if "/api/model/serve" in path:
             return {"error": "Don't POST /api/model/serve directly — use the `serve_model` or `serve_preset` tool (handles host resolution, env_prefix, and cookbook tracking).", "exit_code": 1}
+        if "/api/agents/launch" in path:
+            return {"error": (
+                "Don't POST /api/agents/launch via app_api — use `manage_agent_loadout` with "
+                "action='start' (or `orchestrate_agents` for scoped research fan-out). The tool "
+                "applies this chat's delegation policy, refuses a loadout that has no usable tools, "
+                "links the worker to this chat so it appears in the agent strip and in "
+                "action='status', and reports the model, tools and round budget it actually started "
+                "with. The raw endpoint does none of that and orphans the worker."
+            ), "exit_code": 1}
         if "/api/research/start" in path:
             return {"error": "Don't POST /api/research/start directly — use the `trigger_research` tool (it surfaces the session in the Deep Research sidebar).", "exit_code": 1}
         if "/api/search" in path:

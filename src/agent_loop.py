@@ -9,7 +9,9 @@ The LLM decides when to use tools by writing fenced code blocks.
 import asyncio
 import collections
 import hashlib
+import itertools
 import json
+import math
 import re
 import time
 import logging
@@ -1873,6 +1875,36 @@ def _explicit_delegation_requested(text: str) -> bool:
         if _EXPLICIT_DELEGATION_RE.search(clause):
             return True
     return _orchestration_requested(text)
+
+
+def _resolve_standing_delegation(session_id, settings, *, granted: bool, revoked: bool) -> bool:
+    """Standing delegation authorization for one chat.
+
+    Returns whether delegation launchers are authorized this turn, persisting a
+    change so the next turn does not have to re-read the user's mind. Only a
+    HUMAN message can move it: `granted`/`revoked` are computed from
+    `_delegation_intent_text`, which already excludes worker output, tool
+    results and other injected role=user envelopes.
+
+    A failure to persist is not a failure to authorize — the user asked for
+    agents in this turn either way; it just will not be remembered.
+    """
+    standing = bool(settings.get("delegation_granted"))
+    if revoked and not granted:
+        authorized = False
+    elif granted:
+        authorized = True
+    else:
+        authorized = standing
+    if authorized != standing:
+        try:
+            from core.database import update_session_settings
+
+            update_session_settings(session_id, {"delegation_granted": authorized})
+            logger.info("[agent] standing delegation for %s -> %s", session_id, authorized)
+        except Exception:
+            logger.warning("could not persist standing delegation for %s", session_id, exc_info=True)
+    return authorized
 
 
 def _delegation_intent_text(messages: List[Dict]) -> str:
@@ -5789,11 +5821,25 @@ async def stream_agent_loop(
         disabled_tools.update(_binding_denied)
         _mark_dropped(_binding_denied, "agent-tool-allowlist")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
-    _delegation_authorized = _delegation_policy == "auto" or (
-        _delegation_policy == "explicit" and _explicit_delegation_requested(_delegation_text)
-    )
+    # Authorization is a property of the CHAT, not of the latest sentence in it.
+    # Re-deriving it from every message meant a user who had asked for agents in
+    # plain words was refused two messages later, on a follow-up that simply did
+    # not repeat the request — and the model's reaction was to hand-roll HTTP
+    # POSTs to /api/agents/launch, which bypassed this gate entirely. So a human
+    # request grants it for the chat, an explicit human prohibition takes it
+    # away again, and everything in between just works.
+    _delegation_granted = _explicit_delegation_requested(_delegation_text)
+    _delegation_revoked = bool(_NO_DELEGATION_RE.search(_delegation_text or ""))
+    if _delegation_policy == "explicit" and session_id:
+        _delegation_authorized = _resolve_standing_delegation(
+            session_id, _agent_settings, granted=_delegation_granted, revoked=_delegation_revoked
+        )
+    else:
+        _delegation_authorized = _delegation_policy == "auto" or (
+            _delegation_policy == "explicit" and _delegation_granted
+        )
     if _delegation_policy == "never" or (
-        _delegation_policy == "explicit" and not _explicit_delegation_requested(_delegation_text)
+        _delegation_policy == "explicit" and not _delegation_authorized
     ):
         # Policy must cover every entry point that can start another worker,
         # including a dynamically-connected Pi worker MCP.  The local
@@ -7237,7 +7283,17 @@ async def stream_agent_loop(
     _last_serialized_history = None
     _fenced_announced = set(_relevant_tools or ())
 
-    for round_num in range(1, max_rounds + 1):
+    # `max_rounds` falsy (0 or None) means no round ceiling at all, which is the
+    # default for agents now. Rounds were never the real safety boundary: a turn
+    # is still bounded by the per-run tool-call ceiling
+    # (`agent_max_tool_calls`, default DEFAULT_MAX_TOOL_CALLS_PER_RUN), by the
+    # request timeout, by each tool's own policy, and by the user's stop
+    # control. A round counter only ever ended real work mid-task.
+    _round_budget = max_rounds if max_rounds and max_rounds > 0 else math.inf
+    _round_numbers = (
+        itertools.count(1) if _round_budget is math.inf else range(1, int(_round_budget) + 1)
+    )
+    for round_num in _round_numbers:
         if _turn_discovery is not None:
             try:
                 disabled_tools.update(expand_tool_aliases(load_disabled_tools_strict()))
@@ -7967,7 +8023,7 @@ async def stream_agent_loop(
                 _notice = incomplete_execution_notice(_workflow_receipts)
                 if (_notice and not _workflow_receipts and not _workflow_nudged
                         and _delegation_authorized and "orchestrate_agents" in _sent_set
-                        and not _force_answer and round_num < max_rounds):
+                        and not _force_answer and round_num < _round_budget):
                     _workflow_nudged = True
                     # Nothing has been shown as a successful run. Retry once,
                     # then return a deterministic non-execution result.
@@ -7980,7 +8036,7 @@ async def stream_agent_loop(
                     continue
                 _verified_answer = _notice or cleaned_round
                 if (_agent_control.pending_steer(session_id, run_id=_steer_run_id)
-                        and round_num < max_rounds):
+                        and round_num < _round_budget):
                     continue
                 full_response += _verified_answer
                 round_texts[-1] = _verified_answer
@@ -8251,7 +8307,7 @@ async def stream_agent_loop(
             # whole promise of steering. Bounded by max_rounds like everything
             # else, and _STEER_MAX caps how much can be pending.
             if (_agent_control.pending_steer(session_id, run_id=_steer_run_id)
-                    and round_num < max_rounds):
+                    and round_num < _round_budget):
                 logger.info(
                     "[agent] round %d would end the turn but a steer is pending; continuing",
                     round_num,
@@ -9135,8 +9191,8 @@ async def stream_agent_loop(
         # sub-agent, background follow-up) sees only this frame and the prose,
         # and has to tell its parent where to resume from — see
         # `headless_agent._rounds_exhausted_note`.
-        logger.info("[agent] round cap (%d) reached mid-task after %d tool call(s) — emitting rounds_exhausted",
-                    max_rounds, len(tool_events))
+        logger.info("[agent] round cap (%s) reached mid-task after %d tool call(s) — emitting rounds_exhausted",
+                    _round_budget, len(tool_events))
         yield (f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds, "tool_calls": len(tool_events)})}'
                "\n\n")
 

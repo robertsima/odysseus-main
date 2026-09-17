@@ -13,8 +13,17 @@ import re
 from typing import Any, Dict, List, Optional
 
 MAX_PROFILES = 40
-MAX_ROUNDS_CAP = 40
-DEFAULT_ROUNDS = 12
+# A round budget is a safety stop, not a work allowance, and counting rounds was
+# never what kept a worker safe. The 2026-09-17 logs cut workers off after 12 and
+# 29 tool calls with the task unstarted, which is the only thing the counter
+# reliably achieved. So: UNLIMITED BY DEFAULT (`max_rounds = 0`). What actually
+# bounds a run is unchanged and is not a counter -- the per-run tool-call ceiling
+# (`agent_max_tool_calls`, default 500), the request timeout, the worker's own
+# tool policy, and the user's stop control. An explicit positive budget is still
+# honoured for anyone who wants one, up to MAX_ROUNDS_CAP.
+MAX_ROUNDS_CAP = 200
+UNLIMITED_ROUNDS = 0
+DEFAULT_ROUNDS = UNLIMITED_ROUNDS
 MAX_INSTRUCTIONS = 8000
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$")
 _MEMORY_ACCESS = {"none", "read", "write"}
@@ -60,6 +69,8 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
         seen.add(key)
         tools = _names(raw.get("disabled_tools"), "disabled_tools", name, 200)
         try:
+            # 0 (and a missing value) mean "no round ceiling"; anything positive
+            # is an explicit budget the author chose.
             rounds = int(raw.get("max_rounds") or DEFAULT_ROUNDS)
         except (TypeError, ValueError):
             raise ValueError(f"profile {name!r}: max_rounds must be a number")
@@ -90,7 +101,7 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
             "approval_mode": str(raw.get("approval_mode") or "inherit").strip().lower(),
             "delegation_policy": _choice(raw.get("delegation_policy"), "delegation_policy", name, _DELEGATION, "explicit"),
             "max_parallel_workers": max(0, min(8, workers)),
-            "max_rounds": max(1, min(MAX_ROUNDS_CAP, rounds)),
+            "max_rounds": 0 if rounds <= 0 else min(MAX_ROUNDS_CAP, rounds),
         })
         if out[-1]["approval_mode"] not in {"inherit", "auto", "ask_risky", "ask_all"}:
             raise ValueError(f"profile {name!r}: invalid approval_mode")
