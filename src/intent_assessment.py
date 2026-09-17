@@ -154,6 +154,40 @@ _CONTINUE_WORK_RE = re.compile(
     r"next\s(?:slice|step|task|part|phase|one|item))\b", re.I,
 )
 
+_BACKWARD_REFERENCE_RE = re.compile(
+    r"\b(?:you|we|it|that|those|this)\b[^.!?\n]{0,80}"
+    r"\b(?:before|earlier|previously|already)\b",
+    re.I,
+)
+_METHOD_CAPABILITY_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:use|try|switch\s+to)\s+"
+    r"(?:(?:your|the|those|these|available|connected|appropriate|actual|right|proper)\s+){1,3}"
+    r"(?:(?:mcp|native|built[ -]?in)\s+)?(?:tools?|capabilit(?:y|ies)|functions?)\b",
+    re.I,
+)
+
+
+def is_contextual_reference(messages: Sequence[Mapping[str, Any]], text: str) -> bool:
+    """Whether a short turn points back at prior task state or its mechanism."""
+    if human_turn_count(messages) <= 1:
+        return False
+    value = str(text or "").strip()
+    backward = _BACKWARD_REFERENCE_RE.search(value)
+    if backward and len(value) <= 180:
+        # A correction can introduce a new task in a later clause. In that
+        # shape the actionable clause is self-contained and must not inherit
+        # the old retrieval query ("we already pulled; now search weather").
+        later_clauses = re.split(r"[;.!?]+", value[backward.end():])
+        if not any(looks_like_request(clause) for clause in later_clauses if clause.strip()):
+            return True
+    method = _METHOD_CAPABILITY_RE.match(value)
+    if not method:
+        return False
+    # A method-only correction inherits the task. If another action appears
+    # after the capability phrase, that tail is a new self-contained request.
+    tail = value[method.end():]
+    return not _ACTION_SIGNAL_RE.search(tail) and len(re.findall(r"[A-Za-z0-9_'-]+", tail)) <= 5
+
 
 def is_explicit_continuation(text: str) -> bool:
     return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
@@ -200,6 +234,7 @@ def assess_request(messages: Sequence[Mapping[str, Any]], latest_text: Optional[
         is_explicit_continuation(text) or assistant_followup
         or is_retry_continuation(messages, text)
         or is_work_continuation(messages, text)
+        or is_contextual_reference(messages, text)
     )
     domain_set = frozenset(domains)
     retrieval_query = recent_human_context(messages) if continuation else text

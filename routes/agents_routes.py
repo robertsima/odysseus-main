@@ -140,6 +140,28 @@ def setup_agents_routes(session_manager) -> APIRouter:
             hidden_runs = {str(run_id) for run_id in (settings.get("hidden_agent_runs") or [])}
             children = [child for child in children if child.get("run_id") not in hidden_runs]
             from src.session_settings import effective_worker_limit
+            config = {
+                "agent_profile": settings.get("agent_profile"),
+                "agent_instructions": settings.get("agent_instructions"),
+                "approval_mode": settings.get("approval_mode"),
+                "disabled_tools": settings.get("disabled_tools") or [],
+                "memory_access": settings.get("memory_access", "write"),
+                "skill_access": settings.get("skill_access", "all"),
+                "skill_names": settings.get("skill_names") or [],
+                "model_access": settings.get("model_access", "all"),
+                "allowed_models": settings.get("allowed_models") or [],
+                "delegation_policy": settings.get("delegation_policy", "explicit"),
+                "max_parallel_workers": effective_worker_limit(settings),
+                "allowed_mcp_servers": settings.get("allowed_mcp_servers", ["*"]),
+                "private_vault_access": bool(settings.get("private_vault_access", False)),
+            }
+            # Missing means a legacy denylist-only session. Preserve that
+            # distinction so the dashboard derives its access mode once;
+            # emitting default `all` here would silently broaden old chats.
+            if "tool_access" in settings:
+                config["tool_access"] = settings.get("tool_access")
+            if "enabled_tools" in settings:
+                config["enabled_tools"] = settings.get("enabled_tools") or []
             rows.append({
                 "session_id": sid,
                 "name": getattr(sess, "name", "") or sid,
@@ -171,20 +193,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "hidden_run_ids": sorted(hidden_runs),
                 "approval_mode": settings.get("approval_mode"),
                 "is_current": sid == current_session,
-                "config": {
-                    "agent_profile": settings.get("agent_profile"),
-                    "approval_mode": settings.get("approval_mode"),
-                    "disabled_tools": settings.get("disabled_tools") or [],
-                    "memory_access": settings.get("memory_access", "write"),
-                    "skill_access": settings.get("skill_access", "all"),
-                    "skill_names": settings.get("skill_names") or [],
-                    "model_access": settings.get("model_access", "all"),
-                    "allowed_models": settings.get("allowed_models") or [],
-                    "delegation_policy": settings.get("delegation_policy", "explicit"),
-                    "max_parallel_workers": effective_worker_limit(settings),
-                    "allowed_mcp_servers": settings.get("allowed_mcp_servers", ["*"]),
-                    "private_vault_access": bool(settings.get("private_vault_access", False)),
-                },
+                "config": config,
             })
         order = {"waiting_approval": 0, "running": 1, "failed": 2, "finished": 3, "stopped": 4, "idle": 5}
         rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("latest_ts") or r.get("started_at") or 0)))

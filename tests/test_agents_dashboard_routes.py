@@ -105,6 +105,38 @@ async def test_overview_includes_the_current_open_chat_without_agent_history(env
     assert out["rows"][0]["config"]["delegation_policy"] == "explicit"
 
 
+async def test_overview_round_trips_persona_and_explicit_tool_policy(env, monkeypatch):
+    _mgr, eps = env
+    import core.database as db
+    stored = {
+        "agent_profile": "reviewer",
+        "agent_instructions": "Be exact and skeptical.",
+        "tool_access": "selected",
+        "enabled_tools": ["read_file", "grep"],
+        "disabled_tools": ["bash"],
+    }
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: dict(stored))
+    out = await eps[("GET", "/api/agents/overview")](_req(), current_session="a1")
+    config = out["rows"][0]["config"]
+    assert config["agent_instructions"] == "Be exact and skeptical."
+    assert config["tool_access"] == "selected"
+    assert config["enabled_tools"] == ["read_file", "grep"]
+    assert config["disabled_tools"] == ["bash"]
+
+
+async def test_overview_keeps_legacy_tool_access_absent(env, monkeypatch):
+    _mgr, eps = env
+    import core.database as db
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {
+        "disabled_tools": ["bash"],
+    })
+    out = await eps[("GET", "/api/agents/overview")](_req(), current_session="a1")
+    config = out["rows"][0]["config"]
+    assert config["disabled_tools"] == ["bash"]
+    assert "tool_access" not in config
+    assert "enabled_tools" not in config
+
+
 async def test_archive_is_owner_scoped_recoverable_and_refuses_active_descendants(env, monkeypatch):
     """Cleanup hides idle work only; it neither stops nor erases live work."""
     mgr, eps = env

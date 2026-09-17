@@ -249,6 +249,7 @@
     })();
   </script>
   <link rel="stylesheet" href="/static/style.css?v=20260916workspace2">
+  <link rel="stylesheet" href="/static/skill-import-review.css">
   <link rel="modulepreload" href="/static/app.js?v=20260916workspace2">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260825ctxmeter1">
   <link rel="modulepreload" href="/static/js/ui.js">
@@ -431,7 +432,7 @@
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
               <h2 style="margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;color:var(--accent, var(--red));"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Add Skill</h2>
             </div>
-            <p class="memory-desc doclib-desc" style="margin-top:6px;">Import a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> (folder with <code>SKILL.md</code> and optional templates).</p>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">Preview a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a>, then import it as a draft. Instructions and supporting files are reviewed before use.</p>
             <div class="memory-add-row" style="margin-top:6px;margin-bottom:10px;">
               <div class="skill-ph-wrap" style="flex:1;min-width:0;">
                 <input type="url" id="skill-import-url" placeholder=" " class="memory-add-input skill-hint-input" aria-label="Skill import URL" />
@@ -2856,6 +2857,7 @@
 
 
 <!-- Load modules in this order -->
+<script src="/static/js/pluginCatalog.js"></script>
 <script type="module" src="/static/js/storage.js"></script>
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>

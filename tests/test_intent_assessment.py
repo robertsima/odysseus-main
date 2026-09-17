@@ -62,6 +62,64 @@ def test_changed_topic_does_not_inherit_old_retrieval_query():
     assert assessment.retrieval_query == "explain dependency injection"
 
 
+@pytest.mark.parametrize("followup", [
+    "you had the paths before!",
+    "you already had that earlier",
+    "use the connected MCP tools instead",
+    "try your available tools this time",
+])
+def test_contextual_corrections_inherit_recent_human_task(followup):
+    messages = [
+        {"role": "user", "content": "pull the dog-trainer repository"},
+        {"role": "assistant", "content": "I cannot access it."},
+        {"role": "user", "content": followup},
+    ]
+    assessment = assess_request(messages)
+    assert assessment.continuation is True
+    assert followup in assessment.retrieval_query
+    assert "pull the dog-trainer repository" in assessment.retrieval_query
+
+
+def test_method_with_its_own_task_does_not_inherit_stale_context():
+    messages = [
+        {"role": "user", "content": "check my calendar"},
+        {"role": "assistant", "content": "Tomorrow is open."},
+        {"role": "user", "content": "use the available tools to search release notes"},
+    ]
+    assessment = assess_request(messages)
+    assert assessment.continuation is False
+    assert assessment.retrieval_query == "use the available tools to search release notes"
+
+
+@pytest.mark.parametrize("followup", [
+    "we already pulled; now search weather",
+    "you had the paths before. Find today's exchange rate instead",
+])
+def test_backward_reference_with_new_task_does_not_inherit(followup):
+    messages = [
+        {"role": "user", "content": "pull the dog-trainer repository"},
+        {"role": "assistant", "content": "Done."},
+        {"role": "user", "content": followup},
+    ]
+    assessment = assess_request(messages)
+    assert assessment.continuation is False
+    assert assessment.retrieval_query == followup
+
+
+def test_agent_classifier_does_not_turn_mcp_use_feedback_into_settings_admin():
+    from src.agent_loop import _classify_agent_request, _detect_admin_tools
+    messages = [
+        {"role": "user", "content": "pull the dog-trainer repository"},
+        {"role": "assistant", "content": "I could not access it."},
+        {"role": "user", "content": "use your mcp tools brah wtf"},
+    ]
+    result = _classify_agent_request(messages, "use your mcp tools brah wtf")
+    assert result["continuation"] is True
+    assert "pull the dog-trainer repository" in result["retrieval_query"]
+    assert "settings" not in result["domains"]
+    assert "manage_mcp" not in _detect_admin_tools(messages)
+
+
 def test_terse_followup_inherits_only_human_turns():
     messages = [
         {"role": "user", "content": "search for the release notes"},

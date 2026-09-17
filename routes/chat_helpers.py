@@ -49,6 +49,14 @@ _RETRIEVAL_QUERY_MAX_CHARS = 2400
 _DYNAMIC_CONTEXT_MAX_RATIO = 0.20
 _DYNAMIC_CONTEXT_MAX_TOKENS = 12_000
 _DYNAMIC_CONTEXT_RESPONSE_RESERVE = 512
+_EXPLICIT_GROUNDED_CONTEXT_RE = re.compile(
+    r"\b(?:document|doc|draft|file|attachment|upload|pdf|note|report|pinned|knowledge\s*base|rag|vault)\b",
+    re.IGNORECASE,
+)
+_SHORT_CORRECTIVE_FEEDBACK_RE = re.compile(
+    r"^\s*(?:wtf+|what\s+the\s+f+u+c+k+|come\s+on|seriously|bruh+)\s*[!?.,]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_casual_low_signal(text: str) -> bool:
@@ -62,6 +70,28 @@ def _is_casual_low_signal(text: str) -> bool:
         return False
     tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
     return len(tail_words) <= 2
+
+
+def should_skip_ambient_document_context(message: str, history: list[dict[str, Any]]) -> bool:
+    """True for feedback turns that should not query or inject document context.
+
+    Explicit document/vault language always wins. This gate only covers ambient
+    context: a visible editor pointer and automatic personal-document RAG. It
+    does not affect attachments, explicitly requested documents, or pinned
+    memory semantics.
+    """
+    text = str(message or "").strip()
+    if not text or _EXPLICIT_GROUNDED_CONTEXT_RE.search(text):
+        return False
+    try:
+        from src.intent_assessment import assess_request, is_contextual_reference
+        assessment = assess_request(history or [], latest_text=text)
+        contextual_feedback = is_contextual_reference(history or [], text)
+        low_information = assessment.low_signal and not assessment.continuation
+    except Exception:
+        contextual_feedback = False
+        low_information = False
+    return bool(contextual_feedback or low_information or _SHORT_CORRECTIVE_FEEDBACK_RE.fullmatch(text))
 
 
 def _text_content(content: Any) -> str:
@@ -323,6 +353,10 @@ class ChatContext:
     # Explicit per-chat grant for private vault retrieval/file reads. False is
     # the fail-closed default and is carried into agent tool execution.
     allow_private: bool = False
+    # The latest turn is corrective/method feedback rather than a request for
+    # document grounding. The route uses this to avoid even loading a passive
+    # editor document; personal-document RAG is already disabled here.
+    suppress_active_document: bool = False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -951,7 +985,8 @@ async def build_chat_context(
 
     # Use RAG?
     use_rag_val = (str(use_rag).lower() != "false") if use_rag is not None else True
-    if incognito or not allow_tool_preprocessing or is_research_spinoff or casual_low_signal:
+    explicit_rag = use_rag is not None and str(use_rag).strip().lower() == "true"
+    if incognito or not allow_tool_preprocessing or is_research_spinoff or (casual_low_signal and not explicit_rag):
         use_rag_val = False
 
     # If pre-fetched search context was provided (compare mode), skip live web search
@@ -962,6 +997,12 @@ async def build_chat_context(
     # the sync path uses text_for_context.
     _ctx_msg = preprocessed.enhanced_message if use_enhanced_message else preprocessed.text_for_context
     _history_for_retrieval = _incognito_messages(session_id) if incognito else sess.get_context_messages()
+    suppress_ambient_documents = should_skip_ambient_document_context(
+        preprocessed.text_for_context, _history_for_retrieval,
+    )
+    suppress_document_rag = suppress_ambient_documents and not explicit_rag
+    if suppress_document_rag:
+        use_rag_val = False
     _retrieval_query, _retrieval_mode = build_retrieval_query(
         preprocessed.text_for_context,
         _history_for_retrieval,
@@ -989,7 +1030,7 @@ async def build_chat_context(
             allow_private = False
     allow_private = bool(allow_private)
     _preface_kwargs["allow_private"] = allow_private
-    if use_rag is not None or is_research_spinoff or casual_low_signal:
+    if use_rag is not None or is_research_spinoff or casual_low_signal or suppress_document_rag:
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
@@ -1093,6 +1134,7 @@ async def build_chat_context(
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
         allow_private=allow_private,
+        suppress_active_document=suppress_ambient_documents,
     )
 
 

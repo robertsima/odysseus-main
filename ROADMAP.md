@@ -7,6 +7,24 @@ the codebase, you are probably right to stay away.
 
 ## High Priority
 
+- [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
+  administration, defer irrelevant connected tools, and align advertised tools
+  with private-vault execution permission. See
+  [September 17 log follow-up](docs/harness-log-review-2026-09-17.md).
+- [ ] Design genuinely isolated repository execution so Git/tests can run
+  without granting access to the mounted private vault. A working directory
+  or prompt restriction is not an isolation boundary.
+- [ ] Measure cross-turn cache reuse and large-tool-output growth in production;
+  evaluate pre-turn compaction and bounded output offloading with task-success
+  checks before changing the execution ledger.
+
+- [x] Per-agent persisted personality/instructions, declarative capability plugins,
+  pinned PromptScript/skills CLIs, and reviewed draft-only portable skill imports.
+  See [agent extensions guide](docs/agent-extensions.md).
+- [ ] Verify agent extension controls after deployment: two contrasting personas,
+  plugin enable/remove with manual permission edits, local skill import/publish,
+  and native/Docker CLI readiness.
+
 - [x] Separate shared human-intent assessment, advisory candidate selection,
   and execution authorization; add bounded per-turn capability discovery for
   native and fenced/MCP models. See

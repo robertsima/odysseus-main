@@ -3,6 +3,19 @@
     "type": "git",
     "url": "https://github.com/odysseus-dev/odysseus.git"
   },
+  "engines": {
+    "node": ">=22.20.0"
+  },
+  "scripts": {
+    "promptscript": "prs",
+    "skills:cli": "skills",
+    "skills:add": "node scripts/add-project-skill.mjs",
+    "skills:list": "skills list --agent promptscript"
+  },
+  "dependencies": {
+    "@promptscript/cli": "1.18.1",
+    "skills": "1.6.0"
+  },
   "devDependencies": {
     "@antithesishq/bombadil": "^0.6.1"
   }

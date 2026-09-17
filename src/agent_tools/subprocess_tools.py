@@ -283,13 +283,8 @@ class BashTool:
         # privacy boundary. Missing context is denied too: a caller must carry
         # the explicit per-chat grant all the way to the subprocess boundary.
         if not isinstance(ctx, dict) or ctx.get("allow_private") is not True:
-            return {
-                "error": (
-                    "bash is disabled unless this chat explicitly enables private "
-                    "vault access; use dedicated workspace/file tools for public files"
-                ),
-                "exit_code": 1,
-            }
+            from src.private_access import private_tool_denial
+            return private_tool_denial("bash")
         if isinstance(content, dict):
             content = str(content.get("command") or content.get("cmd") or content.get("code") or "")
 
@@ -373,13 +368,8 @@ class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
         if not isinstance(ctx, dict) or ctx.get("allow_private") is not True:
-            return {
-                "error": (
-                    "python is disabled unless this chat explicitly enables private "
-                    "vault access; use dedicated workspace/file tools for public files"
-                ),
-                "exit_code": 1,
-            }
+            from src.private_access import private_tool_denial
+            return private_tool_denial("python")
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
         proc = await asyncio.create_subprocess_exec(

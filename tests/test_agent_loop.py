@@ -38,6 +38,7 @@ _IMPORTED_AGENT_LOOP = None
 try:
     from src.agent_loop import (
         _detect_admin_intent,
+        _detect_admin_tools,
         _classify_agent_request,
         _compute_final_metrics,
         _append_tool_results,
@@ -267,6 +268,30 @@ class TestDetectAdminIntent:
 
     def test_mcp_server(self):
         assert _detect_admin_intent(self._msgs("add an MCP server")) is True
+
+    @pytest.mark.parametrize("text", [
+        "use your mcp tools brah wtf",
+        "use the connected MCP tools instead",
+        "try your available tools this time",
+    ])
+    def test_tool_use_is_not_mcp_administration(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is False
+
+    @pytest.mark.parametrize("text", [
+        "use MCP tools to show my calendar",
+        "use the MCP server to read a file",
+        "ask the MCP tool to list my tasks",
+    ])
+    def test_actions_performed_through_mcp_are_not_mcp_administration(self, text):
+        assert "manage_mcp" not in _detect_admin_tools(self._msgs(text))
+
+    @pytest.mark.parametrize("text", [
+        "show my MCP servers",
+        "reconnect the MCP server",
+        "configure MCP credentials",
+    ])
+    def test_mcp_management_still_selects_admin_tools(self, text):
+        assert _detect_admin_intent(self._msgs(text)) is True
 
     def test_api_key(self):
         assert _detect_admin_intent(self._msgs("update the API key")) is True

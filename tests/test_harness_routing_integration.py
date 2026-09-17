@@ -90,6 +90,39 @@ def _install_dispatch_spy(monkeypatch):
     return executed
 
 
+def test_direct_greeting_path_applies_only_that_sessions_persona(monkeypatch, admin_owner):
+    """The tool-free fast path still observes scoped personality settings."""
+    _patch_basics(monkeypatch)
+    settings = {
+        "ada": {"agent_instructions": "ADA_ONLY: greet warmly."},
+        "grace": {"agent_instructions": "GRACE_ONLY: answer tersely."},
+    }
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: settings.get(sid, {}))
+    seen = []
+
+    async def stream(_candidates, messages, **kwargs):
+        seen.append((list(messages), kwargs.get("tools")))
+        yield _delta("hello")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream, raising=False)
+    for sid in ("ada", "grace", "plain"):
+        _collect(agent_loop.stream_agent_loop(
+            "https://api.openai.com/v1", "gpt-test",
+            [{"role": "user", "content": "hello"}], session_id=sid,
+            owner=admin_owner, _is_teacher_run=True,
+        ))
+
+    prompts = ["\n".join(str(m.get("content") or "") for m in messages) for messages, _ in seen]
+    assert all(tools is None for _, tools in seen)
+    assert "ADA_ONLY" in prompts[0] and "GRACE_ONLY" not in prompts[0]
+    assert "GRACE_ONLY" in prompts[1] and "ADA_ONLY" not in prompts[1]
+    assert "ADA_ONLY" not in prompts[2] and "GRACE_ONLY" not in prompts[2]
+    assert seen[0][0][0]["role"] == "system"
+    assert "no tools" in seen[0][0][0]["content"]
+    assert seen[0][0][-1] == {"role": "user", "content": "hello"}
+
+
 def test_discovery_contract_is_bounded_stable_and_does_not_mutate_schemas():
     source = [_schema("get_workspace"), _schema("grep"), _schema("read_file")]
     pristine = copy.deepcopy(source)
@@ -107,6 +140,36 @@ def test_discovery_contract_is_bounded_stable_and_does_not_mutate_schemas():
     assert result_a["max_results"] == 8
     assert turn.loaded_names == set(result_a["loaded_names"])
     assert source == pristine
+
+
+@pytest.mark.parametrize("request_grant,session_grant,expected", [
+    (False, False, False), (True, False, False), (False, True, False), (True, True, True),
+])
+def test_initial_schemas_match_effective_private_execution_grant(
+    monkeypatch, admin_owner, request_grant, session_grant, expected,
+):
+    _patch_basics(monkeypatch)
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {
+        "private_vault_access": session_grant,
+    })
+    calls = []
+    async def stream(_candidates, messages, **kwargs):
+        calls.append((copy.deepcopy(messages), kwargs.get("tools") or []))
+        yield _delta("Ready.")
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test",
+        [{"role": "user", "content": "Use bash to run git pull in the repository."}],
+        session_id="repo-chat", owner=admin_owner, allow_private=request_grant,
+        relevant_tools={"bash", "read_file"}, max_rounds=1, _is_teacher_run=True,
+    ))
+    assert calls
+    names = {_name(s) for s in calls[0][1]}
+    assert ("bash" in names) is expected
+    assert "read_file" in names
+    prompt = "\n".join(str(m.get("content") or "") for m in calls[0][0])
+    assert ("not just the repo" in prompt) is (not expected)
 
 
 def test_initial_selection_is_stably_ordered_and_schema_token_bounded():
@@ -401,6 +464,73 @@ def test_fenced_dynamic_mcp_discovery_attaches_parses_and_dispatches(monkeypatch
         _is_teacher_run=True,
     ))
     assert executed == [qualified]
+
+
+def test_small_connected_mcp_is_deferred_on_unrelated_turn_but_discoverable(
+    monkeypatch, admin_owner,
+):
+    _patch_basics(monkeypatch)
+    qualified = "mcp__weather__forecast"
+    schema = {
+        "type": "function",
+        "function": {
+            "name": qualified,
+            "description": "Read a weather forecast.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+
+    class Manager:
+        def get_all_tools(self, disabled_map=None):
+            return [{"server_id": "weather", "name": "forecast", "qualified_name": qualified,
+                     "annotations": {"readOnlyHint": True}}]
+
+        def get_all_openai_schemas(self, disabled_map=None):
+            return [copy.deepcopy(schema)]
+
+        def gated_tool_names(self, disabled_map=None):
+            return set()  # deliberately a small connected server
+
+        def discover_requested_tools(self, *args, **kwargs):
+            return set()
+
+        def demoted_servers(self, disabled_map=None):
+            return []
+
+        def get_tool_descriptions_for_prompt(self, disabled_map=None):
+            return ""
+
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: Manager())
+    monkeypatch.setattr(agent_loop, "_load_mcp_disabled_map", lambda: {})
+    executed = _install_dispatch_spy(monkeypatch)
+    rounds = []
+
+    async def stream(_candidates, messages, **kwargs):
+        names = {_name(item) for item in (kwargs.get("tools") or [])}
+        rounds.append(names)
+        if len(rounds) == 1:
+            assert qualified not in names
+            yield _native_call("discover_tools", {"query": qualified, "max_results": 1}, "d1")
+        elif len(rounds) == 2:
+            assert qualified in names
+            yield _native_call(qualified, {"city": "Boston"}, "w1")
+        else:
+            yield _delta("done")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test",
+        [{"role": "user", "content": "Explain stable sorting algorithms."}],
+        relevant_tools={"discover_tools"}, max_rounds=3, owner=admin_owner,
+        _is_teacher_run=True,
+    ))
+    assert executed == [qualified]
+    assert len(rounds[0]) < len(rounds[1])
 
 
 def test_execution_rechecks_profile_revoked_between_rounds(monkeypatch, admin_owner):

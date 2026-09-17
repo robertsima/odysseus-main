@@ -26,6 +26,7 @@ _SELECTION_MODES = frozenset({"all", "selected", "none"})
 _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
 _LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
+MAX_AGENT_INSTRUCTIONS = 8000
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -108,6 +109,10 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError("agent_profile must be a string")
             out[key] = (value or "").strip()[:40] or None
+        elif key == "agent_instructions":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_instructions must be a string")
+            out[key] = (value or "").strip()[:MAX_AGENT_INSTRUCTIONS] or None
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out

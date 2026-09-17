@@ -1019,11 +1019,16 @@ def setup_chat_routes(
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
-        # Query active document — prefer explicit ID from frontend, fall back to session lookup
+        # Query active document — prefer explicit ID from frontend, fall back to session lookup.
+        # Corrective/task-method feedback must not drag an unrelated visible
+        # editor into the prompt. Explicit document requests are excluded from
+        # this gate by build_chat_context.
         active_doc = None
         _doc_db = SessionLocal()
         try:
-            if active_doc_id:
+            if ctx.suppress_active_document:
+                logger.info("[doc-inject] skipped ambient active document for corrective/low-information turn")
+            elif active_doc_id:
                 logger.info(f"[doc-inject] active_doc_id from frontend: {active_doc_id}")
                 # Scope to the caller's documents. The session and in-memory
                 # fallbacks below are already owner/session-bound; this
@@ -1064,7 +1069,7 @@ def setup_chat_routes(
                         logger.info(f"[doc-inject] found by ID: title={active_doc.title!r}, lang={active_doc.language!r}, is_active={active_doc.is_active}, content_len={len(active_doc.current_content or '')}")
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 _email_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True,
@@ -1073,7 +1078,7 @@ def setup_chat_routes(
                 active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
                 if active_doc:
                     logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
@@ -1087,7 +1092,7 @@ def setup_chat_routes(
             # neither lookup above can associate them with this conversation,
             # so the agent never sees what it just wrote. Guarded so we never
             # leak a doc that belongs to a DIFFERENT session.
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 try:
                     from src.agent_tools.document_tools import get_active_document
                     _mem_id = get_active_document()

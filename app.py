@@ -691,6 +691,9 @@ app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
 
+from routes.plugin_routes import setup_plugin_routes
+app.include_router(setup_plugin_routes(session_manager=session_manager))
+
 # Chat
 from routes.chat_routes import setup_chat_routes
 app.include_router(setup_chat_routes(

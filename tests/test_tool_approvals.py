@@ -186,6 +186,24 @@ def test_profile_validation_normalises_capability_loadouts():
     assert patch["allowed_mcp_servers"] == ["builtin_browser"]
 
 
+def test_profile_persona_is_snapshotted_per_agent_and_bounded():
+    profiles = agent_profiles.validate_profiles([
+        {"name": "Ada", "instructions": "Be analytical."},
+        {"name": "Grace", "instructions": "Be concise."},
+    ])
+    ada = agent_profiles.session_patch(profiles[0])
+    grace = agent_profiles.session_patch(profiles[1])
+    assert ada["agent_instructions"] == "Be analytical."
+    assert grace["agent_instructions"] == "Be concise."
+    profiles[0]["instructions"] = "edited global default"
+    assert ada["agent_instructions"] == "Be analytical."
+
+    long_profile = agent_profiles.validate_profiles([
+        {"name": "bounded", "instructions": "x" * (agent_profiles.MAX_INSTRUCTIONS + 1)},
+    ])[0]
+    assert len(long_profile["instructions"]) == agent_profiles.MAX_INSTRUCTIONS
+
+
 def test_per_chat_capability_patch_validation():
     patch = session_settings.validate_patch({
         "memory_access": "read", "skill_access": "selected", "skill_names": ["citations"],
@@ -196,3 +214,14 @@ def test_per_chat_capability_patch_validation():
     assert patch["delegation_policy"] == "explicit"
     with pytest.raises(ValueError):
         session_settings.validate_patch({"delegation_policy": "always"})
+
+
+def test_per_chat_agent_persona_patch_validation():
+    assert session_settings.validate_patch({"agent_instructions": "  Be precise.  "}) == {
+        "agent_instructions": "Be precise."
+    }
+    assert len(session_settings.validate_patch({
+        "agent_instructions": "x" * (session_settings.MAX_AGENT_INSTRUCTIONS + 1),
+    })["agent_instructions"]) == session_settings.MAX_AGENT_INSTRUCTIONS
+    with pytest.raises(ValueError):
+        session_settings.validate_patch({"agent_instructions": ["shared"]})

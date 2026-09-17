@@ -99,6 +99,8 @@ jobs:
           for f in static/app.js static/js/**/*.js; do
             node --check "$f"
           done
+      - name: Skill tooling and plugin UI contracts
+        run: node --test tests/frontend/*.test.mjs
 
   python-tests:
     name: Python tests (pytest)

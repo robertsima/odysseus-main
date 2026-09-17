@@ -28,6 +28,7 @@ from src.tool_security import (
     owner_is_admin_or_single_user,
 )
 from src.tool_policy import ToolPolicy
+from src.private_access import effective_private_grant, private_tool_denial, tool_requires_private_grant
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
 from src.tool_utils import _truncate, get_mcp_manager
 
@@ -647,24 +648,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "manage_memory":  _parse_manage_memory,
 }
 
-# A user-configured MCP server can expose a filesystem or shell wrapper under
-# any server id.  Qualified calls do not pass through the legacy bare-tool
-# dispatch, so keep the obvious read-capable names behind the same explicit
-# per-chat grant.  This is intentionally conservative: a false positive is a
-# retryable tool error, while a false negative can disclose private vault data.
-_PRIVATE_READ_MCP_TOOL_NAMES = frozenset({
-    "bash", "python", "read_file", "write_file", "edit_file", "apply_patch",
-    "grep", "glob", "ls", "get_workspace", "search_documents", "manage_rag",
-})
-
-
-def _qualified_mcp_needs_private_grant(tool: str) -> bool:
-    if not isinstance(tool, str) or not tool.startswith("mcp__"):
-        return False
-    parts = tool.split("__", 2)
-    return len(parts) == 3 and parts[2].casefold() in _PRIVATE_READ_MCP_TOOL_NAMES
-
-
 # Primary argument key(s) for the legacy line-parsed tools. When a fenced
 # block's content is a JSON object carrying one of these keys, it's structured
 # inline args (the relaxed parser's ```web_search {"query": "..."}``` shape) —
@@ -1100,6 +1083,8 @@ async def _execute_tool_block_impl(
     # Reject tools that the user has disabled for this request
     if disabled_tools and not policy_names.isdisjoint(disabled_tools):
         desc = f"{tool}: BLOCKED"
+        if tool_requires_private_grant(tool) and allow_private is not True:
+            return desc, private_tool_denial(tool)
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
@@ -1118,6 +1103,9 @@ async def _execute_tool_block_impl(
                 "error": "This chat's capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
                 "blocked": True, "blocked_reason": "session_policy_unavailable", "exit_code": 1,
             }
+    allow_private = effective_private_grant(
+        allow_private, _agent_settings if session_id else None,
+    )
     if _agent_settings:
         # Session settings are re-read for every call. A tool disabled after
         # turn preparation must be revoked here before any handler (including
@@ -1290,6 +1278,7 @@ async def _execute_tool_block_impl(
             runtime_disabled.update(_ADMIN_TOOLS)
             runtime_disabled.update(name for name in getattr(tool_discovery, "_catalog", {}) if is_public_blocked_tool(name))
         fresh_settings["_runtime_disabled_tools"] = sorted(runtime_disabled)
+        fresh_settings["private_vault_access"] = allow_private
         result = await tool_discovery.discover(query, max_results, settings=fresh_settings)
         return f"discover_tools: {query[:80]}", result
 
@@ -1299,17 +1288,10 @@ async def _execute_tool_block_impl(
     # per-chat private-vault grant is therefore a hard execution gate, not a
     # prompt hint.  Keep this before the detached-background branch and before
     # MCP dispatch so neither route can escape the same decision.
-    if tool in ("bash", "python") and allow_private is not True:
+    if tool_requires_private_grant(tool) and allow_private is not True:
         desc = f"{tool}: BLOCKED"
-        result = {
-            "error": (
-                f"Tool '{tool}' is disabled unless this chat explicitly enables "
-                "private vault access. Use the dedicated workspace/file tools "
-                "for public project files, or enable 'Allow private vault reads'."
-            ),
-            "exit_code": 1,
-        }
-        logger.info("Unrestricted subprocess blocked without private-vault grant: tool=%s session=%r", tool, session_id)
+        result = private_tool_denial(tool)
+        logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
         return desc, result
 
 
@@ -1580,22 +1562,8 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
-        _mcp_private_blocked = _qualified_mcp_needs_private_grant(tool) and allow_private is not True
-        if _mcp_private_blocked:
-            desc = f"{tool}: BLOCKED"
-            result = {
-                "error": (
-                    f"MCP tool '{tool}' is disabled unless this chat explicitly "
-                    "enables private vault access."
-                ),
-                "exit_code": 1,
-            }
-            logger.info("Qualified MCP private-read tool blocked without grant: tool=%s session=%r", tool, session_id)
-        else:
-            mcp = get_mcp_manager()
-        if _mcp_private_blocked:
-            pass
-        elif mcp:
+        mcp = get_mcp_manager()
+        if mcp:
             desc = f"mcp: {tool}"
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:

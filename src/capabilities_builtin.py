@@ -136,6 +136,35 @@ register(Capability(
 
 # ── host control ──────────────────────────────────────────────────────────
 
+def _skill_cli_available(name):
+    """Support both the image PATH and a native npm ci install, without executing."""
+    def check():
+        from pathlib import Path
+        import shutil
+        executable = shutil.which(name)
+        if executable:
+            return True, executable
+        local = Path(__file__).resolve().parents[1] / 'node_modules' / '.bin'
+        for suffix in ('', '.cmd'):
+            candidate = local / (name + suffix)
+            if candidate.is_file():
+                return True, str(candidate)
+        return False, f'{name} is not installed'
+    return check
+
+
+register(Capability(
+    name='skill_toolchain',
+    title='PromptScript & skills.sh CLI',
+    summary='Project-local skill authoring and installation tools. Does not grant agents shell access or publish imported skills.',
+    requirements=tuple(Requirement(name=name, check=_skill_cli_available(name),
+                                  hint='Rebuild the image or run npm ci --ignore-scripts in the project.')
+                       for name in ('prs', 'skills')),
+    default_enabled=True,
+    docs_url='https://getpromptscript.dev/latest/guides/npx-skills/',
+    # Deliberately no tools: ordinary manage_skills works without these CLIs.
+))
+
 register(Capability(
     name="host_docker",
     title="Host Docker access",

@@ -27,6 +27,16 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 
 FROM node-runtime AS app
 
+# Compiler and skills.sh installer are separate tools. Install their locked
+# dependency trees once at build time, without package lifecycle scripts.
+# This installs CLI binaries globally on PATH, NOT user/global skill bundles.
+ENV DISABLE_TELEMETRY=1 PROMPTSCRIPT_TELEMETRY=false \
+    ODYSSEUS_SKILL_TOOLS_ROOT=/opt/odysseus-skill-tools
+COPY package.json package-lock.json /opt/odysseus-skill-tools/
+RUN cd /opt/odysseus-skill-tools && npm ci --omit=dev --ignore-scripts \
+    && ./node_modules/.bin/prs --version && ./node_modules/.bin/skills --version
+ENV PATH="/opt/odysseus-skill-tools/node_modules/.bin:${PATH}"
+
 # System deps. tmux is required by Cookbook for background downloads/serves.
 # openssh-client is required for Cookbook remote server tests, setup, probes,
 # downloads, and serves from Docker installs.

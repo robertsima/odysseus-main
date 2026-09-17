@@ -22,9 +22,9 @@ SOURCE_PRIORITY = {
     "semantic": 65,
     "domain": 55,
     "retained": 50,
-    "connected": 35,
 }
 PROTECTED_SOURCES = frozenset({"core", "profile", "caller", "forced", "explicit", "skill"})
+DEFERRED_ONLY_SOURCES = frozenset({"connected"})
 
 
 @dataclass(frozen=True)
@@ -78,6 +78,10 @@ def plan_tool_selection(
     costs = schema_costs or {}
     reasons: dict[str, set[str]] = {}
     for source, names in candidates.items():
+        # Connectivity makes a capability discoverable; it is not evidence
+        # that an unrelated turn should pay to attach its schema eagerly.
+        if source in DEFERRED_ONLY_SOURCES:
+            continue
         for name in names:
             if name:
                 reasons.setdefault(str(name), set()).add(source)

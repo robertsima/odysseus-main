@@ -14,6 +14,7 @@ import re
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from src.tool_security import PLAN_MODE_READONLY_TOOLS, email_tool_policy_names
+from src.private_access import tool_requires_private_grant
 
 SemanticSearch = Callable[[str, int], Any]
 _MCP_NAME = re.compile(r"^mcp__([^_][A-Za-z0-9_-]*)__([A-Za-z0-9_-]+)$")
@@ -186,6 +187,8 @@ class TurnToolDiscovery:
         workflow_readonly = bool(settings.get("workflow_readonly"))
         result = {}
         for name, schema in self._catalog.items():
+            if tool_requires_private_grant(name) and settings.get("private_vault_access") is not True:
+                continue
             aliases = email_tool_policy_names(name)
             if not aliases.isdisjoint(denied) or (allowed is not None and aliases.isdisjoint(allowed)):
                 continue

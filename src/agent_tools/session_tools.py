@@ -343,9 +343,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         context.append({"role": "user", "content": message})
         runner = sess
+        # Profile instructions are persisted in the fresh child's settings and
+        # applied by agent_loop on every turn. Do not inject them here too:
+        # that would duplicate the persona on the first turn and differ from a
+        # reopened worker session.
         if profile:
-            if profile.get("instructions"):
-                context.insert(0, {"role": "system", "content": profile["instructions"]})
             if profile.get("model") and not extras.get("_child_created"):
                 # An existing chat delegated to under a profile runs this one
                 # exchange on the profile's model without changing the chat.

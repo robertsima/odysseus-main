@@ -211,6 +211,26 @@ def test_memory_model_skill_and_readonly_filters():
     })["loaded_names"] == ["manage_skills"]
 
 
+def test_private_unconfined_tools_are_not_advertised_but_public_file_tools_remain():
+    names = ["bash", "python", "mcp__files__read_file", "read_file", "grep"]
+    catalog = [schema(name, "Read repository files") for name in names]
+    discovery = TurnToolDiscovery(catalog)
+    assert {s["function"]["name"] for s in discovery.permitted_tools()} == {"read_file", "grep"}
+    assert run(discovery, "bash")["loaded_names"] == []
+    settings = {"private_vault_access": True}
+    assert {s["function"]["name"] for s in discovery.permitted_tools(settings)} == set(names)
+    assert run(discovery, "bash", settings=settings)["loaded_names"] == ["bash"]
+    # Loaded/attached schemas are still hidden immediately after revocation.
+    discovery.set_attached(["bash"])
+    assert run(discovery, "bash", settings={"private_vault_access": False})["already_attached_names"] == []
+
+
+def test_discovery_dispatch_does_not_escalate_from_fresh_grant(monkeypatch):
+    discovery = TurnToolDiscovery([schema("bash", "Run shell")])
+    _, result = _execute(monkeypatch, discovery, {"private_vault_access": True}, {"query": "bash"})
+    assert result["loaded_names"] == []
+
+
 def test_semantic_timeout_falls_back_and_result_boundaries():
     async def slow(_query, _limit):
         await asyncio.sleep(2.2)

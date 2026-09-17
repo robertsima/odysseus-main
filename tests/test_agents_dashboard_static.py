@@ -115,6 +115,31 @@ def test_applying_a_preset_keeps_its_mcp_policy_through_save():
     assert "draft.mcp_access === 'none'" in save
 
 
+def test_explicit_tool_policy_survives_dashboard_load_and_save():
+    """Positive allowlists are authoritative; deny-only derivation is legacy fallback."""
+    config = AGENTS.split("function finalizeToolConfig(config)", 1)[1].split("function configFor(row)", 1)[0]
+    assert "config._explicitToolAccess" in config
+    assert "config.tool_access === 'selected'" in config
+    assert "!disabled.has(name)" in config
+    assert "Backward compatibility" in config
+
+    save = AGENTS.split("async function saveAgentConfig(row)", 1)[1].split("// ── actions", 1)[0]
+    assert "tool_access: draft.tool_access" in save
+    assert "enabled_tools: draft.tool_access === 'selected' ? enabledTools : []" in save
+    assert "explicitDisabled" in save
+    assert "allTools.filter((name) => !enabled.has(name))" in save
+
+
+def test_plugin_apply_merges_capabilities_without_clobbering_unsaved_personality():
+    apply = AGENTS.split("function applyPluginSettings(row, result)", 1)[1].split("function finalizeToolConfig", 1)[0]
+    assert "PLUGIN_CAPABILITY_KEYS.forEach" in apply
+    assert "Object.assign({}, draft" not in apply
+    assert "agent_instructions" not in apply
+    assert "render();" in apply
+    mount = AGENTS.split("OdysseusPluginCatalog.mount", 1)[1].split("});", 1)[0]
+    assert "onApplied: (result) => applyPluginSettings(selectedAgent, result)" in mount
+
+
 def test_fleet_selection_and_window_focus_are_keyboard_accessible():
     assert 'aria-labelledby="ag-window-title"' in INDEX
     assert 'class="ag-row-name ag-card-select"' in AGENTS

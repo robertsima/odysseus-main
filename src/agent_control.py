@@ -637,10 +637,10 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         manager.save_sessions()
     except Exception:
         pass
-    context: List[Dict[str, Any]] = []
-    if profile and profile.get("instructions"):
-        context.append({"role": "system", "content": profile["instructions"]})
-    context.append({"role": "user", "content": task})
+    # The persona is a persisted per-session snapshot consumed by agent_loop
+    # on this first turn and every reopened turn. Keep it out of history so it
+    # cannot be duplicated or drift from the saved agent configuration.
+    context: List[Dict[str, Any]] = [{"role": "user", "content": task}]
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
     # The loadout's own round budget (validate_profiles clamps it to 1..40, and
     # defaults it to DEFAULT_ROUNDS). Recorded on the run and returned to the

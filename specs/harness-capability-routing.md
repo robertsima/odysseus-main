@@ -107,6 +107,30 @@ fails closed. Grants never expand implicitly within an active turn.
 
 ## Token measurement and limits
 
+### September 17 corrective-turn hardening
+
+Short method-only feedback and backward references use recent human task context,
+not a semantic query for the correction itself. A new actionable clause remains
+a new request. MCP use does not itself imply MCP administration. Connectivity
+alone supplies discovery inventory, never an eager schema attachment; explicit
+loadouts, relevant matches and recent use retain their existing priority.
+
+Automatic personal-document retrieval is skipped for bounded low-information
+feedback; explicit RAG opt-in and substantive grounding requests remain intact.
+The active editor was already excluded from the agent prompt when irrelevant;
+the route now avoids unnecessary lookups for feedback turns as well.
+
+Private-read checks share a pure policy between discovery and dispatch. Fresh
+session settings can narrow the request's grant, never enlarge it. Unrestricted
+shell/Python and the existing unconfined MCP file wrappers remain gated; public
+file tools remain available subject to their path policy. Denials carry
+`private_vault_grant_required`, distinguish policy from a missing workspace,
+and state that enabling private reads grants private-vault access, not just Git.
+
+See [log evidence and remaining validation](../docs/harness-log-review-2026-09-17.md).
+
+### Earlier offline measurement
+
 An offline diagnostic candidate fixture on this checkout selected eight compact
 definitions costing approximately 782 tokens, versus 9,796 tokens for all 83
 built-in definitions. This compares schema payloads, not an old-vs-new live bill:
@@ -118,6 +142,18 @@ count, discovery schema tokens and explicit-budget overrides.
 See [acceptance and rollout checks](../docs/harness-routing-acceptance.md). The
 30-case corpus supplies regression inputs and labels; offline replay verifies
 provenance/permission/intent properties, not full semantic task-success scores.
+
+## Extension boundaries
+
+Per-agent `agent_instructions` are persisted session snapshots and appended
+outside the shared base-prompt cache, subordinate to platform policy. Reusable
+profile edits do not mutate existing agents. Declarative plugins group existing
+skill/tool/MCP/model references through owner-scoped explicit selection, never
+execute installers or grant new private-data rights. PromptScript is an
+operator-side compiler, not a replacement runtime policy engine. Remote skill
+imports are reviewed snapshots and remain drafts until explicit publication;
+they cannot enter automatic retrieval while unreviewed. See the
+[extension workflow and limitations](../docs/agent-extensions.md).
 
 ## Validation record
 

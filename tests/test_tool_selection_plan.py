@@ -52,3 +52,22 @@ def test_large_catalog_has_stable_bounded_selection_without_mutating_candidates(
 
 def test_empty_selected_allowlist_is_not_unrestricted():
     assert plan_tool_selection({"read"}, {"core": {"read"}}, allowed_tools=set()).selected == ()
+
+
+def test_connected_catalog_is_discoverable_not_eager_without_another_signal():
+    plan = plan_tool_selection(
+        {"core", "mcp__weather__forecast"},
+        {"core": {"core"}, "connected": {"mcp__weather__forecast"}},
+    )
+    assert plan.selected == ("core",)
+    assert plan.deferred == ("mcp__weather__forecast",)
+
+    relevant = plan_tool_selection(
+        {"core", "mcp__weather__forecast"},
+        {
+            "core": {"core"},
+            "connected": {"mcp__weather__forecast"},
+            "semantic": {"mcp__weather__forecast"},
+        },
+    )
+    assert relevant.selected == ("core", "mcp__weather__forecast")

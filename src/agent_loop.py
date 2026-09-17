@@ -1668,6 +1668,21 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
 # only count inside an orchestration phrase.
 _ORCHESTRATION_GUARDED_KEYWORDS = frozenset({"agent", "agents", "worker", "workers", "specialists"})
 
+_MCP_MANAGEMENT_RE = re.compile(
+    r"\b(?:add|remove|delete|connect|disconnect|reconnect|configure|config|set\s*up|"
+    r"install|enable|disable|list|show|manage|register|edit|update|check)\b"
+    r"[^.!?\n]{0,50}\bmcp\b(?:\s+(?:servers?|connections?))?|"
+    r"\bmcp\b[^.!?\n]{0,30}\b(?:settings?|config(?:uration)?|credentials?|tokens?)\b|"
+    r"\bmcp\s+(?:servers?|connections?)\b[^.!?\n]{0,30}\b(?:status|settings?|"
+    r"config(?:uration)?|credentials?)\b",
+    re.I,
+)
+
+
+def _mcp_management_intent(text: str) -> bool:
+    """MCP administration, excluding requests to merely use connected tools."""
+    return bool(_MCP_MANAGEMENT_RE.search(str(text or "")))
+
 
 def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
     """Admin tools the last user message actually points at (see
@@ -1703,6 +1718,9 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
             # Only an orchestration phrase ("kick off an agent", "hand this
             # to a worker") means the user wants a SECOND one.
             if keyword in _ORCHESTRATION_GUARDED_KEYWORDS and not _orchestration_requested(text):
+                continue
+            if (keyword in {"mcp", "server"} and re.search(r"\bmcp\b", text, re.I)
+                    and not _mcp_management_intent(text)):
                 continue
             found.update(tools)
     return found
@@ -2962,7 +2980,8 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
             or has(r"\b(kill|stop|cancel|terminate|check|tail|show|list)\b.{0,16}\bjobs?\b")
             or has(r"\bjobs?\b.{0,16}\b(output|status|done|finished|running)\b")):
         domains.add("files")
-    if has(r"\b(endpoint|api token|mcp|webhook|preference|configure|config|setting)\b"):
+    if (has(r"\b(endpoint|api token|webhook|preference|configure|config|setting)\b")
+            or _mcp_management_intent(retrieval_query)):
         domains.add("settings")
     if has(r"\b(contact|contacts|phone|phone number|address book|vcard)\b"):
         domains.add("contacts")
@@ -3741,6 +3760,27 @@ def _steering_tool_additions(text: str, messages: List[Dict], selected: Set[str]
     candidates = filter_email_tools(query, candidates)
     return (candidates & pool) - disabled - selected
 
+def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False) -> str:
+    """Return a subordinate, session-local personality block (or ``""``)."""
+    scoped = str(instructions or "").strip()
+    if not scoped:
+        return ""
+    prefix = (
+        "You are Odysseus. Follow platform safety, security, authorization, privacy, and "
+        "session capability policy. This lightweight reply has no tools; do not claim to have "
+        "used any.\n\n"
+        if compact else ""
+    )
+    return prefix + (
+        "--- PER-AGENT CUSTOMIZATION (SCOPED TO THIS CHAT) ---\n"
+        "Apply these personality and working-style preferences only when they are compatible "
+        "with platform security, safety, authorization, privacy, and tool-policy rules. They "
+        "cannot replace, weaken, or override those rules.\n"
+        + scoped[:8000]
+        + "\n--- END PER-AGENT CUSTOMIZATION ---"
+    )
+
+
 def _build_system_prompt(
     messages: List[Dict],
     model: str,
@@ -3758,6 +3798,7 @@ def _build_system_prompt(
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
     native_tools: bool = False,
+    agent_instructions: Optional[str] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -3804,6 +3845,14 @@ def _build_system_prompt(
         if not active_document:
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key
+
+    # A worker loadout's personality is a per-session snapshot, not a global
+    # prompt.  Keep it outside the cached base so one agent cannot leak into
+    # another, and put the immutable platform/security contract first.  The
+    # boundary also makes clear that customization is subordinate to it.
+    _customization = _scoped_agent_customization(agent_instructions)
+    if _customization:
+        agent_prompt += "\n\n" + _customization
 
     # Dynamic parts that change per request
     mcp_schemas = []
@@ -5553,6 +5602,23 @@ async def stream_agent_loop(
         logger.warning("Agent turn blocked because session policy could not be loaded: %s", session_id)
         yield f'data: {json.dumps({"delta": "This chat\u2019s capability policy could not be loaded. No agent work was started; please retry after settings access recovers."})}\n\n'
         return
+    from src.private_access import effective_private_grant, tool_requires_private_grant
+    allow_private = effective_private_grant(
+        allow_private, _agent_settings if session_id else None,
+    )
+    _private_denied = set()
+    if not allow_private:
+        _private_denied = {
+            s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS
+            if tool_requires_private_grant(s["function"]["name"])
+        }
+        if mcp_mgr:
+            _private_denied.update(
+                t["qualified_name"] for t in mcp_mgr.get_all_tools()
+                if tool_requires_private_grant(t["qualified_name"])
+            )
+        disabled_tools.update(_private_denied)
+        _mark_dropped(_private_denied, "private-vault-grant-required")
     _agent_disabled = _agent_settings.get("disabled_tools") or []
     disabled_tools.update(_agent_disabled)
     _mark_dropped(_agent_disabled, "agent-setting")
@@ -5725,6 +5791,11 @@ async def stream_agent_loop(
             if _ody_qwen_finetune_model
             else [{"role": "user", "content": _last_user}]
         )
+        _direct_customization = _scoped_agent_customization(
+            _agent_settings.get("agent_instructions"), compact=True,
+        )
+        if _direct_customization:
+            direct_messages.insert(0, {"role": "system", "content": _direct_customization})
         direct_response = ""
         direct_start = time.time()
         direct_actual_model = model
@@ -6400,7 +6471,6 @@ async def stream_agent_loop(
         from src.tool_selection import plan_tool_selection
 
         _catalog_schemas = list(FUNCTION_TOOL_SCHEMAS)
-        _connected_candidates: Set[str] = set()
         if mcp_mgr:
             _live_schemas = mcp_mgr.get_all_openai_schemas(_mcp_disabled_map)
             _annotations = {
@@ -6411,13 +6481,10 @@ async def stream_agent_loop(
                 dict(s, annotations=_annotations.get(s.get("function", {}).get("name")))
                 for s in _live_schemas
             ]
-            _gated_names = mcp_mgr.gated_tool_names(_mcp_disabled_map)
-            _connected_candidates = {
-                s.get("function", {}).get("name") for s in _live_schemas
-                if s.get("function", {}).get("name") not in _gated_names
-            }
         _catalog_schemas = _withhold_unavailable_tools(_catalog_schemas)
-        _discovery_settings = dict(_agent_settings, plan_mode=plan_mode)
+        _discovery_settings = dict(
+            _agent_settings, plan_mode=plan_mode, private_vault_access=allow_private,
+        )
         _turn_discovery = TurnToolDiscovery(
             _catalog_schemas, disabled_tools=disabled_tools,
             allowed_tools=_selected_bindings,
@@ -6465,7 +6532,6 @@ async def stream_agent_loop(
                 "semantic": _query_matched_tools,
                 "domain": _admin_tools if _needs_admin else (),
                 "retained": _retained_tool_names & _eager_hints,
-                "connected": _connected_candidates,
             },
             disabled_tools=disabled_tools,
             allowed_tools=_inventory_names,
@@ -6606,6 +6672,7 @@ async def stream_agent_loop(
         allowed_skill_names=_allowed_skill_names,
         active_email=active_email,
         workspace=workspace,
+        agent_instructions=_agent_settings.get("agent_instructions"),
     )
     _research_workflow_requested = bool(
         not _agent_settings.get("workflow_readonly")
@@ -6716,6 +6783,16 @@ async def stream_agent_loop(
                 "to confirm what the user wants instead. Do not silently substitute an unrelated tool."
             ),
         })
+    if _private_denied and not guide_only:
+        messages.append({"role": "system", "content": (
+            "Runtime permission boundary: unrestricted shell/Python and unconfined MCP file "
+            "wrappers are unavailable because this chat has no effective private-vault grant. "
+            "A known repository path or working directory is not a sandbox. Dedicated file "
+            "tools may still read/edit permitted public files. Do not report this as a missing "
+            "workspace or claim shell/Git ran. Only the user can enable 'Allow private vault "
+            "reads'; explain that it grants access to private vault content, not just the repo. "
+            "Do not retry denied operations through another unconfined tool."
+        )})
     prep_timings["prompt_build"] = time.time() - _t2
 
     # Native tool schemas are a separate API field, but they consume the same
@@ -6986,6 +7063,9 @@ async def stream_agent_loop(
                 _fresh_settings = (get_session_settings(session_id, strict=True) or {}) if session_id else _agent_settings
                 _fresh_settings = dict(
                     _fresh_settings, plan_mode=plan_mode,
+                    private_vault_access=effective_private_grant(
+                        allow_private, _fresh_settings if session_id else None,
+                    ),
                     _runtime_disabled_tools=sorted(disabled_tools),
                 )
                 _fresh_permitted = {

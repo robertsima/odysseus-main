@@ -32,10 +32,11 @@ def _github_host(url: str) -> str:
 
 
 def _assert_github_url(url: str, *, context: str = "URL") -> None:
-    host = _github_host(url)
-    if host not in _GITHUB_HOSTS:
+    parsed = urlparse(str(url))
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme != "https" or host not in _GITHUB_HOSTS:
         raise SkillImportError(
-            f"{context} must stay on GitHub (got {host or 'unknown host'})"
+            f"{context} must stay on HTTPS GitHub (got {host or 'unknown host'})"
         )
 
 
@@ -45,6 +46,7 @@ class ResolvedSource:
     repo: str
     ref: str
     path: str  # directory or file path inside repo (no leading slash)
+    skill_selector: str = ""
 
 
 class SkillImportError(ValueError):
@@ -52,12 +54,19 @@ class SkillImportError(ValueError):
 
 
 def _safe_relpath(rel: str) -> str:
-    rel = (rel or "").replace("\\", "/").strip().lstrip("/")
-    if not rel or rel.startswith("..") or "/../" in f"/{rel}/":
+    raw = str(rel or "")
+    if "\x00" in raw:
+        raise SkillImportError("unsafe path contains NUL")
+    rel = raw.replace("\\", "/")
+    if not rel or rel.startswith("/") or re.match(r"^[A-Za-z]:", rel):
         raise SkillImportError(f"unsafe path: {rel!r}")
-    parts = [p for p in rel.split("/") if p and p != "."]
-    if any(p == ".." for p in parts):
-        raise SkillImportError(f"unsafe path: {rel!r}")
+    parts = rel.split("/")
+    _win_reserved = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
+    for part in parts:
+        if not part or part != part.strip() or part in {".", ".."} or ":" in part or part.endswith((".", " ")):
+            raise SkillImportError(f"unsafe path: {rel!r}")
+        if part.split(".", 1)[0].casefold() in _win_reserved:
+            raise SkillImportError(f"unsafe reserved path: {rel!r}")
     return "/".join(parts)
 
 
@@ -103,6 +112,7 @@ def _get_checked(
     with httpx.Client(follow_redirects=False, timeout=timeout) as client:
         for _ in range(_MAX_FETCH_REDIRECTS + 1):
             _check_fetch_url(current)
+            _assert_github_url(current, context="fetch URL")
             r = client.get(current, headers=headers)
             if r.status_code in (301, 302, 303, 307, 308):
                 location = r.headers.get("location")
@@ -120,27 +130,22 @@ def parse_skill_source(url: str) -> ResolvedSource:
     if not raw:
         raise SkillImportError("URL is required")
 
-    # skills.sh often links to GitHub; try to unwrap ?url= or redirect target later.
-    if "skills.sh" in raw and "github.com" not in raw:
-        r = _get_checked(raw, timeout=20.0)
-        if r.status_code >= 400:
-            raise _github_response_error(r)
-        final = str(r.url)
-        _assert_github_url(final, context="redirect target")
-        # Page may embed a github link; prefer final URL if redirected.
-        if "github.com" in final:
-            raw = final
-        else:
-            m = re.search(r"https?://github\.com/[^\s\"')]+", r.text or "")
-            if m:
-                raw = m.group(0).rstrip(".,)")
-
     parsed = urlparse(raw)
     host = _github_host(raw)
+    if host in {"skills.sh", "www.skills.sh"}:
+        if parsed.scheme != "https":
+            raise SkillImportError("skills.sh imports require HTTPS")
+        bits = [p for p in parsed.path.split("/") if p]
+        if len(bits) != 3:
+            raise SkillImportError("skills.sh URL must be https://skills.sh/<owner>/<repo>/<skill>")
+        owner, repo, selector = bits
+        return ResolvedSource(owner=owner, repo=repo, ref="main", path="", skill_selector=selector)
     if host not in _GITHUB_HOSTS:
         raise SkillImportError(
             "Only GitHub URLs are supported (https://github.com/... or raw.githubusercontent.com/...)"
         )
+    if parsed.scheme != "https":
+        raise SkillImportError("GitHub imports require HTTPS")
 
     if host == "raw.githubusercontent.com":
         # /owner/repo/ref/path/to/file
@@ -225,8 +230,10 @@ def _fetch_text(url: str) -> str:
 
 
 def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, depth: int = 0) -> None:
-    if depth > 4 or len(out) >= MAX_FILES:
-        return
+    if depth > 4:
+        raise SkillImportError("skill bundle exceeds directory depth limit")
+    if len(out) >= MAX_FILES:
+        raise SkillImportError("skill bundle exceeds file count limit")
     url = _api_contents_url(src, rel_dir)
     r = _get_checked(url, headers={"Accept": "application/vnd.github+json"}, timeout=30.0)
     if r.status_code >= 400:
@@ -237,8 +244,10 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
         raise SkillImportError("expected a directory on GitHub")
     total = sum(len(v.encode("utf-8")) for v in out.values())
     for ent in entries:
-        if len(out) >= MAX_FILES or total >= MAX_TOTAL_BYTES:
-            break
+        if len(out) >= MAX_FILES:
+            raise SkillImportError("skill bundle exceeds file count limit")
+        if total >= MAX_TOTAL_BYTES:
+            raise SkillImportError("skill bundle exceeds size limit")
         if not isinstance(ent, dict):
             continue
         name = ent.get("name") or ""
@@ -248,11 +257,13 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
             _list_github_dir(src, rel, out, depth=depth + 1)
             total = sum(len(v.encode("utf-8")) for v in out.values())
             continue
-        if ent_type != "file" or not _is_text_file(name):
-            continue
+        if ent_type != "file":
+            raise SkillImportError(f"unsupported resource type {ent_type!r}: {rel}")
+        if not _is_text_file(name):
+            raise SkillImportError(f"unsupported non-text resource in skill bundle: {rel}")
         dl = ent.get("download_url")
         if not dl:
-            continue
+            raise SkillImportError(f"skill resource has no download URL: {rel}")
         _assert_github_url(dl, context="download URL")
         text = _fetch_text(dl)
         total += len(text.encode("utf-8"))
@@ -261,56 +272,107 @@ def _list_github_dir(src: ResolvedSource, rel_dir: str, out: Dict[str, str], *, 
         out[rel] = text
 
 
-def fetch_skill_bundle(url: str) -> Tuple[Dict[str, str], ResolvedSource]:
+def _skill_candidates(files: Dict[str, str]) -> List[str]:
+    return sorted(rel for rel in files if rel.rsplit("/", 1)[-1].casefold() == "skill.md")
+
+
+def _select_skill(files: Dict[str, str], selector: str = "") -> str:
+    candidates = _skill_candidates(files)
+    if not candidates:
+        raise SkillImportError("No SKILL.md found — link to a skill folder or SKILL.md on GitHub")
+    if selector:
+        wanted = _safe_relpath(selector).casefold().rstrip("/")
+        exact = [p for p in candidates if p.casefold() == wanted or p.casefold() == f"{wanted}/skill.md"]
+        if not exact:
+            exact = [p for p in candidates if p.rsplit("/", 1)[0].split("/")[-1].casefold() == wanted]
+        if len(exact) != 1:
+            raise SkillImportError(
+                f"skill selector {selector!r} did not identify exactly one skill; candidates: "
+                + ", ".join(candidates)
+            )
+        return exact[0]
+    if len(candidates) != 1:
+        raise SkillImportError("multiple skills found; choose one explicitly: " + ", ".join(candidates))
+    return candidates[0]
+
+
+def _rebase_bundle(files: Dict[str, str], selected: str) -> Dict[str, str]:
+    parent = selected.rsplit("/", 1)[0] if "/" in selected else ""
+    prefix = f"{parent}/" if parent else ""
+    rebased = {}
+    for rel, content in files.items():
+        if parent and not rel.startswith(prefix):
+            continue
+        local = rel[len(prefix):] if prefix else rel
+        rebased[_safe_relpath(local)] = content
+    return rebased
+
+
+def _fetch_selected_location(src: ResolvedSource, selector: str) -> Tuple[Dict[str, str], str]:
+    """Resolve a named skill without recursively downloading the repository."""
+    wanted = _safe_relpath(selector).rstrip("/")
+    locations = []
+    if wanted.casefold().endswith("skill.md"):
+        locations.append(wanted.rsplit("/", 1)[0] if "/" in wanted else "")
+    elif "/" in wanted:
+        locations.append(wanted)
+    else:
+        locations.extend([
+            f".agents/skills/{wanted}",
+            f".promptscript/skills/{wanted}",
+            f"skills/{wanted}",
+            wanted,
+        ])
+    seen = set()
+    not_found = []
+    for directory in locations:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        skill_path = f"{directory}/SKILL.md" if directory else "SKILL.md"
+        try:
+            text = _fetch_text(_raw_url(src, skill_path))
+        except SkillImportError as exc:
+            if "path not found" in str(exc):
+                not_found.append(skill_path)
+                continue
+            raise
+        files: Dict[str, str] = {skill_path: text}
+        if directory:
+            _list_github_dir(src, directory, files)
+        return files, skill_path
+    raise SkillImportError(
+        f"skill selector {selector!r} was not found; checked: " + ", ".join(not_found)
+    )
+
+
+def fetch_skill_bundle(url: str, skill: Optional[str] = None) -> Tuple[Dict[str, str], ResolvedSource]:
     """Download SKILL.md and sibling text assets. Returns relative_path → content."""
     src = parse_skill_source(url)
     files: Dict[str, str] = {}
 
     path = _safe_relpath(src.path) if src.path else ""
+    selector = skill or src.skill_selector
+    if selector and not path:
+        files, selected = _fetch_selected_location(src, selector)
+        return _rebase_bundle(files, selected), src
     if path.lower().endswith("skill.md"):
-        files[path] = _fetch_text(_raw_url(src, path))
         parent = "/".join(path.split("/")[:-1])
-        if parent:
-            try:
-                _list_github_dir(src, parent, files)
-            except SkillImportError:
-                pass
-        return files, src
+        _list_github_dir(src, parent, files)
+        selected = _select_skill(files, path)
+        return _rebase_bundle(files, selected), src
 
     if path:
-        try:
-            _fetch_text(_raw_url(src, f"{path}/SKILL.md"))
-            _list_github_dir(src, path, files)
-            return files, src
-        except Exception:
-            pass
-        try:
-            text = _fetch_text(_raw_url(src, path))
-            if path.lower().endswith(".md"):
-                files[path] = text
-                return files, src
-        except Exception:
-            pass
         _list_github_dir(src, path, files)
     else:
         _list_github_dir(src, "", files)
-
-    if not any(p.lower().endswith("skill.md") for p in files):
-        # Flat repo root with SKILL.md only
-        try:
-            files["SKILL.md"] = _fetch_text(_raw_url(src, "SKILL.md"))
-        except Exception as e:
-            raise SkillImportError(
-                "No SKILL.md found — link to a skill folder or SKILL.md on GitHub"
-            ) from e
-    return files, src
+    selected = _select_skill(files, skill or src.skill_selector)
+    return _rebase_bundle(files, selected), src
 
 
 def pick_skill_md(files: Dict[str, str]) -> Tuple[str, str]:
-    for rel, content in files.items():
-        if rel.lower().endswith("skill.md"):
-            return rel, content
-    raise SkillImportError("bundle has no SKILL.md")
+    selected = _select_skill(files)
+    return selected, files[selected]
 
 
 def default_category_from_source(src: ResolvedSource) -> str:

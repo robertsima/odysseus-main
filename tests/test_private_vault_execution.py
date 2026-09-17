@@ -76,6 +76,7 @@ async def test_dispatcher_carries_private_grant_into_dynamic_tools(monkeypatch):
     import src.tool_execution as execution
 
     monkeypatch.setattr(execution, "is_public_blocked_tool", lambda _tool: False)
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": True})
 
     async def handler(_content, ctx):
         seen.append(ctx)
@@ -92,6 +93,72 @@ async def test_dispatcher_carries_private_grant_into_dynamic_tools(monkeypatch):
     assert seen and seen[0]["session_id"] == "sid"
     assert seen[0]["owner"] == "alice"
     assert seen[0]["allow_private"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tool", ["bash", "python", "mcp__filesystem__read_file"])
+@pytest.mark.parametrize("fresh_grant", [False, None, "true"])
+async def test_fresh_private_revocation_overrides_request_grant(monkeypatch, tool, fresh_grant):
+    import src.tool_execution as execution
+
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": fresh_grant})
+    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(execution, "get_mcp_manager", lambda: pytest.fail("revoked call reached MCP"))
+    monkeypatch.setattr(execution, "_direct_fallback", lambda *a, **kw: pytest.fail("revoked call reached handler"))
+    _, result = await execute_tool_block(
+        ToolBlock(tool, "print('x')" if tool == "python" else "{}"),
+        session_id="sid", owner="admin", allow_private=True,
+    )
+    assert result["blocked_reason"] == "private_vault_grant_required"
+    assert result["retryable"] is False
+    assert "not merely repository access" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_grant_does_not_escalate_request_or_disable_public_file_tools(monkeypatch):
+    import src.tool_execution as execution
+
+    seen = []
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": True})
+    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+    async def handler(content, ctx):
+        seen.append(ctx["allow_private"])
+        return {"output": "public file", "exit_code": 0}
+    monkeypatch.setitem(TOOL_HANDLERS, "read_file", handler)
+    _, public = await execute_tool_block(ToolBlock("read_file", "README.md"), session_id="sid", owner="admin")
+    _, shell = await execute_tool_block(ToolBlock("bash", "git pull"), session_id="sid", owner="admin")
+    assert public["exit_code"] == 0
+    assert seen == [False]
+    assert shell["blocked_reason"] == "private_vault_grant_required"
+
+
+@pytest.mark.asyncio
+async def test_sessionless_call_cannot_carry_a_private_grant(monkeypatch):
+    import src.tool_execution as execution
+    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(execution, "_direct_fallback", lambda *a, **kw: pytest.fail("sessionless shell ran"))
+    _, result = await execute_tool_block(ToolBlock("bash", "git pull"), owner="admin", allow_private=True)
+    assert result["blocked_reason"] == "private_vault_grant_required"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", [
+    "read_text_file", "read_multiple_files", "read_media_file", "list_directory",
+    "list_directory_with_sizes", "directory_tree", "search_files", "get_file_info",
+    "list_allowed_directories", "create_directory", "move_file",
+])
+async def test_standard_mcp_filesystem_names_share_discovery_and_dispatch_gate(monkeypatch, name):
+    import src.tool_execution as execution
+    from src.tool_discovery import TurnToolDiscovery
+    tool = f"mcp__custom_server__{name}"
+    catalog = TurnToolDiscovery([{"type": "function", "function": {"name": tool, "parameters": {}}}])
+    assert catalog.permitted_tools() == []
+    assert catalog.permitted_tools({"private_vault_access": True})[0]["function"]["name"] == tool
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {})
+    monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
+    monkeypatch.setattr(execution, "get_mcp_manager", lambda: pytest.fail("ungranted filesystem MCP dispatched"))
+    _, result = await execute_tool_block(ToolBlock(tool, "{}"), session_id="sid", owner="admin")
+    assert result["blocked_reason"] == "private_vault_grant_required"
 
 
 @pytest.mark.asyncio

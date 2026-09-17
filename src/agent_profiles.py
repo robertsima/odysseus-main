@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional
 MAX_PROFILES = 40
 MAX_ROUNDS_CAP = 40
 DEFAULT_ROUNDS = 12
+MAX_INSTRUCTIONS = 8000
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$")
 _MEMORY_ACCESS = {"none", "read", "write"}
 _SELECTION_ACCESS = {"all", "selected", "none"}
@@ -70,7 +71,9 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
         out.append({
             "name": name,
             "description": str(raw.get("description") or "").strip()[:300],
-            "instructions": str(raw.get("instructions") or "").strip()[:8000],
+            # ``personality`` is an API-friendly alias; the existing editor and
+            # runtime use ``instructions`` as the canonical persisted field.
+            "instructions": str(raw.get("instructions") or raw.get("personality") or "").strip()[:MAX_INSTRUCTIONS],
             "model": str(raw.get("model") or "").strip()[:300],
             "model_fallbacks": _names(raw.get("model_fallbacks"), "model_fallbacks", name, 12),
             "model_access": _choice(raw.get("model_access"), "model_access", name, _MODEL_ACCESS, "current"),
@@ -105,6 +108,10 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
     """Persist the runtime parts of a profile on the worker chat itself."""
     patch = {
         "agent_profile": profile.get("name"),
+        # Snapshot the loadout's persona onto the child.  Profiles are reusable
+        # defaults and may be edited later; an existing agent must not silently
+        # acquire another agent's (or a newly edited) personality.
+        "agent_instructions": profile.get("instructions") or None,
         "tool_access": profile.get("tool_access", "all"),
         "enabled_tools": profile.get("enabled_tools") or [],
         "disabled_tools": profile.get("disabled_tools") or None,

@@ -1550,7 +1550,10 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             return "test_skills requires an owner on the task — refusing to run without scope.", False
 
         sm = SkillsManager(DATA_DIR)
-        skills = sm.load(owner=owner)
+        skills = [
+            skill for skill in sm.load(owner=owner)
+            if not (skill.get("source") == "imported" and skill.get("status") == "draft")
+        ]
         names = [s.get("name") for s in skills if s.get("name")]
         if not names:
             raise TaskNoop("no skills to test")
@@ -1683,6 +1686,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         names = [
             s.get("name") for s in skills
             if s.get("name") and not s.get("audit_verdict")
+            and not (s.get("source") == "imported" and s.get("status") == "draft")
         ]
         if not names:
             raise TaskNoop("no unaudited skills")

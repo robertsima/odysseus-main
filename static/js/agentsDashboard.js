@@ -310,6 +310,17 @@ function render() {
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
   if (!state.configOpen) renderDetail();
+  else {
+    const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
+    const selectedAgent = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
+    if (pluginPicker && selectedAgent && window.OdysseusPluginCatalog?.mount) {
+      window.OdysseusPluginCatalog.mount(pluginPicker, {
+        sessionId: selectedAgent.session_id,
+        api,
+        onApplied: (result) => applyPluginSettings(selectedAgent, result),
+      });
+    }
+  }
   $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; state.fleetPage = 0; renderFleetOnly(); });
 }
 function filteredRows() {
@@ -369,30 +380,66 @@ function updateOpenView() {
   const error = $('ag-refresh-error');
   if (error) { error.textContent = state.error; error.hidden = !state.error; }
 }
+const PLUGIN_CAPABILITY_KEYS = [
+  'tool_access', 'enabled_tools', 'disabled_tools', 'skill_access', 'skill_names',
+  'model_access', 'allowed_models', 'allowed_mcp_servers',
+];
+function applyPluginSettings(row, result) {
+  const settings = result?.settings || {};
+  row.config = Object.assign({}, row.config || {}, settings);
+  const draft = configFor(row);
+  // A plugin apply changes capabilities only. Preserve unsaved personality,
+  // approval and delegation edits in the open form instead of replacing the
+  // whole draft with the server's older copy of those fields.
+  PLUGIN_CAPABILITY_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) draft[key] = settings[key];
+  });
+  draft._explicitToolAccess = Object.prototype.hasOwnProperty.call(settings, 'tool_access')
+    || draft._explicitToolAccess;
+  draft._catalogReady = false;
+  finalizeToolConfig(draft);
+  render();
+}
+function finalizeToolConfig(config) {
+  if (!state.catalog) return config;
+  const disabled = new Set(config.disabled_tools || []);
+  const names = state.catalog.tools.map((tool) => tool.name);
+  if (config._explicitToolAccess) {
+    if (config.tool_access === 'selected') {
+      config.enabled_tools = (config.enabled_tools || []).filter((name) => names.includes(name) && !disabled.has(name));
+    } else if (config.tool_access === 'none') {
+      config.enabled_tools = [];
+    } else {
+      config.tool_access = 'all';
+      config.enabled_tools = names.filter((name) => !disabled.has(name));
+    }
+  } else {
+    // Backward compatibility for sessions saved before positive tool policy
+    // existed: derive access solely from their denylist once.
+    config.tool_access = !disabled.size ? 'all' : disabled.size >= names.length ? 'none' : 'selected';
+    config.enabled_tools = names.filter((name) => !disabled.has(name));
+  }
+  config.mcp_access = config.allowed_mcp_servers?.includes('*') ? 'all' : config.allowed_mcp_servers?.length ? 'selected' : 'none';
+  config._catalogReady = true;
+  return config;
+}
 function configFor(row) {
   if (state.configDrafts.has(row.session_id)) {
     const existing = state.configDrafts.get(row.session_id);
     if (state.catalog && !existing._catalogReady) {
-      const disabled = new Set(existing.disabled_tools || []);
-      const names = state.catalog.tools.map((tool) => tool.name);
-      existing.tool_access = !disabled.size ? 'all' : disabled.size >= names.length ? 'none' : 'selected';
-      existing.enabled_tools = names.filter((name) => !disabled.has(name));
-      existing.mcp_access = existing.allowed_mcp_servers?.includes('*') ? 'all' : existing.allowed_mcp_servers?.length ? 'selected' : 'none';
-      existing._catalogReady = true;
+      finalizeToolConfig(existing);
     }
     return existing;
   }
+  const stored = row.config || {};
   const base = Object.assign({
-    agent_profile: '', approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
+    agent_profile: '', agent_instructions: '', approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
     allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
-  }, row.config || {});
-  const totalTools = state.catalog?.tools?.length || 0;
-  base.tool_access = !base.disabled_tools?.length ? 'all'
-    : (totalTools && base.disabled_tools.length >= totalTools ? 'none' : 'selected');
-  base.enabled_tools = state.catalog ? state.catalog.tools.filter((tool) => !(base.disabled_tools || []).includes(tool.name)).map((tool) => tool.name) : [];
-  base.mcp_access = base.allowed_mcp_servers?.includes('*') ? 'all' : base.allowed_mcp_servers?.length ? 'selected' : 'none';
-  base._catalogReady = !!state.catalog;
+  }, stored);
+  base._explicitToolAccess = Object.prototype.hasOwnProperty.call(stored, 'tool_access');
+  base._catalogReady = false;
+  finalizeToolConfig(base);
   state.configDrafts.set(row.session_id, base);
   return base;
 }
@@ -416,7 +463,7 @@ function profileConfig(profile) {
     // MCP access (or a narrowed list) rendered correctly, then saved as full
     // access: the editor showed one policy and the server stored another.
     mcp_access: profile.mcp_access || 'all',
-    agent_profile: profile.name || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
+    agent_profile: profile.name || '', agent_instructions: profile.instructions || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
     memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
     delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
@@ -449,6 +496,7 @@ function configEditorHtml(row) {
   const tabButton = (id, label, summary) => `<button type="button" class="ag-config-tab${tab === id ? ' active' : ''}" data-ag="config-tab" data-tab="${id}" aria-selected="${tab === id ? 'true' : 'false'}"><span>${label}</span><small>${summary}</small></button>`;
   const generalPanel = `<div class="ag-config-panel ag-config-general" data-config-panel="general">
     <div class="ag-panel-heading"><div><b>Behavior</b><span>Decide how independently this agent may operate.</span></div></div>
+    <label class="ag-field"><span>Personality & instructions</span><textarea class="wb-input ag-textarea" rows="5" maxlength="8000" data-config="agent_instructions" placeholder="How this agent should communicate and approach its work">${esc(c.agent_instructions || '')}</textarea><small>Scoped to this agent. Platform security and capability policy always take priority.</small></label>
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
       <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
@@ -477,6 +525,7 @@ function configEditorHtml(row) {
     <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
+    <div data-ag-plugin-picker></div>
     <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
   </div>`;
 }
@@ -698,6 +747,12 @@ function onConfigChange(e) {
     const values = new Set(draft[list] || []);
     e.target.checked ? values.add(e.target.value) : values.delete(e.target.value);
     draft[list] = [...values];
+    if (list === 'enabled_tools' && e.target.checked) {
+      // A direct human checkbox action is the explicit authorization needed
+      // to remove this one tool from the denylist. Passive profile/plugin
+      // merges never do this, so their additions still respect manual denies.
+      draft.disabled_tools = (draft.disabled_tools || []).filter((name) => name !== e.target.value);
+    }
   }
   syncConfigVisibility(editor, draft);
   const msg = $('ag-config-msg');
@@ -706,19 +761,27 @@ function onConfigChange(e) {
 async function saveAgentConfig(row) {
   const draft = configFor(row);
   const allTools = (state.catalog?.tools || []).map((tool) => tool.name);
-  let disabledTools = [];
-  if (draft.tool_access === 'none') disabledTools = allTools;
+  // Explicit denials always win, including over plugin/profile additions.
+  // Selecting tools narrows from that baseline; it never resurrects a tool
+  // the user deliberately denied.
+  const explicitDisabled = new Set(draft.disabled_tools || []);
+  let disabledTools = [...explicitDisabled];
+  if (draft.tool_access === 'none') disabledTools = [...new Set([...disabledTools, ...allTools])];
   else if (draft.tool_access === 'selected') {
     const enabled = new Set(draft.enabled_tools || []);
-    disabledTools = allTools.filter((name) => !enabled.has(name));
+    disabledTools = [...new Set([...disabledTools, ...allTools.filter((name) => !enabled.has(name))])];
   }
+  const enabledTools = (draft.enabled_tools || []).filter((name) => !explicitDisabled.has(name));
   let allowedMcp = ['*'];
   if (draft.mcp_access === 'none') allowedMcp = [];
   else if (draft.mcp_access === 'selected') allowedMcp = [...(draft.allowed_mcp_servers || [])];
   const payload = {
     agent_profile: draft.agent_profile || null,
+    agent_instructions: draft.agent_instructions || null,
     approval_mode: draft.approval_mode || null,
     disabled_tools: disabledTools,
+    tool_access: draft.tool_access,
+    enabled_tools: draft.tool_access === 'selected' ? enabledTools : [],
     memory_access: draft.memory_access,
     skill_access: draft.skill_access,
     skill_names: draft.skill_access === 'selected' ? (draft.skill_names || []) : [],
