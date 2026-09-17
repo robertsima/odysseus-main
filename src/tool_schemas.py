@@ -1367,7 +1367,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "orchestrate_agents",
-            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. start creates visible child chats and a trace; wait/status collects their actual handoffs. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Omit a specialist model to inherit the current model; otherwise use an exact configured model ID. Only report completion after status=completed; queued/running means unfinished.",
+            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. start creates visible child chats and a trace, and returns a preflight row per agent (model, bindings, MCP server health, credential state); wait/status collects their actual handoffs. An agent with preflight blockers cannot do its branch's work — never report that branch as researched. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Omit a specialist model to inherit the current model; otherwise use an exact configured model ID. Only report completion after status=completed; queued/running means unfinished.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1376,7 +1376,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "specialists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
                         "type": "object", "properties": {
                             "name": {"type": "string"}, "task": {"type": "string"},
-                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only native or mcp__serverId__tool bindings; e.g. web_search, web_fetch and the discovered Bluesky read tools. No posting tools."},
+                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only bindings. Native tools, and ONLY these: web_search, web_fetch, read_file, grep, glob, ls, get_workspace, search_documents, search_chats, vault_get, vault_search, read_app_logs, manage_skills. Anything else (bash, write_file, todowrite, delegation or posting tools) is rejected and the whole start fails. MCP bindings must be exact mcp__serverId__tool names taken from discovery, on a connected server, and read-only."},
                             "skills": {"type": "array", "items": {"type": "string"}},
                             "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
                             "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},

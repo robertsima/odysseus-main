@@ -31,10 +31,13 @@ class OrchestrateAgentsTool:
                     **common, args=args, delegation_authorized=ctx.get("delegation_authorized"),
                     allow_private=bool(ctx.get("allow_private")),
                 )
+                blocked = result.get("preflight_blocked") or []
                 return {**result, "action": "start", "response": (
                     f"Workflow {result['workflow_id']}: {result['launched_agents']} of "
                     f"{result['requested_agents']} child runs launched; status {result['status']}. "
-                    "Use wait/status to collect actual results; queued or running is not completed."
+                    + (f"Preflight blockers on {', '.join(blocked)} — see preflight for the reason; "
+                       "do not report their branches as researched. " if blocked else "")
+                    + "Use wait/status to collect actual results; queued or running is not completed."
                 )}
             if action not in {"status", "wait", "cancel"}:
                 raise ValueError("action must be start, status, wait, or cancel")

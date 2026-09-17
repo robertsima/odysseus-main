@@ -501,3 +501,89 @@ async def test_controller_registries_cleanup_even_when_final_telemetry_raises(ru
     task = workflows._TASKS[result["workflow_id"]]
     await task
     assert not workflows._TASKS and not workflows._LIVE and not agent_control._WORKERS
+
+
+async def test_workspace_orientation_tool_is_a_valid_research_binding(runtime):
+    args = request(specialists=[{"name": "Repo", "task": "Read the checkout", "tools": ["get_workspace", "grep"]}],
+                   synthesis=None)
+    result = await start_and_wait(args)
+    assert result["status"] == "completed"
+    assert runtime.settings[result["children"][0]["session_id"]]["enabled_tools"] == ["get_workspace", "grep"]
+
+
+async def test_rejected_binding_names_every_supported_tool_so_the_retry_can_be_correct(runtime):
+    args = request(specialists=[{"name": "Unsafe", "task": "Read", "tools": ["todowrite", "bash"]}])
+    with pytest.raises(ValueError) as excinfo:
+        await workflows.start(session_id="parent", owner="alice", args=args, delegation_authorized=True)
+    message = str(excinfo.value)
+    assert "todowrite, bash are not supported read-only research tools" in message
+    assert all(tool in message for tool in workflows._READ_TOOLS)
+    assert "mcp__serverId__tool" in message
+    assert not agent_control._WORKERS and len(runtime.sessions) == 1
+
+
+def test_schema_advertises_exactly_the_bindings_the_workflow_accepts():
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+    schema = next(entry["function"] for entry in FUNCTION_TOOL_SCHEMAS
+                  if entry.get("function", {}).get("name") == "orchestrate_agents")
+    described = schema["parameters"]["properties"]["specialists"]["items"]["properties"]["tools"]["description"]
+    advertised = {word.strip(" .,") for word in described.replace(":", " ").split()}
+    assert workflows._READ_TOOLS <= advertised, sorted(workflows._READ_TOOLS - advertised)
+
+
+async def test_preflight_reports_model_bindings_and_mcp_health_per_agent(runtime, monkeypatch):
+    monkeypatch.setattr(workflows, "mcp_server_health", lambda: {
+        "blue": {"server_id": "blue", "server_name": "bluesky-mcp", "status": "connected", "error": None}})
+    result = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    rows = {row["name"]: row for row in result["preflight"]}
+    assert set(rows) == {"Buyers", "Competitors", "Content", "Synthesis"}
+    assert rows["Buyers"]["tools"] == ["web_search"] and rows["Buyers"]["model"] == "inherit"
+    assert rows["Content"]["mcp_servers"] == [
+        {"server_id": "blue", "server_name": "bluesky-mcp", "status": "connected", "error": None}]
+    assert all(row["ready"] for row in result["preflight"])
+    assert result["preflight_blocked"] == []
+    await workflows._TASKS[result["workflow_id"]]
+
+
+async def test_disconnected_mcp_server_is_a_named_preflight_blocker(runtime, monkeypatch):
+    monkeypatch.setattr(workflows, "mcp_server_health", lambda: {
+        "blue": {"server_id": "blue", "server_name": "bluesky-mcp", "status": "error",
+                 "error": "Connection closed"}})
+    result = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    assert result["preflight_blocked"] == ["Content"]
+    blocked = next(row for row in result["preflight"] if row["name"] == "Content")
+    assert blocked["blockers"] == ["MCP server bluesky-mcp is error (Connection closed)"]
+    await workflows._TASKS[result["workflow_id"]]
+    final = await workflows.inspect(workflow_id=result["workflow_id"], session_id="parent", owner="alice")
+    assert "Preflight blockers" in workflows.render_result(final)
+
+
+async def test_expired_provider_credentials_launch_nothing_at_all(runtime, monkeypatch):
+    monkeypatch.setattr(workflows, "_endpoint_auth_state",
+                        lambda url, owner: ("expired", "the provider auth session returned no usable access token"))
+    with pytest.raises(RuntimeError, match="expired or were rejected"):
+        await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    assert not agent_control._WORKERS and len(runtime.sessions) == 1
+    assert not runtime.settings.get("parent", {}).get("agent_workflows")
+
+
+@pytest.mark.parametrize("reason,retried", [
+    ("Upstream model request failed with HTTP 401: credentials expired or were rejected", False),
+    ("Upstream model request failed with HTTP 503: upstream temporarily unavailable", True),
+])
+async def test_authentication_failures_are_not_retried(runtime, monkeypatch, reason, retried):
+    from src import headless_agent
+    attempts = []
+
+    async def headless(sess, *args, **kwargs):
+        attempts.append(sess.id)
+        raise RuntimeError(reason)
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    args = request(specialists=[{"name": "Buyers", "task": "Map buyers", "tools": ["web_search"]}],
+                   synthesis=None, retries=1)
+    result = await start_and_wait(args)
+    assert result["status"] == "failed"
+    assert len(attempts) == (2 if retried else 1)
+    if not retried:
+        assert any("Not retried" in str(failure.get("error", "")) for failure in result["failures"])

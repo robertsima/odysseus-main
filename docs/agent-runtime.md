@@ -522,7 +522,24 @@ Synthesis receives bounded, explicitly untrusted handoffs, and the parent gets o
 durable report rather than one competing auto-continuation per child.
 Detached workers refresh session-backed credentials before starting and promote
 terminal SSE provider errors into failed worker outcomes. Those failures can use
-the workflow's bounded retry instead of being mistaken for successful empty runs.
+the workflow's bounded retry instead of being mistaken for successful empty runs,
+except for authentication and authorization failures: a second identical attempt
+cannot fix an expired bearer, so those are recorded as not retried.
+
+`start` builds a preflight row per agent before anything launches — model,
+resolved tool bindings, per-server MCP connection state, credential state and the
+expected handoff — and returns it as `preflight`, with `preflight_blocked` naming
+the agents that cannot do the work they are about to be sent. Blockers are
+positive findings only: an absent MCP manager reports nothing rather than
+inventing an alarm. When every agent's credential is already known to be expired
+or rejected, `start` refuses the whole workflow instead of manufacturing a run
+whose only output is N identical 401s and a synthesis written over nothing.
+
+Bindings must name a supported read-only tool. The rejection lists the entire
+supported set and the `mcp__serverId__tool` form, so a corrected retry takes one
+step rather than another guess, and an unusable MCP binding says why it is
+unusable — server disconnected, tool disabled, not read-only, or unknown — with
+the connected servers named.
 
 Loading `manage_skills` returns `loaded_not_run`; relevant research procedures
 include an executable capability preflight. Batch-loaded skills now promote all
@@ -532,7 +549,18 @@ requests with no launcher call get one bounded nudge, then a truthful non-execut
 answer. Running/partial workflows cannot be presented as completed research.
 Ordinary questions, negated delegation requests and untrusted worker/skill text
 do not authorize launching agents. A human `continue` can resume an existing
-authorized workflow without starting it again.
+authorized workflow without starting it again. Negation and question forms are
+scoped to their own clause: a report of what failed ("no agents ran") no longer
+cancels a request made in the same message ("relaunch the two specialists"), and
+restart/relaunch/retry phrasings count as orchestration requests.
+
+A skill's `requires_toolsets` entry resolves as an exact tool name, a connected
+MCP server (by id or display name, expanding to its tools), or a known prose
+alias. Only entries that name nothing real are reported as bad front matter;
+an entry that resolves but is switched off for the turn is policy working as
+configured, not metadata to fix. `manage_skills action=add` says so at authoring
+time. Domains starved by a deliberately narrowed loadout are recorded as expected
+observations rather than warnings.
 Stop/status/wait requests do not authorize new launches. Research branches with
 bound web or MCP tools must make successful calls to those bindings before the
 controller can mark their work complete. A missing permission-store read blocks

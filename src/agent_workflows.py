@@ -10,6 +10,7 @@ import asyncio
 import copy
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Optional
@@ -23,9 +24,20 @@ POLL_SECONDS = 1.0
 STOP_GRACE_SECONDS = 5.0
 _TASKS: dict[str, asyncio.Task] = {}
 _LIVE: dict[str, dict] = {}
+# The native tools a read-only research worker may be bound to. Everything here
+# is in tool_security.PLAN_MODE_READONLY_TOOLS or is a read-only vault/skill
+# accessor; nothing here can write, send, publish or delegate.
+#
+# `get_workspace` belongs with the file readers rather than outside them: an
+# agent handed read_file/grep/glob/ls but no way to learn the workspace root
+# cannot use them, and rejecting it (as the 2026-09-17 logs show) killed a
+# whole restart over a tool that mutates nothing. `search_documents` is the
+# read side of the local corpus, and the skill-toolset aliases already point
+# "internal context search" at it.
 _READ_TOOLS = frozenset({
     "web_search", "web_fetch", "read_file", "grep", "glob", "ls", "search_chats",
     "vault_get", "vault_search", "manage_skills", "read_app_logs",
+    "get_workspace", "search_documents",
 })
 _HANDOFF = (
     "Return a JSON handoff with findings, evidence (source URLs and what each supports), "
@@ -155,6 +167,62 @@ def _mcp_catalog():
             if manager.get_server_status(tool["server_id"]).get("status") == "connected"}, readonly_blocked
 
 
+def mcp_server_health():
+    """Connection state per MCP server, keyed by server id and by display name.
+
+    A binding to a server that dropped its stdio connection is the difference
+    between "we researched Bluesky" and "we web-searched about Bluesky", and
+    the 2026-09-17 logs contain both a `Connection closed` for the Bluesky
+    server and a synthesis written as though the research had happened. The
+    workflow reports this before launch instead of inferring it afterwards.
+    """
+    from src.tool_utils import get_mcp_manager
+    manager = get_mcp_manager()
+    health: dict[str, dict] = {}
+    if manager is None:
+        return health
+    try:
+        servers = {tool["server_id"]: tool.get("server_name") or tool["server_id"]
+                   for tool in manager.get_all_tools()}
+    except Exception:
+        logger.debug("[agent-workflow] MCP catalogue unavailable for health", exc_info=True)
+        return health
+    for server_id, name in servers.items():
+        try:
+            status = dict(manager.get_server_status(server_id) or {})
+        except Exception:
+            status = {"status": "unknown"}
+        row = {"server_id": server_id, "server_name": name,
+               "status": str(status.get("status") or "unknown"),
+               "error": str(status.get("error") or "")[:300] or None}
+        health[server_id] = row
+        health.setdefault(str(name), row)
+    return health
+
+
+def _mcp_binding_hint(tool, catalog, blocked):
+    """Say why an MCP binding cannot be used, not merely that it cannot."""
+    if tool in blocked:
+        return "exposed but not read-only; research workers may bind read-only MCP tools only"
+    discovered = catalog.get(tool)
+    if discovered and discovered.get("is_disabled"):
+        return "disabled in this instance's MCP settings; re-enable it before binding it"
+    parts = tool.split("__", 2)
+    server_id = parts[1] if len(parts) > 2 else ""
+    health = mcp_server_health()
+    row = health.get(server_id)
+    if row and row["status"] != "connected":
+        detail = f" ({row['error']})" if row.get("error") else ""
+        return (f"MCP server {row['server_name']} is {row['status']}{detail}; reconnect and health-check "
+                "it before binding its tools, or drop the binding and say the research was not run")
+    if row:
+        available = sorted(name for name in catalog if name.startswith(f"mcp__{server_id}__"))[:12]
+        return ("no such tool on connected server " + row["server_name"]
+                + ("; discovered: " + ", ".join(available) if available else "; it exposes no read-only tools"))
+    connected = sorted({entry["server_name"] for entry in health.values() if entry["status"] == "connected"})
+    return ("unknown MCP server; connected servers: " + (", ".join(connected) if connected else "none"))
+
+
 def _strings(value, field, limit=24):
     if not isinstance(value, list) or len(value) > limit or not all(isinstance(item, str) and item.strip() for item in value):
         raise ValueError(f"{field} must be a list of at most {limit} nonempty names")
@@ -174,21 +242,34 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
     skills = _strings(raw.get("skills") if raw.get("skills") is not None else [], "skills", 8)
     if skills and "manage_skills" not in tools:
         tools.append("manage_skills")
-    servers, errors = set(), []
+    servers, errors, unsupported = set(), [], []
     for tool in tools:
         if tool.startswith("mcp__"):
             discovered = catalog.get(tool)
             if not discovered or discovered.get("is_disabled") or tool in blocked:
-                errors.append(f"{tool}: unavailable, disabled, or not read-only")
+                errors.append(f"{tool}: {_mcp_binding_hint(tool, catalog, blocked)}")
                 continue
             server = discovered["server_id"]
             if "*" not in policy["allowed_mcp_servers"] and server not in policy["allowed_mcp_servers"]:
                 errors.append(f"{tool}: MCP server denied by parent")
             servers.add(server)
         elif tool not in _READ_TOOLS:
-            errors.append(f"{tool}: not a supported read-only research tool")
+            unsupported.append(tool)
+            continue
         if tool not in policy["allowed_tools"]:
             errors.append(f"{tool}: denied by parent")
+    if unsupported:
+        # One combined, actionable line. Naming only the offending tool made the
+        # model guess again on the next attempt; the supported set is short
+        # enough to hand back in full so the retry can be correct in one step.
+        errors.append(
+            ", ".join(unsupported)
+            + (" is not a" if len(unsupported) == 1 else " are not")
+            + " supported read-only research tool"
+            + ("" if len(unsupported) == 1 else "s")
+            + ". Supported native tools: " + ", ".join(sorted(_READ_TOOLS))
+            + ". MCP bindings must be exact mcp__serverId__tool names from discovery"
+        )
     if policy["skill_access"] == "none" and skills:
         errors.append("Skills are disabled for the parent")
     if policy["skill_access"] == "selected" and not set(skills).issubset(policy["skill_names"]):
@@ -267,7 +348,120 @@ def _public(rec, *, research_limit=1800):
                                    if attempt.get("status") in {"failed", "incomplete", "cancelled", "interrupted", "timed_out"}),
             "children": children, "synthesis_status": synthesis["status"] if synthesis else "not_requested",
             "allow_partial_synthesis": bool(rec.get("allow_partial_synthesis")),
+            "preflight": copy.deepcopy(rec.get("preflight") or []),
+            "preflight_blocked": [row["name"] for row in (rec.get("preflight") or []) if not row.get("ready", True)],
             "failures": list(rec["failures"]), "exit_code": exit_code}
+
+
+# Failures a second identical attempt cannot fix. Retrying an expired bearer
+# just doubles the number of 401s in the log and the number of empty child
+# chats the user has to read before reaching the real cause.
+_PERMANENT_FAILURE_RE = re.compile(
+    r"HTTP\s*(?:401|403)\b|\bunauthoriz|\bforbidden\b|credentials?\s+(?:expired|were\s+rejected|are\s+invalid)"
+    r"|reconnect\s+the\s+provider|invalid[_\s]api[_\s]key|authentication\s+failed",
+    re.IGNORECASE,
+)
+
+
+def _retryable(reason) -> bool:
+    return not _PERMANENT_FAILURE_RE.search(str(reason or ""))
+
+
+def _endpoint_auth_state(endpoint_url, owner):
+    """Is the credential behind this endpoint usable RIGHT NOW?
+
+    Session-backed providers (the ChatGPT subscription lane) hold a short-lived
+    bearer that the parent chat refreshes per request. A detached child copies
+    the session's endpoint instead, so an expired refresh token shows up only
+    as an HTTP 401 inside each child -- four of them, in the 2026-09-17 run,
+    each burning a launch, a chat and a retry to learn the same fact.
+
+    Returns ``(state, detail)``; ``state`` is one of ``ok``, ``expired`` or
+    ``unknown``. Only ``expired`` is a positive finding, and only that one
+    blocks a launch: an indeterminate answer must never stop real work.
+    """
+    url = str(endpoint_url or "").strip()
+    if not url:
+        return "unknown", "the calling chat has no endpoint URL"
+    try:
+        from routes.chat_helpers import _session_url_matches_endpoint
+        from src.auth_helpers import owner_filter
+        from src.database import ModelEndpoint, SessionLocal
+        from src.endpoint_resolver import resolve_endpoint_runtime
+    except Exception:
+        logger.debug("[agent-workflow] auth preflight unavailable", exc_info=True)
+        return "unknown", "credential lookup is unavailable in this build"
+    db = SessionLocal()
+    try:
+        query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+        if owner:
+            query = owner_filter(query, ModelEndpoint, owner)
+        for endpoint in query.all():
+            if not _session_url_matches_endpoint(url, getattr(endpoint, "base_url", "") or ""):
+                continue
+            session_backed = bool(getattr(endpoint, "provider_auth_id", None))
+            try:
+                _, api_key = resolve_endpoint_runtime(endpoint, owner=owner)
+            except Exception as exc:
+                if session_backed:
+                    return "expired", f"{type(exc).__name__}: {str(exc)[:200]}"
+                return "unknown", f"could not resolve provider credentials: {type(exc).__name__}"
+            if session_backed and not api_key:
+                return "expired", "the provider auth session returned no usable access token"
+            return "ok", None
+        return "unknown", "no enabled endpoint matches the calling chat's URL"
+    except Exception:
+        logger.debug("[agent-workflow] auth preflight failed", exc_info=True)
+        return "unknown", "credential lookup raised"
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _preflight(children, parent, owner):
+    """One honest row per agent, before anything launches.
+
+    The failure this exists for is the harness reporting six launched agents
+    and a finished synthesis over four children that never got past a 401. Each
+    row states what the agent will actually run on -- model, bindings, MCP
+    server health, credential state -- and anything in ``blockers`` means that
+    agent cannot do the work it is about to be sent.
+    """
+    health = mcp_server_health()
+    auth_state, auth_detail = _endpoint_auth_state(getattr(parent, "endpoint_url", ""), owner)
+    rows = []
+    for child in children:
+        servers, blockers = [], []
+        for tool in child["tools"]:
+            if not tool.startswith("mcp__"):
+                continue
+            server_id = tool.split("__", 2)[1] if tool.count("__") >= 2 else ""
+            row = health.get(server_id) or {"server_id": server_id, "server_name": server_id,
+                                            "status": "unknown", "error": None}
+            if not any(entry["server_id"] == row["server_id"] for entry in servers):
+                servers.append({"server_id": row["server_id"], "server_name": row["server_name"],
+                                "status": row["status"], "error": row.get("error")})
+        for server in servers:
+            # Only a POSITIVE finding blocks. When no MCP manager is running
+            # there is nothing to report, and calling that a blocker would turn
+            # every absent subsystem into a false alarm about real research.
+            if health and server["status"] != "connected":
+                blockers.append(f"MCP server {server['server_name']} is {server['status']}"
+                                + (f" ({server['error']})" if server.get("error") else ""))
+        if child["model"] == "inherit" and auth_state == "expired":
+            blockers.append(f"provider credentials are expired or rejected ({auth_detail})")
+        rows.append({
+            "name": child["name"], "stage": child["stage"],
+            "model": child["model"], "tools": list(child["tools"]), "skills": list(child["skills"]),
+            "mcp_servers": servers,
+            "auth": {"state": auth_state, "detail": auth_detail} if child["model"] == "inherit"
+                    else {"state": "resolved_at_launch", "detail": "explicit model; resolved when the child starts"},
+            "expected_handoff": "JSON handoff with findings, evidence, assumptions and open questions",
+            "blockers": blockers, "ready": not blockers,
+        })
+    return rows
 
 
 def _missing_evidence(child, actual):
@@ -325,12 +519,28 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
         children.append(_prepare(args["synthesis"], policy, catalog, blocked, stage="synthesis"))
     if len({child["name"].casefold() for child in children}) != len(children):
         raise ValueError("Agent names must be unique within the workflow")
+    preflight = _preflight(children, parent, owner)
+    for row in preflight:
+        logger.info("[agent-workflow] preflight name=%s stage=%s model=%s auth=%s tools=%s mcp=%s ready=%s%s",
+                    row["name"], row["stage"], row["model"], row["auth"]["state"], ",".join(row["tools"]) or "-",
+                    ",".join(f"{server['server_name']}:{server['status']}" for server in row["mcp_servers"]) or "-",
+                    row["ready"], "" if row["ready"] else " blockers=" + "; ".join(row["blockers"]))
+    # A credential that is already known to be rejected fails every child the
+    # same way. Refuse the whole workflow instead of manufacturing a run whose
+    # only output is N identical 401s and a synthesis written over nothing.
+    auth_blocked = [row["name"] for row in preflight if row["auth"]["state"] == "expired"]
+    if auth_blocked and len(auth_blocked) == len(preflight):
+        raise RuntimeError(
+            "Provider credentials for this chat are expired or were rejected "
+            f"({preflight[0]['auth']['detail']}). Reconnect the provider, then start the workflow again; "
+            "no agents were launched."
+        )
     wid = f"workflow-{uuid.uuid4().hex[:12]}"
     rec = {"workflow_id": wid, "parent_session": session_id, "owner": owner,
            "parent_run_id": activity.active_turn(session_id), "task": task,
            "status": "running", "started_at": time.time(), "timeout_seconds": timeout,
            "retries": retries, "allow_partial_synthesis": bool(args.get("allow_partial_synthesis", False)),
-           "children": children, "failures": []}
+           "children": children, "failures": [], "preflight": preflight}
     _save(rec)
     _LIVE[wid] = rec
     activity.run_started(session_id, "pipeline", f"Research workflow · {task[:100]}", run_id=wid,
@@ -406,8 +616,15 @@ async def _run(rec):
                     rec["failures"].append({"name": child["name"], "run_id": child["run_id"],
                                              "attempt": child["attempt"], "status": child["status"],
                                              "reason": child.get("reason")})
-                    if child["status"] == "failed" and child["attempt"] <= rec["retries"]:
+                    if (child["status"] == "failed" and child["attempt"] <= rec["retries"]
+                            and _retryable(child.get("reason"))):
                         child["status"] = "queued"
+                    elif child["status"] == "failed" and not _retryable(child.get("reason")):
+                        rec["failures"].append({
+                            "name": child["name"],
+                            "error": "Not retried: the failure is an authentication/authorization error, "
+                                     "which a second identical attempt cannot fix",
+                        })
                 changed = True
             research = [child for child in rec["children"] if child["stage"] == "research"]
             research_done = all(child["status"] not in {"queued", "running"} for child in research)
@@ -571,6 +788,11 @@ def render_result(snapshot):
         for row in snapshot["children"]:
             if row.get("result"):
                 lines.extend([f"{row['name']} result:", row["result"]])
+    blocked = [row for row in snapshot.get("preflight") or [] if not row.get("ready", True)]
+    if blocked:
+        lines.append("Preflight blockers (these agents could not do the work they were sent):")
+        for row in blocked:
+            lines.append(f"- {row['name']} [{row['stage']}] model={row['model']}: " + "; ".join(row["blockers"]))
     lines.append("Execution trace and persisted handoff artifacts:")
     for row in snapshot["children"]:
         tools = sorted({str(call.get("tool")) for call in row.get("tool_calls", [])})

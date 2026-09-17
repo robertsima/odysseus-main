@@ -429,3 +429,88 @@ async def test_loop_does_not_call_model_when_policy_storage_fails(loop_runtime, 
     events = await loop_runtime.run([FALSE_COMPLETION])
     assert "capability policy could not be loaded" in visible_text(events)
     assert not loop_runtime.requests and not loop_runtime.executions
+
+
+@pytest.mark.parametrize("message", [
+    "The last run produced nothing usable - no agents ran. Relaunch the two research specialists.",
+    "no agents actually launched, restart the two specialist research agents",
+    "Nothing happened, but spin up two specialists to redo the Bluesky research",
+    "retry the research agents",
+    "restart the workflow with two research agents",
+])
+def test_restart_after_a_failed_run_still_authorizes_specialists(message):
+    """A report of what failed must not read as a prohibition on trying again.
+
+    Every child of the 2026-09-17 workflow died on a provider 401, and the two
+    restarts the user then asked for were refused for lack of an "explicit
+    specialist request" -- because the sentence describing the failure ("no
+    agents ran") matched the same-message negation veto.
+    """
+    assert agent_loop._explicit_delegation_requested(message)
+
+
+@pytest.mark.parametrize("message", [
+    "Do not use agents to research Umni",
+    "Don't delegate this market research to another agent",
+    "Research Umni without workers",
+    "no sub-agents please, just do this yourself",
+    "Do this yourself. Never delegate to sub-agents.",
+    "cancel the workflow",
+])
+def test_real_prohibitions_and_workflow_controls_still_refuse(message):
+    assert not agent_loop._explicit_delegation_requested(message)
+
+
+def test_skill_toolsets_resolve_mcp_server_names_and_flag_only_real_prose():
+    """`requires_toolsets: [bsky-mcp, ...]` names a server, which is resolvable."""
+    mcp = SimpleNamespace(get_all_tools=lambda *a, **k: [
+        {"server_id": "4dd5076c", "server_name": "bsky-mcp", "qualified_name": "mcp__4dd5076c__search_posts"},
+        {"server_id": "4dd5076c", "server_name": "bsky-mcp", "qualified_name": "mcp__4dd5076c__get_timeline"},
+    ])
+    skill = {"requires_toolsets": ["bsky-mcp", "web search or retrieval", "vibes and good intentions"]}
+
+    tools, unknown = agent_loop._skill_declared_tools([skill], set(), mcp)
+
+    assert {"mcp__4dd5076c__search_posts", "mcp__4dd5076c__get_timeline"} <= tools
+    assert "web_search" in tools
+    assert unknown == {"vibes and good intentions"}
+
+
+def test_a_resolvable_toolset_switched_off_is_not_reported_as_bad_metadata():
+    skill = {"requires_toolsets": ["web research"]}
+
+    tools, unknown = agent_loop._skill_declared_tools([skill], {"web_search", "web_fetch"}, None)
+
+    assert not tools and not unknown
+
+
+def test_scoped_workers_do_not_warn_about_domains_they_were_never_given(caplog):
+    import logging
+
+    relevant, disabled = set(), {tool for tool in agent_loop._DOMAIN_TOOL_MAP.get("contacts") or set()}
+    with caplog.at_level(logging.INFO, logger=agent_loop.logger.name):
+        starved = agent_loop.repair_starved_domains(relevant, {"contacts"}, disabled, narrowed=True)
+
+    assert starved == ["contacts"]
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("as configured" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("payload", [
+    "no " + " " * 20_000,
+    " " * 20_000 + "but agents",
+    "x. " * 10_000,
+    "do not " + "a" * 60,
+])
+def test_delegation_recognisers_stay_linear_on_hostile_text(payload):
+    """These run against arbitrary user text on every turn.
+
+    An earlier clause splitter used a leading `\s+` before the contrast words,
+    which made the engine rescan a whitespace run from every position inside it:
+    20k spaces took 5.7 seconds.
+    """
+    import time
+
+    started = time.perf_counter()
+    agent_loop._explicit_delegation_requested(payload)
+    assert time.perf_counter() - started < 1.0

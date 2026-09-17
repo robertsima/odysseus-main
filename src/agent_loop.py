@@ -811,7 +811,7 @@ _STARVATION_EXEMPT_DOMAINS = frozenset({"web"})
 
 
 def repair_starved_domains(relevant_tools, domains, disabled_tools,
-                           *, allow_repair=True, protected=frozenset()):
+                           *, allow_repair=True, protected=frozenset(), narrowed=False):
     """Restore domains whose tools the selector dropped. Returns the rest.
 
     A domain the user's own words named, whose tools then all vanished, is how
@@ -853,7 +853,17 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
             )
             continue
         starved.append(domain)
-    if starved:
+    if starved and narrowed:
+        # A scoped worker (selected bindings, or a read-only research child)
+        # has almost every domain switched off ON PURPOSE. Logging that as a
+        # warning on every round of every child buried the real warnings in
+        # the 2026-09-17 run; the fact is still worth recording, at the level
+        # of an expected observation.
+        logger.info(
+            "[agent-intent] domains %s are outside this agent's bindings, as configured",
+            starved,
+        )
+    elif starved:
         logger.warning(
             "[agent-intent] domains %s detected but no usable tools remain "
             "(every tool for them is in disabled_tools)",
@@ -1497,17 +1507,27 @@ _AGENT_NOUN_RE = re.compile(
 # A start/hand-off verb followed, within a few words, by a bare agent noun.
 # The filler is capped at three words so "the agent asked me to start the
 # server" cannot pair a distant verb with an unrelated "agent".
+#
+# The `re-` prefixes are not decoration. The second half of a failed run is the
+# RESTART, and "restart the two research agents" / "relaunch the specialists"
+# read as no request at all without them: in the 2026-09-17 logs every child
+# died on a provider 401, and each retry the user asked for was then refused by
+# the delegation gate for lack of an "explicit specialist request". `specialist`
+# joins the noun list for the same reason -- it is the word this tool's own
+# `specialists` parameter uses, so it is the word people type back at it.
 _ORCHESTRATION_VERB = (
     r"(?:kick(?:ing|ed|s)?\s+off|spin(?:ning|s)?\s+up|fir(?:e|es|ing)\s+up|"
     r"stand(?:ing|s)?\s+up|boot(?:ing|s)?\s+up|set(?:ting|s)?\s+up|"
-    r"start(?:ing|ed|s)?|creat(?:e|es|ing|ed)\s+an?|mak(?:e|es|ing)\s+an?|"
-    r"launch(?:ing|ed|es)?|spawn(?:ing|ed|s)?|dispatch(?:ing|ed|es)?|"
+    r"(?:re[\s-]?)?start(?:ing|ed|s)?|creat(?:e|es|ing|ed)\s+an?|mak(?:e|es|ing)\s+an?|"
+    r"(?:re[\s-]?)?launch(?:ing|ed|es)?|re[\s-]?tr(?:y|ies|ying)|"
+    r"spawn(?:ing|ed|s)?|dispatch(?:ing|ed|es)?|"
     r"deleg\w+|farm(?:ing|ed|s)?\s+out|assign(?:ing|ed|s)?|"
     r"hand(?:ing|ed|s)?(?:\s+\w+){0,3}?\s+(?:to|off)|"
     r"have\s+an?|ask\s+an?|get\s+an?|give\s+(?:it|this|that)\s+to\s+an?)"
 )
+_AGENT_NOUN_TAIL = r"(?:agent|worker|specialist)s?\b"
 _AGENT_ORCHESTRATION_RE = re.compile(
-    r"\b" + _ORCHESTRATION_VERB + r"\W+(?:\w+\W+){0,3}?(?:agent|worker)s?\b",
+    r"\b" + _ORCHESTRATION_VERB + r"\W+(?:\w+\W+){0,3}?" + _AGENT_NOUN_TAIL,
     re.IGNORECASE,
 )
 
@@ -1542,9 +1562,32 @@ _USE_AGENTS_RE = re.compile(
     r"(?:agents|specialists|workers)\b" + _HEAD_NOUN_FOLLOWERS,
     re.IGNORECASE,
 )
+# Prohibition, not mere co-occurrence of a negative word and an agent noun.
+#
+# The old form was `(do not|don't|never|without|no) ... {0,65} ... agents`
+# applied to the WHOLE message, which made two very ordinary sentences read as
+# "the user forbade delegation": "no agents actually ran" and "there's no
+# evidence the agents did anything" are reports about a failed run, and they
+# arrive in exactly the turn where the user is asking for a restart. Two
+# narrowings:
+#
+#   1. Only a directive negation ("do not"/"don't"/"never") may bind to a
+#      delegation word across filler. "didn't", "isn't", "no longer" and the
+#      rest are descriptions of what happened, not instructions.
+#   2. Bare "no"/"without" must govern the agent noun DIRECTLY ("no sub-agents",
+#      "without workers"), and not when that noun is the subject of a verb
+#      saying what the agents did or failed to do.
 _NO_DELEGATION_RE = re.compile(
-    r"\b(?:do\s+not|don't|never|without|no)\b[^.!?\n]{0,65}"
-    r"\b(?:delegat\w*|sub[ -]?agents?|agents|workers|specialists)\b",
+    r"(?:"
+    r"\b(?:do\s+not|do\s*n'?t|never|please\s+do\s*n'?t)\b[^.!?\n]{0,65}"
+    r"\b(?:delegat\w*|sub[ -]?agents?|agents|workers|specialists)\b"
+    r"|"
+    r"\b(?:without|no)\s+(?:any\s+|more\s+|further\s+|additional\s+|other\s+|new\s+)*"
+    r"(?:delegation|sub[ -]?agents?|agents|workers|specialists)\b"
+    r"(?!\s+(?:ran|run|launched|started|fired|were|was|have|has|had|did|"
+    r"actually|ever|even|executed|completed|finished|failed|made|produced|"
+    r"reported|returned|appear\w*|show\w*|exist\w*))"
+    r")",
     re.IGNORECASE,
 )
 _DELEGATION_GUIDANCE_RE = re.compile(
@@ -1559,18 +1602,54 @@ _WORKFLOW_CONTROL_RE = re.compile(
 )
 
 
-def _orchestration_requested(text: str) -> bool:
-    """True when the words name another agent, or ask for one to be started."""
-    text = str(text or "")
-    if _NO_DELEGATION_RE.search(text) or _DELEGATION_GUIDANCE_RE.search(text):
+# Sentence/contrast boundaries. Negation and the "is this a question about
+# delegation" test are both properties of ONE clause, not of the message, and a
+# real request routinely arrives in the same message as an unrelated negative:
+# "The last run produced nothing usable -- no agents ran. Relaunch the two
+# research specialists." Evaluating that as one blob vetoed the request.
+#
+# The contrast words use a fixed-width lookbehind rather than a leading `\s+`.
+# `\s+(?:but|...)` makes the engine rescan a whitespace run from every position
+# in it -- quadratic, and measurably so: 20k spaces took 5.7 seconds, on a path
+# that runs against arbitrary user text on every turn.
+_CLAUSE_SPLIT_RE = re.compile(
+    r"[.!?\n]+|(?<=\s)(?:but|however|instead|although|though)\b", re.I
+)
+
+
+def _clauses(text: str) -> List[str]:
+    return [part for part in _CLAUSE_SPLIT_RE.split(str(text or "")) if part and part.strip()]
+
+
+def _clause_orchestration(clause: str) -> bool:
+    """Does THIS clause ask for another agent, rather than forbid or ask about one?"""
+    if _NO_DELEGATION_RE.search(clause) or _DELEGATION_GUIDANCE_RE.search(clause):
         return False
     return bool(
-        _AGENT_NOUN_RE.search(text)
-        or _AGENT_ORCHESTRATION_RE.search(text)
-        or _AGENT_RUN_RE.search(text)
-        or _USING_AGENTS_RE.search(text)
-        or _USE_AGENTS_RE.search(text)
+        _AGENT_NOUN_RE.search(clause)
+        or _AGENT_ORCHESTRATION_RE.search(clause)
+        or _AGENT_RUN_RE.search(clause)
+        or _USING_AGENTS_RE.search(clause)
+        or _USE_AGENTS_RE.search(clause)
     )
+
+
+def _orchestration_requested(text: str) -> bool:
+    """True when the words name another agent, or ask for one to be started.
+
+    A prohibition still wins over a request inside the same clause (that is
+    what `_clause_orchestration` checks), but it no longer reaches across a
+    sentence boundary to cancel a request the user made in plain words.
+    """
+    text = str(text or "")
+    # `_USING_AGENTS_RE` deliberately spans up to 180 characters of filler
+    # ("audit the pipeline end to end ... using agents"), which a clause split
+    # can cut in half, so it also gets a whole-message pass -- guarded by the
+    # message-level prohibition check that has always applied to it.
+    if not (_NO_DELEGATION_RE.search(text) or _DELEGATION_GUIDANCE_RE.search(text)):
+        if _USING_AGENTS_RE.search(text):
+            return True
+    return any(_clause_orchestration(clause) for clause in _clauses(text))
 
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
@@ -1784,10 +1863,16 @@ def _explicit_delegation_requested(text: str) -> bool:
     so the two gates can no longer disagree about the same sentence.
     """
     text = str(text or "")
-    if (_NO_DELEGATION_RE.search(text) or _DELEGATION_GUIDANCE_RE.search(text)
-            or _WORKFLOW_CONTROL_RE.search(text)):
+    # Anchored at the start of the message: "cancel the workflow", "status?".
+    # Those are controls over work already authorized, not new authorization.
+    if _WORKFLOW_CONTROL_RE.search(text):
         return False
-    return bool(_EXPLICIT_DELEGATION_RE.search(text)) or _orchestration_requested(text)
+    for clause in _clauses(text):
+        if _NO_DELEGATION_RE.search(clause) or _DELEGATION_GUIDANCE_RE.search(clause):
+            continue
+        if _EXPLICIT_DELEGATION_RE.search(clause):
+            return True
+    return _orchestration_requested(text)
 
 
 def _delegation_intent_text(messages: List[Dict]) -> str:
@@ -2143,7 +2228,35 @@ _MISSING_TOOL_RE = re.compile(
 )
 
 
-def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
+def _mcp_toolset_index(mcp_mgr) -> Dict[str, Set[str]]:
+    """Map MCP server id AND display name to that server's qualified tools.
+
+    Skills name the server, because that is what the operator configured and
+    what the MCP docs call it: ``requires_toolsets: [bsky-mcp, firecrawl]``.
+    Matching only exact tool names turned both of those into "not tool names,
+    ignored" in the 2026-09-17 logs — while the same run demoted those very
+    servers' schemas for budget, so the declared dependency was the only thing
+    that would have brought them back.
+    """
+    index: Dict[str, Set[str]] = {}
+    if mcp_mgr is None:
+        return index
+    try:
+        catalog = mcp_mgr.get_all_tools() or []
+    except Exception:
+        logger.debug("MCP catalogue unavailable for skill toolset resolution", exc_info=True)
+        return index
+    for tool in catalog:
+        qualified = str(tool.get("qualified_name") or "")
+        if not qualified:
+            continue
+        for key in (tool.get("server_id"), tool.get("server_name")):
+            if key:
+                index.setdefault(str(key).strip().casefold(), set()).add(qualified)
+    return index
+
+
+def _skill_declared_tools(skills, disabled_tools, mcp_mgr=None) -> Tuple[Set[str], Set[str]]:
     """Split a skill's ``requires_toolsets`` into real tools and prose.
 
     The field is operator-authored free text in SKILL.md. A skill declaring
@@ -2153,8 +2266,14 @@ def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
     `selected_without_schema` on every round. The system prompt is built from
     the same set, so the model was also told it had tools that do not exist.
 
-    Returns ``(tools, unknown)``; ``unknown`` is worth logging so the operator
-    can fix the skill's front matter.
+    An entry resolves, in order, as: an exact tool name, a connected MCP server
+    (every read tool it exposes), or one of the prose aliases below.
+
+    Returns ``(tools, unknown)``. ``unknown`` holds ONLY entries that name
+    nothing real, which is the operator's cue to fix the front matter. An entry
+    that does resolve but whose tools are all switched off for this turn is not
+    unknown — policy is working as configured, and reporting it as bad metadata
+    sent the operator to edit a skill that was already correct.
     """
     try:
         from src.tool_policy import known_tool_names
@@ -2162,6 +2281,7 @@ def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
         known = known_tool_names()
     except Exception:
         known = set()
+    mcp_index = _mcp_toolset_index(mcp_mgr)
     tools: Set[str] = set()
     unknown: Set[str] = set()
     disabled = disabled_tools or set()
@@ -2169,17 +2289,26 @@ def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
         for name in (skill.get("requires_toolsets") or []):
             if not name or name in disabled:
                 continue
-            if known and name not in known:
-                # Agent-authored skills describe toolsets in prose; resolve
-                # the common ones instead of dropping the dependency.
-                alias = _SKILL_TOOLSET_ALIASES.get(str(name).strip().casefold())
-                resolved = {tool for tool in (alias or ()) if tool in known and tool not in disabled}
-                if resolved:
-                    tools |= resolved
-                else:
-                    unknown.add(name)
+            if not known or name in known:
+                tools.add(name)
                 continue
-            tools.add(name)
+            key = str(name).strip().casefold()
+            # Agent-authored skills describe toolsets in prose or by MCP server
+            # name; resolve those instead of dropping the dependency.
+            candidates = set(mcp_index.get(key) or ()) | {
+                tool for tool in (_SKILL_TOOLSET_ALIASES.get(key) or ()) if tool in known
+            }
+            if not candidates:
+                unknown.add(name)
+                continue
+            usable = candidates - disabled
+            if usable:
+                tools |= usable
+            else:
+                logger.debug(
+                    "skill toolset %r resolved to %s, all disabled for this turn",
+                    name, sorted(candidates),
+                )
     return tools, unknown
 
 
@@ -6260,7 +6389,7 @@ async def stream_agent_loop(
             _relevant_tools = set(ALWAYS_AVAILABLE)
         if "manage_skills" not in disabled_tools:
             _relevant_tools.add("manage_skills")
-        _skill_tools, _unknown_toolsets = _skill_declared_tools(_explicit_skills, disabled_tools)
+        _skill_tools, _unknown_toolsets = _skill_declared_tools(_explicit_skills, disabled_tools, mcp_mgr)
         _explicit_skill_tools.update(_skill_tools)
         _explicit_skill_tools.add("manage_skills")
         _relevant_tools.update(_skill_tools)
@@ -6326,7 +6455,7 @@ async def stream_agent_loop(
                         _retrieval_query, skills=_owner_skills,
                         threshold=0.25, max_items=3,
                     ):
-                        _skill_tools, _ = _skill_declared_tools([_sk], disabled_tools)
+                        _skill_tools, _ = _skill_declared_tools([_sk], disabled_tools, mcp_mgr)
                         _relevant_tools.update(_skill_tools)
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
@@ -6450,6 +6579,7 @@ async def stream_agent_loop(
             disabled_tools,
             allow_repair=not _ody_qwen_finetune_model,
             protected={"email"} if active_email else frozenset(),
+            narrowed=_selected_bindings is not None or bool(_agent_settings.get("workflow_readonly")),
         )
 
     if _relevant_tools is not None and disabled_tools:
@@ -8482,7 +8612,7 @@ async def stream_agent_loop(
                         _known = _ktn()
                         for _sk in _SkM(_DD).load(owner=owner):
                             if _sk.get("name") in _ms_names:
-                                _new, _ = _skill_declared_tools([_sk], disabled_tools)
+                                _new, _ = _skill_declared_tools([_sk], disabled_tools, mcp_mgr)
                                 if _turn_discovery is not None:
                                     _new &= _permitted_catalog_names
                                 _new -= _relevant_tools

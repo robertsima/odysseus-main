@@ -21,6 +21,42 @@ logger = logging.getLogger(__name__)
 # Skills management tool
 # ---------------------------------------------------------------------------
 
+def _unresolvable_toolsets_note(requested) -> str:
+    """Warn the author about `requires_toolsets` entries that name nothing.
+
+    The field is only useful if the runtime can turn it into schemas. Skills
+    written by agents routinely put a sentence there ("web search or retrieval",
+    "search_documents when internal context is relevant"), and the runtime can
+    only ignore those — which it did silently until the 2026-09-17 logs, where
+    the author never learned the dependency was dead. Said here, at the moment
+    the skill is written, it is one edit away from correct.
+
+    Resolution is deliberately generous: an exact tool name, a connected MCP
+    server, or a known prose alias all count.
+    """
+    names = [str(item).strip() for item in (requested or []) if str(item or "").strip()]
+    if not names:
+        return ""
+    try:
+        from src.agent_loop import _skill_declared_tools
+        from src.tool_utils import get_mcp_manager
+
+        _, unknown = _skill_declared_tools(
+            [{"requires_toolsets": names}], set(), get_mcp_manager()
+        )
+    except Exception:
+        logger.debug("requires_toolsets validation skipped", exc_info=True)
+        return ""
+    if not unknown:
+        return ""
+    return (
+        "\n\nHeads-up: requires_toolsets " + ", ".join(f"`{name}`" for name in sorted(unknown))
+        + " does not name a tool, a connected MCP server, or a known toolset, so the runtime will "
+        "ignore it. Use exact tool names (web_search, search_documents), an `mcp__serverId__tool` "
+        "binding, or the MCP server's name — not a sentence describing when to use one."
+    )
+
+
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 
@@ -185,6 +221,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                 f"A near-identical skill already exists: `{entry['name']}` — not creating "
                 f"a duplicate. View or edit it with action='view', name='{entry['name']}'."
             )}
+        toolset_note = _unresolvable_toolsets_note(args.get("requires_toolsets") or [])
         try:
             from src.event_bus import fire_event
             fire_event("skill_added", owner)
@@ -196,7 +233,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                 "\n\nThis skill is a DRAFT. Run through the procedure once to verify, "
                 f"then publish with action='publish', name='{entry['name']}'."
             )
-        return {"results": f"Created skill `{entry['name']}` — {entry.get('description','')}{verify_hint}"}
+        return {"results": f"Created skill `{entry['name']}` — {entry.get('description','')}{verify_hint}{toolset_note}"}
 
     if action == "edit":
         if not name:
