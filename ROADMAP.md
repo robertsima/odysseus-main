@@ -11,6 +11,9 @@ the codebase, you are probably right to stay away.
   fetch/pull/upstream configuration and confirmation-bound push/merge/deletion
   without a private-vault grant; preserve unresolved URL follow-ups.
   See [local repository sync](docs/agent-worktree.md#updating-an-existing-checkout-scoped-git).
+- [x] Fix native Git calls rejected for unused empty parameters; preserve optional
+  fields through Responses conversion, action guidance through schema compaction,
+  exact single-use confirmations, and routing for pasted Git credential errors.
 - [ ] After rebuild, verify local Git sync against the deployed Umni checkout:
   exact configured upstream, clean fast-forward, dirty/missing-branch refusal,
   and revoked GitHub-read/tool permissions. Do not assume the checkout directory

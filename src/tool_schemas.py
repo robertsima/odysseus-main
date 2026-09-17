@@ -44,8 +44,8 @@ def _strip_schema_descriptions(value):
 def compact_function_tool_schemas(schemas):
     """Return compact provider-payload copies without changing callable shape.
 
-    Canonical schemas remain the execution contract. The API only needs names
-    and JSON constraints; property prose is repeated prompt overhead.
+    Canonical schemas remain the execution contract. Most property prose can
+    be omitted, but multi-action Git tools need their action/field mapping.
     """
     compact = []
     for schema in schemas or []:
@@ -60,7 +60,8 @@ def compact_function_tool_schemas(schemas):
         # Nested object/array schemas are common in MCP tools.  Strip only
         # explanatory prose recursively: ``type``, ``required``, ``enum``,
         # ``items``, and every other JSON-schema constraint stay intact.
-        _strip_schema_descriptions(fn.get("parameters"))
+        if fn.get("name") not in {"manage_git", "manage_agent_worktree"}:
+            _strip_schema_descriptions(fn.get("parameters"))
         compact.append(item)
     return compact
 
@@ -292,7 +293,10 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_git",
+            # Action-dependent optional fields must not become all-required.
+            "strict": False,
             "description": (
+                "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
                 "Git workflows in approved local checkouts: repositories, status, diff, log, "
                 "branches, remotes, stage, unstage, commit, branch, tag, switch, fetch, pull, "
                 "push, merge, delete_branch, set_upstream. No shell/private-vault grant needed. "
@@ -309,16 +313,16 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "pull", "push", "merge", "delete_branch", "set_upstream"]},
-                    "repository": {"type": "string", "description": "Absolute local checkout path, not a URL"},
-                    "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "Exact relative file paths to stage/unstage; no globs"},
+                    "repository": {"type": "string", "description": "All actions except repositories: absolute local checkout path, not a URL"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
                     "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},
                     "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
                     "message": {"type": "string", "description": "Commit message"},
-                    "author_name": {"type": "string"},
-                    "author_email": {"type": "string"},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 50},
-                    "staged": {"type": "boolean", "description": "Diff index versus HEAD instead of worktree versus index"},
-                    "remote_branch": {"type": "string", "description": "Push destination branch on the configured remote"},
+                    "author_name": {"type": "string", "description": "commit only: omit to use local Git identity"},
+                    "author_email": {"type": "string", "description": "commit only: omit to use local Git identity"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "log only: maximum commits (default 20)"},
+                    "staged": {"type": "boolean", "description": "diff only: compare index versus HEAD (default false)"},
+                    "remote_branch": {"type": "string", "description": "push/set_upstream only: configured remote's branch name"},
                     "remote": {"type": "string", "description": "Existing configured remote name (set_upstream only)"},
                     "expected_head": {"type": "string", "description": "Exact HEAD commit being confirmed (push/merge/delete_branch)"},
                     "expected_target": {"type": "string", "description": "Exact target commit being confirmed (merge/delete_branch)"}
@@ -331,7 +335,9 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_agent_worktree",
+            "strict": False,
             "description": (
+                "Choose an action and omit unused fields; repo_list needs only action, repo_status/repo_pull also need repository. "
                 "List/status/fast-forward pull approved local Git repositories (repo_list, "
                 "repo_status, repo_pull), or manage a human-gated publishing worktree. "
                 "repo_status/repo_pull require an absolute repository path from repo_list; "

@@ -147,10 +147,12 @@ class AgentWorktreeTool:
 
     async def _repo_execute(self, args: dict, ctx: dict) -> dict:
         """Separate scoped checkout sync from the app's publishing worktree."""
+        from src.git_tool_contract import normalize_worktree_repo_arguments
         from src.tool_security import owner_is_admin_or_single_user
 
         if not owner_is_admin_or_single_user(ctx.get("owner")):
             return _err("Repository operations require an admin user.", code="admin_required")
+        args = normalize_worktree_repo_arguments(args)
         action = args["action"]
         accepted = {"action"} if action == "repo_list" else {"action", "repository"}
         if set(args) - accepted:

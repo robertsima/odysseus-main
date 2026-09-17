@@ -5,31 +5,15 @@ from __future__ import annotations
 import os
 import re
 
+from src.git_tool_contract import (
+    LOCAL_ACTIONS,
+    REMOTE_ACTIONS,
+    RISKY_ACTIONS,
+    normalize_git_arguments,
+)
 from src.tool_utils import _parse_tool_args
-from .worktree_tools import _err, _repository_read_token
 
-LOCAL_ACTIONS = {
-    "status": set(),
-    "log": {"limit", "ref"},
-    "diff": {"staged"},
-    "branches": set(),
-    "remotes": set(),
-    "stage": {"paths"},
-    "unstage": {"paths"},
-    "commit": {"message", "author_name", "author_email"},
-    "branch": {"name", "ref"},
-    "tag": {"name", "ref"},
-}
-REMOTE_ACTIONS = {
-    "fetch": set(),
-    "pull": set(),
-    "switch": {"name"},
-    "set_upstream": {"remote", "remote_branch"},
-    "push": {"remote_branch", "expected_head"},
-    "merge": {"ref", "expected_head", "expected_target"},
-    "delete_branch": {"name", "expected_head", "expected_target"},
-}
-RISKY_ACTIONS = frozenset({"push", "merge", "delete_branch"})
+from .worktree_tools import _err, _repository_read_token
 
 
 def _write_token(ctx: dict) -> str | None:
@@ -67,7 +51,7 @@ class GitTool:
         if not owner_is_admin_or_single_user(ctx.get("owner")):
             return _err("Git operations require an admin user.", code="admin_required")
         try:
-            args = _parse_tool_args(content)
+            args = normalize_git_arguments(_parse_tool_args(content))
         except ValueError:
             return _err("Git requires JSON arguments.", code="invalid_arguments")
         action = str(args.get("action") or "repositories").strip().lower()
@@ -85,7 +69,10 @@ class GitTool:
         )
         if set(args) - permitted:
             return _err(
-                "Unsupported arguments for this Git action.", code="invalid_arguments"
+                f"Unsupported arguments for Git action {action!r}. "
+                f"Send only: {', '.join(sorted(permitted))}; omit unused fields. "
+                "Non-empty overrides and unknown arguments are not accepted.",
+                code="invalid_arguments",
             )
         repository = args.get("repository")
         if action != "repositories" and (
@@ -158,7 +145,7 @@ class GitTool:
             return {"exit_code": 0, "result": result}
         except sync.RepositorySyncError as exc:
             return _err(str(exc), code=exc.code)
-        except Exception:
+        except Exception:  # noqa: BLE001 - transport errors may contain credentials
             return _err(
                 "Git operation failed. Check repository access/configuration; no shell fallback "
                 "was attempted. Inspect status before retrying a mutation.",

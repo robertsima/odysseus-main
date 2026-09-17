@@ -61,6 +61,28 @@ local files were updated.
 The legacy `manage_agent_worktree` actions `repo_list`, `repo_status`, and
 `repo_pull` remain aliases for the original narrow sync service.
 
+### Tool argument and authentication troubleshooting
+
+Send only the fields for the chosen action, for example
+`{"action":"repositories"}` or
+`{"action":"status","repository":"/app/data/development/your-checkout"}`.
+The September 17 native-call fix tolerates known, irrelevant empty placeholders
+without accepting unknown arguments or non-empty overrides. Empty optional values
+use documented defaults (for example local commit identity and a bounded log limit).
+Required fields still undergo validation. Approval fingerprints use the same normalization;
+changing a repository, branch, action or expected revision still needs fresh approval.
+
+The Git schemas explicitly preserve optional fields in Responses requests and retain
+their field descriptions after token compaction. Without an explicit opt-out,
+[Responses may normalize schemas into strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode),
+where every property is required. Local authorization and argument checks remain in force.
+
+`fatal: could not read Username for 'https://github.com'` from the shell is a
+separate credential error, not a vault access restriction. The scoped Git tool
+uses the permission-checked integration token described above; it does not install
+shell credentials or credential helpers. Pasted Git HTTPS credential diagnostics
+make that tool available for inspection, not authorize a pull or push automatically.
+
 ## Human-gated publishing
 
 The agent gets one persistent Git worktree it can edit and test in. Nothing

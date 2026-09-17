@@ -230,6 +230,46 @@ def test_local_git_sync_is_bound_without_semantic_hit_or_private_grant(monkeypat
     assert "repository" in schema["function"]["parameters"]["properties"]
 
 
+def test_pasted_git_https_auth_failure_binds_diagnostic_tool(
+    monkeypatch, admin_owner
+):
+    _patch_basics(monkeypatch)
+    monkeypatch.setattr("core.database.get_session_settings", lambda *a, **kw: {})
+    calls = []
+
+    async def stream(_candidates, messages, **kwargs):
+        calls.append(kwargs.get("tools") or [])
+        yield _delta("I can inspect the configured checkout and diagnose this failure.")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", stream)
+    error = (
+        "fatal: could not read Username for 'https://github.com': "
+        "No such device or address\r\nCopy\r\nExit code: 1"
+    )
+    _collect(agent_loop.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-test",
+        [{"role": "user", "content": error}],
+        session_id="git-diagnostic", owner=admin_owner, allow_private=False,
+        relevant_tools={"web_search"}, max_rounds=1, _is_teacher_run=True,
+    ))
+
+    assert calls
+    names = {_name(schema) for schema in calls[0]}
+    assert "manage_git" in names
+    assert not {"bash", "python"} & names
+
+
+@pytest.mark.parametrize("text", [
+    "How do I log in to the GitHub website?",
+    "The github.com login page says my password is wrong.",
+    "Search GitHub for authentication documentation.",
+    "I forgot my GitHub username; can you help with my account?",
+])
+def test_generic_github_login_questions_are_not_local_git_diagnostics(text):
+    assert agent_loop._looks_like_local_git_sync_request(text) is False
+
+
 @pytest.mark.parametrize("settings,disabled,plan", [
     ({}, {"manage_git"}, False),
     ({"tool_access": "selected", "enabled_tools": ["read_file"]}, set(), False),

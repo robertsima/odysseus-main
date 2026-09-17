@@ -155,6 +155,19 @@ History rewrites, arbitrary commands and conflict-resolving merges are not expos
 does not widen unrestricted Bash/Python access. See
 [supported scope and deployment checks](../docs/agent-worktree.md).
 
+The 14:14 deployment exposed a native argument-contract regression: models filled
+unused multi-action properties with empty values, and the Git handler rejected
+the call before Git ran. Git/legacy repo-action boundaries now discard only known,
+irrelevant neutral placeholders and use documented defaults for empty optional
+fields. Unknown fields and meaningful disallowed overrides remain invalid;
+required fields are never supplied or repaired. Single-use Git/repo-action approval
+fingerprints use the identical normalization without weakening target/revision binding.
+Git schemas preserve compact field guidance and explicitly opt out of implicit
+Responses strict normalization; the adapter preserves explicit boolean `strict` settings.
+Distinctive Git CLI HTTPS credential diagnostics also select the scoped Git tool
+through the existing permission ceiling instead of relying solely on web retrieval.
+They do not grant execution authority or shell credentials.
+
 ### Earlier offline measurement (baseline)
 
 An offline diagnostic candidate fixture on this checkout selected eight compact
@@ -182,6 +195,13 @@ they cannot enter automatic retrieval while unreviewed. See the
 [extension workflow and limitations](../docs/agent-extensions.md).
 
 ## Validation record
+
+For the 14:14 native Git argument follow-up, **342 tests passed, 6 platform-specific
+tests skipped** across Git operations/security, native provider conversion,
+schema compaction, approvals and routing. Expanded log/commit calls run against
+temporary real repositories; network transport remains mocked. These tests do
+not claim a successful pull in the deployed container; rebuild and live acceptance
+are still required.
 
 For the scoped Git expansion, **621 tests passed, 6 platform-specific tests
 skipped** across repository operations, approval/routing, worktree publishing,

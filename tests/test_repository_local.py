@@ -1,3 +1,4 @@
+import json
 import os
 
 import pytest
@@ -6,8 +7,42 @@ from dulwich.index import IndexEntry
 from dulwich.objects import Blob, Commit, Tree
 from dulwich.repo import Repo
 
+from src import tool_approvals
+from src.agent_tools.git_tools import GitTool
 from src.agent_worktree import repository_local as local
 from src.agent_worktree import repository_sync as sync
+
+
+_NEUTRAL_GIT_FIELDS = {
+    "repository": "",
+    "paths": [],
+    "name": "",
+    "ref": "",
+    "message": "",
+    "author_name": "",
+    "author_email": "",
+    "limit": 0,
+    "staged": False,
+    "remote_branch": "",
+    "remote": "",
+    "expected_head": "",
+    "expected_target": "",
+}
+
+
+def _expanded_git_args(action, repository, **overrides):
+    return {
+        "action": action,
+        **_NEUTRAL_GIT_FIELDS,
+        "repository": str(repository),
+        **overrides,
+    }
+
+
+def _allow_git_tool(monkeypatch):
+    monkeypatch.setattr(
+        "src.tool_security.owner_is_admin_or_single_user", lambda _owner: True
+    )
 
 
 @pytest.fixture
@@ -57,6 +92,34 @@ async def test_status_log_branches_and_remotes_do_not_require_upstream(repositor
 
 
 @pytest.mark.asyncio
+async def test_expanded_git_log_uses_bounded_default_limit(
+    repository, monkeypatch
+):
+    _allow_git_tool(monkeypatch)
+    with Repo(str(repository)) as repo:
+        for index in range(24):
+            (repository / "README.md").write_text(
+                f"revision {index}\n", encoding="utf-8"
+            )
+            porcelain.add(repo, ["README.md"])
+            porcelain.commit(
+                repo,
+                message=f"revision {index}".encode(),
+                author=b"Test <test@example.com>",
+                committer=b"Test <test@example.com>",
+            )
+
+    result = await GitTool().execute(
+        json.dumps(_expanded_git_args("log", repository)),
+        {"owner": "admin"},
+    )
+
+    assert result["exit_code"] == 0
+    assert len(result["result"]["commits"]) == 20
+    assert result["result"]["commits"][0]["message"] == "revision 23"
+
+
+@pytest.mark.asyncio
 async def test_stage_diff_commit_unstage_round_trip(repository):
     readme = repository / "README.md"
     readme.write_text("two\n", encoding="utf-8")
@@ -80,6 +143,27 @@ async def test_stage_diff_commit_unstage_round_trip(repository):
 
 
 @pytest.mark.asyncio
+async def test_expanded_git_commit_uses_configured_identity(repository, monkeypatch):
+    _allow_git_tool(monkeypatch)
+    (repository / "README.md").write_text("expanded commit\n", encoding="utf-8")
+    await local.execute_local("stage", str(repository), paths=["README.md"])
+
+    result = await GitTool().execute(
+        json.dumps(
+            _expanded_git_args(
+                "commit", repository, message="use configured identity"
+            )
+        ),
+        {"owner": "admin"},
+    )
+
+    assert result["exit_code"] == 0
+    with Repo(str(repository)) as repo:
+        commit = repo[result["result"]["commit"].encode()]
+        assert commit.author == b"Local User <local@example.com>"
+
+
+@pytest.mark.asyncio
 async def test_new_file_stage_and_explicit_commit_identity(repository):
     (repository / "new.txt").write_text("new\n", encoding="utf-8")
     await local.execute_local("stage", str(repository), paths=["new.txt"])
@@ -94,6 +178,77 @@ async def test_new_file_stage_and_explicit_commit_identity(repository):
         assert (
             repo[result["commit"].encode()].author == b"Explicit <explicit@example.com>"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "expected_code"),
+    [
+        ("stage", "invalid_paths"),
+        ("unstage", "invalid_paths"),
+        ("commit", "invalid_message"),
+        ("branch", "invalid_ref"),
+        ("tag", "invalid_ref"),
+        ("switch", "invalid_branch"),
+        ("set_upstream", "invalid_branch"),
+    ],
+)
+async def test_expanded_git_call_preserves_required_empty_values_for_validation(
+    repository, monkeypatch, action, expected_code
+):
+    _allow_git_tool(monkeypatch)
+
+    result = await GitTool().execute(
+        json.dumps(_expanded_git_args(action, repository)),
+        {"owner": "admin"},
+    )
+
+    assert result["exit_code"] == 1
+    assert result["code"] == expected_code
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["push", "merge", "delete_branch"])
+async def test_expanded_risky_git_call_refuses_empty_revision_proofs(
+    repository, monkeypatch, action
+):
+    _allow_git_tool(monkeypatch)
+
+    result = await GitTool().execute(
+        json.dumps(_expanded_git_args(action, repository)),
+        {"owner": "admin", "session_id": "empty-revision-proof"},
+    )
+
+    assert result["exit_code"] == 1
+    assert result["code"] == "missing_revision"
+
+
+@pytest.mark.asyncio
+async def test_expanded_merge_preserves_required_empty_ref(repository, monkeypatch):
+    _allow_git_tool(monkeypatch)
+    monkeypatch.setattr(
+        "src.agent_tools.git_tools._repository_read_token", lambda _ctx: None
+    )
+    with Repo(str(repository)) as repo:
+        head = repo.refs[b"HEAD"].decode()
+    args = _expanded_git_args(
+        "merge", repository, expected_head=head, expected_target=head
+    )
+    content = json.dumps(args)
+    tool_approvals._reset_for_tests()
+    pending = tool_approvals.request(
+        "empty-merge-ref", "manage_git", content, "merge"
+    )
+    tool_approvals.decide("empty-merge-ref", pending["id"], "once")
+
+    result = await GitTool().execute(
+        content,
+        {"owner": "admin", "session_id": "empty-merge-ref"},
+    )
+
+    assert result["exit_code"] == 1
+    assert result["code"] == "invalid_branch"
+    tool_approvals._reset_for_tests()
 
 
 @pytest.mark.asyncio

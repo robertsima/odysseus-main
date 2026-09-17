@@ -136,13 +136,31 @@ def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
 
 
 def _key(tool: str, content: str) -> str:
+    normalized = " ".join(str(content or "").split())
     if tool == "manage_git":
         try:
-            normalized = json.dumps(json.loads(content), sort_keys=True, separators=(",", ":"))
+            from src.git_tool_contract import normalize_git_arguments
+
+            normalized = json.dumps(
+                normalize_git_arguments(json.loads(content)),
+                sort_keys=True, separators=(",", ":"),
+            )
         except (ValueError, TypeError):
             normalized = str(content or "")
-    else:
-        normalized = " ".join(str(content or "").split())
+    elif tool == "manage_agent_worktree":
+        try:
+            args = json.loads(content)
+            if isinstance(args, dict) and str(args.get("action") or "").strip().lower() in {
+                "repo_list", "repo_status", "repo_pull",
+            }:
+                from src.git_tool_contract import normalize_worktree_repo_arguments
+
+                normalized = json.dumps(
+                    normalize_worktree_repo_arguments(args),
+                    sort_keys=True, separators=(",", ":"),
+                )
+        except (ValueError, TypeError):
+            pass
     return hashlib.sha256(f"{tool}\x00{normalized}".encode("utf-8", "replace")).hexdigest()[:32]
 
 

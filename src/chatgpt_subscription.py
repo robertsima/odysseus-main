@@ -452,5 +452,10 @@ def build_responses_tools(tools: list[dict] | None) -> list[dict]:
         description = (fn or tool).get("description")
         if description:
             entry["description"] = str(description)
+        # Responses may normalize omitted strict settings into an all-required
+        # schema. Preserve explicit opt-outs for action-dependent parameters.
+        strict = (fn or tool).get("strict")
+        if isinstance(strict, bool):
+            entry["strict"] = strict
         converted.append(entry)
     return converted

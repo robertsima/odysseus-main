@@ -2042,7 +2042,12 @@ def _looks_like_local_git_sync_request(text: str) -> bool:
     return bool(re.search(
         r"\bgit\s+(?:pull|fetch|status|diff|log|branch|switch|checkout|add|commit|push|merge|tag)\b|"
         r"\b(?:pull|sync|update|commit|push|merge|stage)\b[^\n.!?]{0,90}\b(?:repo(?:sitory)?|checkout|branch|changes)\b|"
-        r"\b(?:repo(?:sitory)?|checkout)\b[^\n.!?]{0,90}\b(?:pull|sync|commit|push|branches)\b",
+        r"\b(?:repo(?:sitory)?|checkout)\b[^\n.!?]{0,90}\b(?:pull|sync|commit|push|branches)\b|"
+        # Pasted Git transport diagnostics often omit the command that caused
+        # them.  Match the CLI's distinctive fatal prefix plus GitHub HTTPS
+        # credential wording; a generic GitHub/login question must not count.
+        r"\bfatal:\s*(?:could\s+not\s+read\s+(?:username|password)\s+for|"
+        r"authentication\s+failed\s+for)\s*['\"]https://github\.com(?:[/:'\"])",
         str(text or ""), re.I,
     ))
 
@@ -6815,6 +6820,8 @@ async def stream_agent_loop(
             "staging/commits, branches/tags, switching, fetching/pulling and approved publishing. "
             "Routine local changes can run directly; push, merge and branch deletion always "
             "require a fresh approval card with exact commit IDs from status/branches. "
+            "Tool availability is not authorization: a pasted error or request to "
+            "inspect/diagnose calls for read-only checks, not an automatic retry or mutation. "
             "Do not infer repository identity from its folder name. A supplied GitHub "
             "URL identifies the requested repo; it does not override the checkout's upstream. "
             "GitHub Actions, PR metadata, and web fetches cannot update a local checkout. "
