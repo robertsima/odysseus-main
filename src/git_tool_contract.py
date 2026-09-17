@@ -20,6 +20,7 @@ LOCAL_ACTIONS = {
 REMOTE_ACTIONS = {
     "fetch": set(),
     "pull": set(),
+    "pull_with_restore": set(),
     "switch": {"name"},
     "set_upstream": {"remote", "remote_branch"},
     "push": {"remote_branch", "expected_head"},

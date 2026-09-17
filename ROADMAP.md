@@ -18,8 +18,10 @@ the codebase, you are probably right to stay away.
   exact configured upstream, clean fast-forward, dirty/missing-branch refusal,
   and revoked GitHub-read/tool permissions. Do not assume the checkout directory
   name is the GitHub repository name.
-- [ ] Extend typed Git coverage to clone/init, stash and reviewed history-rewrite
-  workflows. General resets/rebase/force-push and conflict-resolving merge remain
+- [x] Add bounded `pull_with_restore` for dirty checkouts, preserving staged,
+  unstaged and untracked paths without exposing arbitrary stash-pop behavior.
+- [ ] Extend typed Git coverage to clone/init, general stash management and
+  reviewed history-rewrite workflows. General resets/rebase/force-push and conflict-resolving merge remain
   unavailable until their recovery and confirmation paths are implemented.
 - [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
   administration, defer irrelevant connected tools, and align advertised tools

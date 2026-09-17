@@ -13,14 +13,24 @@ publishing worktree. Use `repositories` first; then supply the returned absolute
 | Inspect | `repositories`, `status`, `diff`, `log`, `branches`, `remotes` | Read-only, bounded output |
 | Prepare changes | `stage`, `unstage`, `commit` | Explicit relative file paths; local/supplied author identity; no amend |
 | Local branches | `branch`, `tag`, `switch` | No ref overwrite; switching requires a clean checkout |
-| Synchronize | `fetch`, `pull`, `set_upstream` | Configured GitHub remotes only; pull is fast-forward only; upstream binding cannot replace an existing one |
+| Synchronize | `fetch`, `pull`, `pull_with_restore`, `set_upstream` | Configured GitHub remotes only; pulls are fast-forward only; bounded dirty changes can be saved and restored; upstream binding cannot replace an existing one |
 | Publish/integrate | `push`, `merge`, `delete_branch` | Fresh exact-call human confirmation; no force; merge is fast-forward only; only fully merged, noncurrent local branches may be deleted |
 
 For a new local branch, make an explicit first push to `remote_branch`, then
 use `set_upstream` to bind that already-fetched/pushed branch. An existing
 upstream is never silently changed. A URL in chat identifies a repository;
 it does not override its configured remote. Dirty/diverged checkouts require
-an operator decision, not an automatic reset or stash.
+an operator decision, not an automatic reset. When the user explicitly asks to
+update a dirty checkout, `pull_with_restore` provides the bounded save →
+fast-forward pull → restore workflow without a shell.
+
+`pull_with_restore` preserves staged and unstaged regular-file changes plus
+untracked files. It refuses if upstream changes overlap any preserved path, if
+the save exceeds 1,000 paths or 64 MiB, or if the checkout uses unsafe linked
+files. The temporary stash is durable crash recovery, but restoration applies
+only the originally changed paths so it cannot overwrite unrelated upstream
+changes. On a restoration failure, the tool leaves the saved entry at
+`refs/stash` and reports recovery is required instead of claiming success.
 
 This admin-only tool uses pinned Dulwich directly, not a shell or external Git
 process. It does **not** require private-vault reads. Existing tool bindings,
@@ -39,7 +49,7 @@ remote. Standard
 unchanged. Linked worktrees, vault directories, symlinks, submodules,
 filter-dependent checkouts and other remote hosts are refused. This is **not**
 a general Git/test sandbox. It does not execute hooks or credential helpers.
-Clone/init, stash, reset, rebase, force-push, remote deletion and conflict-resolving
+Clone/init, general stash management, reset, rebase, force-push, remote deletion and conflict-resolving
 merges are not yet exposed; they cannot be smuggled through arbitrary arguments.
 
 Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the

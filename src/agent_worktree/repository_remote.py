@@ -2,27 +2,33 @@
 
 from __future__ import annotations
 
+import os
+import re
+import stat
+from pathlib import Path
 from typing import Any, Optional
 
 from dulwich.client import get_transport_and_path_from_url
+from dulwich.file import FileLocked, GitFile
 from dulwich.graph import can_fast_forward
 from dulwich.repo import Repo
-from dulwich.file import GitFile, FileLocked
+from dulwich.stash import Stash
 
+from src.agent_worktree import repository_sync as sync
+from src.agent_worktree.config import load_config
+from src.agent_worktree.push_guard import is_odysseus_repository
 from src.agent_worktree.repository_sync import (
     RepositorySyncError,
     _branch_upstream,
-    checkout_commit,
     _http_pool,
     _https_url,
     _status,
     _validate_tree,
+    checkout_commit,
     pull_repository,
     run_repository_operation,
 )
 from src.agent_worktree.validation import normalize_branch
-from src.agent_worktree.push_guard import is_odysseus_repository
-from src.agent_worktree.config import load_config
 
 
 def _fail(code: str, message: str) -> None:
@@ -421,11 +427,207 @@ def _set_upstream_sync(path, remote=None, remote_branch=None):
         }
 
 
+def _restore_autostash(
+    path: Path,
+    stash_oid: bytes,
+    changed: list[str],
+    staged: set[str],
+    worktree_snapshots: dict[str, tuple[bytes, int] | None],
+    index_entries: dict[bytes, object | None],
+) -> None:
+    """Restore only originally changed paths, never the stash's whole old tree."""
+    with Repo(str(path)) as repo:
+        stash = Stash(repo)
+        try:
+            current = stash[0]
+        except (IndexError, FileNotFoundError):
+            _fail(
+                "stash_missing", "saved local changes are missing; inspect the checkout"
+            )
+        if current.new_sha != stash_oid:
+            _fail(
+                "stash_changed",
+                "stash state changed during pull; saved changes remain in refs/stash",
+            )
+        current_dirty = _status(repo)
+        unexpectedly_changed = (
+            set(current_dirty["staged"]) | set(current_dirty["unstaged"])
+        ).intersection(changed)
+        if unexpectedly_changed:
+            _fail(
+                "restore_changed",
+                "saved paths changed during pull; local changes remain in refs/stash",
+            )
+        index_path = path / ".git" / "index"
+        index_snapshot = index_path.read_bytes() if index_path.exists() else None
+        pulled_snapshots: dict[str, tuple[bytes, int] | None] = {}
+        for relative in changed:
+            target = path / Path(relative)
+            if target.is_file():
+                info = target.stat()
+                pulled_snapshots[relative] = (
+                    target.read_bytes(),
+                    stat.S_IMODE(info.st_mode),
+                )
+            else:
+                pulled_snapshots[relative] = None
+        try:
+            index = repo.open_index(config=repo.get_config())
+            for relative in changed:
+                target = path / Path(relative)
+                snapshot = worktree_snapshots[relative]
+                if snapshot is None:
+                    if target.exists():
+                        if not target.is_file():
+                            _fail(
+                                "unsafe_worktree",
+                                "restore target is not a regular file",
+                            )
+                        target.unlink()
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(snapshot[0])
+                    target.chmod(snapshot[1])
+                if relative in staged:
+                    raw = os.fsencode(relative)
+                    entry = index_entries[raw]
+                    if entry is None:
+                        if raw in index:
+                            del index[raw]
+                    else:
+                        index[raw] = entry
+            index.write()
+            stash.drop(0)
+        except Exception:  # noqa: BLE001 - stash internals expose no stable exception set
+            for relative, snapshot in pulled_snapshots.items():
+                target = path / Path(relative)
+                if snapshot is None:
+                    if target.is_file():
+                        target.unlink()
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(snapshot[0])
+                    target.chmod(snapshot[1])
+            if index_snapshot is None:
+                index_path.unlink(missing_ok=True)
+            else:
+                index_path.write_bytes(index_snapshot)
+            _fail(
+                "restore_failed",
+                "pull completed but saved changes could not be restored; recover refs/stash",
+            )
+
+
+def _pull_with_restore_sync(path: Path, token=None):
+    """Fast-forward a dirty checkout while preserving bounded local file changes."""
+    with Repo(str(path)) as repo:
+        dirty = _status(repo)
+        changed = sorted(set(dirty["staged"]) | set(dirty["unstaged"]))
+        protected = changed + list(dirty["untracked"])
+        if len(protected) > 1000:
+            _fail("stash_too_large", "at most 1000 local paths can be preserved")
+        total = 0
+        staged = set(dirty["staged"])
+        index = repo.open_index(config=repo.get_config())
+        worktree_snapshots: dict[str, tuple[bytes, int] | None] = {}
+        index_entries: dict[bytes, object | None] = {}
+        for relative in changed:
+            target = path / Path(relative)
+            raw = os.fsencode(relative)
+            entry = index[raw] if raw in index else None
+            if entry is not None and not stat.S_ISREG(entry.mode):
+                _fail("unsafe_index", "only regular file changes can be preserved")
+            index_entries[raw] = entry
+            if target.exists():
+                info = target.lstat()
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1:
+                    _fail(
+                        "unsafe_worktree",
+                        "only regular unlinked changes can be preserved",
+                    )
+                data = target.read_bytes()
+                if Path(relative).name.casefold() == ".gitattributes" and re.search(
+                    rb"(?:^|\s)(?:filter|diff|merge)\s*=",
+                    data,
+                    re.MULTILINE | re.IGNORECASE,
+                ):
+                    _fail(
+                        "unsafe_attributes",
+                        "Git attributes that invoke filters or drivers are not supported",
+                    )
+                total += len(data)
+                worktree_snapshots[relative] = (data, stat.S_IMODE(info.st_mode))
+            else:
+                worktree_snapshots[relative] = None
+            if total > 64 * 1024 * 1024:
+                _fail("stash_too_large", "saved local changes must be at most 64 MiB")
+        if not changed:
+            stash_oid = None
+        else:
+            stash = Stash(repo)
+            try:
+                stash_oid = stash.push(
+                    author=b"Odysseus Autostash <odysseus@localhost>",
+                    committer=b"Odysseus Autostash <odysseus@localhost>",
+                    message=b"Odysseus pull_with_restore",
+                    config=repo.get_config(),
+                )
+            except Exception:  # noqa: BLE001 - stash internals expose no stable exception set
+                _fail("stash_failed", "local changes could not be saved safely")
+
+    try:
+        result = sync._pull_sync(
+            path,
+            token,
+            allow_untracked=True,
+            protected_paths=protected,
+        )
+    except RepositorySyncError as exc:
+        if stash_oid is None or exc.code == "recovery_required":
+            raise
+        try:
+            _restore_autostash(
+                path,
+                stash_oid,
+                changed,
+                staged,
+                worktree_snapshots,
+                index_entries,
+            )
+        except RepositorySyncError:
+            raise RepositorySyncError(
+                "recovery_required",
+                "pull stopped and saved changes could not be restored; recover refs/stash",
+            ) from None
+        raise
+
+    if stash_oid is not None:
+        _restore_autostash(
+            path,
+            stash_oid,
+            changed,
+            staged,
+            worktree_snapshots,
+            index_entries,
+        )
+    final = sync._status_sync(path)
+    return {
+        **result,
+        "dirty": final["dirty"],
+        "saved_and_restored": bool(stash_oid),
+        "preserved_untracked": len(dirty["untracked"]),
+    }
+
+
 async def execute_remote(action, repository, token=None, **args) -> Any:
     """Execute one allowlisted repository operation; never accepts raw Git args."""
     action = str(action or "").strip().lower()
     if action == "pull":
         return await pull_repository(repository, token=token)
+    if action == "pull_with_restore":
+        return await run_repository_operation(
+            repository, lambda path: _pull_with_restore_sync(path, token)
+        )
     if action == "fetch":
         return await run_repository_operation(
             repository, lambda path: _fetch_sync(path, token)
@@ -472,5 +674,5 @@ async def execute_remote(action, repository, token=None, **args) -> Any:
         _fail("unsupported_action", f"{action} is intentionally unsupported")
     _fail(
         "unsupported_action",
-        "supported actions are fetch, pull, push, switch, merge, delete_branch, and set_upstream",
+        "supported actions are fetch, pull, pull_with_restore, push, switch, merge, delete_branch, and set_upstream",
     )

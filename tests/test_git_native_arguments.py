@@ -249,8 +249,9 @@ async def test_unknown_and_meaningful_disallowed_fields_still_fail_closed(monkey
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("allowed", [True, False])
+@pytest.mark.parametrize("action", ["pull", "pull_with_restore"])
 async def test_expanded_pull_uses_only_permission_checked_integration_token(
-    monkeypatch, allowed
+    monkeypatch, allowed, action
 ):
     _admin(monkeypatch)
     monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "test-only-github-token")
@@ -263,7 +264,7 @@ async def test_expanded_pull_uses_only_permission_checked_integration_token(
     monkeypatch.setattr(
         "src.agent_worktree.repository_remote.execute_remote", implementation
     )
-    args = {**_NEUTRAL_GIT_PAYLOAD, "action": "pull", "repository": "/repos/app"}
+    args = {**_NEUTRAL_GIT_PAYLOAD, "action": action, "repository": "/repos/app"}
     blocks, used_native, _calls = _resolve_tool_blocks(
         "",
         [{"id": "git-pull", "name": "manage_git", "arguments": json.dumps(args)}],
@@ -276,7 +277,7 @@ async def test_expanded_pull_uses_only_permission_checked_integration_token(
     )
     assert result["exit_code"] == 0
     implementation.assert_awaited_once_with(
-        "pull", "/repos/app", token="test-only-github-token" if allowed else None
+        action, "/repos/app", token="test-only-github-token" if allowed else None
     )
 
 
@@ -381,3 +382,4 @@ def test_compact_git_payload_preserves_parameter_descriptions():
     assert properties["repository"]["description"]
     assert properties["paths"]["description"]
     assert properties["remote_branch"]["description"]
+    assert "pull_with_restore" in properties["action"]["enum"]

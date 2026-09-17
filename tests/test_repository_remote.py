@@ -59,6 +59,211 @@ async def test_pull_delegates_to_hardened_sync(checkout, monkeypatch):
     assert seen == {"repository": path, "token": "secret"}
 
 
+@pytest.mark.asyncio
+async def test_pull_with_restore_dispatches_under_repository_lock(
+    checkout, monkeypatch
+):
+    path, _ = checkout
+    seen = {}
+
+    def operation(repository, token=None):
+        seen.update(repository=repository, token=token)
+        return {"ok": True}
+
+    monkeypatch.setattr(rr, "_pull_with_restore_sync", operation)
+    assert await rr.execute_remote("pull_with_restore", path, token="secret") == {
+        "ok": True
+    }
+    assert seen == {"repository": path, "token": "secret"}
+
+
+def test_pull_with_restore_preserves_tracked_and_untracked_changes(
+    checkout, monkeypatch
+):
+    path, _ = checkout
+    tracked = path / "a.txt"
+    untracked = path / "draft.md"
+    tracked.write_bytes(b"local edit\n")
+    untracked.write_bytes(b"draft\n")
+    observed = {}
+
+    def pull(repository, token=None, **kwargs):
+        with porcelain.open_repo(str(repository)) as repo:
+            status = rs._status(repo)
+        observed.update(token=token, kwargs=kwargs, status=status)
+        assert untracked.read_bytes() == b"draft\n"
+        return {
+            "ok": True,
+            "before": "a" * 40,
+            "after": "b" * 40,
+            "updated": True,
+        }
+
+    monkeypatch.setattr(rs, "_pull_sync", pull)
+    result = rr._pull_with_restore_sync(path, token="secret")
+
+    assert tracked.read_bytes() == b"local edit\n"
+    assert untracked.read_bytes() == b"draft\n"
+    assert observed["status"]["staged"] == []
+    assert observed["status"]["unstaged"] == []
+    assert observed["kwargs"]["allow_untracked"] is True
+    assert set(observed["kwargs"]["protected_paths"]) == {"a.txt", "draft.md"}
+    assert result["saved_and_restored"] is True
+    assert result["preserved_untracked"] == 1
+    with porcelain.open_repo(str(path)) as repo:
+        assert b"refs/stash" not in repo.refs
+
+
+def test_pull_with_restore_restores_staged_state(checkout, monkeypatch):
+    path, _ = checkout
+    (path / "a.txt").write_bytes(b"staged edit\n")
+    with porcelain.open_repo(str(path)) as repo:
+        porcelain.add(repo, ["a.txt"])
+
+    monkeypatch.setattr(
+        rs,
+        "_pull_sync",
+        lambda *a, **k: {
+            "ok": True,
+            "before": "a" * 40,
+            "after": "a" * 40,
+            "updated": False,
+        },
+    )
+    rr._pull_with_restore_sync(path)
+    with porcelain.open_repo(str(path)) as repo:
+        dirty = rs._status(repo)
+    assert dirty["staged"] == ["a.txt"]
+    assert dirty["unstaged"] == []
+
+
+def test_pull_with_restore_restores_changes_when_pull_refuses(checkout, monkeypatch):
+    path, _ = checkout
+    (path / "a.txt").write_bytes(b"local edit\n")
+
+    def refuse(*_args, **_kwargs):
+        raise rs.RepositorySyncError("diverged", "refusing")
+
+    monkeypatch.setattr(rs, "_pull_sync", refuse)
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._pull_with_restore_sync(path)
+    assert exc.value.code == "diverged"
+    assert (path / "a.txt").read_bytes() == b"local edit\n"
+    with porcelain.open_repo(str(path)) as repo:
+        assert b"refs/stash" not in repo.refs
+
+
+def test_pull_with_restore_preserves_tracked_deletion(checkout, monkeypatch):
+    path, _ = checkout
+    (path / "a.txt").unlink()
+    monkeypatch.setattr(
+        rs,
+        "_pull_sync",
+        lambda *a, **k: {
+            "ok": True,
+            "before": "a" * 40,
+            "after": "a" * 40,
+            "updated": False,
+        },
+    )
+    rr._pull_with_restore_sync(path)
+    assert not (path / "a.txt").exists()
+    with porcelain.open_repo(str(path)) as repo:
+        assert rs._status(repo)["unstaged"] == ["a.txt"]
+
+
+def test_pull_with_restore_rejects_dirty_execution_attributes(checkout, monkeypatch):
+    path, _ = checkout
+    attributes = path / ".gitattributes"
+    attributes.write_bytes(b"*.txt filter=owned\n")
+    with porcelain.open_repo(str(path)) as repo:
+        porcelain.add(repo, [".gitattributes"])
+    monkeypatch.setattr(rs, "_pull_sync", lambda *a, **k: pytest.fail("pull ran"))
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._pull_with_restore_sync(path)
+    assert exc.value.code == "unsafe_attributes"
+
+
+def test_pull_with_restore_fast_forwards_disjoint_change_and_restores_edit(
+    checkout, monkeypatch
+):
+    path, branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        (path / "remote.txt").write_bytes(b"base\n")
+        porcelain.add(repo, ["remote.txt"])
+        before = porcelain.commit(
+            repo, message=b"base", author=b"T <t@e>", committer=b"T <t@e>"
+        )
+        (path / "remote.txt").write_bytes(b"upstream\n")
+        porcelain.add(repo, ["remote.txt"])
+        target = porcelain.commit(
+            repo, message=b"upstream", author=b"T <t@e>", committer=b"T <t@e>"
+        )
+        porcelain.reset(repo, "hard", before)
+    (path / "a.txt").write_bytes(b"local edit\n")
+    (path / "draft.md").write_bytes(b"untracked\n")
+
+    class Client:
+        def fetch(self, _path, repo, determine_wants):
+            refs = {b"refs/heads/" + branch: target}
+            determine_wants(refs)
+            return SimpleNamespace(refs=refs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        rs,
+        "get_transport_and_path_from_url",
+        lambda *a, **k: (Client(), "acme/project.git"),
+    )
+    result = rr._pull_with_restore_sync(path)
+
+    assert result["after"] == target.decode()
+    assert result["saved_and_restored"] is True
+    assert (path / "remote.txt").read_bytes() == b"upstream\n"
+    assert (path / "a.txt").read_bytes() == b"local edit\n"
+    assert (path / "draft.md").read_bytes() == b"untracked\n"
+
+
+def test_pull_with_restore_refuses_upstream_overlap_and_restores_edit(
+    checkout, monkeypatch
+):
+    path, branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        before = repo.refs[b"HEAD"]
+        (path / "a.txt").write_bytes(b"upstream\n")
+        porcelain.add(repo, ["a.txt"])
+        target = porcelain.commit(
+            repo, message=b"upstream", author=b"T <t@e>", committer=b"T <t@e>"
+        )
+        porcelain.reset(repo, "hard", before)
+    (path / "a.txt").write_bytes(b"local edit\n")
+
+    class Client:
+        def fetch(self, _path, repo, determine_wants):
+            refs = {b"refs/heads/" + branch: target}
+            determine_wants(refs)
+            return SimpleNamespace(refs=refs)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        rs,
+        "get_transport_and_path_from_url",
+        lambda *a, **k: (Client(), "acme/project.git"),
+    )
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._pull_with_restore_sync(path)
+
+    assert exc.value.code == "restore_conflict"
+    assert (path / "a.txt").read_bytes() == b"local edit\n"
+    with porcelain.open_repo(str(path)) as repo:
+        assert repo.refs[b"HEAD"] == before
+        assert b"refs/stash" not in repo.refs
+
+
 def test_delete_branch_requires_fresh_approved_head_and_target(checkout):
     path, branch = checkout
     repo = porcelain.open_repo(str(path))

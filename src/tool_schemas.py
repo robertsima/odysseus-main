@@ -298,7 +298,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "description": (
                 "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
                 "Git workflows in approved local checkouts: repositories, status, diff, log, "
-                "branches, remotes, stage, unstage, commit, branch, tag, switch, fetch, pull, "
+                "branches, remotes, stage, unstage, commit, branch, tag, switch, fetch, pull, pull_with_restore, "
                 "push, merge, delete_branch, set_upstream. No shell/private-vault grant needed. "
                 "Use absolute repository paths from repositories. Stage explicit relative files; "
                 "commit uses local identity or supplied author. Pull/merge fast-forward only. "
@@ -312,7 +312,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "pull", "push", "merge", "delete_branch", "set_upstream"]},
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "pull", "pull_with_restore", "push", "merge", "delete_branch", "set_upstream"]},
                     "repository": {"type": "string", "description": "All actions except repositories: absolute local checkout path, not a URL"},
                     "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
                     "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},

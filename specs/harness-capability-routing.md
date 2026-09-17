@@ -155,6 +155,14 @@ History rewrites, arbitrary commands and conflict-resolving merges are not expos
 does not widen unrestricted Bash/Python access. See
 [supported scope and deployment checks](../docs/agent-worktree.md).
 
+Dirty-checkout updates use a single typed `pull_with_restore` operation rather
+than shell access or a general stash-pop primitive. It bounds saved content,
+keeps untracked files in place, rejects any upstream overlap before checkout,
+fast-forwards only, and restores only the paths that were locally changed. A
+durable `refs/stash` entry remains available if restoration fails or the process
+stops mid-operation. Availability of this action does not turn a diagnostic or
+read-only request into authorization to update the checkout.
+
 The 14:14 deployment exposed a native argument-contract regression: models filled
 unused multi-action properties with empty values, and the Git handler rejected
 the call before Git ran. Git/legacy repo-action boundaries now discard only known,
@@ -195,6 +203,14 @@ they cannot enter automatic retrieval while unreviewed. See the
 [extension workflow and limitations](../docs/agent-extensions.md).
 
 ## Validation record
+
+For bounded dirty-checkout synchronization, **352 tests passed, 6
+platform-specific tests skipped** across real temporary-repository save/restore,
+fast-forward, overlap refusal, provider argument conversion, approvals and
+routing. The integration cases verify that unrelated upstream files survive,
+staged/unstaged/deleted paths are restored, untracked files remain, and unsafe
+attribute drivers refuse before stashing. Network transport is mocked; the
+deployed dog-trainer checkout remains a post-rebuild acceptance test.
 
 For the 14:14 native Git argument follow-up, **342 tests passed, 6 platform-specific
 tests skipped** across Git operations/security, native provider conversion,

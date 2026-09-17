@@ -7,36 +7,34 @@ never runs Git, hooks, credential helpers, filters, merges, or submodules.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import stat
-import json
 import unicodedata
 import uuid
-from typing import Any, Callable
 from pathlib import Path
+from typing import Any, Callable
 from urllib.parse import urlparse, urlunparse
 
+import urllib3
 from dulwich.client import get_transport_and_path_from_url
 from dulwich.diff_tree import tree_changes
+from dulwich.ignore import IgnoreFilterManager
 from dulwich.index import (
     update_working_tree,
     validate_path_element_default,
     validate_path_element_hfs,
     validate_path_element_ntfs,
 )
-from dulwich.ignore import IgnoreFilterManager
-from dulwich.objects import Commit
-from dulwich.objects import S_ISGITLINK
 from dulwich.object_store import iter_commit_contents
+from dulwich.objects import S_ISGITLINK, Commit
 from dulwich.porcelain import get_tree_changes, get_unstaged_changes
 from dulwich.repo import Repo
 
 from src.agent_tools.claude_code_tools import repository_roots
 from src.constants import DATA_DIR, PERSONAL_DIR
 from src.rag_sensitivity import vault_root
-
-import urllib3
 
 _LOCKS: dict[str, asyncio.Lock] = {}
 _SCP_GITHUB = re.compile(
@@ -679,13 +677,17 @@ def checkout_commit(
         ) from None
 
 
-def _pull_sync(repository, token=None):
+def _pull_sync(repository, token=None, *, allow_untracked=False, protected_paths=None):
     path = _validate_path(repository)
     with Repo(str(path)) as repo:
         local_ref, branch, remote, merge_ref, raw_url = _branch_upstream(repo)
         url = _https_url(raw_url)
         dirty = _status(repo)
-        if not dirty["clean"]:
+        if (
+            dirty["staged"]
+            or dirty["unstaged"]
+            or (dirty["untracked"] and not allow_untracked)
+        ):
             _fail("dirty_tree", "working tree must be completely clean before pull")
         before = repo.refs[local_ref]
         _validate_tree(repo, before)
@@ -733,8 +735,30 @@ def _pull_sync(repository, token=None):
                 "local and upstream branches have diverged; refusing to merge",
             )
         _validate_tree(repo, after)
-        if not _status(repo)["clean"] or repo.refs[local_ref] != before:
+        current = _status(repo)
+        if (
+            current["staged"]
+            or current["unstaged"]
+            or (current["untracked"] and not allow_untracked)
+            or repo.refs[local_ref] != before
+        ):
             _fail("changed_during_fetch", "repository changed during fetch")
+        protected = {str(value).replace("\\", "/") for value in (protected_paths or ())}
+        if protected:
+            old_commit, new_commit = repo[before], repo[after]
+            changed = {
+                os.fsdecode(side.path).replace("\\", "/")
+                for change in tree_changes(
+                    repo.object_store, old_commit.tree, new_commit.tree
+                )
+                for side in (change.old, change.new)
+                if side is not None
+            }
+            if protected.intersection(changed):
+                _fail(
+                    "restore_conflict",
+                    "upstream changes overlap saved local changes; nothing was pulled",
+                )
         checkout_commit(path, repo, before, after, update_ref=local_ref)
         upstream_suffix = merge_ref[len(b"refs/heads/") :]
         repo.refs[b"refs/remotes/" + remote.encode() + b"/" + upstream_suffix] = after
@@ -746,10 +770,24 @@ def _pull_sync(repository, token=None):
         }
 
 
-async def pull_repository(repository, token=None):
+async def pull_repository(
+    repository, token=None, *, allow_untracked=False, protected_paths=None
+):
     try:
+
+        def pull(path):
+            if allow_untracked or protected_paths:
+                return _pull_sync(
+                    path,
+                    token,
+                    allow_untracked=allow_untracked,
+                    protected_paths=protected_paths,
+                )
+            return _pull_sync(path, token)
+
         return await run_repository_operation(
-            repository, lambda path: _pull_sync(path, token)
+            repository,
+            pull,
         )
     except RepositorySyncError:
         raise

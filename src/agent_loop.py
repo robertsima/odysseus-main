@@ -6818,6 +6818,8 @@ async def stream_agent_loop(
             "Local Git task: use manage_git repositories/status to identify the existing "
             "checkout and its real remote/upstream. The typed tool covers history/diffs, "
             "staging/commits, branches/tags, switching, fetching/pulling and approved publishing. "
+            "For an explicitly requested dirty-checkout update, pull_with_restore can save "
+            "bounded tracked edits, fast-forward, preserve untracked files, and restore edits. "
             "Routine local changes can run directly; push, merge and branch deletion always "
             "require a fresh approval card with exact commit IDs from status/branches. "
             "Tool availability is not authorization: a pasted error or request to "
@@ -6827,7 +6829,7 @@ async def stream_agent_loop(
             "GitHub Actions, PR metadata, and web fetches cannot update a local checkout. "
             "If a Git operation is unavailable or refuses dirty/diverged/unsupported state, "
             "report that specific reason and ask for direction. Do not bypass it with shell, "
-            "change permissions, switch branches without authorization, stash/reset, "
+            "change permissions, switch branches without authorization, reset, "
             "or claim success without the actual tool result."
         )})
     prep_timings["prompt_build"] = time.time() - _t2
