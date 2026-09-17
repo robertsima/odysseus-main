@@ -11,6 +11,7 @@ from typing import Any, Optional
 from dulwich.client import get_transport_and_path_from_url
 from dulwich.file import FileLocked, GitFile
 from dulwich.graph import can_fast_forward
+from dulwich.objects import ZERO_SHA
 from dulwich.repo import Repo
 from dulwich.stash import Stash
 
@@ -97,6 +98,31 @@ def _fetch_sync(path, token=None):
             "branch": branch,
             "remote": remote,
             "remote_branch": suffix.decode(),
+            "before": old.decode() if old else None,
+            "after": oid.decode(),
+            "updated": old != oid,
+        }
+
+
+def _fetch_branch_sync(path, token=None, remote=None, remote_branch=None):
+    name = _branch_name(remote_branch, field="remote_branch")
+    with Repo(str(path)) as repo:
+        selected, url = _select_remote(repo, str(remote).strip() if remote else None)
+        remote_ref = b"refs/heads/" + name.encode()
+        oid = _fetch_exact(repo, url, remote_ref, token)
+        _validate_tree(repo, oid)
+        tracking = b"refs/remotes/" + selected.encode() + b"/" + name.encode()
+        try:
+            old = repo.refs[tracking]
+        except KeyError:
+            old = None
+        repo.refs[tracking] = oid
+        return {
+            "ok": True,
+            "action": "fetch_branch",
+            "repository": str(path),
+            "remote": selected,
+            "remote_branch": name,
             "before": old.decode() if old else None,
             "after": oid.decode(),
             "updated": old != oid,
@@ -253,6 +279,134 @@ def _push_sync(path, token=None, remote_branch=None, expected_head=None):
             "after": local_oid.decode(),
             "updated": remote_oid != local_oid,
             "needs_upstream_action": upstream is None,
+        }
+
+
+def _force_push_with_lease_sync(
+    path, token=None, remote_branch=None, expected_head=None, expected_target=None
+):
+    """Update one branch non-fast-forward only when the remote matches its lease."""
+    with Repo(str(path)) as repo:
+        _local_ref, branch, local_oid = _attached_head(repo)
+        upstream = _upstream(repo, branch)
+        if upstream:
+            remote, merge_ref, url = upstream
+        else:
+            if not remote_branch:
+                _fail(
+                    "remote_branch_required", "force-with-lease requires remote_branch"
+                )
+            remote, url = _select_remote(repo)
+            merge_ref = (
+                b"refs/heads/"
+                + _branch_name(remote_branch, field="remote_branch").encode()
+            )
+        if is_odysseus_repository(str(path)) or _is_app_remote(url):
+            _fail(
+                "use_publish_flow",
+                "Odysseus repositories must use request_publish/publish",
+            )
+        if not _status(repo)["clean"]:
+            _fail("dirty_tree", "working tree must be clean before force-with-lease")
+        _expected(expected_head, local_oid, "HEAD")
+        _validate_tree(repo, local_oid)
+        try:
+            remote_oid = _fetch_exact(repo, url, merge_ref, token)
+        except RepositorySyncError as exc:
+            if exc.code != "missing_remote_branch" or expected_target != "0" * 40:
+                raise
+            remote_oid = None
+        if remote_oid is not None:
+            _expected(expected_target, remote_oid, "remote lease")
+        client, remote_path = _client(url, token)
+
+        def update_refs(refs):
+            if refs.get(merge_ref) != remote_oid:
+                _fail("remote_changed", "remote branch changed after lease validation")
+            return {merge_ref: local_oid}
+
+        try:
+            result = client.send_pack(
+                remote_path.encode(), update_refs, repo.generate_pack_data, atomic=True
+            )
+        except RepositorySyncError:
+            raise
+        except Exception:
+            _fail("push_failed", "GitHub rejected or interrupted force-with-lease")
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        if (getattr(result, "ref_status", None) or {}).get(merge_ref):
+            _fail("push_failed", "GitHub rejected force-with-lease")
+        target_name = merge_ref.removeprefix(b"refs/heads/").decode()
+        repo.refs[b"refs/remotes/" + remote.encode() + b"/" + target_name.encode()] = (
+            local_oid
+        )
+        return {
+            "ok": True,
+            "action": "force_push_with_lease",
+            "repository": str(path),
+            "branch": branch,
+            "remote": remote,
+            "remote_branch": target_name,
+            "before": remote_oid.decode() if remote_oid else None,
+            "after": local_oid.decode(),
+            "updated": remote_oid != local_oid,
+        }
+
+
+def _delete_remote_branch_sync(
+    path, token=None, remote_branch=None, expected_head=None, expected_target=None
+):
+    with Repo(str(path)) as repo:
+        _local_ref, branch, head = _attached_head(repo)
+        _expected(expected_head, head, "HEAD")
+        if not _status(repo)["clean"]:
+            _fail("dirty_tree", "working tree must be clean before remote deletion")
+        name = _branch_name(remote_branch, field="remote_branch")
+        remote, url = _select_remote(repo)
+        if is_odysseus_repository(str(path)) or _is_app_remote(url):
+            _fail(
+                "use_publish_flow",
+                "Odysseus repositories must use request_publish/publish",
+            )
+        target_ref = b"refs/heads/" + name.encode()
+        remote_oid = _fetch_exact(repo, url, target_ref, token)
+        _expected(expected_target, remote_oid, "remote branch")
+        client, remote_path = _client(url, token)
+
+        def update_refs(refs):
+            if refs.get(target_ref) != remote_oid:
+                _fail("remote_changed", "remote branch changed after deletion approval")
+            return {target_ref: ZERO_SHA}
+
+        try:
+            result = client.send_pack(
+                remote_path.encode(), update_refs, repo.generate_pack_data, atomic=True
+            )
+        except RepositorySyncError:
+            raise
+        except Exception:
+            _fail(
+                "push_failed", "GitHub rejected or interrupted remote branch deletion"
+            )
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+        if (getattr(result, "ref_status", None) or {}).get(target_ref):
+            _fail("push_failed", "GitHub rejected remote branch deletion")
+        tracking = b"refs/remotes/" + remote.encode() + b"/" + name.encode()
+        repo.refs.remove_if_equals(tracking, remote_oid)
+        return {
+            "ok": True,
+            "action": "delete_remote_branch",
+            "repository": str(path),
+            "branch": branch,
+            "remote": remote,
+            "remote_branch": name,
+            "deleted": remote_oid.decode(),
         }
 
 
@@ -600,6 +754,26 @@ def _pull_with_restore_sync(path: Path, token=None):
                 "pull stopped and saved changes could not be restored; recover refs/stash",
             ) from None
         raise
+    except Exception:  # transport/library failures must never strand the autostash
+        if stash_oid is not None:
+            try:
+                _restore_autostash(
+                    path,
+                    stash_oid,
+                    changed,
+                    staged,
+                    worktree_snapshots,
+                    index_entries,
+                )
+            except RepositorySyncError:
+                raise RepositorySyncError(
+                    "recovery_required",
+                    "pull failed and saved changes could not be restored; recover refs/stash",
+                ) from None
+        raise RepositorySyncError(
+            "pull_failed",
+            "pull failed before the checkout changed; saved local changes were restored",
+        ) from None
 
     if stash_oid is not None:
         _restore_autostash(
@@ -632,11 +806,40 @@ async def execute_remote(action, repository, token=None, **args) -> Any:
         return await run_repository_operation(
             repository, lambda path: _fetch_sync(path, token)
         )
+    if action == "fetch_branch":
+        return await run_repository_operation(
+            repository,
+            lambda path: _fetch_branch_sync(
+                path, token, args.get("remote"), args.get("remote_branch")
+            ),
+        )
     if action == "push":
         return await run_repository_operation(
             repository,
             lambda path: _push_sync(
                 path, token, args.get("remote_branch"), args.get("expected_head")
+            ),
+        )
+    if action == "force_push_with_lease":
+        return await run_repository_operation(
+            repository,
+            lambda path: _force_push_with_lease_sync(
+                path,
+                token,
+                args.get("remote_branch"),
+                args.get("expected_head"),
+                args.get("expected_target"),
+            ),
+        )
+    if action == "delete_remote_branch":
+        return await run_repository_operation(
+            repository,
+            lambda path: _delete_remote_branch_sync(
+                path,
+                token,
+                args.get("remote_branch"),
+                args.get("expected_head"),
+                args.get("expected_target"),
             ),
         )
     if action == "delete_branch":
@@ -670,7 +873,7 @@ async def execute_remote(action, repository, token=None, **args) -> Any:
                 path, args.get("remote"), args.get("remote_branch")
             ),
         )
-    if action in {"reset", "rebase", "force_push", "delete_remote_branch"}:
+    if action == "force_push":
         _fail("unsupported_action", f"{action} is intentionally unsupported")
     _fail(
         "unsupported_action",

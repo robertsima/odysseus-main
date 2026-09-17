@@ -20,9 +20,10 @@ the codebase, you are probably right to stay away.
   name is the GitHub repository name.
 - [x] Add bounded `pull_with_restore` for dirty checkouts, preserving staged,
   unstaged and untracked paths without exposing arbitrary stash-pop behavior.
-- [ ] Extend typed Git coverage to clone/init, general stash management and
-  reviewed history-rewrite workflows. General resets/rebase/force-push and conflict-resolving merge remain
-  unavailable until their recovery and confirmation paths are implemented.
+- [x] Extend typed Git coverage to clone/init, bounded stash management,
+  recovery-ref reset/rebase, force-with-lease and lease-bound remote branch
+  deletion. Risky actions use exact single-use confirmations; arbitrary force,
+  interactive rebase and conflict-resolving merge remain intentionally unavailable.
 - [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
   administration, defer irrelevant connected tools, and align advertised tools
   with private-vault execution permission. See

@@ -94,10 +94,10 @@ async def test_repository_actions_are_admin_only_before_service_dispatch(monkeyp
 @pytest.mark.parametrize(
     "settings,host,expected",
     [
-        ({}, "", "secret"),
-        ({"allowed_mcp_servers": None}, "github.com", "secret"),
-        ({"allowed_mcp_servers": ["*"]}, "https://github.com", "secret"),
-        ({"allowed_mcp_servers": ["github_read"]}, "github.com", "secret"),
+        ({}, "", "ghp_test_secret"),
+        ({"allowed_mcp_servers": None}, "github.com", "ghp_test_secret"),
+        ({"allowed_mcp_servers": ["*"]}, "https://github.com", "ghp_test_secret"),
+        ({"allowed_mcp_servers": ["github_read"]}, "github.com", "ghp_test_secret"),
         ({"allowed_mcp_servers": []}, "github.com", None),
         ({"allowed_mcp_servers": ["calendar"]}, "github.com", None),
         ({"allowed_mcp_servers": ["github_read"]}, "github.enterprise", None),
@@ -113,10 +113,17 @@ def test_repository_token_requires_fresh_session_permission_and_github_host(
         return settings
 
     monkeypatch.setattr("core.database.get_session_settings", fresh_settings)
-    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "secret")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_test_secret")
     monkeypatch.setenv("GITHUB_HOST", host)
     assert _repository_read_token({"session_id": "chat-1"}) == expected
     assert calls == [("chat-1", True)]
+
+
+def test_repository_read_token_rejects_cross_service_secret(monkeypatch):
+    monkeypatch.setattr("core.database.get_session_settings", lambda *_a, **_k: {})
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ody_not_a_github_token")
+    monkeypatch.delenv("GITHUB_HOST", raising=False)
+    assert _repository_read_token({"session_id": "chat-1"}) is None
 
 
 def test_repository_token_is_never_read_without_session(monkeypatch):

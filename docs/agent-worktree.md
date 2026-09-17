@@ -11,10 +11,13 @@ publishing worktree. Use `repositories` first; then supply the returned absolute
 | Workflow | Actions | Safeguard |
 | --- | --- | --- |
 | Inspect | `repositories`, `status`, `diff`, `log`, `branches`, `remotes` | Read-only, bounded output |
+| Create | `clone`, `init` | New targets only under approved roots; clone accepts credential-free GitHub HTTPS URLs, validates the tree before checkout, and never runs hooks/submodules/filters |
 | Prepare changes | `stage`, `unstage`, `commit` | Explicit relative file paths; local/supplied author identity; no amend |
 | Local branches | `branch`, `tag`, `switch` | No ref overwrite; switching requires a clean checkout |
-| Synchronize | `fetch`, `pull`, `pull_with_restore`, `set_upstream` | Configured GitHub remotes only; pulls are fast-forward only; bounded dirty changes can be saved and restored; upstream binding cannot replace an existing one |
-| Publish/integrate | `push`, `merge`, `delete_branch` | Fresh exact-call human confirmation; no force; merge is fast-forward only; only fully merged, noncurrent local branches may be deleted |
+| Synchronize | `fetch`, `fetch_branch`, `pull`, `pull_with_restore`, `set_upstream` | Configured GitHub remotes only; fetch_branch obtains a live SHA for lease-bound operations; pulls are fast-forward only; bounded dirty changes can be saved and restored; upstream binding cannot replace an existing one |
+| Save/restore | `stash_list`, `stash_create`, `stash_apply`, `stash_pop`, `stash_drop` | Tracked changes only; untracked files stay in place; apply requires a clean checkout at the stash's exact base; pop/drop require exact-call confirmation |
+| Publish/integrate | `push`, `force_push_with_lease`, `merge`, `delete_branch`, `delete_remote_branch` | Fresh exact-call human confirmation; force is lease-bound to the observed remote SHA; merge is fast-forward only; deletion is revision-bound |
+| Rewrite local history | `reset`, `rebase` | Fresh exact-call confirmation; clean checkouts only; durable `refs/odysseus/recovery/...` ref; non-interactive rebase automatically aborts on conflicts |
 
 For a new local branch, make an explicit first push to `remote_branch`, then
 use `set_upstream` to bind that already-fetched/pushed branch. An existing
@@ -35,10 +38,11 @@ changes. On a restoration failure, the tool leaves the saved entry at
 This admin-only tool uses pinned Dulwich directly, not a shell or external Git
 process. It does **not** require private-vault reads. Existing tool bindings,
 disables and plan mode remain binding. Routine changes run directly in `auto`;
-`ask_all` can require confirmation for them too. Push, merge and branch deletion
+`ask_all` can require confirmation for them too. Publishing, history rewrites,
+stash deletion, merge and branch deletion
 **always** require a single-use confirmation, even in `auto`. An “always” UI
 choice is intentionally reduced to one use for this mixed-capability tool.
-Confirmations include `expected_head`, plus `expected_target` for merge/deletion;
+Confirmations include `expected_head` and/or `expected_target` as appropriate;
 stale commit IDs refuse the operation. The tool is withheld entirely in plan
 mode because it also exposes write actions.
 
@@ -49,8 +53,9 @@ remote. Standard
 unchanged. Linked worktrees, vault directories, symlinks, submodules,
 filter-dependent checkouts and other remote hosts are refused. This is **not**
 a general Git/test sandbox. It does not execute hooks or credential helpers.
-Clone/init, general stash management, reset, rebase, force-push, remote deletion and conflict-resolving
-merges are not yet exposed; they cannot be smuggled through arbitrary arguments.
+Arbitrary commands, unconditional force-push, interactive rebase, remote URL
+changes, and conflict-resolving merges remain unavailable; they cannot be
+smuggled through arbitrary arguments.
 
 Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
 current chat permits the `github_read` integration; sessionless calls are
@@ -60,6 +65,24 @@ Odysseus self-publishing still requires the host-reviewed publishing flow below;
 the generic Git tool cannot bypass it. Its publishing token is not borrowed. Tokens stay
 in memory and HTTPS redirects are refused. If an upstream branch was removed,
 the tool reports that instead of silently pulling `main` or `dev`.
+
+For GitHub.com, the token must look like an actual GitHub credential (normally
+`github_pat_...` for a fine-grained PAT or `ghp_...` for a classic PAT). An
+Odysseus `ody_...` API token in that variable is rejected, and the GitHub MCP
+servers are not registered. The deployed container needs:
+
+```dotenv
+GITHUB_PERSONAL_ACCESS_TOKEN=github_pat_your_real_github_token
+ODYSSEUS_GITHUB_MCP_WRITE=1
+ODYSSEUS_DISABLE_MCP=0
+```
+
+Leave `GITHUB_HOST` unset for GitHub.com; set it only for GitHub Enterprise.
+`ODYSSEUS_GITHUB_MCP_BINARY` is optional because the container image includes
+`/usr/local/bin/github-mcp-server`. Agent/session loadouts must separately allow
+`github_read` and `github_write`. With CasaOS/ZimaOS these values belong in the
+deployed app's container environment; recreate the container after changing
+them so the child MCP processes inherit the new values.
 
 Rebuild/redeploy the image to install the new dependency. Smoke test with:
 “List my approved local repositories and show the branch, upstream and changes

@@ -90,8 +90,14 @@ def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
         # confirmation, including chats otherwise configured for automatic tools.
         mandatory = {
             "push": "publishes the displayed commit to GitHub",
+            "force_push_with_lease": "rewrites the displayed remote branch if its exact lease still matches",
+            "delete_remote_branch": "deletes the displayed remote branch if its exact lease still matches",
             "merge": "merges the displayed revision into the current branch (fast-forward only)",
             "delete_branch": "deletes the displayed local branch",
+            "stash_pop": "applies and deletes the displayed recovery stash",
+            "stash_drop": "deletes the displayed recovery stash",
+            "reset": "rewrites the current branch to the displayed revision and leaves a recovery ref",
+            "rebase": "rewrites local commits onto the displayed revision and leaves a recovery ref",
         }
         if action in mandatory:
             return mandatory[action]

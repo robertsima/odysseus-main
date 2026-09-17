@@ -39,7 +39,7 @@ def checkout(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_unknown_and_history_rewrite_actions_are_explicitly_unsupported(checkout):
     path, _ = checkout
-    for action in ("reset", "rebase", "force_push", "delete_remote_branch", "anything"):
+    for action in ("reset", "rebase", "force_push", "anything"):
         with pytest.raises(rs.RepositorySyncError) as exc:
             await rr.execute_remote(action, path)
         assert exc.value.code == "unsupported_action"
@@ -137,6 +137,30 @@ def test_pull_with_restore_restores_staged_state(checkout, monkeypatch):
     assert dirty["unstaged"] == []
 
 
+def test_pull_with_restore_preserves_staged_new_file(checkout, monkeypatch):
+    path, _ = checkout
+    (path / "new.md").write_bytes(b"new staged file\n")
+    with porcelain.open_repo(str(path)) as repo:
+        porcelain.add(repo, ["new.md"])
+    monkeypatch.setattr(
+        rs,
+        "_pull_sync",
+        lambda *a, **k: {
+            "ok": True,
+            "before": "a" * 40,
+            "after": "a" * 40,
+            "updated": False,
+        },
+    )
+    result = rr._pull_with_restore_sync(path)
+    assert result["saved_and_restored"] is True
+    assert (path / "new.md").read_bytes() == b"new staged file\n"
+    with porcelain.open_repo(str(path)) as repo:
+        dirty = rs._status(repo)
+    assert dirty["staged"] == ["new.md"]
+    assert dirty["unstaged"] == []
+
+
 def test_pull_with_restore_restores_changes_when_pull_refuses(checkout, monkeypatch):
     path, _ = checkout
     (path / "a.txt").write_bytes(b"local edit\n")
@@ -148,6 +172,22 @@ def test_pull_with_restore_restores_changes_when_pull_refuses(checkout, monkeypa
     with pytest.raises(rs.RepositorySyncError) as exc:
         rr._pull_with_restore_sync(path)
     assert exc.value.code == "diverged"
+    assert (path / "a.txt").read_bytes() == b"local edit\n"
+    with porcelain.open_repo(str(path)) as repo:
+        assert b"refs/stash" not in repo.refs
+
+
+def test_pull_with_restore_restores_changes_after_unexpected_transport_error(
+    checkout, monkeypatch
+):
+    path, _ = checkout
+    (path / "a.txt").write_bytes(b"local edit\n")
+    monkeypatch.setattr(
+        rs, "_pull_sync", lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("401"))
+    )
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._pull_with_restore_sync(path)
+    assert exc.value.code == "pull_failed"
     assert (path / "a.txt").read_bytes() == b"local edit\n"
     with porcelain.open_repo(str(path)) as repo:
         assert b"refs/stash" not in repo.refs
@@ -350,6 +390,18 @@ def test_fetch_updates_only_remote_tracking_ref(checkout, monkeypatch):
     reopened.close()
 
 
+def test_fetch_branch_returns_live_lease_target(checkout, monkeypatch):
+    path, _branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        target = repo.refs[b"HEAD"]
+    monkeypatch.setattr(rr, "_fetch_exact", lambda *a, **k: target)
+    result = rr._fetch_branch_sync(path, remote_branch="topic")
+    assert result["remote_branch"] == "topic"
+    assert result["after"] == target.decode()
+    with porcelain.open_repo(str(path)) as repo:
+        assert repo.refs[b"refs/remotes/origin/topic"] == target
+
+
 def test_remote_branch_rejects_refs_and_option_shapes():
     for value in ("refs/heads/main", "--force", "../main", ""):
         with pytest.raises(rs.RepositorySyncError) as exc:
@@ -474,6 +526,73 @@ def test_first_push_new_branch_uses_configured_origin_and_explicit_remote_branch
     _local, _branch, remote, merge_ref, _url = rs._branch_upstream(repo)
     assert remote == "origin" and merge_ref == b"refs/heads/new-topic"
     repo.close()
+
+
+def test_force_push_is_exact_force_with_lease(checkout, monkeypatch):
+    path, branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        remote_before = repo.refs[b"HEAD"]
+        (path / "a.txt").write_bytes(b"rewritten\n")
+        porcelain.add(repo, ["a.txt"])
+        local = porcelain.commit(
+            repo, message=b"rewrite", author=b"T <t@e>", committer=b"T <t@e>"
+        )
+    monkeypatch.setattr(rr, "is_odysseus_repository", lambda _path: False)
+    monkeypatch.setattr(rr, "load_config", lambda: SimpleNamespace(repo_slug=""))
+    monkeypatch.setattr(rr, "_fetch_exact", lambda *a, **k: remote_before)
+
+    class Client:
+        def send_pack(self, path, update_refs, generate_pack_data, atomic=False):
+            assert atomic is True
+            assert update_refs({b"refs/heads/" + branch: remote_before}) == {
+                b"refs/heads/" + branch: local
+            }
+            return SimpleNamespace(ref_status={})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rr, "_client", lambda *a: (Client(), "acme/project.git"))
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._force_push_with_lease_sync(
+            path, expected_head=local.decode(), expected_target="f" * 40
+        )
+    assert exc.value.code == "stale_approval"
+    result = rr._force_push_with_lease_sync(
+        path, expected_head=local.decode(), expected_target=remote_before.decode()
+    )
+    assert result["before"] == remote_before.decode()
+    assert result["after"] == local.decode()
+
+
+def test_delete_remote_branch_is_lease_bound(checkout, monkeypatch):
+    path, _branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        head = repo.refs[b"HEAD"]
+    monkeypatch.setattr(rr, "is_odysseus_repository", lambda _path: False)
+    monkeypatch.setattr(rr, "load_config", lambda: SimpleNamespace(repo_slug=""))
+    monkeypatch.setattr(rr, "_fetch_exact", lambda *a, **k: head)
+
+    class Client:
+        def send_pack(self, path, update_refs, generate_pack_data, atomic=False):
+            assert atomic is True
+            assert update_refs({b"refs/heads/topic": head}) == {
+                b"refs/heads/topic": b"0" * 40
+            }
+            return SimpleNamespace(ref_status={})
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(rr, "_client", lambda *a: (Client(), "acme/project.git"))
+    result = rr._delete_remote_branch_sync(
+        path,
+        remote_branch="topic",
+        expected_head=head.decode(),
+        expected_target=head.decode(),
+    )
+    assert result["deleted"] == head.decode()
+    assert result["remote_branch"] == "topic"
 
 
 def test_app_remote_identity_guard_applies_outside_configured_checkout(

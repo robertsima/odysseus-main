@@ -529,7 +529,9 @@ Built-in servers are registered at startup by `register_builtin_servers` in
 and the GitHub MCP Go binary baked into the image. GitHub is split into a
 read-only server and an opt-in `ODYSSEUS_GITHUB_MCP_WRITE=1` write server, both
 pinned to explicit `--tools` lists with no repository-mutating tools and no
-open-ended `--toolsets`. `ODYSSEUS_DISABLE_MCP=1` turns the whole layer off.
+open-ended `--toolsets`. A malformed `GITHUB_PERSONAL_ACCESS_TOKEN` no longer
+registers a misleading server that can only return 401. `ODYSSEUS_DISABLE_MCP=1`
+turns the whole layer off.
 
 `src/integrations.py` is a different mechanism entirely: named presets
 (`miniflux`, `gitea`, `linkding`, `homeassistant`, `ntfy`, `discord_webhook`,

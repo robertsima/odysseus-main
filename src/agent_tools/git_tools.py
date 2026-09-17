@@ -2,18 +2,24 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 from src.git_tool_contract import (
+    CREATION_ACTIONS,
+    HISTORY_ACTIONS,
     LOCAL_ACTIONS,
     REMOTE_ACTIONS,
+    REQUIRED_REVISIONS,
     RISKY_ACTIONS,
     normalize_git_arguments,
 )
 from src.tool_utils import _parse_tool_args
 
 from .worktree_tools import _err, _repository_read_token
+
+logger = logging.getLogger(__name__)
 
 
 def _write_token(ctx: dict) -> str | None:
@@ -35,13 +41,9 @@ def _write_token(ctx: dict) -> str | None:
     ):
         return None
     # The shared credential is usable only at the fixed public GitHub host.
-    if os.environ.get("GITHUB_HOST", "").strip().lower().rstrip("/") not in {
-        "",
-        "github.com",
-        "https://github.com",
-    }:
-        return None
-    return os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip() or None
+    from src.github_credentials import github_token_from_env
+
+    return github_token_from_env(public_only=True)
 
 
 class GitTool:
@@ -55,11 +57,16 @@ class GitTool:
         except ValueError:
             return _err("Git requires JSON arguments.", code="invalid_arguments")
         action = str(args.get("action") or "repositories").strip().lower()
-        allowed = LOCAL_ACTIONS.get(action, REMOTE_ACTIONS.get(action))
+        allowed = LOCAL_ACTIONS.get(
+            action,
+            CREATION_ACTIONS.get(
+                action, HISTORY_ACTIONS.get(action, REMOTE_ACTIONS.get(action))
+            ),
+        )
         if action != "repositories" and allowed is None:
             return _err(
-                "Unsupported Git action. Use the advertised actions; arbitrary commands, "
-                "force pushes, resets, rebases and conflict-resolving merges are not exposed.",
+                "Unsupported Git action. Use the advertised typed actions; arbitrary commands "
+                "and conflict-resolving merges are not exposed.",
                 code="unsupported_action",
             )
         permitted = (
@@ -84,16 +91,14 @@ class GitTool:
             )
         kwargs = {k: v for k, v in args.items() if k not in {"action", "repository"}}
         if action in RISKY_ACTIONS:
-            required = {"expected_head"} | (
-                {"expected_target"} if action != "push" else set()
-            )
+            required = REQUIRED_REVISIONS[action]
             if any(
                 not re.fullmatch(r"[0-9a-fA-F]{40}", str(args.get(k) or ""))
                 for k in required
             ):
                 return _err(
-                    "Inspect status/branches first and supply the exact expected_head"
-                    " (and expected_target for merge/deletion) for the confirmation.",
+                    "Inspect the repository first and supply every exact expected revision "
+                    "required by this action for the confirmation.",
                     code="missing_revision",
                 )
             from src.tool_approvals import consume_once_grant
@@ -123,7 +128,18 @@ class GitTool:
         try:
             if action == "repositories":
                 return {"exit_code": 0, "repositories": await sync.list_repositories()}
-            if action in LOCAL_ACTIONS:
+            if action in CREATION_ACTIONS:
+                from src.agent_worktree.repository_creation import execute_creation
+
+                token = _repository_read_token(ctx) if action == "clone" else None
+                result = await execute_creation(
+                    action, repository, token=token, **kwargs
+                )
+            elif action in HISTORY_ACTIONS:
+                from src.agent_worktree.repository_history import execute_history
+
+                result = await execute_history(action, repository, **kwargs)
+            elif action in LOCAL_ACTIONS:
                 from src.agent_worktree.repository_local import execute_local
 
                 result = await execute_local(action, repository, **kwargs)
@@ -132,10 +148,14 @@ class GitTool:
 
                 token = (
                     _write_token(ctx)
-                    if action == "push"
+                    if action
+                    in {"push", "force_push_with_lease", "delete_remote_branch"}
                     else _repository_read_token(ctx)
                 )
-                if action == "push" and not token:
+                if (
+                    action in {"push", "force_push_with_lease", "delete_remote_branch"}
+                    and not token
+                ):
                     return _err(
                         "GitHub write integration is disabled, disallowed for this agent, or "
                         "missing its token. Enable it explicitly before pushing.",
@@ -145,7 +165,12 @@ class GitTool:
             return {"exit_code": 0, "result": result}
         except sync.RepositorySyncError as exc:
             return _err(str(exc), code=exc.code)
-        except Exception:  # noqa: BLE001 - transport errors may contain credentials
+        except Exception as exc:
+            logger.exception(
+                "Unexpected manage_git failure action=%s error_type=%s",
+                action,
+                type(exc).__name__,
+            )
             return _err(
                 "Git operation failed. Check repository access/configuration; no shell fallback "
                 "was attempted. Inspect status before retrying a mutation.",

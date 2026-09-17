@@ -162,6 +162,62 @@ def _validate_path(raw) -> Path:
     return resolved
 
 
+def _validate_new_path(raw, *, allow_empty_directory: bool = False) -> Path:
+    """Validate a not-yet-repository target under an approved repository root."""
+    if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
+        _fail("invalid_path", "repository target is required")
+    given = Path(raw).expanduser()
+    if not given.is_absolute():
+        _fail("invalid_path", "repository target must be an absolute path")
+    absolute = Path(os.path.abspath(given))
+    roots = tuple(r.resolve(strict=False) for r in repository_roots())
+    lexical_root = next((root for root in roots if _inside(absolute, root)), None)
+    if lexical_root is None or absolute == lexical_root:
+        _fail(
+            "outside_roots",
+            "repository target must be below a configured repository root",
+        )
+    personal = Path(PERSONAL_DIR).resolve(strict=False)
+    configured_vault = Path(vault_root()).expanduser().resolve(strict=False)
+    if (
+        absolute == Path(DATA_DIR).resolve(strict=False)
+        or _inside(absolute, personal)
+        or absolute == configured_vault
+        or _inside(absolute, configured_vault)
+    ):
+        _fail(
+            "private_path", "data, vault, and private paths cannot contain repositories"
+        )
+    relative = absolute.relative_to(lexical_root)
+    _validate_raw_parts([os.fsencode(part) for part in relative.parts])
+    cursor = lexical_root
+    for part in relative.parts:
+        cursor /= part
+        if cursor.exists() and (
+            cursor.is_symlink()
+            or (hasattr(os.path, "isjunction") and os.path.isjunction(cursor))
+        ):
+            _fail(
+                "symlink_path", "repository paths may not contain symlinks or junctions"
+            )
+    if absolute.exists():
+        if (
+            not allow_empty_directory
+            or not absolute.is_dir()
+            or any(absolute.iterdir())
+        ):
+            _fail(
+                "target_exists",
+                "repository target must not exist or must be an empty directory",
+            )
+    elif not absolute.parent.is_dir():
+        _fail("invalid_path", "repository target parent directory does not exist")
+    resolved_parent = absolute.parent.resolve(strict=True)
+    if not _inside(resolved_parent, lexical_root):
+        _fail("outside_roots", "repository target resolves outside its configured root")
+    return absolute
+
+
 def _branch_upstream(repo: Repo):
     raw = repo.refs.read_ref(b"HEAD")
     if not raw or not raw.startswith(b"ref: refs/heads/"):
@@ -360,7 +416,12 @@ def _status_sync(path):
             _fail("detached_head", "checkout must be on an attached branch")
         local_ref = raw_head[5:]
         branch = local_ref[len(b"refs/heads/") :].decode()
-        _validate_tree(repo, repo.refs[local_ref])
+        try:
+            head = repo.refs[local_ref]
+        except KeyError:
+            head = None
+        if head is not None:
+            _validate_tree(repo, head)
         result = {
             "ok": True,
             "repository": str(path),
@@ -368,8 +429,9 @@ def _status_sync(path):
             "remote": None,
             "remote_url": None,
             "upstream": None,
-            "head": repo.refs[local_ref].decode(),
+            "head": head.decode() if head else None,
             "dirty": _status(repo),
+            "unborn": head is None,
         }
         try:
             _, _, remote, merge_ref, remote_url = _branch_upstream(repo)
@@ -439,6 +501,34 @@ async def run_repository_operation(repository, callback: Callable[[Path], Any]) 
     except Exception:
         raise RepositorySyncError(
             "invalid_repository", "repository could not be inspected safely"
+        ) from None
+    lock = _LOCKS.setdefault(os.path.normcase(str(path)), asyncio.Lock())
+    async with lock:
+        worker = asyncio.create_task(asyncio.to_thread(callback, path))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            try:
+                await worker
+            finally:
+                raise
+
+
+async def run_new_repository_operation(
+    repository, callback: Callable[[Path], Any], *, allow_empty_directory: bool = False
+) -> Any:
+    """Serialize creation at a validated target that does not yet contain Git metadata."""
+    try:
+        path = await asyncio.to_thread(
+            _validate_new_path,
+            repository,
+            allow_empty_directory=allow_empty_directory,
+        )
+    except RepositorySyncError:
+        raise
+    except Exception:
+        raise RepositorySyncError(
+            "invalid_repository", "repository target could not be inspected safely"
         ) from None
     lock = _LOCKS.setdefault(os.path.normcase(str(path)), asyncio.Lock())
     async with lock:
@@ -708,6 +798,13 @@ def _pull_sync(repository, token=None, *, allow_untracked=False, protected_paths
 
         try:
             result = client.fetch(remote_path.encode(), repo, determine_wants=wants)
+        except RepositorySyncError:
+            raise
+        except Exception:
+            _fail(
+                "network_error",
+                "GitHub pull failed; check the configured credential and remote access",
+            )
         finally:
             close = getattr(client, "close", None)
             if callable(close):

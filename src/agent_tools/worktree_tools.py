@@ -12,7 +12,6 @@ status) is local and side-effect-free outside the worktree directory.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict
 
 from src.tool_utils import _parse_tool_args
@@ -45,11 +44,9 @@ def _repository_read_token(ctx: dict) -> str | None:
         not isinstance(allowed, list) or not {"*", "github_read"}.intersection(allowed)
     ):
         return None
-    if os.environ.get("GITHUB_HOST", "").strip().lower().rstrip("/") not in {
-        "", "github.com", "https://github.com",
-    }:
-        return None
-    return os.environ.get("GITHUB_PERSONAL_ACCESS_TOKEN", "").strip() or None
+    from src.github_credentials import github_token_from_env
+
+    return github_token_from_env(public_only=True)
 
 
 class AgentWorktreeTool:

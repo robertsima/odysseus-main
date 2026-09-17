@@ -83,7 +83,7 @@ environment-only read before adding any new deployment documentation for it.
 
 ---
 
-## PLACEMENT — stays in the environment (43)
+## PLACEMENT — stays in the environment (45)
 
 | Variable | Read at | What it controls | Verdict |
 |---|---|---|---|
@@ -104,7 +104,9 @@ environment-only read before adding any new deployment documentation for it.
 | `ODYSSEUS_GITHUB_APP_INSTALLATION_ID` | `src/agent_worktree/config.py:133` | GitHub App installation ID. | PLACEMENT |
 | `ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH` | `src/agent_worktree/config.py:134` | Path to the GitHub App's private key file (must be inside a mounted volume in a container). Secret material. | PLACEMENT |
 | `ODYSSEUS_GITHUB_MCP_BINARY` | `src/builtin_mcp.py:156` | Path to the `github-mcp-server` binary, for native installs where it isn't on `PATH`/`/usr/local/bin`. | PLACEMENT |
-| `ODYSSEUS_GITHUB_MCP_WRITE` | `src/builtin_mcp.py:146` | Opt-in for the write-scoped GitHub MCP server (create PR, comment, review). Off by default — a deployment-trust decision scoped to the collaboration layer. | PLACEMENT |
+| `GITHUB_PERSONAL_ACCESS_TOKEN` | `src/github_credentials.py` | GitHub PAT shared by the permission-checked GitHub MCP and typed repository transport. Obvious non-GitHub tokens are rejected on GitHub.com. Secret. | PLACEMENT |
+| `GITHUB_HOST` | `src/github_credentials.py` | Optional GitHub Enterprise host. Leave unset for GitHub.com; typed repository transport is currently GitHub.com-only. | PLACEMENT |
+| `ODYSSEUS_GITHUB_MCP_WRITE` | `src/builtin_mcp.py:146` | Opt-in for the write-scoped GitHub MCP server and typed Git publish/remote-delete transport. Off by default and still bounded by each agent's `github_write` permission. | PLACEMENT |
 | `ODYSSEUS_API_TOKEN` | `src/agent_tools/claude_code_tools.py:385` | Auth token Odysseus mints and hands to a delegated Claude Code / Codex child process so it can call back into this Odysseus instance's API. Secret. | PLACEMENT |
 | `ODYSSEUS_URL` | `src/agent_tools/claude_code_tools.py:373` | Base URL of the running Odysseus instance, passed to the same delegated child process so it knows where to call back. | PLACEMENT |
 | `ODYSSEUS_INTERNAL_BASE` | `src/constants.py:126` | Explicit override for the internal base URL Odysseus uses to call its own API (e.g. behind a TLS-terminating proxy). | PLACEMENT |

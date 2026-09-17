@@ -147,7 +147,7 @@ async def test_model_supplied_approval_parameter_is_rejected(monkeypatch):
 @pytest.mark.parametrize(
     "settings,enabled,expected",
     [
-        ({"allowed_mcp_servers": ["github_write"]}, "true", "secret"),
+        ({"allowed_mcp_servers": ["github_write"]}, "true", "ghp_test_secret"),
         ({"allowed_mcp_servers": []}, "true", None),
         ({"allowed_mcp_servers": ["github_read"]}, "true", None),
         ({"allowed_mcp_servers": ["github_write"]}, "false", None),
@@ -160,10 +160,21 @@ def test_push_token_requires_write_opt_in_and_profile_ceiling(
         "core.database.get_session_settings", lambda sid, strict=False: settings
     )
     monkeypatch.setenv("ODYSSEUS_GITHUB_MCP_WRITE", enabled)
-    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "secret")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_test_secret")
     monkeypatch.setenv("GITHUB_HOST", "github.com")
     assert _write_token({"session_id": "s1"}) == expected
     assert _write_token({}) is None
+
+
+def test_push_token_rejects_cross_service_secret(monkeypatch):
+    monkeypatch.setattr(
+        "core.database.get_session_settings",
+        lambda *_a, **_k: {"allowed_mcp_servers": ["github_write"]},
+    )
+    monkeypatch.setenv("ODYSSEUS_GITHUB_MCP_WRITE", "1")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ody_not_a_github_token")
+    monkeypatch.delenv("GITHUB_HOST", raising=False)
+    assert _write_token({"session_id": "s1"}) is None
 
 
 @pytest.mark.asyncio
@@ -211,6 +222,20 @@ def test_risky_approval_overrides_auto_and_fenced_routing_is_exact():
     )
     blocks = parse_tool_blocks(f"```manage_git\n{risky}\n```")
     assert [(b.tool_type, b.content) for b in blocks] == [("manage_git", risky)]
+
+
+@pytest.mark.parametrize("action", ["reset", "rebase", "force_push_with_lease"])
+def test_history_rewrites_always_require_exact_call_confirmation(action):
+    content = json.dumps(
+        {
+            "action": action,
+            "repository": "/r",
+            "ref": "main" if action != "force_push_with_lease" else "",
+            "expected_head": "a" * 40,
+            "expected_target": "b" * 40,
+        }
+    )
+    assert tool_approvals.approval_reason("manage_git", content, "auto")
 
 
 def test_native_routing_preserves_exact_manage_git_arguments():

@@ -35,6 +35,11 @@ _NEUTRAL_GIT_PAYLOAD = {
     "staged": False,
     "remote_branch": "",
     "remote": "",
+    "source": "",
+    "branch": "",
+    "depth": 0,
+    "initial_branch": "",
+    "index": 0,
     "expected_head": "",
     "expected_target": "",
 }
@@ -89,6 +94,11 @@ def test_normalizer_prunes_only_declared_irrelevant_neutral_fields():
             {"action": "set_upstream", "repository": "/repo", "remote_branch": ""},
             "remote_branch",
         ),
+        ({"action": "clone", "repository": "/repo", "source": ""}, "source"),
+        (
+            {"action": "reset", "repository": "/repo", "expected_target": ""},
+            "expected_target",
+        ),
     ],
 )
 def test_normalizer_retains_required_values_for_validation(args, retained):
@@ -105,6 +115,11 @@ def test_normalizer_retains_required_values_for_validation(args, retained):
         ("diff", {"staged": False}),
         ("push", {"remote_branch": ""}),
         ("set_upstream", {"remote": ""}),
+        ("fetch_branch", {"remote": ""}),
+        ("clone", {"branch": "", "depth": 0}),
+        ("init", {"initial_branch": ""}),
+        ("stash_create", {"message": ""}),
+        ("stash_apply", {"index": 0}),
     ],
 )
 def test_only_explicit_defaultable_fields_treat_neutral_values_as_omission(
@@ -254,7 +269,7 @@ async def test_expanded_pull_uses_only_permission_checked_integration_token(
     monkeypatch, allowed, action
 ):
     _admin(monkeypatch)
-    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "test-only-github-token")
+    monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_test_only_github_token")
     monkeypatch.delenv("GITHUB_HOST", raising=False)
     monkeypatch.setattr(
         "core.database.get_session_settings",
@@ -277,7 +292,7 @@ async def test_expanded_pull_uses_only_permission_checked_integration_token(
     )
     assert result["exit_code"] == 0
     implementation.assert_awaited_once_with(
-        action, "/repos/app", token="test-only-github-token" if allowed else None
+        action, "/repos/app", token="ghp_test_only_github_token" if allowed else None
     )
 
 

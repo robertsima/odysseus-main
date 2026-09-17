@@ -302,8 +302,14 @@ def _identity(repo: Repo, args: dict[str, Any]) -> bytes:
 
 def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
     with Repo(str(path)) as repo:
-        head_id = _head(repo)
-        sync._validate_tree(repo, head_id)
+        try:
+            head_id = _head(repo)
+        except sync.RepositorySyncError as exc:
+            if exc.code != "missing_head":
+                raise
+            head_id = None
+        if head_id is not None:
+            sync._validate_tree(repo, head_id)
         if action == "status":
             _index(repo)
             symbolic = repo.refs.read_ref(b"HEAD")
@@ -314,9 +320,10 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
             )
             return {
                 "repository": str(path),
-                "head": _head(repo).decode(),
+                "head": head_id.decode() if head_id else None,
                 "branch": branch,
                 "status": sync._status(repo),
+                "unborn": head_id is None,
             }
         if action == "log":
             limit = args.get("limit", 20)
@@ -363,6 +370,7 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action == "branches":
             current = repo.refs.read_ref(b"HEAD")
             rows = []
+            remote_rows = []
             for ref in repo.refs.keys():
                 if ref.startswith(b"refs/heads/"):
                     rows.append(
@@ -371,17 +379,26 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
                             "target": repo.refs[ref].decode(),
                         }
                     )
-                    if len(rows) > 1000:
-                        break
+                elif ref.startswith(b"refs/remotes/") and len(remote_rows) <= 1000:
+                    remote_rows.append(
+                        {
+                            "name": os.fsdecode(ref[len(b"refs/remotes/") :]),
+                            "target": repo.refs[ref].decode(),
+                        }
+                    )
+                if len(rows) > 1000 and len(remote_rows) > 1000:
+                    break
             rows.sort(key=lambda row: row["name"])
-            truncated = len(rows) > 1000
+            remote_rows.sort(key=lambda row: row["name"])
+            truncated = len(rows) > 1000 or len(remote_rows) > 1000
             return {
                 "repository": str(path),
-                "head": _head(repo).decode(),
+                "head": head_id.decode() if head_id else None,
                 "current": os.fsdecode(current[len(b"ref: refs/heads/") :])
                 if current and current.startswith(b"ref: refs/heads/")
                 else None,
                 "branches": rows[:1000],
+                "remote_branches": remote_rows[:1000],
                 "truncated": truncated,
             }
         if action == "remotes":
@@ -403,7 +420,7 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if action in {"stage", "unstage"}:
             index = _index(repo)
             selected = _paths(args.get("paths"))
-            head = _commit(repo)
+            head = _commit(repo) if head_id is not None else None
             total_bytes = 0
             for relative, raw in selected:
                 target = _safe_local_target(path, relative)
@@ -433,7 +450,7 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
                     else:
                         _fail("invalid_path", "path does not exist and is not tracked")
                 else:
-                    entry = _tree_entry(repo, head.tree, raw)
+                    entry = _tree_entry(repo, head.tree, raw) if head else None
                     if entry is None:
                         if raw in index:
                             del index[raw]
@@ -460,18 +477,20 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
                     "commit message is required and must be at most 10000 characters",
                 )
             index = _index(repo)
-            parent = _head(repo)
+            parent = head_id
             symbolic = repo.refs.read_ref(b"HEAD")
             if not symbolic or not symbolic.startswith(b"ref: refs/heads/"):
                 _fail("detached_head", "commit requires an attached branch")
             tree = index.commit(repo.object_store)
-            if tree == _commit(repo).tree:
+            if parent is None and not len(index):
+                _fail("nothing_to_commit", "index has no changes to commit")
+            if parent is not None and tree == _commit(repo).tree:
                 _fail("nothing_to_commit", "index has no changes to commit")
             ident = _identity(repo, args)
             now = int(time.time())
             commit = Commit()
             commit.tree = tree
-            commit.parents = [parent]
+            commit.parents = [parent] if parent is not None else []
             commit.author = ident
             commit.committer = ident
             commit.author_time = now
@@ -481,7 +500,12 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
             commit.message = message.strip().encode("utf-8")
             repo.object_store.add_object(commit)
             sync._validate_tree(repo, commit.id)
-            if not repo.refs.set_if_equals(symbolic[5:], parent, commit.id):
+            updated = (
+                repo.refs.set_if_equals(symbolic[5:], parent, commit.id)
+                if parent is not None
+                else repo.refs.add_if_new(symbolic[5:], commit.id)
+            )
+            if not updated:
                 _fail(
                     "changed_during_operation",
                     "branch changed before commit could be recorded",

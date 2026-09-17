@@ -298,34 +298,40 @@ FUNCTION_TOOL_SCHEMAS = [
             "description": (
                 "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
                 "Git workflows in approved local checkouts: repositories, status, diff, log, "
-                "branches, remotes, stage, unstage, commit, branch, tag, switch, fetch, pull, pull_with_restore, "
-                "push, merge, delete_branch, set_upstream. No shell/private-vault grant needed. "
+                "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
+                "stash_list/create/apply/pop/drop, push, force_push_with_lease, merge, reset, rebase, delete_branch, delete_remote_branch, set_upstream. "
+                "No shell/private-vault grant needed. "
                 "Use absolute repository paths from repositories. Stage explicit relative files; "
                 "commit uses local identity or supplied author. Pull/merge fast-forward only. "
                 "After first push, set_upstream can bind the current branch to its fetched/pushed "
                 "remote_branch on an existing configured remote; never replaces an upstream. "
-                "Push/merge/delete_branch require a fresh user confirmation and exact expected_head "
-                "from status; merge/deletion also require expected_target from branches/log. "
-                "No force, reset, rebase, arbitrary commands or remote URL overrides. "
+                "Push/merge/deletion/history rewrites and stash deletion require fresh confirmation bound to exact revisions. "
+                "Force push is force-with-lease only. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
+                "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
                 "Odysseus self-publishing still uses manage_agent_worktree."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "pull", "pull_with_restore", "push", "merge", "delete_branch", "set_upstream"]},
-                    "repository": {"type": "string", "description": "All actions except repositories: absolute local checkout path, not a URL"},
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "stash_drop", "push", "force_push_with_lease", "merge", "reset", "rebase", "delete_branch", "delete_remote_branch", "set_upstream"]},
+                    "repository": {"type": "string", "description": "All actions except repositories: absolute checkout path; clone/init use the new target path"},
+                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL"},
+                    "branch": {"type": "string", "description": "clone only: optional remote branch"},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "clone only: optional shallow history depth"},
+                    "initial_branch": {"type": "string", "description": "init only: initial branch, default main"},
                     "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
                     "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},
                     "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
-                    "message": {"type": "string", "description": "Commit message"},
+                    "message": {"type": "string", "description": "Commit or stash_create message"},
+                    "index": {"type": "integer", "minimum": 0, "maximum": 99, "description": "stash action only: stash index, default 0"},
                     "author_name": {"type": "string", "description": "commit only: omit to use local Git identity"},
                     "author_email": {"type": "string", "description": "commit only: omit to use local Git identity"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "log only: maximum commits (default 20)"},
                     "staged": {"type": "boolean", "description": "diff only: compare index versus HEAD (default false)"},
-                    "remote_branch": {"type": "string", "description": "push/set_upstream only: configured remote's branch name"},
-                    "remote": {"type": "string", "description": "Existing configured remote name (set_upstream only)"},
-                    "expected_head": {"type": "string", "description": "Exact HEAD commit being confirmed (push/merge/delete_branch)"},
-                    "expected_target": {"type": "string", "description": "Exact target commit being confirmed (merge/delete_branch)"}
+                    "remote_branch": {"type": "string", "description": "fetch_branch/push/force_push_with_lease/delete_remote_branch/set_upstream: configured remote's branch name"},
+                    "remote": {"type": "string", "description": "fetch_branch/set_upstream only: existing configured remote name; omit when origin or one remote is unambiguous"},
+                    "expected_head": {"type": "string", "description": "Exact current HEAD being confirmed for publish/integration/history rewrite"},
+                    "expected_target": {"type": "string", "description": "Exact target/stash/remote-lease commit being confirmed; 40 zeros means absent remote for force-with-lease"}
                 },
                 "required": ["action"]
             }
