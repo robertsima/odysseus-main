@@ -102,7 +102,8 @@ agent-switch draft preservation and a docked editor whose Behavior controls fit
 without scrolling. A separate provider-integration suite returned 119 passed,
 1 skipped and 15 failures; an isolated export of committed `4c4ce59` reproduced
 the same 15 Windows/POSIX environment failures. These are not live-provider
-results, and this change has not been pushed or deployed.
+results. That slice was subsequently pushed to `dev` in `7817436`; deployment
+and live-provider acceptance remain operator checks.
 
 - [ ] Repeat same-chat documentation → mailbox → source-audit flows with the
   configured provider, then compare selected tools and actual results.
@@ -117,3 +118,47 @@ results, and this change has not been pushed or deployed.
 - [ ] Compare first-response latency, tool/schema count and extraction traffic
   with the same prompts. Local mocked-stream and synthetic browser checks do
   not establish production performance or validate eight live provider jobs.
+
+## Specialist research / MCP routing audit follow-up
+
+- [x] Recognize "use appropriately scoped agents" as explicit delegation while
+  keeping ordinary questions, negation and injected skill text non-authorizing.
+- [x] Expose `orchestrate_agents` for scoped research fan-out and optional synthesis,
+  using existing workers, parent capacity, ownership checks and policy narrowing.
+- [x] Select bounded read-only tools from explicitly named connected MCP servers,
+  independent of their always-bound catalog-size budget. Persist positive per-agent
+  tool bindings and enforce them against late-connected or hand-written calls.
+- [x] Distinguish loaded skills from execution; handle batch dependency activation.
+- [x] Record real child IDs, attached tools, calls, attempts, handoffs and synthesis
+  outcome. Stop/timeout/failure preserve traceable partial results.
+- [x] Guard unsupported orchestration completion claims, and recover failed
+  Deep Research synthesis once without repeating the research searches.
+- [x] Require successful observations from bound web/MCP research tools; merely
+  attaching tools or loading skills is not evidence of completed research.
+- [x] Preserve narrow positive tool policies with large MCP catalogs, honor
+  equivalent email tool names, and fail closed on permission-read/write errors.
+- [x] Release capacity on pre-start cancellation, retain handoffs after activity
+  registry eviction, and persist interrupted workflows without replaying them.
+
+Local validation: 1,870 passed and 7 skipped in the broad agent/MCP/tool/skill/
+research regression selection. The remaining 27 failures were reproduced on an
+isolated archive of unchanged `7e771528`: Windows path/symlink/subprocess-environment
+fixtures and stale embedding/document assertions. The focused workflow/routing/
+recovery/dashboard/approval selection passed all 209 tests. Fresh-interpreter
+imports of the dispatcher, registry and agent loop passed, as did compilation
+and diff checks. Live-provider validation remains an operator check.
+
+Deployment / live acceptance TODO (mocked-model tests are not live evidence):
+
+- [ ] In a permitted parent chat, request buyer/problem, competitor/positioning and
+  content research agents, followed by synthesis producing a market map and ten
+  draft posts. Load the operator's named marketing/handoff skills.
+- [ ] Confirm three research child chats plus synthesis in Agents/Workbench;
+  each must show actual attached tools and calls, with separate handoff artifact IDs.
+- [ ] Bind only Bluesky `get-profile`, `get-timeline`, `get-post`, `get-posts`
+  qualified tool names to content research; verify an actual read call, no posting
+  schemas/actions, and explicit partial status if Bluesky cannot provide evidence.
+- [ ] Repeat with parent worker limit one, then multiple workers; verify queueing,
+  stop/timeout, result collection and `continue` without duplicate launches.
+- [ ] Reproduce a synthesis-provider failure and verify preserved findings plus
+  `outcome=partial`, not a silently successful incomplete report.

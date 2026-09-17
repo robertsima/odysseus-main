@@ -2566,15 +2566,19 @@ def set_session_mode(session_id: str, mode: str) -> bool:
         logger.warning("Failed to persist mode %r for session %s", mode, session_id)
         return False
 
-def get_session_settings(session_id: str) -> dict:
-    """A chat's saved settings dict ({} when none). Never raises."""
+def get_session_settings(session_id: str, *, strict: bool = False) -> dict:
+    """A chat's settings ({} when none); strict policy reads fail closed."""
     try:
         with get_db_session() as db:
             raw = db.query(Session.settings_json).filter(Session.id == session_id).scalar()
         data = json.loads(raw) if raw else {}
+        if strict and not isinstance(data, dict):
+            raise ValueError("Stored session settings must be an object")
         return data if isinstance(data, dict) else {}
     except Exception:
         logger.warning("Failed to read settings for session %s", session_id)
+        if strict:
+            raise
         return {}
 
 

@@ -101,12 +101,27 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         if not found:
             label = ", ".join(repr(n) for n in missing)
             return {"error": f"Skill {label} not found. Use action='list' for exact names.", "exit_code": 1}
+        execution = {
+            "state": "loaded_not_run",
+            "loaded_skills": [n for n, _ in found],
+            "missing_skills": missing,
+            "note": "Procedure text loaded only. No agents or workflow steps have run. Make actual tool calls and verify their results before reporting execution.",
+        }
+        # A procedure describing research agents can give the caller an exact,
+        # safe first call without auto-running instructions from a document.
+        if any(re.search(r"\b(?:launch|spawn|research|handoff)\b", md, re.I)
+               and re.search(r"\bagents?\b", md, re.I) for _, md in found):
+            execution["next_tool_calls"] = [{"tool": "manage_agent_loadout", "arguments": {"action": "capabilities", "detail": True}}]
+            execution["next_step"] = "Use the returned exact read-only tool bindings to call orchestrate_agents action=start with the user's objective and scoped specialists, then wait for actual handoffs."
+        note = "\n\n[Skill execution status: loaded_not_run. " + execution["note"] + "]"
+        if execution.get("next_tool_calls"):
+            note += "\nExecutable preflight: " + json.dumps(execution["next_tool_calls"]) + "\n" + execution["next_step"]
         if len(requested_names) == 1:
-            return {"results": found[0][1]}
+            return {"results": found[0][1] + note, "execution": execution}
         parts = [f"===== skill: {skill_name} =====\n{md.rstrip()}" for skill_name, md in found]
         if missing:
             parts.append("Not found: " + ", ".join(missing) + " (use action='list' for exact names).")
-        return {"results": "\n\n".join(parts)}
+        return {"results": "\n\n".join(parts) + note, "execution": execution}
 
     if action == "view_ref":
         if not name:

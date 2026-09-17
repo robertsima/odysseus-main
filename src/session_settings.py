@@ -25,7 +25,7 @@ _ACCESS_MODES = frozenset({"none", "read", "write"})
 _SELECTION_MODES = frozenset({"all", "selected", "none"})
 _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
-_LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers"})
+_LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -71,7 +71,7 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
-        elif key == PRIVATE_VAULT_ACCESS_KEY:
+        elif key in (PRIVATE_VAULT_ACCESS_KEY, "workflow_readonly"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
             out[key] = value
@@ -79,9 +79,9 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value not in _ACCESS_MODES:
                 raise ValueError(f"memory_access must be one of {', '.join(sorted(_ACCESS_MODES))}")
             out[key] = value
-        elif key == "skill_access":
+        elif key in ("skill_access", "tool_access"):
             if value not in _SELECTION_MODES:
-                raise ValueError(f"skill_access must be one of {', '.join(sorted(_SELECTION_MODES))}")
+                raise ValueError(f"{key} must be one of {', '.join(sorted(_SELECTION_MODES))}")
             out[key] = value
         elif key == "model_access":
             if value not in _MODEL_ACCESS_MODES:

@@ -21,6 +21,7 @@ sub-agents never prompt (nobody would answer).
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import time
 import uuid
@@ -85,6 +86,13 @@ def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
         return None
     tool = str(tool or "")
     text = str(content or "")
+    if tool == "orchestrate_agents":
+        try:
+            action = json.loads(text).get("action", "status")
+        except (ValueError, TypeError, AttributeError):
+            action = "start"  # malformed requests must not bypass approval
+        if action in {"status", "wait"}:
+            return None
     if tool in _SHELL_TOOLS:
         for pattern, why in _RISKY_SHELL:
             if pattern.search(text):

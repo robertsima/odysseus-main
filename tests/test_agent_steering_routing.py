@@ -30,7 +30,7 @@ def test_running_loop_delivers_steer_with_new_schema_and_preserves_task(monkeypa
 
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     agent_activity._reset_for_tests()
-    monkeypatch.setattr(database, "get_session_settings", lambda sid: {})
+    monkeypatch.setattr(database, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default)
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set())
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None)

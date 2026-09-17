@@ -94,10 +94,19 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def expand_tool_aliases(names) -> set:
+    """Equivalent tool spellings share one permission, including email MCP."""
+    from src.tool_security import email_tool_policy_names
+
+    return {alias for name in names for alias in email_tool_policy_names(name)}
+
+
 def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
     """Persist the runtime parts of a profile on the worker chat itself."""
     patch = {
         "agent_profile": profile.get("name"),
+        "tool_access": profile.get("tool_access", "all"),
+        "enabled_tools": profile.get("enabled_tools") or [],
         "disabled_tools": profile.get("disabled_tools") or None,
         "memory_access": profile.get("memory_access", "read"),
         "skill_access": profile.get("skill_access", "all"),
@@ -118,7 +127,7 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
     if profile.get("tool_access") in {"selected", "none"}:
         try:
             from src.tool_policy import known_tool_names
-            enabled = set(profile.get("enabled_tools") or []) if profile.get("tool_access") == "selected" else set()
+            enabled = expand_tool_aliases(profile.get("enabled_tools") or []) if profile.get("tool_access") == "selected" else set()
             patch["disabled_tools"] = sorted(
                 (set(known_tool_names()) - enabled) | set(profile.get("disabled_tools") or [])
             )

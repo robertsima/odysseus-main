@@ -60,13 +60,14 @@ def test_a_loadout_with_nothing_left_is_stored_as_no_tools():
     assert profile["enabled_tools"] == []
 
 
-def test_the_denylist_is_never_silently_truncated():
-    """validate_profiles caps name lists; a cut-off denylist would read back as
-    'allowed', so an over-long clamp is refused instead."""
+def test_large_inventory_uses_authoritative_positive_policy_not_truncated_denylist():
+    """None/selected stays binding without copying hundreds of denied names."""
     many = {f"tool_{i}" for i in range(agent_loadouts.MAX_DISABLED_TOOLS_IN_PROFILE + 5)}
     caller = policy(allowed_tools=set(), known_tools=many)
-    with pytest.raises(ValueError, match="narrow enabled_tools"):
-        agent_loadouts.clamp(request(tool_access="none"), caller)
+    profile, _ = agent_loadouts.clamp(request(tool_access="none"), caller)
+    assert profile["tool_access"] == "none"
+    assert profile["enabled_tools"] == []
+    assert profile["disabled_tools"] == []
 
 
 # ── graded policies ──────────────────────────────────────────────────────────
@@ -275,7 +276,7 @@ async def test_an_unknown_action_is_refused(store):
 def test_caller_policy_reads_the_chats_own_stored_settings(monkeypatch):
     """The clamp is only meaningful if its ceiling is the policy the Control
     Room writes and agent_loop enforces, not a default."""
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {
         "disabled_tools": ["bash", "write_file"],
         "memory_access": "read",
         "model_access": "current",
@@ -300,14 +301,14 @@ def test_caller_policy_reads_the_chats_own_stored_settings(monkeypatch):
 def test_caller_policy_also_applies_the_owner_baseline(monkeypatch):
     """A tool the operator switched off globally is not available to a loadout
     just because this chat never denied it individually."""
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {})
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: {"web_search"})
     result = agent_loadouts.caller_policy("chat-1", "owner")
     assert "web_search" not in result["allowed_tools"]
 
 
 def test_an_unconfigured_chat_is_not_treated_as_a_locked_down_one(monkeypatch):
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {})
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: set())
     result = agent_loadouts.caller_policy("chat-1", "owner")
     assert result["memory_access"] == "write"

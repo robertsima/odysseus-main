@@ -30,6 +30,7 @@ from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool, MessageAgentTool
 from .bg_job_tools import ManageBgJobsTool
 from .loadout_tools import ManageAgentLoadoutTool
+from .workflow_tools import OrchestrateAgentsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -68,6 +69,7 @@ TOOL_HANDLERS = {
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
     "manage_agent_loadout": ManageAgentLoadoutTool().execute,
+    "orchestrate_agents": OrchestrateAgentsTool().execute,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,

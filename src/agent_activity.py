@@ -320,6 +320,8 @@ _RUN_SUMMARY_KEYS = frozenset({
     "repository", "branch", "commit", "model", "task_id", "target_session", "target_session_name",
     "changed_files", "changes", "commits", "num_turns", "total_cost_usd", "exit_code", "error",
     "job_id", "command", "steps", "pull_request", "request_id", "result_excerpt", "mode",
+    "workflow_id", "parent_session", "parent_run_id", "stage", "workflow_controller",
+    "requested_agents", "launched_agents", "synthesis_status", "handoff_count",
 })
 
 

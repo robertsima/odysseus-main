@@ -30,9 +30,9 @@ from src import agent_profiles
 
 logger = logging.getLogger(__name__)
 
-# `validate_profiles` truncates a profile's name lists rather than rejecting
-# them. For `disabled_tools` that would be a silent *under*-denial, so a clamp
-# that would need more entries than fit is refused instead.
+# Snapshot denylists are only a compatibility/early-filter optimization. The
+# persisted positive tool_access/enabled_tools policy is authoritative, so a
+# large ambient inventory must not prevent a tightly scoped worker starting.
 MAX_DISABLED_TOOLS_IN_PROFILE = 200
 
 _MEMORY_RANK = {"none": 0, "read": 1, "write": 2}
@@ -75,11 +75,28 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
         try:
             from core.database import get_session_settings
 
-            settings = get_session_settings(session_id) or {}
+            settings = get_session_settings(session_id, strict=True) or {}
         except Exception as exc:
             logger.warning("loadout: could not read policy for %s: %s", session_id, exc)
+            raise ValueError("Could not read the calling chat's policy; no loadout permissions granted") from exc
     known = set(known_tool_names())
-    denied = set(settings.get("disabled_tools") or []) | set(owner_baseline_disabled_tools(owner))
+    try:
+        from src.tool_utils import get_mcp_manager
+        manager = get_mcp_manager()
+        mcp_tools = manager.get_all_tools() if manager else []
+        known.update(t["qualified_name"] for t in mcp_tools if t.get("qualified_name"))
+    except Exception:
+        mcp_tools = []
+    denied = agent_profiles.expand_tool_aliases(
+        set(settings.get("disabled_tools") or []) | set(owner_baseline_disabled_tools(owner))
+    )
+    allowed_servers = settings.get("allowed_mcp_servers", ["*"])
+    if isinstance(allowed_servers, list) and "*" not in allowed_servers:
+        denied.update(t["qualified_name"] for t in mcp_tools
+                      if t.get("qualified_name") and t.get("server_id") not in allowed_servers)
+    if settings.get("tool_access") in {"selected", "none"}:
+        enabled = agent_profiles.expand_tool_aliases(settings.get("enabled_tools") or []) if settings["tool_access"] == "selected" else set()
+        denied.update(known - enabled)
     return {
         "allowed_tools": known - denied,
         "known_tools": known,
@@ -88,7 +105,7 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
         "skill_names": set(settings.get("skill_names") or []),
         "model_access": settings.get("model_access") or _POLICY_DEFAULTS["model_access"],
         "allowed_models": set(settings.get("allowed_models") or []),
-        "allowed_mcp_servers": list(settings.get("allowed_mcp_servers") or ["*"]),
+        "allowed_mcp_servers": list(settings.get("allowed_mcp_servers", ["*"]) or []),
         "private_vault_access": bool(settings.get("private_vault_access", False)),
         "delegation_policy": settings.get("delegation_policy") or _POLICY_DEFAULTS["delegation_policy"],
         "max_parallel_workers": effective_worker_limit(settings),
@@ -99,32 +116,32 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
 
 def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -> None:
     known: Set[str] = policy["known_tools"]
-    explicit_denied = set(prof.get("disabled_tools") or [])
+    explicit_denied = agent_profiles.expand_tool_aliases(prof.get("disabled_tools") or [])
     if prof["tool_access"] == "none":
         wanted: Set[str] = set()
     elif prof["tool_access"] == "selected":
         wanted = set(prof.get("enabled_tools") or []) - explicit_denied
     else:
         wanted = known - explicit_denied
-    granted = wanted & policy["allowed_tools"]
+    granted = wanted & agent_profiles.expand_tool_aliases(policy["allowed_tools"])
     refused = sorted(wanted - granted)
     if refused:
         notes.append(
             f"tools: dropped {len(refused)} the calling chat cannot use itself "
             f"({', '.join(refused[:8])}{'…' if len(refused) > 8 else ''})"
         )
-    complement = sorted(known - granted)
+    complement = sorted((known - agent_profiles.expand_tool_aliases(granted)) | set(prof.get("disabled_tools") or []))
     if len(complement) > MAX_DISABLED_TOOLS_IN_PROFILE:
-        # Never store a truncated denylist: the entries that fell off the end
-        # would read back as "allowed".
-        raise ValueError(
-            "too many tools to deny explicitly for this loadout; narrow enabled_tools instead"
-        )
+        # Do not truncate an authoritative denylist or reject a one-tool grant
+        # because hundreds of unrelated MCP tools exist. Keep explicit denials;
+        # selected/none below rejects everything outside the positive bindings,
+        # including tools that connect after this profile is stored.
+        complement = list(prof.get("disabled_tools") or [])
     prof["tool_access"] = "selected" if granted else "none"
     prof["enabled_tools"] = sorted(granted)
-    # Written out as well as implied: launch_worker() hands the profile's own
-    # disabled_tools straight to run_headless(), so the clamp has to be in this
-    # field to bind the very first turn, not only in the chat's saved policy.
+    # Retain the cheap snapshot when it fits, plus explicit denials regardless
+    # of inventory size. Fresh profile children must persist selected/none
+    # successfully before running; that positive policy binds the first turn.
     prof["disabled_tools"] = complement
 
 

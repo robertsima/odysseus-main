@@ -276,10 +276,11 @@ def test_guide_only_skips_tool_retrieval(monkeypatch):
         raise AssertionError("guide-only mode must not retrieve tool candidates")
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    from src.tool_index import email_intent
     monkeypatch.setitem(
         sys.modules,
         "src.tool_index",
-        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set()),
+        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set(), email_intent=email_intent),
     )
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
 

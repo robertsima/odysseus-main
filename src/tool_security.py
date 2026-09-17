@@ -71,6 +71,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     # loadout wider than its own chat; this keeps the shared loadout
     # namespace itself an administrator surface, like manage_settings.
     "manage_agent_loadout",
+    "orchestrate_agents",
     "api_call",
     "app_api",
     "resolve_contact",
@@ -167,7 +168,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "send_to_session", "message_agent", "pipeline", "manage_memory", "manage_skills",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
     "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
-    "manage_agent_loadout",
+    "manage_agent_loadout", "orchestrate_agents",
     "manage_calendar", "api_call", "app_api", "ui_control",
     # manage_wellbeing is read-mostly, but log_checkin writes a check-in.
     "manage_wellbeing",

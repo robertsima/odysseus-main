@@ -69,7 +69,7 @@ async def test_empty_session_policy_still_blocks_start_at_queued_claude_capacity
         def summaries(self, *, limit):
             return [{"task_id": "queued-1", "session_id": "chat-1", "status": "queued"}]
 
-    monkeypatch.setattr(database, "get_session_settings", lambda sid: {})
+    monkeypatch.setattr(database, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [])
     monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
     desc, result = await execute_tool_block(
@@ -91,7 +91,7 @@ async def test_poll_is_executed_while_empty_policy_is_at_capacity(monkeypatch):
     async def fake_fallback(*args, **kwargs):
         return {"output": "poll result", "exit_code": 0}
 
-    monkeypatch.setattr(database, "get_session_settings", lambda sid: {})
+    monkeypatch.setattr(database, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(agent_control, "live_children", lambda sid: 1)
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(execution, "_direct_fallback", fake_fallback)

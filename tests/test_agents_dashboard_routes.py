@@ -51,7 +51,7 @@ def env(tmp_path, monkeypatch):
     import src.ai_interaction as ai
     monkeypatch.setattr(ai, "get_session_manager", lambda: mgr)
     import core.database as db
-    monkeypatch.setattr(db, "get_session_settings", lambda sid: {})
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: patch)
     # Fake endpoints must not perform a real context-window probe while a
     # worker/parent handoff is under its deterministic five-second test limit.

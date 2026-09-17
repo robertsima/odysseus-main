@@ -171,6 +171,15 @@ that its call schemas are not attached this turn and how to ask for one. The
 listing is also what `ToolIndex` embeds, so dropping it would make those tools
 unretrievable as well as uncallable.
 
+Explicit server names now add a bounded, deterministic read-only selection even
+when embeddings miss. For example, an eleven-tool Bluesky server can contribute
+its profile/timeline/post reads without attaching posting tools. Deliberate
+per-agent `enabled_tools` bindings are selected even on a vague follow-up.
+`tool_access=selected` is persisted and enforced at execution time, so a newly
+connected MCP tool cannot evade an older denylist snapshot. Disabled tools,
+private access and MCP server restrictions still win. A destructive annotation
+overrides a contradictory read-only annotation.
+
 The `[agent-debug]` line reports `tools_sent`, `selected`, `admin_selected`,
 `schema_without_selection` and `mcp_demoted` for exactly this audit. A hints-only
 selection is labelled that way rather than being reported as embedding retrieval.
@@ -477,3 +486,50 @@ Two habits worth keeping when adding to them: report the **difference**, not a
 truncated list (a list clipped at N answers "was my tool sent?" confidently and
 wrongly), and state truncation inside the string when it happens — `_name_list`
 exists for this.
+
+## 8. Scoped research workflows
+
+`orchestrate_agents` runs real specialist jobs through `launch_worker`, not a
+second agent runtime. `start` accepts an objective, one to four named specialists
+with self-contained tasks, exact read-only tool bindings, optional selected skills
+and models, plus an optional synthesis agent. It returns a workflow ID;
+`status`/`wait` collect actual results and `cancel` stops the workflow's children.
+Wait is bounded to 60 seconds. The overall deadline is 30–1800 seconds, and the
+optional `retries` setting allows at most one read-only retry (default zero).
+
+Workers remain normal chats and Workbench runs. Parent/child IDs, models, attached
+tools, actual tool calls, attempts, handoff artifact IDs and synthesis status are
+recorded. Child capacity comes from the parent policy; a limit of one queues the
+stages instead of silently raising the limit. Launching an ad-hoc workflow never
+writes a shared reusable loadout. Tool/model/skill/memory/private access is narrowed
+to the parent's permissions. Research cannot post to integrations or edit skills.
+Positive tool bindings remain authoritative with large or changing MCP catalogs.
+Named profiles used with `send_to_session` require a fresh child (`session_id=new`);
+ordinary messages to an existing chat keep that chat's own permissions.
+Synthesis receives bounded, explicitly untrusted handoffs, and the parent gets one
+durable report rather than one competing auto-continuation per child.
+
+Loading `manage_skills` returns `loaded_not_run`; relevant research procedures
+include an executable capability preflight. Batch-loaded skills now promote all
+declared tool dependencies, including supported toolset aliases, subject to policy.
+Only actual launch receipts establish execution. Explicit research-orchestration
+requests with no launcher call get one bounded nudge, then a truthful non-execution
+answer. Running/partial workflows cannot be presented as completed research.
+Ordinary questions, negated delegation requests and untrusted worker/skill text
+do not authorize launching agents. A human `continue` can resume an existing
+authorized workflow without starting it again.
+Stop/status/wait requests do not authorize new launches. Research branches with
+bound web or MCP tools must make successful calls to those bindings before the
+controller can mark their work complete. A missing permission-store read blocks
+execution instead of granting default access.
+
+Cancellation releases worker capacity even before a worker coroutine begins.
+Completed artifacts remain retrievable from their owner-checked child chats when
+the bounded activity registry rotates. Restarted workflows are marked interrupted
+and are not automatically replayed.
+
+Deep Research remains a separate single-job workflow. A corrupt/empty final
+synthesis gets one lower-temperature recovery attempt using the same model and
+collected evidence, within a shared 180-second budget. Unrecovered work retains
+its evidence and is labeled partial. The API's terminal `status=done` still means
+results are available; inspect `outcome` and `synthesis` for completeness.

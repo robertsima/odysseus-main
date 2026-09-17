@@ -82,6 +82,9 @@ def _events(chunks):
 
 
 def _loop(monkeypatch, command, approval_mode):
+    # This stream fixture does not create a database chat; its policy is an
+    # explicit empty snapshot, independent of other tests' database teardown.
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *a, **k: 10, raising=False)

@@ -51,9 +51,10 @@ def live_children(session_id: Optional[str]) -> int:
     try:
         active = [
             rec for rec in activity.list_runs(limit=400)
-            if rec.get("session_id") == sid
+            if (rec.get("session_id") == sid or (rec.get("summary") or {}).get("parent_session") == sid)
             and rec.get("status") == "running"
             and rec.get("source") != "odysseus"
+            and not (rec.get("summary") or {}).get("workflow_controller")
         ]
     except Exception:
         active = []
@@ -552,6 +553,11 @@ async def stop_run(run_id: str) -> dict:
         return {"stopped": False, "status": rec.get("status"), "reason": "not running"}
     summary = rec.get("summary") or {}
     source = rec.get("source")
+    if summary.get("workflow_controller"):
+        from src import agent_workflows
+        result = await agent_workflows.inspect(workflow_id=run_id, session_id=rec["session_id"],
+                                                owner=rec.get("owner"), action="cancel")
+        return {"stopped": result["status"] == "cancelled", "how": "workflow", "status": result["status"]}
     from src.headless_agent import request_stop
 
     if request_stop(run_id):
@@ -583,7 +589,9 @@ _WORKERS: Dict[str, asyncio.Task] = {}
 
 
 async def launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
-                        parent_session: Optional[str] = None, model: Optional[str] = None) -> dict:
+                        parent_session: Optional[str] = None, model: Optional[str] = None,
+                        inline_profile: Optional[dict] = None, handoff: bool = True,
+                        run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None) -> dict:
     """Start a worker in a fresh chat and return at once with its ids.
 
     The worker runs detached (like a chat turn survives a closed tab); its
@@ -601,7 +609,9 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     manager = get_session_manager()
     if manager is None:
         raise RuntimeError("session manager unavailable")
-    profile = None
+    if inline_profile is not None and (profile_name or model):
+        raise ValueError("inline_profile cannot be combined with profile_name or model")
+    profile = agent_profiles.validate_profiles([inline_profile])[0] if inline_profile is not None else None
     if profile_name:
         profile = agent_profiles.get_profile(profile_name)
         if profile is None:
@@ -613,6 +623,16 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     sess, err = _new_child_session(manager, parent_session, owner, task, profile)
     if err:
         raise ValueError(err)
+    if inline_profile is not None:
+        # Workflow profiles are intentionally transient. Persist their complete
+        # narrowed policy on the child before starting; the legacy child helper
+        # is best-effort, which must not turn a failed save into elevated access.
+        from core.database import update_session_settings
+        patch = {**agent_profiles.session_patch(profile), **(runtime_settings or {})}
+        if parent_session:
+            patch["parent_session"] = parent_session
+        if update_session_settings(sess.id, patch) is None:
+            raise RuntimeError("Could not persist the worker's scoped policy; worker not started")
     try:
         manager.save_sessions()
     except Exception:
@@ -632,7 +652,9 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
               "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
-              **({"profile": profile["name"]} if profile and profile.get("name") else {})},
+              **({"profile": profile["name"]} if profile and profile.get("name") else {}),
+              **({"parent_session": parent_session} if parent_session else {}),
+              **(run_metadata or {})},
         detail=task[:1500],
     )
     if parent_session:
@@ -667,7 +689,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
         try:
             sess.add_message(ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
-            meta: Dict[str, Any] = {"source": "worker", "model": sess.model}
+            meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
+                                    "status": status, **(run_metadata or {})}
             if events:
                 meta["tool_events"] = events
             sess.add_message(ChatMessage("assistant", text or "(no reply)", meta))
@@ -681,15 +704,91 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             activity.publish(parent_session, "message", f"← worker {sess.name}: {text[:160]}", source="session",
                              run_id=run_id, owner=owner, detail=text[:2000],
                              level="error" if status == "failed" else "info")
-            try:
-                await _hand_off(manager, parent_session, sess, task, text, status, owner)
-            except Exception:
-                logger.warning("worker hand-off to %s failed", parent_session, exc_info=True)
+            if handoff:
+                try:
+                    await _hand_off(manager, parent_session, sess, task, text, status, owner)
+                except Exception:
+                    logger.warning("worker hand-off to %s failed", parent_session, exc_info=True)
         _WORKERS.pop(run_id, None)
 
-    _WORKERS[run_id] = asyncio.create_task(_run())
+    worker_task = asyncio.create_task(_run())
+    _WORKERS[run_id] = worker_task
+
+    def _cleanup_worker(done):
+        # Cancelling a Task before its coroutine's first instruction bypasses
+        # every try/finally inside that coroutine. Always release its registry
+        # slot, and close a run that otherwise remains 'running' indefinitely.
+        if _WORKERS.get(run_id) is done:
+            _WORKERS.pop(run_id, None)
+        failure = None if done.cancelled() else done.exception()
+        if not done.cancelled() and failure is None:
+            return
+        try:
+            record = activity.get_run(run_id)
+            if record and record.get("status") != "running":
+                return
+            terminal = "cancelled" if done.cancelled() else "failed"
+            from core.models import ChatMessage
+            sess.add_message(ChatMessage("assistant", "", {
+                "source": "worker", "model": sess.model, "run_id": run_id,
+                "status": terminal, **(run_metadata or {}),
+            }))
+            manager.save_sessions()
+        except Exception:
+            logger.debug("worker task cleanup could not persist result", exc_info=True)
+        finally:
+            try:
+                # Do not downgrade a worker that completed before cancellation
+                # interrupted its optional parent continuation.
+                record = activity.get_run(run_id)
+                if record is None or record.get("status") == "running":
+                    activity.run_finished(sess.id, "session", run_id, "Worker task ended before completion",
+                                          status="cancelled" if done.cancelled() else "failed", owner=owner,
+                                          data={"target_session": sess.id})
+            except Exception:
+                logger.debug("worker task cleanup could not close activity run", exc_info=True)
+
+    worker_task.add_done_callback(_cleanup_worker)
     return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
             "max_rounds": rounds}
+
+
+def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Optional[str] = None) -> dict:
+    """Read actual persisted worker output, never infer completion from prose."""
+    from src.ai_interaction import get_session_manager
+
+    rec = activity.get_run(run_id)
+    if rec and (rec.get("owner") != owner or (session_id and rec.get("session_id") != session_id)):
+        raise LookupError("Worker run not found")
+    if rec is None and not session_id:
+        raise LookupError("Worker run not found")
+    manager = get_session_manager()
+    sess = manager.get_session(rec["session_id"] if rec else session_id) if manager else None
+    if sess is None or getattr(sess, "owner", None) != owner:
+        raise LookupError("Worker chat not found")
+    result = {"run_id": run_id, "session_id": sess.id, "status": rec.get("status") if rec else "unknown",
+              "result": "", "tool_calls": []}
+    for message in reversed(getattr(sess, "history", [])):
+        meta = message.get("metadata") or {}
+        if message.get("role") == "assistant" and meta.get("run_id") == run_id:
+            if rec is None:
+                # The small dashboard run registry may rotate long before the
+                # durable child chat. Only an exact message run-id match can
+                # recover its artifact and terminal status after eviction.
+                result["status"] = meta.get("status") or "unknown"
+            text = str(message.get("content") or "")
+            result["result"] = "" if text == "(no reply)" else text[:20000]
+            result["result_truncated"] = len(text) > 20000
+            result["tool_calls"] = [
+                {"tool": ev.get("tool"), "exit_code": ev.get("exit_code"), "round": ev.get("round"),
+                 **({"error": ev["error"]} if ev.get("error") else {})}
+                for ev in (meta.get("tool_events") or [])[:120] if isinstance(ev, dict)
+            ]
+            break
+    else:
+        if rec is None:
+            raise LookupError("Worker result not found in the specified chat")
+    return result
 
 
 _HANDOFF_MAX_ROUNDS = 12

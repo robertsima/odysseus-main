@@ -77,8 +77,13 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
             from src.agent_profiles import session_patch
             patch.update(session_patch(profile))
         if patch:
-            update_session_settings(sid, patch)
+            saved = update_session_settings(sid, patch)
+            if profile and saved is None:
+                return None, "Could not persist the worker's scoped policy; worker not started"
     except Exception:
+        if profile:
+            logger.warning("child session policy persistence failed; worker not started", exc_info=True)
+            return None, "Could not persist the worker's scoped policy; worker not started"
         logger.debug("child session settings failed", exc_info=True)
     return sess, None
 
@@ -281,6 +286,12 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         if profile is None:
             names = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined (Settings › Workbench)"
             return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}"}
+        if target_sid.lower() != "new":
+            return {"error": (
+                "A scoped agent profile requires a fresh child chat so its permissions cannot affect "
+                "another ongoing run. Use session_id: 'new' with this profile, or omit profile to "
+                "message an existing chat under that chat's own settings."
+            )}
         mode = "agent"  # a profile is a worker definition: it always runs with tools
 
     if target_sid.lower() == "new":

@@ -962,6 +962,7 @@ async def execute_tool_block(
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -979,6 +980,7 @@ async def execute_tool_block(
             progress_cb=progress_cb,
             tool_policy=tool_policy,
             allow_private=allow_private,
+            delegation_authorized=delegation_authorized,
         )
         return output
     finally:
@@ -993,6 +995,7 @@ async def _execute_tool_block_impl(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1080,10 +1083,38 @@ async def _execute_tool_block_impl(
     if session_id:
         try:
             from core.database import get_session_settings
-            _agent_settings = get_session_settings(session_id) or {}
+            _agent_settings = get_session_settings(session_id, strict=True) or {}
         except Exception:
-            pass
+            logger.warning("Tool blocked because session policy could not be loaded: session=%s tool=%s", session_id, tool)
+            return f"{tool}: BLOCKED", {
+                "error": "This chat's capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+                "blocked": True, "blocked_reason": "session_policy_unavailable", "exit_code": 1,
+            }
     if _agent_settings:
+        if _agent_settings.get("workflow_readonly"):
+            if tool == "manage_skills":
+                try:
+                    _skill_action = str(json.loads(content).get("action", "")).lower()
+                except (ValueError, TypeError, AttributeError):
+                    _skill_action = ""
+                if _skill_action not in {"list", "index", "search", "view", "view_ref"}:
+                    return f"{tool}: BLOCKED", {"error": "Research workers may load skills, not modify them.", "exit_code": 1}
+            elif tool.startswith("mcp__"):
+                from src.mcp_manager import mcp_tool_is_readonly
+                _manager = get_mcp_manager()
+                _metadata = next((t for t in (_manager.get_all_tools() if _manager else [])
+                                  if t.get("qualified_name") == tool), None)
+                if _metadata is None or not mcp_tool_is_readonly(_metadata):
+                    return f"{tool}: BLOCKED", {"error": "Research workers may call only read-only MCP tools.", "exit_code": 1}
+        # An explicit allowlist remains binding when new MCP tools connect
+        # after the profile was saved; a snapshot denylist cannot do that.
+        _tool_access = _agent_settings.get("tool_access", "all")
+        _enabled = set(_agent_settings.get("enabled_tools") or [])
+        if _tool_access == "none" or (_tool_access == "selected" and policy_names.isdisjoint(_enabled)):
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is not in this agent's selected tool bindings.",
+                "exit_code": 1,
+            }
         _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
         if tool.startswith("mcp__") and isinstance(_allowed_mcp, list) and "*" not in _allowed_mcp:
             _parts = tool.split("__", 2)
@@ -1513,6 +1544,14 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
 
 
+    elif tool == "orchestrate_agents":
+        from src.agent_tools.workflow_tools import OrchestrateAgentsTool
+        desc = tool
+        result = await OrchestrateAgentsTool().execute(content, {
+            "session_id": session_id, "owner": owner,
+            "allow_private": bool(allow_private),
+            "delegation_authorized": delegation_authorized,
+        })
     elif tool in dynamic_handlers:
         first_line = _command_preview(content)
         desc = f"registry: {tool} {first_line}".strip()

@@ -1292,6 +1292,37 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "orchestrate_agents",
+            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. start creates visible child chats and a trace; wait/status collects their actual handoffs. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Only report completion after status=completed; queued/running means unfinished.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel"]},
+                    "task": {"type": "string", "description": "Overall objective, deliverables and constraints; start only."},
+                    "specialists": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+                        "type": "object", "properties": {
+                            "name": {"type": "string"}, "task": {"type": "string"},
+                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only native or mcp__serverId__tool bindings; e.g. web_search, web_fetch and the discovered Bluesky read tools. No posting tools."},
+                            "skills": {"type": "array", "items": {"type": "string"}},
+                            "model": {"type": "string"},
+                            "max_rounds": {"type": "integer", "minimum": 1, "maximum": 40}
+                        }, "required": ["name", "task", "tools"]
+                    }},
+                    "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {
+                        "name": {"type": "string"}, "task": {"type": "string"},
+                        "model": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}
+                    }},
+                    "workflow_id": {"type": "string", "description": "Returned by start; required for status/wait/cancel."},
+                    "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
+                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+                    "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."}
+                }, "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_agent",
             "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider. For repository-wide audits or multi-file work, prefer action=start and then poll with wait_seconds; reserve action=run for short bounded tasks.",
             "parameters": {

@@ -1331,6 +1331,7 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
     "create_session", "list_sessions", "send_to_session", "pipeline",
     "ask_teacher", "list_models", "search_chats",
+    "orchestrate_agents",
 ])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
 # Reindexing MCP tools is generation-guarded, so it runs once after servers
@@ -1431,7 +1432,7 @@ _ADMIN_KEYWORDS = [
     # than trusted on sight — same shape as the "fork" guard.
     "agent", "agents", "worker", "workers",
     "sub-agent", "subagent", "loadout", "loadouts",
-    "delegate", "claude code",
+    "delegate", "claude code", "workflow", "specialists",
 ]
 
 # Admin intent unions _ADMIN_TOOLS into BOTH the prompt sections and the schema
@@ -1530,16 +1531,38 @@ _USING_AGENTS_RE = re.compile(
     r"\busing\s+(?:\*{1,2})?(?:ai\s+)?agents?\b",
     re.IGNORECASE | re.DOTALL,
 )
+_USE_AGENTS_RE = re.compile(
+    r"\b(?:use|using|with|employ|coordinate)\s+(?:[\w-]+\s+){0,4}"
+    r"(?:agents|specialists|workers)\b" + _HEAD_NOUN_FOLLOWERS,
+    re.IGNORECASE,
+)
+_NO_DELEGATION_RE = re.compile(
+    r"\b(?:do\s+not|don't|never|without|no)\b[^.!?\n]{0,65}"
+    r"\b(?:delegat\w*|sub[ -]?agents?|agents|workers|specialists)\b",
+    re.IGNORECASE,
+)
+_DELEGATION_GUIDANCE_RE = re.compile(
+    r"^\s*(?:(?:what|why|when|where|who|which)\b|how\s+(?:do|can|would|should|to)\b)", re.I
+)
+_WORKFLOW_CONTROL_RE = re.compile(
+    r"^\s*(?:(?:please|can you|could you)\s+)?"
+    r"(?:cancel|stop|pause|wait|status|progress|results|"
+    r"(?:show|check|get)(?:\s+me)?(?:\s+the)?\s+(?:status|progress|results))\b",
+    re.I,
+)
 
 
 def _orchestration_requested(text: str) -> bool:
     """True when the words name another agent, or ask for one to be started."""
     text = str(text or "")
+    if _NO_DELEGATION_RE.search(text) or _DELEGATION_GUIDANCE_RE.search(text):
+        return False
     return bool(
         _AGENT_NOUN_RE.search(text)
         or _AGENT_ORCHESTRATION_RE.search(text)
         or _AGENT_RUN_RE.search(text)
         or _USING_AGENTS_RE.search(text)
+        or _USE_AGENTS_RE.search(text)
     )
 
 
@@ -1591,6 +1614,8 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
     "setup": {"manage_settings", "manage_endpoints", "manage_mcp"},
     "manage": {"manage_settings", "manage_session", "manage_documents", "manage_tasks"},
     "pipeline": {"pipeline"},
+    "workflow": {"orchestrate_agents"},
+    "specialists": {"orchestrate_agents", "manage_agent_loadout"},
     "second opinion": {"ask_teacher"},
     "list models": {"list_models"},
     "switch model": {"list_models", "manage_settings"},
@@ -1634,20 +1659,28 @@ _ADMIN_KEYWORD_TOOLS: Dict[str, Set[str]] = {
 
 # Admin keywords whose bare noun is ordinary English here, and which therefore
 # only count inside an orchestration phrase.
-_ORCHESTRATION_GUARDED_KEYWORDS = frozenset({"agent", "agents", "worker", "workers"})
+_ORCHESTRATION_GUARDED_KEYWORDS = frozenset({"agent", "agents", "worker", "workers", "specialists"})
 
 
 def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
     """Admin tools the last user message actually points at (see
     _ADMIN_KEYWORD_TOOLS). Empty when no admin keyword matches."""
-    text = _extract_last_user_message(messages)
+    text = _delegation_intent_text(messages)
     if not text or not _ADMIN_KEYWORD_RE.search(text):
         return set()
     found: Set[str] = set()
+    if _orchestration_requested(text):
+        found.update({"orchestrate_agents", "manage_agent_loadout", "send_to_session"})
     if re.search(r"\badmin\b", text, re.IGNORECASE):
         return set(_ADMIN_TOOLS)
     for keyword, tools in _ADMIN_KEYWORD_TOOLS.items():
         if re.search(r"\b" + _admin_keyword_pattern(keyword) + r"\b", text, re.IGNORECASE):
+            if keyword == "workflow" and not (
+                _orchestration_requested(text)
+                or re.search(r"\b(?:status|wait|cancel|stop|results?|progress)\b", text, re.I)
+                or re.search(r"\bworkflow-[a-f0-9]{12}\b", text, re.I)
+            ):
+                continue
             # "fork" is overwhelmingly a repository/license word unless the
             # user actually names a chat/session/conversation. Treating any
             # occurrence as chat management caused license questions about a
@@ -1671,6 +1704,7 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
 _DELEGATION_TOOLS = frozenset({
     "delegate_to_agent", "delegate_to_claude_code", "send_to_session",
     "message_agent", "pipeline", "create_session", "manage_agent_loadout",
+    "orchestrate_agents",
 })
 
 
@@ -1725,7 +1759,23 @@ def _explicit_delegation_requested(text: str) -> bool:
     so the two gates can no longer disagree about the same sentence.
     """
     text = str(text or "")
+    if (_NO_DELEGATION_RE.search(text) or _DELEGATION_GUIDANCE_RE.search(text)
+            or _WORKFLOW_CONTROL_RE.search(text)):
+        return False
     return bool(_EXPLICIT_DELEGATION_RE.search(text)) or _orchestration_requested(text)
+
+
+def _delegation_intent_text(messages: List[Dict]) -> str:
+    """Carry explicit human authorization across 'continue', never skill prose."""
+    human = [text for msg in messages if (text := _user_intent_text(msg)) is not None]
+    latest = human[-1] if human else ""
+    if not _is_explicit_continuation(latest):
+        return latest
+    for prior in reversed(human[:-1]):
+        if _is_explicit_continuation(prior):
+            continue
+        return prior if _explicit_delegation_requested(prior) else latest
+    return latest
 
 
 def _user_intent_text(msg: Dict) -> Optional[str]:
@@ -2128,9 +2178,10 @@ _SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
     "logs": ("read_app_logs",),
     # Refusal prose says "capability" where a skill normally says "toolset".
     # Keep the same vocabulary available to targeted self-unblock recovery.
-    "delegation": ("delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
-    "agent delegation": ("delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
-    "agent launcher": ("delegate_to_agent", "manage_agent_loadout"),
+    "delegation": ("orchestrate_agents", "delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
+    "agent delegation": ("orchestrate_agents", "delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"),
+    "agent launcher": ("orchestrate_agents", "manage_agent_loadout"),
+    "agent orchestration": ("orchestrate_agents", "manage_agent_loadout"),
 }
 
 
@@ -4397,6 +4448,7 @@ _ADMIN_TOOLS = {
     "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens",
     "manage_documents", "manage_settings", "create_session", "list_sessions",
     "send_to_session", "message_agent", "pipeline", "ask_teacher", "list_models", "delegate_to_agent",
+    "orchestrate_agents", "manage_agent_loadout",
 }
 
 def _build_base_prompt(
@@ -5278,6 +5330,7 @@ def _tool_schemas_for_round(
     last_user: str,
     admin_tools: Optional[Set[str]] = None,
     mcp_gated_names: Optional[Set[str]] = None,
+    delegation_authorized: bool = True,
 ) -> List[Dict]:
     """Return the exact schema list sent for one model round.
 
@@ -5376,6 +5429,14 @@ def _tool_schemas_for_round(
     # schema token reserve read their list from — filtering anywhere earlier
     # would leave the two disagreeing about what was sent.
     selected = _withhold_unavailable_tools(selected)
+    if not delegation_authorized:
+        # Keep result collection usable on a later "status?" turn without
+        # authorizing new jobs. Never mutate the shared canonical schema.
+        selected = [json.loads(json.dumps(s)) if s.get("function", {}).get("name") == "orchestrate_agents" else s
+                    for s in selected]
+        for schema in selected:
+            if schema.get("function", {}).get("name") == "orchestrate_agents":
+                schema["function"]["parameters"]["properties"]["action"]["enum"] = ["status", "wait", "cancel"]
     # Canonical schemas remain the execution contract. Native provider payloads
     # omit repeated parameter prose while preserving every JSON constraint.
     return compact_function_tool_schemas(selected) if is_api_model else selected
@@ -5497,27 +5558,48 @@ async def stream_agent_loop(
     _needs_admin = _detect_admin_intent(messages)
     _admin_tools = _detect_admin_tools(messages) if _needs_admin else set()
     _last_user = _extract_last_user_message(messages)
+    _delegation_text = _delegation_intent_text(messages)
     # Per-agent orchestration policy. The safe default is explicit delegation:
     # an ordinary information request stays with the current open chat even if
     # embedding retrieval considers a coding-agent tool semantically nearby.
     _agent_settings: Dict[str, Any] = {}
     try:
         from core.database import get_session_settings
-        _agent_settings = get_session_settings(session_id) or {}
+        _agent_settings = (get_session_settings(session_id, strict=True) or {}) if session_id else {}
     except Exception:
-        pass
+        logger.warning("Agent turn blocked because session policy could not be loaded: %s", session_id)
+        yield f'data: {json.dumps({"delta": "This chat\u2019s capability policy could not be loaded. No agent work was started; please retry after settings access recovers."})}\n\n'
+        return
     _agent_disabled = _agent_settings.get("disabled_tools") or []
     disabled_tools.update(_agent_disabled)
     _mark_dropped(_agent_disabled, "agent-setting")
+    _selected_bindings = None
+    if _agent_settings.get("tool_access") in {"selected", "none"}:
+        from src.agent_profiles import expand_tool_aliases
+        from src.tool_policy import known_tool_names
+        _selected_bindings = (
+            expand_tool_aliases(_agent_settings.get("enabled_tools") or [])
+            if _agent_settings["tool_access"] == "selected" else set()
+        )
+        _binding_denied = set(known_tool_names()) - _selected_bindings
+        if mcp_mgr:
+            _binding_denied.update(t["qualified_name"] for t in mcp_mgr.get_all_tools()
+                                   if t.get("qualified_name") and t["qualified_name"] not in _selected_bindings)
+        disabled_tools.update(_binding_denied)
+        _mark_dropped(_binding_denied, "agent-tool-allowlist")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
+    _delegation_authorized = _delegation_policy == "auto" or (
+        _delegation_policy == "explicit" and _explicit_delegation_requested(_delegation_text)
+    )
     if _delegation_policy == "never" or (
-        _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
+        _delegation_policy == "explicit" and not _explicit_delegation_requested(_delegation_text)
     ):
         # Policy must cover every entry point that can start another worker,
         # including a dynamically-connected Pi worker MCP.  The local
         # worktree tool deliberately remains outside this set; it does not
         # delegate or start remote work (see `_starts_delegated_work`).
         _policy_delegation_tools = _delegated_work_tools(mcp_mgr)
+        _policy_delegation_tools.discard("orchestrate_agents")  # start is action-gated; collection remains usable
         disabled_tools.update(_policy_delegation_tools)
         _mark_dropped(_policy_delegation_tools, f"delegation-policy:{_delegation_policy}")
     _model_access = str(_agent_settings.get("model_access") or "all")
@@ -5624,6 +5706,12 @@ async def stream_agent_loop(
             _last_user[:80],
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
+    if mcp_mgr:
+        for _mcp_tool in mcp_mgr.get_all_tools():
+            if _mcp_tool.get("qualified_name") in disabled_tools:
+                _mcp_disabled_map.setdefault(str(_mcp_tool.get("server_id") or ""), set()).add(
+                    str(_mcp_tool.get("name") or "")
+                )
     _allowed_mcp_servers = _agent_settings.get("allowed_mcp_servers")
     if mcp_mgr and isinstance(_allowed_mcp_servers, list) and "*" not in _allowed_mcp_servers:
         _allowed_mcp = set(_allowed_mcp_servers)
@@ -6155,10 +6243,8 @@ async def stream_agent_loop(
                         _retrieval_query, skills=_owner_skills,
                         threshold=0.25, max_items=3,
                     ):
-                        _relevant_tools.update(
-                            t for t in (_sk.get("requires_toolsets") or [])
-                            if t in _known
-                        )
+                        _skill_tools, _ = _skill_declared_tools([_sk], disabled_tools)
+                        _relevant_tools.update(_skill_tools)
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
@@ -6288,6 +6374,25 @@ async def stream_agent_loop(
         # selection honest so the per-round schema diff below reads clean.
         _relevant_tools = set(_relevant_tools) - disabled_tools
 
+    # Deliberate per-agent bindings and named live MCP servers must not depend
+    # on embedding retrieval. Large-server demotion only limits unsolicited
+    # schemas; it must not suppress a requested read tool.
+    _mcp_requested_tools = set()
+    if not guide_only and _relevant_tools is not None:
+        if _selected_bindings is not None:
+            _relevant_tools.update(_selected_bindings - disabled_tools)
+        if mcp_mgr and hasattr(mcp_mgr, "discover_requested_tools"):
+            _mcp_requested_tools = mcp_mgr.discover_requested_tools(
+                _last_user, disabled_map=_mcp_disabled_map, disabled_tools=disabled_tools,
+                allowed_servers=_allowed_mcp_servers, enabled_tools=_selected_bindings,
+                readonly=plan_mode or bool(_agent_settings.get("workflow_readonly")),
+            )
+            _relevant_tools.update(_mcp_requested_tools)
+        if _delegation_authorized and _orchestration_requested(_delegation_text):
+            _relevant_tools.update({"orchestrate_agents", "manage_agent_loadout", "send_to_session"} - disabled_tools)
+        if _mcp_requested_tools:
+            logger.info("[tool-routing] requested_mcp_attached=%s", sorted(_mcp_requested_tools))
+
     if _relevant_tools is not None:
         # Same silent-clip trap as the re-arm line: this is read to answer "was
         # the tool I expected selected?", and a bare [:50] answers it wrongly on
@@ -6405,6 +6510,23 @@ async def stream_agent_loop(
         active_email=active_email,
         workspace=workspace,
     )
+    _research_workflow_requested = bool(
+        not _agent_settings.get("workflow_readonly")
+        and _orchestration_requested(_delegation_text)
+        and not _WORKFLOW_CONTROL_RE.search(_delegation_text)
+        and re.search(r"\b(?:research|marketing|market|content|competitor|synthesis)\b", _delegation_text, re.I)
+    )
+    if _research_workflow_requested and not guide_only:
+        messages.append({"role": "system", "content": (
+            "The user requested specialist research agents. Use orchestrate_agents for scoped "
+            "research jobs and synthesis, or the worker launcher for individual jobs. "
+            "delegate_to_agent is a CODING provider, and trigger_research is ONE generic research "
+            "job, not a substitute for multiple specialists. Loading manage_skills only reads "
+            "procedures; it does not execute them. First inspect required skills and exact tool "
+            "bindings, then make real launch calls. Use only read-only MCP bindings for research. "
+            "Poll/wait for actual handoffs before claiming completion. If launch is unavailable "
+            "or no call succeeds, explicitly say the workflow was not run."
+        )})
     if _explicit_skills and not guide_only:
         _explicit_names = ", ".join(
             f"`{skill.get('name')}`" for skill in _explicit_skills
@@ -6416,7 +6538,8 @@ async def stream_agent_loop(
                 "The `manage_skills` tool and the skill's declared tool dependencies "
                 "are available in this turn. Load each named skill with "
                 "`manage_skills` action='view' before proceeding, then follow it. "
-                "If the requested work itself is underspecified, ask only for the "
+                "Loading a skill is not executing a workflow: make the actual tool calls "
+                "required by the procedure and verify their results. If the requested work itself is underspecified, ask only for the "
                 "missing objective after loading the skill. Never claim the named "
                 "skill or its provided tools are unavailable."
             ),
@@ -6511,6 +6634,7 @@ async def stream_agent_loop(
         disabled_tools=disabled_tools,
         ody_qwen_finetune_model=_ody_qwen_finetune_model,
         last_user=_last_user,
+        delegation_authorized=_delegation_authorized,
         # The disabled map sharpens the always-bound size budget: a server whose
         # tools are mostly switched off costs little and should keep binding
         # unconditionally, even if its raw discovered-tool count is large.
@@ -6632,6 +6756,24 @@ async def stream_agent_loop(
     time_to_first_token = None
     first_token_received = False
     tool_events = []   # Persist tool executions for history reload
+    _workflow_receipts = {}
+    _workflow_nudged = False
+    if _research_workflow_requested and _delegation_text != _last_user:
+        # A human 'continue' resumes the most recent durable workflow; it must
+        # not turn absence of THIS turn's launch call into a duplicate launch.
+        from src.workflow_claims import record_execution
+        _saved_workflows = _agent_settings.get("agent_workflows") or {}
+        _saved_rows = [row for row in _saved_workflows.values() if isinstance(row, dict)
+                       and row.get("owner") == owner and row.get("parent_session") == session_id]
+        if _saved_rows:
+            _saved = max(_saved_rows, key=lambda row: row.get("started_at", 0))
+            record_execution(_workflow_receipts, "orchestrate_agents", {
+                "workflow_id": _saved.get("workflow_id"), "status": _saved.get("status"),
+                "requested_agents": len(_saved.get("children") or []),
+                "launched_agents": sum(bool(c.get("run_id")) for c in (_saved.get("children") or [])),
+                "synthesis_status": next((c.get("status") for c in (_saved.get("children") or [])
+                                          if c.get("stage") == "synthesis"), "not_requested"),
+            })
     round_texts = []   # Cleaned text per round for history reload
     # Completion-verifier state (mechanism 3a). _effectful_used flips on when
     # a tool that produces a checkable artifact runs; the verifier only fires
@@ -6868,6 +7010,7 @@ async def stream_agent_loop(
             disabled_tools=disabled_tools,
             ody_qwen_finetune_model=_ody_qwen_finetune_model,
             last_user=_last_user,
+            delegation_authorized=_delegation_authorized,
             # Recomputed each round (not just once) so a mid-loop MCP
             # reconnect (crashed server auto-restart, see
             # McpManager._reconnect_server) is reflected immediately instead
@@ -7139,9 +7282,12 @@ async def stream_agent_loop(
                             if _ody_qwen_finetune_model:
                                 _delta_text = _normalize_ody_qwen_text_artifacts(_delta_text)
                             round_response += _delta_text
-                            full_response += _delta_text
+                            if not _research_workflow_requested or guide_only:
+                                full_response += _delta_text
                             data["delta"] = _delta_text
-                        if not _ody_qwen_finetune_model or data.get("thinking"):
+                        if (not _ody_qwen_finetune_model or data.get("thinking")) and (
+                            not _research_workflow_requested or guide_only or data.get("thinking")
+                        ):
                             yield f"data: {json.dumps(data)}\n\n"
                         # Detect text-fence doc streaming. Normal agent prompts
                         # use ```create_document; the doc LoRA streaming path
@@ -7320,7 +7466,7 @@ async def stream_agent_loop(
             if tool_blocks:
                 logger.info(f"[agent] force-answer round {round_num}: discarding {len(tool_blocks)} ignored tool call(s)")
             tool_blocks = []
-            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip():
+            if not _strip_think_blocks(strip_tool_blocks(round_response)).strip() and not _research_workflow_requested:
                 # The model burned its budget gathering data but never wrote a
                 # final answer (common with weaker models on multi-source
                 # briefings). Salvage it: one blunt non-streaming synthesis call
@@ -7395,11 +7541,37 @@ async def stream_agent_loop(
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
         cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
-        round_texts.append(cleaned_round)
-        if _ody_qwen_finetune_model and not tool_blocks and cleaned_round:
+        # Withhold unverified orchestration prose from history as well as the
+        # live stream. Tool cards already provide truthful progress.
+        round_texts.append("" if _research_workflow_requested and not guide_only else cleaned_round)
+        if _ody_qwen_finetune_model and not tool_blocks and cleaned_round and not _research_workflow_requested:
             yield f'data: {json.dumps({"delta": cleaned_round})}\n\n'
 
         if not tool_blocks:
+            if _research_workflow_requested and not guide_only:
+                from src.workflow_claims import incomplete_execution_notice
+                _notice = incomplete_execution_notice(_workflow_receipts)
+                if (_notice and not _workflow_receipts and not _workflow_nudged
+                        and _delegation_authorized and "orchestrate_agents" in _sent_set
+                        and not _force_answer and round_num < max_rounds):
+                    _workflow_nudged = True
+                    # Nothing has been shown as a successful run. Retry once,
+                    # then return a deterministic non-execution result.
+                    messages.append(_harness_directive(
+                        "No specialist agent launch was recorded. Loading skills is not execution. "
+                        "Use orchestrate_agents action=start with scoped tools and real specialist "
+                        "tasks now, or state the concrete blocker. Do not claim that agents ran."
+                    ))
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
+                _verified_answer = _notice or cleaned_round
+                if (_agent_control.pending_steer(session_id, run_id=_steer_run_id)
+                        and round_num < max_rounds):
+                    continue
+                full_response += _verified_answer
+                round_texts[-1] = _verified_answer
+                yield f'data: {json.dumps({"delta": _verified_answer})}\n\n'
+                break
             # ── Completion verifier (mechanism 3a) ────────────────────
             # The model is finishing. If this was an effectful agentic turn,
             # have a fresh-context verifier independently check the work
@@ -7937,6 +8109,7 @@ async def stream_agent_loop(
                             allow_private=allow_private,
                             progress_cb=_push_progress,
                             workspace=workspace,
+                            delegation_authorized=_delegation_authorized,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
@@ -7969,6 +8142,10 @@ async def stream_agent_loop(
                         except (asyncio.CancelledError, Exception):
                             pass
 
+            # Only tool return values can establish an execution receipt.
+            from src.workflow_claims import record_execution
+            record_execution(_workflow_receipts, block.tool_type, result)
+
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its
             # frontmatter). Union them into the selection so the NEXT round's
@@ -7986,26 +8163,26 @@ async def stream_agent_loop(
                         _ms_args = json.loads(_ms_raw)
                     except json.JSONDecodeError:
                         _ms_args = {}
-                _ms_name = str(_ms_args.get("name", "") or "").strip()
-                if _ms_name and _ms_args.get("action") in ("view", "view_ref"):
+                _ms_names = _ms_args.get("names") or [_ms_args.get("name") or _ms_args.get("skill_id") or ""]
+                if isinstance(_ms_names, str):
+                    _ms_names = [_ms_names]
+                _ms_names = {name.strip() for value in _ms_names for name in re.split(r"[,\n]", str(value)) if name.strip()}
+                if _ms_names and _ms_args.get("action") in ("view", "view_ref"):
                     try:
                         from services.memory.skills import SkillsManager as _SkM
                         from src.constants import DATA_DIR as _DD
                         from src.tool_policy import known_tool_names as _ktn
                         _known = _ktn()
                         for _sk in _SkM(_DD).load(owner=owner):
-                            if _sk.get("name") == _ms_name:
-                                _new = {
-                                    t for t in (_sk.get("requires_toolsets") or [])
-                                    if t in _known and t not in _relevant_tools
-                                }
+                            if _sk.get("name") in _ms_names:
+                                _new, _ = _skill_declared_tools([_sk], disabled_tools)
+                                _new -= _relevant_tools
                                 if _new:
                                     _relevant_tools.update(_new)
                                     logger.info(
                                         "[tool-rag] skill '%s' unlocked tools for next round: %s",
-                                        _ms_name, sorted(_new),
+                                        _sk.get("name"), sorted(_new),
                                     )
-                                break
                     except Exception as _e:
                         logger.debug(f"skill requires_toolsets unlock skipped: {_e}")
 
@@ -8337,6 +8514,10 @@ async def stream_agent_loop(
             for _outcome_key in ("status", "blocked", "blocked_reason", "approval_required", "duplicate_call"):
                 if _outcome_key in result:
                     tool_event[_outcome_key] = result[_outcome_key]
+            if block.tool_type == "orchestrate_agents":
+                for _key in ("workflow_id", "requested_agents", "launched_agents", "synthesis_status"):
+                    if _key in result:
+                        tool_event[_key] = result[_key]
             if result.get("error"):
                 tool_event["error"] = True
             if result.get("image_url"):
@@ -8515,6 +8696,14 @@ async def stream_agent_loop(
         yield (f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds, "tool_calls": len(tool_events)})}'
                "\n\n")
 
+    if _research_workflow_requested and not guide_only and not full_response.strip():
+        from src.workflow_claims import incomplete_execution_notice
+        _notice = incomplete_execution_notice(_workflow_receipts)
+        if _notice:
+            full_response = _notice
+            round_texts.append(_notice)
+            yield f'data: {json.dumps({"delta": _notice})}\n\n'
+
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
     full_response, _fallback_chunk = _empty_response_fallback(
@@ -8607,6 +8796,8 @@ async def stream_agent_loop(
     metrics["agent_rounds"] = max(int(round_num or 0), 0)
     metrics["tool_count"] = len(_tool_names_sent or [])
     metrics["tool_calls"] = len(tool_events or [])
+    if _research_workflow_requested:
+        metrics["orchestration"] = list(_workflow_receipts.values())
     metrics["tool_routing"] = {
         "source": _tool_selection_source,
         "query_matched_count": len(_query_matched_tools),

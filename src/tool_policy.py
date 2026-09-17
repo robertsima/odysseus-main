@@ -83,6 +83,7 @@ _COMMON_TOOL_NAMES = {
     "list_sessions",
     "ls",
     "manage_agent_loadout",
+    "orchestrate_agents",
     "manage_calendar",
     "manage_contact",
     "manage_documents",

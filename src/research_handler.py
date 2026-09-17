@@ -343,6 +343,9 @@ class ResearchHandler:
                     timeout=hard_timeout,
                 )
                 entry["result"] = result
+                # "done" means the background task terminated and its result
+                # can be fetched by existing clients, not that synthesis was
+                # successful. Report quality is carried separately in outcome.
                 entry["status"] = "done"
                 self._save_result(session_id, entry)
                 # Persist to DB via callback (ensures result survives even if SSE disconnected)
@@ -358,12 +361,7 @@ class ResearchHandler:
                 entry["status"] = "error"
                 # If we have partial results, save what we have
                 researcher = entry.get("researcher")
-                if researcher and researcher.evolving_report:
-                    entry["result"] = self._format_research_report(
-                        query, researcher.evolving_report,
-                        researcher.get_stats(), hard_timeout,
-                    )
-                    entry["status"] = "done"
+                if self._preserve_partial_result(query, entry, hard_timeout, "hard_timeout"):
                     self._save_result(session_id, entry)
                     try:
                         sources = self._extract_sources(researcher.findings) if researcher.findings else []
@@ -373,7 +371,10 @@ class ResearchHandler:
                         logger.warning(f"on_complete callback failed in timeout branch: {e}")
                 else:
                     entry["result"] = f"Research timed out after {hard_timeout}s. The model may be too slow for deep research."
-                on_progress({"phase": "error", "message": f"Research timed out after {hard_timeout}s"})
+                    entry["outcome"] = "failed"
+                    entry["synthesis"] = {"status": "failed", "failure": "hard_timeout"}
+                on_progress({"phase": "warning" if entry.get("outcome") == "partial" else "error",
+                             "outcome": entry["outcome"], "message": f"Research timed out after {hard_timeout}s; available material was preserved."})
             except asyncio.CancelledError:
                 entry["status"] = "cancelled"
                 raise
@@ -381,13 +382,8 @@ class ResearchHandler:
                 logger.error(f"Background research failed: {e}", exc_info=True)
                 # Preserve partial findings if available (mirrors timeout branch)
                 researcher = entry.get("researcher")
-                if researcher and researcher.evolving_report:
-                    _elapsed = time.time() - entry["started_at"]
-                    entry["result"] = self._format_research_report(
-                        query, researcher.evolving_report,
-                        researcher.get_stats(), _elapsed,
-                    )
-                    entry["status"] = "done"
+                _elapsed = time.time() - entry["started_at"]
+                if self._preserve_partial_result(query, entry, _elapsed, "background_failure"):
                     self._save_result(session_id, entry)
                     try:
                         sources = self._extract_sources(researcher.findings) if researcher.findings else []
@@ -395,14 +391,30 @@ class ResearchHandler:
                         _guarded_complete(session_id, entry["result"], sources, findings)
                     except Exception as cb_err:
                         logger.warning(f"on_complete callback failed in error branch: {cb_err}")
-                    on_progress({"phase": "warning", "message": f"Research finished with errors — partial results saved ({_elapsed:.0f}s elapsed)"})
+                    on_progress({"phase": "warning", "outcome": "partial", "message": f"Research finished with errors — partial results saved ({_elapsed:.0f}s elapsed)"})
                 else:
                     entry["result"] = str(e)
                     entry["status"] = "error"
+                    entry["outcome"] = "failed"
+                    entry["synthesis"] = {"status": "failed", "failure": "background_failure"}
 
         task = asyncio.create_task(_run())
         entry["task"] = task
         return {"session_id": session_id, "status": "running", "query": query}
+
+    def _preserve_partial_result(self, query: str, entry: dict, elapsed: float, failure: str) -> bool:
+        """Save interrupted research as partial, including findings with no draft."""
+        researcher = entry.get("researcher")
+        if not researcher or not (researcher.evolving_report or researcher.findings):
+            return False
+        report = researcher._partial_final_report(query, researcher.evolving_report, failure)
+        stats = researcher.get_stats()
+        entry.update(
+            status="done", outcome="partial", raw_report=report, stats=stats,
+            synthesis=dict(researcher.final_report_metadata),
+            result=self._format_research_report(query, report, stats, elapsed),
+        )
+        return True
 
     def get_status(self, session_id: str) -> Optional[dict]:
         """Get current research status for a session."""
@@ -424,6 +436,9 @@ class ResearchHandler:
             avg = entry["_avg_duration"]
             if avg is not None:
                 result["avg_duration"] = round(avg, 1)
+            if entry.get("outcome"):
+                result["outcome"] = entry["outcome"]
+                result["synthesis"] = entry.get("synthesis", {})
             return result
         # Check disk for completed research (skip consumed results)
         path = _research_json_path(session_id)
@@ -434,12 +449,16 @@ class ResearchHandler:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 if data.get("consumed"):
                     return None
-                return {
+                result = {
                     "status": data.get("status", "done"),
                     "progress": {},
                     "query": data.get("query", ""),
                     "started_at": data.get("started_at", 0),
                 }
+                if data.get("outcome"):
+                    result["outcome"] = data["outcome"]
+                    result["synthesis"] = data.get("synthesis", {})
+                return result
             except Exception:
                 pass
         return None
@@ -568,7 +587,7 @@ class ResearchHandler:
             for p in RESEARCH_DATA_DIR.glob("*.json"):
                 try:
                     data = json.loads(p.read_text(encoding="utf-8"))
-                    if data.get("status") == "done":
+                    if data.get("status") == "done" and (data.get("outcome") or "complete") == "complete":
                         started = data.get("started_at", 0)
                         completed = data.get("completed_at", 0)
                         if started and completed and completed > started:
@@ -622,6 +641,8 @@ class ResearchHandler:
                 "sources": sources,
                 "raw_findings": raw_findings,
                 "stats": entry.get("stats"),
+                "outcome": entry.get("outcome"),
+                "synthesis": entry.get("synthesis"),
                 "category": entry.get("category"),
                 "started_at": entry["started_at"],
                 "completed_at": time.time(),
@@ -843,7 +864,17 @@ class ResearchHandler:
             elapsed = time.time() - start_time
 
             stats = researcher.get_stats()
-            logger.info("IterResearch completed successfully")
+            synthesis = dict(researcher.final_report_metadata)
+            outcome = synthesis["status"]
+            if outcome == "complete":
+                logger.info("IterResearch completed successfully")
+            else:
+                logger.warning("IterResearch finished with outcome=%s, failure=%s", outcome, synthesis.get("failure", "unknown"))
+                if progress_callback:
+                    progress_callback({
+                        "phase": "warning", "outcome": outcome, "synthesis_status": outcome,
+                        "message": "Research finished without a completed final synthesis; available material was preserved.",
+                    })
             for key, value in stats.items():
                 logger.info(f"  {key}: {value}")
 
@@ -851,6 +882,8 @@ class ResearchHandler:
             if _task_entry is not None:
                 _task_entry["raw_report"] = strip_thinking(report)
                 _task_entry["stats"] = stats
+                _task_entry["outcome"] = outcome
+                _task_entry["synthesis"] = synthesis
 
             return self._format_research_report(query, report, stats, elapsed)
 

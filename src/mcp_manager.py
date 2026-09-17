@@ -298,10 +298,10 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
         else:
             read_hint = getattr(ann, "readOnlyHint", None)
             destructive = getattr(ann, "destructiveHint", None)
-    if read_hint is True:
-        return True
     if read_hint is False or destructive is True:
         return False
+    if read_hint is True:
+        return True
     # No usable hint — heuristic on the tool name's leading verb.
     name = (tool.get("name") or "").lower()
     return name.startswith(_MCP_READONLY_VERBS)
@@ -1296,9 +1296,108 @@ class McpManager:
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
                     "input_schema": _model_visible_schema(tool.get("input_schema")),
+                    # Preserve authoritative hints for downstream selection and
+                    # execution guards; names alone can misclassify MCP tools.
+                    "annotations": tool.get("annotations"),
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
+
+    def discover_requested_tools(
+        self,
+        query: str,
+        *,
+        disabled_map: Optional[Dict[str, set]] = None,
+        disabled_tools: Optional[Set[str]] = None,
+        allowed_servers: Optional[List[str]] = None,
+        enabled_tools: Optional[Set[str]] = None,
+        readonly: bool = False,
+        max_tools: int = 8,
+    ) -> Set[str]:
+        """Deterministically attach a small set from explicitly requested servers.
+
+        Large catalogs still use retrieval gating; mentioning a connected server
+        must not leave its useful tools dependent on embedding similarity alone.
+        This is a selection hint, NOT an authorization grant. Callers must pass
+        the same disabled/private-policy maps used by execution and schemas.
+
+        ``enabled_tools`` means deliberate per-agent selected bindings, not all
+        permitted tools. When supplied it is also an allowlist (including an
+        empty set), and those bindings have priority over query matches. A mere
+        server or tool mention only promotes read-only tools. Writes can only
+        enter here through explicit bindings, and ``readonly`` blocks those too.
+        Normal write-intent retrieval is unchanged elsewhere in the router.
+        """
+        if max_tools <= 0:
+            return set()
+
+        def normalize(value: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", str(value).lower()))
+
+        normalized_query = f" {normalize(query)} "
+        # A qualified tool's server id is not a request for its whole catalog.
+        server_text = re.sub(r"\bmcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+\b", " ", str(query))
+        server_query = f" {normalize(server_text)} "
+        query_words = set(normalized_query.split())
+
+        def mentioned(value: str, text: str = normalized_query) -> bool:
+            phrase = normalize(value)
+            return bool(phrase and f" {phrase} " in text)
+
+        generic = {"mcp", "server", "servers", "tool", "tools", "builtin"}
+
+        def server_mentioned(server_id: str, display_name: str) -> bool:
+            for label in (server_id, display_name):
+                words = normalize(label).split()
+                if not set(words) - generic:
+                    continue
+                # "bluesky-mcp" and "Bluesky MCP server" both match Bluesky,
+                # but a request merely mentioning "MCP" matches no catalog.
+                while words and words[0] in generic:
+                    words.pop(0)
+                while words and words[-1] in generic:
+                    words.pop()
+                if mentioned(label, server_query) or mentioned(" ".join(words), server_query):
+                    return True
+            return False
+
+        blocked = set(disabled_tools or ())
+        selected = set(enabled_tools) if enabled_tools is not None else None
+        allowed = set(allowed_servers) if allowed_servers is not None else None
+        candidates = []
+        for server_id, tools in self._tools.items():
+            conn = self._connections.get(server_id, {})
+            if conn.get("status") != "connected":
+                continue
+            if allowed is not None and "*" not in allowed and server_id not in allowed:
+                continue
+            if self.is_builtin(server_id) and server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS:
+                continue
+            requested_server = server_mentioned(server_id, conn.get("name", server_id))
+            disabled = (disabled_map or {}).get(server_id, set())
+            for tool in tools:
+                name = tool["name"]
+                qualified = f"mcp__{server_id}__{name}"
+                if name in disabled or qualified in disabled or qualified in blocked or name in blocked:
+                    continue
+                if selected is not None and qualified not in selected:
+                    continue
+                bound = selected is not None and qualified in selected
+                read_only = mcp_tool_is_readonly(tool)
+                if not read_only and (readonly or not bound):
+                    continue
+                exact_qualified = re.search(
+                    r"(?<![\w-])" + re.escape(qualified) + r"(?![\w-])", str(query), re.IGNORECASE,
+                ) is not None
+                exact = exact_qualified or (requested_server and mentioned(name))
+                if not (bound or exact or requested_server):
+                    continue
+                # Selected bindings, then exact tool names, then matching nouns
+                # from names. No description matching: untrusted marketing prose
+                # must not make an unrelated schema win this deterministic path.
+                overlap = len(set(normalize(name).split()) & query_words)
+                candidates.append((not bound, not exact, -overlap, qualified))
+        return {row[3] for row in sorted(candidates)[:max_tools]}
 
     def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.
