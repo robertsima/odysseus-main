@@ -9,7 +9,22 @@ class OrchestrateAgentsTool:
             args = _parse_tool_args(content)
             if not isinstance(args, dict):
                 raise ValueError("JSON object required")
-            action = str(args.get("action") or "status").strip().lower()
+            requested_action = str(args.get("action") or "").strip().lower()
+            has_start_payload = bool(
+                args.get("task") or args.get("specialists") or args.get("synthesis")
+            )
+            # Native model calls can omit a required enum or accidentally retain
+            # a follow-up action while providing a complete launch payload.  A
+            # start-shaped request is more reliable evidence than the missing or
+            # contradictory verb; treating it as status produces the misleading
+            # "Workflow not found" failure before any worker can launch.
+            if has_start_payload and (
+                not requested_action
+                or (requested_action in {"status", "wait", "cancel"} and not args.get("workflow_id"))
+            ):
+                action = "start"
+            else:
+                action = requested_action or "status"
             common = {"session_id": ctx.get("session_id"), "owner": ctx.get("owner")}
             if action == "start":
                 result = await agent_workflows.start(
@@ -23,8 +38,11 @@ class OrchestrateAgentsTool:
                 )}
             if action not in {"status", "wait", "cancel"}:
                 raise ValueError("action must be start, status, wait, or cancel")
+            workflow_id = agent_workflows.resolve_workflow_id(
+                args.get("workflow_id"), **common,
+            )
             result = await agent_workflows.inspect(
-                **common, workflow_id=str(args.get("workflow_id") or ""), action=action,
+                **common, workflow_id=workflow_id, action=action,
                 wait_seconds=args.get("wait_seconds", 30),
             )
             return {**result, "action": action, "response": agent_workflows.render_result(result)}

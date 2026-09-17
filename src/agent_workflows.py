@@ -18,7 +18,7 @@ from src import agent_activity as activity, agent_control, agent_loadouts
 
 logger = logging.getLogger(__name__)
 MAX_WORKFLOWS = 20
-MAX_SPECIALISTS = 4
+MAX_SPECIALISTS = 8
 POLL_SECONDS = 1.0
 STOP_GRACE_SECONDS = 5.0
 _TASKS: dict[str, asyncio.Task] = {}
@@ -72,6 +72,52 @@ def _load(workflow_id, session_id, owner):
         _recover_interrupted(rec)
         _save(rec)
     return rec
+
+
+def resolve_workflow_id(workflow_id, session_id, owner):
+    """Resolve an inspect target without confusing loadout names with runs.
+
+    Follow-up tool calls occasionally omit the ID that ``start`` just returned.
+    In that case the newest workflow in this chat is unambiguous enough to use;
+    an arbitrary friendly name is not.  Workflow manifests are session-scoped,
+    so this cannot cross a chat or owner boundary.
+    """
+    _manager_parent(session_id, owner)
+    from core.database import get_session_settings
+
+    requested = str(workflow_id or "").strip()
+    rows = (get_session_settings(session_id, strict=True) or {}).get("agent_workflows") or {}
+    owned = {
+        key: row for key, row in rows.items()
+        if row.get("parent_session") == session_id and row.get("owner") == owner
+    }
+    if requested in owned:
+        return requested
+    if not requested or requested.casefold() in {"current", "latest"}:
+        if not owned:
+            raise LookupError(
+                "No workflow has been started in this chat. Use action=start with task and specialists first"
+            )
+        running = [(key, row) for key, row in owned.items() if row.get("status") == "running"]
+        if not requested and len(running) > 1:
+            raise LookupError(
+                "Multiple workflows are running in this chat; provide the exact workflow-... ID returned by start"
+            )
+        candidates = running or list(owned.items())
+        return max(candidates, key=lambda item: float(item[1].get("started_at") or 0))[0]
+    recent = sorted(
+        owned.items(), key=lambda item: float(item[1].get("started_at") or 0), reverse=True
+    )[:3]
+    suffix = ""
+    if recent:
+        suffix = "; recent workflow IDs: " + ", ".join(
+            f"{key} ({row.get('status', 'unknown')})" for key, row in recent
+        )
+    raise LookupError(
+        f"Workflow {requested!r} was not found in this chat. "
+        "Use the workflow-... ID returned by action=start; loadout names are not workflow IDs"
+        + suffix
+    )
 
 
 def _recover_interrupted(rec):
@@ -244,7 +290,7 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
         raise ValueError("This chat's Child workers limit is zero; only the user may raise it")
     specialists = args.get("specialists")
     if not isinstance(specialists, list) or not 1 <= len(specialists) <= MAX_SPECIALISTS:
-        raise ValueError("specialists must contain 1 to 4 scoped research agents")
+        raise ValueError(f"specialists must contain 1 to {MAX_SPECIALISTS} scoped research agents")
     task = str(args.get("task") or "").strip()
     if not task or len(task) > 8000:
         raise ValueError("task must describe the workflow objective in at most 8000 characters")

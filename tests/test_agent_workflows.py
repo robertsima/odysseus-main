@@ -239,6 +239,56 @@ async def test_tool_wrapper_errors_are_truthful(runtime):
     assert "explicitly" in result["error"]
 
 
+@pytest.mark.parametrize("action", [None, "status"])
+async def test_tool_recovers_start_shaped_calls_with_missing_or_stale_action(runtime, action):
+    args = request()
+    if action is None:
+        args.pop("action")
+    else:
+        args["action"] = action
+    tool = OrchestrateAgentsTool()
+    result = await tool.execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True,
+    })
+    assert result["action"] == "start"
+    assert result["workflow_id"].startswith("workflow-")
+    completed = await tool.execute(json.dumps({"action": "wait", "wait_seconds": 3}), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True,
+    })
+    assert completed["workflow_id"] == result["workflow_id"]
+    assert completed["status"] == "completed"
+
+
+async def test_tool_missing_status_id_explains_that_no_workflow_exists(runtime):
+    result = await OrchestrateAgentsTool().execute('{"action":"status"}', {
+        "session_id": "parent", "owner": "alice",
+    })
+    assert result["exit_code"] == 1
+    assert "No workflow has been started" in result["error"]
+    assert "action=start" in result["error"]
+
+
+def test_missing_followup_id_does_not_guess_between_running_workflows(runtime):
+    runtime.settings["parent"] = {"agent_workflows": {
+        "workflow-one": {"workflow_id": "workflow-one", "parent_session": "parent", "owner": "alice",
+                         "status": "running", "started_at": 1},
+        "workflow-two": {"workflow_id": "workflow-two", "parent_session": "parent", "owner": "alice",
+                         "status": "running", "started_at": 2},
+    }}
+    with pytest.raises(LookupError, match="Multiple workflows are running"):
+        workflows.resolve_workflow_id("", "parent", "alice")
+
+
+async def test_five_specialists_are_bounded_by_parent_capacity_not_rejected(runtime):
+    specialists = [
+        {"name": f"Workstream {index}", "task": f"Research area {index}", "tools": ["web_search"]}
+        for index in range(5)
+    ]
+    result = await start_and_wait(request(specialists=specialists, synthesis=None))
+    assert result["status"] == "completed"
+    assert result["requested_agents"] == result["launched_agents"] == 5
+
+
 async def test_empty_worker_output_stays_failed_in_public_result(runtime, monkeypatch):
     from src import headless_agent
     async def empty(*args, **kwargs):

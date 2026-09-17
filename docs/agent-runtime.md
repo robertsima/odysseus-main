@@ -490,12 +490,15 @@ exists for this.
 ## 8. Scoped research workflows
 
 `orchestrate_agents` runs real specialist jobs through `launch_worker`, not a
-second agent runtime. `start` accepts an objective, one to four named specialists
+second agent runtime. `start` accepts an objective, one to eight named specialists
 with self-contained tasks, exact read-only tool bindings, optional selected skills
 and models, plus an optional synthesis agent. It returns a workflow ID;
 `status`/`wait` collect actual results and `cancel` stops the workflow's children.
 Wait is bounded to 60 seconds. The overall deadline is 30–1800 seconds, and the
 optional `retries` setting allows at most one read-only retry (default zero).
+Follow-up actions may omit the ID when there is one unambiguous running workflow
+in the same chat. Named loadouts are not workflow IDs; explicit IDs always use
+the `workflow-...` value returned by `start`.
 
 Workers remain normal chats and Workbench runs. Parent/child IDs, models, attached
 tools, actual tool calls, attempts, handoff artifact IDs and synthesis status are

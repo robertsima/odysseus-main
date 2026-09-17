@@ -1367,24 +1367,24 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "orchestrate_agents",
-            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. start creates visible child chats and a trace; wait/status collects their actual handoffs. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Only report completion after status=completed; queued/running means unfinished.",
+            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. start creates visible child chats and a trace; wait/status collects their actual handoffs. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Omit a specialist model to inherit the current model; otherwise use an exact configured model ID. Only report completion after status=completed; queued/running means unfinished.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["start", "status", "wait", "cancel"]},
                     "task": {"type": "string", "description": "Overall objective, deliverables and constraints; start only."},
-                    "specialists": {"type": "array", "minItems": 1, "maxItems": 4, "items": {
+                    "specialists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
                         "type": "object", "properties": {
                             "name": {"type": "string"}, "task": {"type": "string"},
                             "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only native or mcp__serverId__tool bindings; e.g. web_search, web_fetch and the discovered Bluesky read tools. No posting tools."},
                             "skills": {"type": "array", "items": {"type": "string"}},
-                            "model": {"type": "string"},
+                            "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
                             "max_rounds": {"type": "integer", "minimum": 1, "maximum": 40}
                         }, "required": ["name", "task", "tools"]
                     }},
                     "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {
                         "name": {"type": "string"}, "task": {"type": "string"},
-                        "model": {"type": "string"}, "skills": {"type": "array", "items": {"type": "string"}}
+                        "model": {"type": "string", "description": "Optional exact configured model ID; omit to inherit."}, "skills": {"type": "array", "items": {"type": "string"}}
                     }},
                     "workflow_id": {"type": "string", "description": "Returned by start; required for status/wait/cancel."},
                     "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
