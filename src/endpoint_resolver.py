@@ -8,6 +8,7 @@ import json
 import logging
 import socket
 import subprocess
+from types import SimpleNamespace
 from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
@@ -15,6 +16,15 @@ from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
 
 logger = logging.getLogger(__name__)
+
+
+def _endpoint_snapshot(ep):
+    """Detach the endpoint fields used during runtime credential resolution."""
+    fields = (
+        "id", "owner", "base_url", "api_key", "provider_auth_id",
+        "cached_models", "models", "pinned_models", "hidden_models",
+    )
+    return SimpleNamespace(**{name: getattr(ep, name, None) for name in fields})
 
 # Model-name substrings that are NOT chat/generation models. When an endpoint
 # has no explicit model configured we pick the first CHAT model from its list —
@@ -426,12 +436,19 @@ def resolve_endpoint(
             ep = ep.first()
         if not ep:
             return fallback_url, fallback_model, fallback_headers
+        ep = _endpoint_snapshot(ep)
+    except Exception as e:
+        logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
+        return fallback_url, fallback_model, fallback_headers
+    finally:
+        db.close()
 
-        try:
-            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-        except Exception as e:
-            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
-            return fallback_url, fallback_model, fallback_headers
+    try:
+        base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+    except Exception as e:
+        logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+        return fallback_url, fallback_model, fallback_headers
+    try:
         chat_url = build_chat_url(base)
         headers = build_headers(api_key, base)
 
@@ -451,8 +468,6 @@ def resolve_endpoint(
     except Exception as e:
         logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
         return fallback_url, fallback_model, fallback_headers
-    finally:
-        db.close()
 
 
 def resolve_endpoint_by_id(
@@ -477,11 +492,19 @@ def resolve_endpoint_by_id(
         ep = q.first()
         if not ep:
             return None
-        try:
-            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-        except Exception as e:
-            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
-            return None
+        ep = _endpoint_snapshot(ep)
+    except Exception as e:
+        logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
+        return None
+    finally:
+        db.close()
+
+    try:
+        base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+    except Exception as e:
+        logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+        return None
+    try:
         chat_url = build_chat_url(base)
         headers = build_headers(api_key, base)
         m = (model or "").strip()
@@ -497,8 +520,6 @@ def resolve_endpoint_by_id(
     except Exception as e:
         logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
         return None
-    finally:
-        db.close()
 
 
 def resolve_chat_fallback_candidates(owner: Optional[str] = None) -> list:

@@ -159,6 +159,13 @@ loadouts. The living behavior specification is
 
 - More tests around endpoint probing and provider setup.
 - Better task scheduler defaults and visibility.
+- Close the database-exhaustion deployment follow-up: without enlarging the
+  pool, validate simultaneous background jobs plus model refresh while ordinary
+  database endpoints remain responsive; verify cancellation leaves no stuck
+  task-run rows, subscription auth refresh stays owner-scoped, and deliberate
+  exhaustion produces safe `503` responses with useful occupancy diagnostics.
+  The 2026-09-17 incident and acceptance checklist are tracked in
+  `specs/harness-reliability-efficiency.md`; the fix is not yet deployed.
 - Backup/restore guide and helper flow for `data/`.
 - Security hardening around admin-only tools and clear docs for their risk.
 

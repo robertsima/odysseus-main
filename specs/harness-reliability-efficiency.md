@@ -162,3 +162,58 @@ Deployment / live acceptance TODO (mocked-model tests are not live evidence):
   stop/timeout, result collection and `continue` without duplicate launches.
 - [ ] Reproduce a synthesis-provider failure and verify preserved findings plus
   `outcome=partial`, not a silently successful incomplete report.
+
+## Database connection exhaustion incident — 2026-09-17
+
+Production logs showed SQLAlchemy's configured `QueuePool` exhausted at five
+regular connections plus ten overflow connections, with a 30-second checkout
+timeout. The visible exception occurred in the cache-only
+`GET /api/model-endpoints` list query; static assets and routes that did not use
+the database remained available. Restarting the service restored availability.
+This makes the list query the observed victim of pool exhaustion, not evidence
+that increasing pool capacity is the remedy.
+
+The current repair keeps the existing pool limits and shortens connection
+ownership around slow or asynchronous work. The covered paths include scheduled
+jobs, endpoint and model probes, subscription-provider legacy and base flows,
+endpoint runtime resolution (including credential refresh), and automatic chat
+sorting. Network waits, provider calls and cancellation waits must occur after
+database state has been reduced to detached scalar snapshots. Writes reopen a
+short transaction and revalidate relevant state before persisting, so an old
+probe cannot overwrite a concurrently edited endpoint. Overload handling adds a
+safe, retryable `503` response after checkout timeout and query-free occupancy
+diagnostics instead of an unclassified server error. The existing checkout
+timeout remains unchanged.
+
+This work has not enlarged the pool and has not yet been deployed to production.
+Local validation: the database/model/credential/session suite passed 330 tests;
+the scheduler compatibility suite passed 126 tests (these selections overlap).
+The new scheduler-pool and owner-scope selection passed 20 tests, including a
+single-connection pool with production-style `autoflush=False`, default
+`expire_on_commit=True`, and SQLite foreign keys enabled. It covers slow work,
+idle/active cancellation, no-op/error/defer outcomes, session delivery and
+research persistence. Compilation and diff checks passed.
+
+Two additional cookbook authorization tests failed identically on an isolated
+archive of unchanged `982e60e`: their fake AuthManager lacks attributes required
+by the existing authentication cache. They are baseline fixture failures, not
+evidence of a production permission regression. Docker/container QA was not
+available locally; live workload recovery remains an operator acceptance check.
+
+Deployment / live acceptance TODO:
+
+- [ ] Run scheduled/background jobs and an explicit model refresh at the same
+  time. Normal database-backed endpoints must remain responsive throughout;
+  static or non-database health alone is insufficient evidence.
+- [ ] Cancel queued, preparing and active scheduled work. No task-run row may
+  remain stuck in a non-terminal state, and cancellation must not retain a
+  checked-out connection while waiting for worker shutdown.
+- [ ] Exercise subscription credential refresh with two owners. Resolution and
+  refreshed auth state must remain owner-scoped, with no cross-owner token or
+  endpoint reuse.
+- [ ] Confirm occupancy diagnostics identify checked-out/overflow pressure and
+  the safe `503` path activates under deliberate exhaustion without exposing
+  credentials or database internals.
+- [ ] Redeploy only after the focused scheduler, endpoint, subscription and
+  concurrent-pool checks pass; then repeat the incident workload and retain the
+  deployment logs as live acceptance evidence.

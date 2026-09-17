@@ -606,6 +606,11 @@ tts_service = get_tts_service()
 logger.info("TTS service initialized (provider managed via admin settings)")
 
 # ========= EXCEPTION HANDLERS =========
+from core.database import pool_diagnostics
+from core.database_health import install_database_error_handler
+
+install_database_error_handler(app, pool_diagnostics)
+
 @app.exception_handler(SessionNotFoundError)
 async def session_not_found_handler(request: Request, exc: SessionNotFoundError):
     return JSONResponse(status_code=404, content={"error": "SESSION_NOT_FOUND", "message": str(exc)})

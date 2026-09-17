@@ -78,6 +78,9 @@ engine = create_engine(
     DATABASE_URL,
     connect_args={"check_same_thread": False} if "sqlite" in DATABASE_URL else {}
 )
+from core.database_health import PoolDiagnostics
+
+pool_diagnostics = PoolDiagnostics(engine)
 
 
 # Sidecar files SQLite can create next to the main DB. -journal is the default
