@@ -103,6 +103,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
 # Code/file discovery is covered by the dedicated read-only tools below
 # (read_file, grep, glob, ls) instead of freestyle shell.
 PLAN_MODE_READONLY_TOOLS = {
+    "discover_tools",
     "read_file",
     "grep",
     "glob",

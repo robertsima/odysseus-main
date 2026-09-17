@@ -7,6 +7,14 @@ the codebase, you are probably right to stay away.
 
 ## High Priority
 
+- [x] Separate shared human-intent assessment, advisory candidate selection,
+  and execution authorization; add bounded per-turn capability discovery for
+  native and fenced/MCP models. See
+  [harness routing design](specs/harness-capability-routing.md).
+- [ ] Run the native/local-provider [routing acceptance matrix](docs/harness-routing-acceptance.md)
+  after deployment; compare task success, total tokens, cached input and
+  latency, including eight concurrent agents and revoked permissions.
+
 - SQUASH BUGS
 - Fresh install smoke tests on Linux, macOS, and Windows. Docker, native Python,
   and WSL all need coverage.

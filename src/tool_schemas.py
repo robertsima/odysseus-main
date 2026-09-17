@@ -71,6 +71,22 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "discover_tools",
+            "description": "Find and load a small number of permitted tools for this turn when the currently attached tools do not cover the task. Discovery is read-only and does not execute a discovered tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "bash",
             "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
             "parameters": {

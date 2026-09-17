@@ -1017,6 +1017,12 @@ Maintain a structured task list for multi-step coding work. Use it when the task
 ```
 Return the absolute path of the active workspace folder. File tools are CONFINED to it (paths can be RELATIVE to it); the shell starts there (cwd) but is NOT sandboxed. Call this first when the user says "the project"/"the code"/"this folder" without a path, instead of asking them. No arguments.""",
 
+    "discover_tools": """\
+```discover_tools
+{"query": "calendar events", "max_results": 5}
+```
+Search only the tools already permitted and connected for this turn. Matching definitions are loaded for the next round; discovery never grants access, connects a server, changes settings, or performs the requested action. Use a short capability query and keep `max_results` small (1-8).""",
+
     "create_document": """\
 ```create_document
 <title>
@@ -1542,7 +1548,8 @@ _NO_DELEGATION_RE = re.compile(
     re.IGNORECASE,
 )
 _DELEGATION_GUIDANCE_RE = re.compile(
-    r"^\s*(?:(?:what|why|when|where|who|which)\b|how\s+(?:do|can|would|should|to)\b)", re.I
+    r"^\s*(?:(?:what|why|when|where|who|which)\b|how\s+(?:do|can|would|should|to)\b|"
+    r"(?:explain|describe|discuss)\b)", re.I
 )
 _WORKFLOW_CONTROL_RE = re.compile(
     r"^\s*(?:(?:please|can you|could you)\s+)?"
@@ -1780,20 +1787,8 @@ def _delegation_intent_text(messages: List[Dict]) -> str:
 
 def _user_intent_text(msg: Dict) -> Optional[str]:
     """Separate human intent from user-role context and runtime envelopes."""
-    if msg.get("role") != "user":
-        return None
-    content = msg.get("content", "")
-    if isinstance(content, list):
-        content = " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
-    content = str(content or "")
-    if (
-        (msg.get("metadata") or {}).get("trusted") is False
-        or _is_untrusted_context_content(content)
-        or content.startswith(("[Context —", "[Tool execution results]",
-                               "[Harness directive —", "[Message from agent session "))
-    ):
-        return None
-    return content
+    from src.intent_assessment import human_user_text
+    return human_user_text(msg)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -1815,11 +1810,8 @@ def _extract_last_user_message(messages: List[Dict]) -> str:
 
 def _user_turn_count(messages: List[Dict]) -> int:
     """Count real user turns in the message list."""
-    count = 0
-    for msg in messages or []:
-        if _user_intent_text(msg) is not None:
-            count += 1
-    return count
+    from src.intent_assessment import human_turn_count
+    return human_turn_count(messages or [])
 
 
 # A fenced tool call is an assistant message whose fence tag IS the tool name
@@ -2674,97 +2666,21 @@ def _strip_think_blocks(text: str) -> str:
     return "".join(parts)
 
 
-_LOW_SIGNAL_RE = re.compile(r"^[\W_]*$", re.UNICODE)
-_CASUAL_OPENING_RE = re.compile(
-    r"^\s*(?:h+i+|hey+|hello+|yo+|sup+|what'?s up|wass?up|hiya|howdy|"
-    r"lol|lmao|haha+|hehe+|thanks?|thank you|ty|idk|dunno|meh|bruh|bro)\b(?P<tail>.*)$",
-    re.IGNORECASE,
-)
-_CASUAL_BLOCKLIST_RE = re.compile(
-    r"\b(?:cookbook|serve|serving|launch|start|vllm|sglang|llama\.?cpp|ollama|"
-    r"download|model|email|document|doc|note|calendar|task|search|web|research|"
-    r"file|folder|repo|git|settings?|endpoint|api|token|mcp)\b",
-    re.IGNORECASE,
-)
-_EXPLICIT_CONTINUATION_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:"
-    r"yes|y|yeah|yep|ok|okay|sure|do it(?: anyway)?|go ahead|"
-    r"continue(?: anyway)?|carry on|keep going|keep on|proceed(?: anyway)?|"
-    r"pick up where you left off|"
-    r"run it|launch it|start it|use that|that one|same|the same|"
-    r"first|second|third|the first one|the second one|the third one|"
-    r"[123]|[abc]"
-    r")"
-    # Bounded "continue the previous X" tail. Without this, "Continue the
-    # previous task please" (a completely ordinary retry after a dropped
-    # turn) missed this regex entirely -- it isn't a bare "continue", so
-    # continuation detection failed, tool retrieval ran on the literal text
-    # instead of inheriting the prior turn's topic, "task" spuriously matched
-    # the notes/calendar/tasks domain, and email/document tools vanished for
-    # the rest of the turn even though the conversation was plainly a
-    # continuation. Kept narrow (fixed noun list, fully anchored) so it does
-    # not swallow genuinely new requests like "continue writing about dogs".
-    # Whitespace runs here are capped at 20 (real phrases use one space) --
-    # an uncapped \s+/\s* here sits right next to the trailing \s* below, and
-    # two adjacent unbounded whitespace quantifiers that both ultimately fail
-    # (e.g. "y" + 40k tabs + "x", no `$`) backtrack O(n^2)/polynomial-redos.
-    r"(?:\s{1,20}(?:with|on)?\s{0,20}(?:the\s{1,20})?(?:previous|last|prior|same|that|this)\s{1,20}"
-    r"(?:task|thing|one|request|conversation|chat|topic))?"
-    # `\s*[.!?]*\s*$` put two \s-matching quantifiers around `[.!?]*`, which
-    # backtracks O(n^2) on a terse reply + whitespace flood (py/polynomial-redos).
-    # `\s*(?:please\s*)?(?:[.!?]+\s*)?$` accepts the same "trailing
-    # space/punctuation/please" tails with exactly one bare, unconditional
-    # \s* -- the \s* bundled inside each optional group only "engages" once
-    # that group's own literal ("please", or `[.!?]+`) has actually matched,
-    # so there is never a second bare \s* free to backtrack against the
-    # first one. A standalone `(?:please)?` between two bare `\s*` (as an
-    # earlier version of this had) recreates the O(n^2) flood case.
-    r"\s*(?:please\s*)?(?:[.!?]+\s*)?$",
-    re.IGNORECASE,
-)
-_RETRY_CONTINUATION_RE = re.compile(
-    r"\b(?:try again|retry|again|rerun|re-run|run it again|launch it again|"
-    r"start it again|failed|fails?|died|crashed|broke|insta|instantly)\b",
-    re.IGNORECASE,
-)
 def _is_explicit_continuation(text: str) -> bool:
     """Only these terse replies may inherit older user turns for tool retrieval."""
-    return bool(_EXPLICIT_CONTINUATION_RE.match(str(text or "").strip()))
-
-
-# "Continue with the next slice if the MVP isn't done", "keep going and finish
-# the rest", "next slice": a request to carry the current work forward. The
-# terse-reply regex above only accepts a bare "continue", so these read as
-# low-signal new requests with no domain — on 2026-09-13 the agent got no
-# shell or file tools and answered with a plan instead of doing the work.
-# Anchored to the start, and only honoured when there is earlier work in the
-# conversation to continue.
-_CONTINUE_WORK_RE = re.compile(
-    r"^\s*(?:ok(?:ay)?[,.!]?\s{1,5}|great[,.!]?\s{1,5}|thanks[,.!]?\s{1,5}|now\s{1,5}|please\s{1,5})?"
-    r"(?:continue|keep\s(?:going|working|at\sit)|carry\son|proceed|resume|go\son|move\son|"
-    r"finish(?:\sup)?|do\sthe\snext|start\sthe\snext|next\s(?:slice|step|task|part|phase|one|item))\b",
-    re.IGNORECASE,
-)
+    from src.intent_assessment import is_explicit_continuation
+    return is_explicit_continuation(text)
 
 
 def _is_work_continuation(messages: List[Dict], text: str) -> bool:
-    return bool(_CONTINUE_WORK_RE.match(str(text or ""))) and _user_turn_count(messages) > 1
+    from src.intent_assessment import is_work_continuation
+    return is_work_continuation(messages, text)
 
 
 def _is_casual_low_signal(text: str) -> bool:
     """True for short greetings/slang that should not inherit stale context."""
-    s = str(text or "").strip()
-    m = _CASUAL_OPENING_RE.match(s)
-    if not m:
-        return False
-    tail = m.group("tail") or ""
-    if _CASUAL_BLOCKLIST_RE.search(tail):
-        return False
-    # Allow a short vocative/address after the opener without hardcoding the
-    # address term itself: "hey man", "yo dude", "sup <name>". Longer tails are
-    # more likely to be an actual request and should get normal context/tooling.
-    tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
-    return len(tail_words) <= 2
+    from src.intent_assessment import is_casual_low_signal
+    return is_casual_low_signal(text)
 
 
 # ── "Is this turn asking for something?" ──────────────────────────────────
@@ -2790,7 +2706,7 @@ def _is_casual_low_signal(text: str) -> bool:
 # words: a false positive costs eight tool schemas for one turn, a false
 # negative costs the whole turn ("I do not have application-log access").
 _REQUEST_ACTION_RE = re.compile(
-    r"\b(?:fix|debug|troubleshoot|diagnose|investigate|analy[sz]e|inspect|"
+    r"\b(?:fix|resolve|reconcile|debug|troubleshoot|diagnose|investigate|analy[sz]e|inspect|"
     r"check|verify|test|reproduce|trace|explain|figure|find|look|search|"
     r"read|write|create|make|build|generate|draft|compose|add|remove|delete|"
     r"update|change|edit|rename|move|copy|convert|install|uninstall|run|"
@@ -2839,7 +2755,14 @@ def _looks_like_a_request(text: str) -> bool:
     if not s or _is_casual_low_signal(s):
         return False
     lowered = s.lower()
+    phrasal_action = re.search(
+        r"\b(?:take\s+care\s+of|work\s+out|sort\b[^.!?\n]{0,40}\bout|"
+        r"use\s+(?:the\s+)?(?:appropriate|available|named|specified)\s+"
+        r"(?:[a-z0-9_-]+\s+){0,2}(?:tool|capability|function))\b",
+        lowered,
+    )
     if not (_REQUEST_ACTION_RE.search(lowered)
+            or phrasal_action
             or "?" in s
             or _QUESTION_OPENER_RE.match(lowered)):
         return False
@@ -2874,10 +2797,8 @@ def _is_contextual_retry_continuation(messages: List[Dict], text: str) -> bool:
     downside is bounded to occasionally also surfacing a stale tool
     alongside the right one, not silently losing the right one.
     """
-    latest = str(text or "").strip()
-    if not latest or not _RETRY_CONTINUATION_RE.search(latest):
-        return False
-    return _user_turn_count(messages) > 1
+    from src.intent_assessment import is_retry_continuation
+    return is_retry_continuation(messages, text)
 
 
 def _assistant_requested_followup(messages: List[Dict]) -> bool:
@@ -2890,7 +2811,7 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     seen_latest_user = False
     for msg in reversed(messages):
         role = msg.get("role")
-        if role == "user" and not seen_latest_user:
+        if role == "user" and not seen_latest_user and _user_intent_text(msg) is not None:
             seen_latest_user = True
             continue
         if not seen_latest_user:
@@ -2921,19 +2842,21 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     which domain rule packs get appended to the system prompt.
     """
     text = str(last_user or "").strip()
-    retry_continuation = _is_contextual_retry_continuation(messages, text)
-    continuation = (_is_explicit_continuation(text) or _assistant_requested_followup(messages)
-                    or retry_continuation or _is_work_continuation(messages, text))
-    retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
+    from src.intent_assessment import assess_request
+    context_assessment = assess_request(
+        messages,
+        text,
+        request_like=_looks_like_a_request(text),
+        assistant_followup=_assistant_requested_followup(messages),
+    )
+    continuation = context_assessment.continuation
+    retrieval_query = context_assessment.retrieval_query
     q = retrieval_query.lower()
 
-    if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
-        return {
-            "low_signal": True,
-            "continuation": False,
-            "domains": set(),
-            "retrieval_query": text,
-        }
+    if context_assessment.low_signal and (
+        not text or _is_casual_low_signal(text) or not text.strip("_ \t\r\n")
+    ):
+        return context_assessment.as_agent_dict()
 
     domains: Set[str] = set()
 
@@ -3135,13 +3058,13 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # always reaching for — `_is_casual_low_signal` above is the positive test
     # for chit-chat itself. The change is monotone: it can only ever clear
     # `low_signal`, never set it, so no turn that retrieves today stops doing so.
-    low_signal = not continuation and not domains and not _looks_like_a_request(text)
-    return {
-        "low_signal": low_signal,
-        "continuation": continuation,
-        "domains": domains,
-        "retrieval_query": retrieval_query,
-    }
+    return assess_request(
+        messages,
+        text,
+        domains=domains,
+        request_like=_looks_like_a_request(text),
+        assistant_followup=_assistant_requested_followup(messages),
+    ).as_agent_dict()
 
 
 def _turn_targets_active_document(intent: Dict[str, object], last_user: str, active_document) -> bool:
@@ -3796,15 +3719,8 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
     manage_calendar and improvises with bash/app_api. Concatenating the recent
     user turns lets the follow-up inherit the topic so just-used tools stay
     surfaced. Newest-first, so the latest turn survives the length cap."""
-    collected = []
-    for msg in reversed(messages):
-        content = _user_intent_text(msg)
-        if not content or not content.strip():
-            continue
-        collected.append(content.strip())
-        if len(collected) >= max_user:
-            break
-    return "\n".join(collected)[:max_chars]
+    from src.intent_assessment import recent_human_context
+    return recent_human_context(messages, max_user=max_user, max_chars=max_chars)
 
 
 def _steering_tool_additions(text: str, messages: List[Dict], selected: Set[str],
@@ -3841,6 +3757,7 @@ def _build_system_prompt(
     allowed_skill_names: Optional[Set[str]] = None,
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
+    native_tools: bool = False,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -3858,7 +3775,7 @@ def _build_system_prompt(
     except Exception:
         _ov_sig = ""
     _skill_key = frozenset(allowed_skill_names) if allowed_skill_names is not None else None
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills, _skill_key)
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, native_tools, _ov_sig, owner, suppress_local_context, suppress_skills, _skill_key)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -4353,9 +4270,33 @@ def _build_system_prompt(
             logger.debug(f"Integration prompt injection skipped: {_integ_err}")
 
     # MCP tool descriptions — sourced from external servers, must not be in system role.
+    # When selection is available, render only the selected canonical schemas.
+    # This prevents a small deferred-tool turn from receiving the entire MCP
+    # inventory in prose after schema selection already bounded the payload.
     if mcp_mgr:
         try:
-            _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
+            if relevant_tools is not None:
+                _selected_mcp = []
+                _selected_names = set(relevant_tools)
+                for _schema in mcp_schemas:
+                    _fn = _schema.get("function") or {}
+                    if _fn.get("name") not in _selected_names:
+                        continue
+                    _selected_mcp.append({
+                        "name": _fn.get("name"),
+                        "description": _fn.get("description") or "",
+                        "parameters": _fn.get("parameters") or {"type": "object", "properties": {}},
+                    })
+                _selected_mcp.sort(key=lambda item: str(item.get("name") or ""))
+                # Compact/API prompts already receive these definitions through
+                # the provider's native schema field. Repeating them as prose
+                # wastes prompt tokens and creates two contracts to reconcile.
+                _mcp_desc = "" if native_tools else json.dumps(
+                    _selected_mcp, ensure_ascii=False, separators=(",", ":"), sort_keys=True,
+                )
+            else:
+                # Compatibility for legacy callers without a selection plan.
+                _mcp_desc = mcp_mgr.get_tool_descriptions_for_prompt(mcp_disabled_map or {})
             if _mcp_desc:
                 _mcp_desc_message = untrusted_context_message("MCP tools", _mcp_desc)
         except Exception as _mcp_err:
@@ -4483,8 +4424,6 @@ def _build_base_prompt(
         # drops. Only force-include the irreducible loop primitives
         # (ask_user, update_plan) as belt-and-suspenders.
         tool_names = set(relevant_tools) | {"ask_user", "update_plan"}
-        if needs_admin:
-            tool_names |= _ADMIN_TOOLS
         agent_prompt = _assemble_prompt(tool_names, disabled, compact=compact)
     else:
         # Fallback: full prompt (RAG unavailable)
@@ -4554,6 +4493,7 @@ def _resolve_tool_blocks(
     round_num: int,
     is_api_model: bool = False,
     allow_fenced_for_api: bool = False,
+    dynamic_tool_names: Optional[Set[str]] = None,
 ):
     """Choose native function calls or fenced code block parsing. Returns (tool_blocks, used_native)."""
     used_native = False
@@ -4592,7 +4532,10 @@ def _resolve_tool_blocks(
         # falling back to DSML). Dropping the whole parser would silently lose
         # those too. Non-native / textual-only models keep every pattern,
         # fenced blocks included, since that's their *only* tool channel.
-        tool_blocks = parse_tool_blocks(round_response, skip_fenced=(is_api_model and not allow_fenced_for_api))
+        tool_blocks = parse_tool_blocks(
+            round_response, skip_fenced=(is_api_model and not allow_fenced_for_api),
+            dynamic_tool_names=dynamic_tool_names,
+        )
         if tool_blocks:
             logger.info(f"Agent round {round_num}: {len(tool_blocks)} fenced tool block(s) detected")
 
@@ -5331,12 +5274,18 @@ def _tool_schemas_for_round(
     admin_tools: Optional[Set[str]] = None,
     mcp_gated_names: Optional[Set[str]] = None,
     delegation_authorized: bool = True,
+    selection_is_complete: bool = False,
 ) -> List[Dict]:
     """Return the exact schema list sent for one model round.
 
     Centralising this keeps the schema token reserve/accounting in lockstep
     with the payload. Previously the schema decision lived only inside the
     round loop, after context trimming had already decided the request fit.
+
+    The live discovery-aware loop uses ``selection_is_complete=True``: only
+    the composed, budgeted attachment list is sent, including an empty list.
+    The fallback behavior documented below is legacy compatibility for callers
+    without a complete plan; it is not used by the new discovery path.
 
     ``mcp_gated_names`` is the set of qualified MCP tool names that must still
     win RAG/intent-based tool selection like a builtin tool would: the large
@@ -5386,7 +5335,23 @@ def _tool_schemas_for_round(
     """
     if force_answer:
         return []
-    if is_api_model:
+    if selection_is_complete:
+        if not is_api_model:
+            # Fenced-only providers receive definitions in prompt text. Never
+            # leak native schemas into their provider ``tools`` argument.
+            return []
+        # A completed plan (including a turn-local discovery context) is an
+        # authoritative attachment list. Do not re-expand it with small MCP
+        # servers, admin fallbacks, or the full registry when it is empty.
+        schema_names = set(relevant_tools or ())
+        selected = [
+            schema for schema in list(FUNCTION_TOOL_SCHEMAS) + list(mcp_schemas)
+            if schema.get("function", {}).get("name") in schema_names
+            or schema.get("name") in schema_names
+        ]
+        if ody_qwen_finetune_model and is_api_model:
+            return []
+    elif is_api_model:
         if relevant_tools:
             schema_names = set(relevant_tools)
             if needs_admin:
@@ -5429,6 +5394,15 @@ def _tool_schemas_for_round(
     # schema token reserve read their list from — filtering anywhere earlier
     # would leave the two disagreeing about what was sent.
     selected = _withhold_unavailable_tools(selected)
+    # Provider prefix caching and trace comparisons require byte-stable schema
+    # order even when callers assembled sets or MCP managers returned tools in
+    # a different order.
+    selected = sorted(
+        selected,
+        key=lambda schema: str(
+            schema.get("function", {}).get("name") or schema.get("name") or ""
+        ),
+    )
     if not delegation_authorized:
         # Keep result collection usable on a later "status?" turn without
         # authorizing new jobs. Never mutate the shared canonical schema.
@@ -5491,6 +5465,15 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    from src.settings import load_disabled_tools_strict
+    from src.agent_profiles import expand_tool_aliases
+    try:
+        disabled_tools.update(expand_tool_aliases(load_disabled_tools_strict()))
+    except Exception as _global_policy_err:
+        logger.warning("[tool-routing] global policy unavailable: %s", type(_global_policy_err).__name__)
+        yield f'data: {json.dumps({"delta": "Tool policy could not be loaded safely. No agent work was started; please check settings and retry."})}\n\n'
+        yield "data: [DONE]\n\n"
+        return
     # Why a tool that retrieval matched never made it into the selection. Each
     # gate below that prunes on purpose records itself here, and the
     # [tool-routing] line names the gate for every dropped match. Without it
@@ -5582,6 +5565,10 @@ async def stream_agent_loop(
             if _agent_settings["tool_access"] == "selected" else set()
         )
         _binding_denied = set(known_tool_names()) - _selected_bindings
+        if _selected_bindings:
+            # Discovery is metadata over this positive allowlist, not an
+            # additional capability grant. Explicit denies still win below.
+            _binding_denied.discard("discover_tools")
         if mcp_mgr:
             _binding_denied.update(t["qualified_name"] for t in mcp_mgr.get_all_tools()
                                    if t.get("qualified_name") and t["qualified_name"] not in _selected_bindings)
@@ -5648,15 +5635,17 @@ async def stream_agent_loop(
     _existing_conversation = _user_turn_count(messages) > 1
     _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
-    if _active_email_draft_relevant:
-        disabled_tools.update({
-            "list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes",
-            "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__audit_emails",
-            "mcp__email__scan_email_unsubscribes",
-        })
+    # An open draft is a relevance hint, not a permission revocation. The
+    # candidate pruning below keeps inbox tools out of the eager set, while
+    # discovery can still find them if this edit needs the original message.
     _prompt_active_document = active_document if _active_document_relevant else None
     _direct_low_signal = (
         _low_signal_turn
+        # Unknown wording is not proof of a greeting. Only clearly casual or
+        # contentless input gets the tool-free short-response fast path;
+        # ambiguous statements retain cheap hints plus discovery, not an
+        # additional classifier/embedding request.
+        and (_casual_low_signal_turn or not re.search(r"\w", _last_user))
         and not _existing_conversation
         and not bool(_intent.get("continuation"))
         and not plan_mode
@@ -5830,7 +5819,9 @@ async def stream_agent_loop(
 
     # RAG-based tool selection: retrieve relevant tools for this query.
     # If caller provided a pre-computed set (e.g. task_scheduler), use that.
-    _relevant_tools = relevant_tools
+    _relevant_tools = None if relevant_tools is None else set(relevant_tools)
+    tool_idx = None
+    _explicit_skill_tools: Set[str] = set()
     _tool_selection_source = "caller" if relevant_tools else "unresolved"
     _retained_tool_names: set[str] = set()
     _suppressed_retained_tools: set[str] = set()
@@ -6180,6 +6171,8 @@ async def stream_agent_loop(
         if "manage_skills" not in disabled_tools:
             _relevant_tools.add("manage_skills")
         _skill_tools, _unknown_toolsets = _skill_declared_tools(_explicit_skills, disabled_tools)
+        _explicit_skill_tools.update(_skill_tools)
+        _explicit_skill_tools.add("manage_skills")
         _relevant_tools.update(_skill_tools)
         if _unknown_toolsets:
             logger.warning(
@@ -6393,6 +6386,109 @@ async def stream_agent_loop(
         if _mcp_requested_tools:
             logger.info("[tool-routing] requested_mcp_attached=%s", sorted(_mcp_requested_tools))
 
+    # Candidate generation above is advisory. This is the sole initial
+    # projection into executable schemas: policy ceiling, provenance, then
+    # budget. Anything not selected stays discoverable, never "unavailable"
+    # merely because a heuristic or embedding did not choose it.
+    _selection_plan = None
+    _turn_discovery = None
+    _discovery_announced: Set[str] = set()
+    _discovery_calls = 0
+    _permitted_catalog_names: Set[str] = set()
+    if not guide_only and not _ody_qwen_finetune_model:
+        from src.tool_discovery import TurnToolDiscovery
+        from src.tool_selection import plan_tool_selection
+
+        _catalog_schemas = list(FUNCTION_TOOL_SCHEMAS)
+        _connected_candidates: Set[str] = set()
+        if mcp_mgr:
+            _live_schemas = mcp_mgr.get_all_openai_schemas(_mcp_disabled_map)
+            _annotations = {
+                t.get("qualified_name"): t.get("annotations")
+                for t in mcp_mgr.get_all_tools()
+            }
+            _catalog_schemas += [
+                dict(s, annotations=_annotations.get(s.get("function", {}).get("name")))
+                for s in _live_schemas
+            ]
+            _gated_names = mcp_mgr.gated_tool_names(_mcp_disabled_map)
+            _connected_candidates = {
+                s.get("function", {}).get("name") for s in _live_schemas
+                if s.get("function", {}).get("name") not in _gated_names
+            }
+        _catalog_schemas = _withhold_unavailable_tools(_catalog_schemas)
+        _discovery_settings = dict(_agent_settings, plan_mode=plan_mode)
+        _turn_discovery = TurnToolDiscovery(
+            _catalog_schemas, disabled_tools=disabled_tools,
+            allowed_tools=_selected_bindings,
+            semantic_search=getattr(tool_idx, "retrieve", None),
+            # The metadata tool itself is excluded from the search catalogue;
+            # reserve its slot/cost in the shared turn ceiling nevertheless.
+            max_loaded=31, max_schema_tokens=4999 - _estimate_tool_schema_tokens(
+                compact_function_tool_schemas([
+                    s for s in FUNCTION_TOOL_SCHEMAS
+                    if s.get("function", {}).get("name") == "discover_tools"
+                ])
+            ),
+        )
+        _permitted_schemas = _turn_discovery.permitted_tools(_discovery_settings)
+        _permitted_catalog_names = {s["function"]["name"] for s in _permitted_schemas}
+        _can_discover = (
+            "discover_tools" not in disabled_tools
+            and _selected_bindings != set()
+            and not (tool_policy and tool_policy.blocks("discover_tools"))
+        )
+        if _can_discover:
+            _permitted_schemas += [s for s in FUNCTION_TOOL_SCHEMAS
+                                   if s.get("function", {}).get("name") == "discover_tools"]
+        _inventory_names = {s["function"]["name"] for s in _permitted_schemas}
+        _eager_hints = set(_relevant_tools or ())
+        _named_tools = {
+            name for name in _inventory_names
+            if re.search(r"(?<![\w])" + re.escape(name) + r"(?![\w])", _last_user, re.I)
+        }
+        _schema_costs = {
+            s["function"]["name"]: _estimate_tool_schema_tokens(
+                compact_function_tool_schemas([s])
+            ) + 1 for s in _permitted_schemas  # round up per-item envelope cost
+        }
+        _selection_plan = plan_tool_selection(
+            {s["function"]["name"] for s in _catalog_schemas},
+            {
+                "core": {"ask_user", "update_plan"} | ({"discover_tools"} if _can_discover else set()),
+                "profile": _selected_bindings or (),
+                "caller": relevant_tools or (),
+                "forced": forced_tools or (),
+                "explicit": _named_tools | _mcp_requested_tools,
+                "skill": _explicit_skill_tools,
+                "context": _eager_hints - _query_matched_tools - _retained_tool_names,
+                "semantic": _query_matched_tools,
+                "domain": _admin_tools if _needs_admin else (),
+                "retained": _retained_tool_names & _eager_hints,
+                "connected": _connected_candidates,
+            },
+            disabled_tools=disabled_tools,
+            allowed_tools=_inventory_names,
+            soft_excluded=_query_matched_tools - _eager_hints,
+            schema_costs=_schema_costs,
+            max_tools=24, max_schema_tokens=3000,
+        )
+        _relevant_tools = set(_selection_plan.selected)
+        _turn_discovery.set_attached(_relevant_tools)
+        logger.info("[tool-routing-plan] %s", json.dumps(_selection_plan.trace(), sort_keys=True))
+
+    def _admit_turn_tools(names: Set[str], source: str = "context") -> Set[str]:
+        """All late additions share the catalogue and cumulative schema budget."""
+        if _selection_plan is None:
+            return set(names) - disabled_tools
+        _admission = plan_tool_selection(
+            _inventory_names,
+            {"core": set(_relevant_tools or ()), source: set(names)},
+            disabled_tools=disabled_tools, schema_costs=_schema_costs,
+            max_tools=32, max_schema_tokens=5000,
+        )
+        return set(_admission.selected) - set(_relevant_tools or ())
+
     if _relevant_tools is not None:
         # Same silent-clip trap as the re-arm line: this is read to answer "was
         # the tool I expected selected?", and a bare [:50] answers it wrongly on
@@ -6503,6 +6599,7 @@ async def stream_agent_loop(
         needs_admin=_needs_admin, relevant_tools=_relevant_tools,
         mcp_disabled_map=_mcp_disabled_map,
         compact=_compact_agent_prompt,
+        native_tools=_is_api_model,
         owner=owner,
         suppress_local_context=guide_only,
         suppress_skills=_low_signal_turn or _skill_access == "none",
@@ -6635,6 +6732,7 @@ async def stream_agent_loop(
         ody_qwen_finetune_model=_ody_qwen_finetune_model,
         last_user=_last_user,
         delegation_authorized=_delegation_authorized,
+        selection_is_complete=_selection_plan is not None,
         # The disabled map sharpens the always-bound size budget: a server whose
         # tools are mostly switched off costs little and should keep binding
         # unconditionally, even if its raw discovered-tool count is large.
@@ -6879,8 +6977,37 @@ async def stream_agent_loop(
     _last_tool_debug_sig = None
     _last_cached_prefix_hash = None
     _last_serialized_history = None
+    _fenced_announced = set(_relevant_tools or ())
 
     for round_num in range(1, max_rounds + 1):
+        if _turn_discovery is not None:
+            try:
+                disabled_tools.update(expand_tool_aliases(load_disabled_tools_strict()))
+                _fresh_settings = (get_session_settings(session_id, strict=True) or {}) if session_id else _agent_settings
+                _fresh_settings = dict(
+                    _fresh_settings, plan_mode=plan_mode,
+                    _runtime_disabled_tools=sorted(disabled_tools),
+                )
+                _fresh_permitted = {
+                    s["function"]["name"]
+                    for s in _turn_discovery.permitted_tools(_fresh_settings)
+                }
+                _permitted_catalog_names.intersection_update(_fresh_permitted)
+                if (_can_discover and "discover_tools" not in disabled_tools
+                        and _fresh_settings.get("tool_access") != "none"
+                        and not (_fresh_settings.get("tool_access") == "selected"
+                                 and not _fresh_settings.get("enabled_tools"))
+                        and "discover_tools" not in (_fresh_settings.get("disabled_tools") or ())):
+                    _fresh_permitted.add("discover_tools")
+                _inventory_names.intersection_update(_fresh_permitted)
+                _relevant_tools.intersection_update(_inventory_names)
+                _turn_discovery.set_attached(_relevant_tools)
+            except Exception as _policy_err:
+                logger.warning("[tool-routing] policy refresh failed; ending turn: %s", type(_policy_err).__name__)
+                _policy_notice = "Capability settings could not be rechecked. Agent work stopped safely; please retry."
+                full_response += _policy_notice
+                yield f'data: {json.dumps({"delta": _policy_notice})}\n\n'
+                break
         # A steer lands here, between rounds, so a correction reaches the model
         # mid-task instead of after the turn. Three senders share this queue: the
         # Agents dashboard, the chat composer, and another agent via
@@ -6931,6 +7058,7 @@ async def stream_agent_loop(
                     _steer_new = _steering_tool_additions(
                         _steer_text, messages, set(_relevant_tools), _steer_pool, disabled_tools,
                     )
+                    _steer_new = _admit_turn_tools(_steer_new)
                     _relevant_tools.update(_steer_new)
                     _steer_added_tools.update(_steer_new)
                     _admin_tools.update(_steer_admin & _relevant_tools)
@@ -6959,6 +7087,25 @@ async def stream_agent_loop(
             messages.append(_harness_directive(_steer_guidance))
             logger.info("[agent-steer] round=%s user_updates=%s added_tools=%s",
                         round_num, len(_steer_user_updates), _name_list(_steer_added_tools, 25))
+        if _turn_discovery is not None and not _is_api_model and not _force_answer:
+            # Discovery, skill dependencies and human steering use one update
+            # path. Append only new signatures after prior tool results, without
+            # rewriting the cached system prefix or duplicating old schemas.
+            _new_fenced = set(_relevant_tools or ()) - _fenced_announced
+            if _new_fenced:
+                _new_definitions = compact_function_tool_schemas([
+                    s for s in list(FUNCTION_TOOL_SCHEMAS) + list(mcp_schemas or [])
+                    if s.get("function", {}).get("name") in _new_fenced
+                ])
+                messages.append(_harness_directive(
+                    "Newly attached tool definitions follow as reference data. "
+                    "Use the exact tool name as the fenced-code tag and a JSON "
+                    "arguments object as the body. Permissions still apply."
+                ))
+                messages.append(untrusted_context_message(
+                    "discovered tool definitions", json.dumps(_new_definitions, separators=(",", ":")),
+                ))
+                _fenced_announced.update(_new_fenced)
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
         round_reasoning_items = []  # opaque Responses reasoning items, replayed next round
@@ -6973,6 +7120,27 @@ async def stream_agent_loop(
         # detect a SUBSEQUENT block in the same round.
         _doc_scan_from = 0
 
+        # Resolve schemas BEFORE trimming: discovery/steering may have added
+        # definitions since the initial context reserve was computed.
+        all_tool_schemas = _tool_schemas_for_round(
+            force_answer=_force_answer,
+            is_api_model=_is_api_model,
+            relevant_tools=_relevant_tools,
+            needs_admin=_needs_admin,
+            admin_tools=_admin_tools,
+            mcp_schemas=mcp_schemas,
+            disabled_tools=disabled_tools,
+            ody_qwen_finetune_model=_ody_qwen_finetune_model,
+            last_user=_last_user,
+            delegation_authorized=_delegation_authorized,
+            selection_is_complete=_selection_plan is not None,
+            mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
+        )
+        _current_schema_tokens = _estimate_tool_schema_tokens(all_tool_schemas)
+        _current_trim_reserve = max(
+            0, _soft_trim_reserve - _initial_schema_tokens + _current_schema_tokens,
+        )
+
         # ── Per-round context re-trim ────────────────────────────────
         # Every round appends this round's tool results, so a run that keeps
         # calling tools grows past the window the pre-loop trim fit it into.
@@ -6985,7 +7153,7 @@ async def stream_agent_loop(
                 _before = estimate_tokens(messages)
                 _retrimmed = _trim(
                     messages, _soft_trim_budget,
-                    reserve_tokens=_soft_trim_reserve,
+                    reserve_tokens=_current_trim_reserve,
                     target_ratio=_trim_target_ratio,
                 )
                 if _retrimmed is not messages:
@@ -6999,25 +7167,6 @@ async def stream_agent_loop(
             except Exception as _e:
                 logger.warning("[agent] round %s context re-trim skipped: %s", round_num, _e)
 
-        # Resolve the exact list used both by the payload and context accounting.
-        all_tool_schemas = _tool_schemas_for_round(
-            force_answer=_force_answer,
-            is_api_model=_is_api_model,
-            relevant_tools=_relevant_tools,
-            needs_admin=_needs_admin,
-            admin_tools=_admin_tools,
-            mcp_schemas=mcp_schemas,
-            disabled_tools=disabled_tools,
-            ody_qwen_finetune_model=_ody_qwen_finetune_model,
-            last_user=_last_user,
-            delegation_authorized=_delegation_authorized,
-            # Recomputed each round (not just once) so a mid-loop MCP
-            # reconnect (crashed server auto-restart, see
-            # McpManager._reconnect_server) is reflected immediately instead
-            # of the round after it, and a server that dropped/re-added tools
-            # mid-stream doesn't leave stale gating decisions in place.
-            mcp_gated_names=mcp_mgr.gated_tool_names(_mcp_disabled_map) if mcp_mgr else None,
-        )
         agent_stream_timeout = int(get_setting("agent_stream_timeout_seconds", 300) or 300)
 
         _tool_names_sent = [t.get("function", {}).get("name") for t in (all_tool_schemas or []) if t.get("function")]
@@ -7382,6 +7531,7 @@ async def stream_agent_loop(
             round_num,
             is_api_model=(_is_api_model and not guide_only),
             allow_fenced_for_api=_ody_doc_finetune_mode,
+            dynamic_tool_names=set(_relevant_tools or ()) if _selection_plan is not None else None,
         )
         if _ody_doc_stream_create_mode and tool_blocks:
             create_idx = next(
@@ -7540,7 +7690,10 @@ async def stream_agent_loop(
         # model with no real native_tool_calls) must not be stripped from the
         # persisted text either — otherwise it streams once and then disappears
         # on reload (#3222 follow-up).
-        cleaned_round = strip_tool_blocks(round_response, skip_fenced=(_is_api_model and not used_native and not guide_only)).strip()
+        cleaned_round = strip_tool_blocks(
+            round_response, skip_fenced=(_is_api_model and not used_native and not guide_only),
+            dynamic_tool_names=set(_relevant_tools or ()) if _selection_plan is not None else None,
+        ).strip()
         # Withhold unverified orchestration prose from history as well as the
         # live stream. Tool cards already provide truthful progress.
         round_texts.append("" if _research_workflow_requested and not guide_only else cleaned_round)
@@ -7655,7 +7808,9 @@ async def stream_agent_loop(
                     s.get("function", {}).get("name")
                     for s in (mcp_schemas or []) if s.get("function")
                 }
-                if not _needs_admin:
+                if _turn_discovery is not None:
+                    _rearm_pool &= _permitted_catalog_names
+                elif not _needs_admin:
                     _rearm_pool -= _ADMIN_TOOLS
                 _rearm_pool = {t for t in _rearm_pool if t and t not in disabled_tools}
                 # Two tiers, both bounded. There is deliberately no third.
@@ -7709,6 +7864,11 @@ async def stream_agent_loop(
                     _rearm_new = _domain_tools - _relevant_tools
                     if _rearm_new:
                         _rearm_scope = "domain:" + (",".join(_domain_labels) or "?")
+                if _rearm_new and _selection_plan is not None:
+                    # Compatibility recovery is subject to the same budget and
+                    # catalogue as initial selection; refusal prose cannot
+                    # attach the whole registry or override a profile ceiling.
+                    _rearm_new = _admit_turn_tools(_rearm_new, "semantic")
                 if _rearm_new:
                     if _rearm_scope.startswith("domain"):
                         _toolset_rearm_count += 1
@@ -8100,6 +8260,8 @@ async def stream_agent_loop(
 
                 async def _run_tool():
                     try:
+                        if _turn_discovery is not None:
+                            _turn_discovery.set_attached(_relevant_tools)
                         return await execute_tool_block(
                             block,
                             session_id=session_id,
@@ -8110,6 +8272,7 @@ async def stream_agent_loop(
                             progress_cb=_push_progress,
                             workspace=workspace,
                             delegation_authorized=_delegation_authorized,
+                            tool_discovery=_turn_discovery,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
@@ -8141,6 +8304,15 @@ async def stream_agent_loop(
                             await _tool_task
                         except (asyncio.CancelledError, Exception):
                             pass
+
+            if block.tool_type == "discover_tools" and _turn_discovery is not None:
+                _discovery_calls += 1
+                # Activation comes only from our turn-local registry. Never
+                # trust activation fields supplied by an arbitrary MCP result.
+                _relevant_tools.update(_admit_turn_tools(_turn_discovery.loaded_names))
+                # Schemas travel once: native tools on the next request, or
+                # a fenced-model context envelope after this round's results.
+                result = {k: v for k, v in result.items() if k != "loaded_tools"}
 
             # Only tool return values can establish an execution receipt.
             from src.workflow_claims import record_execution
@@ -8176,7 +8348,10 @@ async def stream_agent_loop(
                         for _sk in _SkM(_DD).load(owner=owner):
                             if _sk.get("name") in _ms_names:
                                 _new, _ = _skill_declared_tools([_sk], disabled_tools)
+                                if _turn_discovery is not None:
+                                    _new &= _permitted_catalog_names
                                 _new -= _relevant_tools
+                                _new = _admit_turn_tools(_new)
                                 if _new:
                                     _relevant_tools.update(_new)
                                     logger.info(
@@ -8647,6 +8822,9 @@ async def stream_agent_loop(
                                  or _MAX_REASONING_REPLAY_ROUNDS
                              ))
 
+        if _turn_discovery is not None:
+            _discovery_announced.update(_turn_discovery.loaded_names)
+
         # Duplicate-call correction, delivered after the round's tool results so
         # it reads as a reply to the repeat it is about. Capped by
         # _MAX_DUP_CALL_DIRECTIVES; the suppressed result still says it on every
@@ -8715,7 +8893,11 @@ async def stream_agent_loop(
     # Do not persist raw textual tool-call JSON / role markers as assistant
     # prose. Local finetunes may emit those before the parser catches and
     # executes them; saved history should contain only the user-facing answer.
-    full_response = strip_tool_blocks(full_response).strip()
+    full_response = strip_tool_blocks(
+        full_response,
+        dynamic_tool_names=(set(_relevant_tools or ()) | _discovery_announced
+                            if _selection_plan is not None else None),
+    ).strip()
     if _ody_qwen_finetune_model:
         full_response = _normalize_ody_qwen_text_artifacts(full_response)
         if (
@@ -8805,6 +8987,13 @@ async def stream_agent_loop(
         "retained_count": len(_retained_tool_names),
         "suppressed_retained": sorted(_suppressed_retained_tools),
         "disabled_count": len(disabled_tools),
+        "initial_selected_count": len(_selection_plan.selected) if _selection_plan else None,
+        "initial_schema_tokens": _initial_schema_tokens,
+        "deferred_count": len(_selection_plan.deferred) if _selection_plan else 0,
+        "explicit_budget_override": bool(_selection_plan and _selection_plan.budget_exceeded_by_explicit),
+        "discovery_calls": _discovery_calls,
+        "discovered_count": len(_turn_discovery.loaded_names) if _turn_discovery else 0,
+        "discovery_schema_tokens": _turn_discovery.loaded_schema_tokens if _turn_discovery else 0,
     }
     _activity.run_finished(
         session_id, "odysseus", _activity_run_id,

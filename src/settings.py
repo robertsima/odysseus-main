@@ -352,6 +352,29 @@ def load_settings() -> dict:
     return merged
 
 
+def load_disabled_tools_strict() -> frozenset[str]:
+    """Read the current global tool denylist without the fail-soft TTL cache.
+
+    Execution authorization must observe a disable made during the same agent
+    turn. A fresh installation legitimately has no settings file yet; every
+    other read/shape failure is surfaced so the dispatcher can fail closed.
+    Ordinary settings consumers continue to use :func:`load_settings`.
+    """
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except FileNotFoundError:
+        return frozenset()
+    if not isinstance(saved, dict):
+        raise ValueError("settings must be an object")
+    disabled = saved.get("disabled_tools", [])
+    if not isinstance(disabled, list):
+        raise ValueError("disabled_tools must be a list")
+    if any(not isinstance(name, str) for name in disabled):
+        raise ValueError("disabled_tools entries must be strings")
+    return frozenset(name for name in disabled if name)
+
+
 def save_settings(settings: dict):
     """Persist settings to disk (atomic; see core.atomic_io)."""
     from core.atomic_io import atomic_write_json

@@ -963,6 +963,7 @@ async def execute_tool_block(
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -981,6 +982,7 @@ async def execute_tool_block(
             tool_policy=tool_policy,
             allow_private=allow_private,
             delegation_authorized=delegation_authorized,
+            tool_discovery=tool_discovery,
         )
         return output
     finally:
@@ -996,6 +998,7 @@ async def _execute_tool_block_impl(
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1042,6 +1045,31 @@ async def _execute_tool_block_impl(
     # form — see email_tool_policy_names), not just the spelling the model
     # happened to emit.
     policy_names = email_tool_policy_names(tool)
+
+    # Global tool toggles can change during an agent turn (including through
+    # manage_settings itself), so the turn-start disabled_tools snapshot is not
+    # an execution-time authority. Read the small denylist directly, bypassing
+    # the ordinary settings TTL cache, and fail closed on malformed/unreadable
+    # policy. A missing settings file is the valid fresh-install empty policy.
+    try:
+        from src.settings import load_disabled_tools_strict
+        fresh_global_disabled = set(load_disabled_tools_strict())
+    except Exception:
+        logger.exception("Tool blocked because global tool policy could not be loaded: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": "The global capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+            "blocked": True,
+            "blocked_reason": "global_policy_unavailable",
+            "exit_code": 1,
+        }
+    if not policy_names.isdisjoint(fresh_global_disabled):
+        logger.info("Tool blocked by fresh global revocation: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": f"Tool '{tool}' is disabled by the current global settings.",
+            "blocked": True,
+            "blocked_reason": "fresh_global_disabled",
+            "exit_code": 1,
+        }
 
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
@@ -1091,6 +1119,21 @@ async def _execute_tool_block_impl(
                 "blocked": True, "blocked_reason": "session_policy_unavailable", "exit_code": 1,
             }
     if _agent_settings:
+        # Session settings are re-read for every call. A tool disabled after
+        # turn preparation must be revoked here before any handler (including
+        # turn-local discovery) can run; the incoming disabled_tools snapshot
+        # above intentionally cannot see such a mid-turn change.
+        _fresh_disabled = {
+            str(name) for name in (_agent_settings.get("disabled_tools") or ()) if name
+        }
+        if not policy_names.isdisjoint(_fresh_disabled):
+            logger.info("Tool blocked by fresh session revocation: session=%s tool=%s", session_id, tool)
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is disabled by this agent's current settings.",
+                "blocked": True,
+                "blocked_reason": "fresh_session_disabled",
+                "exit_code": 1,
+            }
         if _agent_settings.get("workflow_readonly"):
             if tool == "manage_skills":
                 try:
@@ -1110,7 +1153,8 @@ async def _execute_tool_block_impl(
         # after the profile was saved; a snapshot denylist cannot do that.
         _tool_access = _agent_settings.get("tool_access", "all")
         _enabled = set(_agent_settings.get("enabled_tools") or [])
-        if _tool_access == "none" or (_tool_access == "selected" and policy_names.isdisjoint(_enabled)):
+        _discovery_selected_ok = tool == "discover_tools" and _tool_access == "selected" and bool(_enabled)
+        if _tool_access == "none" or (_tool_access == "selected" and policy_names.isdisjoint(_enabled) and not _discovery_selected_ok):
             return f"{tool}: BLOCKED", {
                 "error": f"Tool '{tool}' is not in this agent's selected tool bindings.",
                 "exit_code": 1,
@@ -1216,6 +1260,38 @@ async def _execute_tool_block_impl(
         }
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
+
+    # Discovery is handled only by the turn-local context supplied by the
+    # agent loop.  It runs after every hard/profile/admin gate above and has no
+    # fallback handler that could accidentally broaden authority.
+    if tool == "discover_tools":
+        if tool_discovery is None:
+            return "discover_tools: BLOCKED", {
+                "error": "Tool discovery is unavailable outside an active agent turn.",
+                "blocked": True,
+                "exit_code": 1,
+            }
+        try:
+            args = json.loads(content or "{}")
+        except (TypeError, ValueError):
+            return "discover_tools: invalid arguments", {"error": "Expected JSON arguments.", "exit_code": 1}
+        if not isinstance(args, dict) or not isinstance(args.get("query"), str):
+            return "discover_tools: invalid arguments", {"error": "A string query is required.", "exit_code": 1}
+        query = args["query"].strip()
+        max_results = args.get("max_results", 5)
+        if not query or len(query) > 500 or isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 8:
+            return "discover_tools: invalid arguments", {
+                "error": "query must contain 1-500 characters and max_results must be an integer from 1 to 8.",
+                "exit_code": 1,
+            }
+        fresh_settings = dict(_agent_settings)
+        runtime_disabled = set(disabled_tools or ()) | fresh_global_disabled
+        if not _owner_is_admin(owner):
+            runtime_disabled.update(_ADMIN_TOOLS)
+            runtime_disabled.update(name for name in getattr(tool_discovery, "_catalog", {}) if is_public_blocked_tool(name))
+        fresh_settings["_runtime_disabled_tools"] = sorted(runtime_disabled)
+        result = await tool_discovery.discover(query, max_results, settings=fresh_settings)
+        return f"discover_tools: {query[:80]}", result
 
     # Shell/Python are unrestricted subprocesses: unlike the dedicated file
     # tools, they can read an absolute path (or walk the vault through a

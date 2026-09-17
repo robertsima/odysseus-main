@@ -36,6 +36,16 @@ _TOOL_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Dynamic MCP names cannot be part of static TOOL_TAGS. Keep both identifier
+# components bounded so hostile model output cannot create an oversized tag or
+# expensive regex scan. Authorization remains the dispatcher's responsibility;
+# callers can additionally pass the exact attached names for strict parsing.
+_DYNAMIC_MCP_FENCE_RE = re.compile(
+    r"```(mcp__[A-Za-z0-9][A-Za-z0-9_-]{0,63}__[A-Za-z0-9][A-Za-z0-9_-]{0,127})(?![\w-])"
+    r"[ \t]*([{\[][^\n]*?)?[ \t]*(?=\r?\n|```)\r?\n?([\s\S]*?)```",
+    re.IGNORECASE,
+)
+
 # Tags whose fenced content is raw code, not JSON args. Same-line text after
 # these tags is Markdown fence metadata on a real language (```bash {title=
 # "setup"}), never inline tool args — only the classic tag-then-newline form
@@ -1252,7 +1262,11 @@ def _iter_xml_direct(text):
     return _iter_backref_blocks(text, _XML_DIRECT_OPEN_RE, _XML_DIRECT_CLOSE_ANY_RE, ci=True)
 
 
-def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
+def parse_tool_blocks(
+    text: str,
+    skip_fenced: bool = False,
+    dynamic_tool_names: Optional[set[str]] = None,
+) -> List[ToolBlock]:
     """Extract executable tool blocks from LLM response text.
 
     Supports multiple formats:
@@ -1319,6 +1333,25 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
                     blocks.append(block)
                     continue
             blocks.append(ToolBlock(tag, content))
+
+        # MCP tools have runtime-qualified names and therefore cannot live in
+        # static TOOL_TAGS. If a strict attachment set is supplied, reject an
+        # unloaded name here before it can become a ToolBlock. With no set,
+        # retain compatibility for explicitly fenced connected MCP tools; the
+        # dispatcher still applies all current policy/server/profile gates.
+        allowed_dynamic = (
+            None if dynamic_tool_names is None
+            else {str(name).casefold() for name in dynamic_tool_names}
+        )
+        for m in _DYNAMIC_MCP_FENCE_RE.finditer(text):
+            call = _fenced_tool_call(m)
+            if call is None:
+                continue
+            tag, content = call
+            if allowed_dynamic is not None and tag.casefold() not in allowed_dynamic:
+                continue
+            if content:
+                blocks.append(ToolBlock(tag, content))
 
     # Pattern 2: [TOOL_CALL] blocks (only if no fenced blocks found)
     # _iter_delimited scans the delimiter-bounded formats forward-only so
@@ -1427,7 +1460,11 @@ def parse_tool_blocks(text: str, skip_fenced: bool = False) -> List[ToolBlock]:
     return blocks
 
 
-def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
+def strip_tool_blocks(
+    text: str,
+    skip_fenced: bool = False,
+    dynamic_tool_names: Optional[set[str]] = None,
+) -> str:
     """Remove executable tool blocks from text for clean display.
 
     `skip_fenced`: when True, fenced ```bash/```python/```json code blocks
@@ -1447,6 +1484,22 @@ def strip_tool_blocks(text: str, skip_fenced: bool = False) -> str:
     # that actually dispatched; leave example fences from native models inert
     # but visible), then remove [TOOL_CALL]{...}[/TOOL_CALL] markup.
     cleaned = text if skip_fenced else _TOOL_BLOCK_RE.sub(_strip_executed_fence, text)
+    if not skip_fenced:
+        allowed_dynamic = (
+            None if dynamic_tool_names is None
+            else {str(name).casefold() for name in dynamic_tool_names}
+        )
+
+        def strip_dynamic(match) -> str:
+            call = _fenced_tool_call(match)
+            if call is None:
+                return match.group(0)
+            tag, _content = call
+            if allowed_dynamic is not None and tag.casefold() not in allowed_dynamic:
+                return match.group(0)
+            return ""
+
+        cleaned = _DYNAMIC_MCP_FENCE_RE.sub(strip_dynamic, cleaned)
     # Forward-only removal mirrors parse_tool_blocks: _strip_delimited pairs each
     # opener with a later closer and stops when none is reachable, so untrusted
     # output can't drive the O(n^2) lazy-rescan (ReDoS); see _iter_delimited.

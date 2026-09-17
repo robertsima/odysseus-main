@@ -9,7 +9,6 @@ from unittest.mock import MagicMock
 # the one its functions live in - which silently breaks tests that monkeypatch
 # it (e.g. test_edit_file's admin gate).
 _ABSENT = object()
-_AGENT_MODULES = ["src.agent_tools", "src.tool_parsing", "src.tool_schemas"]
 _STUBBED = [
     "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext", "sqlalchemy.ext.declarative",
     "sqlalchemy.ext.hybrid", "sqlalchemy.sql", "sqlalchemy.sql.expression",
@@ -17,8 +16,9 @@ _STUBBED = [
 ]
 _saved_stubs = {name: sys.modules.get(name, _ABSENT) for name in _STUBBED}
 
-for _mod in _AGENT_MODULES:
-    sys.modules.pop(_mod, None)
+# Do not evict the registry/parser/schema modules either. Other collected
+# tests hold canonical registry references; rebuilding them here makes their
+# handler monkeypatches silently target an abandoned dictionary.
 for _mod in _STUBBED:
     if _mod not in sys.modules:
         sys.modules[_mod] = MagicMock()

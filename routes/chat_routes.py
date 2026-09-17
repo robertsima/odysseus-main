@@ -42,7 +42,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
     append_dynamic_context,
 )
-from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
+from src.action_intents import ToolIntent, assess_tool_intent
 from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
     WEB_TOOL_NAMES,
@@ -779,18 +779,11 @@ def setup_chat_routes(
         _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
         _explicit_web_intent = False
         _explicit_browser_intent = False
+        _route_assessment = None
         if isinstance(message, str):
-            _msg_l = message.lower()
-            _explicit_web_intent = bool(re.search(
-                r"\b(search|look\s*up|lookup|google|browse|web|online|latest|current|today|news|weather|forecast|rate|exchange\s+rate)\b",
-                _msg_l,
-            ))
-            _explicit_browser_intent = bool(re.search(
-                r"\b(browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|"
-                r"click|fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|"
-                r"contact\s+form|web\s*form|form\s+submission)\b",
-                _msg_l,
-            ))
+            _route_assessment = assess_tool_intent(message)
+            _explicit_web_intent = _route_assessment.explicit_web
+            _explicit_browser_intent = _route_assessment.explicit_browser
         _allow_browser_for_web_turn = bool(
             _explicit_browser_intent
             or _explicit_web_intent
@@ -804,7 +797,14 @@ def setup_chat_routes(
         # its way through a plain chat request (and fail, especially with the
         # shell disabled).
         auto_escalated = False
-        _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
+        _tool_intent = (
+            ToolIntent(
+                _route_assessment.needs_tools,
+                _route_assessment.route_category,
+                _route_assessment.reason,
+            )
+            if _route_assessment is not None else None
+        )
         _workspace_agent_intent = False
         if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
             chat_mode = "agent"

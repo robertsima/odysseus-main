@@ -177,6 +177,15 @@ Route-level disabled tools always win. Active-document and plan-mode pruning
 runs after retention. The final set must be logged as a summary, never with
 arguments or document contents.
 
+The [capability routing refactor](harness-capability-routing.md) makes this
+distinction explicit: active-document relevance is advisory; privacy, profile,
+global/session disables and read-only policy are authorization boundaries.
+`discover_tools` can load an unselected permitted tool, but cannot connect a
+server, grant access or execute the requested operation. Initial schemas and
+all late additions share bounded accounting; explicit user/caller bindings are
+preserved and any advisory-budget override is reported. Fresh global and
+session revocations are enforced again at dispatch.
+
 ## Selection telemetry
 
 Every agent turn SHOULD emit structured, privacy-safe routing telemetry:

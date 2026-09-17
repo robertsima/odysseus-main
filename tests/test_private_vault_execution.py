@@ -88,7 +88,7 @@ async def test_dispatcher_carries_private_grant_into_dynamic_tools(monkeypatch):
         owner="alice",
         allow_private=True,
     )
-    assert result["exit_code"] == 0
+    assert result["exit_code"] == 0, result
     assert seen and seen[0]["session_id"] == "sid"
     assert seen[0]["owner"] == "alice"
     assert seen[0]["allow_private"] is True
