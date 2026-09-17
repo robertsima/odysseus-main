@@ -553,3 +553,33 @@ def test_failing_to_persist_the_grant_does_not_refuse_the_turn(monkeypatch):
 
     monkeypatch.setattr("core.database.update_session_settings", boom)
     assert agent_loop._resolve_standing_delegation("chat-3", {}, granted=True, revoked=False)
+
+
+@pytest.mark.asyncio
+async def test_a_round_budget_does_not_truncate_a_run_that_is_still_working(loop_runtime):
+    """Rounds are advisory; only progress-based limits end a turn.
+
+    Every incarnation of a round ceiling — the loop default, a loadout's
+    `max_rounds`, the small numbers already saved in people's loadouts — did
+    the same thing: stop an agent mid-task and hand back half the work. A
+    caller asking for 2 rounds here must not cut a run that keeps calling
+    tools and then answers on round 5.
+    """
+    def distinct(i):
+        """A different call each round — a repeat is what the stall detector is for."""
+        return {"type": "tool_calls", "calls": [{
+            "id": f"call-{i}", "name": "orchestrate_agents",
+            "arguments": {"action": "status", "workflow_id": f"workflow-{i}"},
+        }]}
+
+    rounds = [distinct(1), distinct(2), distinct(3), distinct(4), VERIFIED_ANSWER]
+
+    events = await loop_runtime.run(
+        rounds,
+        tool_results=[receipt("running"), receipt("running"), receipt("running"), receipt("completed")],
+        max_rounds=2,
+    )
+
+    assert len(loop_runtime.executions) == 4, "the run was cut off at its advisory budget"
+    assert VERIFIED_ANSWER in visible_text(events)
+    assert not [e for e in events if e.get("type") == "rounds_exhausted"]

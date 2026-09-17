@@ -167,3 +167,29 @@ def test_a_status_event_from_the_parent_side_closes_the_run(data_dir):
     # The run still belongs to the worker's chat; the parent only closed it.
     assert run["session_id"] == "worker-chat"
     assert not act.list_runs(session_id="parent-chat", active_only=True)
+
+
+def test_the_global_feed_has_history_not_just_live_events(data_dir):
+    """"All sessions" in the Workbench showed nothing until something new happened.
+
+    `publish` appends to the originating session only, so the `*` key was never
+    a stored session and `history("*")` returned an empty list. `subscribe`
+    deliberately replays nothing for the global feed, so history is the only
+    thing that could have filled that scope.
+    """
+    act.publish("chat-a", "message", "first", source="odysseus")
+    act.publish("chat-b", "message", "second", source="session")
+    act.publish("chat-a", "message", "third", source="claude_code")
+
+    merged = act.history(act.GLOBAL_FEED, limit=50)
+
+    assert [ev["title"] for ev in merged] == ["first", "second", "third"]
+    assert {ev["session_id"] for ev in merged} == {"chat-a", "chat-b"}
+    # and a single session's history is unchanged
+    assert [ev["title"] for ev in act.history("chat-a")] == ["first", "third"]
+
+
+def test_global_history_is_bounded(data_dir):
+    for i in range(60):
+        act.publish(f"chat-{i % 5}", "note", f"event {i}", source="system")
+    assert len(act.history(act.GLOBAL_FEED, limit=10)) == 10

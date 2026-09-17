@@ -349,7 +349,11 @@ def test_guide_only_blocks_later_round_document_streaming(monkeypatch):
         )
     )
     events = _events(chunks)
-    assert calls == 2
+    # A later round has to have been reached — the block under test is the one
+    # that fires after round 1. The exact count is not the property: a round
+    # ceiling no longer ends a run, so the loop runs on until the loop-breaker
+    # trips, and pinning it to 2 was pinning the old cap.
+    assert calls >= 2
     assert not any(event.get("type") == "doc_stream_open" for event in events)
     assert not any(event.get("type") == "doc_stream_delta" for event in events)
 

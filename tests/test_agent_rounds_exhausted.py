@@ -1,9 +1,15 @@
-"""Regression: stream_agent_loop emits `rounds_exhausted` only when the round
-cap is hit while still working, and NOT on a normal finish.
+"""Regression: what ends a run, and what a cut-off run hands back.
 
-The decision is a `for/else` in the loop: the `else` runs only if no `break`
-fired (break = done / budget / error). A refactor that adds a stray break or
-return, or moves the done-break, could silently flip this. See PR #1999 / #1997.
+A round count no longer ends anything. Every incarnation of a ceiling stopped an
+agent in the middle of a task it was still working on, so `stream_agent_loop`
+now iterates until the work is done and the progress-based guards below decide
+when that is not happening: the stall detector, the runaway/duplicate-call
+guard, the per-run tool-call ceiling, and the user's stop control.
+
+`rounds_exhausted` and the headless note that carries it are kept and still
+tested, because they are what a caller would need if a ceiling were ever
+reintroduced — and because `headless_agent` must handle the frame correctly
+whenever it does arrive.
 """
 
 import asyncio
@@ -58,17 +64,21 @@ def _run_loop(monkeypatch, round_text, max_rounds=2):
     return _types(_collect(gen))
 
 
-def test_emits_rounds_exhausted_when_cap_hit_mid_task(monkeypatch):
+def test_a_round_cap_no_longer_cuts_a_run_off(monkeypatch):
+    """The agent keeps working past the advisory budget it was given.
+
+    This is the whole point: a worker asked for 2 rounds, still calling tools,
+    used to stop here with the task half done. Now the run continues and is
+    ended by the stall detector instead — a limit that can actually tell the
+    difference between working and stuck.
+    """
     _patch_common(monkeypatch)
-    # Every round returns a tool block -> never "done" -> loop exhausts the cap.
+    # Every round returns a tool block -> never "done".
     events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=2)
-    exhausted = next((e for e in events if e.get("type") == "rounds_exhausted"), None)
-    assert exhausted is not None, events
-    # The frame has to carry how far the turn got, not only that it stopped: a
-    # headless caller sees this and the prose and nothing else, and has to tell
-    # its parent where to resume from.
-    assert exhausted["rounds"] == 2
-    assert exhausted["tool_calls"] >= 1, exhausted
+
+    assert not any(e.get("type") == "rounds_exhausted" for e in events), events
+    assert any(e.get("type") == "agent_step" and e.get("round", 0) > 2 for e in events), events
+    assert any(e.get("type") == "loop_breaker_triggered" for e in events), events
 
 
 def test_no_rounds_exhausted_on_normal_finish(monkeypatch):

@@ -356,10 +356,10 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     return {
         "response": (
             f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
-            f"with a {preflight['max_rounds']}-round budget and these tools: {tool_note}. "
-            "It runs detached; its progress appears on this chat's activity feed. "
-            "If those tools cannot do the task you just described, stop it and fix the loadout "
-            "instead of waiting for the result."
+            f"with these tools: {tool_note}. It runs until the task is done — a round count never "
+            "ends it — and it runs detached, so its progress appears on this chat's activity feed "
+            "and in action='status'. If those tools cannot do the task you just described, stop it "
+            "and fix the loadout instead of waiting for the result."
         ),
         "preflight": preflight,
         **result,

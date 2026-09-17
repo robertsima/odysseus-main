@@ -504,7 +504,7 @@ async def test_starting_a_stored_toolless_loadout_is_refused_with_a_usable_alter
     assert "Reader" in result["error"]
 
 
-async def test_start_reports_the_model_tools_and_round_budget_it_actually_launched(monkeypatch, store):
+async def test_start_reports_the_model_and_tools_it_actually_launched(monkeypatch, store):
     await manage_agent_loadout(
         '{"action": "create", "name": "Runner", "tool_access": "selected",'
         ' "enabled_tools": ["read_file", "grep"], "max_rounds": 4}', "c", owner="u")
@@ -524,8 +524,10 @@ async def test_start_reports_the_model_tools_and_round_budget_it_actually_launch
         "loadout": "Runner", "model": "gpt-5.6-sol", "max_rounds": 4,
         "tools": ["grep", "read_file"], "skills": [], "allowed_mcp_servers": [],
     }
-    assert "4-round budget" in result["response"]
     assert "grep, read_file" in result["response"]
+    # A round count never ends a run, so the response must not imply one will.
+    assert "round budget" not in result["response"]
+    assert "runs until the task is done" in result["response"]
 
 
 async def test_an_unknown_loadout_name_is_not_an_invitation_to_pick_a_near_miss(store):

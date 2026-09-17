@@ -70,6 +70,15 @@ const state = {
   diffText: '',
   pr: { config: null, list: [], selected: null, detail: null, stateFilter: 'open', loading: false },
   chatCards: new Map(),     // run_id → element
+  // run_id → row from /api/workbench/runs for the CURRENT chat. The strip is
+  // built from this, not from `runs`: the server knows a worker's run belongs
+  // to this chat (it is filed under the worker's own session and carries
+  // `parent_session`), whereas `runs` can only guess from whichever event the
+  // browser happened to see first. That guess is why sub-agents kept failing
+  // to appear above the composer.
+  agentRuns: new Map(),
+  agentRunsAt: 0,
+  agentRunsInFlight: null,
 };
 
 // ── prefs ─────────────────────────────────────────────────────────────────
@@ -200,6 +209,9 @@ function ingest(ev, { live = true } = {}) {
   if (live) {
     updateChatCard(ev);
     scheduleStrip();
+    // Any delegated-work event is a reason to re-ask the server what this
+    // chat's runs are; the call is throttled and failures are silent.
+    if (ev.run_id && ev.source !== 'odysseus') refreshAgentRuns();
     if (!state.paused && isOpen()) scheduleRender('activity');
     else updateBadges();
     if (ev.kind === 'run_started' && CHAT_CARD_SOURCES.has(ev.source) && ev.session_id === state.sessionId) {
@@ -236,19 +248,74 @@ function scheduleStrip() {
   if (_stripTimer) return;
   _stripTimer = setTimeout(() => { _stripTimer = null; renderAgentStrip(); }, 150);
 }
+/** Pull this chat's delegated runs from the server, throttled.
+ *
+ *  `list_runs(session_id)` matches a run's own session OR its `parent_session`,
+ *  so one call covers both "a job filed under this chat" and "a worker this
+ *  chat started, living in its own chat". Failures are silent and leave the
+ *  last good rows in place: the strip degrades to stale, never to empty.
+ */
+const AGENT_RUNS_MIN_MS = 1500;
+async function refreshAgentRuns({ force = false } = {}) {
+  const sid = state.sessionId;
+  if (!state.enabled || !sid) { state.agentRuns.clear(); return; }
+  if (state.agentRunsInFlight) return state.agentRunsInFlight;
+  if (!force && Date.now() - state.agentRunsAt < AGENT_RUNS_MIN_MS) return;
+  const run = (async () => {
+    try {
+      const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sid)}&limit=50`);
+      if (state.sessionId !== sid) return;           // chat changed under us
+      const next = new Map();
+      for (const row of r.runs || []) next.set(row.run_id, row);
+      state.agentRuns = next;
+      state.agentRunsAt = Date.now();
+    } catch (_) {
+      // keep whatever we had
+    } finally {
+      state.agentRunsInFlight = null;
+    }
+  })();
+  state.agentRunsInFlight = run;
+  await run;
+  renderAgentStrip();
+}
+
 function stripRuns() {
   const now = Date.now() / 1000;
-  return Array.from(state.runs.values())
-    .filter((r) => r.session_id === state.sessionId && r.source !== 'odysseus'
-      && (r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S)))
+  const rows = new Map();
+  // Server rows are authoritative for identity and status.
+  for (const row of state.agentRuns.values()) {
+    if (row.source === 'odysseus') continue;
+    rows.set(row.run_id, {
+      run_id: row.run_id, source: row.source, session_id: row.session_id,
+      title: row.title, status: row.status, started_at: row.started_at,
+      finished_at: row.finished_at, data: row.summary || {}, detail: row.detail || '',
+    });
+  }
+  // A run the browser has seen live but the server has not listed yet (the
+  // launch event arrives before the next poll) still belongs on the strip.
+  for (const run of state.runs.values()) {
+    if (run.source === 'odysseus') continue;
+    if (run.session_id !== state.sessionId && !rows.has(run.run_id)) continue;
+    const existing = rows.get(run.run_id);
+    if (!existing) { rows.set(run.run_id, run); continue; }
+    // Merge: keep the server's status, take the live event trail.
+    existing.events = run.events;
+    existing.data = { ...(run.data || {}), ...(existing.data || {}) };
+  }
+  return Array.from(rows.values())
+    .filter((r) => r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S))
     .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) || (a.started_at || 0) - (b.started_at || 0));
 }
 function latestActivity(run) {
-  for (let i = run.events.length - 1; i >= 0; i--) {
-    const ev = run.events[i];
+  const events = run.events || [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
     if (['message', 'tool_start', 'tool_result', 'status', 'file_change', 'commit'].includes(ev.kind)) return ev.title || '';
   }
-  return run.detail ? String(run.detail).split('\n')[0] : '';
+  if (run.detail) return String(run.detail).split('\n')[0];
+  const excerpt = (run.data || {}).result_excerpt;
+  return excerpt ? String(excerpt).split('\n')[0] : '';
 }
 function stripRowHtml(run) {
   const d = run.data || {};
@@ -298,6 +365,10 @@ function renderAgentStrip() {
     _stripTick = setInterval(() => {
       const el = $('agent-strip');
       if (!el || el.hidden) return;
+      // The server is the one that knows when a detached worker ended, so keep
+      // asking while one is live rather than waiting for an event that may
+      // never arrive on this chat's feed.
+      if (runs.some((r) => r.status === 'running')) refreshAgentRuns();
       let lingering = false;
       el.querySelectorAll('.agent-strip-time[data-running="1"]').forEach((t) => {
         const started = parseFloat(t.dataset.started);
@@ -314,7 +385,8 @@ async function onStripAction(btn) {
   if (act === 'collapse') { state.prefs.stripCollapsed = !state.prefs.stripCollapsed; savePrefs(); renderAgentStrip(); return; }
   if (act === 'more' || act === 'less') { state.stripExpanded = act === 'more'; renderAgentStrip(); return; }
   if (act === 'workbench') { open(); setTab('activity'); return; }
-  const run = state.runs.get(btn.dataset.run);
+  const run = state.runs.get(btn.dataset.run)
+    || stripRuns().find((r) => r.run_id === btn.dataset.run);
   if (!run) return;
   const d = run.data || {};
   if (act === 'open') {
@@ -373,19 +445,24 @@ async function connect(force = false) {
   if (!key) { renderActivity(); return; }
   state.esKey = key;
   // History first (bounded), then the live stream from the last seq we saw.
-  if (key !== '*') {
-    try {
-      const h = await api(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
-      if (gen !== _connectGen) return;  // superseded by a newer connect
-      (h.events || []).forEach((ev) => ingest(ev, { live: false }));
+  // "All sessions" gets history too: the server merges the real sessions for
+  // the `*` key, and `subscribe` deliberately replays nothing for it, so the
+  // two halves do not overlap.
+  try {
+    const h = await api(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
+    if (gen !== _connectGen) return;  // superseded by a newer connect
+    (h.events || []).forEach((ev) => ingest(ev, { live: false }));
+    if (key !== '*') {
       state.lastSeq = h.seq || state.lastSeq;
       await reconcileRunningRuns(key);
       if (gen !== _connectGen) return;
-      renderAgentStrip();
-    } catch (e) {
-      if (gen !== _connectGen) return;
-      if (e.status === 403) { state.enabled = false; hideRail(); return; }
     }
+    await refreshAgentRuns({ force: true });
+    if (gen !== _connectGen) return;
+    renderAgentStrip();
+  } catch (e) {
+    if (gen !== _connectGen) return;
+    if (e.status === 403) { state.enabled = false; hideRail(); return; }
   }
   const es = new EventSource(`/api/workbench/activity/stream?session_id=${encodeURIComponent(key)}&since=${state.lastSeq}`);
   state.es = es;
@@ -423,10 +500,13 @@ function watchSession() {
     if (sid !== state.sessionId) {
       state.sessionId = sid;
       state.chatCards.clear();
+      state.agentRuns.clear();
+      state.agentRunsAt = 0;
       state.focusRun = null;
       state.stripExpanded = false;
       renderAgentStrip();
       if (state.es || isOpen() || state.enabled) connect(true);
+      else refreshAgentRuns({ force: true });
     }
   };
   tick();
@@ -520,14 +600,14 @@ function renderActivity() {
       <section class="wb-card wb-runs">
         <div class="wb-card-scroll" data-wb-scroll="runs">
           <div class="wb-group-h"><span class="wb-group-title">Running</span><span class="wb-count">${active.length}</span></div>
-          ${active.length ? active.map(runCardHtml).join('') : emptyHtml('Nothing running. Claude Code delegations, sub-agents, pipelines and background jobs show up here when they start.', { tone: 'inline' })}
+          ${active.length ? active.map(runCardHtml).join('') : emptyHtml(filter ? `Nothing running from ${SOURCE_LABEL[filter] || filter}. Choose All sources to see the rest.` : 'Nothing running. Claude Code delegations, sub-agents, pipelines and background jobs show up here when they start.', { tone: 'inline' })}
           <div class="wb-group-h"><span class="wb-group-title">Recent</span><span class="wb-count">${recent.length}</span></div>
-          ${recent.length ? recent.map(runCardHtml).join('') : emptyHtml(noSession ? 'Open a chat to follow its activity, or switch the scope to All sessions.' : 'No finished runs yet.', { tone: 'inline' })}
+          ${recent.length ? recent.map(runCardHtml).join('') : emptyHtml(noSession ? 'Open a chat to follow its activity, or switch the scope to All sessions.' : filter ? `No finished ${SOURCE_LABEL[filter] || filter} runs in this scope. Choose All sources to see the rest.` : 'No finished runs yet.', { tone: 'inline' })}
         </div>
       </section>
       <section class="wb-card wb-stream">
         <div class="wb-card-h">${streamHead}<span class="wb-count">${shown.length}</span></div>
-        <div class="wb-ev-list" data-wb-scroll="events">${shown.length ? shown.slice().reverse().map((ev) => eventRowHtml(ev, { showSource: !focusRun && !filter })).join('') : emptyHtml(noSession ? 'No chat selected.' : 'No events yet.')}</div>
+        <div class="wb-ev-list" data-wb-scroll="events">${shown.length ? shown.slice().reverse().map((ev) => eventRowHtml(ev, { showSource: !focusRun && !filter })).join('') : emptyHtml(noSession ? 'No chat selected.' : filter ? `No ${SOURCE_LABEL[filter] || filter} events in this scope. Choose All sources, or switch the scope to All sessions.` : 'No events yet.')}</div>
       </section>`;
   });
   updateBadges();

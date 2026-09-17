@@ -7283,17 +7283,29 @@ async def stream_agent_loop(
     _last_serialized_history = None
     _fenced_announced = set(_relevant_tools or ())
 
-    # `max_rounds` falsy (0 or None) means no round ceiling at all, which is the
-    # default for agents now. Rounds were never the real safety boundary: a turn
-    # is still bounded by the per-run tool-call ceiling
-    # (`agent_max_tool_calls`, default DEFAULT_MAX_TOOL_CALLS_PER_RUN), by the
-    # request timeout, by each tool's own policy, and by the user's stop
-    # control. A round counter only ever ended real work mid-task.
-    _round_budget = max_rounds if max_rounds and max_rounds > 0 else math.inf
-    _round_numbers = (
-        itertools.count(1) if _round_budget is math.inf else range(1, int(_round_budget) + 1)
-    )
-    for round_num in _round_numbers:
+    # A round count NEVER ends a run. This is deliberate and absolute: every
+    # incarnation of a round ceiling — the loop default, the per-loadout
+    # `max_rounds`, the tuned-down numbers people had already saved — did the
+    # same thing, which was to stop an agent in the middle of a task it was
+    # still actively working on and hand back half of it. Raising the numbers
+    # only moved where that happened.
+    #
+    # What bounds a run instead is every mechanism below that measures PROGRESS
+    # rather than counting iterations, and they are strictly better at it:
+    #   * the loop-breaker's stall detector (4 rounds with no new call or text),
+    #   * the runaway detector (the same call with the same arguments, forever),
+    #   * the per-run tool-call ceiling (`agent_max_tool_calls`, default 500),
+    #   * the request timeout, each tool's own policy, and the user's stop
+    #     control, which remains live for the whole run.
+    # An agent that is genuinely working now runs until it is finished; one that
+    # is stuck is caught by the thing that can actually tell it is stuck.
+    #
+    # `max_rounds` is still accepted so callers and stored loadouts keep working,
+    # and is still reported for display, but it is advisory.
+    if max_rounds and max_rounds > 0:
+        logger.debug("[agent] max_rounds=%s is advisory; rounds do not end a run", max_rounds)
+    _round_budget = math.inf
+    for round_num in itertools.count(1):
         if _turn_discovery is not None:
             try:
                 disabled_tools.update(expand_tool_aliases(load_disabled_tools_strict()))
@@ -9163,12 +9175,10 @@ async def stream_agent_loop(
         # Separator in accumulated response
         full_response += "\n\n"
     else:
-        # The for-loop completed every allowed round WITHOUT an early `break`
-        # (a `break` fires on "done", budget, or error). Reaching this `else`
-        # means the agent kept working until it ran out of rounds — so offer
-        # Continue instead of stopping silently. This catches ALL exhaustion
-        # paths, including a verifier `continue` on the final round (the old
-        # bottom-of-loop flag missed those).
+        # Unreachable while `_round_budget` is infinite (the loop can only end
+        # through a `break`). Kept, with its original meaning, so that
+        # reintroducing a ceiling restores the Continue affordance rather than
+        # silently truncating a turn.
         _exhausted_rounds = True
 
     # The turn is over, so nothing will drain the steer queue again. Anything

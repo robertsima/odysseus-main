@@ -53,23 +53,27 @@ the execution of whatever tools it asked for.
 The loop ends when a round produces an answer with no tool calls, when a guard
 stops it (§5), or when the round budget runs out.
 
-**Round budget.** There is no round ceiling by default, for a chat turn or for
-a worker (`MAX_AGENT_ROUNDS = 0`, `agent_profiles.DEFAULT_ROUNDS = 0`; `0` means
-unlimited everywhere). Counting rounds was never what kept a run bounded, and a
-worker capped at 12 rounds while the chat that started it had 100 was simply
-gated more than its orchestrator — which is how tasks ended mid-flight with
-nothing finished. What actually bounds a run is unchanged: the per-run tool-call
-ceiling (`agent_max_tool_calls`, default 500), the request timeout, each tool's
-own policy, and the user's stop control.
+**Round budget — there isn't one.** A round count never ends a run, for a chat
+turn or for a worker. Every incarnation of a ceiling did the same thing: stop an
+agent in the middle of a task it was still working on and hand back half of it.
+Raising the numbers only moved where that happened, so the mechanism is gone.
+`max_rounds` (and `agent_max_rounds`) are still accepted and still reported for
+display, but they are advisory — `stream_agent_loop` iterates until the work is
+done.
 
-An explicit positive `max_rounds` is still honoured, up to `MAX_ROUNDS_CAP`
-(200). When one is set and a worker spends it while still executing tools, it is
-handed another budget rather than abandoned — up to `agent_control.CONTINUATION_LEGS`
-times, carrying its previous leg's work plus an instruction not to redo it. A leg
-that executes no tools does not earn another one, so a stuck or looping worker
-stops immediately. Only after that does the run record `incomplete` with
-`rounds_exhausted`; a live chat still turns the same signal into a Continue
-button.
+What bounds a run instead measures PROGRESS rather than counting iterations, and
+is strictly better at the job: the loop-breaker's stall detector (four rounds
+with no new call and no new text), the runaway detector (the same call with the
+same arguments repeated), the per-run tool-call ceiling (`agent_max_tool_calls`,
+default 500), the request timeout, each tool's own policy, and the user's stop
+control, which stays live for the whole run. An agent that is genuinely working
+runs until it finishes; one that is stuck is caught by the thing that can
+actually tell it is stuck.
+
+`agent_control.CONTINUATION_LEGS` remains as the recovery path if a ceiling is
+ever reintroduced: a worker that exhausts a budget while still executing tools
+is handed another, carrying its previous leg's work and an instruction not to
+redo it, and a leg that executes no tools earns nothing.
 
 ---
 

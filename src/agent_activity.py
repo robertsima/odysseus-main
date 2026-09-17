@@ -400,10 +400,25 @@ def close_turn(session_id: Optional[str], *, status: str = "completed", title: O
 
 def history(session_id: str, *, since_seq: int = 0, limit: int = 200) -> List[dict]:
     sid = str(session_id or "global")
+    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
+    if sid == GLOBAL_FEED:
+        # The global feed is a fan-out key, not a stored session: `publish`
+        # appends to the originating session only. So this used to return an
+        # empty list, and the Workbench's "All sessions" scope showed nothing
+        # until something new happened — which read as the filter doing
+        # nothing at all. Merge the real sessions instead. `subscribe` still
+        # replays nothing for GLOBAL_FEED, so there is no double-delivery:
+        # history comes from here, live frames from there.
+        merged: List[dict] = []
+        for name in sessions_with_activity():
+            with _lock:
+                _load_session(name)
+                merged.extend(_events.get(name, ()))
+        merged.sort(key=lambda ev: ev.get("ts") or 0)
+        return merged[-limit:]
     with _lock:
         _load_session(sid)
         rows = [ev for ev in _events.get(sid, ()) if ev.get("seq", 0) > since_seq]
-    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
     return rows[-limit:]
 
 
