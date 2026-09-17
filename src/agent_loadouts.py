@@ -114,6 +114,32 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
     }
 
 
+# Prefix of the narrowing note that means "this loadout has no tools at all".
+# Callers match on it rather than re-deriving the intersection.
+STARVED_NOTE = "tools: NONE of the requested tools are available to the calling chat"
+
+
+def tool_starved(notes: List[str]) -> bool:
+    """Did clamping leave a loadout that asked for tools with none?"""
+    return any(str(note).startswith(STARVED_NOTE) for note in notes or [])
+
+
+def unusable_reason(profile: Dict[str, Any]) -> Optional[str]:
+    """Why a stored loadout cannot do tool-using work, or None.
+
+    ``tool_access: "none"`` covers MCP too: MCP bindings live in
+    ``enabled_tools`` as ``mcp__server__tool`` names, so a loadout with no
+    tools has no MCP reach either.
+    """
+    if str(profile.get("tool_access") or "all") != "none":
+        return None
+    return (
+        f"loadout {profile.get('name', '?')!r} grants no tools at all "
+        "(tool_access is 'none'), so its worker can only produce prose — it cannot read, "
+        "search, or verify anything"
+    )
+
+
 def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -> None:
     known: Set[str] = policy["known_tools"]
     explicit_denied = agent_profiles.expand_tool_aliases(prof.get("disabled_tools") or [])
@@ -125,7 +151,18 @@ def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str])
         wanted = known - explicit_denied
     granted = wanted & agent_profiles.expand_tool_aliases(policy["allowed_tools"])
     refused = sorted(wanted - granted)
-    if refused:
+    if wanted and not granted:
+        # Every requested tool was refused, so line 140 below turns this into
+        # `tool_access: "none"` -- a worker that starts, discovers it can do
+        # nothing, and says so. That is not a narrowing, it is the loadout
+        # failing to exist, and the callers check for this marker to refuse
+        # rather than store or start it. (2026-09-17: a research loadout asked
+        # for web tools from a chat that had none, was stored with zero tools,
+        # and every worker it started opened with "I'm blocked".)
+        notes.append(
+            STARVED_NOTE + f": {', '.join(refused[:8])}{'…' if len(refused) > 8 else ''}"
+        )
+    elif refused:
         notes.append(
             f"tools: dropped {len(refused)} the calling chat cannot use itself "
             f"({', '.join(refused[:8])}{'…' if len(refused) > 8 else ''})"

@@ -448,3 +448,118 @@ async def test_update_does_not_rename_by_recapitalising(store):
     await manage_agent_loadout(
         '{"action": "update", "name": "reviewer", "description": "x"}', "c", owner="u")
     assert [p["name"] for p in store["profiles"]] == ["Reviewer"]
+
+
+# ── a loadout that cannot work must never be stored or started ───────────────
+
+def test_total_tool_refusal_is_flagged_apart_from_ordinary_narrowing():
+    """Losing every tool is the loadout failing, not the loadout being narrowed.
+
+    2026-09-17: a research loadout asked for web tools from a chat that had
+    none. Clamping stored it as `tool_access: "none"`, and every worker it
+    started opened with "I'm blocked from producing the report".
+    """
+    caller = policy(allowed_tools={"read_file", "grep"})
+    starved, notes = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["web_search", "bash"]), caller)
+
+    assert starved["tool_access"] == "none"
+    assert agent_loadouts.tool_starved(notes)
+    assert agent_loadouts.unusable_reason(starved)
+
+    partial, partial_notes = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["read_file", "bash"]), caller)
+    assert not agent_loadouts.tool_starved(partial_notes)
+    assert agent_loadouts.unusable_reason(partial) is None
+
+
+async def test_creating_a_loadout_with_no_usable_tools_is_refused_not_stored(monkeypatch, store):
+    monkeypatch.setattr(agent_loadouts, "caller_policy",
+                        lambda sid, owner: policy(allowed_tools={"read_file", "grep"}))
+
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Researcher", "tool_access": "selected",'
+        ' "enabled_tools": ["web_search", "web_fetch"]}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert "no tools at all" in result["error"]
+    assert "read_file" in result["error"] and "grep" in result["error"]
+    assert store["profiles"] == []
+
+
+async def test_starting_a_stored_toolless_loadout_is_refused_with_a_usable_alternative(monkeypatch, store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"]}', "c", owner="u")
+    # A loadout stored before this guard existed, or authored in a wider chat.
+    store["profiles"].append({**store["profiles"][0], "name": "Toolless",
+                              "tool_access": "none", "enabled_tools": []})
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Toolless", "task": "audit the repository"}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert result["blocked_reason"] == "loadout_has_no_tools"
+    assert "Reader" in result["error"]
+
+
+async def test_start_reports_the_model_tools_and_round_budget_it_actually_launched(monkeypatch, store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Runner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "grep"], "max_rounds": 4}', "c", owner="u")
+
+    async def fake_launch(**kwargs):
+        return {"session_id": "w-1", "session_name": "Runner 1", "run_id": "r-1",
+                "model": "gpt-5.6-sol", "max_rounds": 4}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Runner", "task": "read the changelog"}', "chat-7", owner="u")
+
+    assert result["exit_code"] == 0
+    assert result["preflight"] == {
+        "loadout": "Runner", "model": "gpt-5.6-sol", "max_rounds": 4,
+        "tools": ["grep", "read_file"], "skills": [], "allowed_mcp_servers": [],
+    }
+    assert "4-round budget" in result["response"]
+    assert "grep, read_file" in result["response"]
+
+
+async def test_an_unknown_loadout_name_is_not_an_invitation_to_pick_a_near_miss(store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"]}', "c", owner="u")
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "reader-but-for-umni", "task": "go"}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert "Reader (1 tools)" in result["error"]
+    assert "near-miss name is not a near-miss loadout" in result["error"]
+
+
+async def test_status_reports_what_the_workers_did_without_reading_log_files(monkeypatch, store, tmp_path):
+    from src import agent_activity, constants
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+    agent_activity._reset_for_tests()
+    agent_activity.run_started("w-1", "session", "Worker · Notes UI", run_id="session-a", owner="u",
+                               data={"parent_session": "chat-7", "target_session": "w-1",
+                                     "profile": "Runner", "model": "gpt-5.6-sol", "max_rounds": 6})
+    agent_activity.run_finished("w-1", "session", "session-a", "Worker · Notes UI incomplete",
+                                status="incomplete", owner="u",
+                                data={"target_session": "w-1", "steps": 24, "max_rounds": 6,
+                                      "rounds_exhausted": True, "result_excerpt": "Inspected notes.js."})
+
+    result = await manage_agent_loadout('{"action": "status"}', "chat-7", owner="u")
+
+    assert result["exit_code"] == 0
+    assert result["running"] == 0
+    row = result["runs"][0]
+    assert row["status"] == "incomplete" and row["ran_out_of_rounds"] is True
+    assert row["loadout"] == "Runner" and row["max_rounds"] == 6 and row["tool_calls"] == 24
+    assert "did NOT finish their task" in result["response"]
+    agent_activity._reset_for_tests()

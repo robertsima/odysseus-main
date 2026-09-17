@@ -1329,11 +1329,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_agent_loadout",
-            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one.",
+            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one, and returns the model, tool bindings and round budget it actually got — check those against the task before waiting on a result. action=status reports what those workers did. A loadout whose tools all fall outside this chat's policy is refused rather than stored, because its workers could only report that they were blocked.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name')."},
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start", "status"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name'). status = what the workers this chat started actually did, including which ran out of rounds. Use status instead of searching logs or guessing."},
                     "detail": {"type": "boolean", "description": "capabilities only: include the complete allowed tool-name list. Omit for the compact count/examples summary."},
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
                     "task": {"type": "string", "description": "start only: the whole task. The worker begins with no other context."},

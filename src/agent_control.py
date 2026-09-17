@@ -700,14 +700,29 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             manager.save_sessions()
         except Exception:
             logger.debug("worker persist failed", exc_info=True)
+        exhausted = bool(outcome.get("rounds_exhausted"))
         activity.run_finished(sess.id, "session", run_id,
                               f"Worker · {label}{sess.name} {status}", status=status, owner=owner,
                               data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400],
+                                    "max_rounds": rounds, "rounds_exhausted": exhausted,
                                     **({"error": error_detail} if error_detail else {})})
         if parent_session:
+            # Two events, because they answer different questions. The message
+            # carries the result text; the status event is what closes the run
+            # in the chat that STARTED this worker. Without it the parent's
+            # agent strip kept a row at "running" forever and then, on the next
+            # reconcile, decided the run it could not find had been interrupted
+            # -- which is why sub-agents stopped appearing above the composer.
+            cut = (f" (stopped at its {rounds}-round budget with work outstanding)" if exhausted else "")
             activity.publish(parent_session, "message", f"← worker {sess.name}: {text[:160]}", source="session",
                              run_id=run_id, owner=owner, detail=text[:2000],
                              level="error" if status == "failed" else "info")
+            activity.publish(parent_session, "status", f"Worker {sess.name} {status}{cut}", source="session",
+                             run_id=run_id, owner=owner,
+                             level="error" if status == "failed" else "info",
+                             data={"status": status, "target_session": sess.id, "parent_session": parent_session,
+                                   "max_rounds": rounds, "rounds_exhausted": exhausted,
+                                   **({"error": error_detail} if error_detail else {})})
             if handoff:
                 try:
                     await _hand_off(manager, parent_session, sess, task, text, status, owner)
@@ -746,9 +761,18 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                 # interrupted its optional parent continuation.
                 record = activity.get_run(run_id)
                 if record is None or record.get("status") == "running":
+                    terminal = "cancelled" if done.cancelled() else "failed"
                     activity.run_finished(sess.id, "session", run_id, "Worker task ended before completion",
-                                          status="cancelled" if done.cancelled() else "failed", owner=owner,
+                                          status=terminal, owner=owner,
                                           data={"target_session": sess.id})
+                    if parent_session:
+                        # Same reason as the normal completion path: close the
+                        # row in the chat that started this worker.
+                        activity.publish(parent_session, "status",
+                                         f"Worker {sess.name} {terminal} before completion", source="session",
+                                         run_id=run_id, owner=owner, level="error",
+                                         data={"status": terminal, "target_session": sess.id,
+                                               "parent_session": parent_session})
             except Exception:
                 logger.debug("worker task cleanup could not close activity run", exc_info=True)
 

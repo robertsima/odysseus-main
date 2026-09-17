@@ -17,7 +17,7 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("list", "get", "capabilities", "create", "update", "delete", "start")
+_ACTIONS = ("list", "get", "capabilities", "create", "update", "delete", "start", "status")
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
@@ -54,6 +54,14 @@ def _is_blank(key: str, value: Any) -> bool:
     if key in _ZERO_MEANS_UNSET and isinstance(value, (int, float)) and not isinstance(value, bool):
         return value <= 0
     return False
+
+
+def _tool_examples(policy: Dict[str, Any], limit: int = 14) -> str:
+    names = sorted(policy["allowed_tools"])
+    if not names:
+        return "no tools at all (this chat's own tool access is empty)"
+    shown = ", ".join(names[:limit])
+    return f"{len(names)} tool(s), e.g. {shown}" if len(names) > limit else shown
 
 
 def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -108,6 +116,43 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "and instructions."
             ),
             "loadouts": rows,
+            "exit_code": 0,
+        }
+
+    if action == "status":
+        # What happened to the workers this chat started. Without it the only
+        # way to find out was to grep the activity JSONL by hand -- which is
+        # exactly what the 2026-09-17 transcript spent twenty rounds doing,
+        # while the answer sat in the run registry the whole time.
+        from src import agent_activity
+
+        rows = []
+        for run in agent_activity.list_runs(session_id=session_id, limit=int(args.get("limit") or 20)):
+            summary = run.get("summary") or {}
+            row = {
+                "run_id": run["run_id"], "status": run["status"], "title": run["title"],
+                "worker_session": summary.get("target_session") or run.get("session_id"),
+                "loadout": summary.get("profile"), "model": summary.get("model"),
+                "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
+                "tool_calls": summary.get("steps"),
+                "max_rounds": summary.get("max_rounds"),
+                "ran_out_of_rounds": bool(summary.get("rounds_exhausted")),
+                "result_excerpt": summary.get("result_excerpt"),
+                "error": summary.get("error"),
+            }
+            rows.append({key: value for key, value in row.items() if value not in (None, "")})
+        running = sum(1 for row in rows if row.get("status") == "running")
+        cut_off = [row["run_id"] for row in rows if row.get("ran_out_of_rounds")]
+        return {
+            "response": (
+                f"{len(rows)} worker run(s) for this chat; {running} still running."
+                + (f" Cut off by their round budget: {', '.join(cut_off)} — these did NOT finish their task; "
+                   "restart them with a larger max_rounds rather than reporting their partial work as done."
+                   if cut_off else "")
+                + " A result_excerpt is the worker's own claim, not verified work."
+            ),
+            "runs": rows,
+            "running": running,
             "exit_code": 0,
         }
 
@@ -171,6 +216,24 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             requested["name"] = base["name"]
         try:
             profile, narrowed = agent_loadouts.clamp(requested, policy)
+        except ValueError as exc:
+            return {"error": f"manage_agent_loadout: {exc}", "exit_code": 1}
+        if agent_loadouts.tool_starved(narrowed):
+            # Storing it would only defer the failure to every worker it ever
+            # starts. Refuse here, where the author can still fix it.
+            return {
+                "error": (
+                    f"{action}: none of the tools requested for {requested['name']!r} are available to this "
+                    "chat, so the loadout would start workers with no tools at all. "
+                    + "; ".join(narrowed)
+                    + f". This chat can grant: {_tool_examples(policy)}. "
+                    "Pick from those, or ask the user to widen this chat's own tool access."
+                ),
+                "narrowed": narrowed,
+                "available_tool_count": len(policy["allowed_tools"]),
+                "exit_code": 1,
+            }
+        try:
             saved = agent_loadouts.save(profile, replace=(action == "update"))
         except ValueError as exc:
             return {"error": f"manage_agent_loadout: {exc}", "exit_code": 1}
@@ -208,9 +271,39 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "capacity": {"limit": limit, "active": running, "available": max(0, limit - running)},
             "exit_code": 1,
         }
-    if name and agent_profiles.get_profile(name) is None:
-        available = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined"
-        return {"error": f"no loadout named {name!r}. Available: {available}", "exit_code": 1}
+    started_profile = agent_profiles.get_profile(name) if name else None
+    if name and started_profile is None:
+        rows = agent_profiles.load_profiles()
+        available = ", ".join(
+            f"{p['name']} ({len(p['enabled_tools'])} tools)" if p["tool_access"] == "selected"
+            else f"{p['name']} ({p['tool_access']} tools)"
+            for p in rows
+        ) or "none are defined"
+        return {
+            "error": (
+                f"no loadout named {name!r}. Available: {available}. "
+                "Pick one whose tools actually fit this task, or create one first — "
+                "a near-miss name is not a near-miss loadout."
+            ),
+            "exit_code": 1,
+        }
+    # A worker that cannot read, search or run anything will spend its whole
+    # round budget explaining that. Refuse at launch rather than produce one.
+    unusable = agent_loadouts.unusable_reason(started_profile) if started_profile else None
+    if unusable:
+        usable = [p["name"] for p in agent_profiles.load_profiles()
+                  if agent_loadouts.unusable_reason(p) is None]
+        return {
+            "error": (
+                f"start: {unusable}. Fix it with action='update' (set tool_access and enabled_tools "
+                "from this chat's own tools), or start one of: "
+                + (", ".join(usable) if usable else "none — every stored loadout has this problem")
+            ),
+            "blocked": True,
+            "blocked_reason": "loadout_has_no_tools",
+            "loadout": agent_loadouts.summarize(started_profile),
+            "exit_code": 1,
+        }
 
     # Report to the calling chat unless the agent explicitly asks for a
     # standalone worker (parent_session: ""), so a worker is not orphaned by
@@ -240,11 +333,35 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         )
     except (ValueError, RuntimeError) as exc:
         return {"error": f"start: {exc}", "exit_code": 1}
+    # What it is actually going to run with. The model has to be able to see a
+    # wrong-fit loadout without waiting for the worker to report that it could
+    # not do the job, and the round budget is the number an "it ran out of
+    # rounds" result has to be read against.
+    preflight = {
+        "loadout": started_profile["name"] if started_profile else "ad-hoc worker",
+        "model": result.get("model") or "inherit",
+        "max_rounds": result.get("max_rounds"),
+        "tools": (started_profile["enabled_tools"] if started_profile
+                  and started_profile["tool_access"] == "selected" else
+                  (started_profile["tool_access"] if started_profile else "all")),
+        "skills": started_profile["skill_names"] if started_profile else [],
+        "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
+    }
+    logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s",
+                preflight["loadout"], result.get("run_id"), result.get("session_id"),
+                preflight["model"], preflight["max_rounds"],
+                preflight["tools"] if isinstance(preflight["tools"], str) else ",".join(preflight["tools"]))
+    tool_note = (preflight["tools"] if isinstance(preflight["tools"], str)
+                 else ", ".join(preflight["tools"]) or "none")
     return {
         "response": (
-            f"Started {name or 'worker'} in chat {result.get('session_name')}. It runs detached; "
-            "its progress appears on this chat's activity feed."
+            f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
+            f"with a {preflight['max_rounds']}-round budget and these tools: {tool_note}. "
+            "It runs detached; its progress appears on this chat's activity feed. "
+            "If those tools cannot do the task you just described, stop it and fix the loadout "
+            "instead of waiting for the result."
         ),
+        "preflight": preflight,
         **result,
         "exit_code": 0,
     }

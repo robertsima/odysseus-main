@@ -389,6 +389,23 @@ narrowing is reported back. A chat denied `bash` cannot mint a helper that has
 it. This is an *authoring* rule — what a worker may actually do is still decided
 at execution time by its own stored policy and the owner baseline.
 
+Losing *every* requested tool is not a narrowing, it is the loadout failing to
+exist: the clamp used to store that as `tool_access: "none"`, and each worker it
+started opened by saying it was blocked. Such a loadout is now refused at
+create/update, naming the tools the chat can actually grant, and a stored one is
+refused at `start` with the loadouts that do have tools. `start` returns the
+model, tool bindings and round budget the worker actually got, so a wrong-fit
+loadout is visible immediately rather than after the worker reports it, and
+`action=status` reports what this chat's workers did — including which ran out
+of rounds — so the answer never has to be reconstructed from log files.
+
+A worker's run is filed under the worker's own chat, and the chat that started
+it finds that run through the run record's `parent_session`. That link is what
+the agent strip above the composer reconciles its rows against; without it a
+sub-agent row appeared for a moment and was then marked interrupted. The parent
+also receives a terminal `status` event for each worker, so the row resolves
+where the user is looking instead of sitting at "running" forever.
+
 The explicit-delegation gate covers built-in delegate tools,
 `manage_agent_loadout`, and dynamically qualified MCP tools whose name ends in
 `run_pi_task`. `manage_agent_worktree` is intentionally outside this launch gate:

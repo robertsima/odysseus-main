@@ -361,3 +361,48 @@ async def test_a_finished_worker_hand_off_is_unchanged(monkeypatch):
 
     inject = parent.messages[-1].content
     assert "[Worker Runner finished]" in inject and "cut off" not in inject
+
+
+async def test_the_chat_that_started_a_worker_sees_it_start_and_finish(monkeypatch):
+    """The agent strip above the composer is driven by the PARENT chat's feed.
+
+    A worker's run_started/run_finished are filed under the worker's own chat,
+    so without these two parent-side events the strip drew a row that never
+    resolved and was then reconciled away as interrupted — which is why
+    sub-agents stopped appearing in the chat that launched them.
+    """
+    from src import agent_control
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    parent_chat, worker_chat = _Chat("parent"), _Chat("w-9")
+    sessions = {"parent": parent_chat, "w-9": worker_chat}
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager(sessions))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+    monkeypatch.setattr(agent_runs, "is_busy", lambda sid: True)
+
+    async def fake_headless(sess, messages, **kwargs):
+        kwargs["outcome"]["rounds_exhausted"] = True
+        return "Looked at four files.", [{"tool": "read_file"}]
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+
+    rec = await agent_control.launch_worker(
+        owner="alice", task="audit the notes UI", parent_session="parent")
+    await agent_control._WORKERS[rec["run_id"]]
+
+    parent_events = [ev for ev in act.history("parent") if ev["run_id"] == rec["run_id"]]
+    kinds = [ev["kind"] for ev in parent_events]
+    assert "message" in kinds and "status" in kinds
+
+    closing = next(ev for ev in parent_events if ev["kind"] == "status")
+    assert closing["data"]["status"] == "incomplete"
+    assert closing["data"]["rounds_exhausted"] is True
+    assert f"{rec['max_rounds']}-round budget" in closing["title"]
+
+    # And the parent can list the run, which is what stops the strip's
+    # reconcile pass from deciding the run it could not find was interrupted.
+    listed = act.list_runs(session_id="parent")
+    assert [r["run_id"] for r in listed] == [rec["run_id"]]
+    assert listed[0]["status"] == "incomplete"

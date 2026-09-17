@@ -320,6 +320,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "repository", "branch", "commit", "model", "task_id", "target_session", "target_session_name",
     "changed_files", "changes", "commits", "num_turns", "total_cost_usd", "exit_code", "error",
     "job_id", "command", "steps", "pull_request", "request_id", "result_excerpt", "mode",
+    "max_rounds", "rounds_exhausted", "profile",
     "workflow_id", "parent_session", "parent_run_id", "stage", "workflow_controller",
     "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
     "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
@@ -421,7 +422,15 @@ def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
     if owner is not None:
         rows = [r for r in rows if r.get("owner") in (owner, None)]
     if session_id:
-        rows = [r for r in rows if r.get("session_id") == session_id]
+        # A worker's run is filed under the WORKER's chat, but the chat that
+        # started it has to be able to find it: the agent strip above the
+        # composer reconciles the rows it drew from the parent's own feed
+        # against this list, and a run it cannot find here is marked
+        # interrupted. That is why sub-agents appeared for a moment and then
+        # silently vanished from the chat that launched them.
+        rows = [r for r in rows
+                if r.get("session_id") == session_id
+                or (r.get("summary") or {}).get("parent_session") == session_id]
     if active_only:
         rows = [r for r in rows if r.get("status") == "running"]
     rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
