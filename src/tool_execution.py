@@ -15,7 +15,6 @@ import logging
 import os
 import pathlib
 import re
-import stat
 import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -28,40 +27,17 @@ from src.tool_security import (
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
-from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
-from src.tool_approvals import ExactToolApproval
 from src.tool_policy import ToolPolicy
-<<<<<<< HEAD
-from src.constants import (
-    MAX_OUTPUT_CHARS,
-    MAX_READ_CHARS,
-    MAX_DIFF_LINES,
-    AGENT_WORKSPACE_DIR,
-)
-=======
 from src.private_access import effective_private_grant, private_tool_denial, tool_requires_private_grant
 from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
->>>>>>> origin/dev
 from src.tool_utils import _truncate, get_mcp_manager
 
-
-class _MissingToolSecurityContext:
-    pass
-
-
-class _NoToolSecurityContext:
-    """Explicit sentinel for non-agent callers that have no run provenance."""
-
-
-_MISSING_TOOL_SECURITY_CONTEXT = _MissingToolSecurityContext()
-NO_TOOL_SECURITY_CONTEXT = _NoToolSecurityContext()
-
 # Persistent working directory for agent subprocesses.
-# Resolves to <repo_root>/data/agent_workspace, inside the bind-mounted volume
-# in Docker (/app/data), so files survive a rebuild as before. The subdirectory
-# rather than data/ itself keeps agent scratch files and dotfiles out of the
-# directory holding the session store and the auth database.
-_AGENT_WORKDIR = AGENT_WORKSPACE_DIR
+# Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
+# (/app/data) and the local data directory for manual installs.
+# Using this as cwd and HOME prevents the agent from silently creating files
+# in ephemeral container layers that are lost on the next rebuild.
+_AGENT_WORKDIR = DATA_DIR
 
 
 def _git_safe_directory_env(env: Dict[str, str]) -> Dict[str, str]:
@@ -104,15 +80,10 @@ def _git_safe_directory_env(env: Dict[str, str]) -> Dict[str, str]:
 #   1. Sensitive-subpath deny list — checked FIRST. Blocks .ssh,
 #      .gnupg, shell rc files, token/env files even if the root above
 #      them is on the allowlist.
-#   2. Application-state deny (_is_app_state_path) - DATA_DIR holds the
-#      session store, auth database, app key and settings, so only
-#      _agent_readable_data_subdirs() is readable inside it.
-#   3. Allowlist - only the directories the agent legitimately needs
-#      (its data/ workspace, user content, system tmp). $HOME is NOT on
-#      the default list.
-#   4. Opt-in extra roots - admin can add broader roots via the
-#      "tool_path_extra_roots" setting. These cannot re-open DATA_DIR;
-#      rule 2 is independent of which root a path arrived through.
+#   2. Allowlist — only the directories the agent legitimately needs
+#      (project data/, system tmp). $HOME is NOT on the default list.
+#   3. Opt-in extra roots — admin can add broader roots via the
+#      "tool_path_extra_roots" setting (list of path strings).
 # ---------------------------------------------------------------------------
 
 _SENSITIVE_BASENAMES: set[str] = {
@@ -321,184 +292,6 @@ def _is_under_personal_docs(resolved: str) -> bool:
     return a == b or a.startswith(b + os.sep)
 
 
-def _path_within(resolved: str, root: str) -> bool:
-    """True when *resolved* is *root* itself or sits underneath it.
-
-    Use the platform's path-case rules.  This helper participates in allow
-    decisions, so unconditional case-folding would let a distinct ``/DATA``
-    tree masquerade as a descendant of ``/data`` on case-sensitive systems.
-    """
-    resolved, root = os.path.normcase(resolved), os.path.normcase(root)
-    if resolved == root:
-        return True
-    try:
-        if os.path.commonpath([resolved, root]) == root:
-            return True
-    except ValueError:
-        return False
-    # normcase is intentionally conservative about assumptions (notably on
-    # POSIX), so consult the filesystem when paths exist.  This recognizes a
-    # case alias on a case-insensitive volume without treating distinct
-    # case-sensitive paths as the same allow root.
-    if os.path.exists(root):
-        candidate = resolved
-        while True:
-            try:
-                if os.path.exists(candidate) and os.path.samefile(candidate, root):
-                    return True
-            except OSError:
-                pass
-            parent = os.path.dirname(candidate)
-            if parent == candidate:
-                break
-            candidate = parent
-    return False
-
-
-def _path_within_conservative(resolved: str, root: str) -> bool:
-    """Containment for deny decisions, folding case to fail closed."""
-    resolved, root = resolved.casefold(), root.casefold()
-    if resolved == root:
-        return True
-    try:
-        return os.path.commonpath([resolved, root]) == root
-    except ValueError:
-        return False
-
-
-def _agent_readable_data_subdirs() -> tuple[str, ...]:
-    """The only parts of DATA_DIR the agent's file tools may reach.
-
-    The agent's own scratch folder, plus the directories of user content whose
-    paths the application itself gives to the model, which it would then be
-    unable to open.  These normally live under DATA_DIR; the documented mail
-    attachment override may instead name a disjoint external directory:
-
-      UPLOAD_DIR            the chat upload manifest renders "path=<p>" and
-                            says to read it with read_file (agent_loop.py)
-      MAIL_ATTACHMENTS_DIR  download_attachment returns the path and its own
-                            description tells the model to read it
-      PERSONAL_DIR          GET /api/personal returns a path per file and is
-                            reachable through the app_api tool; RUNBOOK_DIR
-                            nests under it
-      PERSONAL_UPLOADS_DIR  indexed as a personal-docs directory, which
-                            manage_rag lists as an absolute path
-
-    Order matters: the first entry is roots[0], which _resolve_search_root uses
-    when grep/glob/ls are called with no path.
-    """
-    from src.constants import (
-        DATA_DIR,
-        MAIL_ATTACHMENTS_DIR,
-        PERSONAL_DIR,
-        PERSONAL_UPLOADS_DIR,
-        UPLOAD_DIR,
-    )
-    configured = (
-        (AGENT_WORKSPACE_DIR, "agent_workspace", False),
-        (UPLOAD_DIR, "uploads", False),
-        # This has a documented environment override and may legitimately
-        # live outside DATA_DIR, but it must never equal/contain DATA_DIR.
-        (MAIL_ATTACHMENTS_DIR, "mail-attachments", True),
-        (PERSONAL_DIR, "personal_docs", False),
-        (PERSONAL_UPLOADS_DIR, "personal_uploads", False),
-    )
-    configured_data_dir = os.path.abspath(os.path.expanduser(str(DATA_DIR)))
-    data_dir = os.path.realpath(configured_data_dir)
-    safe: list[str] = []
-    for raw, internal_name, external_ok in configured:
-        value = str(raw or "").strip()
-        # These paths are security-policy roots, not ordinary allowlist
-        # entries. Internal roles may inherit a relative DATA_DIR, but must
-        # still resolve to their exact canonical child below. External mail
-        # overrides require an absolute, disjoint directory.
-        if not value:
-            continue
-        expanded = os.path.abspath(os.path.expanduser(value))
-        # A policy root must not acquire an exemption by redirecting its final
-        # path component to protected state or to an unrelated external tree.
-        if os.path.islink(expanded):
-            continue
-        resolved = os.path.realpath(expanded)
-        if os.path.exists(resolved) and not os.path.isdir(resolved):
-            continue
-        expected_internal = os.path.join(data_dir, internal_name)
-        expected_configured = os.path.join(configured_data_dir, internal_name)
-        inside_data = (
-            os.path.normcase(expanded)
-            in {
-                os.path.normcase(expected_configured),
-                os.path.normcase(expected_internal),
-            }
-            and resolved == expected_internal
-        )
-        external_safe = (
-            external_ok
-            and os.path.isabs(os.path.expanduser(value))
-            and resolved != data_dir
-            and os.path.dirname(resolved) != resolved
-            and not _path_within(data_dir, resolved)
-            and not _path_within(resolved, data_dir)
-        )
-        if not (inside_data or external_safe) or _is_sensitive_path(resolved):
-            continue
-        safe.append(resolved)
-    return tuple(safe)
-
-
-def _is_app_state_path(resolved: str) -> bool:
-    """True for anything under DATA_DIR that is not agent-readable.
-
-    DATA_DIR holds the session store, the auth database, the app encryption key
-    and the settings file. A model-supplied path must not reach those through
-    any root, so this is checked in both resolvers rather than expressed as an
-    absence from the allowlist: a workspace bound at or above the data
-    directory, or an opt-in tool_path_extra_roots entry covering it, would
-    otherwise put them back in reach.
-
-    A containment rule rather than a filename deny list, so state files added
-    later are covered without anyone remembering to list them, and so a user's
-    own settings.json or app.db inside a real workspace is not caught.
-    """
-    from src.constants import DATA_DIR
-    if not _path_within_conservative(resolved, os.path.realpath(DATA_DIR)):
-        return False
-    return not any(
-        _path_within(resolved, d)
-        for d in _agent_readable_data_subdirs()
-    )
-
-
-def _is_hardlinked_regular_file(resolved: str) -> bool:
-    """Reject inode aliases that can smuggle DATA_DIR state into an allow root."""
-    try:
-        target = os.stat(resolved, follow_symlinks=False)
-    except OSError:
-        return False
-    return stat.S_ISREG(target.st_mode) and getattr(target, "st_nlink", 1) > 1
-
-
-def _is_denied_tool_path(resolved: str) -> bool:
-    """Apply every path deny to a canonical traversal result."""
-    return (
-        _is_sensitive_path(resolved)
-        or _is_app_state_path(resolved)
-        or _is_hardlinked_regular_file(resolved)
-    )
-
-
-def _can_traverse_tool_path(resolved: str) -> bool:
-    """Allow walking a denied state parent only to reach safe carve-outs."""
-    if _is_sensitive_path(resolved):
-        return False
-    if not _is_app_state_path(resolved):
-        return True
-    return any(
-        _path_within(readable, resolved)
-        for readable in _agent_readable_data_subdirs()
-    )
-
-
 def _tool_path_roots() -> list[str]:
     """Return the list of directory roots that read_file / write_file
     may touch. Default: project data/ + system temp dirs. Extra roots
@@ -507,9 +300,9 @@ def _tool_path_roots() -> list[str]:
     """
     roots: list[str] = []
 
-    # The agent's workspace plus the user-content directories inside data/.
-    # The rest of DATA_DIR is denied by _is_app_state_path.
-    roots.extend(_agent_readable_data_subdirs())
+    # Project data directory — the agent's primary workspace.
+    from src.constants import DATA_DIR
+    roots.append(DATA_DIR)
 
     # /tmp (and its macOS realpath /private/tmp).
     roots.append("/tmp")
@@ -592,12 +385,6 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
-    if _is_app_state_path(resolved):
-        raise ValueError(
-            f"path '{raw_path}' is inside the application state directory"
-        )
-    if _is_hardlinked_regular_file(resolved):
-        raise ValueError(f"path '{raw_path}' is a hard-linked file")
 
     for root in _tool_path_roots():
         if resolved == root:
@@ -662,12 +449,6 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
-    if _is_app_state_path(resolved):
-        raise ValueError(
-            f"path '{raw_path}' is inside the application state directory"
-        )
-    if _is_hardlinked_regular_file(resolved):
-        raise ValueError(f"path '{raw_path}' is a hard-linked file")
     if resolved != base:
         # normcase so containment holds on case-insensitive filesystems
         # (Windows, default macOS): it lowercases on Windows and is a no-op on
@@ -717,10 +498,6 @@ def vet_workspace(raw: str) -> Optional[str]:
     resolved = os.path.realpath(os.path.expanduser(raw))
     if not os.path.isdir(resolved) or _is_sensitive_path(resolved):
         return None
-    # Refuse the bind rather than binding a workspace where every subsequent
-    # tool call would fail on the same deny list.
-    if _is_app_state_path(resolved):
-        return None
     # Reject filesystem roots: binding / (or a Windows drive/UNC root) as the
     # workspace would make every absolute path "inside" it, collapsing the
     # confinement into host-wide file access. A root is its own dirname, which
@@ -733,13 +510,7 @@ def vet_workspace(raw: str) -> Optional[str]:
 def agent_cwd() -> str:
     """Working directory for agent subprocesses (bash/python/background jobs):
     the active workspace when set, else the persistent data dir."""
-    workspace = get_active_workspace()
-    if workspace:
-        return workspace
-    resolved = os.path.realpath(_AGENT_WORKDIR)
-    if resolved not in _agent_readable_data_subdirs():
-        raise RuntimeError("agent workspace is not a safe real directory")
-    return resolved
+    return get_active_workspace() or _AGENT_WORKDIR
 
 
 def get_mcp_manager():
@@ -752,33 +523,21 @@ def get_mcp_manager():
 def _resolve_search_root(raw_path: str, allow_private: bool = False) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
-    With a workspace active, the workspace folder is the default root. A bare
-    request is checked against workspace policy; supplied paths use the global
-    allowlist so the personal-documents tree remains reachable. Otherwise the
-    agent workspace is the default root.
+    With a workspace active, the workspace folder is the default root and a
+    supplied path is confined inside it (or inside the personal-documents tree
+    — see _resolve_tool_path, so grepping the vault does not require unbinding
+    the workspace). Otherwise an empty path defaults to the agent's primary
+    root (project data dir) and a supplied path is confined by the global
+    allowlist + sensitive-file policy.
     """
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-<<<<<<< HEAD
-        # Resolve the empty case as the workspace path rather than returning
-        # it directly: returned unchecked it skipped both deny lists, so a
-        # bare ls listed whatever the workspace was bound to.
-        return _resolve_tool_path_in_workspace(ws, ws) if not raw else _resolve_tool_path(raw)
-    if not raw:
-        roots = _tool_path_roots()
-        default_root = os.path.realpath(AGENT_WORKSPACE_DIR)
-        if default_root in roots and not _is_denied_tool_path(default_root):
-            return default_root
-        raise ValueError("default agent workspace is not a safe readable data subdirectory")
-    return _resolve_tool_path(raw)
-=======
         return os.path.realpath(ws) if not raw else _resolve_tool_path(raw, allow_private=allow_private)
     if not raw:
         roots = _tool_path_roots()
         return roots[0] if roots else os.path.realpath(".")
     return _resolve_tool_path(raw, allow_private=allow_private)
->>>>>>> origin/dev
 
 logger = logging.getLogger(__name__)
 
@@ -1163,28 +922,12 @@ async def _document_tool_dispatch(
     content: str,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
-<<<<<<< HEAD
-    document_id: Optional[str] = None,
-    document_version: Optional[int] = None,
-    document_digest: Optional[str] = None,
-) -> Optional[Dict]:
-    """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
-    from src.agent_tools import TOOL_HANDLERS
-    ctx = {
-        "session_id": session_id,
-        "owner": owner,
-        "doc_id": document_id,
-        "expected_document_version": document_version,
-        "expected_document_digest": document_digest,
-    }
-=======
     allow_private: bool = False,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
     ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private),
            "tool_name": tool}
->>>>>>> origin/dev
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
@@ -1202,18 +945,9 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
-<<<<<<< HEAD
-    security_context: (
-        ToolRunSecurityContext
-        | _NoToolSecurityContext
-        | _MissingToolSecurityContext
-    ) = _MISSING_TOOL_SECURITY_CONTEXT,
-    exact_approval: Optional[ExactToolApproval] = None,
-=======
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
     tool_discovery: Optional[Any] = None,
->>>>>>> origin/dev
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1221,104 +955,6 @@ async def execute_tool_block(
     cwd confine to it) for the duration of this call, then delegate. Reset on the
     way out so the binding never leaks to the next tool call.
     """
-    if security_context is _MISSING_TOOL_SECURITY_CONTEXT:
-        raise TypeError(
-            "execute_tool_block requires security_context; pass a "
-            "ToolRunSecurityContext or NO_TOOL_SECURITY_CONTEXT explicitly"
-        )
-    if (
-        not isinstance(security_context, ToolRunSecurityContext)
-        and security_context is not NO_TOOL_SECURITY_CONTEXT
-    ):
-        raise TypeError(
-            "security_context must be a ToolRunSecurityContext or "
-            "NO_TOOL_SECURITY_CONTEXT"
-        )
-
-    approval_claimed = False
-    if exact_approval is not None:
-        if (
-            not isinstance(security_context, ToolRunSecurityContext)
-            or not security_context.external_untrusted_context_seen
-            or not exact_approval.pending.external_untrusted_context_seen
-        ):
-            return (
-                f"{getattr(block, 'tool_type', None)}: BLOCKED",
-                {
-                    "error": "Exact-action approval requires an armed run security context.",
-                    "exit_code": 1,
-                    "blocked": True,
-                    "policy": "exact_tool_approval",
-                },
-            )
-        if (
-            exact_approval.pending.tool_name
-            in {"edit_document", "suggest_document", "update_document"}
-            and (
-                not exact_approval.pending.document_id
-                or exact_approval.pending.document_version is None
-                or not exact_approval.pending.document_digest
-            )
-        ):
-            return (
-                f"{getattr(block, 'tool_type', None)}: BLOCKED",
-                {
-                    "error": (
-                        "The approved document action has no sealed target and "
-                        "cannot be executed."
-                    ),
-                    "exit_code": 1,
-                    "blocked": True,
-                    "policy": "exact_tool_approval",
-                },
-            )
-        sealed_workspace = exact_approval.pending.workspace
-        if sealed_workspace and vet_workspace(sealed_workspace) != sealed_workspace:
-            return (
-                f"{getattr(block, 'tool_type', None)}: BLOCKED",
-                {
-                    "error": (
-                        "The approved workspace is no longer a valid safe "
-                        "directory. Review the action again."
-                    ),
-                    "exit_code": 1,
-                    "blocked": True,
-                    "policy": "exact_tool_approval",
-                },
-            )
-        approval_claimed = exact_approval.claim(
-            owner=owner,
-            session_id=session_id,
-            tool_name=getattr(block, "tool_type", None),
-            content=getattr(block, "content", None),
-            workspace=workspace,
-        )
-        if not approval_claimed:
-            return (
-                f"{getattr(block, 'tool_type', None)}: BLOCKED",
-                {
-                    "error": "The exact-action approval did not match this tool request.",
-                    "exit_code": 1,
-                    "blocked": True,
-                    "policy": "exact_tool_approval",
-                },
-            )
-
-    if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
-        decision = security_context.decision_for(
-            getattr(block, "tool_type", None),
-            getattr(block, "content", None),
-        )
-        if not decision.allowed:
-            logger.warning(
-                "External-context policy blocked tool=%r",
-                getattr(block, "tool_type", None),
-            )
-            return blocked_tool_result(
-                getattr(block, "tool_type", None),
-                decision.reason or "Tool blocked by external-context policy.",
-            )
-
     token = _active_workspace.set(workspace or None)
     try:
         output = await _execute_tool_block_impl(
@@ -1328,34 +964,10 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
-<<<<<<< HEAD
-            approved_document_id=(
-                exact_approval.pending.document_id
-                if approval_claimed
-                else None
-            ),
-            approved_document_version=(
-                exact_approval.pending.document_version
-                if approval_claimed
-                else None
-            ),
-            approved_document_digest=(
-                exact_approval.pending.document_digest
-                if approval_claimed
-                else None
-            ),
-=======
             allow_private=allow_private,
             delegation_authorized=delegation_authorized,
             tool_discovery=tool_discovery,
->>>>>>> origin/dev
         )
-        if isinstance(security_context, ToolRunSecurityContext):
-            security_context.observe_tool_result(
-                getattr(block, "tool_type", None),
-                output[1],
-                getattr(block, "content", None),
-            )
         return output
     finally:
         _active_workspace.reset(token)
@@ -1368,15 +980,9 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
-<<<<<<< HEAD
-    approved_document_id: Optional[str] = None,
-    approved_document_version: Optional[int] = None,
-    approved_document_digest: Optional[str] = None,
-=======
     allow_private: bool = False,
     delegation_authorized: Optional[bool] = None,
     tool_discovery: Optional[Any] = None,
->>>>>>> origin/dev
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1770,19 +1376,7 @@ async def _execute_tool_block_impl(
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
         desc = f"{tool}: {_command_preview(content)}"
-<<<<<<< HEAD
-        result = await _document_tool_dispatch(
-            tool,
-            content,
-            session_id,
-            owner,
-            document_id=approved_document_id,
-            document_version=approved_document_version,
-            document_digest=approved_document_digest,
-        ) \
-=======
         result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
->>>>>>> origin/dev
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
             desc = f"{tool}: {result.get('title', '')}"

@@ -14,7 +14,6 @@ import asyncio
 import logging
 
 from src import bg_jobs
-from src.prompt_security import untrusted_context_message
 
 logger = logging.getLogger(__name__)
 
@@ -23,16 +22,6 @@ POLL_INTERVAL_S = 5
 # The follow-up agent run is allowed a few rounds to actually continue the task
 # (e.g. after `pip install` finishes, run the transcription).
 _FOLLOWUP_MAX_ROUNDS = 12
-
-
-def _background_result_message(rec):
-    inject = (
-        f"[Background job {rec['id']} finished]\n\n"
-        f"{bg_jobs.result_text(rec)}\n\n"
-        "Continue the task using this output. Don't repeat work that's already done. "
-        "If the task is now complete, give the user the final result."
-    )
-    return untrusted_context_message("background job output", inject)
 
 
 async def _drain_agent(sess, messages, *, run_id=None):
@@ -86,8 +75,14 @@ async def _run_followup(rec: dict) -> bool:
     except Exception:
         pass
 
+    inject = (
+        f"[Background job {rec['id']} finished]\n\n"
+        f"{bg_jobs.result_text(rec)}\n\n"
+        "Continue the task using this output. Don't repeat work that's already done. "
+        "If the task is now complete, give the user the final result."
+    )
     context = sess.get_context_messages()
-    context.append(_background_result_message(rec))
+    context.append({"role": "user", "content": inject})
 
     from src import agent_activity as activity
 

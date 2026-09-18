@@ -36,8 +36,6 @@ secrets.env~
 .idea/
 dev-docs/
 docs/
-website/
-assets/branding/
 *.md
 # Bundled skill instructions and references are runtime application assets.
 !skills/

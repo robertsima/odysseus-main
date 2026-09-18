@@ -466,10 +466,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         return out
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")
-        return {
-            "error": f"Failed to send to session: {e}",
-            "untrusted_content": True,
-        }
+        return {"error": f"Failed to send to session: {e}"}
 
 async def manage_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage sessions: rename, archive, delete, important, truncate, fork.

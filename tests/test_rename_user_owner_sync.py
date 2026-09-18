@@ -114,12 +114,6 @@ def _force_sql_owner_migration_failure(monkeypatch):
         def filter(self, *_args, **_kwargs):
             return self
 
-        def order_by(self, *_args, **_kwargs):
-            return self
-
-        def all(self):
-            return []
-
         def update(self, *_args, **_kwargs):
             raise RuntimeError("forced owner migration failure")
 
@@ -130,12 +124,6 @@ def _force_sql_owner_migration_failure(monkeypatch):
 
         def query(self, _model):
             return FailingQuery()
-
-        def get_bind(self):
-            return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
-
-        def get(self, _model, _key, **_kwargs):
-            return object()
 
         def rollback(self):
             self.rolled_back = True

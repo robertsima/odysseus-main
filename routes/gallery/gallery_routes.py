@@ -139,25 +139,6 @@ def _load_grounding_backend():
     return cached
 
 
-def _model_input_to_device(value, device: str, torch):
-    if not hasattr(value, "to"):
-        return value
-    if (
-        device == "mps"
-        and hasattr(torch, "float64")
-        and getattr(value, "dtype", None) == torch.float64
-    ):
-        return value.to(device=device, dtype=torch.float32)
-    return value.to(device)
-
-
-def _model_inputs_to_device(inputs, device: str, torch) -> Dict[str, Any]:
-    return {
-        key: _model_input_to_device(value, device, torch)
-        for key, value in inputs.items()
-    }
-
-
 def _ground_text_to_box(image, text: str, *, threshold: float = 0.05):
     query = (text or "").strip()
     if not query:
@@ -173,7 +154,10 @@ def _ground_text_to_box(image, text: str, *, threshold: float = 0.05):
         labels.append(f"a photo of {query}")
     try:
         inputs = processor(text=[labels], images=image, return_tensors="pt")
-        model_inputs = _model_inputs_to_device(inputs, device, torch)
+        model_inputs = {
+            k: (v.to(device) if hasattr(v, "to") else v)
+            for k, v in inputs.items()
+        }
         with torch.no_grad():
             outputs = model(**model_inputs)
         target_sizes = torch.tensor([[image.height, image.width]])
@@ -1897,7 +1881,10 @@ def setup_gallery_routes() -> APIRouter:
 
         try:
             inputs = processor(image, **kwargs)
-            model_inputs = _model_inputs_to_device(inputs, device, torch)
+            model_inputs = {
+                k: (v.to(device) if hasattr(v, "to") else v)
+                for k, v in inputs.items()
+            }
             with torch.no_grad():
                 outputs = model(**model_inputs)
             masks = processor.image_processor.post_process_masks(

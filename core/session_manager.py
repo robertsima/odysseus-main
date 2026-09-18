@@ -14,8 +14,6 @@ import logging
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 
-from sqlalchemy import func
-
 from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
 from .models import Session, ChatMessage
 from src.attachment_refs import persistable_message_content
@@ -94,28 +92,14 @@ class SessionManager:
         try:
             db_sessions = db.query(DbSession).filter(
                 DbSession.archived == False,
-                DbSession.messages.any(),
+                DbSession.message_count > 0,
             ).order_by(DbSession.last_accessed.desc()).limit(100).all()
-
-            # message_count is derived metadata and can drift after interrupted
-            # or legacy writes. Count only the bounded discovery set so startup
-            # remains metadata-only while lazy hydration sees an authoritative
-            # positive count for every discovered non-empty session.
-            message_counts = {}
-            if db_sessions:
-                message_counts = dict(
-                    db.query(DbChatMessage.session_id, func.count(DbChatMessage.id))
-                    .filter(DbChatMessage.session_id.in_([row.id for row in db_sessions]))
-                    .group_by(DbChatMessage.session_id)
-                    .all()
-                )
 
             loaded_count = 0
             for db_session in db_sessions:
                 try:
                     session = self._db_to_session_meta(db_session)
                     if session is not None:
-                        session.message_count = message_counts[db_session.id]
                         self.sessions[db_session.id] = session
                         loaded_count += 1
                 except Exception as e:
@@ -210,12 +194,7 @@ class SessionManager:
             is_important=getattr(db_session, 'is_important', False) or False,
         )
 
-        # The rows just loaded are the whole transcript, so they — not the
-        # denormalized sessions.message_count column — are the truth for this
-        # cached object. get_session's hydration gate compares against this
-        # number; seeding it from a drifted column would ask for a reload that
-        # can never close the gap.
-        session.message_count = len(history)
+        session.message_count = getattr(db_session, 'message_count', len(history))
         return session
 
     # ------------------------------------------------------------------
@@ -419,32 +398,22 @@ class SessionManager:
     # ------------------------------------------------------------------
 
     def get_session(self, session_id: str) -> Session:
-        """Get a session by ID, loading complete DB history when needed.
+        """Get a session by ID, loading from DB if needed.
 
-        Sessions seeded by ``load_sessions`` start with empty history, and a
-        cached session can also become partially stale. Refresh metadata first,
-        then hydrate whenever the cached transcript is short of the stored rows.
-        Model-send routes enter through this method before building context,
-        while paginated display history reads SQLite directly.
-
-        The gate compares against ``sync_session_metadata``'s reconciled count
-        (the real ``chat_messages`` total), never the denormalized column, so a
-        hydrate always closes the gap and the next read is a cache hit.
+        Sessions seeded by `load_sessions` start with empty history. The
+        first read here hydrates them with the message rows.
         """
         if session_id not in self.sessions:
             self._load_session_from_db(session_id)
+        else:
+            cached = self.sessions[session_id]
+            # Lazy hydrate: metadata-only entries get their messages on first read.
+            if not cached.history and getattr(cached, "message_count", 0) > 0:
+                self._load_session_from_db(session_id)
 
         # Keep model/endpoint metadata fresh. Endpoint deletion can clear the
-        # DB row while a session object is still cached in RAM. Refreshing first
-        # also exposes the authoritative message count before completeness is
-        # checked.
+        # DB row while a session object is still cached in RAM.
         self.sync_session_metadata(session_id)
-
-        cached = self.sessions[session_id]
-        cached_count = len(cached.history or [])
-        stored_count = int(getattr(cached, "message_count", 0) or 0)
-        if cached_count < stored_count:
-            self._load_session_from_db(session_id)
 
         # Update last_accessed
         self._touch_session(session_id)
@@ -452,17 +421,7 @@ class SessionManager:
         return self.sessions[session_id]
 
     def sync_session_metadata(self, session_id: str) -> bool:
-        """Refresh non-message session fields from the DB into the cached object.
-
-        ``message_count`` is reconciled against the real ``chat_messages`` rows
-        rather than copied from the denormalized ``sessions.message_count``
-        column. That column drifts in normal operation — ``_persist_message``
-        swallows a failed insert but ``add_message`` has already appended in
-        memory, so the next successful persist writes rows+1, and a persist for
-        an uncached session writes 0. Hydration keys off this number: a
-        drifted-high column would reload the whole transcript on every warm
-        read, and a drifted-low one would leave the model a truncated one.
-        """
+        """Refresh non-message session fields from the DB into the cached object."""
         session = self.sessions.get(session_id)
         if session is None:
             return False
@@ -485,11 +444,7 @@ class SessionManager:
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)
             session.is_important = getattr(db_session, "is_important", False) or False
-            session.message_count = (
-                db.query(DbChatMessage)
-                .filter(DbChatMessage.session_id == session_id)
-                .count()
-            )
+            session.message_count = getattr(db_session, "message_count", session.message_count) or 0
             return True
         except Exception as e:
             logger.error(f"Error syncing session metadata {session_id}: {e}")

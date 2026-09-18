@@ -1,4 +1,3 @@
-import re
 from pathlib import Path
 
 
@@ -14,7 +13,7 @@ def test_stream_render_helpers_are_visible_to_catch_block():
     assert "let _cancelThinkingTimer = () => {};" in outer_scope
     assert "let _removeThinkingSpinner = () => {};" in outer_scope
 
-    assert re.search(r"(?m)^\s*_renderStream\s*=", try_body)
+    assert "_renderStream = () => {" in try_body
     assert "_cancelThinkingTimer = () => {" in try_body
     assert "_removeThinkingSpinner = () => {" in try_body
     assert "function _renderStream()" not in try_body

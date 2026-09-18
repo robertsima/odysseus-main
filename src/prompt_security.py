@@ -61,13 +61,7 @@ def _sanitize_label(label: str) -> str:
     return label
 
 
-def untrusted_context_message(
-    label: str,
-    content: Any,
-    *,
-    provenance_origin: str | None = None,
-    arm_tool_gate: bool = True,
-) -> Dict[str, Any]:
+def untrusted_context_message(label: str, content: Any) -> Dict[str, Any]:
     """Return an LLM message that keeps retrieved/source text out of system role.
 
     The template is structured so that *only* the hardcoded
@@ -79,13 +73,6 @@ def untrusted_context_message(
     safe_label = _sanitize_label(label)
     text = "" if content is None else str(content)
     text = _escape_guard_markers(text)
-    metadata: Dict[str, Any] = {
-        "trusted": False,
-        "source": label,
-        "tool_gate_untrusted": bool(arm_tool_gate),
-    }
-    if provenance_origin:
-        metadata["provenance_origin"] = provenance_origin
     return {
         "role": "user",
         "content": (
@@ -95,5 +82,5 @@ def untrusted_context_message(
             f"{text}\n"
             f"{GUARD_CLOSE}"
         ),
-        "metadata": metadata,
+        "metadata": {"trusted": False, "source": label},
     }

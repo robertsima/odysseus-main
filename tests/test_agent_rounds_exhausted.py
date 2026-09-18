@@ -45,7 +45,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
 
     async def _fake_exec(block, *a, **k):
-        return (block.tool_type, {"output": "ok", "exit_code": 0})
+        return ("bash", {"output": "ok", "exit_code": 0})
     monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
 
 
@@ -73,14 +73,8 @@ def test_a_round_cap_no_longer_cuts_a_run_off(monkeypatch):
     difference between working and stuck.
     """
     _patch_common(monkeypatch)
-    # Use a system-owned interaction result so this remains a loop-control test:
-    # Bash output is workspace-derived and now correctly pauses for exact user
-    # approval before a later Bash call.
-    events = _run_loop(
-        monkeypatch,
-        '```update_plan\n{"plan":"- [ ] keep going"}\n```',
-        max_rounds=2,
-    )
+    # Every round returns a tool block -> never "done".
+    events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=2)
 
     assert not any(e.get("type") == "rounds_exhausted" for e in events), events
     assert any(e.get("type") == "agent_step" and e.get("round", 0) > 2 for e in events), events
@@ -108,11 +102,7 @@ def test_emits_intent_nudge_exhausted_when_cap_is_exhausted(monkeypatch):
 def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
     _patch_common(monkeypatch)
 
-    events = _run_loop(
-        monkeypatch,
-        '```update_plan\n{"plan":"- [ ] keep going"}\n```',
-        max_rounds=6,
-    )
+    events = _run_loop(monkeypatch, "```bash\necho hi\n```", max_rounds=6)
 
     guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
     assert guard is not None, events

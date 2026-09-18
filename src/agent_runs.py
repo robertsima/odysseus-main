@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import time
-import uuid
 from contextlib import contextmanager
 from typing import AsyncGenerator, Dict, List, Optional
 
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 class _Run:
     __slots__ = ("buffer", "subscribers", "status", "task", "evict_task",
-                 "owner", "source", "started_at", "finished_at", "run_id")
+                 "owner", "source", "started_at", "finished_at")
 
     def __init__(self, owner: Optional[str] = None, source: str = "chat") -> None:
         self.buffer: list = []          # ordered SSE event strings (replay log)
@@ -39,9 +38,6 @@ class _Run:
         self.source = source
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
-        # Stable across every subscription/replay of this exact detached run.
-        # The browser uses it to make local cost accounting replay-idempotent.
-        self.run_id: str = uuid.uuid4().hex
 
 
 _RUNS: Dict[str, _Run] = {}
@@ -74,23 +70,12 @@ def _publish(run: _Run, ev: str) -> None:
             pass
 
 
-def _wake_run_subscribers(run: _Run) -> None:
-    """Close subscribers even when the drain task never reached its body."""
-    for q in list(run.subscribers):
-        try:
-            q.put_nowait((None, None))
-        except Exception:
-            pass
-
-
-def _schedule_evict(session_id: str, expected_run: Optional[_Run] = None) -> None:
+def _schedule_evict(session_id: str) -> None:
     """(Re)arm a grace-period eviction for a terminal run with no subscribers.
     Identity-checked so a run that gets replaced/reused is never evicted by a
     stale timer."""
     run = _RUNS.get(session_id)
     if run is None:
-        return
-    if expected_run is not None and run is not expected_run:
         return
     if run.evict_task and not run.evict_task.done():
         run.evict_task.cancel()
@@ -170,38 +155,25 @@ def get_status(session_id: str) -> Optional[str]:
     return r.status if r else None
 
 
-def get_run_id(session_id: str) -> Optional[str]:
-    """Return the opaque identity of the current detached run, if present."""
-    r = _RUNS.get(session_id)
-    return r.run_id if r else None
-
-
-def get_active_run(session_id: str) -> Optional[_Run]:
-    """Return the exact active run currently registered for a session."""
-    r = _RUNS.get(session_id)
-    return r if r and r.status == "running" else None
-
-
-async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
+async def _drain(session_id: str, agen: AsyncGenerator[str, None],
                  prev_task: Optional[asyncio.Task] = None) -> None:
     """Pull every event from the wrapped generator into the run buffer, fanning
     each out to live subscribers. Runs to completion regardless of subscribers."""
-    subscribers_woken = False
-
-    def _wake_subscribers() -> None:
-        nonlocal subscribers_woken
-        if subscribers_woken:
-            return
-        subscribers_woken = True
-        _wake_run_subscribers(run)
-
+    run = _RUNS.get(session_id)
+    if run is None:
+        return
     # If this run replaced an in-flight one (rapid double-send), wait for that
     # one to fully finish first. Its CancelledError handler calls aclose(), which
     # persists its partial response — letting it complete before we start writing
     # keeps the two runs' session saves sequential instead of interleaved.
-    try:
-        if prev_task is not None and not prev_task.done():
+    if prev_task is not None and not prev_task.done():
+        try:
             await asyncio.wait({prev_task})
+        except asyncio.CancelledError:
+            raise            # our own cancellation — propagate
+        except Exception:
+            pass
+    try:
         async for ev in agen:
             _publish(run, ev)
         if run.status == "running":
@@ -214,16 +186,6 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
             await agen.aclose()
         except Exception:
             pass
-        # A rapid third replacement can cancel this task while it is still
-        # waiting for its predecessor. Close this run's subscribers promptly,
-        # but keep the task alive until the predecessor finishes so the next
-        # run still observes the transitive session-save ordering barrier.
-        _wake_subscribers()
-        if prev_task is not None and not prev_task.done():
-            try:
-                await asyncio.shield(prev_task)
-            except (asyncio.CancelledError, Exception):
-                pass
     except Exception as e:
         logger.error("[agent-run] %s failed: %s", session_id, e, exc_info=True)
         run.status = "error"
@@ -245,11 +207,15 @@ async def _drain(session_id: str, run: _Run, agen: AsyncGenerator[str, None],
         except Exception:
             pass
         # Wake every subscriber with the end sentinel so their SSE closes.
-        _wake_subscribers()
+        for q in list(run.subscribers):
+            try:
+                q.put_nowait((None, None))
+            except Exception:
+                pass
         # Run is terminal — arm the grace timer so it (and its buffer) is
         # eventually freed even if nobody ever reconnects. subscribe() cancels
         # this on connect and re-arms on disconnect.
-        _schedule_evict(session_id, run)
+        _schedule_evict(session_id)
 
 
 def start(session_id: str, agen: AsyncGenerator[str, None], *, owner: Optional[str] = None) -> _Run:
@@ -259,14 +225,6 @@ def start(session_id: str, agen: AsyncGenerator[str, None], *, owner: Optional[s
     prev_task: Optional[asyncio.Task] = None
     if prev:
         if prev.task and not prev.task.done():
-            # A task cancelled before its first instruction never enters
-            # _drain(), so its except/finally blocks cannot update status or
-            # wake a response already bound to this exact run. Terminalize it
-            # synchronously before cancelling; _drain's cleanup is idempotent
-            # when the task had already started.
-            if prev.status == "running":
-                prev.status = "stopped"
-                _wake_run_subscribers(prev)
             prev.task.cancel()
             prev_task = prev.task   # new run awaits this before it starts writing
         if prev.evict_task and not prev.evict_task.done():
@@ -274,23 +232,14 @@ def start(session_id: str, agen: AsyncGenerator[str, None], *, owner: Optional[s
     _FINISHED.pop(session_id, None)
     run = _Run(owner=owner)
     _RUNS[session_id] = run
-    run.task = asyncio.create_task(_drain(session_id, run, agen, prev_task))
+    run.task = asyncio.create_task(_drain(session_id, agen, prev_task))
     return run
 
 
-async def subscribe(
-    session_id: str,
-    expected_run: Optional[_Run] = None,
-) -> AsyncGenerator[str, None]:
+async def subscribe(session_id: str) -> AsyncGenerator[str, None]:
     """Replay the run's buffer from the start, then stream live until it ends.
-    Safe to call repeatedly (reconnect) and from multiple clients at once.
-
-    ``expected_run`` binds a lazy StreamingResponse body to the same run whose
-    identity was put in its response headers. Without that binding, a rapid
-    replacement between response construction and body iteration could replay
-    the replacement run under the prior run's identity.
-    """
-    run = expected_run or _RUNS.get(session_id)
+    Safe to call repeatedly (reconnect) and from multiple clients at once."""
+    run = _RUNS.get(session_id)
     if run is None:
         return
     q: asyncio.Queue = asyncio.Queue()
@@ -333,19 +282,12 @@ async def subscribe(
         # Last subscriber gone on a finished run — (re)arm eviction so the
         # buffer doesn't linger indefinitely.
         if not run.subscribers and run.status != "running":
-            _schedule_evict(session_id, run)
+            _schedule_evict(session_id)
 
 
-def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
-    """Cancel the matching in-flight run (which saves its partial output).
-
-    A stale browser may issue Stop after another tab has replaced the session's
-    run. Once the caller knows its opaque run identity, fail closed rather than
-    cancelling that newer run.
-    """
+def stop(session_id: str) -> bool:
+    """Cancel an in-flight run (the wrapped generator saves its partial)."""
     run = _RUNS.get(session_id)
-    if not expected_run_id or run is None or run.run_id != expected_run_id:
-        return False
     if run and run.task and not run.task.done():
         run.task.cancel()
         return True

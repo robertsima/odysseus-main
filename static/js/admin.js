@@ -6,7 +6,6 @@ import settingsModule from './settings.js';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
-import { getSettings, getTools, invalidateSettings, invalidateTools } from './appConfig.js';
 
 let initialized = false;
 let modalEl = null;
@@ -346,7 +345,8 @@ function initSignupToggle() {
 
 function initShareDefaultsToggle() {
   const toggle = el('adm-shareDefaultsToggle');
-  getSettings()
+  fetch('/api/auth/settings', { credentials: 'same-origin' })
+    .then(r => r.json())
     .then(d => { toggle.checked = !!d.share_defaults_with_users; })
     .catch(e => console.warn('Settings fetch failed:', e));
   toggle.addEventListener('change', async () => {
@@ -361,9 +361,6 @@ function initShareDefaultsToggle() {
       toggle.checked = !!data.share_defaults_with_users;
     } catch (e) {
       toggle.checked = !toggle.checked;
-    } finally {
-      // Drop the shared snapshot: it still says what this toggle used to be.
-      invalidateSettings();
     }
   });
 }
@@ -1927,16 +1924,8 @@ async function loadBuiltinTools() {
   const list = el('adm-builtin-tools-list');
   if (!list) return;
   try {
-    // This panel is an editor, and its save posts the whole disabled list
-    // rebuilt from the checkboxes below. So it has to render authoritative
-    // state: a snapshot that went stale out of band (the manage_settings tool,
-    // another tab) would be re-posted wholesale on the next unrelated toggle
-    // and would silently undo the newer state. refreshAll() calls this on every
-    // panel open, so drop the shared entry and refill it. The startup read that
-    // chatRenderer.js shares is unaffected; this panel just never edits a cache,
-    // which is the same rule the settings panel follows by reading directly.
-    invalidateTools();
-    const data = await getTools();
+    const res = await fetch('/api/tools', { credentials: 'same-origin' });
+    const data = await res.json();
     const tools = data.tools || [];
     if (!tools.length) { list.innerHTML = '<div class="admin-empty">No tools found</div>'; return; }
 
@@ -2010,50 +1999,17 @@ async function loadBuiltinTools() {
       });
     });
 
-    // Merge only the user's intended changes onto authoritative server state.
-    // /api/tools replaces the full disabled list, so rebuilding it from this
-    // panel's DOM can undo a change made by another tab or manage_settings
-    // after the panel was opened.
-    async function _saveToolState(changes) {
-      invalidateTools();
-      const latest = await getTools();
-      const state = new Map(
-        (latest.tools || []).map(t => [t.id, !!t.enabled])
-      );
-
-      for (const change of changes) {
-        if (state.has(change.id)) {
-          state.set(change.id, !!change.enabled);
-        }
-      }
-
-      const disabled = Array.from(state.entries())
-        .filter(([, enabled]) => !enabled)
-        .map(([id]) => id);
-
-      try {
-        const res = await fetch('/api/tools', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ disabled }),
-          credentials: 'same-origin',
-        });
-        if (!res.ok) throw new Error(`Failed to update tools (${res.status})`);
-
-        // Bring the still-open editor forward to the same merged snapshot so an
-        // out-of-band change is visible instead of leaving stale checkboxes.
-        list.querySelectorAll('input[data-tool-id]').forEach(c => {
-          if (state.has(c.dataset.toolId)) {
-            c.checked = state.get(c.dataset.toolId);
-          }
-        });
-        list.querySelectorAll('.admin-tool-category').forEach(_updateCatCounter);
-      } finally {
-        // This route persists disabled_tools into the settings store
-        // (routes/model_routes.py), so both snapshots are now stale.
-        invalidateTools();
-        invalidateSettings();
-      }
+    // Helper: save disabled tools + update counters
+    async function _saveToolState() {
+      const allChecks = list.querySelectorAll('input[data-tool-id]');
+      const disabled = [];
+      allChecks.forEach(c => { if (!c.checked) disabled.push(c.dataset.toolId); });
+      await fetch('/api/tools', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabled }),
+        credentials: 'same-origin',
+      });
     }
     function _updateCatCounter(catEl) {
       if (!catEl) return;
@@ -2068,9 +2024,7 @@ async function loadBuiltinTools() {
     // Wire individual tool toggles
     list.querySelectorAll('input[data-tool-id]').forEach(chk => {
       chk.addEventListener('change', async () => {
-        await _saveToolState([
-          { id: chk.dataset.toolId, enabled: chk.checked },
-        ]);
+        await _saveToolState();
         _updateCatCounter(chk.closest('.admin-tool-category'));
       });
     });
@@ -2081,10 +2035,8 @@ async function loadBuiltinTools() {
         const catEl = chk.closest('.admin-tool-category');
         if (!catEl) return;
         const checked = chk.checked;
-        const changes = Array.from(catEl.querySelectorAll('input[data-tool-id]'))
-          .map(c => ({ id: c.dataset.toolId, enabled: checked }));
         catEl.querySelectorAll('input[data-tool-id]').forEach(c => { c.checked = checked; });
-        await _saveToolState(changes);
+        await _saveToolState();
         _updateCatCounter(catEl);
       });
     });
@@ -2406,7 +2358,6 @@ function initMcpForm() {
     if (transport === 'stdio' && !command) { msg.textContent = 'Command is required for stdio'; msg.className = 'admin-error'; return; }
     if (transport === 'sse' && !url) { msg.textContent = 'URL is required for SSE'; msg.className = 'admin-error'; return; }
     try { JSON.parse(env); } catch { msg.textContent = 'Env must be valid JSON'; msg.className = 'admin-error'; return; }
-    try { JSON.parse(args); } catch { msg.textContent = 'Args must be valid JSON, e.g. ["-y", "pkg"]'; msg.className = 'admin-error'; return; }
     const fd = new FormData();
     fd.append('name', name); fd.append('transport', transport); fd.append('command', command); fd.append('args', args); fd.append('env', env); fd.append('url', url);
     // If preset has oauthFile config, send credentials for file generation
@@ -2428,10 +2379,6 @@ function initMcpForm() {
     try {
       const res = await fetch('/api/mcp/servers', { method: 'POST', body: fd, credentials: 'same-origin' });
       const data = await res.json();
-      if (!res.ok) {
-        msg.textContent = data.detail || `Failed (${res.status})`; msg.className = 'admin-error';
-        return;
-      }
       if (data.needs_oauth) {
         msg.innerHTML = `Added ${esc(name)} — <a href="/api/mcp/oauth/authorize/${data.id}" target="_blank" style="color:var(--red);font-weight:600;">Authorize with Google</a> to connect`;
         msg.className = 'admin-success';
