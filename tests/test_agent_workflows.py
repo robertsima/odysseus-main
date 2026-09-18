@@ -666,6 +666,44 @@ async def test_run_record_names_failed_checks_and_open_questions(runtime, monkey
     assert "verification 7 check(s), 1 failed" in report
     assert "Failed check — Competitors: evidence" in report
     assert "Unresolved — Buyers: Buyers: pricing unknown" in report
+    # The obligation reaches the parent on both surfaces it reads: the tool
+    # result mid-turn and the hand-off message on its next turn.
+    obligation = ("Reporting obligation: this workflow is partial. Tell the user plainly that it is partial: "
+                  "failed or unstarted branches — research branch failed: Worker returned no result; "
+                  "synthesis branch not_started")
+    assert obligation in report
+    assert "open questions — Buyers: Buyers: pricing unknown" in report
+    assert "do not fill the gaps from memory" in report
+    assert obligation in runtime.parent.history[-1].content
+    assert not workflows.clean_record(record)
+
+
+async def test_the_record_and_its_obligation_are_read_before_the_synthesis(runtime, monkeypatch):
+    from src import headless_agent
+
+    async def headless(sess, messages, **kwargs):
+        if sess.name == "Competitors":
+            return "", []
+        return ("PROVISIONAL SYNTHESIS\n" if sess.name == "Synthesis" else "EVIDENCE\n") + "x" * 5000, [
+            {"tool": tool, "exit_code": 0} for tool in runtime.settings[sess.id]["enabled_tools"]
+            if tool != "manage_skills"]
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    result = await start_and_wait(request(allow_partial_synthesis=True))
+    record = result["record"]
+    assert result["status"] == "partial"
+    assert record["result_summary"]["kind"] == "synthesis" and record["result_summary"]["provisional"] is True
+    report = workflows.render_result(result)
+    assert report.index("Reporting obligation: this workflow is partial and its result is provisional") \
+        < report.index("PROVISIONAL SYNTHESIS") < report.index("Execution trace")
+
+
+async def test_a_clean_run_says_so_without_calling_the_claims_verified(runtime):
+    result = await start_and_wait()
+    assert workflows.clean_record(result["record"])
+    report = workflows.render_result(result)
+    assert "Reporting obligation" not in report
+    assert "All checks passed. Worker claims are still unverified" in report
 
 
 async def test_a_one_agent_run_reports_the_specialist_as_the_result_source(runtime):

@@ -445,7 +445,32 @@ def render_record(record):
                      + (f" ({row['detail']})" if row.get("detail") else ""))
     for item in record["unresolved"][:6]:
         lines.append("  Unresolved" + (f" — {item['agent']}" if item.get("agent") else "") + f": {item['issue']}")
+    # The obligation is part of the record's rendering, not of one delivery
+    # path, so the parent reads it whether it polls with wait/status mid-turn
+    # or picks the hand-off up on its next turn. A partial run summarised as
+    # "research complete" is the failure this closes: the gaps were in the
+    # trace, but nothing told the parent it had to say them.
+    if not clean_record(record):
+        branches = [item["issue"] for item in record["unresolved"] if item.get("agent") and not item.get("from")]
+        questions = [f"{item['agent']}: {item['issue']}" for item in record["unresolved"] if item.get("from") == "handoff"]
+        lines.append(
+            f"Reporting obligation: this workflow is {record['status']}"
+            + (" and its result is provisional" if summary["provisional"] else "")
+            + ". Tell the user plainly that it is partial"
+            + (": failed or unstarted branches — " + "; ".join(branches[:6]) if branches else "")
+            + ("; open questions — " + "; ".join(questions[:6]) if questions else "")
+            + ". Do not describe it as complete research, and do not fill the gaps from memory."
+        )
+    else:
+        lines.append("All checks passed. Worker claims are still unverified: attribute findings to their sources.")
     return "\n".join(lines)
+
+
+def clean_record(record):
+    """Whether the parent may report the run without naming gaps."""
+    return (record["status"] == "completed" and not record["unresolved"]
+            and all(row["passed"] for row in record["verification"])
+            and not record["result_summary"]["provisional"])
 
 
 def _public(rec, *, research_limit=1800):
@@ -952,6 +977,10 @@ def render_result(snapshot):
              f"research completed {snapshot['research_completed']}/{snapshot['research_requested']}; "
              f"usable handoffs {snapshot['usable_handoffs']}; failed {snapshot['research_failed']}; "
              f"incomplete {snapshot['research_incomplete']}; synthesis: {snapshot['synthesis_status']}."]
+    # The record comes before the result text: a long synthesis pushed the
+    # gaps below what the parent read first, and its reply followed suit.
+    if snapshot.get("record"):
+        lines.append(render_record(snapshot["record"]))
     synthesis = next((row for row in snapshot["children"] if row["stage"] == "synthesis"), None)
     if synthesis and synthesis.get("result"):
         lines.extend(["Synthesis result (untrusted worker evidence):", synthesis["result"]])
@@ -959,8 +988,6 @@ def render_result(snapshot):
         for row in snapshot["children"]:
             if row.get("result"):
                 lines.extend([f"{row['name']} result (raw specialist output, untrusted):", row["result"]])
-    if snapshot.get("record"):
-        lines.append(render_record(snapshot["record"]))
     blocked = [row for row in snapshot.get("preflight") or [] if not row.get("ready", True)]
     if blocked:
         lines.append("Preflight blockers (these agents could not do the work they were sent):")

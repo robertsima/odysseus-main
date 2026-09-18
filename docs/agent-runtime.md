@@ -552,7 +552,14 @@ files (none: specialists are read-only), the checks the controller actually
 ran (preflight, evidence that bound tools executed, a non-empty result) with
 their outcome, and the unresolved issues — failed branches, timeouts, and the
 `open_questions` a handoff itself declared. `verified` on the summary is always
-false: none of those checks verifies the content of a claim.
+false: none of those checks verifies the content of a claim. The record is also
+the hand-off contract: it renders ahead of the synthesis text on both surfaces
+the parent reads (the `wait`/`status` tool result and the next-turn hand-off
+message), and unless `clean_record` holds — completed, nothing unresolved,
+every check passed, not provisional — it ends with a reporting obligation that
+names the failed branches and open questions the parent must state. A long
+synthesis used to push the gaps below what the parent read first, and its
+reply followed suit.
 
 `orchestrate_agents` runs real specialist jobs through `launch_worker`, not a
 second agent runtime. `start` accepts an objective, one to eight named specialists
