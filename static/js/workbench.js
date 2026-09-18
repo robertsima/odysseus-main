@@ -79,6 +79,11 @@ const state = {
   agentRuns: new Map(),
   agentRunsAt: 0,
   agentRunsInFlight: null,
+  // The strip is a chat affordance, not part of the Workbench window: it
+  // keeps polling when the Workbench feature is switched off, and only stops
+  // when the server says this user may not see runs (401/403).
+  stripEnabled: true,
+  stripWarned: new Set(),
 };
 
 // ── prefs ─────────────────────────────────────────────────────────────────
@@ -256,22 +261,56 @@ function scheduleStrip() {
  *  last good rows in place: the strip degrades to stale, never to empty.
  */
 const AGENT_RUNS_MIN_MS = 1500;
+// A poll that has not answered in this long is abandoned. Browsers allow six
+// connections per host over HTTP/1.1 and every open Odysseus tab used to hold
+// two event streams; with three tabs (or two tabs and a streaming reply) a new
+// fetch queued behind them indefinitely -- proven on 2026-09-17: a chat whose
+// worker was running polled once, then never again, until the other tabs were
+// closed. A queued poll must not wedge `agentRunsInFlight` for the page's life.
+const AGENT_RUNS_TIMEOUT_MS = 8000;
+// How often the strip re-asks on its own. Discovery used to depend on the
+// activity stream delivering the launch event; when that stream was the
+// connection that never opened, nothing ever asked the server about the runs
+// it had.
+const AGENT_RUNS_POLL_MS = 4000;
+function stripWarn(key, message) {
+  if (state.stripWarned.has(key)) return;
+  state.stripWarned.add(key);
+  try { console.warn(`[agent strip] ${message}`); } catch (_) {}
+}
 async function refreshAgentRuns({ force = false } = {}) {
   const sid = state.sessionId;
-  if (!state.enabled || !sid) { state.agentRuns.clear(); return; }
+  if (!state.stripEnabled || !sid) { state.agentRuns.clear(); return; }
   if (state.agentRunsInFlight) return state.agentRunsInFlight;
   if (!force && Date.now() - state.agentRunsAt < AGENT_RUNS_MIN_MS) return;
   const run = (async () => {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), AGENT_RUNS_TIMEOUT_MS) : null;
     try {
-      const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sid)}&limit=50`);
+      const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sid)}&limit=50`,
+        ctl ? { signal: ctl.signal } : {});
       if (state.sessionId !== sid) return;           // chat changed under us
       const next = new Map();
       for (const row of r.runs || []) next.set(row.run_id, row);
+      if (next.size !== state.agentRuns.size) {
+        try { console.info(`[agent strip] ${next.size} run(s) filed for this chat`); } catch (_) {}
+      }
       state.agentRuns = next;
       state.agentRunsAt = Date.now();
-    } catch (_) {
-      // keep whatever we had
+    } catch (e) {
+      // Keep whatever we had, but say why -- a silent failure here is what
+      // made four rounds of fixes look identical from the outside.
+      if (e && (e.status === 401 || e.status === 403)) {
+        state.stripEnabled = false;
+        stripWarn('denied', `this account cannot list runs (${e.status} ${e.message}); the strip stays hidden`);
+      } else if (e && e.name === 'AbortError') {
+        stripWarn('timeout', `/api/workbench/runs did not answer within ${AGENT_RUNS_TIMEOUT_MS / 1000}s -- ` +
+          'the browser may be out of connections to this host (too many open Odysseus tabs?); will keep retrying');
+      } else {
+        stripWarn(`err:${e && e.message}`, `/api/workbench/runs failed: ${e && e.message}; will keep retrying`);
+      }
     } finally {
+      if (timer) clearTimeout(timer);
       state.agentRunsInFlight = null;
     }
   })();
@@ -335,8 +374,11 @@ function stripRowHtml(run) {
 }
 function renderAgentStrip() {
   const box = $('agent-strip');
-  if (!box) return;
-  const runs = state.enabled ? stripRuns() : [];
+  const runs = state.stripEnabled ? stripRuns() : [];
+  if (!box) {
+    if (runs.length) stripWarn('no-box', `${runs.length} run(s) to show but #agent-strip is not in the page (stale index.html? reload)`);
+    return;
+  }
   if (!runs.length) {
     box.hidden = true;
     box.innerHTML = '';
@@ -505,12 +547,38 @@ function watchSession() {
       state.focusRun = null;
       state.stripExpanded = false;
       renderAgentStrip();
-      if (state.es || isOpen() || state.enabled) connect(true);
+      if (state.enabled && (state.es || isOpen() || !document.hidden)) connect(true);
       else refreshAgentRuns({ force: true });
     }
   };
   tick();
   setInterval(tick, 1500);
+  // The strip's own heartbeat: the server is asked about this chat's runs on
+  // a steady cadence whether or not the activity stream is delivering, and at
+  // once when the tab comes back into view.
+  setInterval(() => { if (!document.hidden && state.sessionId) refreshAgentRuns(); }, AGENT_RUNS_POLL_MS);
+}
+
+// An event stream per hidden tab is what exhausts the browser's per-host
+// connection budget (see AGENT_RUNS_TIMEOUT_MS). A tab that has been hidden
+// for a while drops its stream; coming back replays history and reconnects,
+// so nothing is lost but the idle connection.
+const HIDDEN_STREAM_GRACE_MS = 30000;
+let _hiddenTimer = null;
+function watchVisibility() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (_hiddenTimer || !state.es) return;
+      _hiddenTimer = setTimeout(() => {
+        _hiddenTimer = null;
+        if (document.hidden && state.es) disconnect();
+      }, HIDDEN_STREAM_GRACE_MS);
+      return;
+    }
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    if (state.enabled && state.sessionId && !state.es) connect(true);
+    else refreshAgentRuns({ force: true });
+  });
 }
 
 // ── rendering: activity ───────────────────────────────────────────────────
@@ -1295,7 +1363,7 @@ async function probeSettings() {
     const s = await r.json();
     state.enabled = s.workbench_enabled !== false;
     state.autoOpen = s.workbench_auto_open !== false;
-    if (!state.enabled) { hideRail(); disconnect(); renderAgentStrip(); }
+    if (!state.enabled) { hideRail(); disconnect(); }
   } catch (_) {}
 }
 
@@ -1305,8 +1373,11 @@ export async function init() {
   loadPrefs();
   wireWindow();
   await probeSettings();
-  if (!state.enabled) return;
+  // The strip follows the chat even with the Workbench window switched off;
+  // only the window, its rail button and the event stream are feature-gated.
   watchSession();
+  watchVisibility();
+  if (!state.enabled) return;
   // Auto-open on the first sub-process run of the session (Claude Code, a
   // sub-agent…), so the user sees the work as it happens.
   // A minimized Workbench stays minimized: the user put it away on purpose.

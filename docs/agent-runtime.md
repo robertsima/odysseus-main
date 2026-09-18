@@ -412,12 +412,34 @@ loadout is visible immediately rather than after the worker reports it, and
 `action=status` reports what this chat's workers did — including which ran out
 of rounds — so the answer never has to be reconstructed from log files.
 
+The clamp only narrows to what the caller has, and for `tool_access: "all"`
+that is *everything* the caller has — two read-only audit loadouts were stored
+with ~200 tools each (shell, email, posting, the browser MCP surface) because
+the model wrote "all". So the tool refuses an explicit "all", naming the
+read-only set and the mutating tools it would have granted, and a loadout that
+names no tool policy gets the read-only set the chat can grant (the harness's
+own classification, the same one a research specialist gets) rather than
+everything. `enabled_tools` may say `"@read_only"` for that set plus any other
+tools by name. A model named at create/update is resolved then, with the
+available ids in the error, rather than at `start` two rounds later. Tool
+lists in the log and in `start`'s result are a preview and a count, never the
+inventory.
+
 A worker's run is filed under the worker's own chat, and the chat that started
 it finds that run through the run record's `parent_session`. That link is what
-the agent strip above the composer reconciles its rows against; without it a
-sub-agent row appeared for a moment and was then marked interrupted. The parent
-also receives a terminal `status` event for each worker, so the row resolves
-where the user is looking instead of sitting at "running" forever.
+the agent strip above the composer is built from: it polls
+`/api/workbench/runs?session_id=<chat>` on its own cadence (and at once on any
+delegated-work event), so it does not depend on the activity stream delivering
+the launch event. That mattered: browsers allow six connections per host over
+HTTP/1.1, and every open Odysseus tab used to hold two event streams for its
+whole life, so with three tabs — or two and a streaming reply — every further
+fetch queued indefinitely and the strip in the launching chat never asked. Hidden
+tabs now drop their streams after 30 s and reconnect on return, the strip's
+poll times out instead of wedging, and it says why in the console when it
+cannot show what the server has (`[agent strip] …`); the runs route logs one
+line per change so the same question can be answered from the server log. The
+parent also receives a terminal `status` event for each worker, so the row
+resolves where the user is looking instead of sitting at "running" forever.
 
 The explicit-delegation gate covers built-in delegate tools,
 `manage_agent_loadout`, and dynamically qualified MCP tools whose name ends in

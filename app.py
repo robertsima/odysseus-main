@@ -905,7 +905,13 @@ app.include_router(setup_companion_routes())
 async def serve_index(request: Request):
     static_path = abs_join(BASE_DIR, "static/index.html")
     if os.path.exists(static_path):
-        return serve_html_with_nonce(request, static_path)
+        resp = serve_html_with_nonce(request, static_path)
+        # The shell carries the `?v=` cache-busters for every module, so a
+        # stale shell means stale modules: with no header here browsers kept a
+        # heuristically-fresh copy across deploys and the fixes in it never
+        # arrived. Same rule as _RevalidatingStatic: keep the bytes, but ask.
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
     # No static bundle — fall back to a root-level index.html if one is shipped.
     # If neither exists, serve_html_with_nonce logs it and returns a generic 500:
     # a missing index.html is a broken deployment (server fault), not a client

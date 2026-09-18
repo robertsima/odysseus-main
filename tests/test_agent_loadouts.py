@@ -522,7 +522,7 @@ async def test_start_reports_the_model_and_tools_it_actually_launched(monkeypatc
     assert result["exit_code"] == 0
     assert result["preflight"] == {
         "loadout": "Runner", "model": "gpt-5.6-sol", "max_rounds": 4,
-        "tools": ["grep", "read_file"], "skills": [], "allowed_mcp_servers": [],
+        "tools": ["grep", "read_file"], "tool_count": 2, "skills": [], "allowed_mcp_servers": [],
     }
     assert "grep, read_file" in result["response"]
     # A round count never ends a run, so the response must not imply one will.
@@ -565,3 +565,123 @@ async def test_status_reports_what_the_workers_did_without_reading_log_files(mon
     assert row["loadout"] == "Runner" and row["max_rounds"] == 6 and row["tool_calls"] == 24
     assert "did NOT finish their task" in result["response"]
     agent_activity._reset_for_tests()
+
+
+# ── an agent-authored loadout is scoped, never "everything I have" ───────────
+#
+# 2026-09-17: two read-only audit loadouts were stored with ~200 tools each
+# (bash, python, send_email, vault_unlock, Bluesky posting, the browser MCP
+# surface) because the model wrote tool_access "all" and the clamp faithfully
+# granted everything the chat had.
+
+async def test_tool_access_all_is_refused_with_the_read_only_set_to_copy(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "tool_access": "all"}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert "@read_only" in result["error"]
+    assert result["read_only_tools"] == ["grep", "read_file", "web_search"]
+    assert result["mutating_tool_count"] == 3          # bash, send_to_session, write_file
+    assert "bash" in result["error"]
+    assert store["profiles"] == []
+
+
+async def test_a_loadout_with_no_tool_policy_gets_the_read_only_set_not_everything(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Reviewer", "description": "reads diffs"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    saved = store["profiles"][0]
+    assert saved["tool_access"] == "selected"
+    assert saved["enabled_tools"] == ["grep", "read_file", "web_search"]
+    assert any("read-only" in note for note in result["narrowed"])
+
+
+async def test_read_only_token_expands_and_can_be_widened_by_name(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Fixer", "tool_access": "selected",'
+        ' "enabled_tools": ["@read_only", "bash"]}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["enabled_tools"] == ["bash", "grep", "read_file", "web_search"]
+
+
+async def test_an_update_that_leaves_tool_access_alone_does_not_trip_the_all_refusal(store):
+    """A loadout the user made wide in Settings stays wide when an agent only
+    edits its description; the refusal is for what the agent *asks* for."""
+    from src import agent_profiles
+    store["profiles"] = agent_profiles.validate_profiles([{"name": "Wide", "tool_access": "all"}])
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Wide", "description": "documented"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["description"] == "documented"
+    assert store["profiles"][0]["tool_access"] == "selected"   # the clamp's own normal form
+    assert store["profiles"][0]["enabled_tools"] == sorted(policy()["allowed_tools"])
+
+
+async def test_a_wide_grant_is_reported_as_a_count_not_an_inventory(monkeypatch, store):
+    import json
+    many = {f"tool_{i:02d}" for i in range(30)}
+    monkeypatch.setattr(agent_loadouts, "caller_policy",
+                        lambda sid, owner: policy(allowed_tools=set(many), known_tools=set(many)))
+    created = await manage_agent_loadout(
+        json.dumps({"action": "create", "name": "Wide", "tool_access": "selected",
+                    "enabled_tools": sorted(many)}), "c", owner="u")
+    assert created["exit_code"] == 0
+
+    async def fake_launch(**kwargs):
+        return {"session_id": "w-1", "session_name": "Wide 1", "run_id": "r-1", "model": "m", "max_rounds": 0}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Wide", "task": "go"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert "(+18 more, 30 total)" in result["response"]
+    assert len(result["preflight"]["tools"]) == 12
+    assert result["preflight"]["tool_count"] == 30
+    assert "tool_29" not in result["response"]
+
+
+# ── a model id is checked when it is written, not when a worker fails ────────
+
+async def test_a_model_that_does_not_exist_is_refused_at_create_with_the_real_ids(monkeypatch, store):
+    """`model: "gpt-luna-5.6"` (a misspelling of gpt-5.6-luna) used to be accepted
+    and only fail at start, two rounds later, with "has no available model"."""
+    import src.agent_tools.loadout_tools as lt
+    monkeypatch.setattr(lt, "_model_problem",
+                        lambda spec, owner: None if spec == "gpt-5.6-luna" else f"Model '{spec}' not found")
+    monkeypatch.setattr(lt, "_available_model_ids", lambda owner: ["gpt-5.6-luna", "gpt-5.6-sol"])
+
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-luna-5.6",'
+        ' "enabled_tools": ["@read_only"]}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert "gpt-luna-5.6" in result["error"] and "gpt-5.6-luna" in result["error"]
+    assert result["available_models"] == ["gpt-5.6-luna", "gpt-5.6-sol"]
+    assert store["profiles"] == []
+
+    ok = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-5.6-luna",'
+        ' "enabled_tools": ["@read_only"]}', "c", owner="u")
+    assert ok["exit_code"] == 0 and store["profiles"][0]["model"] == "gpt-5.6-luna"
+
+
+async def test_an_update_only_checks_the_models_it_names(monkeypatch, store):
+    import src.agent_tools.loadout_tools as lt
+    monkeypatch.setattr(lt, "_model_problem", lambda spec, owner: None)
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-5.6-luna"}', "c", owner="u")
+    # The endpoint is now unreachable; renaming must not be blocked by it.
+    monkeypatch.setattr(lt, "_model_problem", lambda spec, owner: "No enabled endpoints found")
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Auditor", "description": "audits"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["model"] == "gpt-5.6-luna"
+
+
+# ── start without a task says exactly what to send ───────────────────────────
+
+async def test_start_without_a_task_spells_out_the_call_shape(store):
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Auditor", "detail": true}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert '"task": "<the whole assignment>"' in result["error"]
+    assert "'detail'" in result["error"]

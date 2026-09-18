@@ -114,6 +114,15 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
     }
 
 
+def read_only_tools() -> frozenset:
+    """The harness's read-only classification: plan mode's allowlist plus the
+    read-side accessors it leaves out. It is the set a research specialist
+    gets, so "read-only" means one thing for every kind of worker."""
+    from src.agent_workflows import _READ_TOOLS
+
+    return frozenset(_READ_TOOLS)
+
+
 # Prefix of the narrowing note that means "this loadout has no tools at all".
 # Callers match on it rather than re-deriving the intersection.
 STARVED_NOTE = "tools: NONE of the requested tools are available to the calling chat"

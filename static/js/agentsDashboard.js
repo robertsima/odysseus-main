@@ -1136,9 +1136,24 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }
   });
   // Badges stay current while the page is closed: a light poll plus the feed.
-  connect();
+  // The feed is held only by a visible tab. Every open tab used to keep this
+  // stream (and the Workbench's) for its whole life, and six such connections
+  // is all a browser allows per host over HTTP/1.1 -- after that every fetch
+  // from any Odysseus tab queued indefinitely, which is how the agent strip
+  // in the chat that launched a worker never got to ask about it (2026-09-17).
+  if (!document.hidden) connect();
   refresh();
   state.pollTimer = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, state.open ? 5000 : 20000);
+  let hiddenTimer = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (!hiddenTimer) hiddenTimer = setTimeout(() => { hiddenTimer = null; if (document.hidden) disconnect(); }, 30000);
+      return;
+    }
+    if (hiddenTimer) { clearTimeout(hiddenTimer); hiddenTimer = null; }
+    connect();
+    refresh();
+  });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 

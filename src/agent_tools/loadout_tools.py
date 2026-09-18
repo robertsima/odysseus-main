@@ -10,7 +10,7 @@ report back exactly which parts of a request were narrowed.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src import agent_loadouts, agent_profiles
 from src.tool_utils import _parse_tool_args
@@ -64,6 +64,151 @@ def _tool_examples(policy: Dict[str, Any], limit: int = 14) -> str:
     return f"{len(names)} tool(s), e.g. {shown}" if len(names) > limit else shown
 
 
+# How many tool names a log line or a tool result spells out before switching
+# to a count. A worker granted 200 tools produced a 200-name wall in the server
+# log and again in the model's context (2026-09-17); the names past the first
+# dozen tell nobody anything.
+_TOOL_LIST_PREVIEW = 12
+
+
+def _tool_list_note(tools: Any) -> str:
+    if isinstance(tools, str):
+        return tools
+    names = [str(t) for t in (tools or [])]
+    if not names:
+        return "none"
+    shown = ", ".join(names[:_TOOL_LIST_PREVIEW])
+    if len(names) <= _TOOL_LIST_PREVIEW:
+        return shown
+    return f"{shown} … (+{len(names) - _TOOL_LIST_PREVIEW} more, {len(names)} total)"
+
+
+# Shorthand an agent may put in `enabled_tools`: the read-only tools this chat
+# can grant, resolved at authoring time. It is also what a loadout gets when
+# its author names no tool policy at all.
+READ_ONLY_TOKEN = "@read_only"
+
+
+def _scope_tools(requested: Dict[str, Any], policy: Dict[str, Any], *, action: str,
+                 supplied_access: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """Settle an agent-authored tool policy before the clamp sees it.
+
+    Returns ``(error, notes)``. The clamp only narrows to what the caller has,
+    which for ``tool_access: "all"`` is *everything* the caller has: two
+    read-only audit loadouts were stored on 2026-09-17 with ~200 tools each —
+    bash, python, send_email, vault_unlock, manage_settings, Bluesky posting,
+    the whole browser MCP surface — because the model wrote "all" and nothing
+    asked it what the task needed. So:
+
+    - "all" is refused, with the read-only set and the mutating tools it would
+      have granted, so the author names what the worker needs;
+    - no tool policy at all defaults to the read-only set the chat can grant
+      (a note says so), falling back to the caller's own tools only when the
+      chat has no read-only tools to give — a loadout that grants nothing is
+      the failure the starved-loadout check exists for, not an outcome;
+    - ``@read_only`` inside ``enabled_tools`` expands to that same set.
+    """
+    allowed = set(policy["allowed_tools"])
+    read_only = sorted(allowed & agent_loadouts.read_only_tools())
+    notes: List[str] = []
+    if supplied_access == "all":
+        mutating = sorted(allowed - set(read_only))
+        return {
+            "error": (
+                f"{action}: tool_access 'all' would hand this worker every one of the "
+                f"{len(allowed)} tools this chat has, including {len(mutating)} that write, send, "
+                f"post or run things ({_tool_list_note(mutating[:8]) if mutating else 'none'}). "
+                "Name what the task needs instead: tool_access='selected' with enabled_tools "
+                f"listing exact names, or enabled_tools=[\"{READ_ONLY_TOKEN}\"] for the "
+                f"{len(read_only)} read-only tools ({_tool_list_note(read_only)}) plus any others "
+                "by name. action='capabilities' with detail=true lists every grantable name."
+            ),
+            "read_only_tools": read_only,
+            "mutating_tool_count": len(mutating),
+            "exit_code": 1,
+        }, notes
+    enabled = requested.get("enabled_tools")
+    if isinstance(enabled, list) and READ_ONLY_TOKEN in enabled:
+        requested["enabled_tools"] = sorted(
+            {str(t) for t in enabled if t != READ_ONLY_TOKEN} | set(read_only))
+        requested.setdefault("tool_access", "selected")
+        notes.append(f"tools: {READ_ONLY_TOKEN} expanded to {len(read_only)} read-only tool(s)")
+    if not requested.get("tool_access"):
+        if read_only:
+            requested["tool_access"] = "selected"
+            requested["enabled_tools"] = sorted(set(requested.get("enabled_tools") or []) | set(read_only))
+            notes.append(
+                f"tools: no tool policy given, so this loadout gets the {len(read_only)} read-only "
+                f"tool(s) this chat can grant ({_tool_list_note(read_only)}); name enabled_tools "
+                "to widen it"
+            )
+        else:
+            notes.append("tools: no tool policy given and this chat has no read-only tools, "
+                         "so the loadout gets the chat's own tools")
+    return None, notes
+
+
+def _model_problem(spec: str, owner: Optional[str]) -> Optional[str]:
+    """Why ``spec`` cannot be started with right now, or None.
+
+    Checked when a loadout is written, not when it is started: `model:
+    "gpt-luna-5.6"` (a misspelling of gpt-5.6-luna) was accepted at create and
+    only failed at start with "has no available model", two rounds later.
+    A registry that cannot be read is not the author's mistake, so that is
+    not a problem here.
+    """
+    try:
+        from src.ai_interaction import _resolve_model
+
+        _resolve_model(spec, owner=owner)
+    except ValueError as exc:
+        return str(exc)
+    except Exception:  # registry unavailable: leave it to start
+        logger.debug("loadout: model check for %r skipped", spec, exc_info=True)
+    return None
+
+
+def _available_model_ids(owner: Optional[str], limit: int = 40) -> List[str]:
+    """Model ids the author could have meant, from every enabled endpoint."""
+    ids: List[str] = []
+    try:
+        from src.auth_helpers import owner_filter
+        from src.database import ModelEndpoint, SessionLocal
+        from src.endpoint_resolver import build_headers, resolve_endpoint_runtime
+        from src.llm_core import list_model_ids
+
+        db = SessionLocal()
+        try:
+            query = db.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
+            if owner:
+                query = owner_filter(query, ModelEndpoint, owner)
+            endpoints = list(query.all())
+        finally:
+            db.close()
+        for ep in endpoints:
+            try:
+                base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+                ids.extend(list_model_ids(base, timeout=5, headers=build_headers(api_key, base),
+                                          owner=owner, endpoint_id=getattr(ep, "id", None)))
+            except Exception:
+                continue
+    except Exception:
+        logger.debug("loadout: could not list model ids", exc_info=True)
+    seen: List[str] = []
+    for model_id in ids:
+        if model_id and model_id not in seen:
+            seen.append(model_id)
+    return seen[:limit]
+
+
+def _supplied(args: Dict[str, Any]) -> Dict[str, Any]:
+    """The loadout fields this call actually carries, given inline or under `loadout`."""
+    nested = args.get("loadout")
+    source = nested if isinstance(nested, dict) else args
+    return {key: source[key] for key in _FIELDS
+            if key in source and not _is_blank(key, source[key])}
+
+
 def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The loadout definition, given either inline or under `loadout`.
 
@@ -78,10 +223,7 @@ def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> D
     tool its author can use". A field is unset deliberately by naming it in
     `clear`, never by sending it empty.
     """
-    nested = args.get("loadout")
-    source = nested if isinstance(nested, dict) else args
-    supplied = {key: source[key] for key in _FIELDS
-                if key in source and not _is_blank(key, source[key])}
+    supplied = _supplied(args)
     if base is None:
         return supplied
     merged = {key: base[key] for key in _FIELDS if key in base}
@@ -214,10 +356,34 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         # typed, so `update` never renames a loadout as a side effect.
         if base is not None:
             requested["name"] = base["name"]
+        supplied = _supplied(args)
+        error, scope_notes = _scope_tools(
+            requested, policy, action=action,
+            supplied_access=str(supplied.get("tool_access") or "").strip().lower())
+        if error:
+            return error
+        # Only the models named in THIS call are checked, so an endpoint that is
+        # down does not block renaming a loadout that already has a model.
+        if policy["model_access"] != "current":
+            for spec in [supplied.get("model"), *(supplied.get("model_fallbacks") or [])]:
+                problem = _model_problem(str(spec), owner) if spec else None
+                if problem:
+                    available = _available_model_ids(owner)
+                    return {
+                        "error": (
+                            f"{action}: model {spec!r} is not available: {problem}. "
+                            + (f"Available model ids: {', '.join(available)}. "
+                               if available else "")
+                            + "Use one of those exactly, or omit model to inherit the calling chat's."
+                        ),
+                        "available_models": available,
+                        "exit_code": 1,
+                    }
         try:
             profile, narrowed = agent_loadouts.clamp(requested, policy)
         except ValueError as exc:
             return {"error": f"manage_agent_loadout: {exc}", "exit_code": 1}
+        narrowed = [*scope_notes, *narrowed]
         if agent_loadouts.tool_starved(narrowed):
             # Storing it would only defer the failure to every worker it ever
             # starts. Refuse here, where the author can still fix it.
@@ -246,8 +412,18 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     # action == "start"
     task = str(args.get("task") or "").strip()
     if not task:
-        return {"error": "start: describe the whole task — the worker begins with no other context",
-                "exit_code": 1}
+        # Spell out the call shape: two rounds were spent on
+        # {"action":"start","name":...,"detail":true} before the model found
+        # that `task` is the whole assignment and `detail` is not a start field.
+        return {
+            "error": (
+                "start: 'task' is required and was not given. Send "
+                '{"action": "start", "name": "<loadout>", "task": "<the whole assignment>"} — '
+                "the worker begins with no other context. 'detail' is a capabilities parameter, "
+                "not a start one."
+            ),
+            "exit_code": 1,
+        }
     if policy["delegation_policy"] == "never":
         return {"error": "start: this chat's delegation policy is 'never'", "exit_code": 1}
     from src import agent_control
@@ -337,22 +513,24 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     # wrong-fit loadout without waiting for the worker to report that it could
     # not do the job, and the round budget is the number an "it ran out of
     # rounds" result has to be read against.
+    granted = (started_profile["enabled_tools"] if started_profile
+               and started_profile["tool_access"] == "selected" else
+               (started_profile["tool_access"] if started_profile else "all"))
+    # The full inventory stays out of both the log and the model's context: a
+    # preview and a count say what was granted; `get` has the whole list.
     preflight = {
         "loadout": started_profile["name"] if started_profile else "ad-hoc worker",
         "model": result.get("model") or "inherit",
         "max_rounds": result.get("max_rounds"),
-        "tools": (started_profile["enabled_tools"] if started_profile
-                  and started_profile["tool_access"] == "selected" else
-                  (started_profile["tool_access"] if started_profile else "all")),
+        "tools": granted if isinstance(granted, str) else list(granted[:_TOOL_LIST_PREVIEW]),
+        "tool_count": None if isinstance(granted, str) else len(granted),
         "skills": started_profile["skill_names"] if started_profile else [],
         "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
     }
+    tool_note = _tool_list_note(granted)
     logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s",
                 preflight["loadout"], result.get("run_id"), result.get("session_id"),
-                preflight["model"], preflight["max_rounds"],
-                preflight["tools"] if isinstance(preflight["tools"], str) else ",".join(preflight["tools"]))
-    tool_note = (preflight["tools"] if isinstance(preflight["tools"], str)
-                 else ", ".join(preflight["tools"]) or "none")
+                preflight["model"], preflight["max_rounds"], tool_note)
     return {
         "response": (
             f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
