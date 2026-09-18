@@ -320,6 +320,19 @@ def approved_unused_calls(session_id: str) -> list:
     return out
 
 
+def retire_approved_call(session_id: str, tool: str, content: str) -> bool:
+    """Revoke the once-grant for a call that was approved but cannot run.
+
+    A rejected call never reaches `consume_once_grant`, so its grant used to
+    survive and `approved_unused_calls` handed it back at the start of every
+    turn, where it failed the same way again -- three turns running on
+    2026-09-18 for a stash_drop missing its revision proof and a push with an
+    argument push does not take. Returns whether anything was retired.
+    """
+    grants = _GRANTS.get(session_id or "") or {}
+    return (grants.get("once") or {}).pop(_key(tool, content), None) is not None
+
+
 def chat_grants(session_id: str) -> list:
     grants = _GRANTS.get(session_id or "")
     if not grants:

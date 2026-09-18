@@ -1877,6 +1877,22 @@ def _explicit_delegation_requested(text: str) -> bool:
     return _orchestration_requested(text)
 
 
+def _git_precheck_error(content: str) -> Optional[dict]:
+    """The error a manage_git call would fail with before it could run, or None.
+
+    Checked before a call is held for approval, so the user is only ever asked
+    about calls that can actually execute. Never raises: an unexpected problem
+    here must not block a call that would otherwise have been held normally.
+    """
+    try:
+        from src.agent_tools.git_tools import GitTool
+
+        return GitTool.precheck(content)
+    except Exception:
+        logger.debug("manage_git precheck failed", exc_info=True)
+        return None
+
+
 def _resolve_standing_delegation(session_id, settings, *, granted: bool, revoked: bool) -> bool:
     """Standing delegation authorization for one chat.
 
@@ -1955,20 +1971,61 @@ def _user_turn_count(messages: List[Dict]) -> int:
 _FENCED_TOOL_TAG_RE = re.compile(r"^[ \t]*`{3,}[ \t]*([A-Za-z][A-Za-z0-9_]{1,60})[ \t]*$", re.MULTILINE)
 
 
+def _message_tool_names(msg: Dict) -> list:
+    """Tool names one persisted assistant message records, in call order.
+
+    A finished turn is stored as text plus `metadata.tool_events`
+    (routes/chat_helpers.py); `ChatMessage.to_dict()` replays role, content and
+    metadata and never `tool_calls`. So for a native-tool model -- no fenced
+    tags in the text either -- every earlier turn looked tool-free, and
+    retention found nothing to keep: the 2026-09-18 "Ok, continue" turn of a
+    git merge came back with `retained_count=0` and `manage_git` deselected.
+    """
+    names: list = []
+    for tc in (msg.get("tool_calls") or []):
+        name = str(((tc or {}).get("function") or {}).get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    meta = msg.get("metadata")
+    if isinstance(meta, dict):
+        for ev in (meta.get("tool_events") or []):
+            name = str((ev or {}).get("tool") or "").strip() if isinstance(ev, dict) else ""
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _tools_used_last_turn(messages: List[Dict], known: set) -> set:
+    """Tools the most recent tool-using assistant turn called.
+
+    What "continue" continues. Deliberately one turn, not the whole
+    conversation: a long chat's full history would crowd the budget with work
+    it finished hours ago, and the planner orders equal-priority names
+    alphabetically, not by recency.
+    """
+    for msg in reversed(messages or []):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        names = [n for n in _message_tool_names(msg) if not known or n in known]
+        if names:
+            return set(names)
+    return set()
+
+
 def _tools_used_in_conversation(messages: List[Dict], known: set, cap: int = 24) -> list:
     """Tool names this conversation has already called, most recent first.
 
-    Covers both call styles: native `tool_calls` on the assistant message, and
-    the fenced form this loop also accepts for models without function calling.
-    Capped so a very long session doesn't accumulate an unbounded schema list.
+    Covers every call style: native `tool_calls`, the persisted
+    `metadata.tool_events` a finished turn is replayed with, and the fenced
+    form this loop also accepts for models without function calling. Capped so
+    a very long session doesn't accumulate an unbounded schema list.
     """
     seen: list = []
     for msg in reversed(messages or []):
         if not isinstance(msg, dict) or msg.get("role") != "assistant":
             continue
-        for tc in (msg.get("tool_calls") or []):
-            name = str(((tc or {}).get("function") or {}).get("name") or "").strip()
-            if name and name not in seen:
+        for name in _message_tool_names(msg):
+            if name not in seen:
                 seen.append(name)
         content = msg.get("content")
         if isinstance(content, str) and "```" in content:
@@ -6089,6 +6146,9 @@ async def stream_agent_loop(
     _explicit_skill_tools: Set[str] = set()
     _tool_selection_source = "caller" if relevant_tools else "unresolved"
     _retained_tool_names: set[str] = set()
+    # The previous turn's tools, when this turn continues it; see the "context"
+    # source in the selection plan.
+    _continued_tools: set[str] = set()
     _suppressed_retained_tools: set[str] = set()
     _low_signal_hints_only = False
     _t1 = time.time()
@@ -6372,6 +6432,12 @@ async def stream_agent_loop(
         )
         _retained = sorted(_retained_allowed - _relevant_tools)
         _retained_tool_names = set(_retained)
+        if _intent.get("continuation"):
+            # Same policy as retention (generic shells stay out unless this is
+            # shell work), narrowed to the turn being continued.
+            _continued_tools = (
+                _tools_used_last_turn(messages, _known_names) & _retained_allowed
+            ) - disabled_tools
         if _retained:
             _relevant_tools |= _retained_allowed
             logger.info(
@@ -6726,10 +6792,17 @@ async def stream_agent_loop(
                 "forced": forced_tools or (),
                 "explicit": _named_tools | _mcp_requested_tools | _local_git_tools,
                 "skill": _explicit_skill_tools,
-                "context": _eager_hints - _query_matched_tools - _retained_tool_names,
+                # A continuation resumes the previous turn's work, so that
+                # turn's tools rank as context, above keyword guesses. They used
+                # to need a keyword hint from the new message to be retained at
+                # all -- and "Ok, continue" carries none, so a git merge resumed
+                # without manage_git while a pasted summary mentioning calendar
+                # sync got manage_calendar. Still budgeted, still policy-bound.
+                "context": (_eager_hints - _query_matched_tools - _retained_tool_names)
+                           | _continued_tools,
                 "semantic": _query_matched_tools,
                 "domain": _admin_tools if _needs_admin else (),
-                "retained": _retained_tool_names & _eager_hints,
+                "retained": (_retained_tool_names & _eager_hints) - _continued_tools,
             },
             disabled_tools=disabled_tools,
             allowed_tools=_inventory_names,
@@ -6739,10 +6812,27 @@ async def stream_agent_loop(
         )
         _relevant_tools = set(_selection_plan.selected)
         _turn_discovery.set_attached(_relevant_tools)
+        if _continued_tools:
+            logger.info("[tool-routing] continuation carried the previous turn's tools=%s (kept %d)",
+                        _name_list(_continued_tools, 20), len(_continued_tools & _relevant_tools))
         logger.info("[tool-routing-plan] %s", json.dumps(_selection_plan.trace(), sort_keys=True))
 
     def _admit_turn_tools(names: Set[str], source: str = "context") -> Set[str]:
-        """All late additions share the catalogue and cumulative schema budget."""
+        """All late additions share the catalogue and cumulative schema budget.
+
+        The budget is cumulative and the current selection enters as `core`,
+        which is protected and never evicted -- so a turn's first guesses keep
+        the room, and once 32 tools / 5000 schema tokens are spent an
+        unprotected `source` admits NOTHING. That is what stopped the agent
+        unblocking itself: the self-unblock re-armed via "semantic",
+        `discover_tools` via "context", a loaded skill's declared tools via
+        "context" -- all budgeted, all silently refused on a full turn, while
+        the model was told the tools had loaded. Callers therefore pass the
+        source that says what the addition IS: "explicit" for a tool the model
+        or user named, "skill" for a skill's declared dependency. Both are
+        PROTECTED_SOURCES, which the planner documents as exactly the requests
+        allowed past the advisory budget. Guesses stay budgeted.
+        """
         if _selection_plan is None:
             return set(names) - disabled_tools
         _admission = plan_tool_selection(
@@ -6751,7 +6841,19 @@ async def stream_agent_loop(
             disabled_tools=disabled_tools, schema_costs=_schema_costs,
             max_tools=32, max_schema_tokens=5000,
         )
-        return set(_admission.selected) - set(_relevant_tools or ())
+        admitted = set(_admission.selected) - set(_relevant_tools or ())
+        refused = (set(names) - disabled_tools) - admitted - set(_relevant_tools or ())
+        if refused:
+            # Never silent: a refused late addition is indistinguishable from
+            # "the tool does not exist" to the model, and from "the harness
+            # forgot" to whoever reads this log.
+            logger.warning(
+                "[tool-routing] late %s addition refused by the turn budget "
+                "(%d tools, ~%d schema tokens already): %s",
+                source, len(_relevant_tools or ()), _admission.estimated_schema_tokens,
+                _name_list(refused, 20),
+            )
+        return admitted
 
     if _relevant_tools is not None:
         # Same silent-clip trap as the re-arm line: this is read to answer "was
@@ -8221,10 +8323,16 @@ async def stream_agent_loop(
                     if _rearm_new:
                         _rearm_scope = "domain:" + (",".join(_domain_labels) or "?")
                 if _rearm_new and _selection_plan is not None:
-                    # Compatibility recovery is subject to the same budget and
-                    # catalogue as initial selection; refusal prose cannot
-                    # attach the whole registry or override a profile ceiling.
-                    _rearm_new = _admit_turn_tools(_rearm_new, "semantic")
+                    # The catalogue and profile ceiling still bind both tiers
+                    # (`_rearm_pool` is already filtered by them). The targeted
+                    # tier names the exact tools the claim pointed at, so it is
+                    # a named request and may exceed the advisory budget --
+                    # otherwise a full turn could never recover from the very
+                    # miss this block exists for. The domain closure is a guess
+                    # and stays budgeted, as c62b6ba intended.
+                    _rearm_new = _admit_turn_tools(
+                        _rearm_new, "explicit" if _rearm_scope == "targeted" else "semantic"
+                    )
                 if _rearm_new:
                     if _rearm_scope.startswith("domain"):
                         _toolset_rearm_count += 1
@@ -8567,6 +8675,23 @@ async def stream_agent_loop(
                         "explain what changed first."
                         + _failure_instruction
                     )
+            elif (
+                _approval_why
+                and block.tool_type == "manage_git"
+                and (_git_invalid := _git_precheck_error(full_command)) is not None
+            ):
+                # Validate BEFORE asking. The 2026-09-18 approvals were for a
+                # stash_drop missing its revision proof, a push carrying an
+                # argument push does not take, and a push the publish-flow rule
+                # forbids -- each approved by the user, each rejected only when
+                # it ran. The model gets the real error now and fixes the call;
+                # an approval that already exists for this exact call is
+                # retired so it is not handed back to fail again.
+                _tool_approvals.retire_approved_call(session_id, block.tool_type, full_command)
+                desc = f"{block.tool_type}: INVALID (not held for approval)"
+                result = dict(_git_invalid)
+                logger.info("Tool %s not held for approval: the call is invalid (%s) in session %s",
+                            block.tool_type, result.get("code") or result.get("error", "")[:80], session_id)
             elif _approval_why and not (
                 (_tool_approvals.has_once_grant(session_id, block.tool_type, full_command)
                  or _tool_approvals.git_standing_grant_allows(session_id, full_command))
@@ -8670,7 +8795,7 @@ async def stream_agent_loop(
                 _discovery_calls += 1
                 # Activation comes only from our turn-local registry. Never
                 # trust activation fields supplied by an arbitrary MCP result.
-                _relevant_tools.update(_admit_turn_tools(_turn_discovery.loaded_names))
+                _relevant_tools.update(_admit_turn_tools(_turn_discovery.loaded_names, "explicit"))
                 # Schemas travel once: native tools on the next request, or
                 # a fenced-model context envelope after this round's results.
                 result = {k: v for k, v in result.items() if k != "loaded_tools"}
@@ -8712,7 +8837,7 @@ async def stream_agent_loop(
                                 if _turn_discovery is not None:
                                     _new &= _permitted_catalog_names
                                 _new -= _relevant_tools
-                                _new = _admit_turn_tools(_new)
+                                _new = _admit_turn_tools(_new, "skill")
                                 if _new:
                                     _relevant_tools.update(_new)
                                     logger.info(

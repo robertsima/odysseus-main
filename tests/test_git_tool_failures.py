@@ -314,3 +314,76 @@ async def test_resolving_and_committing_records_a_real_two_parent_merge(conflict
     assert not (repo / ".git" / "MERGE_HEAD").exists()
     assert _git(repo, "show", "HEAD:new.txt").stdout == "from upstream\n"
     assert "Already up to date" in _git(repo, "merge", "upstream").stdout
+
+
+# ── approvals: never ask about a call that cannot run, never re-offer one ─────
+#
+# The three calls from the 2026-09-18 log, each approved by the user and each
+# rejected only when it ran -- then handed back at the start of every turn.
+
+import inspect
+
+import src.agent_loop as agent_loop
+from src.agent_tools.git_tools import GitTool
+
+STASH_DROP_WITHOUT_PROOF = json.dumps({"action": "stash_drop", "repository": "/r", "index": 0})
+PUSH_WITH_FOREIGN_ARG = json.dumps({"action": "push", "repository": "/r", "remote_branch": "dev",
+                                    "expected_head": "a" * 40, "expected_target": "b" * 40})
+VALID_MERGE = json.dumps({"action": "merge", "repository": "/r", "ref": "upstream/dev",
+                          "expected_head": "a" * 40, "expected_target": "b" * 40})
+
+
+def test_precheck_names_the_missing_revision_proof():
+    error = GitTool.precheck(STASH_DROP_WITHOUT_PROOF)
+    assert error["code"] == "missing_revision"
+    assert "expected_target" in error["error"]
+
+
+def test_precheck_rejects_an_argument_the_action_does_not_take():
+    error = GitTool.precheck(PUSH_WITH_FOREIGN_ARG)
+    assert error["code"] == "invalid_arguments"
+    assert "expected_target" not in error["error"].split("Send only:")[1].split(";")[0]
+
+
+def test_precheck_rejects_a_push_the_publish_flow_forbids(monkeypatch):
+    monkeypatch.setattr("src.agent_worktree.repository_remote.publish_refusal",
+                        lambda path, action: "Odysseus repositories must use request_publish/publish")
+    push = json.dumps({"action": "push", "repository": "/r", "remote_branch": "dev",
+                       "expected_head": "a" * 40})
+    error = GitTool.precheck(push)
+    assert error["code"] == "use_publish_flow"
+    assert "request_publish" in error["error"]
+
+
+def test_precheck_lets_a_valid_call_through_to_be_held():
+    assert GitTool.precheck(VALID_MERGE) is None
+
+
+def test_the_loop_prechecks_before_it_holds():
+    src = inspect.getsource(agent_loop.stream_agent_loop)
+    precheck = src.index("_git_precheck_error(full_command)")
+    hold = src.index("_tool_approvals.request(session_id, block.tool_type, full_command")
+    assert precheck < hold, "validation must come before the approval card"
+
+
+def test_a_retired_approval_is_not_handed_back():
+    pending = tool_approvals.request("chat", "manage_git", STASH_DROP_WITHOUT_PROOF, "drops")
+    tool_approvals.decide("chat", pending["id"], "once")
+    assert tool_approvals.approved_unused_calls("chat")          # would be re-offered
+
+    assert tool_approvals.retire_approved_call("chat", "manage_git", STASH_DROP_WITHOUT_PROOF)
+    assert tool_approvals.approved_unused_calls("chat") == []
+    assert not tool_approvals.retire_approved_call("chat", "manage_git", STASH_DROP_WITHOUT_PROOF)
+
+
+@pytest.mark.asyncio
+async def test_running_an_approved_but_invalid_call_retires_its_approval(monkeypatch):
+    """The loop the log shows: approved, rejected, re-offered, rejected, ..."""
+    monkeypatch.setattr("src.tool_security.owner_is_admin_or_single_user", lambda owner: True)
+    pending = tool_approvals.request("chat", "manage_git", PUSH_WITH_FOREIGN_ARG, "publishes")
+    tool_approvals.decide("chat", pending["id"], "once")
+
+    result = await GitTool().execute(PUSH_WITH_FOREIGN_ARG, {"owner": "admin", "session_id": "chat"})
+
+    assert result["code"] == "invalid_arguments"
+    assert tool_approvals.approved_unused_calls("chat") == []

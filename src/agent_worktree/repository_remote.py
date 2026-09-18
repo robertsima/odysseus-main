@@ -201,6 +201,35 @@ def _is_app_remote(url: str) -> bool:
     return bool(cfg.repo_slug and path.casefold() == cfg.repo_slug.casefold())
 
 
+PUBLISH_FLOW_MESSAGE = "Odysseus repositories must use request_publish/publish"
+
+
+def publish_refusal(path, action: str) -> Optional[str]:
+    """The `use_publish_flow` refusal a publish action would hit, answered early.
+
+    Resolves the destination exactly as `_push_sync`,
+    `_force_push_with_lease_sync` and `_delete_remote_branch_sync` do (the
+    branch's upstream, else the selected remote; delete always selects), so it
+    cannot disagree with them about WHICH remote. Asked before a call is held
+    for approval: on 2026-09-18 the user approved a push that this rule then
+    refused, because nothing checked it until the call ran. Returns None
+    whenever it cannot tell -- the real call remains the authority.
+    """
+    if is_odysseus_repository(str(path)):
+        return PUBLISH_FLOW_MESSAGE
+    try:
+        with Repo(str(path)) as repo:
+            if action == "delete_remote_branch":
+                _remote, url = _select_remote(repo)
+            else:
+                _local_ref, branch, _oid = _attached_head(repo)
+                upstream = _upstream(repo, branch)
+                url = upstream[2] if upstream else _select_remote(repo)[1]
+    except Exception:
+        return None
+    return PUBLISH_FLOW_MESSAGE if _is_app_remote(url) else None
+
+
 def _push_sync(path, token=None, remote_branch=None, expected_head=None):
     with Repo(str(path)) as repo:
         local_ref, branch, local_oid = _attached_head(repo)
