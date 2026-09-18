@@ -1,3 +1,7 @@
+# Keep this pinned release aligned with .nvmrc (used by CI and local tooling).
+# Use the official multi-architecture distribution, not Debian's older Node.
+FROM node:22.23.2-bookworm-slim AS node-distribution
+
 # ---- builder: patch + build wheels for Real-ESRGAN's broken-on-3.14 deps ----
 # basicsr/gfpgan/facexlib read their version via exec()+locals()['__version__'],
 # which raises KeyError on Python 3.13+ (PEP 667). Build patched wheels here so
@@ -9,14 +13,36 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl \
 COPY docker/build-realesrgan-wheels.sh /usr/local/bin/build-realesrgan-wheels.sh
 RUN bash /usr/local/bin/build-realesrgan-wheels.sh /wheels
 
-FROM python:3.14-slim
+# Small, independently testable base shared by the final application image.
+FROM python:3.14-slim AS node-runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=node-distribution /usr/local/bin/node /usr/local/bin/node
+COPY --from=node-distribution /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
+COPY --from=node-distribution /usr/local/include/node/ /usr/local/include/node/
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
+    && node --version && npm --version && npx --version
+
+FROM node-runtime AS app
+
+# Compiler and skills.sh installer are separate tools. Install their locked
+# dependency trees once at build time, without package lifecycle scripts.
+# This installs CLI binaries globally on PATH, NOT user/global skill bundles.
+ENV DISABLE_TELEMETRY=1 PROMPTSCRIPT_TELEMETRY=false \
+    ODYSSEUS_SKILL_TOOLS_ROOT=/opt/odysseus-skill-tools
+COPY package.json package-lock.json /opt/odysseus-skill-tools/
+RUN cd /opt/odysseus-skill-tools && npm ci --omit=dev --ignore-scripts \
+    && ./node_modules/.bin/prs --version && ./node_modules/.bin/skills --version
+ENV PATH="/opt/odysseus-skill-tools/node_modules/.bin:${PATH}"
 
 # System deps. tmux is required by Cookbook for background downloads/serves.
 # openssh-client is required for Cookbook remote server tests, setup, probes,
 # downloads, and serves from Docker installs.
 # git/cmake are required when Cookbook builds llama.cpp on first llama.cpp
 # launch inside Docker.
-# nodejs/npm provide npx for the built-in Browser MCP server.
+# node-runtime provides Node/npm/npx for the built-in MCP integrations.
 # chromium provides the actual browser binary used by that MCP server.
 # gosu lets the entrypoint drop privileges cleanly so signals still reach
 # uvicorn directly (no extra shell layer like `su`/`sudo` would add).
@@ -25,8 +51,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     curl \
     git \
-    nodejs \
-    npm \
     chromium \
     tmux \
     openssh-client \

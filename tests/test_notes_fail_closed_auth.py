@@ -24,19 +24,14 @@ loop — no portal thread, no BaseHTTPMiddleware — so the suite is portable.
 Identity is injected by a pure-ASGI shim that writes the same
 ``request.state`` fields the real auth middleware sets.
 """
-import uuid
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.pool import NullPool
-
-import core.database as cdb
-from core.database import Note
 import routes.note_routes as nr
+from src.notes_markdown import NoteItem, NoteRecord
+from tests.helpers.fake_notes_store import FakeNotesStore
 
 
 # A deliberately NON-loopback peer. require_user has loopback fall-throughs
@@ -70,18 +65,7 @@ class _Identity:
         await self.app(scope, receive, send)
 
 
-def _temp_db(tmp_path):
-    """Note routes over a fresh temp DB; returns the session factory."""
-    engine = create_engine(
-        f"sqlite:///{tmp_path / 'notes.db'}",
-        connect_args={"check_same_thread": False},
-        poolclass=NullPool,
-    )
-    cdb.Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)
-
-
-def _build_app(factory, *, configured=True):
+def _build_app(*, configured=True):
     app = FastAPI()
     app.state.auth_manager = SimpleNamespace(is_configured=configured)
     app.include_router(nr.setup_note_routes())
@@ -102,20 +86,17 @@ def env(monkeypatch, tmp_path):
     (mirroring the auth middleware); no header => no identity, the exact state
     an auth-middleware regression leaves behind. Seeds one note each for alice
     and bob. Returns (app, factory)."""
-    factory = _temp_db(tmp_path)
-    monkeypatch.setattr(nr, "SessionLocal", factory)
+    store = FakeNotesStore(
+        NoteRecord(id="note-alice", owner="alice", title="a", content="x",
+                   items=[NoteItem(text="t", done=False)]),
+        NoteRecord(id="note-bob", owner="bob", title="b", content="y"),
+    )
+    monkeypatch.setattr(nr, "STORE", store)
     monkeypatch.setenv("AUTH_ENABLED", "true")
     monkeypatch.delenv("LOCALHOST_BYPASS", raising=False)
 
-    app = _build_app(factory)
-
-    db = factory()
-    db.add(Note(id="note-alice", owner="alice", title="a", content="x",
-                items='[{"text": "t", "done": false}]'))
-    db.add(Note(id="note-bob", owner="bob", title="b", content="y"))
-    db.commit()
-    db.close()
-    return app, factory
+    app = _build_app()
+    return app, store
 
 
 async def test_no_identity_fails_closed_on_every_owner_scoped_route(env):
@@ -133,14 +114,12 @@ async def test_no_identity_fails_closed_on_every_owner_scoped_route(env):
 
 
 async def test_no_identity_did_not_mutate_anything(env):
-    app, factory = env
+    app, store = env
     async with _client(app) as c:
         await c.put("/api/notes/note-alice", json={"title": "pwn"})
         await c.post("/api/notes/note-alice/pin")
         await c.delete("/api/notes/note-bob")
-    db = factory()
-    rows = {n.id: n for n in db.query(Note).all()}
-    db.close()
+    rows = store.notes
     assert set(rows) == {"note-alice", "note-bob"}
     assert rows["note-alice"].title == "a"
     assert not rows["note-alice"].pinned
@@ -171,16 +150,11 @@ async def test_auth_disabled_keeps_single_user_mode_working(monkeypatch, tmp_pat
     """AUTH_ENABLED=false is the operator's explicit anonymous mode: no
     identity must still mean full single-user access (issue #622 contract),
     even with a stale configured auth.json on disk."""
-    factory = _temp_db(tmp_path)
-    monkeypatch.setattr(nr, "SessionLocal", factory)
+    store = FakeNotesStore(NoteRecord(id="n1", owner=None, title="solo", content="x"))
+    monkeypatch.setattr(nr, "STORE", store)
     monkeypatch.setenv("AUTH_ENABLED", "false")
 
-    app = _build_app(factory)
-
-    db = factory()
-    db.add(Note(id="n1", owner=None, title="solo", content="x"))
-    db.commit()
-    db.close()
+    app = _build_app()
 
     async with _client(app) as c:
         assert [n["id"] for n in (await c.get("/api/notes")).json()["notes"]] == ["n1"]

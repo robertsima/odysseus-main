@@ -2684,6 +2684,7 @@ export function addMessage(role, content, modelName, metadata) {
 
 	    wrap.dataset.raw = text;
 	    if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
+	    if (metadata?.steer_id) wrap.dataset.steerId = String(metadata.steer_id);
     // Prepend sources box if saved in metadata
     var sourcesPrefix = '';
     var findingsSuffix = '';

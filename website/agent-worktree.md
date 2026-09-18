@@ -1,5 +1,123 @@
 # Agent worktree and gated publishing
 
+## Updating an existing checkout (scoped Git)
+
+`manage_git` supports ordinary Git workflows, separate from Odysseus's own
+publishing worktree. Use `repositories` first; then supply the returned absolute
+`repository` path. Roots come from **Settings → Claude Code repository roots**
+(`claude_code_repository_roots` / `CLAUDE_CODE_REPOSITORY_ROOTS`), defaulting to
+`/app/data/development` and `/app/data/agent_worktrees` in the container.
+
+| Workflow | Actions | Safeguard |
+| --- | --- | --- |
+| Inspect | `repositories`, `status`, `diff`, `log`, `branches`, `remotes` | Read-only, bounded output |
+| Create | `clone`, `init` | New targets only under approved roots; clone accepts credential-free GitHub HTTPS URLs, validates the tree before checkout, and never runs hooks/submodules/filters |
+| Prepare changes | `stage`, `unstage`, `commit` | Explicit relative file paths; local/supplied author identity; no amend |
+| Local branches | `branch`, `tag`, `switch` | No ref overwrite; switching requires a clean checkout |
+| Synchronize | `fetch`, `fetch_branch`, `pull`, `pull_with_restore`, `set_upstream` | Configured GitHub remotes only; fetch_branch obtains a live SHA for lease-bound operations; pulls are fast-forward only; bounded dirty changes can be saved and restored; upstream binding cannot replace an existing one |
+| Save/restore | `stash_list`, `stash_create`, `stash_apply`, `stash_pop`, `stash_drop` | Tracked changes only; untracked files stay in place; apply requires a clean checkout at the stash's exact base; pop/drop require exact-call confirmation |
+| Publish/integrate | `push`, `force_push_with_lease`, `merge`, `delete_branch`, `delete_remote_branch` | Fresh exact-call human confirmation; force is lease-bound to the observed remote SHA; merge is fast-forward only; deletion is revision-bound |
+| Rewrite local history | `reset`, `rebase` | Fresh exact-call confirmation; clean checkouts only; durable `refs/odysseus/recovery/...` ref; non-interactive rebase automatically aborts on conflicts |
+
+For a new local branch, make an explicit first push to `remote_branch`, then
+use `set_upstream` to bind that already-fetched/pushed branch. An existing
+upstream is never silently changed. A URL in chat identifies a repository;
+it does not override its configured remote. Dirty/diverged checkouts require
+an operator decision, not an automatic reset. When the user explicitly asks to
+update a dirty checkout, `pull_with_restore` provides the bounded save →
+fast-forward pull → restore workflow without a shell.
+
+`pull_with_restore` preserves staged and unstaged regular-file changes plus
+untracked files. It refuses if upstream changes overlap any preserved path, if
+the save exceeds 1,000 paths or 64 MiB, or if the checkout uses unsafe linked
+files. The temporary stash is durable crash recovery, but restoration applies
+only the originally changed paths so it cannot overwrite unrelated upstream
+changes. On a restoration failure, the tool leaves the saved entry at
+`refs/stash` and reports recovery is required instead of claiming success.
+
+This admin-only tool uses pinned Dulwich directly, not a shell or external Git
+process. It does **not** require private-vault reads. Existing tool bindings,
+disables and plan mode remain binding. Routine changes run directly in `auto`;
+`ask_all` can require confirmation for them too. Publishing, history rewrites,
+stash deletion, merge and branch deletion
+**always** require a single-use confirmation, even in `auto`. An “always” UI
+choice is intentionally reduced to one use for this mixed-capability tool.
+Confirmations include `expected_head` and/or `expected_target` as appropriate;
+stale commit IDs refuse the operation. The tool is withheld entirely in plan
+mode because it also exposes write actions.
+
+The initial supported scope is ordinary physical checkouts with a `.git`
+directory; network operations require a configured `https://github.com/owner/repo`
+remote. Standard
+`git@github.com:owner/repo.git` URLs are normalized in memory; saved config is
+unchanged. Linked worktrees, vault directories, symlinks, submodules,
+filter-dependent checkouts and other remote hosts are refused. This is **not**
+a general Git/test sandbox. It does not execute hooks or credential helpers.
+Arbitrary commands, unconditional force-push, interactive rebase, remote URL
+changes, and conflict-resolving merges remain unavailable; they cannot be
+smuggled through arbitrary arguments.
+
+Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
+current chat permits the `github_read` integration; sessionless calls are
+anonymous. Push also requires `ODYSSEUS_GITHUB_MCP_WRITE=true`, permission for
+`github_write` in that agent's loadout, and a token with repository write access.
+Odysseus self-publishing still requires the host-reviewed publishing flow below;
+the generic Git tool cannot bypass it. Its publishing token is not borrowed. Tokens stay
+in memory and HTTPS redirects are refused. If an upstream branch was removed,
+the tool reports that instead of silently pulling `main` or `dev`.
+
+For GitHub.com, the token must look like an actual GitHub credential (normally
+`github_pat_...` for a fine-grained PAT or `ghp_...` for a classic PAT). An
+Odysseus `ody_...` API token in that variable is rejected, and the GitHub MCP
+servers are not registered. The deployed container needs:
+
+```dotenv
+GITHUB_PERSONAL_ACCESS_TOKEN=github_pat_your_real_github_token
+ODYSSEUS_GITHUB_MCP_WRITE=1
+ODYSSEUS_DISABLE_MCP=0
+```
+
+Leave `GITHUB_HOST` unset for GitHub.com; set it only for GitHub Enterprise.
+`ODYSSEUS_GITHUB_MCP_BINARY` is optional because the container image includes
+`/usr/local/bin/github-mcp-server`. Agent/session loadouts must separately allow
+`github_read` and `github_write`. With CasaOS/ZimaOS these values belong in the
+deployed app's container environment; recreate the container after changing
+them so the child MCP processes inherit the new values.
+
+Rebuild/redeploy the image to install the new dependency. Smoke test with:
+“List my approved local repositories and show the branch, upstream and changes
+for Umni. Do not modify anything.” Then, if the reported checkout/upstream is
+correct and clean: “Pull that checkout from its configured upstream.” Check
+the result's before/after commit IDs; GitHub CI/API results alone do not prove
+local files were updated.
+
+The legacy `manage_agent_worktree` actions `repo_list`, `repo_status`, and
+`repo_pull` remain aliases for the original narrow sync service.
+
+### Tool argument and authentication troubleshooting
+
+Send only the fields for the chosen action, for example
+`{"action":"repositories"}` or
+`{"action":"status","repository":"/app/data/development/your-checkout"}`.
+The September 17 native-call fix tolerates known, irrelevant empty placeholders
+without accepting unknown arguments or non-empty overrides. Empty optional values
+use documented defaults (for example local commit identity and a bounded log limit).
+Required fields still undergo validation. Approval fingerprints use the same normalization;
+changing a repository, branch, action or expected revision still needs fresh approval.
+
+The Git schemas explicitly preserve optional fields in Responses requests and retain
+their field descriptions after token compaction. Without an explicit opt-out,
+[Responses may normalize schemas into strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode),
+where every property is required. Local authorization and argument checks remain in force.
+
+`fatal: could not read Username for 'https://github.com'` from the shell is a
+separate credential error, not a vault access restriction. The scoped Git tool
+uses the permission-checked integration token described above; it does not install
+shell credentials or credential helpers. Pasted Git HTTPS credential diagnostics
+make that tool available for inspection, not authorize a pull or push automatically.
+
+## Human-gated publishing
+
 The agent gets one persistent Git worktree it can edit and test in. Nothing
 leaves the machine until a human, at the host, approves that exact commit.
 

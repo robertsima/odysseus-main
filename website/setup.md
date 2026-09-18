@@ -30,6 +30,22 @@ docker compose up -d --build
 ```
 To include optional extras in the image (PDF viewer, Office extraction; includes AGPL PyMuPDF), build with `docker compose build --build-arg INSTALL_OPTIONAL=true` before `up`.
 
+The image bundles Node.js **22.23.2** (Node 22 LTS, above the 22.6 minimum),
+including npm and npx for MCP integrations and the Todoist CLI. Docker and CI
+use the same pinned release; `.nvmrc` records it for local development too.
+This does not change Node installed on your host. After pulling an update,
+rebuild and recreate the application container to apply runtime changes:
+
+```bash
+docker compose build --pull odysseus
+docker compose up -d --no-deps odysseus
+docker compose exec odysseus node --version
+docker compose exec odysseus npx --version
+```
+
+For a lightweight runtime check without building the full Python application:
+`docker build --target node-runtime -t odysseus-node-runtime .`.
+
 Open `http://localhost:7000` when the containers are healthy. Docker Compose
 binds the web UI to `127.0.0.1` by default. If the port is taken, set
 `APP_PORT=7001` in `.env` and recreate the container. Set `APP_BIND=0.0.0.0`
@@ -453,8 +469,11 @@ A grab-bag of small gotchas that otherwise turn into long debugging sessions.
 | Package | Feature unlocked |
 |---------|-----------------|
 | `faster-whisper` | Local speech-to-text (microphone -> text) via the "local" STT provider. |
+<<<<<<< HEAD:website/setup.md
 | `kokoro`, `soundfile` | Local Kokoro-82M text-to-speech on a CUDA GPU. The pinned Kokoro release supports Odysseus installs on Python 3.11-3.12; these packages are intentionally skipped on Python 3.13+ (including the Python 3.14 container image). |
 | `ddgs` | DuckDuckGo as a search provider option. |
+=======
+>>>>>>> origin/dev:docs/setup.md
 | `PyMuPDF` | PDF page rendering in the side viewer panel and form-filling. (Note: AGPL-3.0) |
 | `markitdown` | Office/EPUB document text extraction (converts .docx/.xlsx/.pptx/.xls/.epub to Markdown). |
 
@@ -713,7 +732,7 @@ Key settings:
 | `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
 | `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
 | `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
-| `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint |
+| `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint. **Not currently consulted** — retrieval embeds with local FastEmbed only ([details](vault-retrieval.md#embeddings-and-the-vector-store)). |
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
 | `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Gallery transform input cap in bytes (25 MB). |

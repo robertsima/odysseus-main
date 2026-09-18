@@ -1,0 +1,20 @@
+.skill-import-review {
+  background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+  border-radius: 12px; padding: 24px; width: min(820px, 90vw);
+  max-height: 88vh; box-sizing: border-box; overflow: auto; font: inherit;
+}
+.skill-import-review::backdrop { background: rgb(0 0 0 / 55%); }
+.skill-import-review h2 { margin-top: 0; }
+.skill-import-review p, .skill-import-review code { overflow-wrap: anywhere; }
+.skill-import-review label { display: flex; gap: 12px; align-items: center; }
+.skill-import-review select {
+  flex: 1; min-width: 0; background: var(--bg); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; padding: 8px; font: inherit;
+}
+.skill-import-review pre {
+  background: var(--bg); padding: 16px; border: 1px solid var(--border);
+  border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere;
+  min-height: 180px; max-height: 42vh; overflow: auto; font-size: 13px;
+}
+.skill-import-review summary { cursor: pointer; }
+.skill-import-review footer { display: flex; justify-content: flex-end; gap: 12px; margin-top: 18px; }

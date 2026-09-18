@@ -21,6 +21,42 @@ logger = logging.getLogger(__name__)
 # Skills management tool
 # ---------------------------------------------------------------------------
 
+def _unresolvable_toolsets_note(requested) -> str:
+    """Warn the author about `requires_toolsets` entries that name nothing.
+
+    The field is only useful if the runtime can turn it into schemas. Skills
+    written by agents routinely put a sentence there ("web search or retrieval",
+    "search_documents when internal context is relevant"), and the runtime can
+    only ignore those — which it did silently until the 2026-09-17 logs, where
+    the author never learned the dependency was dead. Said here, at the moment
+    the skill is written, it is one edit away from correct.
+
+    Resolution is deliberately generous: an exact tool name, a connected MCP
+    server, or a known prose alias all count.
+    """
+    names = [str(item).strip() for item in (requested or []) if str(item or "").strip()]
+    if not names:
+        return ""
+    try:
+        from src.agent_loop import _skill_declared_tools
+        from src.tool_utils import get_mcp_manager
+
+        _, unknown = _skill_declared_tools(
+            [{"requires_toolsets": names}], set(), get_mcp_manager()
+        )
+    except Exception:
+        logger.debug("requires_toolsets validation skipped", exc_info=True)
+        return ""
+    if not unknown:
+        return ""
+    return (
+        "\n\nHeads-up: requires_toolsets " + ", ".join(f"`{name}`" for name in sorted(unknown))
+        + " does not name a tool, a connected MCP server, or a known toolset, so the runtime will "
+        "ignore it. Use exact tool names (web_search, search_documents), an `mcp__serverId__tool` "
+        "binding, or the MCP server's name — not a sentence describing when to use one."
+    )
+
+
 async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
     """Handle manage_skills tool calls.
 
@@ -101,12 +137,27 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         if not found:
             label = ", ".join(repr(n) for n in missing)
             return {"error": f"Skill {label} not found. Use action='list' for exact names.", "exit_code": 1}
+        execution = {
+            "state": "loaded_not_run",
+            "loaded_skills": [n for n, _ in found],
+            "missing_skills": missing,
+            "note": "Procedure text loaded only. No agents or workflow steps have run. Make actual tool calls and verify their results before reporting execution.",
+        }
+        # A procedure describing research agents can give the caller an exact,
+        # safe first call without auto-running instructions from a document.
+        if any(re.search(r"\b(?:launch|spawn|research|handoff)\b", md, re.I)
+               and re.search(r"\bagents?\b", md, re.I) for _, md in found):
+            execution["next_tool_calls"] = [{"tool": "manage_agent_loadout", "arguments": {"action": "capabilities", "detail": True}}]
+            execution["next_step"] = "Use the returned exact read-only tool bindings to call orchestrate_agents action=start with the user's objective and scoped specialists, then wait for actual handoffs."
+        note = "\n\n[Skill execution status: loaded_not_run. " + execution["note"] + "]"
+        if execution.get("next_tool_calls"):
+            note += "\nExecutable preflight: " + json.dumps(execution["next_tool_calls"]) + "\n" + execution["next_step"]
         if len(requested_names) == 1:
-            return {"results": found[0][1]}
+            return {"results": found[0][1] + note, "execution": execution}
         parts = [f"===== skill: {skill_name} =====\n{md.rstrip()}" for skill_name, md in found]
         if missing:
             parts.append("Not found: " + ", ".join(missing) + " (use action='list' for exact names).")
-        return {"results": "\n\n".join(parts)}
+        return {"results": "\n\n".join(parts) + note, "execution": execution}
 
     if action == "view_ref":
         if not name:
@@ -170,6 +221,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                 f"A near-identical skill already exists: `{entry['name']}` — not creating "
                 f"a duplicate. View or edit it with action='view', name='{entry['name']}'."
             )}
+        toolset_note = _unresolvable_toolsets_note(args.get("requires_toolsets") or [])
         try:
             from src.event_bus import fire_event
             fire_event("skill_added", owner)
@@ -181,7 +233,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
                 "\n\nThis skill is a DRAFT. Run through the procedure once to verify, "
                 f"then publish with action='publish', name='{entry['name']}'."
             )
-        return {"results": f"Created skill `{entry['name']}` — {entry.get('description','')}{verify_hint}"}
+        return {"results": f"Created skill `{entry['name']}` — {entry.get('description','')}{verify_hint}{toolset_note}"}
 
     if action == "edit":
         if not name:
@@ -599,6 +651,14 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     # sidebar surfaces the session. Raw start works but the agent
     # fumbles the payload + the session doesn't reliably show up.
     ("POST",   "/api/research/start"),
+    # Use manage_agent_loadout / orchestrate_agents. The raw endpoint skips
+    # the delegation policy, skips the loadout preflight, and — because the
+    # model has to remember to pass `parent_session` — usually produces a
+    # worker with no link back to the chat that started it. That worker then
+    # never appears in the agent strip above the composer and cannot be found
+    # by `manage_agent_loadout action=status`, which is exactly how the
+    # 2026-09-17 run ended up with invisible agents and four HTTP 400s.
+    ("POST",   "/api/agents/launch"),
     # Use web_search — the HTTP search route is UI-shaped and generic
     # app_api calls can return empty/poorly formatted results compared with the
     # named tool's source-aware output.
@@ -616,8 +676,44 @@ _APP_API_BLOCKLIST_METHOD_PATH = (
     ("DELETE", "/api/calendar/events"),
 )
 
+# These human-facing routes return note bodies or private filenames. The
+# generic API bridge runs inside the agent process, so normal browser auth is
+# not a private-vault capability boundary. Keep them undiscoverable and
+# unreachable unless the dispatcher carries the chat's explicit grant.
+_APP_API_PRIVATE_READ_PREFIXES = (
+    "/api/notes",
+    "/api/personal",
+)
 
-async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
+
+def _app_api_requires_private_grant(method: str, path: str) -> bool:
+    """Whether a loopback request could read or weaken the vault boundary."""
+    method = (method or "GET").upper()
+    if method == "GET" and any(path.startswith(p) for p in _APP_API_PRIVATE_READ_PREFIXES):
+        return True
+    # Personal-doc mutations can change directory labels or rebuild the index;
+    # deny those too so an unprivileged model cannot declassify then retrieve.
+    if method != "GET" and path.startswith("/api/personal"):
+        return True
+    # The generic settings endpoint can alter the global vault policy, while a
+    # chat-settings PATCH could grant this very chat private access. A model
+    # must never be able to mint its own capability through app_api.
+    if method != "GET" and path.startswith("/api/settings/schema"):
+        return True
+    if (
+        method != "GET"
+        and path.startswith("/api/session/")
+        and path.rstrip("/").endswith("/settings")
+    ):
+        return True
+    return False
+
+
+async def do_app_api(
+    content: str,
+    owner: Optional[str] = None,
+    allow_private: bool = False,
+) -> Dict:
     """Generic loopback to allowed internal Odysseus API endpoints. Lets the
     agent reach the full UI-button surface (cookbook, email, notes,
     calendar, skills, sessions, gallery, research, etc.) without us
@@ -654,11 +750,18 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         # Fetch FastAPI's OpenAPI schema so the agent can discover any
         # endpoint without us pre-listing them. Filter by an optional
         # `filter` keyword (substring match on path or summary).
-        kw = (args.get("filter") or "").lower()
+        kw = str(args.get("filter") or "").strip().lower()
+        try:
+            limit = max(1, min(50, int(args.get("limit", 25))))
+            offset = max(0, int(args.get("offset", 0)))
+        except (TypeError, ValueError):
+            return {"error": "limit and offset must be integers", "exit_code": 1}
         try:
             async with httpx.AsyncClient(timeout=15) as client:
                 resp = await client.get(f"{base}/openapi.json",
                                         headers=_internal_headers())
+                if getattr(resp, "status_code", 200) >= 400:
+                    return {"error": f"OpenAPI fetch failed: HTTP {resp.status_code}", "exit_code": 1}
                 data = resp.json()
         except Exception as e:
             return {"error": f"OpenAPI fetch failed: {e}", "exit_code": 1}
@@ -671,7 +774,11 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             for method, op in methods.items():
                 if method.lower() not in ("get", "post", "put", "patch", "delete"):
                     continue
+                if not isinstance(op, dict):
+                    continue
                 if any(method.upper() == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
+                    continue
+                if not allow_private and _app_api_requires_private_grant(method, path):
                     continue
                 summary = (op or {}).get("summary") or (op or {}).get("description") or ""
                 if isinstance(summary, str):
@@ -682,15 +789,34 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
         rows.sort(key=lambda r: (r["path"], r["method"]))
         if not rows:
             return {"output": f"No endpoints match filter {kw!r}." if kw else "No endpoints found.", "exit_code": 0}
-        lines = [f"{len(rows)} endpoint(s)" + (f" matching {kw!r}" if kw else "") + ":"]
-        for r in rows[:200]:
-            line = f"  {r['method']:6s} {r['path']}"
-            if r["summary"]:
-                line += f"  — {r['summary']}"
-            lines.append(line)
-        if len(rows) > 200:
-            lines.append(f"  ...({len(rows) - 200} more — filter to narrow)")
-        return {"output": "\n".join(lines), "endpoints": rows, "exit_code": 0}
+        page = []
+        for row in rows[offset:offset + limit]:
+            candidate = page + [row]
+            # The tool formatter caps structured data at 8k characters.
+            # End a page before that cap so it never cuts an endpoint in half
+            # while claiming the agent has received the entire page.
+            if page and len(json.dumps(candidate, indent=2, ensure_ascii=False)) > 6000:
+                break
+            page.append(row)
+        next_offset = offset + len(page) if offset + len(page) < len(rows) else None
+        # Keep the data in one representation. format_tool_result already
+        # renders structured fields; duplicating the table in `output` made
+        # discovery consume thousands of tokens before any real work started.
+        summary = f"Showing {len(page)} of {len(rows)} endpoint(s)"
+        if kw:
+            summary += f" matching {kw!r}"
+        summary += f" (offset {offset})."
+        if next_offset is not None:
+            summary += " Narrow with filter or request the next offset."
+        return {
+            "output": summary,
+            "endpoints": page,
+            "total": len(rows),
+            "offset": offset,
+            "limit": limit,
+            "next_offset": next_offset,
+            "exit_code": 0,
+        }
 
     # action == "call"
     path = args.get("path") or ""
@@ -704,6 +830,15 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
     method = (args.get("method") or "GET").upper()
     if method not in ("GET", "POST", "PUT", "PATCH", "DELETE"):
         return {"error": f"Unsupported method: {method}", "exit_code": 1}
+    if not allow_private and _app_api_requires_private_grant(method, path):
+        return {
+            "error": (
+                f"{method} {path} is blocked because this chat has not been "
+                "granted private-vault read access. Use the guarded notes/RAG "
+                "tools or explicitly enable private vault reads for this chat."
+            ),
+            "exit_code": 1,
+        }
     if any(method == m and path.startswith(p) for m, p in _APP_API_BLOCKLIST_METHOD_PATH):
         if "/api/email/accounts" in path:
             return {"error": "Don't use /api/email/accounts via app_api — it is owner-filtered in tool context and may return empty. Use the `list_email_accounts` email tool, then pass `account` to list_emails/read_email.", "exit_code": 1}
@@ -717,6 +852,15 @@ async def do_app_api(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "Don't POST /api/model/download directly — use the `download_model` tool (it resolves the server name, sets the venv env_prefix, and registers the task so it shows in the UI).", "exit_code": 1}
         if "/api/model/serve" in path:
             return {"error": "Don't POST /api/model/serve directly — use the `serve_model` or `serve_preset` tool (handles host resolution, env_prefix, and cookbook tracking).", "exit_code": 1}
+        if "/api/agents/launch" in path:
+            return {"error": (
+                "Don't POST /api/agents/launch via app_api — use `manage_agent_loadout` with "
+                "action='start' (or `orchestrate_agents` for scoped research fan-out). The tool "
+                "applies this chat's delegation policy, refuses a loadout that has no usable tools, "
+                "links the worker to this chat so it appears in the agent strip and in "
+                "action='status', and reports the model, tools and round budget it actually started "
+                "with. The raw endpoint does none of that and orphans the worker."
+            ), "exit_code": 1}
         if "/api/research/start" in path:
             return {"error": "Don't POST /api/research/start directly — use the `trigger_research` tool (it surfaces the session in the Deep Research sidebar).", "exit_code": 1}
         if "/api/search" in path:

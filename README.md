@@ -8,7 +8,13 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
+<<<<<<< HEAD
   <a href="website/setup.md">Setup Guide</a> ·
+=======
+  <a href="docs/setup.md">Setup Guide</a> ·
+  <a href="docs/configuration.md">Configuration</a> ·
+  <a href="docs/">Docs</a> ·
+>>>>>>> origin/dev
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="ROADMAP.md">Roadmap</a>
 </p>
@@ -36,7 +42,11 @@ docker compose up -d --build
 
 Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
+<<<<<<< HEAD
 Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration live in the [setup guide](website/setup.md).
+=======
+Native installs, GPU notes, Windows/macOS instructions, and HTTPS live in the [setup guide](docs/setup.md). For what belongs in `.env` versus the Settings UI, see [Configuration](docs/configuration.md).
+>>>>>>> origin/dev
 
 ## Features
 
@@ -56,6 +66,15 @@ A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-
 ## Contributing
 
 Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
+
+To find your way around the code, start with [`docs/`](docs/README.md). Four
+documents cover the whole system: [architecture and runtime](docs/architecture-runtime.md)
+(what runs where, a request end to end, where state lives),
+[subsystems](docs/subsystems.md) (which files implement which feature),
+[the agent runtime](docs/agent-runtime.md) (how a turn picks its tools and
+keeps its context bounded), and [design patterns](docs/design-patterns.md)
+(why the code is written the way it is — worth reading before a refactor).
+`specs/` holds the behaviour rules the code has to satisfy.
 
 ## Security
 

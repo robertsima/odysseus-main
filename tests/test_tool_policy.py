@@ -280,10 +280,11 @@ def test_guide_only_skips_tool_retrieval(monkeypatch):
         raise AssertionError("guide-only mode must not retrieve tool candidates")
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    from src.tool_index import email_intent
     monkeypatch.setitem(
         sys.modules,
         "src.tool_index",
-        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set()),
+        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set(), email_intent=email_intent),
     )
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
 
@@ -352,7 +353,11 @@ def test_guide_only_blocks_later_round_document_streaming(monkeypatch):
         )
     )
     events = _events(chunks)
-    assert calls == 2
+    # A later round has to have been reached — the block under test is the one
+    # that fires after round 1. The exact count is not the property: a round
+    # ceiling no longer ends a run, so the loop runs on until the loop-breaker
+    # trips, and pinning it to 2 was pinning the old cap.
+    assert calls >= 2
     assert not any(event.get("type") == "doc_stream_open" for event in events)
     assert not any(event.get("type") == "doc_stream_delta" for event in events)
 

@@ -20,6 +20,13 @@ from src import tool_approvals
 
 _TOGGLE_KEYS = ("web", "bash", "plan", "rag")
 MAX_DISABLED_TOOLS = 300
+PRIVATE_VAULT_ACCESS_KEY = "private_vault_access"
+_ACCESS_MODES = frozenset({"none", "read", "write"})
+_SELECTION_MODES = frozenset({"all", "selected", "none"})
+_MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
+_DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
+_LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
+MAX_AGENT_INSTRUCTIONS = 8000
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -65,6 +72,47 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
+        elif key in (PRIVATE_VAULT_ACCESS_KEY, "workflow_readonly"):
+            if not isinstance(value, bool):
+                raise ValueError(f"{key} must be a boolean")
+            out[key] = value
+        elif key == "memory_access":
+            if value not in _ACCESS_MODES:
+                raise ValueError(f"memory_access must be one of {', '.join(sorted(_ACCESS_MODES))}")
+            out[key] = value
+        elif key in ("skill_access", "tool_access"):
+            if value not in _SELECTION_MODES:
+                raise ValueError(f"{key} must be one of {', '.join(sorted(_SELECTION_MODES))}")
+            out[key] = value
+        elif key == "model_access":
+            if value not in _MODEL_ACCESS_MODES:
+                raise ValueError(f"model_access must be one of {', '.join(sorted(_MODEL_ACCESS_MODES))}")
+            out[key] = value
+        elif key == "delegation_policy":
+            if value not in _DELEGATION_POLICIES:
+                raise ValueError(f"delegation_policy must be one of {', '.join(sorted(_DELEGATION_POLICIES))}")
+            out[key] = value
+        elif key in _LIST_KEYS:
+            if value is None:
+                out[key] = []
+                continue
+            if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+                raise ValueError(f"{key} must be a list of names")
+            out[key] = sorted({v.strip() for v in value})[:300]
+        elif key == "max_parallel_workers":
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                raise ValueError("max_parallel_workers must be a number")
+            out[key] = max(0, min(8, count))
+        elif key == "agent_profile":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_profile must be a string")
+            out[key] = (value or "").strip()[:40] or None
+        elif key == "agent_instructions":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_instructions must be a string")
+            out[key] = (value or "").strip()[:MAX_AGENT_INSTRUCTIONS] or None
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out
@@ -81,6 +129,15 @@ def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
         return tool_approvals.normalize_mode(get_setting("agent_approval_mode", tool_approvals.DEFAULT_MODE))
     except Exception:
         return tool_approvals.DEFAULT_MODE
+
+
+def effective_worker_limit(settings: Optional[Dict[str, Any]]) -> int:
+    """The parent chat's child limit, independent of provider-wide capacity."""
+    raw = (settings or {}).get("max_parallel_workers")
+    try:
+        return max(0, min(8, int(1 if raw is None else raw)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def last_used_from_request(*, chat_mode: str, allow_web: Any, allow_bash: Any, plan_mode: bool,

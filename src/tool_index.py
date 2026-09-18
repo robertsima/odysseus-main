@@ -81,6 +81,154 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
 
 COLLECTION_NAME = "odysseus_tool_index"
 
+# Chroma reports cosine distance here and retrieval historically accepted every
+# top-K neighbour, even one with effectively no semantic overlap.  That let an
+# ntfy notification request bind the email suite merely because email text was
+# its least-bad neighbour.  0.18 retains intentionally broad tool requests
+# while rejecting the weak tail observed from unrelated connected services.
+_MIN_RETRIEVAL_SIMILARITY = 0.18
+
+# Email tools are intentionally split by intent.  A bare word such as
+# ``send``/``message``/``reply`` is not enough to identify email work: those
+# words are also common in notification, agent-delegation, and chat requests.
+# Keep this vocabulary here (rather than adding one-off exclusions for each
+# integration) so retrieval can apply the same context gate to built-ins while
+# leaving explicitly matched MCP tools untouched.
+_EMAIL_READ_TOOLS = frozenset({
+    "list_email_accounts", "list_emails", "read_email", "audit_emails",
+    "scan_email_unsubscribes", "resolve_contact", "ui_control",
+})
+_EMAIL_MUTATION_TOOLS = frozenset({
+    "send_email", "reply_to_email", "bulk_email", "delete_email",
+    "archive_email", "mark_email_read", "unsubscribe_email",
+})
+# ``ui_control`` and ``resolve_contact`` are shared tools. They are useful for
+# unrelated UI/contact requests and must survive filtering of those requests.
+_EMAIL_TOOLS = (_EMAIL_READ_TOOLS - {"ui_control", "resolve_contact"}) | _EMAIL_MUTATION_TOOLS
+_EXPLICIT_EMAIL_TOOL_RE = re.compile(
+    r"\b(?:list_email_accounts|list_emails|read_email|audit_emails|"
+    r"scan_email_unsubscribes|unsubscribe_email|send_email|reply_to_email|"
+    r"bulk_email|delete_email|archive_email|mark_email_read)\b",
+    re.I,
+)
+
+# A mailbox noun is a useful positive signal, but only when it is not being
+# used as part of a software/code audit.  The latter is a frequent request for
+# this project and must not make mail mutation schemas compete with delegation
+# and source-inspection tools.  Code context is structural: a code noun must
+# occur alongside an audit/inspection-style operation.  Words like
+# ``security`` or ``tests`` alone are intentionally not enough, since users
+# often ask to read mail about those subjects.
+_EMAIL_CONTEXT_RE = re.compile(
+    r"\b(?:e-?mails?|mails?|mailbox(?:es)?|gmail|googlemail|inbox(?:es)?|unread)\b",
+    re.I,
+)
+_EMAIL_CODE_OPERATION_RE = re.compile(
+    r"\b(?:audits?|reviews?|inspect|debug|fix|implement|analy[sz]e|run)\b",
+    re.I,
+)
+_EMAIL_CODE_NOUN_RE = re.compile(
+    r"\b(?:e-?mail|mail)(?:[\s-]+(?:sync|delivery|processing|polling|account|server)){0,2}"
+    r"[\s-]+(?:subsystem|code|implementation|backend|pollers?|module|function|class|lifecycle|integration)\b"
+    r"|\b(?:implementation|source\s+code|code|module|backend)\s+(?:of|for)\s+(?:the\s+)?(?:e-?mail|mail)\b",
+    re.I,
+)
+_EMAIL_MUTATION_RE = re.compile(
+    r"(?:"
+    r"\bsend\b.{0,48}\b(?:e-?mails?|mails?)\b|"
+    r"\b(?:e-?mails?|mails?)\b.{0,48}\bsend\b|"
+    r"\breply\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?)\b|"
+    r"\b(?:delete|archive|mark|unsubscribe)\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b|"
+    r"\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b.{0,48}\b(?:delete|archive|mark|unsubscribe)\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_ADDRESS_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:send|message|reply)\b.{0,64}"
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|"
+    r"\b(?:e-?mail|mail)\s+[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_RESULT_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:e-?mail|mail)\b\s+(?:(?:me|us|him|her|them)\s+)?"
+    r"(?:(?:the|a|an)\s+)?(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:e-?mail|mail)\b.{0,48}"
+    r"\b(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:result|results|report|summary|findings|output)\b"
+    r".{0,24}\b(?:by|via|through)\s+(?:an?\s+)?(?:e-?mail|mail)\b"
+    r")",
+    re.I | re.S,
+)
+
+
+def email_intent(query: str) -> Dict[str, bool]:
+    """Classify the small amount of context needed for email tool routing.
+
+    This deliberately does not classify MCP tools.  It only identifies when
+    exact built-in email names are supported by the user's wording, allowing
+    callers such as the agent-loop fallback/domain seeding path to share the
+    same decision as embedding retrieval.
+    """
+    text = str(query or "")
+    email_context = bool(_EMAIL_CONTEXT_RE.search(text))
+    result_action = bool(_EMAIL_RESULT_ACTION_RE.search(text))
+    code_context = (
+        email_context
+        and bool(_EMAIL_CODE_OPERATION_RE.search(text))
+        and bool(_EMAIL_CODE_NOUN_RE.search(text))
+        and not result_action
+    )
+    mutation = bool(_EMAIL_MUTATION_RE.search(text)) or result_action
+    address_action = bool(_EMAIL_ADDRESS_ACTION_RE.search(text))
+    return {
+        "email_context": email_context,
+        "code_context": code_context,
+        "mutation": mutation,
+        "address_action": address_action,
+        "result_action": result_action,
+    }
+
+
+def filter_email_tools(query: str, selected: Set[str]) -> Set[str]:
+    """Filter/seed built-in email tools using contextual intent.
+
+    Exact built-in names are the only values removed or added. Namespaced MCP
+    tools (including explicit ``mcp__...__ntfy...`` matches) pass through.
+    """
+    tools = set(selected or ())
+    intent = email_intent(query)
+    # An exact built-in tool name is an explicit request and outranks the
+    # heuristic context filter (while still leaving namespaced MCP tools alone).
+    mentioned = {
+        match.casefold()
+        for match in _EXPLICIT_EMAIL_TOOL_RE.findall(str(query or ""))
+    }
+    explicit = {name for name in _EMAIL_TOOLS if name.casefold() in mentioned}
+    if intent["code_context"]:
+        tools.difference_update(_EMAIL_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["email_context"]:
+        tools.update(_EMAIL_READ_TOOLS)
+        if intent["mutation"] or intent["address_action"]:
+            tools.update(_EMAIL_MUTATION_TOOLS)
+        else:
+            # Retrieval can return destructive tools for a read-only mailbox
+            # query. Keep that request read-only unless the wording is explicit.
+            tools.difference_update(_EMAIL_MUTATION_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["address_action"]:
+        tools.update(_EMAIL_TOOLS)
+    else:
+        # Generic send/message/reply or notification wording is not email
+        # intent. Keep unrelated UI/MCP tools untouched.
+        tools.difference_update(_EMAIL_TOOLS)
+    tools.update(explicit)
+    return tools
 # ── Tool description registry ──
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
@@ -94,12 +242,17 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
+    "discover_tools": "Search the already-permitted, already-connected tool catalog for a capability and load a bounded set of matching definitions for the next agent round. Discovery never grants permission, connects services, changes settings, or performs the requested action.",
     "write_file": "Write/create or fully rewrite a file ON DISK (source code, configs, project files). Use for new files or full rewrites — NOT create_document (editor panel) and NOT a bash heredoc.",
     "edit_file": "Edit an existing file ON DISK by exact string replacement (fix a bug, change a function). Shows a diff. The tool for changing files on disk — NOT edit_document (editor panel) and NOT bash sed/heredoc.",
     "apply_patch": "Apply a multi-file patch to source files ON DISK. Use for implementation, refactors, and bug fixes where several edits belong together. Workspace-confined and returns a diff. Prefer over bash redirects/heredocs/sed.",
     "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
-    "manage_agent_worktree": "Work on this codebase in an isolated, persistent git worktree on an agent/odysseus/* branch, then publish it as a DRAFT pull request once a human approves. Use for any 'change the code / fix this bug / open a PR / push a branch' request about Odysseus itself. Actions: start, status, diff, commit, request_publish, publish, list_requests, show_request, remove. This is the ONLY way to push: git commands run through bash have no credentials and will fail to authenticate.",
+    "manage_git": "Typed Git workflows: discover/clone/init repositories; status/diff/log; stage/commit; branch/tag/switch; fetch/pull; managed stash; push; force-with-lease; fast-forward merge; reset/rebase with recovery refs; and lease-bound local/remote branch deletion. Works in approved roots without shell or private-vault access. Publishing, deletion, stash deletion, and history rewrites require exact-call human confirmation. GitHub API metadata cannot update local checkouts; arbitrary commands remain unavailable.",
+    "manage_agent_worktree": "Odysseus's persistent agent/odysseus/* worktree and human-gated publishing: start/status/diff/commit/request_publish/publish/list_requests/show_request/remove. Publishing credentials belong to this reviewed path, not arbitrary bash commands. Use manage_git for ordinary repository workflows. Legacy repo_list/repo_status/repo_pull actions also support scoped checkout synchronization.",
     "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working. Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
+    "manage_agent_loadout": "Define reusable worker loadouts (named policies: instructions, model, tools, skills, memory, MCP, delegation, approvals, worker limit) and start workers with them. Use for \u2018set up a researcher/reviewer/builder agent\u2019, \u2018make a worker that can only read files\u2019, \u2018spin up an agent to do X\u2019. A loadout you create is intersected with this chat\u2019s own policy, so it can never grant more than you already have; action=capabilities reports that ceiling.",
+    "orchestrate_agents": "Run multiple scoped specialist research agents, collect evidence-backed handoffs and synthesize results. Use appropriately scoped agents and MCP tools for market research, competitor positioning, content research, and draft synthesis. Real start/status/wait/cancel lifecycle with per-agent tool bindings, not simply loading skills or generic deep research.",
+    "delegate_to_agent": "Delegate a bounded coding task through the administrator-selected provider: a local subscription-backed CLI or a connected remote coding-agent MCP tool. Provider-neutral; use instead of assuming Claude is installed.",
     "read_app_logs": "Read Odysseus's own application logs to debug or troubleshoot the running app. Use when something in the app failed, errored, or behaved unexpectedly and you need to see what it recorded. action=list to enumerate log files, action=tail for the last N lines with optional substring or minimum-level filters. Read-only; credentials are redacted.",
     "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
     "edit_document": "Preferred tool for editing an existing document — targeted find-and-replace. Use for any small change: add a function, fix a bug, tweak a section, rename things.",
@@ -125,6 +278,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "create_session": "Create a new chat with a name and model.",
     "list_sessions": "List all chats with their metadata (the UI calls these 'chats'). Use for 'list my chats', 'rename all my chats' (list first, then manage_session to rename each).",
     "send_to_session": "Send a message to another chat. Cross-chat communication.",
+    "message_agent": "Tell a running agent something now, without waiting for its reply. Peer-to-peer agent messaging; lands between its rounds.",
     "recall_tool_output": "Read back a large tool result that was moved out of the conversation. Oversized tool output (long logs, whole files, big API responses) is kept only as a head/tail excerpt naming a `toolout-...` reference; this searches or pages through the full stored text. Use for \"the rest of that output\", \"what did the log say about X\", \"show me more of that file\" — never re-run the command to see what was trimmed.",
     "search_documents": "Semantic/vector search over the user's personal documents, vault, notes, journal entries, voice logs, and uploaded files using the ChromaDB embedding index. Answers questions ABOUT the content of the user's own documents — what did I write about X, find my notes on Y, what does my vault say about Z. Returns the relevant excerpts and their file paths. This is the correct tool instead of read_file/bash/cat over the personal documents directory, which floods context with whole files.",
     "search_chats": "Search past session transcripts across chats.",
@@ -351,7 +505,13 @@ class ToolIndex:
             except Exception as e:
                 logger.warning("Tool retrieval failed in %s lane: %s", lane.name, e)
         rows.sort(key=lambda row: (-row["score"], lane_priority.get(row["embedding_lane"], 99)))
-        return [row["tool_name"] for row in dedupe_results(rows, id_key="tool_name", limit=k)]
+        above_floor = [row for row in rows if row["score"] >= _MIN_RETRIEVAL_SIMILARITY]
+        if rows and not above_floor:
+            logger.debug(
+                "Tool retrieval rejected %d weak neighbour(s); best similarity=%.4f floor=%.2f",
+                len(rows), rows[0]["score"], _MIN_RETRIEVAL_SIMILARITY,
+            )
+        return [row["tool_name"] for row in dedupe_results(above_floor, id_key="tool_name", limit=k)]
 
     # Structural recurring-schedule intent. Typo-resilient (matches "every dya"
     # via "every <word>"), and catches bare clock times ("at 7:30 am", "7am").
@@ -370,12 +530,14 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
-        # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
-        # request (e.g. "visit <url> and tell me the title"), force-including the
-        # whole email toolset and crowding out the relevant tools — the model then
-        # believed it had only email tools and refused web/other tasks (#1707).
-        frozenset({"email", "emails", "mail", "mails", "mailbox", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
-            {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
+        # Email retrieval is gated by contextual intent below.  In particular,
+        # generic verbs such as "send", "message", and "reply" must not
+        # force-load the entire mailbox suite for notification or agent-chat
+        # requests.  This hint only contributes the read-only/inspection set;
+        # mutation tools are added when an email action is explicit.
+        frozenset({"email", "emails", "mail", "mails", "mailbox", "mailboxes",
+                   "gmail", "googlemail", "inbox", "inboxes", "unread"}):
+            _EMAIL_READ_TOOLS,
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
         # Source-control work on Odysseus itself. Without this the retrieval step
@@ -386,12 +548,27 @@ class ToolIndex:
                    "push", "publish", "merge", "rebase", "worktree", "checkout",
                    "open a pr", "raise a pr", "draft pr", "codebase", "repo",
                    "repository", "patch", "changeset", "diff"}):
-            {"manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
+            {"manage_git", "manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
         # Self-debugging: the app's own logs.
+        #
+        # Matching is `\b<hint>\b`, so the plural "logs" is already safe from
+        # "blogs", "catalogs" and "dialogues" — but the SINGULAR "log" is not
+        # safe from the verb in "log in", which is why it only ever appears
+        # here with a qualifier attached. Same hazard class as the stem guard
+        # documented at `_ADMIN_STEM_MIN_LEN` in agent_loop.
+        #
+        # The 2026-09-16 incident phrase was "analyze your own logs", which
+        # none of the original entries covered: the user addressed the app in
+        # the second person and this set only knew "the logs" / "app logs".
         frozenset({"app log", "app logs", "application log", "application logs",
                    "server log", "server logs", "the logs", "check the logs",
-                   "log output", "stack trace", "traceback", "error log",
-                   "why did it fail", "what went wrong"}):
+                   "log output", "log file", "log files", "stack trace",
+                   "traceback", "error log", "error logs", "error message",
+                   "your logs", "your own logs", "own logs", "odysseus logs",
+                   "exception", "crash", "crashed", "crashing",
+                   "debug this", "debug it", "debugging", "troubleshoot",
+                   "troubleshooting", "went wrong", "what went wrong",
+                   "why did it fail", "why it failed", "why did that fail"}):
             {"read_app_logs"},
         # Detached background `bash` jobs (#!bg): check on / read output / kill.
         frozenset({"background job", "background jobs", "bg job", "bg jobs",
@@ -468,7 +645,13 @@ class ToolIndex:
                    "delegate to claude", "have claude", "let claude", "ask claude code",
                    "coding agent", "coding harness", "hand off to claude", "hand this to claude",
                    "claude integration", "delegate coding", "delegate this coding"}):
-            {"delegate_to_claude_code", "read_app_logs"},
+            {"delegate_to_agent", "delegate_to_claude_code", "read_app_logs"},
+        # "Set up / spin up an agent" is loadout authoring, not a chat relay.
+        frozenset({"agent loadout", "loadout", "worker profile", "agent profile",
+                   "set up an agent", "create an agent", "make an agent",
+                   "spin up an agent", "start a worker", "launch a worker",
+                   "new worker", "worker agent", "sub-agent profile"}):
+            {"manage_agent_loadout", "list_sessions"},
         frozenset({"ask gpt", "ask claude", "ask gemini", "ask deepseek",
                    "ask minimax", "ask qwen", "ask the", "ask another model",
                    "what does", "what would", "second opinion", "other model",
@@ -607,6 +790,13 @@ class ToolIndex:
         for keywords, tools in self._KEYWORD_HINTS.items():
             if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
                 base.update(tools)
+
+        # Apply the shared email context gate after both keyword hints and
+        # embedding retrieval. Embeddings are intentionally broad and can
+        # return mail tools as the least-bad neighbours for an ntfy
+        # notification or a code audit; semantic similarity alone is not an
+        # authorization to expose those schemas.
+        base = filter_email_tools(query, base)
         # Structural scheduling-intent detection — typo-resilient (the literal
         # keyword "every day" misses "every dya"). Catches "every <word>",
         # daily/nightly/etc., or a clock time like "at 7:30 am" / "7am", which

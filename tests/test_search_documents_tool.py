@@ -2,7 +2,7 @@
 
 The point of this tool is to stop the agent pulling whole vault notes into
 context, so the tests that matter are: it is actually reachable as a tool, it
-never returns private material to a non-local endpoint, and it degrades to a
+never returns private material without an explicit grant, and it degrades to a
 readable message instead of an exception when ChromaDB is down.
 """
 

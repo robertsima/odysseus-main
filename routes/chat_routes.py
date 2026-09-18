@@ -17,7 +17,7 @@ from core.models import ChatMessage
 from src.request_models import ChatRequest
 from src.llm_core import llm_call_async, stream_llm, stream_llm_with_fallback
 from src.agent_loop import _classify_agent_request, stream_agent_loop
-from src import agent_runs
+from src import agent_runs, agent_activity
 from src.model_context import estimate_tokens
 from src.chat_helpers import coerce_message_and_session
 from src.endpoint_resolver import normalize_base as _normalize_base, build_chat_url
@@ -42,7 +42,7 @@ from routes.chat_helpers import (
     _enforce_chat_privileges,
     append_dynamic_context,
 )
-from src.action_intents import ToolIntent, classify_tool_intent as _classify_tool_intent
+from src.action_intents import ToolIntent, assess_tool_intent
 from src.image_model_ids import looks_like_image_generation_model
 from src.tool_policy import (
     WEB_TOOL_NAMES,
@@ -779,18 +779,11 @@ def setup_chat_routes(
         _search_enabled = web_search_enabled_for_turn(allow_web_search, use_web)
         _explicit_web_intent = False
         _explicit_browser_intent = False
+        _route_assessment = None
         if isinstance(message, str):
-            _msg_l = message.lower()
-            _explicit_web_intent = bool(re.search(
-                r"\b(search|look\s*up|lookup|google|browse|web|online|latest|current|today|news|weather|forecast|rate|exchange\s+rate)\b",
-                _msg_l,
-            ))
-            _explicit_browser_intent = bool(re.search(
-                r"\b(browser|browse|open\s+(?:the\s+)?(?:site|page|url|link)|"
-                r"click|fill(?:\s+out)?|submit|send\s+(?:the\s+)?form|"
-                r"contact\s+form|web\s*form|form\s+submission)\b",
-                _msg_l,
-            ))
+            _route_assessment = assess_tool_intent(message)
+            _explicit_web_intent = _route_assessment.explicit_web
+            _explicit_browser_intent = _route_assessment.explicit_browser
         _allow_browser_for_web_turn = bool(
             _explicit_browser_intent
             or _explicit_web_intent
@@ -804,7 +797,14 @@ def setup_chat_routes(
         # its way through a plain chat request (and fail, especially with the
         # shell disabled).
         auto_escalated = False
-        _tool_intent = _classify_tool_intent(message) if isinstance(message, str) else None
+        _tool_intent = (
+            ToolIntent(
+                _route_assessment.needs_tools,
+                _route_assessment.route_category,
+                _route_assessment.reason,
+            )
+            if _route_assessment is not None else None
+        )
         _workspace_agent_intent = False
         if chat_mode == "chat" and _tool_intent and _tool_intent.needs_tools:
             chat_mode = "agent"
@@ -1019,11 +1019,16 @@ def setup_chat_routes(
 
         _research_flags = {"do": do_research}  # Mutable container for generator scope
 
-        # Query active document — prefer explicit ID from frontend, fall back to session lookup
+        # Query active document — prefer explicit ID from frontend, fall back to session lookup.
+        # Corrective/task-method feedback must not drag an unrelated visible
+        # editor into the prompt. Explicit document requests are excluded from
+        # this gate by build_chat_context.
         active_doc = None
         _doc_db = SessionLocal()
         try:
-            if active_doc_id:
+            if ctx.suppress_active_document:
+                logger.info("[doc-inject] skipped ambient active document for corrective/low-information turn")
+            elif active_doc_id:
                 logger.info(f"[doc-inject] active_doc_id from frontend: {active_doc_id}")
                 # Scope to the caller's documents. The session and in-memory
                 # fallbacks below are already owner/session-bound; this
@@ -1064,7 +1069,7 @@ def setup_chat_routes(
                         logger.info(f"[doc-inject] found by ID: title={active_doc.title!r}, lang={active_doc.language!r}, is_active={active_doc.is_active}, content_len={len(active_doc.current_content or '')}")
                 else:
                     logger.warning(f"[doc-inject] NOT FOUND by ID {active_doc_id}")
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 _email_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True,
@@ -1073,7 +1078,7 @@ def setup_chat_routes(
                 active_doc = _owner_session_filter(_email_doc_q, ctx.user).order_by(DBDocument.updated_at.desc()).first()
                 if active_doc:
                     logger.info(f"[doc-inject] found email draft by session fallback: title={active_doc.title!r}")
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 _session_doc_q = _doc_db.query(DBDocument).filter(
                     DBDocument.session_id == session,
                     DBDocument.is_active == True
@@ -1087,7 +1092,7 @@ def setup_chat_routes(
             # neither lookup above can associate them with this conversation,
             # so the agent never sees what it just wrote. Guarded so we never
             # leak a doc that belongs to a DIFFERENT session.
-            if not active_doc:
+            if not active_doc and not ctx.suppress_active_document:
                 try:
                     from src.agent_tools.document_tools import get_active_document
                     _mem_id = get_active_document()
@@ -1293,14 +1298,22 @@ def setup_chat_routes(
             except Exception:
                 logger.debug("chat settings snapshot failed", exc_info=True)
 
+        _steer_run_id = None
+
         async def stream_with_save() -> AsyncGenerator[str, None]:
+            nonlocal _steer_run_id
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
             research_sources = None
             web_sources = ctx.web_sources
 
             # Register active stream for partial-save safety net
-            _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
+            # Allocate the steering identity before the loop begins.  A composer
+            # POST can arrive during preparation, before stream_agent_loop has
+            # published its telemetry run; binding here avoids accepting an
+            # unowned correction that no later loop may safely drain.
+            _steer_run_id = agent_activity.new_run_id("steer") if _effective_mode == "agent" else None
+            _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode, "steer_run_id": _steer_run_id}
 
             # The client sent a workspace the server refused to bind (deleted
             # folder, file path, sensitive dir, filesystem root). Tell it up
@@ -1724,6 +1737,15 @@ def setup_chat_routes(
                         session_manager.save_sessions()
                     raise
                 finally:
+                    # The loop normally clears this run's queue at its orderly
+                    # end. Preparation failures/cancellation never reach that
+                    # point, so close only this stream's steering bucket here.
+                    if _steer_run_id:
+                        try:
+                            from src import agent_control
+                            agent_control.clear_steer(session, run_id=_steer_run_id)
+                        except Exception:
+                            logger.debug("steer cleanup failed", exc_info=True)
                     _active_streams.pop(session, None)
             else:
                 # ── Agent mode: full agent loop with tools ──
@@ -1788,7 +1810,9 @@ def setup_chat_routes(
                         workspace=workspace or None,
                         forced_tools=_forced_tools,
                         uploaded_files=ctx.uploaded_files,
+                        allow_private=ctx.allow_private,
                         approval_mode=_approval_mode,
+                        steer_run_id=_steer_run_id,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:
@@ -1807,8 +1831,8 @@ def setup_chat_routes(
                                     # Keep the mid-task instruction in history so
                                     # the next turn (and the transcript) has it.
                                     try:
-                                        sess.add_message(ChatMessage("user", str(data.get("text") or ""),
-                                                                     {"source": "steer"}))
+                                        from src.agent_control import persist_applied_steer
+                                        persist_applied_steer(sess, data)
                                     except Exception:
                                         logger.debug("steer persist failed", exc_info=True)
                                     yield chunk
@@ -1921,6 +1945,12 @@ def setup_chat_routes(
                         logger.exception("Failed to save partial response on disconnect (session %s)", session)
                     raise
                 finally:
+                    if _steer_run_id:
+                        try:
+                            from src import agent_control
+                            agent_control.clear_steer(session, run_id=_steer_run_id)
+                        except Exception:
+                            logger.debug("steer cleanup failed", exc_info=True)
                     _active_streams.pop(session, None)
 
         async def _safe_stream() -> AsyncGenerator[str, None]:
@@ -1930,6 +1960,12 @@ def setup_chat_routes(
                 async for chunk in stream_with_save():
                     yield chunk
             finally:
+                if _steer_run_id:
+                    try:
+                        from src import agent_control
+                        agent_control.clear_steer(session, run_id=_steer_run_id)
+                    except Exception:
+                        logger.debug("steer cleanup failed", exc_info=True)
                 _active_streams.pop(session, None)
 
         # Compare panes are short-lived, single-shot generations whose sessions

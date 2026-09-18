@@ -211,7 +211,7 @@ class _InteractiveActivityMiddleware(_BaseHTTPMiddleware):
         from src.interactive_gate import should_track_interactive_request, track_interactive_request
 
         path = request.url.path or ""
-        if not should_track_interactive_request(path, request.method):
+        if not should_track_interactive_request(path, request.method, request.headers):
             return await call_next(request)
         async def _stop_background():
             try:
@@ -233,6 +233,11 @@ class _SlowRequestLogMiddleware(_BaseHTTPMiddleware):
             return response
         finally:
             elapsed = time.perf_counter() - start
+            try:
+                from src.route_latency import record as _record_route_latency
+                _record_route_latency(request.method, request.url.path, elapsed)
+            except Exception:
+                pass
             try:
                 threshold = float(os.getenv("ODYSSEUS_SLOW_REQUEST_LOG_SECONDS", "0.75") or "0.75")
             except Exception:
@@ -615,6 +620,11 @@ tts_service = get_tts_service()
 logger.info("TTS service initialized (provider managed via admin settings)")
 
 # ========= EXCEPTION HANDLERS =========
+from core.database import pool_diagnostics
+from core.database_health import install_database_error_handler
+
+install_database_error_handler(app, pool_diagnostics)
+
 @app.exception_handler(SessionNotFoundError)
 async def session_not_found_handler(request: Request, exc: SessionNotFoundError):
     return JSONResponse(status_code=404, content={"error": "SESSION_NOT_FOUND", "message": str(exc)})
@@ -692,12 +702,22 @@ app.include_router(setup_session_routes(
 from routes.admin_wipe.admin_wipe_routes import setup_admin_wipe_routes
 app.include_router(setup_admin_wipe_routes(session_manager))
 
+# Capability registry + declared settings schema. Importing capabilities_builtin
+# registers the declarations; without it the registry is empty and every
+# capability reads as available, which would defeat the point of gating.
+import src.capabilities_builtin  # noqa: F401
+from routes.capability_routes import setup_capability_routes
+app.include_router(setup_capability_routes())
+
 # Memory
 from routes.memory.memory_routes import setup_memory_routes
 memory_router = setup_memory_routes(memory_manager, session_manager, memory_vector=memory_vector)
 app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
+
+from routes.plugin_routes import setup_plugin_routes
+app.include_router(setup_plugin_routes(session_manager=session_manager))
 
 # Chat
 from routes.chat_routes import setup_chat_routes
@@ -910,7 +930,13 @@ app.include_router(setup_companion_routes())
 async def serve_index(request: Request):
     static_path = abs_join(BASE_DIR, "static/index.html")
     if os.path.exists(static_path):
-        return serve_html_with_nonce(request, static_path)
+        resp = serve_html_with_nonce(request, static_path)
+        # The shell carries the `?v=` cache-busters for every module, so a
+        # stale shell means stale modules: with no header here browsers kept a
+        # heuristically-fresh copy across deploys and the fixes in it never
+        # arrived. Same rule as _RevalidatingStatic: keep the bytes, but ask.
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
     # No static bundle — fall back to a root-level index.html if one is shipped.
     # If neither exists, serve_html_with_nonce logs it and returns a generic 500:
     # a missing index.html is a broken deployment (server fault), not a client
@@ -1111,7 +1137,11 @@ async def _startup_event():
     # Startup warmups are opt-in. They make later requests a little warmer, but
     # they also compete with the first seconds of real UI use on slow or busy
     # machines. Default to clear/idle startup and let requests warm what they use.
-    _startup_warmups_enabled = str(os.getenv("ODYSSEUS_STARTUP_WARMUPS", "")).lower() in {"1", "true", "yes", "on"}
+    from src.settings import get_setting_or_env
+
+    _startup_warmups_enabled = str(
+        get_setting_or_env("startup_warmups_enabled", "ODYSSEUS_STARTUP_WARMUPS", False)
+    ).lower() in {"1", "true", "yes", "on"}
     if _startup_warmups_enabled:
         async def _warmup_tool_index():
             try:
@@ -1144,12 +1174,14 @@ async def _startup_event():
 
         _startup_tasks.append(asyncio.create_task(_warmup_endpoints()))
     else:
-        logger.info("Startup warmups disabled (set ODYSSEUS_STARTUP_WARMUPS=1 to enable)")
+        logger.info("Startup warmups disabled (enable startup_warmups_enabled in Settings)")
 
     # Keep-alive is opt-in. The ping path performs model discovery, and when
     # stale LAN endpoints are configured it can add periodic backend pressure
     # that delays unrelated UI requests such as Notes/Documents.
-    _keepalive_enabled = str(os.getenv("ODYSSEUS_MODEL_KEEPALIVE", "")).lower() in {"1", "true", "yes", "on"}
+    _keepalive_enabled = str(
+        get_setting_or_env("model_keepalive_enabled", "ODYSSEUS_MODEL_KEEPALIVE", False)
+    ).lower() in {"1", "true", "yes", "on"}
     if _keepalive_enabled:
         async def _keepalive_loop():
             while True:

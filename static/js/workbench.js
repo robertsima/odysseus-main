@@ -70,6 +70,20 @@ const state = {
   diffText: '',
   pr: { config: null, list: [], selected: null, detail: null, stateFilter: 'open', loading: false },
   chatCards: new Map(),     // run_id → element
+  // run_id → row from /api/workbench/runs for the CURRENT chat. The strip is
+  // built from this, not from `runs`: the server knows a worker's run belongs
+  // to this chat (it is filed under the worker's own session and carries
+  // `parent_session`), whereas `runs` can only guess from whichever event the
+  // browser happened to see first. That guess is why sub-agents kept failing
+  // to appear above the composer.
+  agentRuns: new Map(),
+  agentRunsAt: 0,
+  agentRunsInFlight: null,
+  // The strip is a chat affordance, not part of the Workbench window: it
+  // keeps polling when the Workbench feature is switched off, and only stops
+  // when the server says this user may not see runs (401/403).
+  stripEnabled: true,
+  stripWarned: new Set(),
 };
 
 // ── prefs ─────────────────────────────────────────────────────────────────
@@ -200,6 +214,9 @@ function ingest(ev, { live = true } = {}) {
   if (live) {
     updateChatCard(ev);
     scheduleStrip();
+    // Any delegated-work event is a reason to re-ask the server what this
+    // chat's runs are; the call is throttled and failures are silent.
+    if (ev.run_id && ev.source !== 'odysseus') refreshAgentRuns();
     if (!state.paused && isOpen()) scheduleRender('activity');
     else updateBadges();
     if (ev.kind === 'run_started' && CHAT_CARD_SOURCES.has(ev.source) && ev.session_id === state.sessionId) {
@@ -236,19 +253,108 @@ function scheduleStrip() {
   if (_stripTimer) return;
   _stripTimer = setTimeout(() => { _stripTimer = null; renderAgentStrip(); }, 150);
 }
+/** Pull this chat's delegated runs from the server, throttled.
+ *
+ *  `list_runs(session_id)` matches a run's own session OR its `parent_session`,
+ *  so one call covers both "a job filed under this chat" and "a worker this
+ *  chat started, living in its own chat". Failures are silent and leave the
+ *  last good rows in place: the strip degrades to stale, never to empty.
+ */
+const AGENT_RUNS_MIN_MS = 1500;
+// A poll that has not answered in this long is abandoned. Browsers allow six
+// connections per host over HTTP/1.1 and every open Odysseus tab used to hold
+// two event streams; with three tabs (or two tabs and a streaming reply) a new
+// fetch queued behind them indefinitely -- proven on 2026-09-17: a chat whose
+// worker was running polled once, then never again, until the other tabs were
+// closed. A queued poll must not wedge `agentRunsInFlight` for the page's life.
+const AGENT_RUNS_TIMEOUT_MS = 8000;
+// How often the strip re-asks on its own. Discovery used to depend on the
+// activity stream delivering the launch event; when that stream was the
+// connection that never opened, nothing ever asked the server about the runs
+// it had.
+const AGENT_RUNS_POLL_MS = 4000;
+function stripWarn(key, message) {
+  if (state.stripWarned.has(key)) return;
+  state.stripWarned.add(key);
+  try { console.warn(`[agent strip] ${message}`); } catch (_) {}
+}
+async function refreshAgentRuns({ force = false } = {}) {
+  const sid = state.sessionId;
+  if (!state.stripEnabled || !sid) { state.agentRuns.clear(); return; }
+  if (state.agentRunsInFlight) return state.agentRunsInFlight;
+  if (!force && Date.now() - state.agentRunsAt < AGENT_RUNS_MIN_MS) return;
+  const run = (async () => {
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = ctl ? setTimeout(() => ctl.abort(), AGENT_RUNS_TIMEOUT_MS) : null;
+    try {
+      const r = await api(`/api/workbench/runs?session_id=${encodeURIComponent(sid)}&limit=50`,
+        ctl ? { signal: ctl.signal } : {});
+      if (state.sessionId !== sid) return;           // chat changed under us
+      const next = new Map();
+      for (const row of r.runs || []) next.set(row.run_id, row);
+      if (next.size !== state.agentRuns.size) {
+        try { console.info(`[agent strip] ${next.size} run(s) filed for this chat`); } catch (_) {}
+      }
+      state.agentRuns = next;
+      state.agentRunsAt = Date.now();
+    } catch (e) {
+      // Keep whatever we had, but say why -- a silent failure here is what
+      // made four rounds of fixes look identical from the outside.
+      if (e && (e.status === 401 || e.status === 403)) {
+        state.stripEnabled = false;
+        stripWarn('denied', `this account cannot list runs (${e.status} ${e.message}); the strip stays hidden`);
+      } else if (e && e.name === 'AbortError') {
+        stripWarn('timeout', `/api/workbench/runs did not answer within ${AGENT_RUNS_TIMEOUT_MS / 1000}s -- ` +
+          'the browser may be out of connections to this host (too many open Odysseus tabs?); will keep retrying');
+      } else {
+        stripWarn(`err:${e && e.message}`, `/api/workbench/runs failed: ${e && e.message}; will keep retrying`);
+      }
+    } finally {
+      if (timer) clearTimeout(timer);
+      state.agentRunsInFlight = null;
+    }
+  })();
+  state.agentRunsInFlight = run;
+  await run;
+  renderAgentStrip();
+}
+
 function stripRuns() {
   const now = Date.now() / 1000;
-  return Array.from(state.runs.values())
-    .filter((r) => r.session_id === state.sessionId && r.source !== 'odysseus'
-      && (r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S)))
+  const rows = new Map();
+  // Server rows are authoritative for identity and status.
+  for (const row of state.agentRuns.values()) {
+    if (row.source === 'odysseus') continue;
+    rows.set(row.run_id, {
+      run_id: row.run_id, source: row.source, session_id: row.session_id,
+      title: row.title, status: row.status, started_at: row.started_at,
+      finished_at: row.finished_at, data: row.summary || {}, detail: row.detail || '',
+    });
+  }
+  // A run the browser has seen live but the server has not listed yet (the
+  // launch event arrives before the next poll) still belongs on the strip.
+  for (const run of state.runs.values()) {
+    if (run.source === 'odysseus') continue;
+    if (run.session_id !== state.sessionId && !rows.has(run.run_id)) continue;
+    const existing = rows.get(run.run_id);
+    if (!existing) { rows.set(run.run_id, run); continue; }
+    // Merge: keep the server's status, take the live event trail.
+    existing.events = run.events;
+    existing.data = { ...(run.data || {}), ...(existing.data || {}) };
+  }
+  return Array.from(rows.values())
+    .filter((r) => r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S))
     .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) || (a.started_at || 0) - (b.started_at || 0));
 }
 function latestActivity(run) {
-  for (let i = run.events.length - 1; i >= 0; i--) {
-    const ev = run.events[i];
+  const events = run.events || [];
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
     if (['message', 'tool_start', 'tool_result', 'status', 'file_change', 'commit'].includes(ev.kind)) return ev.title || '';
   }
-  return run.detail ? String(run.detail).split('\n')[0] : '';
+  if (run.detail) return String(run.detail).split('\n')[0];
+  const excerpt = (run.data || {}).result_excerpt;
+  return excerpt ? String(excerpt).split('\n')[0] : '';
 }
 function stripRowHtml(run) {
   const d = run.data || {};
@@ -268,8 +374,11 @@ function stripRowHtml(run) {
 }
 function renderAgentStrip() {
   const box = $('agent-strip');
-  if (!box) return;
-  const runs = state.enabled ? stripRuns() : [];
+  const runs = state.stripEnabled ? stripRuns() : [];
+  if (!box) {
+    if (runs.length) stripWarn('no-box', `${runs.length} run(s) to show but #agent-strip is not in the page (stale index.html? reload)`);
+    return;
+  }
   if (!runs.length) {
     box.hidden = true;
     box.innerHTML = '';
@@ -298,6 +407,10 @@ function renderAgentStrip() {
     _stripTick = setInterval(() => {
       const el = $('agent-strip');
       if (!el || el.hidden) return;
+      // The server is the one that knows when a detached worker ended, so keep
+      // asking while one is live rather than waiting for an event that may
+      // never arrive on this chat's feed.
+      if (runs.some((r) => r.status === 'running')) refreshAgentRuns();
       let lingering = false;
       el.querySelectorAll('.agent-strip-time[data-running="1"]').forEach((t) => {
         const started = parseFloat(t.dataset.started);
@@ -314,7 +427,8 @@ async function onStripAction(btn) {
   if (act === 'collapse') { state.prefs.stripCollapsed = !state.prefs.stripCollapsed; savePrefs(); renderAgentStrip(); return; }
   if (act === 'more' || act === 'less') { state.stripExpanded = act === 'more'; renderAgentStrip(); return; }
   if (act === 'workbench') { open(); setTab('activity'); return; }
-  const run = state.runs.get(btn.dataset.run);
+  const run = state.runs.get(btn.dataset.run)
+    || stripRuns().find((r) => r.run_id === btn.dataset.run);
   if (!run) return;
   const d = run.data || {};
   if (act === 'open') {
@@ -373,19 +487,24 @@ async function connect(force = false) {
   if (!key) { renderActivity(); return; }
   state.esKey = key;
   // History first (bounded), then the live stream from the last seq we saw.
-  if (key !== '*') {
-    try {
-      const h = await api(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
-      if (gen !== _connectGen) return;  // superseded by a newer connect
-      (h.events || []).forEach((ev) => ingest(ev, { live: false }));
+  // "All sessions" gets history too: the server merges the real sessions for
+  // the `*` key, and `subscribe` deliberately replays nothing for it, so the
+  // two halves do not overlap.
+  try {
+    const h = await api(`/api/workbench/activity?session_id=${encodeURIComponent(key)}&limit=400`);
+    if (gen !== _connectGen) return;  // superseded by a newer connect
+    (h.events || []).forEach((ev) => ingest(ev, { live: false }));
+    if (key !== '*') {
       state.lastSeq = h.seq || state.lastSeq;
       await reconcileRunningRuns(key);
       if (gen !== _connectGen) return;
-      renderAgentStrip();
-    } catch (e) {
-      if (gen !== _connectGen) return;
-      if (e.status === 403) { state.enabled = false; hideRail(); return; }
     }
+    await refreshAgentRuns({ force: true });
+    if (gen !== _connectGen) return;
+    renderAgentStrip();
+  } catch (e) {
+    if (gen !== _connectGen) return;
+    if (e.status === 403) { state.enabled = false; hideRail(); return; }
   }
   const es = new EventSource(`/api/workbench/activity/stream?session_id=${encodeURIComponent(key)}&since=${state.lastSeq}`);
   state.es = es;
@@ -423,14 +542,43 @@ function watchSession() {
     if (sid !== state.sessionId) {
       state.sessionId = sid;
       state.chatCards.clear();
+      state.agentRuns.clear();
+      state.agentRunsAt = 0;
       state.focusRun = null;
       state.stripExpanded = false;
       renderAgentStrip();
-      if (state.es || isOpen() || state.enabled) connect(true);
+      if (state.enabled && (state.es || isOpen() || !document.hidden)) connect(true);
+      else refreshAgentRuns({ force: true });
     }
   };
   tick();
   setInterval(tick, 1500);
+  // The strip's own heartbeat: the server is asked about this chat's runs on
+  // a steady cadence whether or not the activity stream is delivering, and at
+  // once when the tab comes back into view.
+  setInterval(() => { if (!document.hidden && state.sessionId) refreshAgentRuns(); }, AGENT_RUNS_POLL_MS);
+}
+
+// An event stream per hidden tab is what exhausts the browser's per-host
+// connection budget (see AGENT_RUNS_TIMEOUT_MS). A tab that has been hidden
+// for a while drops its stream; coming back replays history and reconnects,
+// so nothing is lost but the idle connection.
+const HIDDEN_STREAM_GRACE_MS = 30000;
+let _hiddenTimer = null;
+function watchVisibility() {
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (_hiddenTimer || !state.es) return;
+      _hiddenTimer = setTimeout(() => {
+        _hiddenTimer = null;
+        if (document.hidden && state.es) disconnect();
+      }, HIDDEN_STREAM_GRACE_MS);
+      return;
+    }
+    if (_hiddenTimer) { clearTimeout(_hiddenTimer); _hiddenTimer = null; }
+    if (state.enabled && state.sessionId && !state.es) connect(true);
+    else refreshAgentRuns({ force: true });
+  });
 }
 
 // ── rendering: activity ───────────────────────────────────────────────────
@@ -438,7 +586,11 @@ function statusClass(status) {
   const s = status || 'running';
   if (s === 'running' || s === 'queued' || s === 'in_progress' || s === 'pending') return 'run';
   if (s === 'completed' || s === 'succeeded' || s === 'done' || s === 'success' || s === 'open' || s === 'merged') return 'ok';
-  if (s === 'cancelled' || s === 'draft' || s === 'interrupted') return 'warn';
+  // `incomplete` is a run that spent its round budget with the task
+  // unfinished (agent_control.launch_worker). That is a partial result to
+  // pick up, not a failure, so it reads amber like cancelled/interrupted
+  // rather than falling through to the red default.
+  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {
@@ -462,6 +614,12 @@ function runCardHtml(run) {
   if (run.source === 'claude_code' && d.task_id) {
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-changes" data-task="${esc(d.task_id)}">Changes</button>`);
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-transcript" data-task="${esc(d.task_id)}">Transcript</button>`);
+  }
+  if (run.source === 'session' && d.target_session) {
+    actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-open-chat" data-run="${esc(run.run_id)}" title="Open this agent's chat">Open chat</button>`);
+  }
+  if (run.status === 'running') {
+    actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-stop" data-run="${esc(run.run_id)}" title="Stop this run; partial work remains available">Stop</button>`);
   }
   const excerpt = d.error || d.result_excerpt;
   const focused = state.focusRun === run.run_id;
@@ -510,14 +668,14 @@ function renderActivity() {
       <section class="wb-card wb-runs">
         <div class="wb-card-scroll" data-wb-scroll="runs">
           <div class="wb-group-h"><span class="wb-group-title">Running</span><span class="wb-count">${active.length}</span></div>
-          ${active.length ? active.map(runCardHtml).join('') : emptyHtml('Nothing running. Claude Code delegations, sub-agents, pipelines and background jobs show up here when they start.', { tone: 'inline' })}
+          ${active.length ? active.map(runCardHtml).join('') : emptyHtml(filter ? `Nothing running from ${SOURCE_LABEL[filter] || filter}. Choose All sources to see the rest.` : 'Nothing running. Claude Code delegations, sub-agents, pipelines and background jobs show up here when they start.', { tone: 'inline' })}
           <div class="wb-group-h"><span class="wb-group-title">Recent</span><span class="wb-count">${recent.length}</span></div>
-          ${recent.length ? recent.map(runCardHtml).join('') : emptyHtml(noSession ? 'Open a chat to follow its activity, or switch the scope to All sessions.' : 'No finished runs yet.', { tone: 'inline' })}
+          ${recent.length ? recent.map(runCardHtml).join('') : emptyHtml(noSession ? 'Open a chat to follow its activity, or switch the scope to All sessions.' : filter ? `No finished ${SOURCE_LABEL[filter] || filter} runs in this scope. Choose All sources to see the rest.` : 'No finished runs yet.', { tone: 'inline' })}
         </div>
       </section>
       <section class="wb-card wb-stream">
         <div class="wb-card-h">${streamHead}<span class="wb-count">${shown.length}</span></div>
-        <div class="wb-ev-list" data-wb-scroll="events">${shown.length ? shown.slice().reverse().map((ev) => eventRowHtml(ev, { showSource: !focusRun && !filter })).join('') : emptyHtml(noSession ? 'No chat selected.' : 'No events yet.')}</div>
+        <div class="wb-ev-list" data-wb-scroll="events">${shown.length ? shown.slice().reverse().map((ev) => eventRowHtml(ev, { showSource: !focusRun && !filter })).join('') : emptyHtml(noSession ? 'No chat selected.' : filter ? `No ${SOURCE_LABEL[filter] || filter} events in this scope. Choose All sources, or switch the scope to All sessions.` : 'No events yet.')}</div>
       </section>`;
   });
   updateBadges();
@@ -1124,6 +1282,8 @@ function onAction(b) {
     case 'leave-run': { const path = state.repoCtx.path || state.prefs.repo; state.repoCtx = { path: '', base: '', taskId: null, label: '' }; if (path) setRepo(path); else { renderChanges(); renderCommits(); } break; }
     case 'run-changes': loadTask(b.dataset.task, { tab: 'changes' }); break;
     case 'run-transcript': showTranscript(b.dataset.task); break;
+    case 'run-open-chat': openRunChat(b.dataset.run); break;
+    case 'run-stop': stopWorkbenchRun(b.dataset.run); break;
     case 'unfocus': state.focusRun = null; renderActivity(); break;
     case 'popout': popout(state.selectedFile || 'Diff', renderDiffText(state.diffText || '', { mode: state.prefs.mode, path: state.selectedFile })); break;
     case 'popout-commit': { const k = state.selectedCommit; if (k && k.selectedFile) popout(`${(k.sha || '').slice(0, 7)} · ${k.selectedFile}`, renderDiffText(k.diffText || '', { mode: state.prefs.mode, path: k.selectedFile })); break; }
@@ -1134,6 +1294,31 @@ function onAction(b) {
     case 'pr-to-agent': prToAgent(); break;
     case 'drop-pending': { const d = state.pr.detail; if (d) { d.pendingComments.splice(parseInt(b.dataset.i, 10), 1); renderPRs(); } break; }
     default: break;
+  }
+}
+
+function openRunChat(runId) {
+  const run = state.runs.get(runId);
+  if (!run) return;
+  const target = (run.data || {}).target_session;
+  if (!target || !window.sessionModule?.selectSession) {
+    showToast('This run has no chat to open', 'warning');
+    return;
+  }
+  window.sessionModule.selectSession(target);
+}
+
+async function stopWorkbenchRun(runId) {
+  const run = state.runs.get(runId);
+  if (!run || run.status !== 'running') return;
+  try {
+    const result = await post(`/api/workbench/runs/${encodeURIComponent(runId)}/stop`, {});
+    showToast(
+      result.stopped ? 'Stopping run; partial work remains available' : `Not stopped: ${result.reason || result.status || 'already finished'}`,
+      result.stopped ? 'success' : 'warning',
+    );
+  } catch (error) {
+    showToast(`Could not stop run: ${error.message}`, 'error');
   }
 }
 
@@ -1178,7 +1363,7 @@ async function probeSettings() {
     const s = await r.json();
     state.enabled = s.workbench_enabled !== false;
     state.autoOpen = s.workbench_auto_open !== false;
-    if (!state.enabled) { hideRail(); disconnect(); renderAgentStrip(); }
+    if (!state.enabled) { hideRail(); disconnect(); }
   } catch (_) {}
 }
 
@@ -1188,8 +1373,11 @@ export async function init() {
   loadPrefs();
   wireWindow();
   await probeSettings();
-  if (!state.enabled) return;
+  // The strip follows the chat even with the Workbench window switched off;
+  // only the window, its rail button and the event stream are feature-gated.
   watchSession();
+  watchVisibility();
+  if (!state.enabled) return;
   // Auto-open on the first sub-process run of the session (Claude Code, a
   // sub-agent…), so the user sees the work as it happens.
   // A minimized Workbench stays minimized: the user put it away on purpose.
@@ -1197,5 +1385,20 @@ export async function init() {
 }
 
 export function refreshSettings() { return probeSettings(); }
+/** Open one run from the Agents dashboard. Align the Workbench stream with
+ * the selected chat before focusing so its history is available immediately,
+ * rather than waiting for the session watcher to notice the navigation. */
+export async function openRun(runId, sessionId) {
+  if (!state.enabled) throw new Error('Workbench is disabled');
+  open();
+  if (sessionId && sessionId !== state.sessionId) {
+    state.sessionId = sessionId;
+    state.prefs.scope = 'session';
+    savePrefs();
+    await connect(true);
+  }
+  state.focusRun = runId || null;
+  setTab('activity');
+}
 export const _state = state;
-export default { init, open, close, toggle, refreshSettings };
+export default { init, open, close, toggle, refreshSettings, openRun };

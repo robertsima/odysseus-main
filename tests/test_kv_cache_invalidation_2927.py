@@ -464,3 +464,54 @@ def test_payload_omits_session_id_when_not_provided(monkeypatch):
     assert len(captured) == 1
     assert "session_id" not in captured[0]
     assert captured[0]["cache_prompt"] is True
+
+
+def test_agent_cached_prefix_hash_ignores_turn_tail_and_detects_real_prefix_changes():
+    """Round instrumentation distinguishes expected history growth from a
+    system/tool-schema mutation that can actually invalidate KV reuse."""
+    from src.agent_loop import _cached_prefix_hash, _harness_directive
+
+    prefix = [{"role": "system", "content": "stable instructions"},
+              {"role": "user", "content": "first request"}]
+    schemas = [{"type": "function", "function": {"name": "read_file", "parameters": {}}}]
+    first = _cached_prefix_hash(prefix, schemas)
+
+    # Assistant/tool output and harness directives grow the turn tail only.
+    same_prefix = prefix + [
+        {"role": "assistant", "content": "I'll inspect it."},
+        _harness_directive("Use the prior result instead of retrying."),
+    ]
+    assert _cached_prefix_hash(same_prefix, schemas) == first
+
+    assert _cached_prefix_hash(
+        [{"role": "system", "content": "changed instructions"}] + prefix[1:], schemas,
+    ) != first
+    assert _cached_prefix_hash(prefix, schemas + [
+        {"type": "function", "function": {"name": "grep", "parameters": {}}}
+    ]) != first
+
+
+def test_agent_history_prefix_continuity_detects_mid_history_mutation():
+    """Tail growth is cache-friendly; replacing an older replayed message is
+    not, even if system instructions and schemas did not change."""
+    from src.agent_loop import _history_prefix_continuity
+
+    first_messages = [
+        {"role": "system", "content": "stable"},
+        {"role": "user", "content": "request"},
+    ]
+    prior, continuity, changed, old_hash, new_hash = _history_prefix_continuity(None, first_messages)
+    assert continuity is None and changed is None and old_hash == new_hash == "-"
+
+    grown, continuity, changed, old_hash, new_hash = _history_prefix_continuity(
+        prior, first_messages + [{"role": "assistant", "content": "answer"}],
+    )
+    assert continuity is True and changed is None and old_hash == new_hash == "-"
+
+    _, continuity, changed, old_hash, new_hash = _history_prefix_continuity(
+        grown,
+        [first_messages[0], {"role": "user", "content": "rewritten request"},
+         {"role": "assistant", "content": "answer"}],
+    )
+    assert continuity is False and changed == 1
+    assert old_hash != "-" and new_hash != "-" and old_hash != new_hash

@@ -22,6 +22,7 @@ from src.rag_sensitivity import (
     apply_sensitivity,
     metadata_is_private,
     normalize_sensitivity,
+    resolve_sensitivity,
 )
 from pathlib import Path
 
@@ -588,13 +589,13 @@ class VectorRAG:
         query: str,
         k: int = 5,
         owner: Optional[str] = None,
-        allow_private: bool = True,
+        allow_private: bool = False,
     ) -> List[Dict[str, Any]]:
         """Hybrid search, optionally scoped to public-only chunks.
 
         ``allow_private=False`` is what keeps notes marked private from being
-        pasted into a prompt bound for a hosted API — callers derive it from
-        the session's endpoint (see ``model_context.is_local_endpoint``).
+        pasted into a model prompt. Callers must pass an explicit per-chat
+        private-vault grant; endpoint URL locality is not authorization.
 
         ``owner`` is accepted for callers that still pass it but does not
         filter anything — see ``_build_where``.
@@ -789,7 +790,7 @@ class VectorRAG:
         query: str,
         k: int = 5,
         owner: Optional[str] = None,
-        allow_private: bool = True,
+        allow_private: bool = False,
     ) -> List[Dict[str, Any]]:
         """Python-side scan used when every lane's vector query fails.
 
@@ -991,12 +992,23 @@ class VectorRAG:
             if not content or not content.strip():
                 return (0, 0)
 
+            resolved_sensitivity = sensitivity
+            if resolved_sensitivity is None:
+                frontmatter = None
+                if ext in MARKDOWN_EXTENSIONS:
+                    try:
+                        from src.vault_markdown import split_frontmatter
+                        frontmatter, _ = split_frontmatter(content)
+                    except Exception:
+                        logger.debug("sensitivity frontmatter parse failed for %s", path, exc_info=True)
+                resolved_sensitivity = resolve_sensitivity(path, frontmatter=frontmatter)
+
             meta = apply_sensitivity({
                 'source': path,
                 'filename': fname,
                 'directory': os.path.dirname(path),
                 'type': ext,
-            }, sensitivity)
+            }, resolved_sensitivity)
             if owner:
                 meta['owner'] = owner
 

@@ -83,6 +83,17 @@ def _condition() -> asyncio.Condition:
     return _COND
 
 
+# Watching background work must never cancel it.
+#
+# Every tracked request makes the foreground sweep kill all running background
+# tasks, so an endpoint on a client timer is not evidence of user intent — it is
+# evidence that a tab is open. The agents dashboard polls /overview +
+# /approvals every 20s (5s while open) and *also* refreshes on the SSE
+# run_started event, which closed a livelock: a scheduled task started, the
+# dashboard noticed, its poll cancelled the task ~1.4s in, and the task
+# re-queued to die the same way on the next tick — never finishing, but paying
+# for a full prompt every time. Observability endpoints are therefore passive by
+# construction, not by accident.
 _PASSIVE_EXACT_PATHS = {
     "/api/activity/heartbeat",
     "/api/client-perf",
@@ -92,6 +103,11 @@ _PASSIVE_EXACT_PATHS = {
     "/api/email/urgency-state",
     # UI idle poll sibling of urgency-state; must not pre-empt background tasks.
     "/api/email/unread-state",
+    # Read-only views *of* background work (agents dashboard + sidebar polls).
+    "/api/agents/overview",
+    "/api/agents/approvals",
+    "/api/agents/stream",
+    "/api/chat/runs",
 }
 
 _PASSIVE_PREFIXES = (
@@ -100,6 +116,12 @@ _PASSIVE_PREFIXES = (
     "/api/prefs",
 )
 
+# Clients put this on requests fired by a timer rather than by a person, so a
+# poll that reuses a genuinely interactive endpoint (the inbox unread-count
+# ticker hitting /api/email/list, say) does not read as user intent. Only GET /
+# HEAD honour it: nothing that writes is ever passive, whatever it claims.
+POLL_HEADER = "x-odysseus-poll"
+_TRUTHY = {"1", "true", "yes", "on"}
 
 async def maybe_stop_background_tasks_for_heartbeat(stop_background) -> bool:
     """Stop background work for browser activity only when the gate is enabled.
@@ -114,15 +136,22 @@ async def maybe_stop_background_tasks_for_heartbeat(stop_background) -> bool:
     return True
 
 
-def should_track_interactive_request(path: str, method: str = "GET") -> bool:
+def should_track_interactive_request(path: str, method: str = "GET", headers=None) -> bool:
     if not _enabled():
         return False
-    if (method or "").upper() == "OPTIONS":
+    verb = (method or "").upper()
+    if verb == "OPTIONS":
         return False
     if path in _PASSIVE_EXACT_PATHS:
         return False
     if any(path.startswith(prefix) for prefix in _PASSIVE_PREFIXES):
         return False
+    if headers is not None and verb in {"GET", "HEAD"}:
+        try:
+            if str(headers.get(POLL_HEADER) or "").strip().lower() in _TRUTHY:
+                return False
+        except Exception:
+            pass
     return True
 
 

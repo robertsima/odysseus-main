@@ -253,42 +253,75 @@ def access_token_is_expiring(access_token: str, skew_seconds: int = CHATGPT_ACCE
 
 def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, force_refresh: bool = False) -> Dict[str, Any]:
     ProviderAuthSession, SessionLocal, utcnow_naive = _database_handles()
-    db = SessionLocal()
-    try:
-        q = db.query(ProviderAuthSession).filter(
-            ProviderAuthSession.id == auth_id,
-            ProviderAuthSession.provider == CHATGPT_SUBSCRIPTION_PROVIDER,
-        )
-        if owner:
-            q = q.filter(ProviderAuthSession.owner == owner)
-        row = q.first()
-        if row is None:
-            raise ChatGPTSubscriptionAuthNotFound("ChatGPT Subscription credentials were not found for this user.")
 
-        access_token = row.access_token or ""
-        if force_refresh or access_token_is_expiring(access_token):
-            with _refresh_lock_for(auth_id):
-                db.refresh(row)
-                access_token = row.access_token or ""
-                refresh_token = row.refresh_token or ""
-                if force_refresh or access_token_is_expiring(access_token):
-                    refreshed = refresh_oauth_tokens(access_token, refresh_token)
+    def _read_stored() -> Dict[str, str]:
+        db = SessionLocal()
+        try:
+            q = db.query(ProviderAuthSession).filter(
+                ProviderAuthSession.id == auth_id,
+                ProviderAuthSession.provider == CHATGPT_SUBSCRIPTION_PROVIDER,
+            )
+            if owner:
+                q = q.filter(ProviderAuthSession.owner == owner)
+            row = q.first()
+            if row is None:
+                raise ChatGPTSubscriptionAuthNotFound(
+                    "ChatGPT Subscription credentials were not found for this user."
+                )
+            return {
+                "access_token": row.access_token or "",
+                "refresh_token": row.refresh_token or "",
+                "base_url": row.base_url or DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL,
+                "auth_mode": row.auth_mode or "chatgpt",
+            }
+        finally:
+            db.close()
+
+    stored = _read_stored()
+    access_token = stored["access_token"]
+    if force_refresh or access_token_is_expiring(access_token):
+        # Waiting for the per-account refresh lock and calling OAuth can both
+        # take seconds. Neither phase may pin a connection from the shared app
+        # QueuePool, especially when many agents resolve the same endpoint.
+        with _refresh_lock_for(auth_id):
+            stored = _read_stored()
+            access_token = stored["access_token"]
+            if force_refresh or access_token_is_expiring(access_token):
+                refreshed = refresh_oauth_tokens(access_token, stored["refresh_token"])
+                db = SessionLocal()
+                try:
+                    q = db.query(ProviderAuthSession).filter(
+                        ProviderAuthSession.id == auth_id,
+                        ProviderAuthSession.provider == CHATGPT_SUBSCRIPTION_PROVIDER,
+                    )
+                    if owner:
+                        q = q.filter(ProviderAuthSession.owner == owner)
+                    row = q.first()
+                    if row is None:
+                        raise ChatGPTSubscriptionAuthNotFound(
+                            "ChatGPT Subscription credentials were not found for this user."
+                        )
                     row.access_token = refreshed["access_token"]
                     if refreshed.get("refresh_token"):
                         row.refresh_token = refreshed["refresh_token"]
                     row.last_refresh = utcnow_naive()
                     db.commit()
-                    db.refresh(row)
-            access_token = row.access_token or ""
+                    stored = {
+                        "access_token": row.access_token or "",
+                        "refresh_token": row.refresh_token or "",
+                        "base_url": row.base_url or DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL,
+                        "auth_mode": row.auth_mode or "chatgpt",
+                    }
+                finally:
+                    db.close()
+            access_token = stored["access_token"]
 
-        return {
-            "provider": CHATGPT_SUBSCRIPTION_PROVIDER,
-            "base_url": (row.base_url or DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL).rstrip("/"),
-            "api_key": access_token,
-            "auth_mode": row.auth_mode or "chatgpt",
-        }
-    finally:
-        db.close()
+    return {
+        "provider": CHATGPT_SUBSCRIPTION_PROVIDER,
+        "base_url": stored["base_url"].rstrip("/"),
+        "api_key": access_token,
+        "auth_mode": stored["auth_mode"],
+    }
 
 
 def to_http_exception(exc: Exception) -> HTTPException:
@@ -419,5 +452,10 @@ def build_responses_tools(tools: list[dict] | None) -> list[dict]:
         description = (fn or tool).get("description")
         if description:
             entry["description"] = str(description)
+        # Responses may normalize omitted strict settings into an all-required
+        # schema. Preserve explicit opt-outs for action-dependent parameters.
+        strict = (fn or tool).get("strict")
+        if isinstance(strict, bool):
+            entry["strict"] = strict
         converted.append(entry)
     return converted

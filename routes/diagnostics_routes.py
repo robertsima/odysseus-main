@@ -53,6 +53,13 @@ def setup_diagnostics_routes(
             logger.error(f"Diagnostics logs retrieval error: {e}")
             raise HTTPException(500, f"Failed to retrieve logs: {str(e)}")
 
+    @router.get("/api/diagnostics/route_latency")
+    async def get_route_latency(request: Request) -> Dict[str, Any]:
+        """Return content-free, normalized per-route latency aggregates."""
+        require_admin(request)
+        from src.route_latency import stats as route_latency_stats
+        return {"routes": route_latency_stats()}
+
     @router.get("/api/db/stats")
     async def get_database_stats(request: Request) -> Dict[str, Any]:
         require_admin(request)

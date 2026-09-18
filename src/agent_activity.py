@@ -320,6 +320,11 @@ _RUN_SUMMARY_KEYS = frozenset({
     "repository", "branch", "commit", "model", "task_id", "target_session", "target_session_name",
     "changed_files", "changes", "commits", "num_turns", "total_cost_usd", "exit_code", "error",
     "job_id", "command", "steps", "pull_request", "request_id", "result_excerpt", "mode",
+    "max_rounds", "rounds_exhausted", "profile",
+    "workflow_id", "parent_session", "parent_run_id", "stage", "workflow_controller",
+    "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
+    "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
+    "unresolved_count", "verification_failed",
 })
 
 
@@ -359,6 +364,22 @@ def active_turn(session_id: Optional[str]) -> Optional[str]:
         return _active_turns.get(str(session_id or ""))
 
 
+def has_active_run(session_id: Optional[str]) -> bool:
+    """Whether activity still records live work for this chat.
+
+    This is deliberately a small read-side helper for lifecycle operations
+    such as archiving.  A session may have work which was started outside the
+    chat-run registry (Claude Code, a background job, or a delegated session),
+    so checking only ``agent_runs.is_busy`` would let its history disappear
+    from the active workspace while it is still doing work.
+    """
+    sid = str(session_id or "")
+    with _lock:
+        _load_runs()
+        return any(rec.get("session_id") == sid and rec.get("status") == "running"
+                   for rec in _runs.values())
+
+
 def close_turn(session_id: Optional[str], *, status: str = "completed", title: Optional[str] = None) -> bool:
     """Finish the session's live chat turn if it never reported its own end.
 
@@ -380,10 +401,25 @@ def close_turn(session_id: Optional[str], *, status: str = "completed", title: O
 
 def history(session_id: str, *, since_seq: int = 0, limit: int = 200) -> List[dict]:
     sid = str(session_id or "global")
+    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
+    if sid == GLOBAL_FEED:
+        # The global feed is a fan-out key, not a stored session: `publish`
+        # appends to the originating session only. So this used to return an
+        # empty list, and the Workbench's "All sessions" scope showed nothing
+        # until something new happened — which read as the filter doing
+        # nothing at all. Merge the real sessions instead. `subscribe` still
+        # replays nothing for GLOBAL_FEED, so there is no double-delivery:
+        # history comes from here, live frames from there.
+        merged: List[dict] = []
+        for name in sessions_with_activity():
+            with _lock:
+                _load_session(name)
+                merged.extend(_events.get(name, ()))
+        merged.sort(key=lambda ev: ev.get("ts") or 0)
+        return merged[-limit:]
     with _lock:
         _load_session(sid)
         rows = [ev for ev in _events.get(sid, ()) if ev.get("seq", 0) > since_seq]
-    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
     return rows[-limit:]
 
 
@@ -402,7 +438,15 @@ def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
     if owner is not None:
         rows = [r for r in rows if r.get("owner") in (owner, None)]
     if session_id:
-        rows = [r for r in rows if r.get("session_id") == session_id]
+        # A worker's run is filed under the WORKER's chat, but the chat that
+        # started it has to be able to find it: the agent strip above the
+        # composer reconciles the rows it drew from the parent's own feed
+        # against this list, and a run it cannot find here is marked
+        # interrupted. That is why sub-agents appeared for a moment and then
+        # silently vanished from the chat that launched them.
+        rows = [r for r in rows
+                if r.get("session_id") == session_id
+                or (r.get("summary") or {}).get("parent_session") == session_id]
     if active_only:
         rows = [r for r in rows if r.get("status") == "running"]
     rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)

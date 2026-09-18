@@ -66,6 +66,11 @@ class SkillAddRequest(BaseModel):
 
 class SkillImportUrlRequest(BaseModel):
     url: str = Field(..., min_length=8, max_length=2000)
+    skill: Optional[str] = Field(None, min_length=1, max_length=300)
+
+
+class SkillImportConfirmRequest(BaseModel):
+    review_token: str = Field(..., min_length=20, max_length=100)
 
 
 class SkillUpdateRequest(BaseModel):
@@ -1152,19 +1157,22 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
         logger.info("Scheduled skill audit skipped — a run is already active.")
         return {"status": "running", "skipped": True}
 
-    try:
-        url, model, headers, teacher = _resolve_audit_models(owner=owner)
-    except ValueError as e:
-        logger.info(f"Scheduled skill audit skipped — {e}")
-        return {"status": "skipped", "reason": str(e)}
-
-    skills = skills_manager.load(owner=owner)
+    skills = [
+        skill for skill in skills_manager.load(owner=owner)
+        if not (skill.get("source") == "imported" and skill.get("status") == "draft")
+    ]
     # Oldest-audited first (never-audited sort to the very front via -1), so each
     # night picks up where the last left off and we don't repeat fresh ones.
     skills.sort(key=lambda s: (s.get("audited_at") if s.get("audited_at") is not None else -1.0))
     names = [s.get("name") for s in skills if s.get("name")][:max(1, max_skills)]
     if not names:
         return {"status": "done", "total": 0}
+
+    try:
+        url, model, headers, teacher = _resolve_audit_models(owner=owner)
+    except ValueError as e:
+        logger.info(f"Scheduled skill audit skipped — {e}")
+        return {"status": "skipped", "reason": str(e)}
 
     _skill_audit_jobs[key] = {
         "status": "running", "scope": "scheduled", "model": model,
@@ -1182,6 +1190,8 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
 
 def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
     router = APIRouter(prefix="/api/skills", tags=["skills"])
+    from services.memory.skill_import_review import SkillImportReviews
+    import_reviews = SkillImportReviews()
 
     def _owner(request: Request) -> Optional[str]:
         return get_current_user(request)
@@ -1349,9 +1359,43 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             save_settings(settings)
         return {"ok": True, "name": name, "is_overridden": False}
 
-    @router.post("/import-from-url")
+    @router.post("/imports/inspect")
+    async def inspect_skill_import(request: Request, body: SkillImportUrlRequest):
+        """Download without installing, publishing, executing, or starting an audit."""
+        import asyncio
+        from services.memory.skill_importer import SkillImportError, fetch_skill_bundle
+        require_admin(request)
+        user = _owner(request)
+        try:
+            files, _ = await asyncio.to_thread(fetch_skill_bundle, body.url.strip(), skill=body.skill)
+            return import_reviews.inspect(files, owner=user, source_url=body.url.strip())
+        except (SkillImportError, ValueError) as exc:
+            raise HTTPException(400, str(exc)) from exc
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, "Could not download skill bundle; try again.") from exc
+
+    @router.post("/imports/confirm")
+    async def confirm_skill_import(request: Request, body: SkillImportConfirmRequest):
+        """Import the exact reviewed snapshot as a draft, scoped to this owner."""
+        import asyncio
+        require_admin(request)
+        user = _owner(request)
+        try:
+            pending = import_reviews.consume(body.review_token, owner=user)
+            entry = await asyncio.to_thread(
+                skills_manager.import_bundle_from_files, pending['files'],
+                owner=user, source_url=pending['source_url'],
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        # Do not fire skill_added: an automated audit can execute instructions
+        # and auto-publish. That is a separate, explicit action for imports.
+        return {"ok": True, "skill": entry, "files": len(pending['files'])}
+
+    @router.post("/import-from-url", deprecated=True)
     async def import_skill_from_url(request: Request, body: SkillImportUrlRequest):
-        """Install a SKILL.md bundle from a public GitHub URL (skills.sh links supported)."""
+        """Compatibility: draft-only import. New clients should preview/confirm."""
+        import asyncio
         require_admin(request)
         user = _owner(request)
         from services.memory.skill_importer import (
@@ -1360,9 +1404,9 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
         )
 
         try:
-            files, _src = fetch_skill_bundle(body.url.strip())
-            entry = skills_manager.import_bundle_from_files(
-                files,
+            files, _src = await asyncio.to_thread(fetch_skill_bundle, body.url.strip(), skill=body.skill)
+            entry = await asyncio.to_thread(
+                skills_manager.import_bundle_from_files, files,
                 owner=user,
                 source_url=body.url.strip(),
             )
@@ -1376,7 +1420,6 @@ def setup_skills_routes(skills_manager: SkillsManager) -> APIRouter:
             logger.error("skill import failed: %s", e)
             raise HTTPException(500, "Skill import failed") from e
 
-        _fire_skill_added(user)
         return {"ok": True, "skill": entry, "files": len(files)}
 
     @router.post("/add")

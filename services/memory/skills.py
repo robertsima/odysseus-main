@@ -23,6 +23,8 @@ import json
 import logging
 import os
 import re
+import shutil
+import tempfile
 import time
 from typing import Dict, Iterable, List, Optional
 
@@ -464,35 +466,83 @@ class SkillsManager:
             raise SkillImportError("empty bundle")
         _rel, skill_md = pick_skill_md(files)
         sk = Skill.from_markdown(skill_md)
-        nm = slugify(sk.name or _rel.split("/")[-2] or "skill")
+        rel_parts = [part for part in _rel.split("/") if part]
+        rel_parent = rel_parts[-2] if len(rel_parts) >= 2 else "skill"
+        nm = slugify(sk.name or rel_parent or "skill")
         cat = slugify(category or sk.category or "imported", fallback="imported")
 
         existing = {s["name"] for s in self.load_all()}
         base = nm
         i = 2
-        while nm in existing:
+        while nm in existing or os.path.lexists(self._skill_dir(cat, nm)):
             nm = f"{base}-{i}"
             i += 1
 
         skill_dir = self._skill_dir(cat, nm)
-        os.makedirs(skill_dir, exist_ok=True)
-
-        # Preserve bundle layout (templates/, references/, etc.) under the skill dir.
+        root_real = os.path.realpath(self.skills_root)
+        dir_real = os.path.realpath(skill_dir)
+        if os.path.commonpath((root_real, dir_real)) != root_real or os.path.islink(skill_dir):
+            raise SkillImportError("unsafe skill import destination")
+        # Validate the complete manifest before creating any category/skill
+        # directory. This prevents an early upstream SKILL.md from becoming
+        # visible if a later resource path is invalid.
+        manifest = []
+        portable_names = set()
         for rel, content in files.items():
             safe = _safe_relpath(rel)
-            dest = os.path.join(skill_dir, safe)
-            os.makedirs(os.path.dirname(dest), exist_ok=True)
-            atomic_write_text(dest, content)
+            portable = safe.casefold()
+            if portable in portable_names:
+                raise SkillImportError(f"duplicate portable bundle path: {rel!r}")
+            portable_names.add(portable)
+            dest = os.path.normpath(os.path.join(skill_dir, safe))
+            if os.path.commonpath((dir_real, os.path.realpath(os.path.dirname(dest)))) != dir_real:
+                raise SkillImportError(f"unsafe bundle path: {rel!r}")
+            manifest.append((safe, content))
 
         sk.name = nm
         sk.category = cat
         sk.owner = owner
         sk.source = "imported"
+        sk.status = "draft"
+        # Upstream review/teacher claims are not local attestations. Preserve
+        # the original artifact separately, but clear attribution on the
+        # installed draft until this owner explicitly reviews/publishes it.
+        sk.teacher_model = None
         if source_url:
             extra = (sk.body_extra or "").strip()
             note = f"Imported from {source_url}"
             sk.body_extra = f"{extra}\n\n{note}".strip() if extra else note
-        atomic_write_text(self._skill_file(cat, nm), sk.to_markdown())
+        canonical = sk.to_markdown()
+        preserve_source = canonical != skill_md
+        if preserve_source and any(safe.casefold() == "imported_source.md" for safe, _ in manifest):
+            raise SkillImportError("bundle uses reserved path IMPORTED_SOURCE.md")
+
+        # Stage beside (not inside) skills_root: readers recursively scan that
+        # root for SKILL.md, so an upstream published/foreign-owner document
+        # must never become visible before the canonical rewrite is complete.
+        stage = tempfile.mkdtemp(prefix=".skill-import-", dir=self.data_dir)
+        installed = False
+        try:
+            for safe, content in manifest:
+                dest = os.path.join(stage, safe)
+                os.makedirs(os.path.dirname(dest), exist_ok=True)
+                atomic_write_text(dest, content)
+            if preserve_source:
+                atomic_write_text(os.path.join(stage, "IMPORTED_SOURCE.md"), skill_md)
+            atomic_write_text(os.path.join(stage, "SKILL.md"), canonical)
+            os.makedirs(os.path.dirname(skill_dir), exist_ok=True)
+            if os.path.lexists(skill_dir):
+                raise SkillImportError("skill import destination already exists")
+            os.rename(stage, skill_dir)
+            installed = True
+        finally:
+            if not installed:
+                shutil.rmtree(stage, ignore_errors=True)
+        usage = self._load_usage()
+        usage_key = self._usage_key(nm, owner)
+        if usage_key in usage:
+            usage.pop(usage_key, None)
+            self._save_usage(usage)
         sk.path = self._skill_file(cat, nm)
         return sk.to_dict()
 
@@ -734,7 +784,11 @@ class SkillsManager:
         # without a manual publish click. The UI flags teacher-written
         # entries with a 🎓 badge so users can demote / delete bad
         # ones when they spot them.
-        skills = [s for s in skills if s.get("status") in ("published", "draft")]
+        skills = [
+            s for s in skills
+            if s.get("status") in ("published", "draft")
+            and not (s.get("status") == "draft" and s.get("source") == "imported")
+        ]
         # Confidence gate (used by prompt-injection, NOT by search): a DRAFT
         # skill must clear the bar to be injected. Published skills are already
         # vetted, so they always qualify. Missing confidence = treat as 1.0

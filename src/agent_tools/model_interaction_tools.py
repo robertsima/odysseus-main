@@ -1,16 +1,25 @@
 """model_interaction_tools.py - agent tools for talking to other models.
 
 Owns the model-interaction tool implementations (chat_with_model, ask_teacher,
-list_models) and their handler classes, registered in ``TOOL_HANDLERS``. Part
-of the tool -> registry migration (#3629): the implementations were moved here
-out of ``src.ai_interaction`` so dispatch flows through the registry instead of
-the elif chain / dispatch_ai_tool in tool_execution.py.
+list_models, message_agent) and their handler classes, registered in
+``TOOL_HANDLERS``. Part of the tool -> registry migration (#3629): the
+implementations were moved here out of ``src.ai_interaction`` so dispatch
+flows through the registry instead of the elif chain / dispatch_ai_tool in
+tool_execution.py.
 
 Shared helpers that still live in ``src.ai_interaction`` and are used by tools
 not yet migrated (``_resolve_model``, ``AI_CHAT_TIMEOUT``) are imported lazily
 inside the functions to avoid an import cycle at module load.
+
+``message_agent`` is the odd one out here: it doesn't talk to a model, it
+talks to another running AGENT via ``src.agent_mailbox`` (a peer-messaging
+layer built on the same steer queue the Agents dashboard uses). It lives in
+this file rather than ``session_tools.py`` (home of the blocking
+``send_to_session``) because the two are meant to read side by side in the
+tool list — see each one's description for how they differ.
 """
 import asyncio
+import json
 import logging
 import re
 from typing import Dict, List, Optional
@@ -263,6 +272,77 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
         db.close()
 
 
+def _parse_message_agent_args(content: str) -> tuple:
+    """``(session_id, message)`` from JSON ``{session_id, message}`` or 2 lines."""
+    raw = (content or "").strip()
+    if raw.startswith("{"):
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            data = None
+        if isinstance(data, dict):
+            return (str(data.get("session_id") or data.get("session") or data.get("to_session") or "").strip(),
+                    str(data.get("message") or data.get("text") or "").strip())
+    lines = raw.split("\n", 1)
+    if len(lines) < 2:
+        return "", ""
+    return lines[0].strip(), lines[1].strip()
+
+
+async def message_agent(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
+    """Tell another running agent something now, without waiting for a reply.
+
+    This is NOT ``send_to_session``: that call blocks this turn until the
+    target produces one response, and the target can only ever answer, never
+    speak first. ``message_agent`` queues the message and returns at once —
+    the target's own turn picks it up between its rounds, tagged as coming
+    from THIS session so it can't be mistaken for something its own user
+    said. Use this to steer, warn, or update a peer that is doing its own
+    independent work ("don't touch that file, I'm already on it", "done,
+    here's the result"), not to delegate a task and wait for the outcome.
+
+    A recipient that wants to answer calls ``message_agent`` right back,
+    naming this session as its target — that's how a back-and-forth between
+    two agents happens, with neither one blocked while it waits.
+
+    Content format:
+      JSON: {"session_id": <target session id>, "message": <text>}
+      Legacy 2-line form: line 1 = target session_id, line 2+ = message
+    """
+    from src import agent_mailbox
+
+    target_sid, message = _parse_message_agent_args(content)
+    if not target_sid or not message:
+        return {"error": "Need a session_id and a message (JSON {session_id, message}, or 2 lines)"}
+    if not session_id:
+        return {"error": "message_agent must be called from within a running session"}
+
+    from_name = ""
+    try:
+        from src.ai_interaction import get_session_manager
+
+        manager = get_session_manager()
+        source = manager.get_session(session_id) if manager else None
+        from_name = str(getattr(source, "name", "") or "") if source else ""
+    except Exception:
+        logger.debug("message_agent: could not resolve sender name for %s", session_id, exc_info=True)
+
+    result = agent_mailbox.send(target_sid, message, from_session=session_id, owner=owner,
+                                from_session_name=from_name)
+    if not result.get("ok"):
+        return {"error": result.get("reason") or "message_agent failed"}
+
+    return {
+        "delivered": True,
+        "to_session": result["to_session"],
+        "pending_for_recipient": result.get("pending"),
+        "budget_remaining": result.get("budget_remaining"),
+        "note": ("Delivered — it lands before the recipient's next round; this is not a reply. "
+                 "If you need one, either wait for the recipient to message_agent back to this "
+                 "session, or use send_to_session instead to block for an answer."),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Handler classes registered in TOOL_HANDLERS
 # ---------------------------------------------------------------------------
@@ -280,3 +360,8 @@ class AskTeacherTool:
 class ListModelsTool:
     async def execute(self, content: str, ctx: dict) -> Dict:
         return await list_models(content, ctx.get("session_id"), owner=ctx.get("owner"))
+
+
+class MessageAgentTool:
+    async def execute(self, content: str, ctx: dict) -> Dict:
+        return await message_agent(content, ctx.get("session_id"), owner=ctx.get("owner"))

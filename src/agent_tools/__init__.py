@@ -22,12 +22,16 @@ from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
 from .coding_tools import TodoWriteTool
 from .claude_code_tools import ClaudeCodeTool
+from .delegation_tools import DelegationTool
 from .worktree_tools import AgentWorktreeTool, ReadAppLogsTool
+from .git_tools import GitTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
-from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool
+from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool, MessageAgentTool
 from .bg_job_tools import ManageBgJobsTool
+from .loadout_tools import ManageAgentLoadoutTool
+from .workflow_tools import OrchestrateAgentsTool
 from .session_tools import CreateSessionTool, ListSessionsTool, SendToSessionTool, ManageSessionTool
 from .admin_tools import (
     ADMIN_TOOL_HANDLERS,
@@ -46,6 +50,7 @@ TOOL_HANDLERS = {
     "apply_patch": ApplyPatchTool().execute,
     "todowrite": TodoWriteTool().execute,
     "manage_agent_worktree": AgentWorktreeTool().execute,
+    "manage_git": GitTool().execute,
     "read_app_logs": ReadAppLogsTool().execute,
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
@@ -61,14 +66,18 @@ TOOL_HANDLERS = {
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,
     "chat_with_model": ChatWithModelTool().execute,
+    "message_agent": MessageAgentTool().execute,
     "ask_teacher": AskTeacherTool().execute,
     "list_models": ListModelsTool().execute,
     "manage_bg_jobs": ManageBgJobsTool().execute,
+    "manage_agent_loadout": ManageAgentLoadoutTool().execute,
+    "orchestrate_agents": OrchestrateAgentsTool().execute,
     "create_session": CreateSessionTool().execute,
     "list_sessions": ListSessionsTool().execute,
     "send_to_session": SendToSessionTool().execute,
     "manage_session": ManageSessionTool().execute,
     "delegate_to_claude_code": ClaudeCodeTool().execute,
+    "delegate_to_agent": DelegationTool().execute,
 }
 # Config/integration admin tools (manage_endpoints/mcp/webhooks/tokens/settings).
 TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
@@ -77,7 +86,13 @@ TOOL_HANDLERS.update(ADMIN_TOOL_HANDLERS)
 # Constants (re-exported for backward compatibility — single source of truth
 # is src.constants; always prefer importing from there for new code)
 # ---------------------------------------------------------------------------
-MAX_AGENT_ROUNDS = 100
+# 0 = no round ceiling. The orchestrator chat and the workers it starts are held
+# to the same rule; a worker was previously capped at 12 rounds while this chat
+# had 100, which is why workers kept stopping mid-task on work the chat itself
+# would have finished. A turn is still bounded by the per-run tool-call ceiling
+# (`agent_max_tool_calls`, default 500), the request timeout, tool policy and
+# the stop control -- none of which a round counter was adding to.
+MAX_AGENT_ROUNDS = 0
 SHELL_TIMEOUT = 60
 PYTHON_TIMEOUT = 30
 

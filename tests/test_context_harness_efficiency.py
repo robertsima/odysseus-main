@@ -152,3 +152,20 @@ async def test_build_context_compacts_only_stable_history_and_appends_dynamic_ta
     assert ctx.messages[-1]["content"] == "[Context — current date/time]"
     assert ctx.context_diagnostics["retrieval_mode"] == "follow_up"
     assert ctx.context_diagnostics["rag_source_count"] == 1
+
+    # The real chat builder intentionally appends retrieval and time context
+    # after the human request for prefix caching. Agent prompt construction
+    # must normalize that real shape so the command is final for the model.
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "_build_base_prompt", lambda *a, **k: ("AGENT", ""))
+    monkeypatch.setattr(agent_loop, "set_active_model", lambda _model: None)
+    monkeypatch.setattr(agent_loop, "get_builtin_overrides", lambda: {})
+    agent_messages, _ = agent_loop._build_system_prompt(
+        ctx.messages,
+        model="model",
+        active_document=None,
+        mcp_mgr=None,
+        relevant_tools=set(),
+        suppress_local_context=True,
+    )
+    assert agent_messages[-1]["content"] == "do this again"

@@ -8,8 +8,11 @@ user asks how a feature works.
 from __future__ import annotations
 
 import re
+from dataclasses import replace
 from dataclasses import dataclass
 from typing import Iterable, Pattern
+
+from src.intent_assessment import IntentAssessment, assess_request, explicit_route_hints
 
 
 @dataclass(frozen=True)
@@ -152,6 +155,21 @@ def classify_tool_intent(text: str) -> ToolIntent:
         if pattern.search(text):
             return ToolIntent(True, category=category, reason=reason)
     return ToolIntent(False, reason="no tool-action pattern matched")
+
+
+def assess_tool_intent(text: str) -> IntentAssessment:
+    """Return the typed, policy-neutral form of the chat routing decision."""
+    intent = classify_tool_intent(text)
+    explicit_web, explicit_browser = explicit_route_hints(text)
+    context = assess_request([{"role": "user", "content": str(text or "")}])
+    return replace(
+        context,
+        needs_tools=intent.needs_tools,
+        route_category=intent.category,
+        reason=intent.reason,
+        explicit_web=explicit_web,
+        explicit_browser=explicit_browser,
+    )
 
 
 def message_needs_tools(text: str, patterns: Iterable[Pattern[str]] = _TOOL_INTENT_PATTERNS) -> bool:

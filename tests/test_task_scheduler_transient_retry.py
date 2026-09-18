@@ -86,3 +86,142 @@ def test_retry_budget_is_per_task():
     assert sched._transient_retry_delay("t1", err) is None
     # A second task's budget is untouched by the first one exhausting its own.
     assert sched._transient_retry_delay("t2", err) == TaskScheduler._TRANSIENT_RETRY_DELAYS[0]
+
+
+# ── circuit breaker, and how it composes with the retry above ────────────
+#
+# The retry budget answers "run *this task* again later". It does nothing about
+# the next task pointed at the same dead endpoint, which pays the same timeout
+# from scratch — that is the "repeated upstream 502 overload" pattern in the
+# Sept 15-16 logs. The breaker is the memory between tasks, and the two have to
+# agree: a run the breaker skips must be rescheduled, not written off.
+
+
+@pytest.fixture(autouse=True)
+def _fresh_breakers():
+    from src.circuit_breaker import reset_all
+    reset_all()
+    yield
+    reset_all()
+
+
+def _endpoint_calls(sched, url, err=None, result="ok"):
+    """Drive `_guarded_model_call`, reporting how often the endpoint was
+    actually dialled — which is the whole point of the breaker."""
+    calls = {"n": 0}
+
+    async def _call():
+        calls["n"] += 1
+        if err is not None:
+            raise err
+        return result
+
+    async def _drive():
+        return await sched._guarded_model_call(url, _call)
+
+    return calls, _drive
+
+
+@pytest.mark.asyncio
+async def test_repeated_overload_stops_being_dialled():
+    from src.circuit_breaker import CircuitOpen
+
+    sched = _scheduler()
+    url = "https://api.example.com/v1/chat/completions"
+    calls, drive = _endpoint_calls(sched, url, err=HTTPException(502, "upstream overloaded"))
+
+    for _ in range(3):
+        with pytest.raises(HTTPException):
+            await drive()
+    assert calls["n"] == 3
+
+    # The fourth attempt never reaches the endpoint.
+    with pytest.raises(CircuitOpen):
+        await drive()
+    assert calls["n"] == 3
+
+
+@pytest.mark.asyncio
+async def test_a_short_circuited_run_is_rescheduled_not_written_off():
+    """CircuitOpen has to land in the transient bucket, or the breaker would
+    turn a recoverable outage into a task that lost its slot for good."""
+    from src.circuit_breaker import CircuitOpen
+
+    sched = _scheduler()
+    url = "https://api.example.com/v1/chat/completions"
+    _, drive = _endpoint_calls(sched, url, err=HTTPException(502, "overloaded"))
+    for _ in range(3):
+        with pytest.raises(HTTPException):
+            await drive()
+    with pytest.raises(CircuitOpen) as exc:
+        await drive()
+
+    assert sched._transient_retry_delay("t1", exc.value) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_bad_request_never_takes_the_endpoint_offline():
+    """A 400 is the provider answering. Cutting a working endpoint off for five
+    minutes because one task's model name was wrong would be a worse bug than
+    the one the breaker fixes."""
+    sched = _scheduler()
+    url = "https://api.example.com/v1/chat/completions"
+    calls, drive = _endpoint_calls(
+        sched, url, err=HTTPException(400, "model 'gpt-5.4' does not exist")
+    )
+    for _ in range(10):
+        with pytest.raises(HTTPException):
+            await drive()
+    assert calls["n"] == 10
+
+
+@pytest.mark.asyncio
+async def test_a_success_clears_the_streak():
+    sched = _scheduler()
+    url = "https://api.example.com/v1/chat/completions"
+    _, fail = _endpoint_calls(sched, url, err=HTTPException(502, "overloaded"))
+    _, ok = _endpoint_calls(sched, url)
+    for _ in range(2):
+        with pytest.raises(HTTPException):
+            await fail()
+    assert await ok() == "ok"
+    for _ in range(2):
+        with pytest.raises(HTTPException):
+            await fail()
+    # Two failures since the success — under the threshold, still dialling.
+    assert await ok() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_endpoints_are_judged_separately():
+    from src.circuit_breaker import CircuitOpen
+
+    sched = _scheduler()
+    dead = "https://dead.example.com/v1/chat/completions"
+    live = "https://live.example.com/v1/chat/completions"
+    _, fail = _endpoint_calls(sched, dead, err=HTTPException(502, "overloaded"))
+    for _ in range(3):
+        with pytest.raises(HTTPException):
+            await fail()
+    with pytest.raises(CircuitOpen):
+        await fail()
+
+    _, ok = _endpoint_calls(sched, live)
+    assert await ok() == "ok"
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_run_says_nothing_about_the_endpoint():
+    """Foreground activity cancels background runs constantly. Counting those
+    as endpoint failures would trip the breaker on a healthy provider."""
+    import asyncio
+
+    from src.circuit_breaker import get_breaker
+
+    sched = _scheduler()
+    url = "https://api.example.com/v1/chat/completions"
+    _, cancelled = _endpoint_calls(sched, url, err=asyncio.CancelledError())
+    for _ in range(5):
+        with pytest.raises(asyncio.CancelledError):
+            await cancelled()
+    assert get_breaker("scheduled_model_endpoint").snapshot() == {}

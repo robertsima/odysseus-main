@@ -175,9 +175,10 @@ async def test_profile_starts_a_new_child_chat_with_its_model_tools_and_instruct
     child = created["child"]
     assert out["response"] == "Summary of findings" and out["session_id"] == child.id and out["mode"] == "agent"
     assert child.name.startswith("↳ researcher: compare pricing") and seen["model"] == "cheap-model"
-    assert seen["messages"][0] == {"role": "system", "content": "Only research; never edit files."}
+    assert seen["messages"] == [{"role": "user", "content": "compare pricing"}]
     assert {"bash", "write_file", "send_to_session"} <= set(seen["disabled_tools"]) and seen["max_rounds"] == 5
     assert saved[child.id]["parent_session"] == "child-1" and saved[child.id]["agent_profile"] == "researcher"
+    assert saved[child.id]["agent_instructions"] == "Only research; never edit files."
     run = act.list_runs(session_id="child-1")[0]
     assert run["summary"]["target_session"] == child.id
 
@@ -187,3 +188,16 @@ async def test_unknown_profile_lists_the_available_ones(env, monkeypatch):
     monkeypatch.setattr(ap, "load_profiles", lambda: ap.validate_profiles([{"name": "coder"}]))
     out = await st.send_to_session(json.dumps({"session_id": "new", "message": "x", "profile": "ghost"}), owner="alice")
     assert "No agent profile named 'ghost'" in out["error"] and "coder" in out["error"]
+
+
+async def test_profile_cannot_transiently_override_an_existing_agents_persona(env, monkeypatch):
+    """Profiles are copied onto fresh agents, never overlaid on another chat."""
+    import src.agent_profiles as ap
+    monkeypatch.setattr(ap, "load_profiles", lambda: ap.validate_profiles([
+        {"name": "reviewer", "instructions": "Act as a reviewer."},
+    ]))
+    out = await st.send_to_session(json.dumps({
+        "session_id": "child-1", "message": "review this", "profile": "reviewer",
+    }), owner="alice")
+    assert "requires a fresh child chat" in out["error"]
+    assert "session_id: 'new'" in out["error"]

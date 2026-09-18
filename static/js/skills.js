@@ -1902,6 +1902,40 @@ async function _showSkillSource(name) {
   });
 }
 
+function reviewSkillImport(data) {
+  return new Promise(resolve => {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'skill-import-review';
+    dialog.setAttribute('aria-labelledby', 'skill-import-review-title');
+    dialog.innerHTML = `<h2 id="skill-import-review-title">Review skill import</h2>
+      <p>${esc(data.source_url)}</p>
+      <p>Import creates a <strong>draft</strong>. Review the instructions and supporting files before publishing. No scripts or automated audits run on import.</p>
+      <label>Bundle file <select data-review-file aria-label="Preview bundle file">
+        ${data.files.map((file, index) => `<option value="${index}">${esc(file.path)} (${file.bytes} bytes)</option>`).join('')}
+      </select></label>
+      <pre data-review-content tabindex="0"></pre>
+      <details><summary>Integrity & permissions</summary><p>SHA-256: <code>${esc(data.sha256)}</code></p>
+        ${data.warnings.map(warning => `<p>${esc(warning)}</p>`).join('')}</details>
+      <footer><button type="button" class="theme-io-btn" data-review-cancel>Cancel</button>
+        <button type="button" class="theme-io-btn" data-review-confirm>Import as draft</button></footer>`;
+    const select = dialog.querySelector('[data-review-file]');
+    const content = dialog.querySelector('[data-review-content]');
+    const update = () => { content.textContent = data.files[Number(select.value)]?.content || ''; };
+    select.value = String(Math.max(0, data.files.findIndex(file => file.path === data.skill_path)));
+    select.addEventListener('change', update);
+    update();
+    dialog.addEventListener('close', () => {
+      const confirmed = dialog.returnValue === 'confirm';
+      dialog.remove();
+      resolve(confirmed);
+    }, { once: true });
+    dialog.querySelector('[data-review-cancel]').addEventListener('click', () => dialog.close('cancel'));
+    dialog.querySelector('[data-review-confirm]').addEventListener('click', () => dialog.close('confirm'));
+    document.body.appendChild(dialog);
+    dialog.showModal();
+  });
+}
+
 async function importSkillFromUrl() {
   const input = document.getElementById('skill-import-url');
   const url = (input?.value || '').trim();
@@ -1912,17 +1946,24 @@ async function importSkillFromUrl() {
   const btn = document.getElementById('skill-import-url-btn');
   if (btn) btn.disabled = true;
   try {
-    const res = await fetch(`${API}/api/skills/import-from-url`, {
+    const res = await fetch(`${API}/api/skills/imports/inspect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ url }),
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+    const preview = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(preview.detail || preview.error || `HTTP ${res.status}`);
+    if (!await reviewSkillImport(preview)) return;
+    const confirmation = await fetch(`${API}/api/skills/imports/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ review_token: preview.review_token }),
+    });
+    const data = await confirmation.json().catch(() => ({}));
+    if (!confirmation.ok) throw new Error(data.detail || `HTTP ${confirmation.status}`);
     if (input) input.value = '';
     await loadSkills();
     const name = data.skill?.name || 'skill';
-    uiModule.showToast(`Imported ${name} (${data.files || 1} file(s))`);
+    uiModule.showToast(`Imported draft: ${name} (${data.files || 1} file(s)). Review before publishing.`);
     if (name) openSkill(name);
   } catch (err) {
     uiModule.showError('Import failed: ' + err.message);

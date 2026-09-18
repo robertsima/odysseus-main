@@ -35,6 +35,47 @@ def test_endpoint_runtime_headers_uses_refreshed_token(monkeypatch):
     assert "fresh-token" in repr(headers)
 
 
+def test_endpoint_runtime_uses_registered_subscription_provider(monkeypatch):
+    """Credential resolution follows the auth row's provider adapter."""
+    import src.endpoint_resolver as er
+
+    calls = {}
+
+    class _Provider:
+        provider_id = "test-subscription"
+
+        def resolve_runtime_credentials(self, auth_id, owner=None):
+            calls["resolve"] = (auth_id, owner)
+            return {
+                "base_url": "https://subscription.example/v1",
+                "api_key": "subscription-token",
+            }
+
+        def headers(self, token):
+            calls["headers"] = token
+            return {"Authorization": f"Subscription {token}"}
+
+    provider = _Provider()
+    monkeypatch.setattr(
+        "src.subscription.provider_for_auth_id",
+        lambda auth_id, owner=None: provider,
+    )
+    ep = _Ep(
+        id="ep-provider",
+        base_url="https://configured.example/v1",
+        api_key=None,
+        provider_auth_id="auth-provider",
+        owner="alice",
+    )
+
+    base, token = er.resolve_endpoint_runtime(ep, owner="alice")
+    assert (base, token) == ("https://subscription.example/v1", "subscription-token")
+    headers = er.endpoint_runtime_headers(ep, owner="alice")
+    assert headers == {"Authorization": "Subscription subscription-token"}
+    assert calls["resolve"] == ("auth-provider", "alice")
+    assert calls["headers"] == "subscription-token"
+
+
 def test_endpoint_runtime_headers_falls_back_to_stored_key(monkeypatch):
     """A provider whose refresh is broken keeps its old behaviour."""
     import src.endpoint_resolver as er

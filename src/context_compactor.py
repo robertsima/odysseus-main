@@ -7,6 +7,7 @@ Summarizes older messages via the same LLM, preserving key context.
 
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, List, Optional
 
@@ -295,6 +296,12 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     2. Older conversation turns
     Reserves space for the response.
     """
+    # The reserve (output room + tool schemas) must never eat the whole budget.
+    # An agent with ~6K of tool schemas against a 6K budget got a NEGATIVE
+    # budget, so every step below failed to fit and the harshest path ran every
+    # round: system prompt cut to 2000 chars, tool results truncated, the
+    # user's request reduced to a fragment. Keep at least half for messages.
+    reserve_tokens = max(0, min(reserve_tokens, context_length // 2))
     budget = context_length - reserve_tokens
     used = estimate_tokens(messages)
     if used <= budget:
@@ -640,3 +647,490 @@ def _update_session_history(session, split_point: int, summary: str,
         if manager.replace_messages(session.id, new_history):
             return
     session.history = new_history
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution ledger: collapsing completed tool exchanges
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# WHY
+#
+# A tool result is written into the transcript once and then replayed to the
+# model on every remaining round of the turn. The Sept 15-16 production audit
+# measured one workflow at 26 rounds / ~96k prompt tokens with tool results from
+# long-finished phases still riding along. `tool_output_store` already caps a
+# SINGLE oversized result; it does nothing about twenty ordinary ones
+# accumulating. This is the accumulation half of that problem.
+#
+# WHAT A LEDGER ENTRY KEEPS, AND WHY THAT LIST
+#
+# `format_tool_result` has a structural property we can lean on instead of
+# guessing: facts live OUTSIDE fenced blocks and bulk lives INSIDE them.
+#
+#     ### read_file: /srv/app/src/agent_loop.py      <- fact (what, and on what)
+#     **content (31204 chars):**                     <- fact (shape of result)
+#     ```                                            <- bulk begins
+#     ...31k characters of source...
+#     ```                                            <- bulk ends
+#     **exit_code:** 0                               <- fact (outcome)
+#
+# So an entry keeps every non-fenced line — the `### <tool>: <target>` header
+# (the path read, the command run, the query issued, the file written), the
+# `File written: …` / `Document created … (id: …, v3)` / `Session created …
+# (id: …)` outcome lines, exit codes, error text — and drops the fenced payload.
+# That is the split the audit asks for: drop bulk, keep facts. A path or an id
+# the agent would otherwise have to re-derive by re-running a tool is never
+# inside a fence, so it is never dropped.
+#
+# WHAT IT DROPS, AND WHY THAT IS SAFE
+#
+# Nothing is destroyed. Before a message is collapsed its ORIGINAL text is
+# written to `tool_output_store`, and the entry names the resulting `toolout-…`
+# ref, so `recall_tool_output` can still search or page through the full
+# verbatim result. If the store write fails and the result carries no ref of its
+# own, the exchange is left untouched rather than trimmed — the offload is the
+# precondition for compacting, not a bonus. A ledger entry is therefore a
+# pointer plus the facts you would otherwise have had to open the pointer for.
+#
+# WHAT IS NEVER COLLAPSED
+#
+# - The most recent `keep_rounds` tool exchanges. Recency is where an exact
+#   `read_file` body is still needed by the `edit_file` that follows it.
+# - Anything under `LEDGER_MIN_RESULT_CHARS`. Short results are ids, paths and
+#   confirmations — pure fact, no bulk. Compacting them saves nothing and is all
+#   downside.
+# - Results from `_LEDGER_NEVER_COMPACT` tools. `recall_tool_output` is the
+#   model's *second* attempt to obtain something the head/tail excerpt did not
+#   give it; collapsing it invites exactly the re-ask loop documented in
+#   `tool_output_store`. `ask_user` ends the turn and holds the live question.
+# - Failed / blocked / non-zero-exit exchanges, until a LATER round ran the same
+#   tool successfully. An unresolved error is active state, not a completed
+#   phase. Once something resolved it the entry still records the failure line,
+#   so the model does not blindly retry into it.
+#
+# HOW THIS AVOIDS PER-ROUND PREFIX INVALIDATION
+#
+# `specs/prompt-prefix-stability.md` documents the incident this mechanism could
+# easily repeat: pruning replayed reasoning items a little every round moved the
+# provider cache boundary every round, and `cached=` sat flat at the static
+# prefix for 28 rounds. Editing a tool result in the middle of an already-cached
+# prompt costs the same. So:
+#
+#   1. Compaction fires in BATCHES. Unprocessed exchanges accumulate to
+#      `keep_rounds + slack_rounds` before anything is touched, then everything
+#      older than `keep_rounds` collapses in one pass and every exchange in that
+#      pass is marked processed. Invalidation happens once per ~`slack_rounds`
+#      rounds instead of every round — the same discipline, and the same slack
+#      rule, as the reasoning-item prune in `_append_tool_results`.
+#   2. Entries are APPEND-ONLY and never rewritten. Each batch collapses a
+#      contiguous stretch of exchanges IN PLACE and leaves earlier entries
+#      byte-identical, so the invalidation point advances monotonically toward
+#      the tail. A single growing consolidated ledger message would instead have
+#      to be rewritten on every batch, moving the boundary back to the front of
+#      the conversation each time — worse than doing nothing.
+#
+# Note the deliberate difference from `maybe_compact` above, which REPLACES
+# prior summaries per `specs/bounded-recursive-compaction.md`. That rule exists
+# because summaries are derived from each other and would otherwise stack.
+# Ledger entries are not recursive: an entry is derived once, from one message,
+# and is then immutable, so there is nothing to accumulate and the replacement
+# rule has nothing to act on. An entry is also never fed to the utility model —
+# it is not a summary, it is the surviving non-bulk text — so it cannot consume
+# summary-input budget. When `maybe_compact` later summarizes a stretch of
+# history containing entries, it folds them in like any other message.
+#
+# SCOPE
+#
+# This edits the request-local `messages` list only. Persisted history and the
+# UI re-render from `tool_events` (desc/command/output), which this never
+# touches, so a reloaded conversation still shows full tool output.
+
+LEDGER_KEEP_ROUNDS = 3
+# Unprocessed exchanges may overrun the keep window by this much before a batch
+# fires. Mirrors the reasoning-replay slack rule (`max(4, window)`).
+LEDGER_SLACK_ROUNDS = 4
+# Below this, a result is facts rather than bulk — leave it alone.
+LEDGER_MIN_RESULT_CHARS = 600
+# Ceiling on the fact text a single entry may carry forward.
+LEDGER_MAX_ENTRY_CHARS = 900
+# Per-line ceiling, so one pathological unfenced line cannot fill the entry.
+_LEDGER_MAX_LINE_CHARS = 240
+
+_LEDGER_NEVER_COMPACT = frozenset({"recall_tool_output", "ask_user"})
+
+_LEDGER_REF_RE = re.compile(r"\btoolout-[0-9a-f]{10}\b")
+_LEDGER_FENCE_RE = re.compile(r"^\s*```")
+_LEDGER_HEADER_RE = re.compile(r"^###[ \t]+(?P<desc>.*)$", re.MULTILINE)
+# How far into a result to look for that header. Comfortably past the untrusted
+# wrapper (`UNTRUSTED_CONTEXT_HEADER` + guard + `Source:` line ≈ 480 chars) that
+# fronts a textual-path tool-results message, and short enough that a stray
+# markdown `###` deep inside the payload cannot be mistaken for it.
+_LEDGER_HEADER_SCAN_CHARS = 1200
+_LEDGER_EXIT_RE = re.compile(r"^\*\*exit_code:\*\*\s*(?P<code>\S+)")
+# Boilerplate the offload excerpt appends. The ledger emits its own pointer, so
+# carrying this too would be ~350 characters of duplicated instructions.
+_LEDGER_BOILERPLATE = (
+    "This output was large, so only its head and tail are shown.",
+)
+_LEDGER_FAIL_MARKERS = (
+    "**Error:**",
+    ": BLOCKED",
+    "APPROVAL REQUIRED",
+    "misformatted tool call",
+)
+# Lines that must survive the entry budget whatever else is dropped: the tool
+# header, structured outcome lines, and the omission notes.
+_LEDGER_STRUCTURAL_PREFIXES = (
+    "###",
+    "**",
+    "[",
+    "File written:",
+    "Document created:",
+    "Document updated:",
+    "Document edited:",
+    "Session created:",
+    "Error:",
+)
+
+LEDGER_HEADER = (
+    "[Execution ledger — this completed tool exchange was compacted; "
+    "the facts below are still current]"
+)
+
+# Stamped on every result message a ledger batch has considered, whether or not
+# it was rewritten. It means "already processed", not "was collapsed": without
+# that distinction a group holding one short result would stay countable
+# forever, the batch gate would never fall back below its threshold, and a batch
+# would fire EVERY round — reintroducing the per-round invalidation this design
+# exists to avoid. Stripped before the provider call by the allow-list in
+# `_sanitize_llm_messages`, so it never reaches an API.
+LEDGER_MARK = "_ledger"
+
+
+def _ledger_enabled() -> bool:
+    """Kill switch. This runs on the path of every agent turn, so it needs one.
+
+    Read from the environment rather than settings: `_append_tool_results` has
+    no session/owner handle to resolve a setting against, and a per-round
+    settings lookup would be a database hit on the hot path.
+    """
+    value = (os.getenv("ODYSSEUS_AGENT_EXECUTION_LEDGER", "1") or "1").strip().lower()
+    return value not in ("0", "false", "off", "no")
+
+
+def _ledger_tool_name(text: str, fallback: str = "") -> str:
+    """The tool a formatted result came from, read off its `### <desc>` header.
+
+    `desc` is built as `"{tool}: {first_line}"` (or bare `"{tool}"`) by
+    `execute_tool_block`, so the token before the first colon is the tool name.
+
+    The header is searched for within a leading window rather than required on
+    the first line: a textual-path result sits behind the untrusted-context
+    wrapper, and an already-collapsed entry sits behind LEDGER_HEADER. Both must
+    still be identifiable, because the failure-resolution scan keys on the tool
+    name and an unidentifiable failure is never collapsed at all.
+    """
+    match = _LEDGER_HEADER_RE.search((text or "")[:_LEDGER_HEADER_SCAN_CHARS])
+    if not match:
+        return fallback
+    desc = match.group("desc").strip()
+    return (desc.split(":", 1)[0] if ":" in desc else desc).strip() or fallback
+
+
+def _ledger_failed(text: str) -> bool:
+    """Did this result report a failure the agent may still be working around?
+
+    Conservative by construction: any recognised failure marker, or any non-zero
+    or unknown exit code, counts. A false positive costs some tokens; a false
+    negative silently collapses the error the agent is mid-recovery from.
+    """
+    body = text or ""
+    if any(marker in body for marker in _LEDGER_FAIL_MARKERS):
+        return True
+    for line in body.splitlines():
+        match = _LEDGER_EXIT_RE.match(line.strip())
+        if match and match.group("code") not in ("0", "None"):
+            return True
+    return False
+
+
+def _ledger_facts(text: str) -> str:
+    """Strip fenced bulk from a formatted tool result, keep the rest, bound it.
+
+    Each fenced block becomes a one-line note of how much was dropped, so the
+    agent can see output existed and roughly how big it was — a bare absence
+    reads like the tool returned nothing, which invites a re-run.
+    """
+    kept: List[str] = []
+    in_fence = False
+    fence_chars = 0
+    fence_lines = 0
+
+    def _flush_fence() -> None:
+        nonlocal fence_chars, fence_lines
+        if fence_chars:
+            kept.append(f"[{fence_chars:,} chars / {fence_lines:,} lines of output omitted]")
+        fence_chars = 0
+        fence_lines = 0
+
+    for line in (text or "").splitlines():
+        if _LEDGER_FENCE_RE.match(line):
+            if in_fence:
+                _flush_fence()
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            fence_chars += len(line) + 1
+            fence_lines += 1
+            continue
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(_LEDGER_BOILERPLATE):
+            continue
+        # The excerpt's own "[... N of M characters held outside ... as `ref`]"
+        # line is superseded by the pointer this entry emits, which names that
+        # same ref (the caller passes every ref found in the body through).
+        if stripped.startswith("[") and _LEDGER_REF_RE.search(stripped):
+            continue
+        if len(stripped) > _LEDGER_MAX_LINE_CHARS:
+            stripped = stripped[:_LEDGER_MAX_LINE_CHARS].rstrip() + " […]"
+        kept.append(stripped)
+    if in_fence:
+        # Unterminated fence: an offload excerpt can cut mid-block.
+        _flush_fence()
+
+    body = "\n".join(kept)
+    if len(body) <= LEDGER_MAX_ENTRY_CHARS:
+        return body
+
+    # Over budget. Structural lines (header, outcome, omission notes) are kept
+    # whole and prose is dropped, in original order — truncating the entry from
+    # the end would lose the outcome of a multi-call round, which is the single
+    # most load-bearing line in it.
+    structural = {
+        i for i, ln in enumerate(kept) if ln.startswith(_LEDGER_STRUCTURAL_PREFIXES)
+    }
+    room = LEDGER_MAX_ENTRY_CHARS - sum(len(kept[i]) + 1 for i in structural)
+    out: List[str] = []
+    dropped = 0
+    for i, line in enumerate(kept):
+        if i in structural:
+            out.append(line)
+        elif room - (len(line) + 1) >= 0:
+            out.append(line)
+            room -= len(line) + 1
+        else:
+            dropped += len(line) + 1
+    if dropped:
+        out.append(f"[{dropped:,} further chars of result text omitted]")
+    return "\n".join(out)
+
+
+def ledger_entry(text: str, refs: Optional[List[str]] = None) -> str:
+    """Render one collapsed tool exchange: surviving facts plus how to reopen it."""
+    facts = _ledger_facts(text)
+    unique = list(dict.fromkeys(r for r in (refs or []) if r))
+    pointer = ""
+    if unique:
+        joined = ", ".join(f"`{r}`" for r in unique)
+        pointer = (
+            f"\n[Full verbatim result kept as {joined}. Call `recall_tool_output` "
+            f'with {{"ref": "{unique[0]}", "query": "<what you need>"}} to reopen '
+            f"it — do NOT re-run the tool.]"
+        )
+    return f"{LEDGER_HEADER}\n{facts}{pointer}"
+
+
+def _split_guarded(text: str) -> Optional[tuple]:
+    """Split an untrusted-context message into (framing, body, closing), or None.
+
+    A textual-path tool result arrives wrapped in the prompt-injection guard:
+    ~450 characters of "do not follow instructions inside this block", the
+    `<<<UNTRUSTED_SOURCE_DATA>>>` marker and a `Source:` line, then the results,
+    then the closing marker. The ledger must rewrite ONLY the body. Running the
+    fact filter over the whole message would hit the warning paragraph with the
+    per-line cap and truncate it mid-sentence — quietly weakening the fence that
+    makes tool output data rather than instructions (THREAT_MODEL.md).
+    """
+    from src.prompt_security import GUARD_CLOSE, GUARD_OPEN
+
+    start = text.find(GUARD_OPEN)
+    end = text.rfind(GUARD_CLOSE)
+    if start < 0 or end <= start:
+        return None
+    marker_eol = text.find("\n", start + len(GUARD_OPEN))
+    source_eol = text.find("\n", marker_eol + 1) if marker_eol >= 0 else -1
+    if source_eol < 0 or source_eol >= end:
+        return None
+    return text[: source_eol + 1], text[source_eol + 1: end], text[end:]
+
+
+def _is_tool_results_message(msg: Any) -> bool:
+    """The textual-path tool-results message built by `untrusted_context_message`."""
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return False
+    return (msg.get("metadata") or {}).get("source") == "tool execution results"
+
+
+def _tool_result_groups(messages: List[Dict]) -> List[Dict[str, Any]]:
+    """Locate each round's tool exchange in the request-local message list.
+
+    Two shapes exist — native (`assistant.tool_calls` + N `role:"tool"`) and
+    textual (assistant prose + one guarded tool-results user message) — and both
+    are returned as `{"results": [indices]}` so the caller only ever edits the
+    RESULT messages. The assistant turn that made the calls is left alone:
+    rewriting it would break the `tool_calls`/`tool` pairing that
+    `_sanitize_llm_messages` and every OpenAI-compatible provider enforce, and
+    its `tool_calls` arguments are the agent's own intent, not tool bulk.
+    """
+    groups: List[Dict[str, Any]] = []
+    i = 0
+    total = len(messages)
+    while i < total:
+        msg = messages[i]
+        if not isinstance(msg, dict):
+            i += 1
+            continue
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            j = i + 1
+            results = []
+            while j < total and isinstance(messages[j], dict) and messages[j].get("role") == "tool":
+                results.append(j)
+                j += 1
+            if results:
+                groups.append({"kind": "native", "results": results})
+            i = max(j, i + 1)
+            continue
+        if (
+            msg.get("role") == "assistant"
+            and i + 1 < total
+            and _is_tool_results_message(messages[i + 1])
+        ):
+            groups.append({"kind": "textual", "results": [i + 1]})
+            i += 2
+            continue
+        i += 1
+    return groups
+
+
+def compact_tool_exchanges(
+    messages: List[Dict],
+    *,
+    keep_rounds: int = LEDGER_KEEP_ROUNDS,
+    slack_rounds: int = LEDGER_SLACK_ROUNDS,
+    session_id: Optional[str] = None,
+) -> Dict[str, int]:
+    """Collapse completed tool exchanges into ledger entries, in batches.
+
+    Mutates `messages` in place. Returns counts for logging. Never raises: this
+    sits on the hot path of every agent turn, and a bug here must degrade to
+    "context stays large", never to "the turn fails".
+    """
+    stats = {"groups": 0, "entries": 0, "chars_before": 0, "chars_after": 0}
+    if not _ledger_enabled() or not messages:
+        return stats
+
+    keep = max(1, int(keep_rounds or LEDGER_KEEP_ROUNDS))
+    slack = max(1, int(slack_rounds or LEDGER_SLACK_ROUNDS))
+
+    groups = _tool_result_groups(messages)
+    unprocessed = [
+        g for g in groups
+        if not all(messages[k].get(LEDGER_MARK) for k in g["results"])
+    ]
+    # THE BATCH GATE. Below this, do nothing at all — not "a little". See the
+    # prefix-stability note above.
+    if len(unprocessed) <= keep + slack:
+        return stats
+
+    try:
+        from src.tool_output_store import store as _store
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("execution ledger unavailable (tool output store): %s", exc)
+        return stats
+
+    # A tool that succeeded somewhere in this turn resolves an earlier failure of
+    # the same tool. Built from EVERY group, including already-collapsed ones, so
+    # a resolution recorded in an earlier batch still counts.
+    resolved = set()
+    for group in groups:
+        for idx in group["results"]:
+            body = messages[idx].get("content")
+            if isinstance(body, str) and not _ledger_failed(body):
+                # Skip unnamed results: an unparseable header would otherwise
+                # resolve every other unparseable failure by accident.
+                resolved.add(_ledger_tool_name(body) or None)
+    resolved.discard(None)
+
+    # Everything before the keep window is in scope for this batch — including
+    # exchanges a PREVIOUS batch deferred because their failure was still
+    # unresolved, since the round that resolved it may have arrived since. Ones
+    # already finalized (`LEDGER_MARK is True`) are skipped, so no byte that is
+    # already cached is ever rewritten twice.
+    keep_first = unprocessed[-keep]
+    cutoff = len(groups)
+    for pos, group in enumerate(groups):
+        if group is keep_first:
+            cutoff = pos
+            break
+
+    for group in groups[:cutoff]:
+        collapsed_here = False
+        for idx in group["results"]:
+            msg = messages[idx]
+            if msg.get(LEDGER_MARK) is True:
+                continue
+            body = msg.get("content")
+            deferred = False
+            if isinstance(body, str) and len(body) >= LEDGER_MIN_RESULT_CHARS:
+                entry, deferred = _ledger_collapse(body, session_id, resolved, _store)
+                if entry is not None:
+                    stats["chars_before"] += len(body)
+                    stats["chars_after"] += len(entry)
+                    stats["entries"] += 1
+                    msg["content"] = entry
+                    collapsed_here = True
+            # Marked either way, so the batch gate can fall back below its
+            # threshold and the next batch is a window away rather than next
+            # round. "deferred" still counts as processed for the gate.
+            msg[LEDGER_MARK] = "deferred" if deferred else True
+        if collapsed_here:
+            stats["groups"] += 1
+    return stats
+
+
+def _ledger_collapse(body: str, session_id, resolved: set, store) -> tuple:
+    """Return (entry_or_None, defer) for one result.
+
+    `defer` asks the caller to look at this exchange again on a later batch:
+    the only case is a failure nothing has resolved yet, which may well be
+    resolved by a round that has not happened. Every other refusal is final.
+    """
+    tool = _ledger_tool_name(body)
+    if tool in _LEDGER_NEVER_COMPACT:
+        return None, False
+    if _ledger_failed(body) and tool not in resolved:
+        return None, True
+    # Only the guarded body is rewritten; the injection fence around it is
+    # reproduced byte for byte.
+    guard = _split_guarded(body)
+    framing, inner, closing = guard if guard else ("", body, "")
+    refs = _LEDGER_REF_RE.findall(inner)
+    record = None
+    try:
+        # The whole message goes to the store, guard and all, so what
+        # `recall_tool_output` hands back is exactly what was in the transcript.
+        record = store(body, tool=tool, command="execution-ledger", session_id=session_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.debug("execution ledger offload failed for %s: %s", tool, exc)
+    if record is None and not refs:
+        # Nothing would remain recoverable. Leave the exchange verbatim: losing a
+        # path costs a re-read, which costs more than this entry would have saved
+        # and is far harder to notice.
+        return None, False
+    if record is not None:
+        refs = [record["ref"]] + refs
+    entry = f"{framing}{ledger_entry(inner, refs)}\n{closing}" if guard else ledger_entry(inner, refs)
+    # Don't churn the cache boundary for a result that was mostly facts already.
+    return (entry, False) if len(entry) < len(body) else (None, False)

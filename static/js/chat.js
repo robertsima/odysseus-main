@@ -59,6 +59,14 @@ import { loadPanel } from './panels.js';
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  // A mid-turn steer is not a normal chat turn: it is an ephemeral composer
+  // affordance backed by the steering activity log.  Keep the server-issued
+  // id with its bubble so it can leave the pending UI once the loop has
+  // acknowledged, injected, cancelled, or failed it.  Without this map a
+  // green "Steering" chip survived forever even after its instruction had
+  // reached the model.
+  const _steeredBubbles = new Map(); // session id -> Map<steer id, element>
+  const _steerStatusTimers = new Map();
   let _contextHeaderSeq = 0;
   let _contextHeaderData = null;
   let _contextHeaderBound = false;
@@ -1099,6 +1107,232 @@ import { loadPanel } from './panels.js';
     return true;
   }
 
+  /** Render the pending, mid-turn form of a user instruction.
+   *
+   * The server persists an injected steer as a normal user message. Until that
+   * happens this temporary bubble lives in the pending host; injection promotes
+   * it into the regular transcript, while failed/cancelled steers disappear
+   * with an honest error and remain in the durable Agents lifecycle log.
+   */
+  function _createSteeredBubble(text, steerId) {
+    const host = _ensureQueuedBubbleHost();
+    if (!host) return null;
+    const wrap = document.createElement('div');
+    wrap.className = 'msg msg-user msg-user-steered';
+    if (steerId) wrap.dataset.steerId = steerId;
+    wrap.dataset.raw = String(text || '');
+    wrap.dataset.steerState = 'queued';
+    wrap.title = 'Waiting for the running agent to pick this up';
+    wrap.innerHTML = `<div class="role">You <span class="steered-pill">Steering</span></div>` +
+      `<div class="body">${_escapeQueueText(text)}</div>`;
+    host.appendChild(wrap);
+    uiModule.scrollHistory();
+    return wrap;
+  }
+
+  function _trackedSteers(sessionId) {
+    const sid = String(sessionId || '');
+    let tracked = _steeredBubbles.get(sid);
+    if (!tracked) {
+      tracked = new Map();
+      _steeredBubbles.set(sid, tracked);
+    }
+    return tracked;
+  }
+
+  function _forgetSteeredBubble(sessionId, steerId) {
+    const sid = String(sessionId || '');
+    const tracked = _steeredBubbles.get(sid);
+    if (!tracked) return;
+    tracked.delete(String(steerId || ''));
+    if (!tracked.size) {
+      _steeredBubbles.delete(sid);
+      const timer = _steerStatusTimers.get(sid);
+      if (timer) clearTimeout(timer);
+      _steerStatusTimers.delete(sid);
+    }
+  }
+
+  function _promoteInjectedSteeredBubble(sessionId, steerId, bubble) {
+    // The route has persisted this exact text as a normal user turn before it
+    // forwards `steer_applied`. Move the optimistic DOM node out of the pending
+    // host and strip only the lifecycle affordance, so the user does not watch
+    // their instruction vanish until the next history refresh.
+    const host = bubble.parentNode;
+    const transcript = host && host.parentNode;
+    if (transcript && host.classList?.contains('chat-queued-bubble-host')) {
+      transcript.insertBefore(bubble, host);
+    }
+    bubble.classList.remove('msg-user-steered');
+    delete bubble.dataset.steerState;
+    bubble.removeAttribute('title');
+    const role = bubble.querySelector('.role');
+    if (role) role.textContent = 'You';
+    _forgetSteeredBubble(sessionId, steerId);
+  }
+
+  function _steerIsVisible(steerId) {
+    if (typeof document === 'undefined') return false;
+    const id = String(steerId || '');
+    return !!(id && Array.from(document.querySelectorAll('#chat-history .msg-user'))
+      .some((node) => String(node.dataset?.steerId || '') === id));
+  }
+
+  function _restoreInjectedSteerAfterRedraw(sessionId, steer) {
+    // A detached SSE can replay `steer_applied` after a session-history redraw
+    // removed its optimistic chip.  The route persisted the user message before
+    // publishing that event, but the redraw may have fetched just before that
+    // write.  Put back one ordinary user bubble unless the redraw already has
+    // it; otherwise an injected instruction visibly disappears until a later
+    // manual session reload.
+    if (sessionModule.getCurrentSessionId?.() !== String(sessionId || '')) return;
+    const text = String(steer?.text || '');
+    if (!text || _steerIsVisible(steer?.id)) return;
+    const bubble = _createSteeredBubble(text, steer?.id);
+    if (bubble) _promoteInjectedSteeredBubble(sessionId, steer?.id, bubble);
+  }
+
+  function _applySteeredBubbleState(sessionId, steer) {
+    const steerId = String(steer && steer.id || '');
+    const bubble = _steeredBubbles.get(String(sessionId || ''))?.get(steerId);
+    if (!bubble) return;
+    // A session redraw or switch may have removed this ephemeral bubble. Its
+    // server-side history is still retained, so do not keep polling a dead DOM
+    // node just to recreate it.
+    if (!bubble.isConnected) {
+      const detachedState = String(steer?.state || 'queued');
+      if (detachedState === 'injected') {
+        // Poll rows contain a bounded excerpt; the disconnected local chip
+        // retains the complete instruction, just like an ordinary user bubble.
+        _restoreInjectedSteerAfterRedraw(sessionId, { ...steer, text: bubble.dataset?.raw || steer.text });
+        _forgetSteeredBubble(sessionId, steerId);
+      } else if (['cancelled', 'failed'].includes(detachedState)) {
+        _forgetSteeredBubble(sessionId, steerId);
+        const reason = steer.reason ? `: ${steer.reason}` : '';
+        try { uiModule.showError && uiModule.showError(`Steering ${detachedState}${reason}. See Agent Control Room for the recorded message.`); } catch (_) {}
+      } else if (detachedState === 'queued' && steer.live === false) {
+        _forgetSteeredBubble(sessionId, steerId);
+        try { uiModule.showError && uiModule.showError('Steering is no longer in the live queue. See Agent Control Room for the recorded message.'); } catch (_) {}
+      } else if (sessionModule.getCurrentSessionId?.() !== String(sessionId || '')) {
+        _forgetSteeredBubble(sessionId, steerId);
+      }
+      return;
+    }
+    const steerState = String(steer.state || 'queued');
+    bubble.dataset.steerState = steerState;
+    const pill = bubble.querySelector('.steered-pill');
+    if (steerState === 'queued') {
+      if (steer.live === false) {
+        // The history knows about it but the in-memory queue was lost (for
+        // example, after a server restart). It is no longer pending work, so
+        // remove the chip without pretending the agent received it.
+        if (bubble.parentNode) bubble.remove();
+        _forgetSteeredBubble(sessionId, steerId);
+        try { uiModule.showError && uiModule.showError('Steering is no longer in the live queue. See Agent Control Room for the recorded message.'); } catch (_) {}
+        return;
+      }
+      bubble.title = 'Waiting for the running agent to pick this up';
+      if (pill) pill.textContent = 'Steering';
+      return;
+    }
+    if (steerState === 'acknowledged') {
+      // Acknowledgement means the loop owns it, not that the model has seen it.
+      bubble.title = 'The running turn picked this up; waiting for injection';
+      if (pill) pill.textContent = 'Picked up';
+      return;
+    }
+
+    if (steerState === 'injected') {
+      _promoteInjectedSteeredBubble(sessionId, steerId, bubble);
+      return;
+    }
+    if (!['cancelled', 'failed'].includes(steerState)) return;
+
+    // Cancellation and failure have no transcript user turn to promote. Remove
+    // their pending chip, retain their lifecycle record in the Control Room,
+    // and never rename either outcome to "completed".
+    if (bubble.parentNode) bubble.remove();
+    _forgetSteeredBubble(sessionId, steerId);
+    if (steerState === 'cancelled' || steerState === 'failed') {
+      const reason = steer.reason ? `: ${steer.reason}` : '';
+      try { uiModule.showError && uiModule.showError(`Steering ${steerState}${reason}. See Agent Control Room for the recorded message.`); } catch (_) {}
+    }
+  }
+
+  function _discardDisconnectedSteeredBubbles(sessionId) {
+    const sid = String(sessionId || '');
+    const tracked = _steeredBubbles.get(sid);
+    if (!tracked) return;
+    // A history redraw can remove these ephemeral nodes before the activity
+    // feed has produced a row. Clean them up independently of the response so
+    // an absent history row cannot leave a poller running forever.
+    for (const [steerId, bubble] of tracked) {
+      if (!bubble || !bubble.isConnected) {
+        // Keep a redraw-detached chip through the next lifecycle poll: an
+        // injected row there can restore it exactly once. A session switch is
+        // different — never poll an invisible chat indefinitely.
+        if (sessionModule.getCurrentSessionId?.() !== sid) _forgetSteeredBubble(sid, steerId);
+      }
+    }
+  }
+
+  function _handleSteerApplied(sessionId, event) {
+    const steerId = event && event.steer_id;
+    if (!steerId || event?.kind === 'peer') return;
+    // The stream is the immediate confirmation path for the tab that sent the
+    // instruction. It means "injected into the model", not "completed".
+    _applySteeredBubbleState(sessionId, {
+      id: steerId, text: event.text, state: 'injected', round: event.round,
+    });
+  }
+
+  function _scheduleSteerStatusCheck(sessionId, delay = 0) {
+    const sid = String(sessionId || '');
+    if (!sid || !_steeredBubbles.get(sid)?.size || _steerStatusTimers.has(sid)) return;
+    const timer = setTimeout(async () => {
+      _steerStatusTimers.delete(sid);
+      _discardDisconnectedSteeredBubbles(sid);
+      if (!_steeredBubbles.get(sid)?.size) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/agents/sessions/${encodeURIComponent(sid)}/steer?limit=50`, {
+          credentials: 'same-origin',
+          // This is a reconciliation timer, not user activity. Without the
+          // marker the foreground keepalive middleware can mistake it for a
+          // user interaction and interfere with detached work.
+          headers: { 'X-Odysseus-Poll': '1' },
+        });
+        if (res.ok) {
+          const status = await res.json();
+          const messages = Array.isArray(status && status.messages) ? status.messages : [];
+          messages.forEach((steer) => _applySteeredBubbleState(sid, steer));
+        }
+      } catch (_) {
+        // Keep the current pending state. The next short poll will reconcile it
+        // once the transient network failure clears.
+      }
+      if (_steeredBubbles.get(sid)?.size) _scheduleSteerStatusCheck(sid, 1200);
+    }, Math.max(0, delay));
+    _steerStatusTimers.set(sid, timer);
+  }
+
+  function _trackSteeredBubble(sessionId, steerId, bubble) {
+    if (!sessionId || !steerId || !bubble) return;
+    _trackedSteers(sessionId).set(String(steerId), bubble);
+    _scheduleSteerStatusCheck(sessionId);
+  }
+
+  /**
+   * Send a message typed while a turn is still running.
+   *
+   * An agent turn drains the steer queue between rounds, so the message lands
+   * within seconds instead of waiting out the whole loop — which is what
+   * "queued for after this response" used to mean even for a 56-round turn.
+   * A plain single-shot reply has no rounds to land between, so the server
+   * answers 409 and we fall back to queueing it as the next turn.
+   *
+   * Stays synchronous for its caller (which uses the boolean to decide whether
+   * the submit was handled); the steer/queue decision resolves after.
+   */
   export function queueStreamingComposerRequest() {
     if (!isStreaming) return false;
     const queuedInput = uiModule.el('message');
@@ -1108,12 +1342,53 @@ import { loadPanel } from './panels.js';
       try { uiModule.showError && uiModule.showError('Finish the current response before queueing messages with attachments.'); } catch (_) {}
       return true;
     }
-    if (_queueAgentRequest(queuedText)) {
-      queuedInput.value = '';
-      queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
-      if (uiModule.autoResize) uiModule.autoResize(queuedInput);
-      try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
-    }
+    const sid = sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+    // Clear the composer up front either way: the submit is handled from here.
+    queuedInput.value = '';
+    queuedInput.dispatchEvent(new Event('input', { bubbles: true }));
+    if (uiModule.autoResize) uiModule.autoResize(queuedInput);
+    try { window._updateSendBtnIcon && window._updateSendBtnIcon(); } catch (_) {}
+
+    const fallbackToQueue = () => { _queueAgentRequest(queuedText); };
+    if (!sid) { fallbackToQueue(); return true; }
+
+    (async () => {
+      let steerRecord = null;
+      let steerAccepted = false;
+      try {
+        const res = await fetch(`${API_BASE}/api/agents/sessions/${encodeURIComponent(sid)}/steer`, {
+          method: 'POST',
+          credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: queuedText }),
+        });
+        if (res.ok) {
+          steerAccepted = true;
+          const data = await res.json();
+          // A successful steer must have the id returned by the route. Treat a
+          // malformed success as an observable server-side error rather than
+          // sending the instruction again as a normal turn (which would apply
+          // the same correction twice).
+          if (data && data.id) steerRecord = data;
+        }
+      } catch (_) {
+        steerRecord = null;
+      }
+      if (steerRecord) {
+        // The request is asynchronous. Never append a late result to whatever
+        // session the user opened while it was in flight.
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
+        const bubble = _createSteeredBubble(queuedText, steerRecord.id);
+        _trackSteeredBubble(sid, steerRecord.id, bubble);
+        try { uiModule.showToast && uiModule.showToast('Steering queued for the running agent'); } catch (_) {}
+      } else if (steerAccepted) {
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
+        try { uiModule.showError && uiModule.showError('Steering was accepted but could not be tracked. See Agent Control Room for the recorded message.'); } catch (_) {}
+      } else {
+        if (sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() !== sid) return;
+        fallbackToQueue();
+      }
+    })();
     return true;
   }
 
@@ -2904,7 +3179,18 @@ import { loadPanel } from './panels.js';
                 if (spinner && spinner.element) spinner.destroy();
                 break;
               }
+<<<<<<< HEAD
               if (json.delta || json.type === 'agent_prep' || json.type === 'tool_approval_resolved' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+=======
+              if (json.type === 'steer_applied') {
+                // This is the low-latency path for the foreground stream. The
+                // status poll remains the reconciliation fallback after an SSE
+                // reconnect or an event the browser did not receive.
+                _handleSteerApplied(streamSessionId, json);
+                continue;
+              }
+              if (json.delta || json.type === 'agent_prep' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
+>>>>>>> origin/dev
                 clearResponseTimeout();
                 clearProcessingProbe();
                 clearFirstTokenWaitTimers();
@@ -4746,6 +5032,7 @@ import { loadPanel } from './panels.js';
     if (holder && accumulated) {
       holder.dataset.raw = accumulated;
     }
+<<<<<<< HEAD
     // The server run is detached and keeps its exact pinned model/tool state.
     // Reconnect to that run instead of submitting a new user turn, which would
     // cancel it, retry the selected model, and risk duplicating side effects.
@@ -4758,6 +5045,63 @@ import { loadPanel } from './panels.js';
         const body = holder.querySelector('.body');
         if (body) typewriterInto(body, 'Connection lost. The existing run could not be resumed.');
       }
+=======
+    _pendingContinue = holder || null;   // merge the continuation into the same bubble
+    _hideUserBubble = true;              // no user bubble for the handshake
+    _autoContinuePending = true;         // don't reset the counter on this submit
+    const _abandon = () => {             // clear the pending flags so they can't
+      _pendingContinue = null;           // leak into whatever chat is now open
+      _hideUserBubble = false;
+      _autoContinuePending = false;
+    };
+    // Defer so the stream's finally resets state first — otherwise the send
+    // button is still in "stop" mode and clicking it would toggle, not send.
+    setTimeout(async () => {
+      // The stream that died may not be the chat the user is now looking at —
+      // never inject the recovery handshake into the wrong conversation.
+      if (sessionId && sessionModule.getCurrentSessionId() !== sessionId) { _abandon(); return; }
+      // Losing the SSE is not losing the run. Chat/agent turns are detached
+      // server-side (agent_runs.start), so dropping this connection only
+      // removed a subscriber — the agent is very likely still working. Nudging
+      // it here injected a fake user turn ("The stream dropped before you
+      // finished…") into a live conversation, which is where the stray bare
+      // "DONE" rounds came from. Ask the server first, and re-attach to the run
+      // we already have instead of inventing a new one. Only a server that
+      // confirms no run (404) earns a handshake.
+      if (sessionId) {
+        let stillRunning = false;
+        try {
+          const probe = await fetch(
+            `${API_BASE}/api/chat/stream_status/${encodeURIComponent(sessionId)}`,
+            { credentials: 'same-origin', cache: 'no-store' },
+          );
+          stillRunning = probe.status !== 404;
+        } catch (_) {
+          // Can't reach the server at all: the network, not the run, is down.
+          // A nudge cannot be delivered either, so don't corrupt the transcript
+          // trying — let the caller surface the failure.
+          _abandon();
+          _autoNudges--;
+          return;
+        }
+        if (stillRunning) {
+          _abandon();
+          _autoNudges--;
+          if (sessionModule.getCurrentSessionId() === sessionId) {
+            try { await resumeStream(sessionId); } catch (_) {}
+          }
+          return;
+        }
+      }
+      const msgInput = uiModule.el('message');
+      const sb = document.querySelector('.send-btn');
+      if (!msgInput || !sb) { _abandon(); return; }
+      const tail = (accumulated || '').slice(-400);
+      msgInput.value = tail
+        ? `The stream dropped before you finished. It ended with:\n\n${tail}\n\nIf the task is fully complete, reply with just: DONE. Otherwise continue exactly where you left off and finish it — do not repeat what you already wrote.`
+        : `The stream dropped before you produced anything. If the task is already done, reply with just: DONE. Otherwise complete it now.`;
+      sb.click();
+>>>>>>> origin/dev
     }, 200);
     return true;
   }
@@ -5064,8 +5408,15 @@ import { loadPanel } from './panels.js';
           }
           let json;
           try { json = JSON.parse(payload); } catch (_) { continue; }
+<<<<<<< HEAD
           if (eventIsError) {
             replayError = createTerminalStreamError(json);
+=======
+          if (json.type === 'steer_applied') {
+            // Resume replays the same event stream as the live reader, so it
+            // must settle a local steer chip the same way.
+            _handleSteerApplied(sessionId, json);
+>>>>>>> origin/dev
           } else if (json.delta) {
             roundText += json.delta;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {

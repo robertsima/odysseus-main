@@ -26,7 +26,6 @@ soundfile; python_version >= "3.11" and python_version < "3.13"
 # Install if you want DDG in the search-provider dropdown.
 # Alternatives: SearXNG, Brave, Tavily, Serper, Google PSE.
 ddgs
-
 # PDF form-filling feature (fillable AcroForm detection, field extraction,
 # value/annotation/signature stamping, page rendering for the form overlay).
 # NOTE: PyMuPDF is AGPL-3.0. Installing it brings AGPL obligations for a

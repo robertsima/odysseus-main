@@ -82,6 +82,9 @@ def _events(chunks):
 
 
 def _loop(monkeypatch, command, approval_mode):
+    # This stream fixture does not create a database chat; its policy is an
+    # explicit empty snapshot, independent of other tests' database teardown.
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *a, **k: 10, raising=False)
@@ -157,9 +160,74 @@ def test_last_used_snapshot_and_effective_mode(monkeypatch):
 
 def test_profile_validation_normalises_and_rejects():
     out = agent_profiles.validate_profiles([
-        {"name": "researcher", "model": "qwen", "disabled_tools": "bash, send_email", "max_rounds": 99},
+        {"name": "researcher", "model": "qwen", "disabled_tools": "bash, send_email",
+         "max_rounds": agent_profiles.MAX_ROUNDS_CAP + 1},
     ])
     assert out[0]["disabled_tools"] == ["bash", "send_email"] and out[0]["max_rounds"] == agent_profiles.MAX_ROUNDS_CAP
+    # An explicit budget under the cap is kept as asked.
+    assert agent_profiles.validate_profiles([{"name": "r", "max_rounds": 99}])[0]["max_rounds"] == 99
+    # No budget, or 0, means no round ceiling — the default for a worker.
+    for unlimited in ({"name": "r"}, {"name": "r", "max_rounds": 0}, {"name": "r", "max_rounds": -5}):
+        assert agent_profiles.validate_profiles([unlimited])[0]["max_rounds"] == 0
     for bad in ([{"name": ""}], [{"name": "a"}, {"name": "A"}], "nope", [{"name": "x", "max_rounds": "lots"}]):
         with pytest.raises(ValueError):
             agent_profiles.validate_profiles(bad)
+
+
+def test_profile_validation_normalises_capability_loadouts():
+    out = agent_profiles.validate_profiles([{
+        "name": "researcher", "memory_access": "read", "skill_access": "selected",
+        "skill_names": "web-research, citations", "tool_access": "selected",
+        "enabled_tools": "web_search,web_fetch", "mcp_access": "selected",
+        "allowed_mcp_servers": ["builtin_browser"], "model_access": "selected",
+        "allowed_models": ["fast", "strong"], "delegation_policy": "never",
+        "private_vault_access": True, "max_parallel_workers": 99,
+    }])[0]
+    assert out["skill_names"] == ["citations", "web-research"]
+    assert out["enabled_tools"] == ["web_fetch", "web_search"]
+    assert out["allowed_mcp_servers"] == ["builtin_browser"]
+    assert out["max_parallel_workers"] == 8
+    patch = agent_profiles.session_patch(out)
+    assert patch["delegation_policy"] == "never" and patch["private_vault_access"] is True
+    assert patch["allowed_mcp_servers"] == ["builtin_browser"]
+
+
+def test_profile_persona_is_snapshotted_per_agent_and_bounded():
+    profiles = agent_profiles.validate_profiles([
+        {"name": "Ada", "instructions": "Be analytical."},
+        {"name": "Grace", "instructions": "Be concise."},
+    ])
+    ada = agent_profiles.session_patch(profiles[0])
+    grace = agent_profiles.session_patch(profiles[1])
+    assert ada["agent_instructions"] == "Be analytical."
+    assert grace["agent_instructions"] == "Be concise."
+    profiles[0]["instructions"] = "edited global default"
+    assert ada["agent_instructions"] == "Be analytical."
+
+    long_profile = agent_profiles.validate_profiles([
+        {"name": "bounded", "instructions": "x" * (agent_profiles.MAX_INSTRUCTIONS + 1)},
+    ])[0]
+    assert len(long_profile["instructions"]) == agent_profiles.MAX_INSTRUCTIONS
+
+
+def test_per_chat_capability_patch_validation():
+    patch = session_settings.validate_patch({
+        "memory_access": "read", "skill_access": "selected", "skill_names": ["citations"],
+        "model_access": "current", "allowed_models": [], "delegation_policy": "explicit",
+        "allowed_mcp_servers": ["rag"], "max_parallel_workers": 99,
+    })
+    assert patch["max_parallel_workers"] == 8
+    assert patch["delegation_policy"] == "explicit"
+    with pytest.raises(ValueError):
+        session_settings.validate_patch({"delegation_policy": "always"})
+
+
+def test_per_chat_agent_persona_patch_validation():
+    assert session_settings.validate_patch({"agent_instructions": "  Be precise.  "}) == {
+        "agent_instructions": "Be precise."
+    }
+    assert len(session_settings.validate_patch({
+        "agent_instructions": "x" * (session_settings.MAX_AGENT_INSTRUCTIONS + 1),
+    })["agent_instructions"]) == session_settings.MAX_AGENT_INSTRUCTIONS
+    with pytest.raises(ValueError):
+        session_settings.validate_patch({"agent_instructions": ["shared"]})

@@ -22,6 +22,10 @@ from src.prompt_security import untrusted_context_message
 logger = logging.getLogger(__name__)
 
 
+class _InvalidResearchReport(ValueError):
+    """A generation completed without usable report content."""
+
+
 def current_date_context() -> str:
     """Preamble that grounds query-generation/planning LLMs in the real current
     date. Without it the model falls back to its training-cutoff year and emits
@@ -140,6 +144,7 @@ Requirements:
 - Include specific data points, numbers, and statistics from the evidence
 - Include source URLs as inline citations [like this](url)
 - Note where sources agree and where they disagree
+- Use only facts supported by the collected evidence; state evidence gaps rather than inventing detail to meet a word target
 - Add a brief executive summary at the top
 - End with a clear conclusion that directly answers the question
 - Write in an engaging, informative style — not dry or robotic
@@ -241,6 +246,7 @@ class DeepResearcher:
         self.findings: List[Dict] = []
         self.evolving_report: str = ""
         self.research_plan: str = ""
+        self.final_report_metadata: Dict = {"status": "pending", "attempts": 0}
 
     def cancel(self):
         """Request cooperative cancellation of the research loop."""
@@ -265,6 +271,7 @@ class DeepResearcher:
             prior_urls: URLs already visited (won't be re-fetched).
         """
         self._start_time = time.time()
+        self.final_report_metadata = {"status": "pending", "attempts": 0}
         findings: List[Dict] = list(prior_findings) if prior_findings else []
         report = prior_report or ""
 
@@ -328,6 +335,7 @@ class DeepResearcher:
                     err_detail = getattr(self, '_last_search_error', 'unknown error')
                     self._emit(phase="error", message=f"Search engine unavailable: {err_detail}")
                     if not findings:
+                        self.final_report_metadata.update(status="failed", failure="search_unavailable")
                         return (
                             f"**Search unavailable** — Web search failed after "
                             f"{round_num} rounds. Error: {err_detail}\n\n"
@@ -341,6 +349,7 @@ class DeepResearcher:
                            total_sources=len(self.urls_fetched),
                            total_findings=len(findings))
                 report = await self._synthesize(question, findings, report)
+                self.evolving_report = report  # keep the latest draft available during timeout/cancellation
 
             # DECIDE
             if round_num >= self.min_rounds:
@@ -362,14 +371,18 @@ class DeepResearcher:
                     "Synthesis produced no report; returning %d gathered "
                     "finding(s) as a fallback", len(findings)
                 )
+                self.final_report_metadata.update(status="partial", failure="synthesis_unavailable")
+                self._emit(phase="warning", message="Research findings were preserved, but synthesis did not complete.",
+                           synthesis_status="partial")
                 return self._fallback_report(question, findings)
+            self.final_report_metadata.update(status="failed", failure="no_findings")
             return "No information could be gathered for this question."
 
         self.evolving_report = report  # preserve pre-synthesis report
         final = await self._final_report(question, report)
         elapsed = time.time() - self._start_time
         logger.info(
-            f"Research complete: {self.round_count} rounds, "
+            f"Research finished (synthesis={self.final_report_metadata['status']}): {self.round_count} rounds, "
             f"{len(findings)} findings, {len(self.urls_fetched)} URLs, "
             f"{elapsed:.1f}s"
         )
@@ -684,7 +697,7 @@ class DeepResearcher:
         )
 
         try:
-            return await self._llm(
+            result = await self._llm(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
                 max_tokens=self.max_report_tokens,
@@ -694,6 +707,7 @@ class DeepResearcher:
                 # out mid-stream and discarded the round's findings (#1551).
                 timeout=180,
             )
+            return self._validated_report(result)
         except Exception as e:
             logger.error(f"Synthesis failed: {e}")
             self._emit(phase="warning", message="Synthesis failed, keeping previous report")
@@ -735,7 +749,13 @@ class DeepResearcher:
     # FINAL REPORT
     # ------------------------------------------------------------------
     async def _final_report(self, question: str, report: str) -> str:
-        """LLM writes a polished final report, retrying if too short."""
+        """Finalize the existing evidence with at most two bounded LLM calls.
+
+        Retry recoverable failures once, without restarting the research or
+        sending evidence to a different, unconfigured model. Expansion is
+        optional and shares the same call/time budget as recovery.
+        """
+        self.final_report_metadata = {"status": "writing", "attempts": 0}
         prompt = FINAL_REPORT_PROMPT.format(
             question=question,
             report=report,
@@ -744,19 +764,61 @@ class DeepResearcher:
         if cat_extra:
             prompt += "\n\n" + cat_extra
 
-        try:
-            result = await self._llm(
-                [{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=self.max_report_tokens,
-                timeout=180,
-            )
+        # The provider may have its own retries. Bound their aggregate time as
+        # well, so a failing provider cannot multiply the finalization budget.
+        deadline = time.monotonic() + 180
+        failure = "generation_failed"
+        result = ""
+        for attempt in range(2):
+            if self._cancelled:
+                return self._partial_final_report(question, report, "cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = "timeout"
+                break
+            recovery_prompt = prompt
+            if attempt:
+                recovery_prompt += (
+                    "\n\nThe previous generation failed. Write a concise, non-repetitive report "
+                    "using only the evidence above. Evidence quality takes priority over the "
+                    "word-count target. State any gaps explicitly."
+                )
+            self.final_report_metadata["attempts"] += 1
+            try:
+                response = await asyncio.wait_for(
+                    self._llm(
+                        [{"role": "user", "content": recovery_prompt}],
+                        temperature=0.1 if attempt else 0.3,
+                        max_tokens=self.max_report_tokens,
+                        timeout=remaining,
+                    ),
+                    timeout=remaining,
+                )
+                result = self._validated_report(response)
+                if self._cancelled:
+                    return self._partial_final_report(question, report, "cancelled")
+                break
+            except Exception as exc:
+                failure, retryable = self._final_failure(exc)
+                logger.warning("Final report attempt %s failed (%s): %s", attempt + 1, failure, exc)
+                self.final_report_metadata["last_failure"] = failure
+                if not retryable or attempt or time.monotonic() >= deadline:
+                    break
+                self._emit(phase="writing", message="Retrying final synthesis at lower temperature; collected sources are preserved.",
+                           synthesis_status="retrying", attempt=2, failure=failure)
 
-            # If report is too short, ask the LLM to expand it
-            if len(result.split()) < 400:
-                logger.info(f"Final report too short ({len(result.split())} words), requesting expansion")
-                self._emit(phase="writing", message="Expanding report...")
-                expanded = await self._llm(
+        if not result:
+            return self._partial_final_report(question, report, failure)
+
+        # A valid short report is useful even if optional expansion fails. Do
+        # not discard it, and never expand a corrupt/empty response or add a
+        # third generation after a recovery attempt.
+        remaining = deadline - time.monotonic()
+        if len(result.split()) < 400 and self.final_report_metadata["attempts"] < 2 and remaining > 0:
+            self._emit(phase="writing", message="Expanding report...")
+            self.final_report_metadata["attempts"] += 1
+            try:
+                expanded = await asyncio.wait_for(self._llm(
                     [
                         {"role": "user", "content": prompt},
                         {"role": "assistant", "content": result},
@@ -770,17 +832,78 @@ class DeepResearcher:
                             "Write the full expanded report now."
                         },
                     ],
-                    temperature=0.4,
+                    temperature=0.2,
                     max_tokens=self.max_report_tokens,
-                    timeout=180,
-                )
+                    timeout=remaining,
+                ), timeout=remaining)
+                expanded = self._validated_report(expanded)
                 if len(expanded.split()) > len(result.split()):
-                    return expanded
+                    result = expanded
+            except Exception as exc:
+                expansion_failure, _ = self._final_failure(exc)
+                self.final_report_metadata["expansion_failure"] = expansion_failure
+                logger.warning("Report expansion failed (%s); preserving valid report", expansion_failure)
+                self._emit(phase="warning", message="Report expansion did not complete; the valid shorter report was preserved.")
 
-            return result
-        except Exception as e:
-            logger.error(f"Final report generation failed: {e}")
-            return report  # return the evolving report as-is
+        if self._cancelled:
+            return self._partial_final_report(question, report, "cancelled")
+        self.final_report_metadata["status"] = "complete"
+        self._emit(phase="writing", synthesis_status="complete", attempts=self.final_report_metadata["attempts"])
+        return result
+
+    def _validated_report(self, result: str) -> str:
+        """Apply the stream-quality guard to non-streamed synthesis too."""
+        clean = strip_thinking(result or "").strip()
+        if not clean:
+            raise _InvalidResearchReport("empty_output")
+        from src.llm_core import _DegenerateStreamGuard
+
+        guard = _DegenerateStreamGuard(getattr(self, "llm_model", "research"))
+        # Feed complete words incrementally; checking only the final window
+        # could miss a repeated segment followed by otherwise normal prose.
+        words = clean.split()
+        for start in range(0, len(words), 24):
+            if guard.check(" ".join(words[start:start + 24])):
+                raise _InvalidResearchReport("repetitive_output")
+        return clean
+
+    @staticmethod
+    def _final_failure(exc: Exception):
+        """Return safe status metadata and whether another generation can help."""
+        if isinstance(exc, _InvalidResearchReport):
+            return str(exc), True
+        if isinstance(exc, TimeoutError):
+            return "timeout", True
+        if isinstance(exc, ConnectionError):
+            return "connection_error", True
+        import httpx
+
+        if isinstance(exc, httpx.TransportError):
+            return "transport_error", True
+        status = getattr(exc, "status_code", None)
+        if status is None:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+        if status == 502 and "started repeating tokens" in str(getattr(exc, "detail", "")).lower():
+            return "repetitive_output", True
+        if isinstance(status, int):
+            return f"provider_http_{status}", status in {408, 429, 500, 502, 503, 504}
+        return "generation_failed", False
+
+    def _partial_final_report(self, question: str, report: str, failure: str) -> str:
+        """Surface a failed finalization honestly without losing collected work."""
+        status = "cancelled" if failure == "cancelled" else "partial"
+        self.final_report_metadata.update(status=status, failure=failure)
+        self._emit(phase="warning", message="Final synthesis did not complete; collected research has been preserved.",
+                   synthesis_status=status, failure=failure, attempts=self.final_report_metadata["attempts"])
+        try:
+            preserved = self._validated_report(report)
+        except _InvalidResearchReport:
+            preserved = self._fallback_report(question, self.findings)
+        return (
+            "**Partial research — final synthesis did not complete.** "
+            "The material below is the preserved research draft, not a completed final report.\n\n"
+            + preserved
+        )
 
     # ------------------------------------------------------------------
     # Helpers
@@ -926,4 +1049,9 @@ class DeepResearcher:
             stats["Search"] = ", ".join(self.providers_used)
         if self.category:
             stats["Category"] = self.category.capitalize()
+        metadata = self.final_report_metadata
+        stats["Synthesis"] = metadata["status"]
+        stats["Synthesis attempts"] = metadata["attempts"]
+        if metadata.get("failure"):
+            stats["Synthesis failure"] = metadata["failure"]
         return stats

@@ -10,7 +10,6 @@ from src.chat_helpers import extract_urls
 from src.youtube_handler import is_youtube_url
 from src.search import comprehensive_web_search, fetch_webpage_content
 from src.prompt_security import UNTRUSTED_CONTEXT_POLICY, untrusted_context_message
-from src.model_context import is_local_endpoint
 
 logger = logging.getLogger(__name__)
 
@@ -413,6 +412,7 @@ class ChatProcessor:
         agent_mode: bool = False,
         incognito: bool = False,
         use_skills: bool = True,
+        allow_private: Optional[bool] = None,
     ) -> Tuple[List[Dict[str, str]], List[Dict[str, Any]], List[Dict[str, str]]]:
         """Build the context preface for LLM calls.
 
@@ -499,6 +499,26 @@ class ChatProcessor:
             # agent mode so chat mode and incognito stay clean.)
 
         # RAG: search if enabled and rag_manager available, inject only above threshold
+        #
+        # Contentless turns skip it. This search is two ChromaDB collections and
+        # four round trips, and it ran on every turn including "hey", "lol" and
+        # "thanks!" — spending that latency to inject whatever a greeting
+        # happens to sit nearest in embedding space. The test is deliberately
+        # the NARROW one (`_is_casual_low_signal`, the chit-chat check), not the
+        # broad `low_signal` flag that gates tool retrieval: that flag is true
+        # for "fix the failing test" too, and losing document context there is
+        # the opposite of the problem being fixed. The active document and
+        # memory injection are separate paths and are unaffected.
+        if use_rag and retrieval_query:
+            try:
+                from src.agent_loop import _is_casual_low_signal
+
+                if _is_casual_low_signal(retrieval_query):
+                    logger.debug("RAG: skipping document retrieval for a contentless turn")
+                    use_rag = False
+            except Exception as _e:
+                # Never let the gate itself cost us retrieval.
+                logger.debug("RAG: low-signal check unavailable: %s", _e)
         if use_rag:
             try:
                 rag_manager = getattr(self.personal_docs_manager, 'rag_manager', None)
@@ -520,14 +540,15 @@ class ChatProcessor:
                     except Exception as _e:
                         logger.debug("RAG: lazy rag_manager resolution failed: %s", _e)
                 if rag_manager:
-                    # Documents marked private are only retrieved when the turn
-                    # is being served by a local endpoint. On a hosted API the
-                    # retrieved text is pasted straight into the outbound
-                    # prompt, so the filter has to happen here, before
-                    # retrieval, not at render time.
-                    allow_private = is_local_endpoint(getattr(session, "endpoint_url", "") or "")
+                    # Private documents require an explicit per-chat grant.
+                    # Endpoint URL locality is not an authorization signal.
+                    if allow_private is None:
+                        from src.private_access import allows_private_vault
+
+                        allow_private = allows_private_vault(getattr(session, "id", None))
+                    allow_private = bool(allow_private)
                     if not allow_private:
-                        logger.debug("RAG: non-local endpoint — restricting retrieval to public documents")
+                        logger.debug("RAG: private-vault grant absent — restricting retrieval to public documents")
                     results = rag_manager.search(retrieval_query, k=5, owner=owner, allow_private=allow_private)
                     # Filter by similarity threshold
                     relevant = [r for r in results if r.get("similarity", 0) >= self.RAG_SIMILARITY_THRESHOLD]

@@ -86,7 +86,29 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     upload_handler = UploadHandler(base_dir, UPLOAD_DIR)
     session_manager.upload_handler = upload_handler
     set_upload_handler(upload_handler)
-    personal_docs_manager = PersonalDocsManager(PERSONAL_DIR, rag_manager)
+    # Notes used to live only in SQLite.  Materialize any legacy rows before
+    # the document manager builds its local index, so switching to the
+    # Markdown store does not make an existing install appear empty.  This is
+    # additive and manifest-backed: the DB rows remain untouched and the
+    # migration can be previewed/rolled back through its CLI.
+    try:
+        from src.notes_vault_migration import migrate_legacy_notes
+        migration_plan, _migration_manifest = migrate_legacy_notes(startup=True)
+        if migration_plan.writes:
+            logger.info(
+                "Migrated %d legacy note(s) into Markdown vault (%d collision(s))",
+                len(migration_plan.writes), len(migration_plan.conflicts),
+            )
+    except Exception as e:
+        # Notes remain available in the legacy table if the vault is
+        # temporarily unavailable; do not make startup fail because of this
+        # best-effort bridge.
+        logger.warning("Legacy notes migration skipped: %s", e)
+
+    from src.rag_sensitivity import vault_root
+    personal_docs_manager = PersonalDocsManager(
+        vault_root(), rag_manager, state_dir=PERSONAL_DIR
+    )
     # Apply ODYSSEUS_PERSONAL_DIRS before anything can retrieve: a declared
     # private tree must carry its label from the first request, not from
     # whenever an operator remembers to set it.

@@ -7,6 +7,7 @@ import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from core.auth import RESERVED_USERNAMES
@@ -17,6 +18,23 @@ from src.task_action_policy import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _orm_scalar_snapshot(obj):
+    """Copy mapped scalar columns while *obj* is attached and fully usable.
+
+    Scheduled execution crosses long async boundaries.  Passing ORM instances
+    across those boundaries is unsafe because the default Session expires them
+    on commit and detached attribute access then attempts a lazy refresh.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    if isinstance(obj, SimpleNamespace):
+        return SimpleNamespace(**vars(obj))
+    return SimpleNamespace(**{
+        attr.key: getattr(obj, attr.key)
+        for attr in sa_inspect(obj).mapper.column_attrs
+    })
 
 
 def _utcnow() -> datetime:
@@ -342,6 +360,46 @@ def _normalize_chat_endpoint(url: str) -> str:
         return url
 
 
+def _endpoint_breaker_key(endpoint_url: str) -> str:
+    """Breaker key for a model endpoint: scheme://host[:port], no path.
+
+    Per host rather than per URL so `/v1/chat/completions` and `/v1/messages`
+    on the same overloaded provider share one verdict, and per host rather than
+    globally so one dead endpoint never silences a healthy second one.
+    """
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(endpoint_url or "")
+        if parts.scheme and parts.netloc:
+            return f"{parts.scheme}://{parts.netloc}"
+    except Exception:
+        pass
+    return (endpoint_url or "unknown")[:120]
+
+
+def _model_endpoint_breaker():
+    """Breaker for the scheduler's own model-endpoint calls.
+
+    Sits deliberately *above* `llm_core`'s dead-host cooldown rather than
+    duplicating it. That one is 20s and only ever sees connect failures, which
+    is right for interactive chat: a user who clicks again in a minute should
+    get through. This one sees the failure the audit actually recorded — an
+    endpoint that answers, with `502 overload`, over and over — and is scaled
+    to a scheduler's clock, where re-dialling a saturated provider every tick
+    for an hour buys nothing.
+    """
+    from src.circuit_breaker import get_breaker
+    return get_breaker(
+        "scheduled_model_endpoint",
+        failure_threshold=3,
+        # Matches the first step of _TRANSIENT_RETRY_DELAYS, so a task deferred
+        # by the breaker and a task deferred by the retry backoff come back at
+        # roughly the same time instead of the retry landing inside a cooldown.
+        cooldown_seconds=5 * 60,
+        max_cooldown_seconds=30 * 60,
+    )
+
+
 def _parse_stream_error(chunk: str) -> str:
     """Pull a human-readable message out of an SSE ``event: error`` frame.
 
@@ -374,6 +432,54 @@ def _parse_stream_error(chunk: str) -> str:
     return ""
 
 
+# ── Execution lanes ──────────────────────────────────────────────────────
+#
+# The scheduler used to gate model work behind a single Semaphore(1) and let
+# everything else run with no bound at all. Both halves were wrong. On
+# 2026-09-15 three tasks came due at 07:45 and the Skills Audit — an LLM job —
+# deferred three times waiting for the one slot, while "everything else" meant
+# an unbounded fan-out of housekeeping actions that nothing was counting.
+#
+# So: three lanes, each with its own bound. A lane is a queue plus a cap, not a
+# priority — a job in one lane never waits on a job in another.
+#
+#   model        The box is sized for ONE of these. Anything that drives an LLM
+#                or loads a model lives here, and the default cap is 1, which is
+#                byte-for-byte the old behaviour.
+#   external     Bounded I/O against something outside the process: a remote
+#                shell, a script host, the calendar/mail aggregation pass. Slow
+#                because of the network, not because of compute, so a couple can
+#                overlap without competing for the same resource.
+#   maintenance  Local housekeeping: cleanup, indexing, health. Cheap, local,
+#                and the whole point of the split — a tidy pass must never queue
+#                behind a twenty-minute research run.
+#
+# Classification is by explicit membership (see TaskScheduler._lane_for_task).
+# There is no heuristic and no fallthrough to "probably fine in parallel": an
+# action nobody has classified, or a task row we cannot read, lands in `model`,
+# the most restrictive lane. Being wrong in that direction costs a task some
+# queue time; being wrong in the other direction runs two LLM jobs at once on a
+# box sized for one.
+LANE_MODEL = "model"
+LANE_EXTERNAL = "external"
+LANE_MAINTENANCE = "maintenance"
+LANES = (LANE_MODEL, LANE_EXTERNAL, LANE_MAINTENANCE)
+
+#: lane -> (settings key, default cap). Follows the `research_extraction_
+#: concurrency` precedent: an operator-tunable integer read through
+#: `get_setting` at scheduler start. The model default is 1 so an untouched
+#: install behaves exactly as it does today.
+LANE_CONCURRENCY_SETTINGS = {
+    LANE_MODEL: ("task_model_lane_concurrency", 1),
+    LANE_EXTERNAL: ("task_external_lane_concurrency", 2),
+    LANE_MAINTENANCE: ("task_maintenance_lane_concurrency", 2),
+}
+
+#: Upper bound on any lane cap. These are background jobs on a single box; a
+#: fat-fingered 500 in settings.json should not be able to fork-bomb the host.
+LANE_CONCURRENCY_MAX = 8
+
+
 class TaskScheduler:
     def __init__(self, session_manager):
         self._session_manager = session_manager
@@ -392,12 +498,23 @@ class TaskScheduler:
         # retry instead of the usual "advance to the next occurrence", so a
         # daily task doesn't lose its whole day to a few unreachable seconds.
         self._task_transient_retries = {}
-        # Strict serial execution — exactly one task runs at a time. Anything
-        # else (manual trigger, scheduled dispatch, task chain) waits behind
-        # the semaphore as "queued" and starts when the current run finishes.
-        # This is a hard guarantee, not configurable.
-        self._run_semaphore = asyncio.Semaphore(1)
-        self._concurrency_cap = 1
+        # Execution lanes (see LANE_* below). Built eagerly here so `start()`
+        # can log the caps, but every accessor re-creates them lazily because
+        # most tests construct the scheduler with __new__ and set only the
+        # attributes they care about.
+        self._lane_semaphores = {}
+        self._lane_caps = {}
+        # task_id -> lane, for "which queue is this sitting in" in the UI/logs.
+        self._executing_lanes = {}
+        for _lane in LANES:
+            self._lane_caps[_lane] = self._lane_concurrency(_lane)
+            self._lane_semaphores[_lane] = asyncio.Semaphore(self._lane_caps[_lane])
+        # Back-compat aliases. The model lane *is* the old single run slot, and
+        # several call sites and tests reach for these names directly; keeping
+        # them pointed at the model lane means "the one slot the box is sized
+        # for" still has exactly one owner.
+        self._run_semaphore = self._lane_semaphores[LANE_MODEL]
+        self._concurrency_cap = self._lane_caps[LANE_MODEL]
         self._task_handles = {}
         # Task IDs the user explicitly triggered with "Run now" (refcounted so a
         # parallel force-run can overlap a queued normal run of the same task).
@@ -414,6 +531,152 @@ class TaskScheduler:
             self._manual_runs[task_id] = left
         else:
             self._manual_runs.pop(task_id, None)
+
+    # ── lanes ────────────────────────────────────────────────────────────
+    def _lane_concurrency(self, lane: str) -> int:
+        """Operator-tunable cap for one lane, clamped to something sane.
+
+        Read through `get_setting` like `research_extraction_concurrency`, and
+        defensively: a missing settings file, a string where an int belongs or
+        an unknown lane all fall back to the lane's default rather than raising
+        inside scheduler construction.
+        """
+        key, default = LANE_CONCURRENCY_SETTINGS.get(lane, ("", 1))
+        if not key:
+            return 1
+        try:
+            from src.settings import get_setting
+            raw = get_setting(key, default)
+            value = int(raw) if raw not in (None, "") else int(default)
+        except Exception:
+            logger.debug("Lane concurrency for %r unreadable; using %s", lane, default)
+            value = int(default)
+        return max(1, min(LANE_CONCURRENCY_MAX, value))
+
+    def _lane_semaphore(self, lane: str) -> asyncio.Semaphore:
+        """The lane's slot, created on first use.
+
+        Lazy for the same reason `_transient_retry_counts` is: tests (and the
+        cancel/foreground regressions in particular) build a scheduler with
+        `__new__` and hand-set a `_run_semaphore`, so the model lane must adopt
+        that object rather than quietly running beside it.
+        """
+        sems = getattr(self, "_lane_semaphores", None)
+        if sems is None:
+            sems = {}
+            self._lane_semaphores = sems
+        sem = sems.get(lane)
+        if sem is None:
+            if lane == LANE_MODEL and getattr(self, "_run_semaphore", None) is not None:
+                sem = self._run_semaphore
+            else:
+                sem = asyncio.Semaphore(self._lane_cap(lane))
+            sems[lane] = sem
+            if lane == LANE_MODEL:
+                self._run_semaphore = sem
+        return sem
+
+    def _lane_cap(self, lane: str) -> int:
+        caps = getattr(self, "_lane_caps", None)
+        if caps is None:
+            caps = {}
+            self._lane_caps = caps
+        if lane not in caps:
+            caps[lane] = self._lane_concurrency(lane)
+        return caps[lane]
+
+    #: Local housekeeping. No model, no remote host — the work this split exists
+    #: to stop queueing behind a research run.
+    _MAINTENANCE_ACTIONS = frozenset({
+        "tidy_sessions",
+        "tidy_documents",
+        "tidy_research",
+    })
+
+    #: Network-bound but model-free. `daily_brief` aggregates calendar/mail/todo
+    #: state; the shell actions reach a local or remote host over SSH. Slow on
+    #: I/O rather than on compute, so two at once cost nothing the box needs for
+    #: the model lane.
+    _EXTERNAL_ACTIONS = frozenset({
+        "daily_brief",
+        "ssh_command",
+        "run_script",
+        "run_local",
+    })
+
+    def _lane_for_task(self, task_id: str) -> str:
+        """Which lane this task runs in. Explicit membership only.
+
+        Replaces the old `_task_needs_model_slot`, which answered a yes/no
+        question ("does this take the one slot?") and therefore had to dump
+        every 'no' into an unbounded free-for-all.
+
+        Everything that is not a built-in action — an LLM task, a research task,
+        a task whose `task_type` is blank or unrecognised — is model work.
+        Built-in actions are placed by name, and a name in none of the three
+        sets (a new action, a typo, an action added by a plugin) goes to
+        `model`. `cookbook_serve` lands there by that rule and belongs there:
+        it loads a model onto the same GPU the model lane is rationing, and
+        under the old code it bypassed the slot entirely.
+        """
+        from core.database import SessionLocal, ScheduledTask
+
+        db = SessionLocal()
+        try:
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            if not task:
+                # Row gone or unreadable: we know nothing, so assume the worst.
+                return LANE_MODEL
+            task_type = getattr(task, "task_type", "") or "llm"
+            if task_type != "action":
+                return LANE_MODEL
+            action = (getattr(task, "action", "") or "").strip()
+            if action in self._MODEL_BACKED_ACTIONS:
+                return LANE_MODEL
+            if action in self._MAINTENANCE_ACTIONS:
+                return LANE_MAINTENANCE
+            if action in self._EXTERNAL_ACTIONS:
+                return LANE_EXTERNAL
+            logger.debug(
+                "Task %s action %r is unclassified — running it in the %s lane",
+                task_id, action, LANE_MODEL,
+            )
+            return LANE_MODEL
+        except Exception:
+            logger.debug("Lane lookup failed for task %s", task_id, exc_info=True)
+            return LANE_MODEL
+        finally:
+            db.close()
+
+    def lane_status(self) -> dict:
+        """Per-lane queue state for the Tasks UI and diagnostics.
+
+        `_executing` is the scheduler's "this task is running OR queued" guard;
+        splitting it by lane is what keeps "queued behind the semaphore"
+        meaningful now that there is more than one semaphore. `running` is
+        derived from the lane's semaphore rather than counted separately so it
+        cannot drift from the thing actually doing the gating.
+        """
+        lanes_by_task = getattr(self, "_executing_lanes", None) or {}
+        executing = getattr(self, "_executing", None) or set()
+        out = {}
+        for lane in LANES:
+            cap = self._lane_cap(lane)
+            sem = (getattr(self, "_lane_semaphores", None) or {}).get(lane)
+            free = getattr(sem, "_value", cap) if sem is not None else cap
+            in_lane = [t for t in executing if lanes_by_task.get(t) == lane]
+            running = max(0, cap - int(free))
+            out[lane] = {
+                "concurrency": cap,
+                "setting": LANE_CONCURRENCY_SETTINGS.get(lane, ("", 0))[0],
+                "running": running,
+                # Anything admitted to the lane that is not currently holding a
+                # slot is waiting for one. This is the number that was invisible
+                # when the Skills Audit kept deferring.
+                "queued": max(0, len(in_lane) - running),
+                "task_ids": in_lane,
+            }
+        return out
 
     def _set_run_progress(self, run_id: str, message: str):
         """Persist short live progress text for Activity while a run is active."""
@@ -610,7 +873,14 @@ class TaskScheduler:
         # same calendar event.
         self._note_pings_task = asyncio.create_task(self._note_pings_loop())
         self._lotus_pings_task = asyncio.create_task(self._lotus_pings_loop())
-        logger.info(f"Task scheduler started (concurrency cap: {self._concurrency_cap})")
+        # Log every lane's cap, not just the model one. An operator who raised
+        # a lane in settings needs to see that it took effect, and an operator
+        # debugging "why is my cleanup task late" needs to see which bound it
+        # is actually subject to.
+        logger.info(
+            "Task scheduler started (lane caps: %s)",
+            ", ".join(f"{lane}={self._lane_cap(lane)}" for lane in LANES),
+        )
         # Audit clusters: show any minute-of-day where >1 active scheduled
         # tasks land. Helps spot "all my tasks fire at 9am" patterns the user
         # may want to spread out.
@@ -724,21 +994,17 @@ class TaskScheduler:
         rows could get the browser reminder while the backend email/ntfy
         scanner never ran for that owner.
         """
-        from core.database import SessionLocal, ScheduledTask, Note
+        from core.database import SessionLocal, ScheduledTask
+        from src.notes_store import STORE
         db = SessionLocal()
         try:
             owners = set()
             for r in db.query(ScheduledTask.owner).distinct().all():
                 if r[0]:
                     owners.add(r[0])
-            note_q = db.query(Note.owner).filter(
-                Note.due_date.isnot(None),
-                Note.due_date != "",
-                Note.archived == False,  # noqa: E712
-            ).distinct()
-            for r in note_q.all():
-                if r[0]:
-                    owners.add(r[0])
+            for note in STORE.list(None, archived=False):
+                if note.owner and note.due_date:
+                    owners.add(note.owner)
             return sorted(owners)
         except Exception:
             return []
@@ -825,6 +1091,16 @@ class TaskScheduler:
         current = asyncio.current_task()
         if current:
             self._task_handles[task_id] = current
+        # Classify before anything else so the lane is on the queued run row and
+        # in the logs even if the run is cancelled while still waiting. A
+        # force-run bypasses every lane, so it is not "in" one.
+        lane = None if bypass_model_slot else self._lane_for_task(task_id)
+        if lane:
+            lanes = getattr(self, "_executing_lanes", None)
+            if lanes is None:
+                lanes = {}
+                self._executing_lanes = lanes
+            lanes[task_id] = lane
         run_id = str(uuid.uuid4())
         _q_db = SessionLocal()
         try:
@@ -833,7 +1109,12 @@ class TaskScheduler:
                 task_id=task_id,
                 started_at=_utcnow(),
                 status="queued",
-                result="Queued — waiting for a free slot…",
+                # Name the lane: "queued" with no further detail was why three
+                # tasks stacking up at 07:45 read as the scheduler doing nothing.
+                result=(
+                    f"Queued — waiting for a free slot in the {lane} lane…"
+                    if lane else "Queued — waiting for a free slot…"
+                ),
             )
             _q_db.add(run)
             _q_db.commit()
@@ -852,7 +1133,9 @@ class TaskScheduler:
             from src.interactive_gate import mark_manual_foreground_run
             mark_manual_foreground_run()
         try:
-            if bypass_model_slot or not self._task_needs_model_slot(task_id):
+            if lane is None:
+                # Force-run: the user asked for this one specifically and it is
+                # allowed to overlap whatever is in the lanes.
                 await self._execute_task_locked(
                     task_id,
                     run_id,
@@ -862,14 +1145,22 @@ class TaskScheduler:
                 )
                 return
 
-            # Wait for the app to go quiet BEFORE taking the one run slot.
-            # Waiting inside it parks a background task on the gate while it
-            # holds the slot, and every other task — a manual "Run now"
+            # Wait for the app to go quiet BEFORE taking a lane slot. Waiting
+            # inside it parks a background task on the gate while it holds the
+            # slot, and every other task in that lane — a manual "Run now"
             # included — then queues behind a run that cannot start until the
             # user walks away.
             if gate_foreground:
                 await self._wait_for_idle_before_slot(task_id, run_id)
-            async with self._run_semaphore:
+            sem = self._lane_semaphore(lane)
+            if sem.locked():
+                # Not an error, but the thing we were blind to before: say out
+                # loud that a due task is waiting, and for which lane.
+                logger.info(
+                    "Task %s waiting for a free slot in the %s lane (cap %d)",
+                    task_id, lane, self._lane_cap(lane),
+                )
+            async with sem:
                 await self._execute_task_locked(
                     task_id,
                     run_id,
@@ -894,9 +1185,10 @@ class TaskScheduler:
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
+                    (getattr(self, "_executing_lanes", None) or {}).pop(task_id, None)
 
     async def _wait_for_idle_before_slot(self, task_id: str, run_id: str):
-        """Hold a background run outside the model slot until the UI is quiet."""
+        """Hold a background run outside its lane slot until the UI is quiet."""
         from core.database import SessionLocal, TaskRun
 
         db = SessionLocal()
@@ -1027,12 +1319,29 @@ class TaskScheduler:
             # `idle_wait_done` means the caller already waited for quiet outside
             # the model slot, so don't take the slot hostage doing it again.
             if gate_foreground and not idle_wait_done:
+                task_view = _orm_scalar_snapshot(task)
                 waiting = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if waiting and waiting.status == "queued":
                     waiting.result = "Queued — waiting for Odysseus to be idle…"
                     db.commit()
+                # The quiet gate can wait indefinitely.  A Session does not
+                # check a connection out until the first query, but once it
+                # has, commit() returns the connection only incidentally and
+                # later attribute access can immediately check it out again.
+                # Close it deliberately before crossing the async boundary.
+                db.close()
                 from src.interactive_gate import wait_for_interactive_quiet
-                await wait_for_interactive_quiet(f"scheduled task {task.name}")
+                await wait_for_interactive_quiet(f"scheduled task {task_view.name}")
+                db = SessionLocal()
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                if not task or task.status != "active":
+                    stale = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                    if stale and stale.status == "queued":
+                        stale.status = "skipped"
+                        stale.finished_at = _utcnow()
+                        stale.error = "Task no longer active after waiting for idle"
+                        db.commit()
+                    return
 
             # Flip the run from queued → running. Reset started_at to the
             # actual execution start so queue wait time is visible from
@@ -1086,27 +1395,64 @@ class TaskScheduler:
 
                 foreground_monitor = asyncio.create_task(_cancel_if_foreground_active())
             try:
+                # Execution is remote/slow.  Run it with a detached, fully
+                # loaded task and no scheduler-owned checkout.  Helpers which
+                # need database setup use their own short-lived session.
+                task = _orm_scalar_snapshot(task)
+                db.close()
                 if task_type == "action":
                     result, success = await self._execute_action(task, run_id=run_id, manual=manual)
-                    run.status = "success" if success else "error"
-                    run.result = result
-                    if not success:
-                        run.error = result
                 elif task_type == "research":
-                    result = await self._execute_research_task(task, db)
-                    run.status = "success"
-                    run.result = result
+                    helper_db = SessionLocal()
+                    try:
+                        result = await self._execute_research_task(task, helper_db)
+                    finally:
+                        # Helpers normally close before their network await;
+                        # this also covers every setup exception path.
+                        helper_db.close()
                 else:
                     # LLM task — use agent loop for tool access
-                    result = await self._execute_llm_task(task, db)
-                    run.status = "success"
-                    run.result = result
+                    helper_db = SessionLocal()
+                    try:
+                        result = await self._execute_llm_task(task, helper_db)
+                    finally:
+                        helper_db.close()
+                db = SessionLocal()
+                task_obj = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if not task_obj or not run:
+                    return
+                task = task_obj
+                run.status = "success" if task_type != "action" or success else "error"
+                run.result = result
+                if run.status == "error":
+                    run.error = result
                 # Record which model actually ran (resolved inside the executor).
                 if getattr(self, "_last_run_model", None):
                     run.model = self._last_run_model
+                # Persist the execution outcome before releasing the session
+                # for potentially slow delivery.  Closing with pending changes
+                # would roll them back and leave Activity stuck at "running".
+                db.commit()
                 if run.status == "success":
-                    await self._deliver_task_result(task, result, db, model=getattr(self, "_last_run_model", None))
+                    # Delivery may call email/MCP endpoints.  It owns any DB
+                    # setup it needs and must not inherit this transaction.
+                    task = _orm_scalar_snapshot(task)
+                    db.close()
+                    delivery_db = SessionLocal()
+                    try:
+                        await self._deliver_task_result(
+                            task, result, delivery_db,
+                            model=getattr(self, "_last_run_model", None),
+                        )
+                    finally:
+                        delivery_db.close()
             except TaskDeferred as defer:
+                db.close()
+                db = SessionLocal()
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                if not task:
+                    return
                 if manual:
                     # The user asked for this run explicitly — don't silently
                     # drop the Activity row and slide the schedule. Show why it
@@ -1136,6 +1482,11 @@ class TaskScheduler:
                 db.commit()
                 return
             except asyncio.CancelledError:
+                db.close()
+                db = SessionLocal()
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                if not task:
+                    return
                 msg = (
                     "Paused because Odysseus became active"
                     if foreground_cancel.get("hit")
@@ -1164,6 +1515,12 @@ class TaskScheduler:
                 db.commit()
                 return
             except TaskNoop as noop:
+                db.close()
+                db = SessionLocal()
+                task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+                run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+                if not task or not run:
+                    return
                 # Action reported "nothing to do". Mark the run as `skipped`
                 # with the reason in `result` so it surfaces in Activity as a
                 # slim "skipped — <reason>" row instead of vanishing silently.
@@ -1187,6 +1544,9 @@ class TaskScheduler:
                 db.commit()
                 return
             finally:
+                # Cleanup is also an async boundary.  All outcomes above are
+                # committed already; never hold a checkout waiting for a monitor.
+                db.close()
                 if foreground_monitor and not foreground_monitor.done():
                     foreground_monitor.cancel()
                     try:
@@ -1194,6 +1554,11 @@ class TaskScheduler:
                     except asyncio.CancelledError:
                         pass
 
+            db = SessionLocal()
+            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
+            run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+            if not task or not run:
+                return
             run.finished_at = _utcnow()
 
             # Update task
@@ -1217,7 +1582,19 @@ class TaskScheduler:
                 task.next_run = None
 
             db.commit()
-            logger.info(f"Task '{task.name}' completed (run {run_id})")
+            # Report what actually happened. `run.status` is already correct
+            # here ("error" when the action returned success=False), but this
+            # line used to say "completed" unconditionally, so a failed run read
+            # as a clean one in the logs:
+            #   ERROR audit_skills action failed: No model configured
+            #   INFO  Task 'Skills Audit' completed (run …)
+            if run.status == "success":
+                logger.info(f"Task '{task.name}' completed (run {run_id})")
+            else:
+                logger.warning(
+                    "Task '%s' finished with status=%s (run %s): %s",
+                    task.name, run.status, run_id, (run.error or run.result or "no detail"),
+                )
             output = task.output_target or "session"
             # Per-task notification gate. Default True (notifications_enabled
             # defaults to True at column level), but skip when the user has
@@ -1266,7 +1643,18 @@ class TaskScheduler:
                 else:
                     logger.warning(f"Skipping chain from '{task.name}': cycle detected")
 
+        except asyncio.CancelledError:
+            # Quiet-gate cancellation precedes the execution handler above.
+            # Release the read transaction before marking Activity terminal;
+            # the outer dispatcher still handles deferring automatic work.
+            db.close()
+            self._mark_run_aborted(task_id, run_id)
+            raise
         except Exception as exec_exc:
+            # An earlier query/commit may have left this transaction failed.
+            # Recovery always starts with a clean, independently owned session.
+            db.close()
+            db = SessionLocal()
             # A momentary upstream outage is not a broken task. Retry it in a
             # few minutes instead of writing the run off and sliding to the
             # next occurrence, which for a daily task means losing the day.
@@ -1375,6 +1763,7 @@ class TaskScheduler:
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
+                    (getattr(self, "_executing_lanes", None) or {}).pop(task_id, None)
 
 
 
@@ -1410,22 +1799,42 @@ class TaskScheduler:
         "consolidate_memory",
     })
 
-    def _task_needs_model_slot(self, task_id: str) -> bool:
-        """Only LLM/research/model-backed actions should wait in the model
-        queue. Pure housekeeping actions can run immediately."""
-        from core.database import SessionLocal, ScheduledTask
+    async def _guarded_model_call(self, endpoint_url: str, call):
+        """Run one model-endpoint interaction behind the breaker.
 
-        db = SessionLocal()
+        `call` is a zero-arg coroutine *factory*, not a coroutine: when the
+        circuit is open we must not create the coroutine at all, or Python warns
+        about one that was never awaited.
+
+        Both scheduled model executors go through here so the LLM path and the
+        research path share a single verdict per endpoint — a provider that is
+        overloaded for the daily brief is overloaded for the research run that
+        starts ninety seconds later.
+        """
+        from src.circuit_breaker import is_dependency_down
+
+        breaker = _model_endpoint_breaker()
+        key = _endpoint_breaker_key(endpoint_url)
+        # Raises CircuitOpen, which reads as transient upstream trouble to
+        # `_transient_retry_delay`, so the run is recorded as an error with the
+        # cooldown in its message and the task comes back in a few minutes
+        # rather than losing its slot in the schedule.
+        breaker.allow(key)
         try:
-            task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
-            if not task:
-                return True
-            task_type = getattr(task, "task_type", "") or "llm"
-            if task_type != "action":
-                return True
-            return (getattr(task, "action", "") or "") in self._MODEL_BACKED_ACTIONS
-        finally:
-            db.close()
+            result = await call()
+        except asyncio.CancelledError:
+            # A foreground interrupt or a user "Stop" says nothing about the
+            # endpoint's health. Leave the streak exactly as it was.
+            raise
+        except BaseException as exc:
+            breaker.record_failure(
+                key,
+                dependency_down=is_dependency_down(exc),
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            raise
+        breaker.record_success(key)
+        return result
 
     def _log_to_assistant(self, db, task, result_text: str):
         """Log a task result to the assistant's chat session."""
@@ -1458,18 +1867,24 @@ class TaskScheduler:
 
         own_db = db is None
         db2 = SessionLocal() if own_db else db
+        matched = None
         try:
             ep_q = db2.query(ModelEndpoint).filter(ModelEndpoint.is_enabled == True)  # noqa: E712
             ep_q = owner_filter(ep_q, ModelEndpoint, owner or None)
             for ep in ep_q.all():
                 ep_base = normalize_base(ep.base_url)
                 if ep_base and (ep_base in endpoint_url or endpoint_url in ep_base):
-                    return endpoint_runtime_headers(ep, owner=owner or None)
+                    matched = ep
+                    break
         except Exception:
             logger.debug("Header resolution failed for %r", endpoint_url, exc_info=True)
         finally:
             if own_db:
                 db2.close()
+        if matched is not None:
+            # Credential refresh may perform OAuth/network I/O.  Never retain
+            # the lookup checkout while that happens.
+            return endpoint_runtime_headers(matched, owner=owner or None)
         return {}
 
     async def _execute_action(self, task, run_id: str | None = None, *, manual: bool = False) -> tuple:
@@ -1574,7 +1989,7 @@ class TaskScheduler:
         from src.tool_implementations import do_manage_notes
         from src.tool_utils import get_mcp_manager
 
-        tz_name = _resolve_task_timezone(db, task)
+        tz_name = getattr(crew, "timezone", None) or _resolve_task_timezone(db, task)
         try:
             if tz_name:
                 from zoneinfo import ZoneInfo
@@ -1585,7 +2000,6 @@ class TaskScheduler:
                 now = _utcnow()
             time_str = now.strftime("%A, %B %d %Y, %H:%M")
         except Exception:
-            from datetime import timedelta
             now = _utcnow()
             time_str = now.strftime("%H:%M UTC")
 
@@ -1594,7 +2008,7 @@ class TaskScheduler:
         # Calendar: today+tomorrow, this week, month ahead
         # Pull directly from DB so we can include event_type and importance.
         try:
-            from core.database import SessionLocal as _SL, CalendarEvent as _CE
+            from core.database import SessionLocal as _SL
             _db = _SL()
             try:
                 for label, start, end in _digest_windows(now):
@@ -1749,7 +2163,15 @@ class TaskScheduler:
 
     async def _execute_llm_task(self, task, db) -> str:
         """Execute an LLM task with full tool access via the agent loop."""
-        from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.database import SessionLocal, Session as DbSession, CrewMember, ScheduledTask
+
+        if db is None:
+            setup_db = SessionLocal()
+            try:
+                return await self._execute_llm_task(task, setup_db)
+            finally:
+                setup_db.close()
+        task = _orm_scalar_snapshot(task)
 
         # If this task is wired to a CrewMember (personal assistant, custom
         # crew), prefer the crew member's persona/model/endpoint as overrides.
@@ -1757,6 +2179,8 @@ class TaskScheduler:
         if getattr(task, "crew_member_id", None):
             try:
                 crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
+                if crew is not None:
+                    crew = _orm_scalar_snapshot(crew)
             except Exception:
                 crew = None
 
@@ -1791,7 +2215,13 @@ class TaskScheduler:
                 updated_at=_utcnow(),
             )
             db.add(sess)
+            # SessionLocal disables autoflush; insert the referenced session
+            # before updating ScheduledTask's foreign key with a bulk query.
+            db.flush()
             task.session_id = session_id
+            db.query(ScheduledTask).filter(ScheduledTask.id == task.id).update(
+                {ScheduledTask.session_id: session_id}, synchronize_session=False
+            )
             db.commit()
             if self._session_manager:
                 try:
@@ -1806,7 +2236,13 @@ class TaskScheduler:
         # as separate messages. More reliable than hoping the model calls tools.
         is_checkin = crew and crew.is_default_assistant and "check-in" in (task.name or "").lower()
         if is_checkin:
-            return await self._execute_checkin(task, crew, db, session_id, endpoint_url, model)
+            # Check-ins do their own tool/network work; none of it needs an
+            # open transaction from the setup above.
+            task = _orm_scalar_snapshot(task)
+            if crew is not None:
+                crew = _orm_scalar_snapshot(crew)
+            db.close()
+            return await self._execute_checkin(task, crew, None, session_id, endpoint_url, model)
 
         # Build system prompt: crew member persona overrides the default.
         # Built-in character_id (Socrates, Razor, etc.) further biases the
@@ -1834,6 +2270,9 @@ class TaskScheduler:
         # once here and shared by both execution paths below (agent loop and the
         # direct fallback) so time grounding is never lost on either path.
         tz_name = _resolve_task_timezone(db, task)
+        # Tool retrieval can involve remote embeddings as well as local reads.
+        # Configuration is fully materialized now; release before either kind.
+        db.close()
         try:
             from src.user_time import current_datetime_context_message_for_tz
             _dt_msg: dict | None = current_datetime_context_message_for_tz(tz_name)
@@ -1880,34 +2319,42 @@ class TaskScheduler:
         except Exception as e:
             logger.warning(f"[assistant] RAG tool selection failed, using all: {e}")
 
-        # Try using the agent loop for full tool access
-        try:
-            result = await self._run_agent_loop(
-                endpoint_url, model, task, session_id,
-                system_prompt=system_prompt, disabled_tools=disabled_tools or None,
-                relevant_tools=relevant_tools,
-                datetime_context_msg=_dt_msg,
-            )
-        except Exception as e:
-            logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
-            from src.task_endpoint import task_llm_call_async
-            messages: list = [{"role": "system", "content": system_prompt}]
-            if _dt_msg:
-                messages.append(_dt_msg)
-            messages.append({"role": "user", "content": task.prompt})
-            result = await task_llm_call_async(
-                messages,
-                fallback_url=endpoint_url,
-                fallback_model=model,
-                # Without headers this fallback dispatches to the same
-                # endpoint unauthenticated: resolve_endpoint returns the
-                # caller's (url, model, headers) verbatim when no task/utility
-                # endpoint is configured, so a 502 in the agent loop turned
-                # into a 401 here on a perfectly connected account.
-                fallback_headers=self._resolve_endpoint_headers(endpoint_url, task.owner, db=db),
-                owner=task.owner,
-                timeout=120,
-            )
+        # Try using the agent loop for full tool access. The whole attempt —
+        # agent loop plus simple-call fallback — is one trip to the endpoint as
+        # far as the breaker is concerned: the fallback dials the same host, so
+        # counting it separately would double every failure.
+        fallback_headers = self._resolve_endpoint_headers(endpoint_url, task.owner)
+
+        async def _call_model():
+            try:
+                return await self._run_agent_loop(
+                    endpoint_url, model, task, session_id,
+                    system_prompt=system_prompt, disabled_tools=disabled_tools or None,
+                    relevant_tools=relevant_tools,
+                    datetime_context_msg=_dt_msg,
+                )
+            except Exception as e:
+                logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
+                from src.task_endpoint import task_llm_call_async
+                messages: list = [{"role": "system", "content": system_prompt}]
+                if _dt_msg:
+                    messages.append(_dt_msg)
+                messages.append({"role": "user", "content": task.prompt})
+                return await task_llm_call_async(
+                    messages,
+                    fallback_url=endpoint_url,
+                    fallback_model=model,
+                    # Without headers this fallback dispatches to the same
+                    # endpoint unauthenticated: resolve_endpoint returns the
+                    # caller's (url, model, headers) verbatim when no task/utility
+                    # endpoint is configured, so a 502 in the agent loop turned
+                    # into a 401 here on a perfectly connected account.
+                    fallback_headers=fallback_headers,
+                    owner=task.owner,
+                    timeout=120,
+                )
+
+        result = await self._guarded_model_call(endpoint_url, _call_model)
 
         # Strip the model's chain-of-thought before saving/delivering. Task
         # output is LLM-only, so prose=True (which also removes untagged
@@ -1933,8 +2380,16 @@ class TaskScheduler:
         actions cannot drift into hidden delivery paths that disagree with the
         task's visible output target.
         """
-        from core.database import Session as DbSession, ChatMessage, CrewMember
+        from core.database import SessionLocal, Session as DbSession, ChatMessage, CrewMember, ScheduledTask
         from core.models import ChatMessage as MemChatMessage
+
+        if db is None:
+            delivery_db = SessionLocal()
+            try:
+                return await self._deliver_task_result(task, result, delivery_db, model=model)
+            finally:
+                delivery_db.close()
+        task = _orm_scalar_snapshot(task)
 
         output = task.output_target or "session"
         if (
@@ -1942,16 +2397,20 @@ class TaskScheduler:
             and (getattr(task, "task_type", "") or "") == "action"
             and (getattr(task, "action", "") or "") in self._SILENT_ACTIONS
         ):
+            db.close()
             return
         if output.startswith("mcp__"):
+            db.close()
             await self._deliver_via_mcp(output, task, result)
             return
 
         if self._is_email_output_target(output):
+            db.close()
             await self._deliver_via_email(output, task, result)
             return
 
         if output != "session":
+            db.close()
             return
 
         endpoint_url = task.endpoint_url
@@ -1960,6 +2419,8 @@ class TaskScheduler:
         if getattr(task, "crew_member_id", None):
             try:
                 crew = db.query(CrewMember).filter(CrewMember.id == task.crew_member_id).first()
+                if crew is not None:
+                    crew = _orm_scalar_snapshot(crew)
             except Exception:
                 crew = None
         if (not endpoint_url or not model_name) and crew:
@@ -1989,7 +2450,11 @@ class TaskScheduler:
                 updated_at=_utcnow(),
             )
             db.add(sess)
+            db.flush()
             task.session_id = session_id
+            db.query(ScheduledTask).filter(ScheduledTask.id == task.id).update(
+                {ScheduledTask.session_id: session_id}, synchronize_session=False
+            )
             db.commit()
             if self._session_manager:
                 try:
@@ -2008,6 +2473,7 @@ class TaskScheduler:
 
         # Use SessionManager for persistence so in-memory cache stays in sync
         if self._session_manager and session_id:
+            db.close()
             try:
                 self._session_manager.add_message(
                     session_id,
@@ -2049,6 +2515,7 @@ class TaskScheduler:
             db.add(user_msg)
             db.add(assistant_msg)
             db.commit()
+        db.close()
 
     @staticmethod
     def _is_email_output_target(output: str) -> bool:
@@ -2082,6 +2549,19 @@ class TaskScheduler:
         elif "@" in target:
             explicit = target
 
+        # Breaker #2. The audit's "email network/DNS outages" show up here as a
+        # 30s connect timeout per delivery, paid *after* the task's model work
+        # has already succeeded — so an SMTP host that is gone converts good
+        # runs into failed ones, one expensive half-minute at a time. Keyed by
+        # SMTP host so a broken personal account cannot mute a working work one.
+        from src.circuit_breaker import get_breaker, is_smtp_dependency_down
+        breaker = get_breaker(
+            "task_email_delivery",
+            failure_threshold=3,
+            cooldown_seconds=5 * 60,
+            max_cooldown_seconds=30 * 60,
+        )
+        breaker_key = ""
         try:
             from routes.email_routes import _resolve_send_config
             from routes.email_helpers import _send_smtp_message
@@ -2090,6 +2570,10 @@ class TaskScheduler:
             to_addr = explicit or cfg.get("from_address") or cfg.get("smtp_user") or ""
             if not to_addr:
                 raise RuntimeError("No email recipient resolved for task output")
+            # Resolved after the config lookup, because the host is what we are
+            # judging — not the task, and not the recipient.
+            breaker_key = f"{cfg.get('smtp_host') or 'unknown'}:{cfg.get('smtp_port') or ''}"
+            breaker.allow(breaker_key)
 
             from_addr = cfg.get("from_address") or cfg.get("smtp_user") or to_addr
             msg = EmailMessage()
@@ -2101,8 +2585,23 @@ class TaskScheduler:
             msg["X-Odysseus-Ref"] = str(task.id)
             msg.set_content(result or "")
             _send_smtp_message(cfg, from_addr, [to_addr], msg.as_string(), timeout=30)
+            breaker.record_success(breaker_key)
             logger.info("Task %s emailed result (recipient_set=%s, %sb)", task.id, bool(to_addr), len(result or ""))
         except Exception as e:
+            from src.circuit_breaker import CircuitOpen
+            if breaker_key and not isinstance(e, CircuitOpen):
+                # Never feed our own fast-fail back in: it is not an attempt,
+                # and recording it would clear the very streak that produced it.
+                #
+                # A refused recipient or a rejected login is the server
+                # answering — it is up, and the fix is in this task's config,
+                # not in waiting. Only the connection-level failures move the
+                # breaker toward tripping (see is_smtp_dependency_down).
+                breaker.record_failure(
+                    breaker_key,
+                    dependency_down=is_smtp_dependency_down(e),
+                    error=f"{type(e).__name__}: {e}",
+                )
             logger.error("Task %s email delivery failed: %s", task.id, e, exc_info=True)
             raise
 
@@ -2287,11 +2786,20 @@ class TaskScheduler:
 
     async def _execute_research_task(self, task, db) -> str:
         """Execute a deep research task using DeepResearcher."""
-        from core.database import Session as DbSession, ChatMessage
+        from core.database import SessionLocal, Session as DbSession, ScheduledTask
         from src.deep_research import DeepResearcher
         from src.research_handler import RESEARCH_DATA_DIR, ResearchHandler
         from src.research_utils import strip_thinking
         from src.settings import get_setting
+
+        if db is None:
+            setup_db = SessionLocal()
+            try:
+                return await self._execute_research_task(task, setup_db)
+            finally:
+                setup_db.close()
+        task = _orm_scalar_snapshot(task)
+        db.close()
 
         # Resolve endpoint/model: research settings > task settings > session defaults
         endpoint_url = task.endpoint_url
@@ -2325,10 +2833,6 @@ class TaskScheduler:
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
 
-        # Resolve headers, refreshing session-backed tokens.
-        if not headers_from_resolver:
-            headers = self._resolve_endpoint_headers(endpoint_url, task.owner, db=db) or headers
-
         max_tokens = int(get_setting("research_max_tokens", 8192))
         extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
         extraction_concurrency = int(get_setting("research_extraction_concurrency", 3) or 3)
@@ -2344,8 +2848,22 @@ class TaskScheduler:
             extraction_concurrency=extraction_concurrency,
         )
 
+        # All configuration and credential reads are complete.  Research can
+        # run for ten minutes and must not reserve a pool slot while it does.
+        db.close()
+        # Refreshing OAuth-backed credentials may itself perform network I/O;
+        # do it only after the research setup session has been returned.
+        if not headers_from_resolver:
+            headers = self._resolve_endpoint_headers(endpoint_url, task.owner) or headers
+            researcher.llm_headers = headers
+
         started_ts = time.time()
-        report = await researcher.research(task.prompt)
+        # Same breaker, same key: a deep-research run is many calls to the very
+        # endpoint the LLM lane just found unreachable, and it is the most
+        # expensive thing to start against a dead provider.
+        report = await self._guarded_model_call(
+            endpoint_url, lambda: researcher.research(task.prompt)
+        )
         completed_ts = time.time()
         try:
             stats = researcher.get_stats() or {}
@@ -2366,12 +2884,20 @@ class TaskScheduler:
                 created_at=_utcnow(),
                 updated_at=_utcnow(),
             )
-            db.add(sess)
+            with SessionLocal() as output_db:
+                output_db.add(sess)
+                output_db.flush()
+                output_db.query(ScheduledTask).filter(ScheduledTask.id == task.id).update(
+                    {ScheduledTask.session_id: session_id}, synchronize_session=False
+                )
+                output_db.commit()
             task.session_id = session_id
-            db.commit()
             if self._session_manager:
                 try:
-                    self._session_manager.sessions[session_id] = self._session_manager._db_to_session(sess)
+                    self._session_manager.ensure_task_session(
+                        session_id, f"[Research] {task.name}", endpoint_url, model,
+                        owner=task.owner, task=task,
+                    )
                 except Exception:
                     pass
 
@@ -2569,6 +3095,7 @@ class TaskScheduler:
         async with self._executing_lock:
             if task_id in self._executing:
                 self._executing.discard(task_id)
+                (getattr(self, "_executing_lanes", None) or {}).pop(task_id, None)
                 stopped = True
 
         stopped = self._mark_run_aborted(task_id) or stopped
@@ -2823,7 +3350,7 @@ class TaskScheduler:
         if not owner or owner in REQUEST_SENTINEL_OWNERS:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
-        from core.database import SessionLocal, CrewMember, ScheduledTask
+        from core.database import SessionLocal, CrewMember
         from core.database import Session as DbSession
 
         db = SessionLocal()

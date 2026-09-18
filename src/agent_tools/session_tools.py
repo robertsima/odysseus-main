@@ -48,10 +48,17 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
     """
     parent = manager.get_session(parent_id) if parent_id else None
     if profile and profile.get("model"):
-        try:
-            url, model, headers = _resolve_model(profile["model"], owner=owner)
-        except ValueError as exc:
-            return None, f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}"
+        resolved = None
+        failures = []
+        for candidate in [profile["model"], *(profile.get("model_fallbacks") or [])]:
+            try:
+                resolved = _resolve_model(candidate, owner=owner)
+                break
+            except ValueError as exc:
+                failures.append(f"{candidate}: {exc}")
+        if resolved is None:
+            return None, f"Profile {profile['name']!r} has no available model: {'; '.join(failures)}"
+        url, model, headers = resolved
     elif parent is not None:
         url, model, headers = parent.endpoint_url, parent.model, getattr(parent, "headers", None)
     else:
@@ -67,12 +74,16 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
 
         patch = {"parent_session": parent_id} if parent_id else {}
         if profile:
-            patch["agent_profile"] = profile["name"]
-            if profile.get("disabled_tools"):
-                patch["disabled_tools"] = profile["disabled_tools"]
+            from src.agent_profiles import session_patch
+            patch.update(session_patch(profile))
         if patch:
-            update_session_settings(sid, patch)
+            saved = update_session_settings(sid, patch)
+            if profile and saved is None:
+                return None, "Could not persist the worker's scoped policy; worker not started"
     except Exception:
+        if profile:
+            logger.warning("child session policy persistence failed; worker not started", exc_info=True)
+            return None, "Could not persist the worker's scoped policy; worker not started"
         logger.debug("child session settings failed", exc_info=True)
     return sess, None
 
@@ -275,6 +286,12 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         if profile is None:
             names = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined (Settings › Workbench)"
             return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}"}
+        if target_sid.lower() != "new":
+            return {"error": (
+                "A scoped agent profile requires a fresh child chat so its permissions cannot affect "
+                "another ongoing run. Use session_id: 'new' with this profile, or omit profile to "
+                "message an existing chat under that chat's own settings."
+            )}
         mode = "agent"  # a profile is a worker definition: it always runs with tools
 
     if target_sid.lower() == "new":
@@ -326,16 +343,28 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         context.append({"role": "user", "content": message})
         runner = sess
+        # Profile instructions are persisted in the fresh child's settings and
+        # applied by agent_loop on every turn. Do not inject them here too:
+        # that would duplicate the persona on the first turn and differ from a
+        # reopened worker session.
         if profile:
-            if profile.get("instructions"):
-                context.insert(0, {"role": "system", "content": profile["instructions"]})
             if profile.get("model") and not extras.get("_child_created"):
                 # An existing chat delegated to under a profile runs this one
                 # exchange on the profile's model without changing the chat.
                 try:
                     from types import SimpleNamespace
 
-                    url, model_id, headers = await asyncio.to_thread(_resolve_model, profile["model"], owner=owner)
+                    resolved = None
+                    failures = []
+                    for candidate in [profile["model"], *(profile.get("model_fallbacks") or [])]:
+                        try:
+                            resolved = await asyncio.to_thread(_resolve_model, candidate, owner=owner)
+                            break
+                        except ValueError as exc:
+                            failures.append(f"{candidate}: {exc}")
+                    if resolved is None:
+                        raise ValueError("; ".join(failures))
+                    url, model_id, headers = resolved
                     runner = SimpleNamespace(id=sess.id, endpoint_url=url, model=model_id, headers=headers,
                                              owner=getattr(sess, "owner", None),
                                              context_length=getattr(sess, "context_length", 0))

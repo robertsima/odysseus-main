@@ -8,6 +8,7 @@ All modules should import from here instead of accessing files directly.
 import json
 import time
 import logging
+import os
 from typing import Any
 
 from src.constants import SETTINGS_FILE, FEATURES_FILE
@@ -36,6 +37,31 @@ def _invalidate_caches():
 # ── Default values ──
 
 DEFAULT_SETTINGS = {
+    # ── Knowledge: notes and vault documents are one Markdown store ──
+    # Notes used to be SQLite rows with no privacy label at all, while vault
+    # files had folder-scoped sensitivity. One store, one policy: a note is a
+    # Markdown file, so it inherits the folder's label like everything else.
+    # Empty means "use PERSONAL_DIR", so an existing deployment keeps working.
+    "vault_directory": "",
+    "notes_directory": "Notes",
+    "notes_archive_directory": "Notes/Archive",
+    # Folder-wide by default, per-file override available — the coarse default
+    # is the safe one, because an undeclared folder that reads as public is how
+    # private content leaks to a hosted model.
+    "vault_default_sensitivity": "public",
+    "vault_folder_sensitivity": {},
+    # ── Agents ──
+    # "auto" picks the first provider that reports itself usable on this host.
+    "delegation_provider": "auto",
+    # Qualified MCP tool used when delegation_provider=mcp. Remote-server OAuth
+    # stays in the MCP connection; Odysseus never stores model-vendor tokens.
+    "delegation_mcp_tool": "",
+    "delegation_mcp_default_arguments": {},
+    "agent_peer_messaging": True,
+    "agent_peer_message_budget": 8,
+    # ── Remote hosts ──
+    "remote_hosts": [],
+
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
     # scheduled_emails table with status='agent_draft' and return a
@@ -63,6 +89,39 @@ DEFAULT_SETTINGS = {
     "stt_provider": "local",
     "stt_model": "base",
     "stt_language": "",
+    # Tunable limits and model/retrieval preferences. Environment variables
+    # remain a one-way compatibility fallback for installs that have not yet
+    # saved the corresponding Settings value.
+    "stt_beam_size": 1,
+    "stt_max_audio_seconds": 300,
+    "chat_upload_max_bytes": 10 * 1024 * 1024,
+    "gallery_upload_max_bytes": 100 * 1024 * 1024,
+    "gallery_transform_upload_max_bytes": 25 * 1024 * 1024,
+    "memory_import_max_bytes": 10 * 1024 * 1024,
+    "personal_upload_max_bytes": 25 * 1024 * 1024,
+    "email_compose_upload_max_bytes": 25 * 1024 * 1024,
+    "stt_max_audio_bytes": 25 * 1024 * 1024,
+    "ics_import_max_bytes": 10 * 1024 * 1024,
+    "tts_cache_max_bytes": 500 * 1024 * 1024,
+    "imap_timeout_seconds": 30,
+    "slow_request_log_seconds": 0.75,
+    "startup_warmups_enabled": False,
+    "model_keepalive_enabled": False,
+    "mistral_reasoning_effort": "high",
+    "rag_recency_halflife_days": 180.0,
+    "rag_temporal_weight": 0.05,
+    "rag_temporal_intent_weight": 0.30,
+    "rag_tag_credit": 1.0,
+    "rag_max_chunks_per_doc": 2,
+    "rag_focused_cap_multiplier": 2,
+    "rag_link_expansion": True,
+    "vault_date_order": "day",
+    "vault_scan_seconds": 30,
+    "gallery_sam_model": "facebook/sam-vit-base",
+    "gallery_grounding_model": "google/owlvit-base-patch32",
+    "browser_isolated": True,
+    "agent_approval_ttl_seconds": 900,
+    "agent_base_branch": "dev",
     "search_provider": "searxng",
     # Default fallback chain — when the primary provider fails or
     # rate-limits, we try DuckDuckGo next. Free, no API key required, so
@@ -104,6 +163,14 @@ DEFAULT_SETTINGS = {
     "research_planning_timeout_seconds": 90,
     "research_query_timeout_seconds": 90,
     "research_extraction_concurrency": 3,
+    # Scheduler execution lanes (src/task_scheduler.py). Each lane is its own
+    # bounded queue, so lightweight housekeeping no longer waits behind an
+    # LLM-heavy job. `model` stays at 1 — that is the box's real limit and the
+    # pre-lane behaviour — while the I/O-bound lanes allow a little overlap.
+    # Clamped to 1..8 when read.
+    "task_model_lane_concurrency": 1,
+    "task_external_lane_concurrency": 2,
+    "task_maintenance_lane_concurrency": 2,
     # Hard wall-clock cap on a single deep-research run. The previous 600s
     # (10 min) default cut off slow local / edge LLMs mid-synthesis; 1800s
     # (30 min) is comfortable for most local setups while still bounding
@@ -176,6 +243,17 @@ DEFAULT_SETTINGS = {
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
     "agent_stream_timeout_seconds": 300,
+    # How much MCP may stay bound on every turn without winning tool retrieval.
+    # A connected server small enough to fit these caps is attached to every
+    # round, so a vague follow-up ("continue") can never make it vanish; a
+    # server that exceeds them is gated behind RAG/intent selection like the
+    # builtin browser/GitHub catalogs, and stays retrievable and listed in the
+    # prompt. Per-server cap first, then the total, trimmed largest-first. Set
+    # either to 0 for "no cap on this dimension". Raise them on a large-context
+    # host with a deliberately MCP-centric setup; see the reasoning behind the
+    # defaults in `src.mcp_manager._always_bound_limits`.
+    "mcp_always_bound_server_max_tools": 8,
+    "mcp_always_bound_total_max_tools": 24,
     # Extra directory roots that read_file / write_file may access, in
     # addition to the built-in project data/ and system temp dirs. Each
     # entry is an absolute path. Sensitive subpaths (.ssh, .gnupg, shell
@@ -291,6 +369,29 @@ def load_settings() -> dict:
     return merged
 
 
+def load_disabled_tools_strict() -> frozenset[str]:
+    """Read the current global tool denylist without the fail-soft TTL cache.
+
+    Execution authorization must observe a disable made during the same agent
+    turn. A fresh installation legitimately has no settings file yet; every
+    other read/shape failure is surfaced so the dispatcher can fail closed.
+    Ordinary settings consumers continue to use :func:`load_settings`.
+    """
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except FileNotFoundError:
+        return frozenset()
+    if not isinstance(saved, dict):
+        raise ValueError("settings must be an object")
+    disabled = saved.get("disabled_tools", [])
+    if not isinstance(disabled, list):
+        raise ValueError("disabled_tools must be a list")
+    if any(not isinstance(name, str) for name in disabled):
+        raise ValueError("disabled_tools entries must be strings")
+    return frozenset(name for name in disabled if name)
+
+
 def save_settings(settings: dict):
     """Persist settings to disk (atomic; see core.atomic_io)."""
     from core.atomic_io import atomic_write_json
@@ -301,6 +402,21 @@ def save_settings(settings: dict):
 def get_setting(key: str, default: Any = None) -> Any:
     """Read a single setting value."""
     return load_settings().get(key, default)
+
+
+def get_setting_or_env(key: str, env_name: str, default: Any = None) -> Any:
+    """Return a saved setting, falling back to a legacy env value.
+
+    Environment support is intentionally transitional for migrated choices:
+    once a user/admin saves the setting, the environment can no longer shadow
+    it. Blank environment values are treated as unset.
+    """
+    if is_setting_overridden(key):
+        return get_setting(key, default)
+    legacy = os.environ.get(env_name)
+    if legacy is not None and str(legacy).strip():
+        return legacy
+    return get_setting(key, default)
 
 
 def is_setting_overridden(key: str) -> bool:
@@ -317,7 +433,7 @@ def is_setting_overridden(key: str) -> bool:
         with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
             saved = json.load(f)
         return isinstance(saved, dict) and key in saved
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (FileNotFoundError, PermissionError, json.JSONDecodeError, ValueError):
         return False
 
 

@@ -9,6 +9,7 @@ import ipaddress
 import logging
 import socket
 import subprocess
+from types import SimpleNamespace
 from typing import Optional, Tuple, Dict
 from urllib.parse import urlparse, urlunparse
 
@@ -16,6 +17,15 @@ from core.database import SessionLocal, ModelEndpoint
 from src.llm_core import _detect_provider, _host_match, _is_kimi_code_url, KIMI_CODE_USER_AGENT, _ollama_api_root
 
 logger = logging.getLogger(__name__)
+
+
+def _endpoint_snapshot(ep):
+    """Detach the endpoint fields used during runtime credential resolution."""
+    fields = (
+        "id", "owner", "base_url", "api_key", "provider_auth_id",
+        "cached_models", "models", "pinned_models", "hidden_models",
+    )
+    return SimpleNamespace(**{name: getattr(ep, name, None) for name in fields})
 
 # Model-name substrings that are NOT chat/generation models. When an endpoint
 # has no explicit model configured we pick the first CHAT model from its list —
@@ -154,9 +164,19 @@ def resolve_endpoint_runtime(ep, owner: Optional[str] = None) -> Tuple[str, Opti
     api_key = getattr(ep, "api_key", None)
     auth_id = getattr(ep, "provider_auth_id", None)
     if auth_id:
-        from src.chatgpt_subscription import resolve_runtime_credentials
+        # The stored auth-session provider is authoritative. URL matching is
+        # only a compatibility fallback for legacy/test rows without a record.
+        auth_owner = owner if owner is not None else getattr(ep, "owner", None)
+        from src.subscription import provider_for_auth_id, provider_for_url
 
-        creds = resolve_runtime_credentials(auth_id, owner=owner)
+        provider = provider_for_auth_id(auth_id, owner=auth_owner)
+        if provider is None:
+            provider = provider_for_url(base)
+        if provider is None:
+            raise RuntimeError(
+                "Subscription endpoint has no installed provider for its auth session"
+            )
+        creds = provider.resolve_runtime_credentials(auth_id, owner=auth_owner)
         base = normalize_base(creds.get("base_url") or base)
         api_key = creds.get("api_key")
     return base, api_key
@@ -182,6 +202,24 @@ def endpoint_runtime_headers(ep, owner: Optional[str] = None) -> Dict[str, str]:
         api_key = resolved_key
     except Exception as e:
         logger.warning("Could not resolve runtime credentials for %s: %s", base, e)
+    auth_id = getattr(ep, "provider_auth_id", None)
+    if auth_id:
+        auth_owner = owner if owner is not None else getattr(ep, "owner", None)
+        try:
+            from src.subscription import provider_for_auth_id, provider_for_url
+
+            provider = provider_for_auth_id(auth_id, owner=auth_owner)
+            if provider is None:
+                provider = provider_for_url(base)
+            if provider is not None:
+                return provider.headers(api_key)
+        except Exception as e:
+            logger.warning("Could not resolve subscription headers for %s: %s", base, e)
+        # A row carrying provider_auth_id is not a static-key endpoint. Do not
+        # silently reinterpret a missing/unknown subscription provider as a
+        # generic bearer endpoint; that can send a credential to the wrong
+        # billing surface. Legacy ChatGPT rows are handled by provider_for_url.
+        return {}
     return build_headers(api_key, base)
 
 
@@ -350,6 +388,14 @@ def build_headers(api_key: Optional[str], base: str) -> Dict[str, str]:
     if provider == "copilot":
         from src.copilot import copilot_headers
         return copilot_headers(api_key)
+    try:
+        from src.subscription import get as get_subscription_provider
+
+        subscription_provider = get_subscription_provider(provider)
+        if subscription_provider is not None:
+            return subscription_provider.headers(api_key)
+    except Exception:
+        pass
     if provider == "chatgpt-subscription":
         from src.chatgpt_subscription import chatgpt_headers
         return chatgpt_headers(api_key)
@@ -428,12 +474,19 @@ def resolve_endpoint(
             ep = ep.first()
         if not ep:
             return fallback_url, fallback_model, fallback_headers
+        ep = _endpoint_snapshot(ep)
+    except Exception as e:
+        logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
+        return fallback_url, fallback_model, fallback_headers
+    finally:
+        db.close()
 
-        try:
-            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-        except Exception as e:
-            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
-            return fallback_url, fallback_model, fallback_headers
+    try:
+        base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+    except Exception as e:
+        logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+        return fallback_url, fallback_model, fallback_headers
+    try:
         chat_url = build_chat_url(base)
         headers = build_headers(api_key, base)
 
@@ -453,8 +506,6 @@ def resolve_endpoint(
     except Exception as e:
         logger.debug(f"Could not resolve {setting_prefix} endpoint: {e}")
         return fallback_url, fallback_model, fallback_headers
-    finally:
-        db.close()
 
 
 def _resolve_endpoint_by_id_with_descriptor(
@@ -483,11 +534,19 @@ def _resolve_endpoint_by_id_with_descriptor(
         ep = q.first()
         if not ep:
             return None
-        try:
-            base, api_key = resolve_endpoint_runtime(ep, owner=owner)
-        except Exception as e:
-            logger.warning("Could not resolve endpoint runtime credentials: %s", e)
-            return None
+        ep = _endpoint_snapshot(ep)
+    except Exception as e:
+        logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
+        return None
+    finally:
+        db.close()
+
+    try:
+        base, api_key = resolve_endpoint_runtime(ep, owner=owner)
+    except Exception as e:
+        logger.warning("Could not resolve endpoint runtime credentials: %s", e)
+        return None
+    try:
         chat_url = build_chat_url(base)
         headers = build_headers(api_key, base)
         m = (model or "").strip()
@@ -522,8 +581,6 @@ def _resolve_endpoint_by_id_with_descriptor(
     except Exception as e:
         logger.debug(f"Could not resolve endpoint {ep_id}: {e}")
         return None
-    finally:
-        db.close()
 
 
 def resolve_endpoint_by_id(

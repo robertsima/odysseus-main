@@ -130,3 +130,66 @@ async def test_global_feed_filters_by_owner_and_emits_heartbeats(data_dir):
     await asyncio.wait_for(task, timeout=2)
     titles = [json.loads(f[6:])["title"] for f in frames if f.startswith("data: ") and "title" in f]
     assert titles == ["alice sees this", "unowned is visible"]
+
+
+def test_a_parent_chat_finds_the_runs_of_the_workers_it_started(data_dir):
+    """The chat that launched a worker must be able to list that worker's run.
+
+    The run is filed under the WORKER's chat, but the agent strip above the
+    composer draws its rows from the parent's own feed and then reconciles them
+    against this list. A run the parent could not find was marked interrupted,
+    so sub-agents flashed up and vanished from the chat that started them.
+    """
+    act.run_started("worker-chat", "session", "Worker · audit", run_id="session-1", owner="alice",
+                    data={"parent_session": "parent-chat", "target_session": "worker-chat"})
+    act.run_started("other-chat", "session", "Unrelated worker", run_id="session-2", owner="alice",
+                    data={"parent_session": "someone-else", "target_session": "other-chat"})
+
+    from_parent = act.list_runs(session_id="parent-chat", active_only=True)
+    assert [r["run_id"] for r in from_parent] == ["session-1"]
+    assert from_parent[0]["session_id"] == "worker-chat"
+
+    # The worker's own chat still finds it, and an unrelated chat does not.
+    assert [r["run_id"] for r in act.list_runs(session_id="worker-chat")] == ["session-1"]
+    assert act.list_runs(session_id="parent-chat", active_only=True) != act.list_runs(session_id="other-chat")
+
+
+def test_a_status_event_from_the_parent_side_closes_the_run(data_dir):
+    act.run_started("worker-chat", "session", "Worker · audit", run_id="session-3", owner="alice",
+                    data={"parent_session": "parent-chat"})
+    assert act.get_run("session-3")["status"] == "running"
+
+    act.publish("parent-chat", "status", "Worker finished", source="session", run_id="session-3",
+                data={"status": "incomplete", "rounds_exhausted": True, "max_rounds": 6})
+
+    run = act.get_run("session-3")
+    assert run["status"] == "incomplete"
+    # The run still belongs to the worker's chat; the parent only closed it.
+    assert run["session_id"] == "worker-chat"
+    assert not act.list_runs(session_id="parent-chat", active_only=True)
+
+
+def test_the_global_feed_has_history_not_just_live_events(data_dir):
+    """"All sessions" in the Workbench showed nothing until something new happened.
+
+    `publish` appends to the originating session only, so the `*` key was never
+    a stored session and `history("*")` returned an empty list. `subscribe`
+    deliberately replays nothing for the global feed, so history is the only
+    thing that could have filled that scope.
+    """
+    act.publish("chat-a", "message", "first", source="odysseus")
+    act.publish("chat-b", "message", "second", source="session")
+    act.publish("chat-a", "message", "third", source="claude_code")
+
+    merged = act.history(act.GLOBAL_FEED, limit=50)
+
+    assert [ev["title"] for ev in merged] == ["first", "second", "third"]
+    assert {ev["session_id"] for ev in merged} == {"chat-a", "chat-b"}
+    # and a single session's history is unchanged
+    assert [ev["title"] for ev in act.history("chat-a")] == ["first", "third"]
+
+
+def test_global_history_is_bounded(data_dir):
+    for i in range(60):
+        act.publish(f"chat-{i % 5}", "note", f"event {i}", source="system")
+    assert len(act.history(act.GLOBAL_FEED, limit=10)) == 10

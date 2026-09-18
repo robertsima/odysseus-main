@@ -1,13 +1,20 @@
 // static/sw.js — Odysseus PWA Service Worker
 // Strategy:
-//   - HTML (navigation): stale-while-revalidate. Instant open from cache,
-//     background refresh so the next open has latest HTML.
+//   - HTML (navigation): network-first with a short timeout, cache fallback.
+//     The shell carries every module's `?v=` cache-buster, so serving it
+//     stale-while-revalidate meant each deploy showed up one reload late --
+//     and a fix that appears only on the *second* reload looks like no fix.
 //   - JS/CSS (/static/*.js|.css): network-first, cache fallback for offline.
 //     (So code/style edits show up on a normal reload, no manual cache clear.)
 //   - Other static assets (images/fonts/libs): cache-first with bg refresh.
 //   - API / non-GET: never cached.
 // Bump CACHE_NAME whenever the precache list or SW logic changes.
+<<<<<<< HEAD
 const CACHE_NAME = 'odysseus-v381-upstream-merge';
+=======
+const CACHE_NAME = 'odysseus-v388-fresh-shell';
+const SHELL_NETWORK_TIMEOUT_MS = 2500;
+>>>>>>> origin/dev
 
 // KaTeX resolves these from its own stylesheet, so caching the CSS without them
 // gives offline math fallback glyphs instead of proper typesetting.
@@ -42,7 +49,11 @@ const PRECACHE = [
   '/static/style.css',
   '/static/app.js',
   '/static/js/storage.js',
+<<<<<<< HEAD
   '/static/js/appConfig.js',
+=======
+  '/static/js/serverPrefs.js',
+>>>>>>> origin/dev
   '/static/js/ui.js',
   '/static/js/markdown.js',
   '/static/js/dragSort.js',
@@ -80,6 +91,8 @@ const PRECACHE = [
   '/static/js/notes.js',
   '/static/js/tasks.js',
   '/static/js/assistant.js',
+  '/static/js/agentsDashboard.js',
+  '/static/js/navOrder.js',
   '/static/js/calendar.js',
   '/static/js/calendar/utils.js',
   '/static/js/calendar/reminders.js',
@@ -190,18 +203,25 @@ self.addEventListener('fetch', (e) => {
   // Never touch API calls or non-GET.
   if (url.pathname.startsWith('/api/') || e.request.method !== 'GET') return;
 
-  // HTML navigation: stale-while-revalidate the app shell — but ONLY for the
-  // SPA root. Other navigations (e.g. a deep-linked /static/*.html page) must
-  // go to the network/static handlers below; otherwise every navigation was
+  // HTML navigation: network-first for the app shell — but ONLY for the SPA
+  // root. Other navigations (e.g. a deep-linked /static/*.html page) must go
+  // to the network/static handlers below; otherwise every navigation was
   // served the app index, replacing the page the user actually asked for.
+  // The cached copy is the fallback for offline or a slow network, not the
+  // first answer.
   if (e.request.mode === 'navigate' && url.pathname === '/') {
     e.respondWith(
       caches.open(CACHE_NAME).then(async cache => {
-        const cached = await cache.match('/');
         const network = fetch(e.request).then(res => {
           if (res && res.ok) cache.put('/', res.clone());
           return res;
-        }).catch(() => cached);
+        });
+        const timeout = new Promise(resolve => setTimeout(() => resolve(null), SHELL_NETWORK_TIMEOUT_MS));
+        try {
+          const res = await Promise.race([network, timeout]);
+          if (res) return res;
+        } catch (_) { /* offline: fall through */ }
+        const cached = await cache.match('/');
         return cached || network;
       })
     );

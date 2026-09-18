@@ -231,6 +231,7 @@
       }
     }
   </style>
+<<<<<<< HEAD
   <!-- KaTeX and Mermaid are vendored in /static/lib and pulled in by
        static/js/markdown.js the first time a page actually renders math or a
        ```mermaid fence. They used to load here from cdn.jsdelivr.net on every
@@ -248,6 +249,29 @@
   <link rel="stylesheet" href="/static/style.css?v=20260918upstreammerge1">
   <link rel="modulepreload" href="/static/app.js?v=20260918upstreammerge1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260918upstreammerge1">
+=======
+  <!-- KaTeX CSS is loaded with media="print" so it doesn't block render,
+       then flipped to "all" via JS after load. Mermaid init runs once the
+       library finishes loading. Both hooks are wired via addEventListener
+       below (inline onload= attrs are blocked by CSP script-src-attr). -->
+  <link id="katex-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" media="print">
+  <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
+  <script id="mermaid-script" async src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script nonce="{{CSP_NONCE}}">
+    (function(){
+      var k = document.getElementById('katex-css');
+      if (k) k.addEventListener('load', function(){ k.media = 'all'; }, { once: true });
+      var m = document.getElementById('mermaid-script');
+      if (m) m.addEventListener('load', function(){
+        if (window.odysseusInitMermaid) window.odysseusInitMermaid();
+      }, { once: true });
+    })();
+  </script>
+  <link rel="stylesheet" href="/static/style.css?v=20260916workspace2">
+  <link rel="stylesheet" href="/static/skill-import-review.css">
+  <link rel="modulepreload" href="/static/app.js?v=20260916workspace2">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260825ctxmeter1">
+>>>>>>> origin/dev
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -325,8 +349,27 @@
       </div>
     </div>
   </div>
-  <!-- Agents dashboard: full-page fleet view (js/agentsDashboard.js) -->
-  <div id="agents-dashboard" class="agents-dashboard" role="dialog" aria-label="Agents" hidden></div>
+  <!-- Agent Control Room: draggable/dockable fleet monitor (js/agentsDashboard.js) -->
+  <div id="agents-dashboard" class="modal agents-dashboard hidden" role="dialog" aria-labelledby="ag-window-title" aria-modal="false" tabindex="-1" hidden>
+    <div class="modal-content agents-modal-content">
+      <div class="modal-header agents-window-header">
+        <div class="ag-window-mark" aria-hidden="true">
+          <span class="ag-window-antenna"></span><i></i><i></i>
+        </div>
+        <div class="ag-window-title">
+          <h3 id="ag-window-title">Agent Control Room</h3>
+          <span id="ag-window-summary">Fleet telemetry and live controls</span>
+        </div>
+        <div class="ag-window-actions">
+          <button type="button" class="doc-action-icon-btn" id="ag-dock-left" title="Dock left" aria-label="Dock Agent Control Room left">&#9703;</button>
+          <button type="button" class="doc-action-icon-btn" id="ag-dock-right" title="Dock right" aria-label="Dock Agent Control Room right">&#9704;</button>
+          <button type="button" class="doc-action-icon-btn" id="ag-maximize" title="Fill workspace" aria-label="Maximize Agent Control Room">&#9635;</button>
+          <button type="button" class="modal-close" id="close-agents-dashboard" title="Close" aria-label="Close Agent Control Room">&times;</button>
+        </div>
+      </div>
+      <div id="agents-dashboard-body" class="agents-dashboard-body"></div>
+    </div>
+  </div>
   <div id="workbench-diff-modal" class="modal hidden">
     <div class="modal-content workbench-diff-content" role="dialog" aria-label="Diff" style="background:var(--bg)">
       <div class="modal-header"><h4 class="wb-popout-title">Diff</h4><button class="close-btn" id="close-workbench-diff-modal" aria-label="Close diff">✖</button></div>
@@ -415,7 +458,7 @@
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
               <h2 style="margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;color:var(--accent, var(--red));"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Add Skill</h2>
             </div>
-            <p class="memory-desc doclib-desc" style="margin-top:6px;">Import a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> (folder with <code>SKILL.md</code> and optional templates).</p>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">Preview a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a>, then import it as a draft. Instructions and supporting files are reviewed before use.</p>
             <div class="memory-add-row" style="margin-top:6px;margin-bottom:10px;">
               <div class="skill-ph-wrap" style="flex:1;min-width:0;">
                 <input type="url" id="skill-import-url" placeholder=" " class="memory-add-input skill-hint-input" aria-label="Skill import URL" />
@@ -1596,6 +1639,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
             <span>Users</span>
           </button>
+          <button class="settings-nav-item admin-only" data-settings-tab="capabilities">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 17.5h7M17.5 14v7"/></svg>
+            <span>Configuration</span>
+          </button>
           <button class="settings-nav-item admin-only" data-settings-tab="system">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v-.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>
             <span>System</span>
@@ -2607,7 +2654,7 @@
               <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
             </div>
             <h3 class="agent-profiles-title">Agent profiles</h3>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Named workers the agent can delegate to with <code>send_to_session</code> (<code>session_id: "new"</code>, <code>profile: "name"</code>). Each runs in its own chat with these instructions, an optional cheaper or stronger model (<code>model</code> or <code>model@endpoint</code>; empty = the calling chat's model), tools it may not use, and a round budget. Live workers show above the composer with Open and Stop.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. A preset can choose instructions, primary and fallback models, tool and skill allowlists, MCP/integration access, memory permissions, private-vault access, approval behavior, delegation policy, and worker limits. Apply one from the Agent Control Room; the selected agent receives its own editable copy.</div>
             <div id="set-agentProfiles" class="agent-profiles"></div>
             <div class="agent-profiles-actions">
               <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
@@ -2637,8 +2684,8 @@
                 <input id="set-ccDefaultRepo" type="text" placeholder="auto" class="settings-select" style="width:320px;">
               </div>
               <div class="settings-row">
-                <label class="settings-label">Max concurrent jobs</label>
-                <input id="set-ccConcurrency" type="text" inputmode="numeric" placeholder="2" class="settings-select" style="width:120px;">
+                <label class="settings-label" title="Shared across all chats. Each parent chat also has its own Child workers limit in Agents > Loadout; raising this provider ceiling does not change that limit.">Provider-wide concurrent jobs</label>
+                <input id="set-ccConcurrency" type="number" min="0" max="16" step="1" placeholder="Default" class="settings-select" style="width:120px;" aria-label="Provider-wide concurrent jobs; zero uses deployment default">
               </div>
               <div class="settings-row">
                 <label class="settings-label" title="Claude model alias passed with --model, e.g. sonnet or opus. Empty = Claude Code's own default.">Model</label>
@@ -2672,7 +2719,7 @@
           </div>
           <div class="admin-card" style="margin-bottom:12px;">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>Personal Documents</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Folders indexed for retrieval. <strong>Private</strong> content is only ever retrieved for sessions on an endpoint marked <em>local</em> — everything else is sent to whichever model the session uses.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Folders indexed into one retrieval store. <strong>Private</strong> content stays hidden unless you explicitly enable private-vault reads for that chat; once enabled, excerpts may be sent to the selected model endpoint.</div>
 
             <div class="admin-rag-upload-zone" id="adm-ragDropZone">
               <div class="admin-rag-icon">📄</div>
@@ -2704,6 +2751,15 @@
         </div>
 
         <!-- ═══ SYSTEM TAB ═══ -->
+        <!-- ═══ CAPABILITIES TAB ═══ -->
+        <!-- What this install can do, and the declared settings that configure
+             it. Rendered from /api/capabilities + /api/settings/schema by
+             js/capabilitiesPanel.js, so a newly declared setting gets a control
+             without this markup changing. -->
+        <div data-settings-panel="capabilities" class="hidden">
+          <div id="capabilities-panel-body" class="capabilities-panel"></div>
+        </div>
+
         <div data-settings-panel="system" class="hidden">
 
           <div class="admin-card" id="settings-system-logs-card">
@@ -2760,6 +2816,12 @@
                 <div class="settings-system-logs-placeholder">Initializing logs terminal viewer...</div>
               </div>
             </div>
+          </div>
+          <div class="admin-card">
+            <h2>Route Latency</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Per-route request timing. Refresh manually; this panel does not auto-poll.</div>
+            <div style="margin-bottom:8px;"><button type="button" class="admin-btn-sm" id="adm-routeLatencyRefresh">Refresh</button></div>
+            <div id="adm-routeLatencyList" class="settings-col"></div>
           </div>
           <div class="admin-card">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>Data Backup</h2>
@@ -2870,6 +2932,7 @@
 
 
 <!-- Load modules in this order -->
+<script src="/static/js/pluginCatalog.js"></script>
 <script type="module" src="/static/js/storage.js"></script>
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
@@ -2898,9 +2961,16 @@
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
+<<<<<<< HEAD
 <script type="module" src="/static/js/settings.js?v=20260918upstreammerge1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
 <script type="module" src="/static/app.js?v=20260918upstreammerge1"></script>  <!-- app.js must be LAST -->
+=======
+<script type="module" src="/static/js/settings.js?v=20260916workspace2"></script>
+<script type="module" src="/static/js/capabilitiesPanel.js?v=20260916workspace2"></script>
+<script type="module" src="/static/js/assistant.js"></script>
+<script type="module" src="/static/app.js?v=20260916workspace2"></script>  <!-- app.js must be LAST -->
+>>>>>>> origin/dev
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

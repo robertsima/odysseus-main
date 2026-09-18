@@ -1815,9 +1815,9 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
     + top-N senders/subjects, active todos."""
     try:
         from datetime import datetime as _dt, timedelta as _td
-        import json as _json
 
-        from core.database import SessionLocal, CalendarEvent, CalendarCal, Note
+        from core.database import SessionLocal, CalendarEvent, CalendarCal
+        from src.notes_store import STORE
         from routes.email_helpers import _imap_connect, _decode_header
 
         # ----- Calendar: today's events -----
@@ -1842,11 +1842,8 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
             if owner:
                 ev_q = owner_filter(ev_q, CalendarCal, owner, include_shared=_allow_null)
             events = ev_q.order_by(CalendarEvent.dtstart).all()
-            # ----- Notes: pinned + non-archived todos with at least one undone item -----
-            n_q = db.query(Note).filter(Note.archived == False)  # noqa: E712
-            if owner:
-                n_q = owner_filter(n_q, Note, owner, include_shared=_allow_null)
-            notes = n_q.all()
+            # ----- Notes: file-backed vault notes, owner-scoped -----
+            notes = STORE.list(owner or None, archived=False, allow_private=True)
         finally:
             db.close()
 
@@ -1892,8 +1889,7 @@ async def action_daily_brief(owner: str, **kwargs) -> Tuple[str, bool]:
         for n in notes:
             if n.note_type == "checklist" and n.items:
                 try:
-                    items = _json.loads(n.items)
-                    pending = [it.get("text", "") for it in items if not it.get("done")]
+                    pending = [item.text for item in n.items if not item.done]
                     for t in pending[:3]:
                         if t:
                             todo_lines.append(f"{n.title or 'Checklist'}: {t}")
@@ -1957,7 +1953,10 @@ async def action_test_skills(owner: str, **kwargs) -> Tuple[str, bool]:
             return "test_skills requires an owner on the task — refusing to run without scope.", False
 
         sm = SkillsManager(DATA_DIR)
-        skills = sm.load(owner=owner)
+        skills = [
+            skill for skill in sm.load(owner=owner)
+            if not (skill.get("source") == "imported" and skill.get("status") == "draft")
+        ]
         names = [s.get("name") for s in skills if s.get("name")]
         if not names:
             raise TaskNoop("no skills to test")
@@ -2090,6 +2089,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         names = [
             s.get("name") for s in skills
             if s.get("name") and not s.get("audit_verdict")
+            and not (s.get("source") == "imported" and s.get("status") == "draft")
         ]
         if not names:
             raise TaskNoop("no unaudited skills")
@@ -2145,10 +2145,9 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
     """
     try:
         import json as _json
-        import time as _time
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from pathlib import Path as _P
-        from core.database import SessionLocal as _SL, Note as _N
+        from src.notes_store import STORE
 
         # Per-owner state file so cache-pruning doesn't cross-delete other
         # users' entries (review C4). Legacy path kept as fallback so a
@@ -2191,14 +2190,8 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
         except Exception:
             cache = {}
 
-        db = _SL()
-        try:
-            q = db.query(_N).filter(_N.archived == False)  # noqa: E712
-            q = q.filter(_N.due_date.isnot(None), _N.due_date != "")
-            if owner:
-                # Match owner OR legacy null-owner notes (single-user installs).
-                q = owner_filter(q, _N, owner)
-            notes = q.all()
+        if True:
+            notes = [n for n in STORE.list(owner or None, archived=False, allow_private=True) if n.due_date]
             if not notes:
                 raise TaskNoop("no notes with due dates")
 
@@ -2237,11 +2230,8 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
                 # Items: list pending checklist entries inline.
                 if n.items:
                     try:
-                        items = _json.loads(n.items)
                         pending = [
-                            it.get("text", "")
-                            for it in items
-                            if not it.get("done") and not it.get("checked")
+                            it.text for it in n.items if not it.done and not it.extra.get("checked")
                         ]
                         if pending:
                             body_parts.append("Pending:\n" + "\n".join(f"- {t}" for t in pending[:8]))
@@ -2273,8 +2263,6 @@ async def action_ping_notes(owner: str, **kwargs) -> Tuple[str, bool]:
             preview = "; ".join(sent[:3])
             extra = f" (+{len(sent) - 3} more)" if len(sent) > 3 else ""
             return f"Pinged {len(sent)} note(s): {preview}{extra}", True
-        finally:
-            db.close()
     except TaskNoop:
         raise
     except Exception as e:
@@ -2332,10 +2320,8 @@ async def action_check_email_urgency(owner: str, **kwargs) -> Tuple[str, bool]:
         import json as _json
         import email as _email_mod
         import asyncio as _aio
-        import os as _os
         import re as _re
         import time as _time
-        import httpx
         from datetime import datetime as _dt, timedelta as _td
         from pathlib import Path as _P
         from core.database import SessionLocal as _SL, EmailAccount as _EA

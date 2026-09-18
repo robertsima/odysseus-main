@@ -21,7 +21,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "apply_patch", "todowrite",
              # Isolated agent worktree + human-gated publishing, and read-only
              # access to the app's own logs for self-debugging.
-             "manage_agent_worktree", "read_app_logs",
+             "manage_agent_worktree", "manage_git", "read_app_logs",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
              "search_chats", "search_documents", "recall_tool_output",
@@ -29,13 +29,15 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "send_to_session",
              "pipeline",
              "manage_session", "manage_memory", "list_models",
+             "manage_agent_loadout", "orchestrate_agents",
              "ui_control", "generate_image", "ask_user", "update_plan",
              "manage_tasks", "api_call", "ask_teacher", "manage_skills",
              "suggest_document",
              "manage_endpoints", "manage_mcp", "manage_webhooks",
              "manage_tokens", "manage_documents", "manage_settings",
              "manage_notes", "manage_calendar", "manage_wellbeing",
-             "resolve_contact", "manage_contact", "delegate_to_claude_code",
+             "resolve_contact", "manage_contact", "delegate_to_agent", "delegate_to_claude_code",
+             "message_agent",
              # Email tool names come from BUILTIN_EMAIL_TOOLS (unioned below)
              # so the fence regex, dispatch, and non-admin blocklist all cover
              # the same set.
@@ -55,6 +57,6 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # Generic loopback to any UI-button endpoint (cookbook,
              # gallery, email folders, etc.) — agent uses this when
              # there's no named tool wrapper for the action.
-             "app_api"} | BUILTIN_EMAIL_TOOLS
+             "app_api", "discover_tools"} | BUILTIN_EMAIL_TOOLS
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])

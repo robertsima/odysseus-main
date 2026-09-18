@@ -30,6 +30,97 @@ _BUILTIN_FUNCTION_CALLING_SERVERS = {
 }
 
 
+# ── How much MCP may stay bound on every turn ──
+#
+# `gated_tool_names` below decides which MCP tools have to WIN retrieval to be
+# sent and which are attached unconditionally. The original split was "builtin
+# catalog = gated, anything the user added = always bound", resting on the
+# stated assumption that a user-added server "is typically a handful of tools".
+# That assumption is what broke. On 2026-09-16 a turn that had selected 11
+# tools was sent 48: five connected servers contributed 37 unselected schemas,
+# 11,146 schema tokens, one firecrawl server accounting for 27 of them.
+#
+# The cost was not only tokens. The turn's own tools (`read_app_logs`, the file
+# tools) had not been selected, so the only callable things in its schema list
+# were those 37 always-bound strangers, and it spent six rounds steering a
+# design tool and a docs lookup at a "read the logs and fix the bug" request
+# before giving up in prose. An always-bound tool is not neutral ballast: it is
+# an active suggestion about what this turn is for.
+#
+# The guarantee itself is still right for a SMALL server -- it is what stops a
+# real, connected tool from vanishing the moment a follow-up message
+# ("continue", "now run it") fails to resemble its description. So keep it and
+# bound it, with two limits expressed in tools rather than tokens. Tools are
+# the unit the operator actually sees (the MCP settings list, the tool-index
+# count); token cost per schema varies several-fold with how verbose a server's
+# parameter prose is, so a token cap would demote different servers on
+# different days for reasons no one can see in the UI.
+#
+#   * Per server. A server larger than _MCP_ALWAYS_BOUND_SERVER_MAX_TOOLS is
+#     not "a handful the user wired up for this job"; it is an ambient catalog
+#     like the browser or GitHub ones, and is gated exactly like those.
+#   * In total. Ten six-tool servers flood a turn just as thoroughly as one
+#     sixty-tool server, so whatever survives the per-server rule is capped at
+#     _MCP_ALWAYS_BOUND_TOTAL_MAX_TOOLS and trimmed LARGEST SERVER FIRST.
+#     Largest-first frees the most schema budget per server that loses the
+#     guarantee, so the fewest servers lose it -- demoting three two-tool
+#     servers to save six schemas would break the guarantee three times over
+#     for a sixth of the benefit.
+#
+# The numbers, from the 2026-09-16 measurement of ~300 schema tokens per MCP
+# tool (11,146 / 37):
+#   8 tools  ~= 2.4k tokens. Comparable to one builtin tool group, and still
+#              affordable to waste on an 8k-context local model when the server
+#              turns out to be irrelevant to the turn. It also matches the
+#              observed shape of purpose-built servers (ntfy 2, context7 2,
+#              penpot 5, sequentialthinking 1) while excluding scraped-API
+#              catalogs (firecrawl 27).
+#   24 tools ~= 7k tokens, i.e. at most three max-size servers. Past this point
+#              MCP stops being an accessory to the builtin toolset and becomes
+#              the bulk of what the model is asked to choose from, which is the
+#              misrouting failure above.
+#
+# Demotion is deliberately the safe direction to be wrong in: a demoted tool is
+# still indexed and still retrievable (see `get_tool_descriptions_for_prompt`,
+# which feeds ToolIndex.index_mcp_tools for every connected server, gated or
+# not), so over-demoting costs a round of retrieval, while under-demoting costs
+# the whole turn. That asymmetry is also why the counts below are of DISCOVERED
+# tools: a server whose tools are mostly disabled counts small once the caller
+# passes its disabled map, and counts large otherwise, which is the cautious
+# reading.
+_MCP_ALWAYS_BOUND_SERVER_MAX_TOOLS = 8
+_MCP_ALWAYS_BOUND_TOTAL_MAX_TOOLS = 24
+
+
+def _always_bound_limits() -> Tuple[int, int]:
+    """(per-server cap, total cap) for unconditionally bound MCP tools.
+
+    Settings-overridable like the other agent budgets (cf. agent_loop's
+    `agent_input_token_budget`), for a host with a very large context window or
+    a deliberately MCP-centric setup. A missing or non-numeric value falls back
+    to the constant; a value <= 0 means "no cap for this dimension", which
+    restores the pre-2026-09-16 always-bind-everything behaviour for an
+    operator who knowingly wants it.
+    """
+    per_server = _MCP_ALWAYS_BOUND_SERVER_MAX_TOOLS
+    total = _MCP_ALWAYS_BOUND_TOTAL_MAX_TOOLS
+    try:
+        from src.settings import get_setting
+
+        per_server = int(get_setting(
+            "mcp_always_bound_server_max_tools", per_server,
+        ))
+        total = int(get_setting(
+            "mcp_always_bound_total_max_tools", total,
+        ))
+    except (ImportError, TypeError, ValueError):
+        # Settings unreadable (import cycle during early boot) or a hand-edited
+        # non-numeric value: the defaults are a working policy, an exception
+        # here would take the whole turn down.
+        return _MCP_ALWAYS_BOUND_SERVER_MAX_TOOLS, _MCP_ALWAYS_BOUND_TOTAL_MAX_TOOLS
+    return per_server, total
+
+
 def _model_visible_schema(schema: Any) -> Dict:
     """Remove dispatcher-injected arguments from a model-facing MCP schema."""
     if not isinstance(schema, dict):
@@ -207,10 +298,10 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
         else:
             read_hint = getattr(ann, "readOnlyHint", None)
             destructive = getattr(ann, "destructiveHint", None)
-    if read_hint is True:
-        return True
     if read_hint is False or destructive is True:
         return False
+    if read_hint is True:
+        return True
     # No usable hint — heuristic on the tool name's leading verb.
     name = (tool.get("name") or "").lower()
     return name.startswith(_MCP_READONLY_VERBS)
@@ -807,6 +898,30 @@ class McpManager:
                 logger.warning(f"MCP call failed for {qualified_name}, attempting reconnect: {detail}")
                 reconnected = await self._reconnect_server(server_id)
                 if reconnected:
+                    # Reconnecting and replaying are separate decisions. A dead
+                    # transport proves the call did not complete; otherwise only
+                    # read-only tools are safe to replay automatically.
+                    tool_meta = next(
+                        (t for t in self._tools.get(server_id, []) if t.get("name") == tool_name),
+                        None,
+                    )
+                    safe_to_replay = _is_dead_transport_error(e) or (
+                        tool_meta is not None and mcp_tool_is_readonly(tool_meta)
+                    )
+                    if not safe_to_replay:
+                        logger.error(
+                            f"MCP server {server_id} reconnected but '{tool_name}' was not "
+                            f"replayed (outcome of the failed call is unknown): {detail}"
+                        )
+                        return {
+                            "error": (
+                                f"MCP server '{server_id}' dropped the connection while running "
+                                f"'{tool_name}' ({detail}). The server has been reconnected, but this "
+                                "call was NOT retried automatically because it may have already taken "
+                                "effect. Check whether it already happened before calling it again."
+                            ),
+                            "exit_code": 1,
+                        }
                     session = self._sessions.get(server_id)
                     if session:
                         try:
@@ -1052,6 +1167,123 @@ class McpManager:
 
         return schemas
 
+    def _schema_bearing_tool_counts(
+        self, disabled_map: Optional[Dict[str, set]] = None
+    ) -> Dict[str, int]:
+        """{server_id: enabled tool count} for servers whose tools reach the
+        model as function schemas.
+
+        Mirrors the skip in `get_all_openai_schemas`: builtin PYTHON servers
+        speak the code-block format instead, never appear in the schema list,
+        and so cannot flood it -- they must not be counted against the
+        always-bound budget either, or a host with several of them would push
+        real MCP servers out for tokens nobody is spending.
+        """
+        counts: Dict[str, int] = {}
+        for server_id, tools in self._tools.items():
+            if self.is_builtin(server_id) and server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS:
+                continue
+            disabled = (disabled_map or {}).get(server_id, set())
+            counts[server_id] = sum(1 for t in tools if t["name"] not in disabled)
+        return counts
+
+    def demoted_servers(
+        self, disabled_map: Optional[Dict[str, set]] = None
+    ) -> List[Tuple[str, str, int]]:
+        """[(server_id, display name, tool count)] for user-added servers that
+        exceeded the always-bound budget and are now gated behind retrieval.
+
+        Ordered largest first -- the order they were demoted in. Separate from
+        `gated_tool_names` so the agent loop can name the decision in its
+        existing [agent-debug] line without re-deriving the rule; the two share
+        `_resolve_gating` so they can never disagree about who was demoted.
+        """
+        return self._resolve_gating(disabled_map)[1]
+
+    def _resolve_gating(
+        self, disabled_map: Optional[Dict[str, set]] = None
+    ) -> Tuple[Set[str], List[Tuple[str, str, int]]]:
+        """(gated qualified names, demoted server rows). See the budget notes
+        at the top of this module for the rule and the numbers behind it."""
+        per_server_cap, total_cap = _always_bound_limits()
+        counts = self._schema_bearing_tool_counts(disabled_map)
+
+        # The embedded catalogs are gated by identity, not by size: they ship
+        # with Odysseus, are relevant to a minority of turns, and were already
+        # behind retrieval before any budget existed. They are not "demoted" --
+        # nothing changed for them -- so they stay out of the demoted list and
+        # out of the budget arithmetic below.
+        candidates = {
+            sid: n for sid, n in counts.items()
+            if sid not in _BUILTIN_FUNCTION_CALLING_SERVERS
+        }
+
+        demoted_ids: List[str] = []
+        if per_server_cap > 0:
+            demoted_ids = [
+                sid for sid, n in sorted(candidates.items(), key=lambda kv: (-kv[1], kv[0]))
+                if n > per_server_cap
+            ]
+
+        if total_cap > 0:
+            remaining = {sid: n for sid, n in candidates.items() if sid not in demoted_ids}
+            bound = sum(remaining.values())
+            # Largest first; server_id breaks ties so two equally sized servers
+            # cannot swap places between rounds. The schema list is part of the
+            # cached prompt prefix, and a set-iteration-order tie-break would
+            # invalidate that cache at random.
+            for sid, n in sorted(remaining.items(), key=lambda kv: (-kv[1], kv[0])):
+                if bound <= total_cap:
+                    break
+                demoted_ids.append(sid)
+                bound -= n
+
+        gated: Set[str] = set()
+        for server_id, tools in self._tools.items():
+            if server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS and server_id not in demoted_ids:
+                continue
+            for tool in tools:
+                gated.add(f"mcp__{server_id}__{tool['name']}")
+
+        demoted = [
+            (sid, self._connections.get(sid, {}).get("name", sid), candidates.get(sid, 0))
+            for sid in demoted_ids
+        ]
+        return gated, demoted
+
+    def gated_tool_names(self, disabled_map: Optional[Dict[str, set]] = None) -> Set[str]:
+        """Qualified names of MCP tools that must still win RAG/intent-based
+        tool selection to appear in a turn's schema list.
+
+        Two groups land here.
+
+        The large embedded catalogs (browser, GitHub, Todoist, Lotus,
+        pi_worker) where showing every tool on every turn would flood small
+        models with ~30 irrelevant schemas (issue tracked alongside the
+        Terminus toolset swap).
+
+        And any user-added server that has outgrown the always-bound budget --
+        by itself or together with its peers. Everything under that budget
+        still binds unconditionally once connected, regardless of how the RAG
+        tool-selection heuristic scores the turn's wording, because that is
+        what stops a real, connected tool from silently disappearing the moment
+        a follow-up message ("continue", "now run it") does not semantically
+        resemble its description. See the budget notes at the top of this
+        module, and the root-cause note in
+        agent_loop._tool_schemas_for_round.
+
+        Gating is not hiding: a gated tool stays indexed (every connected
+        server is fed to ToolIndex via `get_tool_descriptions_for_prompt`), so
+        retrieval can still surface it, and that same prompt text tells the
+        model which servers are connected but not attached this turn.
+
+        ``disabled_map`` is optional and only sharpens the counts: a server
+        whose tools are mostly switched off is small in practice, and passing
+        the map lets it keep the always-bound guarantee it would otherwise
+        lose on its raw tool count.
+        """
+        return self._resolve_gating(disabled_map)[0]
+
     def get_all_tools(self, disabled_map: Optional[Dict[str, set]] = None) -> List[Dict]:
         """Return a flat list of all discovered tools with server info."""
         result = []
@@ -1066,9 +1298,108 @@ class McpManager:
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
                     "input_schema": _model_visible_schema(tool.get("input_schema")),
+                    # Preserve authoritative hints for downstream selection and
+                    # execution guards; names alone can misclassify MCP tools.
+                    "annotations": tool.get("annotations"),
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
+
+    def discover_requested_tools(
+        self,
+        query: str,
+        *,
+        disabled_map: Optional[Dict[str, set]] = None,
+        disabled_tools: Optional[Set[str]] = None,
+        allowed_servers: Optional[List[str]] = None,
+        enabled_tools: Optional[Set[str]] = None,
+        readonly: bool = False,
+        max_tools: int = 8,
+    ) -> Set[str]:
+        """Deterministically attach a small set from explicitly requested servers.
+
+        Large catalogs still use retrieval gating; mentioning a connected server
+        must not leave its useful tools dependent on embedding similarity alone.
+        This is a selection hint, NOT an authorization grant. Callers must pass
+        the same disabled/private-policy maps used by execution and schemas.
+
+        ``enabled_tools`` means deliberate per-agent selected bindings, not all
+        permitted tools. When supplied it is also an allowlist (including an
+        empty set), and those bindings have priority over query matches. A mere
+        server or tool mention only promotes read-only tools. Writes can only
+        enter here through explicit bindings, and ``readonly`` blocks those too.
+        Normal write-intent retrieval is unchanged elsewhere in the router.
+        """
+        if max_tools <= 0:
+            return set()
+
+        def normalize(value: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", str(value).lower()))
+
+        normalized_query = f" {normalize(query)} "
+        # A qualified tool's server id is not a request for its whole catalog.
+        server_text = re.sub(r"\bmcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+\b", " ", str(query))
+        server_query = f" {normalize(server_text)} "
+        query_words = set(normalized_query.split())
+
+        def mentioned(value: str, text: str = normalized_query) -> bool:
+            phrase = normalize(value)
+            return bool(phrase and f" {phrase} " in text)
+
+        generic = {"mcp", "server", "servers", "tool", "tools", "builtin"}
+
+        def server_mentioned(server_id: str, display_name: str) -> bool:
+            for label in (server_id, display_name):
+                words = normalize(label).split()
+                if not set(words) - generic:
+                    continue
+                # "bluesky-mcp" and "Bluesky MCP server" both match Bluesky,
+                # but a request merely mentioning "MCP" matches no catalog.
+                while words and words[0] in generic:
+                    words.pop(0)
+                while words and words[-1] in generic:
+                    words.pop()
+                if mentioned(label, server_query) or mentioned(" ".join(words), server_query):
+                    return True
+            return False
+
+        blocked = set(disabled_tools or ())
+        selected = set(enabled_tools) if enabled_tools is not None else None
+        allowed = set(allowed_servers) if allowed_servers is not None else None
+        candidates = []
+        for server_id, tools in self._tools.items():
+            conn = self._connections.get(server_id, {})
+            if conn.get("status") != "connected":
+                continue
+            if allowed is not None and "*" not in allowed and server_id not in allowed:
+                continue
+            if self.is_builtin(server_id) and server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS:
+                continue
+            requested_server = server_mentioned(server_id, conn.get("name", server_id))
+            disabled = (disabled_map or {}).get(server_id, set())
+            for tool in tools:
+                name = tool["name"]
+                qualified = f"mcp__{server_id}__{name}"
+                if name in disabled or qualified in disabled or qualified in blocked or name in blocked:
+                    continue
+                if selected is not None and qualified not in selected:
+                    continue
+                bound = selected is not None and qualified in selected
+                read_only = mcp_tool_is_readonly(tool)
+                if not read_only and (readonly or not bound):
+                    continue
+                exact_qualified = re.search(
+                    r"(?<![\w-])" + re.escape(qualified) + r"(?![\w-])", str(query), re.IGNORECASE,
+                ) is not None
+                exact = exact_qualified or (requested_server and mentioned(name))
+                if not (bound or exact or requested_server):
+                    continue
+                # Selected bindings, then exact tool names, then matching nouns
+                # from names. No description matching: untrusted marketing prose
+                # must not make an unrelated schema win this deterministic path.
+                overlap = len(set(normalize(name).split()) & query_words)
+                candidates.append((not bound, not exact, -overlap, qualified))
+        return {row[3] for row in sorted(candidates)[:max_tools]}
 
     def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.
@@ -1115,10 +1446,17 @@ class McpManager:
 
     def get_tool_descriptions_for_prompt(self, disabled_map: Optional[Dict[str, set]] = None) -> str:
         """Generate text describing MCP tools for the agent system prompt. Cached."""
+        # Which servers are connected but not attached this turn is part of the
+        # text (see the note emitted per server below), and it moves with the
+        # always-bound settings as well as with the tool inventory -- so it goes
+        # in the cache key, or a settings change would keep serving a prompt
+        # that contradicts the schemas actually being sent.
+        _demoted_ids = tuple(sid for sid, _name, _n in self.demoted_servers(disabled_map))
         cache_key = (
             frozenset((k, frozenset(v)) for k, v in (disabled_map or {}).items()),
             len(self._tools),
             self._generation,
+            _demoted_ids,
         )
         if self._cached_prompt_desc is not None and self._cached_prompt_desc_key == cache_key:
             return self._cached_prompt_desc
@@ -1149,6 +1487,36 @@ class McpManager:
             identity = self._connections.get(sid, {}).get("identity", "")
             label = f"{server_name} ({identity})" if identity else server_name
             lines.append(f"\n**{label}:**")
+            # Builtin catalogs are gated by identity on every turn, so they have
+            # exactly the same honesty problem a demoted server has: listed here
+            # under "you also have access to these", with no attached schema
+            # until retrieval surfaces one. Telling the model a tool is callable
+            # when it is not is what produces the "I do not have X" refusals this
+            # note exists to prevent, so both cases get it -- only the reason
+            # differs.
+            if sid in _demoted_ids or sid in _BUILTIN_FUNCTION_CALLING_SERVERS:
+                # A demoted server keeps its full listing here -- the model must
+                # be able to find out these tools EXIST, or the always-bound
+                # budget just reintroduces the vanishing bug one level down
+                # (and this same text is what ToolIndex embeds, so dropping it
+                # would also make the tools unretrievable). What it loses is the
+                # attached call schema, so say that plainly and say how to get
+                # it back. The phrasing is deliberate: naming the qualified tool
+                # and the words "do not have ... available" is exactly what the
+                # agent loop's missing-tool self-unblock listens for, and the
+                # targeted re-arm then matches the tool name verbatim. Reusing
+                # that existing path beats inventing a second one -- it already
+                # handles the identical case for the builtin catalogs.
+                _why = ("it is too large to attach to every turn"
+                        if sid in _demoted_ids
+                        else "this catalog is attached on demand")
+                lines.append(
+                    f"  (CONNECTED AND WORKING, but this server's {len(server_tools)} call "
+                    f"schemas are not attached this turn -- {_why}. Do NOT report these tools "
+                    "as unavailable to the user, and do NOT substitute an unrelated tool. To "
+                    "get one attached, state that you do not have the exact tool available, by "
+                    "its full mcp__ name, and it will be attached for the next round.)"
+                )
             for t in server_tools:
                 # One line per tool, truncated. A multi-line description
                 # ("Actions:\n- create: ...") otherwise reads as extra

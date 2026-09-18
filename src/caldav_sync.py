@@ -35,6 +35,8 @@ from urllib.parse import urlparse, urlunparse
 
 from sqlalchemy.exc import IntegrityError
 
+from core.log_safety import redact_url
+
 logger = logging.getLogger(__name__)
 
 # Pull window: 90 days back, 1 year forward. Keeps the REPORT cheap and
@@ -715,11 +717,95 @@ def _save_caldav_accounts(owner: str, accounts: list) -> None:
     _save_for_user(owner, prefs)
 
 
-def _refresh_google_caldav_token(owner: str, account_id: str, refresh_token: str) -> str | None:
+# --- Google OAuth token refresh -------------------------------------------
+#
+# Token-refresh outcomes, in the order callers care about. The distinction is
+# not cosmetic: a terminal failure will never fix itself, so it has to reach
+# the user, while a transient one must stay a quiet retry or every flaky
+# network minute turns into a "reconnect your calendar" scare.
+# The verdict taxonomy is shared with the mail transport — see
+# src/oauth_errors.py for why it does not live in either subsystem.
+from src.oauth_errors import (  # noqa: E402
+    TOKEN_OK, TOKEN_UNCONFIGURED, TOKEN_TERMINAL, TOKEN_TRANSIENT,
+    GOOGLE_TERMINAL_TOKEN_ERRORS, classify_google_token_failure,
+)
+
+_classify_google_token_failure = classify_google_token_failure
+
+# User-facing text for each terminal-ish case. Kept here so the sync response,
+# the write-back path and the /test probe all say the same thing.
+GOOGLE_REAUTH_REQUIRED = (
+    "Google Calendar access has expired or been revoked — reconnect the account in Settings"
+)
+GOOGLE_REFRESH_TRANSIENT = (
+    "Google Calendar token refresh failed temporarily — will retry on the next sync"
+)
+GOOGLE_OAUTH_UNCONFIGURED = (
+    "Google Calendar OAuth is not configured on this server — set "
+    "GOOGLE_OAUTH_CLIENT_ID and GOOGLE_OAUTH_CLIENT_SECRET"
+)
+
+
+def google_token_error_message(status: str) -> str:
+    """User-facing text for a non-OK ``TOKEN_*`` status.
+
+    Single source of truth for the three call sites that report a missing
+    Google token — the pull (sync_caldav), the push (caldav_writeback) and the
+    /test probe — so they cannot drift into saying different things about the
+    same failure.
+    """
+    if status == TOKEN_TRANSIENT:
+        return GOOGLE_REFRESH_TRANSIENT
+    if status == TOKEN_UNCONFIGURED:
+        return GOOGLE_OAUTH_UNCONFIGURED
+    return GOOGLE_REAUTH_REQUIRED
+
+
+
+def _mark_google_caldav_account(owner: str, account_id: str, *, needs_reconnect: bool) -> None:
+    """Persist (or clear) the "this Google account needs re-authorization" flag
+    on the stored caldav_accounts entry.
+
+    The sync response only tells whoever happened to call /sync. The flag is
+    what makes the dead account visible afterwards: routes/calendar_routes.py's
+    account listing folds it into ``needs_reconnect``, which the Settings card
+    already renders as "⚠ Needs reconnecting". Without it a revoked account
+    keeps advertising "✓ Connected via Google OAuth" forever.
+
+    Best-effort: prefs may be unwritable (read-only config, minimal test mock)
+    and a failure here must never sink an otherwise working sync.
+    """
+    try:
+        accounts = _load_caldav_accounts(owner)
+        changed = False
+        for acc in accounts:
+            if acc.get("id") != account_id:
+                continue
+            if needs_reconnect:
+                if not acc.get("oauth_needs_reconnect"):
+                    acc["oauth_needs_reconnect"] = True
+                    changed = True
+            elif acc.pop("oauth_needs_reconnect", None):
+                changed = True
+            break
+        if changed:
+            _save_caldav_accounts(owner, accounts)
+    except Exception:
+        logger.debug("Could not persist reconnect flag for account %s", account_id, exc_info=True)
+
+
+def _refresh_google_caldav_token_status(
+    owner: str, account_id: str, refresh_token: str
+) -> tuple[str | None, str]:
     """Exchange a stored refresh token for a new Google access token and
     persist it onto the matching caldav_accounts entry. Mirrors
     routes/email_helpers.py's ``_refresh_google_token`` but reads/writes the
-    prefs-stored caldav account list instead of the EmailAccount table."""
+    prefs-stored caldav account list instead of the EmailAccount table.
+
+    Returns ``(access_token, status)`` where status is one of the ``TOKEN_*``
+    constants. Callers use the status to decide whether to nag the user
+    (terminal) or stay quiet and retry (transient).
+    """
     import time as _time
 
     import httpx
@@ -729,7 +815,12 @@ def _refresh_google_caldav_token(owner: str, account_id: str, refresh_token: str
     client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
     client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
     if not client_id or not client_secret:
-        return None
+        # Server-side misconfiguration, not the user's credentials — don't tell
+        # them to reconnect an account that is fine.
+        logger.warning("Google Calendar refresh skipped: OAuth client is not configured")
+        return None, TOKEN_UNCONFIGURED
+
+    resp = None
     try:
         resp = httpx.post("https://oauth2.googleapis.com/token", data={
             "client_id": client_id,
@@ -741,8 +832,16 @@ def _refresh_google_caldav_token(owner: str, account_id: str, refresh_token: str
         data = resp.json()
         access_token = data["access_token"]
     except Exception:
-        logger.warning("Google Calendar token refresh failed for account %s", account_id)
-        return None
+        status, code = _classify_google_token_failure(resp)
+        # Never log the token, the refresh token or the client secret — the
+        # account id and the short OAuth error code are enough to debug with.
+        logger.warning(
+            "Google Calendar token refresh failed for account %s (%s%s)",
+            account_id, status, f": {code}" if code else "",
+        )
+        if status == TOKEN_TERMINAL:
+            _mark_google_caldav_account(owner, account_id, needs_reconnect=True)
+        return None, status
 
     expiry = str(int(_time.time()) + data.get("expires_in", 3600))
     accounts = _load_caldav_accounts(owner)
@@ -751,18 +850,29 @@ def _refresh_google_caldav_token(owner: str, account_id: str, refresh_token: str
         if acc.get("id") == account_id:
             acc["oauth_access_token"] = _enc(access_token)
             acc["oauth_token_expiry"] = expiry
+            # A working refresh clears any earlier terminal verdict — e.g. the
+            # user reconnected, or Google's 400 was a one-off after all.
+            acc.pop("oauth_needs_reconnect", None)
             found = True
             break
     if found:
         _save_caldav_accounts(owner, accounts)
-    return access_token
+    return access_token, TOKEN_OK
 
 
-def _get_valid_google_caldav_token(owner: str, acc: dict) -> str | None:
-    """Return a valid Google OAuth access token for a CalDAV account,
+def _refresh_google_caldav_token(owner: str, account_id: str, refresh_token: str) -> str | None:
+    """Back-compatible wrapper: the access token, or None on any failure."""
+    return _refresh_google_caldav_token_status(owner, account_id, refresh_token)[0]
+
+
+def _google_caldav_token_status(owner: str, acc: dict) -> tuple[str | None, str]:
+    """Return ``(access_token, status)`` for a Google-OAuth CalDAV account,
     refreshing via the stored refresh token if the cached one is missing or
-    expired. Returns None if the account was never connected via OAuth or the
-    refresh token has been revoked — callers surface that as "reconnect"."""
+    expired.
+
+    The status is what lets callers tell "reconnect this account" apart from
+    "the token endpoint was briefly unhappy" — see the ``TOKEN_*`` constants.
+    """
     import time as _time
 
     from src.secret_storage import decrypt as _dec
@@ -775,7 +885,7 @@ def _get_valid_google_caldav_token(owner: str, acc: dict) -> str | None:
     if access_token and expiry_str:
         try:
             if int(expiry_str) - 60 > _time.time():
-                return access_token
+                return access_token, TOKEN_OK
         except (ValueError, TypeError):
             pass
     try:
@@ -783,35 +893,68 @@ def _get_valid_google_caldav_token(owner: str, acc: dict) -> str | None:
     except Exception:
         refresh_token = ""
     if not refresh_token:
-        return None
-    return _refresh_google_caldav_token(owner, acc.get("id") or "", refresh_token)
+        # Never connected, or the token was cleared out. Same remedy as a
+        # revoked grant, so it is terminal too.
+        return None, TOKEN_TERMINAL
+    if acc.get("oauth_needs_reconnect"):
+        # A previous refresh got an invalid_grant. Re-asking Google produces the
+        # same 400 every sync, so short-circuit until the user reconnects.
+        return None, TOKEN_TERMINAL
+    return _refresh_google_caldav_token_status(owner, acc.get("id") or "", refresh_token)
+
+
+def _get_valid_google_caldav_token(owner: str, acc: dict) -> str | None:
+    """Return a valid Google OAuth access token for a CalDAV account, or None if
+    the account was never connected via OAuth or the refresh failed. Callers
+    that need to tell those apart use ``_google_caldav_token_status``."""
+    return _google_caldav_token_status(owner, acc)[0]
 
 
 async def sync_caldav(owner: str) -> dict:
     """Pull CalDAV state into local DB for `owner` across all configured accounts.
-    Returns aggregated counts + per-account errors."""
+
+    Returns aggregated counts, per-account error strings, and ``auth_errors`` —
+    the subset of failures that no amount of retrying will clear, as structured
+    ``{account_id, label, provider, message}`` entries. Callers that can only
+    afford to interrupt the user once (the calendar's background sync) watch
+    ``auth_errors``; everything else reads ``errors``.
+    """
     from src.secret_storage import decrypt
 
     accounts = _load_caldav_accounts(owner)
     if not accounts:
         return {
             "calendars": 0, "events": 0, "deleted": 0,
-            "errors": ["CalDAV is not configured"],
+            "errors": ["CalDAV is not configured"], "auth_errors": [],
         }
 
-    totals: dict = {"calendars": 0, "events": 0, "deleted": 0, "errors": []}
+    totals: dict = {"calendars": 0, "events": 0, "deleted": 0, "errors": [], "auth_errors": []}
     for acc in accounts:
         url = (acc.get("url") or "").strip()
         account_id = acc.get("id") or ""
-        label = acc.get("label") or url or account_id
+        # The label is echoed straight back to the UI, and a CalDAV URL can
+        # carry credentials in its userinfo (https://user:pass@host), so the
+        # URL fallback goes through redact_url first.
+        label = acc.get("label") or redact_url(url) or account_id
         is_google_oauth = acc.get("oauth_provider") == "google"
 
         if is_google_oauth:
-            token = _get_valid_google_caldav_token(owner, acc)
+            token, token_status = _google_caldav_token_status(owner, acc)
             if not token:
-                totals["errors"].append(
-                    f"{label}: Google Calendar needs reconnecting — sign in again from Settings"
-                )
+                # A dead grant and a hiccup at the token endpoint both land
+                # here, but they need opposite handling: only the first has to
+                # reach the user, and only it goes into auth_errors. (A server
+                # with no OAuth client at all is the operator's problem —
+                # reconnecting would fail the same way, so no prompt for it.)
+                message = google_token_error_message(token_status)
+                totals["errors"].append(f"{label}: {message}")
+                if token_status == TOKEN_TERMINAL:
+                    totals["auth_errors"].append({
+                        "account_id": account_id,
+                        "label": label,
+                        "provider": "google",
+                        "message": message,
+                    })
                 continue
             try:
                 url = validate_caldav_url(url)
@@ -876,8 +1019,19 @@ async def push_event_delete(owner: str, uid: str) -> dict:
 
 
 async def push_pending_events(owner: str) -> dict:
-    result = {"events": 0, "errors": []}
+    result: dict = {"events": 0, "errors": [], "auth_errors": []}
     uids, delete_uids = _pending_writeback_uids(owner)
+
+    def _note_auth_error(out: dict) -> None:
+        """Hoist a write-back's terminal-credential marker onto the aggregate,
+        de-duplicated by account: one dead account can fail every queued event
+        and the user only needs telling once."""
+        auth = (out or {}).get("auth_error")
+        if auth and not any(
+            e.get("account_id") == auth.get("account_id") for e in result["auth_errors"]
+        ):
+            result["auth_errors"].append(auth)
+
     for event_uid in uids:
         try:
             out = await push_event_update(owner, event_uid)
@@ -885,6 +1039,7 @@ async def push_pending_events(owner: str) -> dict:
                 result["events"] += 1
             elif not out.get("skipped"):
                 result["errors"].append(f"{event_uid}: {str(out.get('error') or out)[:160]}")
+                _note_auth_error(out)
         except Exception as e:
             logger.warning("CalDAV pending push failed for uid=%s: %s", event_uid, e)
             result["errors"].append(f"{event_uid}: {str(e)[:160]}")
@@ -895,6 +1050,7 @@ async def push_pending_events(owner: str) -> dict:
                 result["events"] += 1
             elif not out.get("skipped"):
                 result["errors"].append(f"{event_uid}: {str(out.get('error') or out)[:160]}")
+                _note_auth_error(out)
         except Exception as e:
             logger.warning("CalDAV pending delete failed for uid=%s: %s", event_uid, e)
             result["errors"].append(f"{event_uid}: {str(e)[:160]}")
@@ -910,10 +1066,28 @@ async def sync_caldav_direction(owner: str, direction: str = "pull") -> dict:
     if direction == "both":
         pushed = await push_pending_events(owner)
         pulled = await sync_caldav(owner)
-        return {"push": pushed, "pull": pulled}
+        # The nested {"push": ..., "pull": ...} shape this used to return had no
+        # top-level "errors" key, so routes/calendar_routes.py's
+        # `caldav_result.get("errors", [])` silently read an empty list and the
+        # endpoint reported a clean 200 over a failed sync. Flatten to the same
+        # contract the other directions use and keep the sub-results alongside
+        # it for callers that want the breakdown.
+        return {
+            "calendars": pulled.get("calendars", 0),
+            "events": pushed.get("events", 0) + pulled.get("events", 0),
+            "deleted": pulled.get("deleted", 0),
+            "errors": [
+                *(f"push: {err}" for err in pushed.get("errors", [])),
+                *pulled.get("errors", []),
+            ],
+            "auth_errors": [*pushed.get("auth_errors", []), *pulled.get("auth_errors", [])],
+            "push": pushed,
+            "pull": pulled,
+        }
     return {
         "calendars": 0,
         "events": 0,
         "deleted": 0,
         "errors": [f"Unsupported CalDAV sync direction: {direction}"],
+        "auth_errors": [],
     }

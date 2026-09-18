@@ -92,6 +92,42 @@ def test_dead_transport_errors_are_distinguished_from_tool_errors():
     assert _is_dead_transport_error(_ClosedResourceError())
     assert _is_dead_transport_error(BrokenPipeError())
     assert not _is_dead_transport_error(RuntimeError("tool said no"))
+
+
+def _connected(server_id: str, name: str, tool_names) -> McpManager:
+    mgr = McpManager()
+    mgr._tools = {
+        server_id: [
+            {"name": n, "description": f"{n} tool.", "input_schema": {}}
+            for n in tool_names
+        ]
+    }
+    mgr._connections = {server_id: {"status": "connected", "name": name, "identity": ""}}
+    return mgr
+
+
+def test_gated_tool_names_excludes_user_added_external_servers():
+    # Regression for the Penpot MCP incident: a user-added server (any id not
+    # in the hardcoded embedded-catalog set) must not be gated behind RAG/
+    # intent tool selection -- it's a handful of tools the user explicitly
+    # connected, not a large ambient catalog like the browser/GitHub ones.
+    # "A handful" is now enforced rather than assumed: a server that outgrows
+    # the always-bound budget IS gated. See the size-budget cases in
+    # tests/test_mcp_tool_binding.py; three tools is comfortably under it.
+    mgr = _connected("penpot", "Penpot", ["execute_code", "get_page", "list_boards"])
+    assert mgr.gated_tool_names() == set()
+
+
+def test_gated_tool_names_includes_large_embedded_catalogs():
+    # The browser (Playwright, ~30 tools) and similar embedded catalogs stay
+    # gated so a single semantic match doesn't flood a small model's schema
+    # list with every tool in that catalog.
+    mgr = _connected("builtin_browser", "Browser", ["click", "navigate", "screenshot"])
+    assert mgr.gated_tool_names() == {
+        "mcp__builtin_browser__click",
+        "mcp__builtin_browser__navigate",
+        "mcp__builtin_browser__screenshot",
+    }
     assert not _is_dead_transport_error(None)
 
 
@@ -158,6 +194,60 @@ def test_ordinary_tool_exception_is_not_retried_on_a_user_added_server():
     assert result["exit_code"] == 1
     assert "topic not found" in result["error"]
     assert len(calls) == 1
+
+
+def _connected_builtin_manager(server_id="email", tool_names=("send_email",)):
+    mgr = McpManager()
+    mgr._sessions[server_id] = object()
+    mgr._connections[server_id] = {"status": "connected", "name": "Built-in: Email"}
+    mgr._tools[server_id] = [
+        {"name": name, "description": f"{name} tool.", "input_schema": {}}
+        for name in tool_names
+    ]
+    return mgr
+
+
+def test_builtin_mutating_tool_is_not_replayed_after_an_ambiguous_failure():
+    mgr = _connected_builtin_manager()
+    calls = []
+
+    async def fake_do_call(session, tool_name, arguments):
+        calls.append(session)
+        raise RuntimeError("SMTP handshake timed out")
+
+    async def fake_reconnect(server_id):
+        mgr._sessions[server_id] = object()
+        return True
+
+    with patch.object(McpManager, "_do_call", side_effect=fake_do_call), \
+         patch.object(McpManager, "_reconnect_server", side_effect=fake_reconnect):
+        result = asyncio.run(mgr.call_tool("mcp__email__send_email", {"to": "a@b.com"}))
+
+    assert result["exit_code"] == 1
+    assert "NOT retried automatically" in result["error"]
+    assert len(calls) == 1
+
+
+def test_builtin_read_only_tool_is_replayed_after_an_ambiguous_failure():
+    mgr = _connected_builtin_manager(tool_names=("list_emails",))
+    calls = []
+
+    async def fake_do_call(session, tool_name, arguments):
+        calls.append(session)
+        if len(calls) == 1:
+            raise RuntimeError("connection reset")
+        return {"stdout": "[]", "stderr": "", "exit_code": 0}
+
+    async def fake_reconnect(server_id):
+        mgr._sessions[server_id] = object()
+        return True
+
+    with patch.object(McpManager, "_do_call", side_effect=fake_do_call), \
+         patch.object(McpManager, "_reconnect_server", side_effect=fake_reconnect):
+        result = asyncio.run(mgr.call_tool("mcp__email__list_emails", {}))
+
+    assert result["exit_code"] == 0
+    assert len(calls) == 2
 
 
 def test_dead_transport_error_reported_to_the_agent_is_actionable():

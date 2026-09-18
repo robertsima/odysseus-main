@@ -31,12 +31,17 @@ from src.tool_security import (
 from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
 from src.tool_approvals import ExactToolApproval
 from src.tool_policy import ToolPolicy
+<<<<<<< HEAD
 from src.constants import (
     MAX_OUTPUT_CHARS,
     MAX_READ_CHARS,
     MAX_DIFF_LINES,
     AGENT_WORKSPACE_DIR,
 )
+=======
+from src.private_access import effective_private_grant, private_tool_denial, tool_requires_private_grant
+from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
+>>>>>>> origin/dev
 from src.tool_utils import _truncate, get_mcp_manager
 
 
@@ -144,7 +149,7 @@ _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _S
 _SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
 
 
-def _is_sensitive_path(resolved: str) -> bool:
+def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
 
@@ -153,7 +158,9 @@ def _is_sensitive_path(resolved: str) -> bool:
     the lowercase form, so a case-sensitive check would let it slip past the
     deny-list in every file tool that relies on it.
     """
-    parts = [p.casefold() for p in resolved.split(os.sep)]
+    # Accept both separators so tests and model-supplied paths copied from a
+    # different platform cannot evade the deny-list on Windows.
+    parts = [p.casefold() for p in re.split(r"[\\\\/]", resolved)]
     filename = parts[-1] if parts else ""
 
     # Check if any path component is a sensitive directory.
@@ -166,12 +173,25 @@ def _is_sensitive_path(resolved: str) -> bool:
     # model could read a private note by absolute path and walk straight around
     # the RAG sensitivity filter. Blocking here covers the file tools only:
     # indexing and retrieval read from disk directly and never consult this
-    # function, so local models still search and cite private documents
-    # normally; they just cannot open them as files.
+    # function. An explicit per-chat grant is required for both retrieval and
+    # direct reads; merely using a local endpoint does not widen access.
     try:
-        from src.rag_sensitivity import path_is_under_private_directory
+        from src.rag_sensitivity import (
+            path_is_under_private_directory,
+            resolve_sensitivity,
+            vault_root,
+        )
 
-        if path_is_under_private_directory(resolved):
+        in_vault = False
+        try:
+            vault = os.path.realpath(vault_root())
+            in_vault = resolved == vault or os.path.commonpath([resolved, vault]) == vault
+        except (OSError, ValueError):
+            pass
+        if not allow_private and (
+            path_is_under_private_directory(resolved)
+            or (in_vault and resolve_sensitivity(resolved) == "private")
+        ):
             return True
     except Exception as e:  # never let a label lookup break file tools
         logger.warning("private-path check failed for %s: %s", resolved, e)
@@ -532,7 +552,7 @@ def _tool_path_roots() -> list[str]:
     return out
 
 
-def _resolve_tool_path(raw_path: str) -> str:
+def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
     """Resolve and confine a model-supplied path.
 
     Order of checks:
@@ -550,7 +570,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     ws = get_active_workspace()
     if ws:
         try:
-            return _resolve_tool_path_in_workspace(ws, raw_path)
+            return _resolve_tool_path_in_workspace(ws, raw_path, allow_private=allow_private)
         except ValueError:
             # The knowledge base is not "somewhere else on the host" — it is
             # the user's own indexed notes, reachable by these same tools when
@@ -561,13 +581,13 @@ def _resolve_tool_path(raw_path: str) -> str:
             # turn revoked everything else. Keep it reachable in both modes.
             # The sensitive/private deny-list below still applies, so a
             # directory the user labelled private stays closed either way.
-            return _resolve_personal_docs_path(raw_path)
+            return _resolve_personal_docs_path(raw_path, allow_private=allow_private)
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
     expanded = os.path.expanduser(str(raw_path).strip())
     resolved = os.path.realpath(expanded)
 
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -593,7 +613,7 @@ def _resolve_tool_path(raw_path: str) -> str:
     )
 
 
-def _resolve_personal_docs_path(raw_path: str) -> str:
+def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> str:
     """Resolve a path that must land inside the personal-documents tree.
 
     Used as the second chance when a workspace is bound: the workspace is the
@@ -609,7 +629,7 @@ def _resolve_personal_docs_path(raw_path: str) -> str:
     if not os.path.isabs(candidate) and root:
         candidate = os.path.join(root, candidate)
     resolved = os.path.realpath(candidate)
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -622,7 +642,7 @@ def _resolve_personal_docs_path(raw_path: str) -> str:
     return resolved
 
 
-def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
+def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private: bool = False) -> str:
     """Confine a model-supplied path to the active workspace.
 
     Layered on top of upstream's path policy: the workspace is the allowed
@@ -637,7 +657,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str) -> str:
     expanded = os.path.expanduser(str(raw_path).strip())
     candidate = expanded if os.path.isabs(expanded) else os.path.join(base, expanded)
     resolved = os.path.realpath(candidate)
-    if _is_sensitive_path(resolved):
+    if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
@@ -729,7 +749,7 @@ def get_mcp_manager():
 
 
 
-def _resolve_search_root(raw_path: str) -> str:
+def _resolve_search_root(raw_path: str, allow_private: bool = False) -> str:
     """Resolve + confine a code-nav path (grep/glob/ls).
 
     With a workspace active, the workspace folder is the default root. A bare
@@ -740,6 +760,7 @@ def _resolve_search_root(raw_path: str) -> str:
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
+<<<<<<< HEAD
         # Resolve the empty case as the workspace path rather than returning
         # it directly: returned unchecked it skipped both deny lists, so a
         # bare ls listed whatever the workspace was bound to.
@@ -751,6 +772,13 @@ def _resolve_search_root(raw_path: str) -> str:
             return default_root
         raise ValueError("default agent workspace is not a safe readable data subdirectory")
     return _resolve_tool_path(raw)
+=======
+        return os.path.realpath(ws) if not raw else _resolve_tool_path(raw, allow_private=allow_private)
+    if not raw:
+        roots = _tool_path_roots()
+        return roots[0] if roots else os.path.realpath(".")
+    return _resolve_tool_path(raw, allow_private=allow_private)
+>>>>>>> origin/dev
 
 logger = logging.getLogger(__name__)
 
@@ -760,9 +788,10 @@ _ADMIN_TOOLS = {
     # Touches the operator's git checkout and the publishing flow; log content
     # is operator-facing diagnostic data.
     "manage_agent_worktree",
+    "manage_git",
     "read_app_logs",
     # Runs an external coding agent against an approved repo checkout.
-    "delegate_to_claude_code",
+    "delegate_to_agent", "delegate_to_claude_code",
     "manage_endpoints",
     "manage_mcp",
     "manage_webhooks",
@@ -861,7 +890,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "manage_memory":  _parse_manage_memory,
 }
 
-
 # Primary argument key(s) for the legacy line-parsed tools. When a fenced
 # block's content is a JSON object carrying one of these keys, it's structured
 # inline args (the relaxed parser's ```web_search {"query": "..."}``` shape) —
@@ -906,11 +934,14 @@ async def _call_mcp_tool(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    session_id: Optional[str] = None,
+    owner: Optional[str] = None,
+    allow_private: bool = False,
 ) -> Dict:
     """Route a legacy tool call through the MCP manager, with direct fallbacks."""
     mcp = get_mcp_manager()
     if not mcp:
-        return await _direct_fallback(tool, content, progress_cb=progress_cb) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
+        return await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private) or {"error": f"MCP manager not available for tool '{tool}'", "exit_code": 1}
 
     server_id, tool_name = _MCP_TOOL_MAP[tool]
     qualified = f"mcp__{server_id}__{tool_name}"
@@ -919,7 +950,7 @@ async def _call_mcp_tool(
 
     # If MCP server not connected, try direct fallback
     if isinstance(result, dict) and result.get("exit_code") == 1 and "not connected" in result.get("error", ""):
-        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        fallback = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private)
         if fallback:
             return fallback
 
@@ -1037,12 +1068,64 @@ def _failure_detail(result: Any, limit: int = 200) -> str:
     return _redact_for_log(text) if text else ""
 
 
+_DELEGATION_INSPECTION_ACTIONS = frozenset({
+    "poll", "get", "cancel", "list", "status", "list_repositories", "repositories",
+})
+
+
+def _tool_action(content: Any, default: str = "") -> str:
+    """Read an action verb from a structured tool call without failing it."""
+    try:
+        args = json.loads(content) if isinstance(content, str) else content
+    except (TypeError, ValueError):
+        return default
+    if not isinstance(args, dict):
+        return default
+    return str(args.get("action") or default).strip().lower()
+
+
+def _capacity_limited_tool_call(tool: str, content: Any) -> bool:
+    """Whether this call may start new worker work.
+
+    ``delegate_*`` multiplexes inspection and lifecycle operations. Blocking a
+    poll/list/status behind a full worker limit traps the caller: it cannot
+    observe, cancel, or wait for the work occupying the slot.
+    """
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        return _tool_action(content, "run") not in _DELEGATION_INSPECTION_ACTIONS
+    return tool in {"send_to_session", "pipeline", "create_session"}
+
+
+def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any]:
+    available = max(0, limit - active)
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        next_step = (
+            f"inspect existing work with {tool} action='list' or action='poll', or cancel it if appropriate."
+        )
+    else:
+        next_step = "Wait for existing work to finish or cancel it before starting another worker."
+    return {
+        "error": (
+            f"Worker capacity reached: {active} active of this chat's limit {limit}. "
+            "This is the parent chat's Child workers limit, not the provider-wide concurrent-jobs setting. "
+            "Do not retry a start while capacity is unchanged; " + next_step
+        ),
+        "blocked": True,
+        "blocked_reason": "worker_capacity",
+        "capacity": {"limit": limit, "active": active, "available": available},
+        "capacity_scope": "parent_chat",
+        "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
+        "exit_code": 1,
+    }
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+    allow_private: bool = False,
 ) -> Optional[Dict]:
     _subproc_env = {
         **os.environ,
@@ -1059,6 +1142,10 @@ async def _direct_fallback(
             "subproc_env": _subproc_env,
             "session_id": session_id,
             "owner": owner,
+            "allow_private": bool(allow_private),
+            # Provider-neutral delegation still needs the concrete tool name
+            # for actionable, stable error prefixes.
+            "tool_name": tool,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -1076,6 +1163,7 @@ async def _document_tool_dispatch(
     content: str,
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
+<<<<<<< HEAD
     document_id: Optional[str] = None,
     document_version: Optional[int] = None,
     document_digest: Optional[str] = None,
@@ -1089,6 +1177,14 @@ async def _document_tool_dispatch(
         "expected_document_version": document_version,
         "expected_document_digest": document_digest,
     }
+=======
+    allow_private: bool = False,
+) -> Optional[Dict]:
+    """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
+    from src.agent_tools import TOOL_HANDLERS
+    ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private),
+           "tool_name": tool}
+>>>>>>> origin/dev
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
@@ -1106,12 +1202,18 @@ async def execute_tool_block(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
+<<<<<<< HEAD
     security_context: (
         ToolRunSecurityContext
         | _NoToolSecurityContext
         | _MissingToolSecurityContext
     ) = _MISSING_TOOL_SECURITY_CONTEXT,
     exact_approval: Optional[ExactToolApproval] = None,
+=======
+    allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
+>>>>>>> origin/dev
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1226,6 +1328,7 @@ async def execute_tool_block(
             owner=owner,
             progress_cb=progress_cb,
             tool_policy=tool_policy,
+<<<<<<< HEAD
             approved_document_id=(
                 exact_approval.pending.document_id
                 if approval_claimed
@@ -1241,6 +1344,11 @@ async def execute_tool_block(
                 if approval_claimed
                 else None
             ),
+=======
+            allow_private=allow_private,
+            delegation_authorized=delegation_authorized,
+            tool_discovery=tool_discovery,
+>>>>>>> origin/dev
         )
         if isinstance(security_context, ToolRunSecurityContext):
             security_context.observe_tool_result(
@@ -1260,9 +1368,15 @@ async def _execute_tool_block_impl(
     owner: Optional[str] = None,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
+<<<<<<< HEAD
     approved_document_id: Optional[str] = None,
     approved_document_version: Optional[int] = None,
     approved_document_digest: Optional[str] = None,
+=======
+    allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
+>>>>>>> origin/dev
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -1310,6 +1424,31 @@ async def _execute_tool_block_impl(
     # happened to emit.
     policy_names = email_tool_policy_names(tool)
 
+    # Global tool toggles can change during an agent turn (including through
+    # manage_settings itself), so the turn-start disabled_tools snapshot is not
+    # an execution-time authority. Read the small denylist directly, bypassing
+    # the ordinary settings TTL cache, and fail closed on malformed/unreadable
+    # policy. A missing settings file is the valid fresh-install empty policy.
+    try:
+        from src.settings import load_disabled_tools_strict
+        fresh_global_disabled = set(load_disabled_tools_strict())
+    except Exception:
+        logger.exception("Tool blocked because global tool policy could not be loaded: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": "The global capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+            "blocked": True,
+            "blocked_reason": "global_policy_unavailable",
+            "exit_code": 1,
+        }
+    if not policy_names.isdisjoint(fresh_global_disabled):
+        logger.info("Tool blocked by fresh global revocation: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": f"Tool '{tool}' is disabled by the current global settings.",
+            "blocked": True,
+            "blocked_reason": "fresh_global_disabled",
+            "exit_code": 1,
+        }
+
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
     # Return a helpful error so the model retries with the correct format.
@@ -1339,9 +1478,144 @@ async def _execute_tool_block_impl(
     # Reject tools that the user has disabled for this request
     if disabled_tools and not policy_names.isdisjoint(disabled_tools):
         desc = f"{tool}: BLOCKED"
+        if tool_requires_private_grant(tool) and allow_private is not True:
+            return desc, private_tool_denial(tool)
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
+
+    # Defense-in-depth for per-agent capability profiles. The prompt/schema
+    # layer hides disallowed capabilities; these checks also reject a stale or
+    # hand-written tool call so a running agent cannot bypass a profile change.
+    _agent_settings = {}
+    if session_id:
+        try:
+            from core.database import get_session_settings
+            _agent_settings = get_session_settings(session_id, strict=True) or {}
+        except Exception:
+            logger.warning("Tool blocked because session policy could not be loaded: session=%s tool=%s", session_id, tool)
+            return f"{tool}: BLOCKED", {
+                "error": "This chat's capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+                "blocked": True, "blocked_reason": "session_policy_unavailable", "exit_code": 1,
+            }
+    allow_private = effective_private_grant(
+        allow_private, _agent_settings if session_id else None,
+    )
+    if _agent_settings:
+        # Session settings are re-read for every call. A tool disabled after
+        # turn preparation must be revoked here before any handler (including
+        # turn-local discovery) can run; the incoming disabled_tools snapshot
+        # above intentionally cannot see such a mid-turn change.
+        _fresh_disabled = {
+            str(name) for name in (_agent_settings.get("disabled_tools") or ()) if name
+        }
+        if not policy_names.isdisjoint(_fresh_disabled):
+            logger.info("Tool blocked by fresh session revocation: session=%s tool=%s", session_id, tool)
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is disabled by this agent's current settings.",
+                "blocked": True,
+                "blocked_reason": "fresh_session_disabled",
+                "exit_code": 1,
+            }
+        if _agent_settings.get("workflow_readonly"):
+            if tool == "manage_skills":
+                try:
+                    _skill_action = str(json.loads(content).get("action", "")).lower()
+                except (ValueError, TypeError, AttributeError):
+                    _skill_action = ""
+                if _skill_action not in {"list", "index", "search", "view", "view_ref"}:
+                    return f"{tool}: BLOCKED", {"error": "Research workers may load skills, not modify them.", "exit_code": 1}
+            elif tool.startswith("mcp__"):
+                from src.mcp_manager import mcp_tool_is_readonly
+                _manager = get_mcp_manager()
+                _metadata = next((t for t in (_manager.get_all_tools() if _manager else [])
+                                  if t.get("qualified_name") == tool), None)
+                if _metadata is None or not mcp_tool_is_readonly(_metadata):
+                    return f"{tool}: BLOCKED", {"error": "Research workers may call only read-only MCP tools.", "exit_code": 1}
+        # An explicit allowlist remains binding when new MCP tools connect
+        # after the profile was saved; a snapshot denylist cannot do that.
+        _tool_access = _agent_settings.get("tool_access", "all")
+        _enabled = set(_agent_settings.get("enabled_tools") or [])
+        _discovery_selected_ok = tool == "discover_tools" and _tool_access == "selected" and bool(_enabled)
+        if _tool_access == "none" or (_tool_access == "selected" and policy_names.isdisjoint(_enabled) and not _discovery_selected_ok):
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is not in this agent's selected tool bindings.",
+                "exit_code": 1,
+            }
+        _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
+        if tool.startswith("mcp__") and isinstance(_allowed_mcp, list) and "*" not in _allowed_mcp:
+            _parts = tool.split("__", 2)
+            if len(_parts) == 3 and _parts[1] not in set(_allowed_mcp):
+                return f"{tool}: BLOCKED", {
+                    "error": f"MCP server '{_parts[1]}' is not enabled for this agent.",
+                    "exit_code": 1,
+                }
+
+        _memory_tool = tool == "manage_memory" or tool == "mcp__memory__manage_memory"
+        if _memory_tool:
+            _memory_access = str(_agent_settings.get("memory_access") or "write")
+            _memory_action = ""
+            try:
+                _memory_args = json.loads(content) if str(content).lstrip().startswith("{") else None
+                if isinstance(_memory_args, dict):
+                    _memory_action = str(_memory_args.get("action") or "").lower()
+            except Exception:
+                pass
+            if not _memory_action:
+                _memory_action = str(content or "").strip().split("\n", 1)[0].lower()
+            if _memory_access == "none" or (_memory_access == "read" and _memory_action not in {"list", "search"}):
+                return f"{tool}: BLOCKED", {
+                    "error": "This agent has read-only memory access; only list and search are allowed."
+                    if _memory_access == "read" else "Memory is disabled for this agent.",
+                    "exit_code": 1,
+                }
+
+        if tool in {"chat_with_model", "ask_teacher"} and _agent_settings.get("model_access") == "selected":
+            _allowed_models = {str(v).casefold() for v in (_agent_settings.get("allowed_models") or [])}
+            _requested_model = str(content or "").strip().split("\n", 1)[0]
+            try:
+                _model_args = json.loads(content) if str(content).lstrip().startswith("{") else None
+                if isinstance(_model_args, dict):
+                    _requested_model = str(_model_args.get("model") or _model_args.get("name") or _requested_model)
+            except Exception:
+                pass
+            if _requested_model.casefold() not in _allowed_models:
+                return f"{tool}: BLOCKED", {
+                    "error": f"Model '{_requested_model}' is not in this agent's model allowlist.",
+                    "exit_code": 1,
+                }
+
+        if tool == "manage_skills" and _agent_settings.get("skill_access") == "selected":
+            _allowed_skills = {str(v).casefold() for v in (_agent_settings.get("skill_names") or [])}
+            try:
+                _skill_args = json.loads(content) if str(content).lstrip().startswith("{") else {}
+            except Exception:
+                _skill_args = {}
+            _requested_skills = []
+            if isinstance(_skill_args, dict):
+                _requested_skills = _skill_args.get("names") or [_skill_args.get("name")]
+            _requested_skills = {str(v).casefold() for v in _requested_skills if v}
+            if not _requested_skills or not _requested_skills.issubset(_allowed_skills):
+                return f"{tool}: BLOCKED", {
+                    "error": "This agent may only load the skills selected in its capability profile.",
+                    "exit_code": 1,
+                }
+
+    # Capacity is a default policy, not an opt-in profile setting: an empty
+    # settings object still means one child at a time. Keep it outside the
+    # profile-only guards above, which intentionally do nothing for a plain
+    # chat, so that a missing settings row cannot bypass the limit.
+    if _capacity_limited_tool_call(tool, content):
+        from src.session_settings import effective_worker_limit
+        _limit = effective_worker_limit(_agent_settings)
+        from src import agent_control as _agent_control
+        _live_children = _agent_control.live_children(session_id)
+        if _limit <= 0 or _live_children >= _limit:
+            logger.info(
+                "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
+                tool, _tool_action(content, "run"), _live_children, _limit,
+            )
+            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
@@ -1368,6 +1642,51 @@ async def _execute_tool_block_impl(
             "exit_code": 1,
         }
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
+        return desc, result
+
+    # Discovery is handled only by the turn-local context supplied by the
+    # agent loop.  It runs after every hard/profile/admin gate above and has no
+    # fallback handler that could accidentally broaden authority.
+    if tool == "discover_tools":
+        if tool_discovery is None:
+            return "discover_tools: BLOCKED", {
+                "error": "Tool discovery is unavailable outside an active agent turn.",
+                "blocked": True,
+                "exit_code": 1,
+            }
+        try:
+            args = json.loads(content or "{}")
+        except (TypeError, ValueError):
+            return "discover_tools: invalid arguments", {"error": "Expected JSON arguments.", "exit_code": 1}
+        if not isinstance(args, dict) or not isinstance(args.get("query"), str):
+            return "discover_tools: invalid arguments", {"error": "A string query is required.", "exit_code": 1}
+        query = args["query"].strip()
+        max_results = args.get("max_results", 5)
+        if not query or len(query) > 500 or isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 8:
+            return "discover_tools: invalid arguments", {
+                "error": "query must contain 1-500 characters and max_results must be an integer from 1 to 8.",
+                "exit_code": 1,
+            }
+        fresh_settings = dict(_agent_settings)
+        runtime_disabled = set(disabled_tools or ()) | fresh_global_disabled
+        if not _owner_is_admin(owner):
+            runtime_disabled.update(_ADMIN_TOOLS)
+            runtime_disabled.update(name for name in getattr(tool_discovery, "_catalog", {}) if is_public_blocked_tool(name))
+        fresh_settings["_runtime_disabled_tools"] = sorted(runtime_disabled)
+        fresh_settings["private_vault_access"] = allow_private
+        result = await tool_discovery.discover(query, max_results, settings=fresh_settings)
+        return f"discover_tools: {query[:80]}", result
+
+    # Shell/Python are unrestricted subprocesses: unlike the dedicated file
+    # tools, they can read an absolute path (or walk the vault through a
+    # command substitution) before any local sensitivity resolver runs.  The
+    # per-chat private-vault grant is therefore a hard execution gate, not a
+    # prompt hint.  Keep this before the detached-background branch and before
+    # MCP dispatch so neither route can escape the same decision.
+    if tool_requires_private_grant(tool) and allow_private is not True:
+        desc = f"{tool}: BLOCKED"
+        result = private_tool_denial(tool)
+        logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
         return desc, result
 
 
@@ -1401,29 +1720,57 @@ async def _execute_tool_block_impl(
     # Route MCP-extracted tools through the MCP manager. Forward
     # the progress callback so long-running subprocess tools
     # (bash, python) can stream `tool_progress` events to the UI.
-    if tool in _MCP_TOOL_MAP:
+    # Filesystem reads/writes have a local sensitivity policy and must not be
+    # handed to an arbitrary MCP server before that policy runs. The native
+    # handlers receive the explicit private-read context below.
+    if tool in ("read_file", "write_file"):
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
-        result = await _call_mcp_tool(tool, content, progress_cb=progress_cb)
+        result = await _direct_fallback(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            allow_private=allow_private,
+        ) or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool in _MCP_TOOL_MAP:
+        first_line = _command_preview(content)
+        desc = f"{tool}: {first_line}"
+        result = await _call_mcp_tool(
+            tool,
+            content,
+            progress_cb=progress_cb,
+            session_id=session_id,
+            owner=owner,
+            allow_private=allow_private,
+        )
     elif tool in ("grep", "glob", "ls", "get_workspace"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"
-        result = await _direct_fallback(tool, content, progress_cb=progress_cb) \
+        result = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("apply_patch", "todowrite"):
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
+    elif tool == "manage_agent_loadout":
+        # Authors/starts worker loadouts; needs session_id to read the calling
+        # chat's own policy, which is the ceiling for anything it creates.
+        desc = f"manage_agent_loadout: {_command_preview(content, 60)}"
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
+            or {"error": "manage_agent_loadout: execution failed", "exit_code": 1}
     elif tool == "manage_bg_jobs":
         # Inspect/kill detached `bash` jobs; needs session_id to scope to chat.
         desc = f"manage_bg_jobs: {_command_preview(content)}"
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": "manage_bg_jobs: execution failed", "exit_code": 1}
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
         desc = f"{tool}: {_command_preview(content)}"
+<<<<<<< HEAD
         result = await _document_tool_dispatch(
             tool,
             content,
@@ -1433,6 +1780,9 @@ async def _execute_tool_block_impl(
             document_version=approved_document_version,
             document_digest=approved_document_digest,
         ) \
+=======
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
+>>>>>>> origin/dev
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
             desc = f"{tool}: {result.get('title', '')}"
@@ -1447,7 +1797,7 @@ async def _execute_tool_block_impl(
         # src/agent_tools/model_interaction_tools.py.
         first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("create_session", "list_sessions", "send_to_session", "manage_session"):
         # Migrated to the agent_tools registry (#3629): dispatched through
@@ -1455,7 +1805,7 @@ async def _execute_tool_block_impl(
         # live in src/agent_tools/session_tools.py.
         first_line = _command_preview(content, 60)
         desc = f"{tool}: {first_line}" if first_line else tool
-        result = await _document_tool_dispatch(tool, content, session_id, owner) \
+        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool in ("pipeline", "manage_memory", "ui_control"):
         from src.ai_interaction import dispatch_ai_tool
@@ -1473,11 +1823,11 @@ async def _execute_tool_block_impl(
     elif tool in ("manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "manage_settings"):
         # Registry-dispatched (agent_tools.admin_tools); owner threaded for ownership/admin checks.
         desc = tool
-        result = await _direct_fallback(tool, content, owner=owner) \
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "manage_notes":
         desc = "manage_notes"
-        result = await do_manage_notes(content, owner=owner)
+        result = await do_manage_notes(content, owner=owner, allow_private=allow_private)
     elif tool == "manage_wellbeing":
         # Defense in depth. The agent loop already strips this tool from the
         # prompt and schema set for an endpoint scope the owner has denied (see
@@ -1524,7 +1874,11 @@ async def _execute_tool_block_impl(
         result = await do_list_cached_models(content, owner=owner)
     elif tool == "app_api":
         desc = "app_api"
-        result = await do_app_api(content, owner=owner)
+        result = await do_app_api(
+            content,
+            owner=owner,
+            allow_private=allow_private,
+        )
     elif tool == "list_serve_presets":
         desc = "list_serve_presets"
         result = await do_list_serve_presets(content, owner=owner)
@@ -1541,7 +1895,7 @@ async def _execute_tool_block_impl(
         desc = "edit_image"
         result = await do_edit_image(content, owner=owner)
     elif tool == "edit_file":
-        result = await _direct_fallback(tool, content) or {"error": "edit failed", "exit_code": 1}
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) or {"error": "edit failed", "exit_code": 1}
         desc = result.get("output") or result.get("error") or "edit_file"
     elif tool == "trigger_research":
         desc = "trigger_research"
@@ -1555,10 +1909,10 @@ async def _execute_tool_block_impl(
     elif tool == "manage_contact":
         desc = "manage_contact"
         result = await do_manage_contact(content, owner=owner)
-    elif tool == "delegate_to_claude_code":
-        desc = "delegate_to_claude_code"
-        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner) \
-            or {"error": "delegate_to_claude_code: execution failed", "exit_code": 1}
+    elif tool in ("delegate_to_agent", "delegate_to_claude_code"):
+        desc = tool
+        result = await _direct_fallback(tool, content, session_id=session_id, owner=owner, allow_private=allow_private) \
+            or {"error": f"{tool}: execution failed", "exit_code": 1}
     elif tool == "vault_search":
         desc = "vault_search"
         result = await do_vault_search(content, owner=owner)
@@ -1641,10 +1995,18 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
 
 
+    elif tool == "orchestrate_agents":
+        from src.agent_tools.workflow_tools import OrchestrateAgentsTool
+        desc = tool
+        result = await OrchestrateAgentsTool().execute(content, {
+            "session_id": session_id, "owner": owner,
+            "allow_private": bool(allow_private),
+            "delegation_authorized": delegation_authorized,
+        })
     elif tool in dynamic_handlers:
         first_line = _command_preview(content)
         desc = f"registry: {tool} {first_line}".strip()
-        res = await _direct_fallback(tool, content, progress_cb=progress_cb)
+        res = await _direct_fallback(tool, content, progress_cb=progress_cb, session_id=session_id, owner=owner, allow_private=allow_private)
 
         if isinstance(res, tuple):
             desc, result = res
@@ -1677,13 +2039,21 @@ _FORMATTER_HANDLED_KEYS = {
     "stdout", "stderr", "exit_code", "content", "size",
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
-    "error", "output",
+    "error", "output", "delegation_state", "delegation_note",
 }
 
 
 def format_tool_result(description: str, result: Dict) -> str:
     """Format a tool result into text for feeding back to the LLM."""
     parts = [f"### {description}"]
+
+    # Provider output is evidence, but it may be an optimistic or stale text
+    # payload. Put the normalized local outcome ahead of raw stdout/output so
+    # the next agent round cannot mistake "started" prose for a confirmation.
+    if result.get("delegation_state"):
+        state = str(result["delegation_state"])
+        note = str(result.get("delegation_note") or "")
+        parts.append(f"**delegation:** `{state}`" + (f" — {note}" if note else ""))
 
     if "stdout" in result:
         if result["stdout"]:

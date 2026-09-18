@@ -29,6 +29,15 @@ let _viewMode = (typeof localStorage !== 'undefined' && localStorage.getItem('od
 let _showingArchived = false;
 let _selectMode = false;
 let _reminderTimer = null;
+let _panelMode = 'notes'; // 'notes' | 'vault'
+let _vaultTree = null;
+let _vaultFile = null;
+let _vaultLoading = false;
+let _vaultDirty = false;
+// Folders start collapsed and only open after a human toggles them. Keep that
+// explicit state across file loads/search rerenders without persisting it as a
+// surprising default for the next browser session.
+const _vaultExpandedFolders = new Set();
 // Tracks the global keydown listener so closePanel can remove it
 // (previously leaked one per openPanel; on multi-open sessions this
 // stacked dozens of identical handlers).
@@ -50,6 +59,8 @@ const REMINDER_DISMISSED_AT_KEY = 'odysseus-notes-reminder-dismissed-at';
 const NOTES_FIRST_OPEN_HINT_KEY = 'odysseus-notes-first-open-hint-v1';
 
 function _forceCloseNotesPanel() {
+  if (_panelMode === 'vault' && _vaultDirty
+      && !confirm('Discard the unsaved changes to this vault file?')) return;
   _open = false;
   _editingId = null;
   try { _commitOpenInPlaceEditor(); } catch {}
@@ -89,7 +100,7 @@ function _showNotesFirstOpenHint(pane) {
   hint.id = 'notes-first-open-hint';
   hint.className = 'tour-hint';
   hint.innerHTML = `
-    <div class="tour-hint-text"><b>Notes</b> is your basic todo list, and also where reminders are managed.</div>
+    <div class="tour-hint-text"><b>Notes</b> manages todos and reminders. Use <b>Vault files</b> to browse and edit every Markdown note in your mounted vault.</div>
     <button type="button" class="tour-hint-dismiss">OK</button>
   `;
   document.body.appendChild(hint);
@@ -487,6 +498,278 @@ async function _patchNote(id, patch) {
   });
   if (!res.ok) throw new Error('Failed to update note');
   return await res.json();
+}
+
+async function _fetchVaultTree() {
+  _vaultLoading = true;
+  try {
+    const res = await fetch(`${API_BASE}/api/personal/vault/tree`, { credentials: 'same-origin' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    _vaultTree = data.tree || null;
+  } catch (e) {
+    console.error('Failed to fetch vault tree:', e);
+    _vaultTree = { type: 'error', message: 'Could not load the vault. Check that its Docker path is mounted.' };
+  } finally {
+    _vaultLoading = false;
+  }
+}
+
+async function _openVaultFile(path) {
+  if (_vaultDirty && _vaultFile?.path !== path) {
+    const ok = uiModule?.styledConfirm
+      ? await uiModule.styledConfirm(
+        'Discard the unsaved changes to this vault file?',
+        { confirmText: 'Discard', danger: true },
+      )
+      : confirm('Discard the unsaved changes to this vault file?');
+    if (!ok) return;
+  }
+  _vaultLoading = true;
+  _renderVault();
+  try {
+    const res = await fetch(`${API_BASE}/api/personal/vault/file?path=${encodeURIComponent(path)}`, {
+      credentials: 'same-origin',
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || `HTTP ${res.status}`);
+    }
+    _vaultFile = await res.json();
+    _vaultDirty = false;
+  } catch (e) {
+    uiModule.showError(`Could not open vault file: ${e.message || e}`);
+  } finally {
+    _vaultLoading = false;
+    _renderVault();
+  }
+}
+
+async function _saveVaultFile() {
+  if (!_vaultFile?.path) return;
+  const editor = document.getElementById('vault-file-editor');
+  const save = document.getElementById('vault-file-save');
+  if (!editor || !save) return;
+  const draft = editor.value;
+  let saved = false;
+  save.disabled = true;
+  save.textContent = 'Saving…';
+  try {
+    const res = await fetch(`${API_BASE}/api/personal/vault/file`, {
+      method: 'PUT',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        path: _vaultFile.path,
+        content: draft,
+        modified: _vaultFile.modified ?? null,
+      }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    _vaultFile = { ..._vaultFile, ...data, content: draft };
+    _vaultDirty = false;
+    saved = true;
+    uiModule.showToast('Vault file saved');
+    await _fetchVaultTree();
+  } catch (e) {
+    uiModule.showError(`Could not save vault file: ${e.message || e}`);
+  } finally {
+    if (saved) {
+      _renderVault();
+    } else {
+      // Keep the failed draft in the textarea so a conflict or transient
+      // network error never destroys the human's edits.
+      save.disabled = false;
+      save.textContent = 'Save';
+    }
+  }
+}
+
+function _vaultNodeMatches(node, query) {
+  if (!query) return true;
+  if (node.type === 'file') return `${node.name} ${node.path}`.toLowerCase().includes(query);
+  return (node.children || []).some(child => _vaultNodeMatches(child, query));
+}
+
+function _vaultPolicyLabels(file) {
+  if (!file) return [];
+  const sensitivity = file.sensitivity === 'private' ? 'private' : 'public';
+  return file.readonly ? [sensitivity, 'readonly'] : [sensitivity];
+}
+
+function _vaultFileHtml(node, depth = 0, searchResult = false) {
+  const active = _vaultFile?.path === node.path ? ' active' : '';
+  // Public is the quiet default. Only exceptional access rules need a marker
+  // in the navigation tree; the selected file still shows its full policy in
+  // the editor header.
+  const policies = _vaultPolicyLabels(node).filter(policy => policy !== 'public');
+  const policyTags = policies.map(policy => {
+    const label = policy === 'readonly' ? 'Read only' : policy[0].toUpperCase() + policy.slice(1);
+    return `<i class="vault-policy-dot ${_attrEsc(policy)}" role="img" title="LLM policy: ${_attrEsc(label)}" aria-label="${_attrEsc(label)}"></i>`;
+  }).join('');
+  const icon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/></svg>';
+  const name = searchResult
+    ? `<span class="vault-search-file-name"><b>${_esc(node.name)}</b><small>${_esc(node.path)}</small></span>`
+    : `<span>${_esc(node.name)}</span>`;
+  return `<button type="button" class="vault-tree-file${searchResult ? ' vault-search-result' : ''}${active}" data-vault-file="${_attrEsc(node.path)}" style="--vault-indent:${depth * 20}px" title="${_attrEsc(node.path)}">${icon}${name}<span class="vault-policy-dots">${policyTags}</span></button>`;
+}
+
+function _vaultDescendantCount(node) {
+  if (!node) return 0;
+  if (node.type === 'file') return 1;
+  return (node.children || []).reduce((total, child) => total + _vaultDescendantCount(child), 0);
+}
+
+function _vaultTreeHtml(node, depth = 0) {
+  if (!node || node.type === 'error') return '';
+  if (node.type === 'file') return _vaultFileHtml(node, depth);
+  // The API root is a transport wrapper, not a useful navigation level. Show
+  // its children directly so users do not have to open "Vault" before they
+  // can reach the actual top-level folders.
+  if (depth === 0 && !node.path) {
+    return (node.children || []).map(child => _vaultTreeHtml(child, 0)).join('');
+  }
+  const visible = (node.children || []).map(child => _vaultTreeHtml(child, depth + 1)).join('');
+  if (!visible && depth > 0) return '';
+  const folderIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h7l2 2h9v11H3z"/></svg>';
+  const folderPath = node.path || '';
+  const open = _vaultExpandedFolders.has(folderPath) ? ' open' : '';
+  const count = _vaultDescendantCount(node);
+  return `<details class="vault-tree-folder" data-vault-folder="${_attrEsc(folderPath)}" style="--vault-indent:${depth * 20}px"${open}><summary title="${_attrEsc(folderPath || node.name || 'Vault')}">${folderIcon}<span>${_esc(node.name || 'Vault')}</span><small>${count}</small></summary>${visible}</details>`;
+}
+
+function _vaultSearchHtml(root) {
+  const matches = [];
+  const collect = (node) => {
+    if (!node) return;
+    if (node.type === 'file') {
+      if (_vaultNodeMatches(node, _searchQuery)) matches.push(node);
+      return;
+    }
+    (node.children || []).forEach(collect);
+  };
+  collect(root);
+  return matches.map(node => _vaultFileHtml(node, 0, true)).join('');
+}
+
+function _renderVault() {
+  if (_panelMode !== 'vault') return;
+  const body = document.querySelector('#notes-pane .notes-pane-body');
+  if (!body) return;
+  if (_vaultLoading && !_vaultTree) {
+    body.innerHTML = '<div class="vault-loading">Loading vault…</div>';
+    return;
+  }
+  if (_vaultTree?.type === 'error') {
+    body.innerHTML = `<div class="notes-empty">${_esc(_vaultTree.message)}</div>`;
+    return;
+  }
+
+  const treeHtml = _searchQuery ? _vaultSearchHtml(_vaultTree) : _vaultTreeHtml(_vaultTree);
+  const fileCount = _vaultDescendantCount(_vaultTree);
+  const policies = _vaultPolicyLabels(_vaultFile);
+  const policyText = policies.join(' + ');
+  const policyBadges = policies.map(policy => `<span class="vault-policy-badge ${_attrEsc(policy)}" title="This label limits LLM and agent access only">${_esc(policy)}</span>`).join('');
+  body.innerHTML = `
+    <div class="vault-browser">
+      <aside class="vault-tree-pane">
+        <div class="vault-tree-heading">
+          <span><b>${_searchQuery ? 'Search results' : 'Vault files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
+          <div class="vault-tree-actions">
+            ${!_searchQuery ? `<button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_vaultExpandedFolders.size ? '' : ' hidden'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>` : ''}
+            <button type="button" id="vault-tree-refresh" title="Refresh vault tree" aria-label="Refresh vault tree"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
+          </div>
+        </div>
+        <div class="vault-tree" aria-label="Vault file tree">${treeHtml || `<div class="vault-tree-empty">${_searchQuery ? 'No matching Markdown files' : 'No Markdown files found'}</div>`}</div>
+      </aside>
+      <section class="vault-editor-pane">
+        ${_vaultFile ? `
+          <div class="vault-editor-header">
+            <div class="vault-editor-title"><b>${_esc(_vaultFile.name || _vaultFile.path)}</b><small>${_esc(_vaultFile.path)}</small></div>
+            <span class="vault-policy-badges">${policyBadges}</span>
+            <button type="button" id="vault-file-save" class="vault-save-btn"${_vaultDirty ? '' : ' disabled'}>Save</button>
+          </div>
+          <div class="vault-human-note">You can edit this file. ${_esc(policyText)} applies to LLMs and agents, not your UI access.</div>
+          <textarea id="vault-file-editor" spellcheck="true" aria-label="Markdown file editor"></textarea>
+        ` : `
+          <div class="vault-editor-empty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
+            <b>Select a Markdown file</b>
+            <span>Private, readonly and public are model policies. Your signed-in UI can open and edit all mounted files.</span>
+          </div>
+        `}
+      </section>
+    </div>`;
+
+  const editor = document.getElementById('vault-file-editor');
+  if (editor && _vaultFile) {
+    editor.value = _vaultFile.content || '';
+    editor.addEventListener('input', () => {
+      _vaultDirty = editor.value !== (_vaultFile.content || '');
+      const save = document.getElementById('vault-file-save');
+      if (save) save.disabled = !_vaultDirty;
+    });
+    editor.addEventListener('keydown', (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        _saveVaultFile();
+      }
+    });
+  }
+  document.getElementById('vault-file-save')?.addEventListener('click', _saveVaultFile);
+  document.getElementById('vault-tree-refresh')?.addEventListener('click', async () => {
+    await _fetchVaultTree();
+    _renderVault();
+  });
+  document.getElementById('vault-tree-collapse')?.addEventListener('click', () => {
+    _vaultExpandedFolders.clear();
+    _renderVault();
+  });
+  body.querySelectorAll('[data-vault-folder]').forEach(folder => {
+    folder.addEventListener('toggle', () => {
+      const path = folder.dataset.vaultFolder || '';
+      if (folder.open) _vaultExpandedFolders.add(path);
+      else _vaultExpandedFolders.delete(path);
+      const collapse = document.getElementById('vault-tree-collapse');
+      if (collapse) collapse.hidden = _vaultExpandedFolders.size === 0;
+    });
+  });
+  body.querySelectorAll('[data-vault-file]').forEach(button => {
+    button.addEventListener('click', () => _openVaultFile(button.dataset.vaultFile));
+  });
+}
+
+async function _setPanelMode(mode) {
+  const nextMode = mode === 'vault' ? 'vault' : 'notes';
+  if (_panelMode === 'vault' && nextMode !== 'vault' && _vaultDirty) {
+    await _saveVaultFile();
+    if (_vaultDirty) return;
+  }
+  _panelMode = nextMode;
+  const pane = document.getElementById('notes-pane');
+  pane?.classList.toggle('notes-vault-mode', _panelMode === 'vault');
+  pane?.querySelectorAll('[data-notes-mode]').forEach(button => {
+    button.classList.toggle('active', button.dataset.notesMode === _panelMode);
+    button.setAttribute('aria-selected', button.dataset.notesMode === _panelMode ? 'true' : 'false');
+  });
+  ['notes-archive-toggle', 'notes-view-toggle', 'notes-select-btn'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = _panelMode === 'vault';
+  });
+  document.getElementById('notes-bulk-bar')?.classList.toggle('hidden', _panelMode === 'vault' || !_selectMode);
+  const search = document.getElementById('notes-search');
+  if (search) {
+    search.value = '';
+    search.placeholder = _panelMode === 'vault' ? 'Filter vault files…' : 'Search notes…';
+  }
+  _searchQuery = '';
+  if (_panelMode === 'vault') {
+    if (!_vaultTree) await _fetchVaultTree();
+    _renderVault();
+  } else {
+    _renderNotes();
+  }
 }
 
 // ---- Helpers ----
@@ -1149,6 +1432,7 @@ export function openPanel() {
   }
   _open = true;
   _editingId = null;
+  _panelMode = 'notes';
   _searchQuery = '';
   _clearViewedReminderGlows();
   _firedDotDismissedAt = Date.now();
@@ -1194,6 +1478,11 @@ export function openPanel() {
         <span class="notes-header-btn-label">Toggle</span>
       </button>
       <button id="notes-minimize-btn" class="modal-minimize-btn" title="Minimize" aria-label="Minimize notes" style="position:relative;left:2px;"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.4" stroke-linecap="round" aria-hidden="true"><line x1="6" y1="18" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="notes-mode-tabs" role="tablist" aria-label="Notes view">
+      <button type="button" class="active" data-notes-mode="notes" role="tab">Notes</button>
+      <button type="button" data-notes-mode="vault" role="tab">Vault files</button>
+      <span>Human access · LLM policies shown as badges</span>
     </div>
     <div class="notes-search-bar">
       <input type="text" id="notes-search" class="memory-search-input" placeholder="Search notes…" autocomplete="off" />
@@ -1265,9 +1554,14 @@ export function openPanel() {
   if (searchEl) {
     searchEl.addEventListener('input', () => {
       _searchQuery = searchEl.value.trim().toLowerCase();
-      _renderNotes();
+      if (_panelMode === 'vault') _renderVault();
+      else _renderNotes();
     });
   }
+
+  pane.querySelectorAll('[data-notes-mode]').forEach(button => {
+    button.addEventListener('click', () => _setPanelMode(button.dataset.notesMode));
+  });
 
   // View toggle
   const archiveBtn = document.getElementById('notes-archive-toggle');
@@ -1630,6 +1924,8 @@ function _ensureNotesChipRegistered() {
 // Any other call (close button, programmatic) is a full close.
 export function closePanel(direction) {
   if (!_open) return;
+  if (_panelMode === 'vault' && _vaultDirty
+      && !confirm('Discard the unsaved changes to this vault file?')) return;
   _open = false;
   _editingId = null;
   _clearViewedReminderGlows();

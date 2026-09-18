@@ -526,6 +526,15 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             "brave_api_key", "google_pse_key", "google_pse_cx",
             "tavily_api_key", "serper_api_key", "app_public_url",
         }
+        # These keys define the boundary protecting private note content. An
+        # agent may use the resulting grant, but it must not declassify the
+        # vault or point the vault elsewhere through its generic settings tool.
+        # The human-owned Settings UI remains the authority for these values.
+        _PRIVACY_POLICY_KEYS = {
+            "vault_directory",
+            "vault_default_sensitivity",
+            "vault_folder_sensitivity",
+        }
         def _is_secret(k):
             # `token` must be a suffix, not a substring: otherwise the int
             # setting `agent_input_token_budget` (which even has a "token budget"
@@ -659,6 +668,14 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             key = _resolve(raw)
             if not _is_managed_key(key):
                 return {"error": f"Unknown setting '{raw}'. Use action='list' to see available settings.", "exit_code": 1}
+            if key in _PRIVACY_POLICY_KEYS:
+                return {
+                    "response": (
+                        f"'{key}' controls the private-vault security boundary and "
+                        "can only be changed by the user in Settings."
+                    ),
+                    "exit_code": 0,
+                }
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential/secret. For security I can't set it from chat. Open Settings and set it there.", "exit_code": 0}
             # Structured settings (dicts/lists like keybinds or vision fallbacks)
@@ -692,6 +709,14 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             key = _resolve(args.get("key", ""))
             if not _is_managed_key(key):
                 return {"error": f"Unknown setting '{args.get('key')}'.", "exit_code": 1}
+            if key in _PRIVACY_POLICY_KEYS:
+                return {
+                    "response": (
+                        f"'{key}' controls the private-vault security boundary and "
+                        "can only be changed by the user in Settings."
+                    ),
+                    "exit_code": 0,
+                }
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential. Reset it in the panel.", "exit_code": 0}
             s = load_settings()

@@ -49,6 +49,14 @@ _RETRIEVAL_QUERY_MAX_CHARS = 2400
 _DYNAMIC_CONTEXT_MAX_RATIO = 0.20
 _DYNAMIC_CONTEXT_MAX_TOKENS = 12_000
 _DYNAMIC_CONTEXT_RESPONSE_RESERVE = 512
+_EXPLICIT_GROUNDED_CONTEXT_RE = re.compile(
+    r"\b(?:document|doc|draft|file|attachment|upload|pdf|note|report|pinned|knowledge\s*base|rag|vault)\b",
+    re.IGNORECASE,
+)
+_SHORT_CORRECTIVE_FEEDBACK_RE = re.compile(
+    r"^\s*(?:wtf+|what\s+the\s+f+u+c+k+|come\s+on|seriously|bruh+)\s*[!?.,]*\s*$",
+    re.IGNORECASE,
+)
 
 
 def _is_casual_low_signal(text: str) -> bool:
@@ -62,6 +70,28 @@ def _is_casual_low_signal(text: str) -> bool:
         return False
     tail_words = re.findall(r"[A-Za-z0-9_'-]+", tail)
     return len(tail_words) <= 2
+
+
+def should_skip_ambient_document_context(message: str, history: list[dict[str, Any]]) -> bool:
+    """True for feedback turns that should not query or inject document context.
+
+    Explicit document/vault language always wins. This gate only covers ambient
+    context: a visible editor pointer and automatic personal-document RAG. It
+    does not affect attachments, explicitly requested documents, or pinned
+    memory semantics.
+    """
+    text = str(message or "").strip()
+    if not text or _EXPLICIT_GROUNDED_CONTEXT_RE.search(text):
+        return False
+    try:
+        from src.intent_assessment import assess_request, is_contextual_reference
+        assessment = assess_request(history or [], latest_text=text)
+        contextual_feedback = is_contextual_reference(history or [], text)
+        low_information = assessment.low_signal and not assessment.continuation
+    except Exception:
+        contextual_feedback = False
+        low_information = False
+    return bool(contextual_feedback or low_information or _SHORT_CORRECTIVE_FEEDBACK_RE.fullmatch(text))
 
 
 def _text_content(content: Any) -> str:
@@ -324,6 +354,13 @@ class ChatContext:
     # retained only when explicit foreground fallbacks are enabled so each
     # concrete candidate can apply its own context budget independently.
     route_messages: list = field(default_factory=list)
+    # Explicit per-chat grant for private vault retrieval/file reads. False is
+    # the fail-closed default and is carried into agent tool execution.
+    allow_private: bool = False
+    # The latest turn is corrective/method feedback rather than a request for
+    # document grounding. The route uses this to avoid even loading a passive
+    # editor document; personal-document RAG is already disabled here.
+    suppress_active_document: bool = False
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -816,6 +853,7 @@ async def build_chat_context(
     defer_context_shaping: bool = False,
     continuation_context_message: str | None = None,
     persist_user_message: bool = True,
+    allow_private: Optional[bool] = None,
 ) -> ChatContext:
     """Build the full context (preface + messages) for an LLM call.
 
@@ -891,7 +929,8 @@ async def build_chat_context(
 
     # Use RAG?
     use_rag_val = (str(use_rag).lower() != "false") if use_rag is not None else True
-    if incognito or not allow_tool_preprocessing or is_research_spinoff or casual_low_signal:
+    explicit_rag = use_rag is not None and str(use_rag).strip().lower() == "true"
+    if incognito or not allow_tool_preprocessing or is_research_spinoff or (casual_low_signal and not explicit_rag):
         use_rag_val = False
 
     # If pre-fetched search context was provided (compare mode), skip live web search
@@ -901,6 +940,12 @@ async def build_chat_context(
     # The stream path uses enhanced_message (with CoT/preprocessing applied),
     # the sync path uses text_for_context.
     _history_for_retrieval = _incognito_messages(session_id) if incognito else sess.get_context_messages()
+    suppress_ambient_documents = should_skip_ambient_document_context(
+        preprocessed.text_for_context, _history_for_retrieval,
+    )
+    suppress_document_rag = suppress_ambient_documents and not explicit_rag
+    if suppress_document_rag:
+        use_rag_val = False
     _retrieval_query, _retrieval_mode = build_retrieval_query(
         preprocessed.text_for_context,
         _history_for_retrieval,
@@ -928,7 +973,16 @@ async def build_chat_context(
         incognito=incognito,
         use_skills=skills_enabled,
     )
-    if use_rag is not None or is_research_spinoff or casual_low_signal:
+    if allow_private is None:
+        try:
+            from src.private_access import allows_private_vault
+
+            allow_private = allows_private_vault(session_id)
+        except Exception:
+            allow_private = False
+    allow_private = bool(allow_private)
+    _preface_kwargs["allow_private"] = allow_private
+    if use_rag is not None or is_research_spinoff or casual_low_signal or suppress_document_rag:
         _preface_kwargs["use_rag"] = use_rag_val
     preface, rag_sources, web_sources = chat_processor.build_context_preface(**_preface_kwargs)
 
@@ -1040,6 +1094,8 @@ async def build_chat_context(
         auto_opened_docs=auto_opened_docs,
         uploaded_files=uploaded_files,
         route_messages=route_messages,
+        allow_private=allow_private,
+        suppress_active_document=suppress_ambient_documents,
     )
 
 
@@ -1410,6 +1466,51 @@ async def _run_extraction_jobs_sequentially(session_id: str, jobs: list, max_wai
             logger.warning("[bg-extract] %s extraction job failed for session %s", name, session_id, exc_info=True)
 
 
+def _session_allows_memory_writes(session_id: str) -> bool:
+    """Fail closed when the per-session memory permission is unavailable."""
+    try:
+        from core.database import get_session_settings
+        return str(
+            (get_session_settings(session_id) or {}).get("memory_access") or "write"
+        ) == "write"
+    except Exception:
+        logger.warning(
+            "[bg-extract] could not resolve memory access for session %s; "
+            "skipping automatic memory writes",
+            session_id,
+            exc_info=True,
+        )
+        return False
+
+
+def _snapshot_session_for_extraction(sess, *, limit: int = 12):
+    """Freeze only bounded, human-relevant evidence for delayed extractors."""
+    import copy
+    from services.memory.extraction_context import conversation_for_extraction
+
+    getter = getattr(sess, "get_context_messages", None)
+    if callable(getter):
+        raw = getter()
+    else:
+        raw = []
+        for message in list(getattr(sess, "history", []) or []):
+            if isinstance(message, dict):
+                raw.append(dict(message))
+            elif callable(getattr(message, "to_dict", None)):
+                raw.append(message.to_dict())
+    recent = conversation_for_extraction(raw, limit=limit)
+    snapshot = copy.copy(sess)
+    # Keep authoritative turn accounting and identity/ownership from the real
+    # session, but do not duplicate a potentially enormous mutable history.
+    snapshot.message_count = int(
+        getattr(sess, "message_count", 0) or len(getattr(sess, "history", []) or [])
+    )
+    snapshot.history = []
+    frozen = copy.deepcopy(recent)
+    snapshot.get_context_messages = lambda: copy.deepcopy(frozen)
+    return snapshot
+
+
 def run_post_response_tasks(
     sess,
     session_manager,
@@ -1451,7 +1552,31 @@ def run_post_response_tasks(
     # Memory extraction — only every 4th message pair to avoid excess LLM calls
     _msg_count = len(sess.history) if hasattr(sess, 'history') else 0
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
-    if allow_background_extraction and not incognito and not compare_mode and _should_extract and uprefs.get("auto_memory", True):
+    _memory_candidate = (allow_background_extraction and not incognito and not compare_mode
+                         and _should_extract and uprefs.get("auto_memory", True))
+    # Resolve session permissions only when memory extraction would otherwise
+    # dispatch; ordinary turns pay neither a DB lookup nor a snapshot cost.
+    _memory_eligible = bool(
+        _memory_candidate and _session_allows_memory_writes(session_id)
+    )
+
+    auto_skills_enabled = bool(uprefs.get("auto_skills", True))
+    _skill_eligible = bool(
+        extract_skills and allow_background_extraction and auto_skills_enabled
+        and not incognito and not compare_mode
+        and (agent_rounds >= 2 or agent_tool_calls >= 2)
+        and skills_manager is not None
+    )
+
+    # Extraction runs later. Snapshot only when at least one extractor will
+    # actually dispatch, and only after filtering so trailing runtime/tool
+    # envelopes cannot push real user turns outside the bounded window.
+    _extraction_sess = (
+        _snapshot_session_for_extraction(sess, limit=12)
+        if (_memory_eligible or _skill_eligible) else None
+    )
+
+    if _memory_eligible:
         from services.memory.memory_extractor import extract_and_store
         from src.task_endpoint import resolve_task_candidates
         t_candidates = resolve_task_candidates(
@@ -1463,7 +1588,7 @@ def run_post_response_tasks(
             else (sess.endpoint_url, sess.model, sess.headers)
         )
         _extraction_jobs.append(("memory", extract_and_store(
-            sess, memory_manager, memory_vector,
+            _extraction_sess, memory_manager, memory_vector,
             t_url, t_model, t_headers,
             llm_candidates=t_candidates,
         )))
@@ -1471,7 +1596,6 @@ def run_post_response_tasks(
     # Skill extraction from complex agent runs. Only when the user actually
     # chose agent mode — not a chat we auto-escalated for a notes/calendar
     # intent, and never in incognito/compare.
-    auto_skills_enabled = bool(uprefs.get("auto_skills", True))
     # Quiet by default — full gate/dispatch/start trace runs at DEBUG so
     # users can re-enable diagnostics with LOG_LEVEL=DEBUG when something
     # silently breaks. INFO-level only shows the outcome inside
@@ -1482,12 +1606,29 @@ def run_post_response_tasks(
         extract_skills, auto_skills_enabled, incognito, compare_mode,
         agent_rounds, agent_tool_calls, "set" if skills_manager else "MISSING",
     )
-    if (
-        extract_skills
-        and allow_background_extraction
-        and auto_skills_enabled
-        and not incognito
-        and not compare_mode
+    if _skill_eligible:
+        from services.memory.skill_extractor import maybe_extract_skill
+        from src.task_endpoint import resolve_task_candidates
+        s_candidates = resolve_task_candidates(
+            sess.endpoint_url, sess.model, sess.headers, owner=owner,
+        )
+        s_url, s_model, s_headers = (
+            s_candidates[0]
+            if s_candidates
+            else (sess.endpoint_url, sess.model, sess.headers)
+        )
+        logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
+        _extraction_jobs.append(("skill", maybe_extract_skill(
+            _extraction_sess, skills_manager,
+            s_url, s_model, s_headers,
+            agent_rounds, agent_tool_calls,
+            owner=owner,
+            llm_candidates=s_candidates,
+            tool_events=(last_metrics or {}).get("tool_events"),
+        )))
+    elif (
+        extract_skills and allow_background_extraction and auto_skills_enabled
+        and not incognito and not compare_mode
         and (agent_rounds >= 2 or agent_tool_calls >= 2)
     ):
         if skills_manager is None:
@@ -1495,25 +1636,6 @@ def run_post_response_tasks(
                 "[skill-extract] gate PASSED but skills_manager is None — "
                 "extraction skipped. (Bug: caller didn't pass skills_manager.)"
             )
-        else:
-            from services.memory.skill_extractor import maybe_extract_skill
-            from src.task_endpoint import resolve_task_candidates
-            s_candidates = resolve_task_candidates(
-                sess.endpoint_url, sess.model, sess.headers, owner=owner,
-            )
-            s_url, s_model, s_headers = (
-                s_candidates[0]
-                if s_candidates
-                else (sess.endpoint_url, sess.model, sess.headers)
-            )
-            logger.debug("[skill-extract] dispatching extractor (model=%s)", s_model)
-            _extraction_jobs.append(("skill", maybe_extract_skill(
-                sess, skills_manager,
-                s_url, s_model, s_headers,
-                agent_rounds, agent_tool_calls,
-                owner=owner,
-                llm_candidates=s_candidates,
-            )))
 
     if _extraction_jobs:
         _spawn_bg(_run_extraction_jobs_sequentially(session_id, _extraction_jobs))

@@ -486,6 +486,22 @@ def _host_key(url: str) -> str:
     s = urlsplit(url)
     return f"{s.scheme}://{s.netloc}" if s.scheme and s.netloc else url
 
+def _connect_reason(exc: BaseException) -> str:
+    """A non-empty description of a connect failure.
+
+    httpx raises ConnectError/ConnectTimeout with an empty str() for several
+    common cases (notably a refused or reset TCP connect), which logged as
+    "stream connect to https://… failed:  — transient, will retry" and told the
+    operator nothing. Fall back to the exception type, and its cause, so the
+    line always names something.
+    """
+    msg = str(exc).strip()
+    if msg:
+        return msg
+    cause = exc.__cause__ or exc.__context__
+    detail = str(cause).strip() if cause is not None else ""
+    return f"{type(exc).__name__}{f': {detail}' if detail else ' (no detail)'}"
+
 def _is_host_dead(url: str) -> bool:
     key = _host_key(url)
     with _host_health_lock:
@@ -1077,6 +1093,17 @@ def _detect_provider(url: str) -> str:
         return "nvidia"
     if _host_match(url, "moonshot.ai") or _host_match(url, "moonshot.cn"):
         return "moonshot"
+    # Subscription providers are registered independently of this transport
+    # module. Keep the established direct fallback below for legacy installs,
+    # but let the registry be the source of truth when available.
+    try:
+        from src.subscription import provider_for_url
+
+        subscription_provider = provider_for_url(url)
+        if subscription_provider is not None:
+            return subscription_provider.provider_id
+    except Exception:
+        pass
     from src.chatgpt_subscription import is_chatgpt_subscription_base
     if is_chatgpt_subscription_base(url):
         return "chatgpt-subscription"
@@ -1845,9 +1872,17 @@ def _anthropic_rejects_temperature(model: str) -> bool:
 
 # Reasoning effort level sent to Mistral thinking-capable models. Mistral's
 # API accepts "high", "medium", "low", "none" — see
-# https://docs.mistral.ai/capabilities/reasoning/. Override via env var
-# ODYSSEUS_MISTRAL_REASONING_EFFORT (e.g. set to "medium" for cheaper chat).
-_MISTRAL_REASONING_EFFORT = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
+# https://docs.mistral.ai/capabilities/reasoning/. The Settings value is the
+# primary control; the env var remains a compatibility fallback for old hosts.
+from src.settings import get_setting_or_env as _get_setting_or_env
+
+_MISTRAL_REASONING_EFFORT = str(
+    _get_setting_or_env(
+        "mistral_reasoning_effort", "ODYSSEUS_MISTRAL_REASONING_EFFORT", "high"
+    )
+).strip().lower()
+if _MISTRAL_REASONING_EFFORT not in {"high", "medium", "low", "none"}:
+    _MISTRAL_REASONING_EFFORT = "high"
 
 # Models that support structured thinking — may output </think> without opening tag
 _THINKING_MODEL_PATTERNS = (
@@ -2559,13 +2594,44 @@ def dedupe_model_candidates(candidates):
     return out
 
 
+# Statuses where trying the next candidate cannot help and actively hurts.
+# 401/403 means the stored credential was rejected: the operator has to
+# reconnect the provider, and hammering the rest of the chain with the same
+# expired cookie just multiplies the rejections (and, for shared credentials,
+# risks the upstream treating it as abuse). 400/422 means *we* built a bad
+# request — the next model will reject it identically. Failing fast keeps the
+# actionable "reconnect the provider" error intact instead of burying it behind
+# a later candidate's generic timeout.
+_TERMINAL_FALLBACK_STATUSES = frozenset({400, 401, 403, 422})
+
+
+def _is_terminal_fallback_error(exc: Exception) -> bool:
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status in _TERMINAL_FALLBACK_STATUSES
+
+
+def is_expected_upstream_failure(exc: Exception) -> bool:
+    """True for upstream conditions whose message is already the whole story.
+
+    Expired credentials, rate limits and unreachable hosts are operating states,
+    not defects: the formatted message names the cause and the fix. Background
+    enrichment (memory/skill extraction, tagging) hits them once per run for as
+    long as the condition lasts, so callers use this to log one clean line
+    instead of a stack trace per occurrence — which is what buried the real
+    signal in the 2026-09-15 logs. Anything else stays a traceback.
+    """
+    status = getattr(exc, "status_code", None)
+    return isinstance(status, int) and status in {401, 403, 429, 502, 503, 504}
+
+
 def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
     """Sync `llm_call` with an ordered fallback chain.
 
     `candidates` is a list of (url, model, headers). The first one that returns
     without an exception wins. Connection / 5xx-style failures fall through to
-    the next candidate. The dead-host cooldown inside `llm_call` makes repeat
-    attempts at an offline primary effectively free.
+    the next candidate; rejected credentials and malformed requests do not (see
+    `_TERMINAL_FALLBACK_STATUSES`). The dead-host cooldown inside `llm_call`
+    makes repeat attempts at an offline primary effectively free.
     """
     cands = dedupe_model_candidates(candidates)
     if not cands:
@@ -2577,6 +2643,12 @@ def llm_call_with_fallback(candidates, messages, **kwargs) -> str:
         except Exception as e:
             last_err = e
             tag = "primary" if i == 0 else "candidate"
+            if _is_terminal_fallback_error(e):
+                logger.warning(
+                    f"[fallback] {tag} {model} failed with HTTP {e.status_code}; "
+                    "not retryable on another candidate"
+                )
+                raise
             logger.warning(f"[fallback] {tag} {model} failed ({type(e).__name__}); trying next")
             continue
     raise last_err if last_err else HTTPException(503, "All fallback candidates failed")
@@ -2594,6 +2666,12 @@ async def llm_call_async_with_fallback(candidates, messages, **kwargs) -> str:
         except Exception as e:
             last_err = e
             tag = "primary" if i == 0 else "candidate"
+            if _is_terminal_fallback_error(e):
+                logger.warning(
+                    f"[fallback] {tag} {model} failed with HTTP {e.status_code}; "
+                    "not retryable on another candidate"
+                )
+                raise
             logger.warning(f"[fallback] {tag} {model} failed ({type(e).__name__}); trying next")
             continue
     raise last_err if last_err else HTTPException(503, "All fallback candidates failed")
@@ -2913,7 +2991,7 @@ async def llm_call_async(
             _cooled = _mark_host_dead(target_url)
             duration = time.time() - start
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"LLM async connect to {target_url} failed after {duration:.2f}s: {e}{_tail}")
+            logger.warning(f"LLM async connect to {target_url} failed after {duration:.2f}s: {_connect_reason(e)}{_tail}")
             if _cooled or attempt >= max_retries:
                 raise HTTPException(503, f"Cannot reach {_host_key(target_url)}: {e}")
             await asyncio.sleep(LLMConfig.RETRY_DELAY)
@@ -3113,7 +3191,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             payload["tool_choice"] = "none"
         # Mistral thinking-capable models — send reasoning_effort so Mistral
         # activates thinking mode and returns structured reasoning_content.
-        # Effort level is configurable via ODYSSEUS_MISTRAL_REASONING_EFFORT
+        # Effort level is configurable via Settings (legacy env fallback).
         # (high / medium / low / none); default "high".
         if provider == "mistral" and _supports_thinking(model):
             payload["reasoning_effort"] = _MISTRAL_REASONING_EFFORT
@@ -3363,7 +3441,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {e}{_tail}")
+            logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
@@ -3461,7 +3539,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Ollama stream connect to {target_url} failed: {e}{_tail}")
+            logger.warning(f"Ollama stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
@@ -3624,7 +3702,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             _cooled = _mark_host_dead(target_url)
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-            logger.warning(f"Anthropic stream connect to {target_url} failed: {e}{_tail}")
+            logger.warning(f"Anthropic stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
@@ -3955,7 +4033,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     except (httpx.ConnectError, httpx.ConnectTimeout) as e:
         _cooled = _mark_host_dead(target_url)
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
-        logger.warning(f"Stream connect to {target_url} failed: {e}{_tail}")
+        logger.warning(f"Stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
         yield _connect_error_chunk(target_url)
     except httpx.ReadTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
