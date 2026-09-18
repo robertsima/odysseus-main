@@ -31,6 +31,9 @@ const STATUS = {
   // not a failure — without this entry pill() fell through to the raw status
   // word with no class at all.
   incomplete: ['Out of rounds', 'warn'],
+  // Refused before it started (src/worker_preflight.py): no workspace for a
+  // repository task, or the tools it needs are switched off.
+  blocked: ['Blocked', 'warn'],
   // Steering-message states (src/agent_control.py). They share this map, and
   // therefore the same pill colours, because they answer the same question the
   // run statuses above do: is this still going, did it land, or did it not.
@@ -713,6 +716,7 @@ function launchHtml() {
     <label class="ag-field"><span>Task</span><textarea id="ag-task" class="wb-input ag-textarea" rows="5" placeholder="The whole task — the worker starts with no other context."></textarea></label>
     <label class="ag-field"><span>Report to chat</span><select id="ag-parent" class="wb-select"><option value="">None (standalone)</option>${chats}</select></label>
     <label class="ag-field"><span>Model override</span><input id="ag-model" class="wb-input" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
+    <label class="ag-field"><span>Workspace</span><input id="ag-workspace" class="wb-input" placeholder="optional checkout path; default: the parent chat's, or the one the task names"></label>
     <div class="ag-launch-actions"><button type="button" class="wb-btn wb-btn-primary" data-ag="launch-go">Launch</button><span class="ag-launch-msg" id="ag-launch-msg"></span></div>
     ${state.profiles.length ? '' : '<p class="wb-hint">No profiles yet — define workers under Settings › Workbench › Agent profiles.</p>'}`;
 }
@@ -960,7 +964,7 @@ async function onClick(e) {
       if (!task) { if (msg) msg.textContent = 'Describe the task first.'; return; }
       b.disabled = true; if (msg) msg.textContent = 'Launching…';
       try {
-        const r = await post('/api/agents/launch', { task, profile: $('ag-profile')?.value || '', parent_session: $('ag-parent')?.value || '', model: $('ag-model')?.value || '' });
+        const r = await post('/api/agents/launch', { task, profile: $('ag-profile')?.value || '', parent_session: $('ag-parent')?.value || '', model: $('ag-model')?.value || '', workspace: $('ag-workspace')?.value || '' });
         state.launchOpen = false; state.selected = r.session_id; state.events.delete(r.session_id);
         uiModule.showToast(`Worker started: ${r.session_name}`, 'success');
         await refresh();

@@ -865,6 +865,10 @@ async def _run(rec):
                         run_metadata={"workflow_id": rec["workflow_id"], "stage": child["stage"],
                                       "parent_run_id": rec["parent_run_id"]},
                         runtime_settings={"workflow_readonly": True},
+                        # The workflow chose this branch's tools itself; a
+                        # research task that mentions code must not be held
+                        # for a workspace it was never meant to have.
+                        preflight=False,
                     )
                     child.update(launched, status="running")
                     child.pop("reason", None)

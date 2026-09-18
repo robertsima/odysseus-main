@@ -533,8 +533,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 owner=user, task=str((body or {}).get("task") or ""),
                 profile_name=str((body or {}).get("profile") or "").strip() or None,
                 parent_session=parent, model=str((body or {}).get("model") or "").strip() or None,
+                workspace=str((body or {}).get("workspace") or "").strip() or None,
             )
         except ValueError as exc:
+            # A preflight refusal (WorkerBlocked) reads as the reason and the
+            # fix, e.g. which checkout to pick.
             raise HTTPException(400, str(exc))
 
     return router

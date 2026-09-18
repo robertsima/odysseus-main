@@ -640,7 +640,7 @@ function statusClass(status) {
   // judgement for a research workflow: some branches produced usable evidence
   // (agent_workflows._run), which is degraded, not failed.
   if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete' || s === 'partial'
-      || s === 'waiting_approval') return 'warn';
+      || s === 'waiting_approval' || s === 'blocked') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {

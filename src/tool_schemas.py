@@ -644,7 +644,9 @@ FUNCTION_TOOL_SCHEMAS = [
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
                     "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
                     "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
-                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent."}
+                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent."},
+                    "workspace": {"type": "string", "description": "agent mode: the checkout the sub-agent's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
+                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "agent mode: what the task needs. The sub-agent is refused before it starts, with the fix, when a need cannot be met."}
                 },
                 "required": ["session_id", "message"]
             }
@@ -1357,6 +1359,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
                     "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
                     "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."},
+                    "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
+                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "start only: what the task needs. A worker that cannot meet a need is refused before it starts, with the fix."},
                     "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."}
                 },
                 "required": ["action"]

@@ -176,6 +176,8 @@ async def run_headless(
     owner: Optional[str] = None,
     on_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     outcome: Optional[Dict[str, Any]] = None,
+    workspace: Optional[str] = None,
+    forced_tools: Optional[Set[str]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Drain ``stream_agent_loop`` for ``sess`` over ``messages``.
 
@@ -218,6 +220,11 @@ async def run_headless(
     # The worker's own chat decides what asks (a profile's mode is stored
     # there when the child is created), else the app-wide default.
     approval_mode = effective_approval_mode(chat_settings)
+    # The folder its file tools work in: the caller's (preflight's) choice,
+    # else the one saved on the chat. Without it a worker had no workspace at
+    # all and every repository task ended in "cannot read the repository".
+    from src.tool_execution import vet_workspace
+    workspace = vet_workspace(workspace or chat_settings.get("workspace") or "") or None
 
     baseline = owner_baseline_disabled_tools(effective_owner)
     if disabled_tools is None:
@@ -233,7 +240,8 @@ async def run_headless(
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
-                                         allow_private=allow_private, approval_mode=approval_mode))
+                                         allow_private=allow_private, approval_mode=approval_mode,
+                                         workspace=workspace, forced_tools=forced_tools))
     try:
         if stop_event is None:
             await drain
@@ -301,7 +309,8 @@ async def run_headless(
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
                  source: str, on_event, allow_private: bool = False,
-                 approval_mode: Optional[str] = None) -> None:
+                 approval_mode: Optional[str] = None, workspace: Optional[str] = None,
+                 forced_tools: Optional[Set[str]] = None) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -320,6 +329,8 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         disabled_tools=blocked,
         allow_private=allow_private,
         approval_mode=approval_mode,
+        workspace=workspace,
+        forced_tools=set(forced_tools) if forced_tools else None,
     ):
         event_error = _sse_error_payload(chunk)
         if event_error is not None:

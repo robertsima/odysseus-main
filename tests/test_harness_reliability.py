@@ -298,3 +298,49 @@ async def test_worktree_not_started_points_at_start(monkeypatch):
     out = await AgentWorktreeTool().execute(json.dumps({"action": "request_publish", "name": "cache-fix"}), {})
     assert out["code"] == "WORKTREE_NOT_STARTED"
     assert out["next_action"] == {"action": "start", "name": "cache-fix"}
+
+
+# ── GitHub fetch retries network failures only ────────────────────────────
+
+def _fake_fetch_env(monkeypatch, failures):
+    from types import SimpleNamespace
+    from src.agent_worktree import repository_remote as rr
+
+    calls = []
+
+    class _Client:
+        def fetch(self, path, repo, determine_wants):
+            calls.append(1)
+            if failures:
+                raise failures.pop(0)
+            return SimpleNamespace(refs={b"refs/heads/dev": b"abc"})
+
+    monkeypatch.setattr(rr, "_client", lambda url, token: (_Client(), "/owner/repo"))
+    monkeypatch.setattr(rr.time, "sleep", lambda s: None)
+    return rr, calls, SimpleNamespace(object_store={b"abc"})
+
+
+def test_fetch_retries_a_timeout_then_succeeds(monkeypatch):
+    rr, calls, repo = _fake_fetch_env(monkeypatch, [TimeoutError("Read timed out. (read timeout=60.0)")])
+    assert rr._fetch_exact(repo, "https://github.com/o/r", b"refs/heads/dev", None) == b"abc"
+    assert len(calls) == 2
+
+
+def test_fetch_gives_up_after_bounded_attempts(monkeypatch):
+    from src.agent_worktree.repository_sync import RepositorySyncError
+
+    errors = [TimeoutError("Read timed out") for _ in range(5)]
+    rr, calls, repo = _fake_fetch_env(monkeypatch, errors)
+    with pytest.raises(RepositorySyncError) as info:
+        rr._fetch_exact(repo, "https://github.com/o/r", b"refs/heads/dev", None)
+    assert len(calls) == rr.FETCH_ATTEMPTS
+    assert "Tried 3 times" in str(info.value)
+
+
+def test_fetch_does_not_retry_a_missing_repository(monkeypatch):
+    from src.agent_worktree.repository_sync import RepositorySyncError
+
+    rr, calls, repo = _fake_fetch_env(monkeypatch, [RuntimeError("404 Not Found")])
+    with pytest.raises(RepositorySyncError):
+        rr._fetch_exact(repo, "https://github.com/o/r", b"refs/heads/dev", None)
+    assert len(calls) == 1

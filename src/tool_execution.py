@@ -439,7 +439,59 @@ def _agent_readable_data_subdirs() -> tuple[str, ...]:
         if not (inside_data or external_safe) or _is_sensitive_path(resolved):
             continue
         safe.append(resolved)
+    safe.extend(r for r in _repository_data_subdirs(data_dir) if r not in safe)
     return tuple(safe)
+
+
+# Settings-derived, and consulted on every path check; a few seconds is fresh
+# enough for a changed repository-roots setting.
+_REPO_SUBDIRS_TTL_S = 5.0
+_REPO_SUBDIRS_CACHE: dict[str, tuple[float, tuple[str, ...]]] = {}
+
+
+def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
+    """Configured repository roots that live inside DATA_DIR.
+
+    The defaults (/app/data/development and /app/data/agent_worktrees) are
+    under DATA_DIR, and get_workspace lists the checkouts in them, yet every
+    file tool refused them as application state and a workspace could not be
+    bound there: the 2026-09-18 workers reported "cannot read
+    /app/data/development/odysseus-main" and stopped. They are admitted here
+    only as real, non-symlinked directories strictly inside DATA_DIR that hold
+    neither DATA_DIR itself nor the worktree approval state. Sensitive files,
+    private documents and that approval state are still refused inside them,
+    by the checks in _is_sensitive_path.
+    """
+    now = time.monotonic()
+    cached = _REPO_SUBDIRS_CACHE.get(data_dir)
+    if cached and now - cached[0] < _REPO_SUBDIRS_TTL_S:
+        return cached[1]
+    try:
+        from src.agent_worktree.config import load_config
+        from src.agent_worktree.repository_sync import git_repository_roots
+
+        roots = [str(root) for root in git_repository_roots()]
+        state_dir = os.path.realpath(load_config().state_dir)
+    except Exception:
+        return ()
+    out: list[str] = []
+    for raw in roots:
+        expanded = os.path.abspath(os.path.expanduser(raw))
+        if os.path.islink(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if (
+            not os.path.isdir(resolved)
+            or resolved == data_dir
+            or not _path_within(resolved, data_dir)
+            or _path_within(state_dir, resolved)
+            or _is_sensitive_path(resolved)
+        ):
+            continue
+        out.append(resolved)
+    result = tuple(out)
+    _REPO_SUBDIRS_CACHE[data_dir] = (now, result)
+    return result
 
 
 def _is_app_state_path(resolved: str) -> bool:

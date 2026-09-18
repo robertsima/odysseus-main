@@ -26,7 +26,8 @@ SUBAGENT_MAX_ROUNDS = 12
 
 
 def _parse_send_extras(content: str) -> Dict:
-    """``profile`` from the JSON form (the legacy two-line form has none)."""
+    """``profile``, ``workspace`` and ``requires`` from the JSON form (the
+    legacy two-line form has none)."""
     raw = (content or "").strip()
     if not raw.startswith("{"):
         return {}
@@ -36,11 +37,39 @@ def _parse_send_extras(content: str) -> Dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {"profile": str(data.get("profile") or "").strip()}
+    requires = data.get("requires") or []
+    if isinstance(requires, str):
+        requires = [requires]
+    return {
+        "profile": str(data.get("profile") or "").strip(),
+        "workspace": str(data.get("workspace") or "").strip(),
+        "requires": [str(r) for r in requires if isinstance(r, str)] if isinstance(requires, list) else [],
+    }
+
+
+def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
+    """The workspace of the chat delegating the task: the one bound to the
+    turn that is calling this tool, else the one saved on that chat."""
+    try:
+        from src.tool_execution import get_active_workspace
+
+        active = get_active_workspace()
+        if active:
+            return active
+    except Exception:
+        pass
+    if not session_id:
+        return None
+    try:
+        from core.database import get_session_settings
+
+        return (get_session_settings(session_id) or {}).get("workspace") or None
+    except Exception:
+        return None
 
 
 def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
-                       profile: Optional[Dict]) -> tuple:
+                       profile: Optional[Dict], workspace: Optional[str] = None) -> tuple:
     """Create a fresh chat for a delegated task. Returns ``(session, error)``.
 
     The child runs on the profile's model when it names one, else on the
@@ -73,6 +102,10 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
         from core.database import update_session_settings
 
         patch = {"parent_session": parent_id} if parent_id else {}
+        if workspace:
+            # Saved on the chat, so the worker's runs and a user who opens its
+            # chat later both work in the folder preflight chose.
+            patch["workspace"] = workspace
         if profile:
             from src.agent_profiles import session_patch
             patch.update(session_patch(profile))
@@ -294,10 +327,41 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             )}
         mode = "agent"  # a profile is a worker definition: it always runs with tools
 
+    # Before anything starts: does the task need a repository, is there a
+    # workspace for it, and can the worker use the tools it needs? A worker
+    # that cannot do the task is refused here with the fix, instead of running
+    # into the wall and reporting it later.
+    preflight = None
+    if target_sid.lower() == "new" or mode == "agent":
+        from src import worker_preflight
+
+        target_settings: Dict = {}
+        if target_sid.lower() != "new":
+            existing = _session_manager.get_session(target_sid)
+            if existing is not None and (not owner or getattr(existing, "owner", None) == owner):
+                try:
+                    from core.database import get_session_settings
+
+                    target_settings = get_session_settings(target_sid) or {}
+                except Exception:
+                    target_settings = {}
+        preflight = worker_preflight.run_preflight(
+            message,
+            explicit_workspace=extras.get("workspace") or None,
+            inherited_workspace=target_settings.get("workspace") or _caller_workspace(session_id),
+            unavailable_tools=worker_preflight.worker_unavailable_tools(
+                owner, profile, target_settings.get("disabled_tools") or ()),
+            requires=extras.get("requires") or (),
+        )
+        if not preflight.ok:
+            worker_preflight.record_blocked(session_id, owner, message, preflight)
+            return preflight.blocked_payload()
+
     if target_sid.lower() == "new":
         if not message:
             return {"error": "No message provided"}
-        sess, err = _new_child_session(_session_manager, session_id, owner, message, profile)
+        child_kwargs = {"workspace": preflight.workspace} if preflight and preflight.workspace else {}
+        sess, err = _new_child_session(_session_manager, session_id, owner, message, profile, **child_kwargs)
         if err:
             return {"error": err}
         target_sid = sess.id
@@ -403,6 +467,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         source="session",
                         owner=owner,
                         outcome=outcome,
+                        workspace=preflight.workspace if preflight else None,
+                        forced_tools=preflight.forced_tools if preflight else None,
                     )
                     if not response.strip() and tool_events:
                         response = "(the sub-agent finished with tool calls but no closing text)"
@@ -473,6 +539,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             out["stopped_by_user"] = True
         if run_status != "completed":
             out["status"] = run_status
+        if preflight is not None:
+            out["preflight"] = preflight.summary()
         if outcome.get("awaiting_approval"):
             out["awaiting_approval"] = {
                 "tool": outcome["awaiting_approval"].get("tool"),

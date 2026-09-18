@@ -13,6 +13,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from src import agent_loadouts, agent_profiles
+from src.worker_preflight import WorkerBlocked
 from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
@@ -502,11 +503,18 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             return error
         if target is None or (owner and getattr(target, "owner", None) != owner):
             return error
+    requires = args.get("requires") or []
+    if isinstance(requires, str):
+        requires = [requires]
     try:
         result = await agent_control.launch_worker(
             owner=owner, task=task, profile_name=name or None,
             parent_session=parent, model=str(args.get("model") or "").strip() or None,
+            workspace=str(args.get("workspace") or "").strip() or None,
+            requires=[str(r) for r in requires] if isinstance(requires, list) else [],
         )
+    except WorkerBlocked as exc:
+        return exc.payload
     except (ValueError, RuntimeError) as exc:
         return {"error": f"start: {exc}", "exit_code": 1}
     # What it is actually going to run with. The model has to be able to see a
@@ -526,6 +534,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         "tool_count": None if isinstance(granted, str) else len(granted),
         "skills": started_profile["skill_names"] if started_profile else [],
         "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
+        **(result.get("preflight") or {}),
     }
     tool_note = _tool_list_note(granted)
     logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s",
@@ -540,7 +549,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "and fix the loadout instead of waiting for the result."
         ),
         "preflight": preflight,
-        **result,
+        **{key: value for key, value in result.items() if key != "preflight"},
         "exit_code": 0,
     }
 

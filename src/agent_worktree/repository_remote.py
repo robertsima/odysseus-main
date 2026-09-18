@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import stat
+import time
 from pathlib import Path
 from typing import Any, Optional
 
@@ -56,27 +57,44 @@ def _client(url: str, token: Optional[str]):
     )
 
 
-def _fetch_exact(repo: Repo, url: str, remote_ref: bytes, token: Optional[str]):
-    client, remote_path = _client(url, token)
+# A network failure (a 60s read timeout in the 2026-09-18 logs) is retried
+# here, a bounded number of times with a pause, rather than by the model
+# spending rounds re-issuing the call. Auth, not-found and protocol failures
+# are not retried: the same call fails the same way.
+FETCH_ATTEMPTS = 3
+FETCH_RETRY_DELAYS_S = (2.0, 5.0)
 
+
+def _fetch_exact(repo: Repo, url: str, remote_ref: bytes, token: Optional[str]):
     def wants(refs, depth=None):
         if remote_ref not in refs:
             _fail("missing_remote_branch", "the requested remote branch does not exist")
         oid = refs[remote_ref]
         return [] if oid in repo.object_store else [oid]
 
-    try:
-        result = client.fetch(remote_path.encode(), repo, determine_wants=wants)
-    except RepositorySyncError:
-        raise
-    except Exception as exc:
-        code, message = sync.describe_remote_failure(exc, operation="fetch", url=url)
-        logger.warning("[manage_git] fetch from %s failed: %s", url, message, exc_info=True)
-        _fail(code, message)
-    finally:
-        close = getattr(client, "close", None)
-        if callable(close):
-            close()
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        client, remote_path = _client(url, token)
+        try:
+            result = client.fetch(remote_path.encode(), repo, determine_wants=wants)
+            break
+        except RepositorySyncError:
+            raise
+        except Exception as exc:
+            code, message = sync.describe_remote_failure(exc, operation="fetch", url=url)
+            if code == "network_error" and attempt < FETCH_ATTEMPTS:
+                delay = FETCH_RETRY_DELAYS_S[min(attempt, len(FETCH_RETRY_DELAYS_S)) - 1]
+                logger.warning("[manage_git] fetch from %s failed (attempt %d/%d), retrying in %.0fs: %s",
+                               url, attempt, FETCH_ATTEMPTS, delay, message)
+                time.sleep(delay)
+                continue
+            logger.warning("[manage_git] fetch from %s failed: %s", url, message, exc_info=True)
+            if code == "network_error":
+                message += f" Tried {FETCH_ATTEMPTS} times; check the network before retrying."
+            _fail(code, message)
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
     oid = result.refs.get(remote_ref)
     if not oid or oid not in repo.object_store:
         _fail("fetch_failed", "the requested remote commit was not fetched")

@@ -608,12 +608,19 @@ _WORKERS: Dict[str, asyncio.Task] = {}
 async def launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
                         parent_session: Optional[str] = None, model: Optional[str] = None,
                         inline_profile: Optional[dict] = None, handoff: bool = True,
-                        run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None) -> dict:
+                        run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None,
+                        workspace: Optional[str] = None, requires: Optional[List[str]] = None,
+                        preflight: bool = True) -> dict:
     """Start a worker in a fresh chat and return at once with its ids.
 
     The worker runs detached (like a chat turn survives a closed tab); its
     progress is on its own chat's activity feed and on the parent's when one
     is given, so the dashboard and the parent chat both see it.
+
+    Unless ``preflight`` is off, src.worker_preflight checks the task first:
+    it binds a workspace (``workspace``, else the parent chat's, else a
+    checkout the task names) and attaches the file tools the task needs, or
+    raises WorkerBlocked (a ValueError) with the fix, before any chat exists.
     """
     from src import agent_profiles, agent_runs
     from src.agent_tools.session_tools import _new_child_session
@@ -637,7 +644,23 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         profile = dict(profile or {"name": "worker", "instructions": "", "disabled_tools": [],
                                    "max_rounds": agent_profiles.DEFAULT_ROUNDS})
         profile["model"] = model
-    sess, err = _new_child_session(manager, parent_session, owner, task, profile)
+    checked = None
+    if preflight:
+        from src import worker_preflight
+        from src.agent_tools.session_tools import _caller_workspace
+
+        checked = worker_preflight.run_preflight(
+            task,
+            explicit_workspace=workspace,
+            inherited_workspace=_caller_workspace(parent_session),
+            unavailable_tools=worker_preflight.worker_unavailable_tools(owner, profile),
+            requires=requires or (),
+        )
+        if not checked.ok:
+            worker_preflight.record_blocked(parent_session, owner, task, checked)
+            raise worker_preflight.WorkerBlocked(checked)
+    child_kwargs = {"workspace": checked.workspace} if checked and checked.workspace else {}
+    sess, err = _new_child_session(manager, parent_session, owner, task, profile, **child_kwargs)
     if err:
         raise ValueError(err)
     if inline_profile is not None:
@@ -703,6 +726,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                         disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
                         activity_session_id=sess.id, run_id=run_id, source="session", owner=owner,
                         outcome=outcome,
+                        workspace=checked.workspace if checked else None,
+                        forced_tools=checked.forced_tools if checked else None,
                     )
                     events.extend(leg_events)
                     if not outcome.get("rounds_exhausted") or outcome.get("stopped"):
@@ -838,7 +863,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
 
     worker_task.add_done_callback(_cleanup_worker)
     return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
-            "max_rounds": rounds}
+            "max_rounds": rounds, **({"preflight": checked.summary()} if checked else {})}
 
 
 def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Optional[str] = None) -> dict:
