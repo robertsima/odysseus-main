@@ -6889,6 +6889,33 @@ async def stream_agent_loop(
             "Poll/wait for actual handoffs before claiming completion. If launch is unavailable "
             "or no call succeeds, explicitly say the workflow was not run."
         )})
+    # A user-approved call is run from the stored record, not from the model's
+    # memory of it. The grant matches an exact hash of the arguments, and "issue
+    # exactly the same call again" failed in practice: the execution ledger may
+    # already have compacted the held call out of history, and the model tends
+    # to re-inspect first and then re-issue with different arguments — which is
+    # a different call, so it was held again. See
+    # `tool_approvals.approved_unused_calls`.
+    if session_id and not guide_only:
+        try:
+            _approved_calls = _tool_approvals.approved_unused_calls(session_id)
+        except Exception:
+            logger.debug("approved-call lookup failed", exc_info=True)
+            _approved_calls = []
+        if _approved_calls:
+            _lines = "\n\n".join(
+                f"{call['tool']} with these exact arguments:\n```\n{call['command']}\n```"
+                for call in _approved_calls
+            )
+            messages.append(_harness_directive(
+                "The user approved the following call(s). Issue each one NOW as your first action, "
+                "with the arguments reproduced exactly as shown — same fields, same values, nothing "
+                "added or removed. Do not re-inspect state first and do not substitute a revision or "
+                "branch you think is better: any change makes it a different call that needs a new "
+                "approval.\n\n" + _lines
+            ))
+            logger.info("[approval] reissuing %d approved call(s) in %s: %s", len(_approved_calls),
+                        session_id, ", ".join(call["tool"] for call in _approved_calls))
     if _explicit_skills and not guide_only:
         _explicit_names = ", ".join(
             f"`{skill.get('name')}`" for skill in _explicit_skills
@@ -8541,7 +8568,8 @@ async def stream_agent_loop(
                         + _failure_instruction
                     )
             elif _approval_why and not (
-                _tool_approvals.has_once_grant(session_id, block.tool_type, full_command)
+                (_tool_approvals.has_once_grant(session_id, block.tool_type, full_command)
+                 or _tool_approvals.git_standing_grant_allows(session_id, full_command))
                 if block.tool_type == "manage_git"
                 else _tool_approvals.consume_grant(session_id, block.tool_type, full_command)
             ):

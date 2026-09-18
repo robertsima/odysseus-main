@@ -101,10 +101,13 @@ class GitTool:
                     "required by this action for the confirmation.",
                     code="missing_revision",
                 )
-            from src.tool_approvals import consume_once_grant
+            from src.tool_approvals import consume_once_grant, git_standing_grant_allows
 
-            if not consume_once_grant(
-                ctx.get("session_id"), "manage_git", content.strip()
+            # The exact grant is consumed first (one approval, one call); a
+            # standing "Always allow" covers local actions but never publication.
+            if not (
+                consume_once_grant(ctx.get("session_id"), "manage_git", content.strip())
+                or git_standing_grant_allows(ctx.get("session_id"), content.strip())
             ):
                 return _err(
                     "This Git operation needs a fresh confirmation for these exact arguments. "

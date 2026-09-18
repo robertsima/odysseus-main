@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import stat
@@ -30,6 +31,8 @@ from src.agent_worktree.repository_sync import (
     run_repository_operation,
 )
 from src.agent_worktree.validation import normalize_branch
+
+logger = logging.getLogger(__name__)
 
 
 def _fail(code: str, message: str) -> None:
@@ -66,8 +69,10 @@ def _fetch_exact(repo: Repo, url: str, remote_ref: bytes, token: Optional[str]):
         result = client.fetch(remote_path.encode(), repo, determine_wants=wants)
     except RepositorySyncError:
         raise
-    except Exception:
-        _fail("network_error", "GitHub fetch failed")
+    except Exception as exc:
+        code, message = sync.describe_remote_failure(exc, operation="fetch", url=url)
+        logger.warning("[manage_git] fetch from %s failed: %s", url, message, exc_info=True)
+        _fail(code, message)
     finally:
         close = getattr(client, "close", None)
         if callable(close):

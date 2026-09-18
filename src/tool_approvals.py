@@ -214,14 +214,20 @@ def decide(session_id: str, pid: str, decision: str) -> Optional[dict]:
         return None
     if decision not in ("once", "always", "deny"):
         raise ValueError("decision must be once, always or deny")
-    if rec["tool"] == "manage_git" and decision == "always":
-        # This tool mixes inspection with publication. A broad tool-wide grant
-        # must not authorize future pushes or different commit/ref targets.
-        decision = "once"
     rec["decision"] = decision
     grants = _GRANTS.setdefault(session_id, {"once": {}, "tools": set()})
     if decision == "once":
         grants["once"][rec["key"]] = time.time() + _ONCE_TTL_S
+    elif decision == "always" and rec["tool"] == "manage_git":
+        # This tool mixes local history work with publication, and a tool-wide
+        # grant must never authorize a future push. It used to be downgraded to
+        # "once" for that reason — silently, so the card's "Always allow
+        # manage_git" button did nothing it said, and the user was asked again
+        # for every merge, stash and switch. Honour the choice for what stays on
+        # this machine; publication (GIT_PUBLISH_ACTIONS) still asks per call.
+        # The approved call itself also gets its exact grant, so it runs now.
+        grants["once"][rec["key"]] = time.time() + _ONCE_TTL_S
+        grants["git_local"] = True
     elif decision == "always":
         grants["tools"].add(rec["tool"])
     return rec
@@ -243,6 +249,31 @@ def consume_grant(session_id: str, tool: str, content: str) -> bool:
     return False
 
 
+# Actions that change a remote. An "always" grant on manage_git never covers
+# these: publishing is the one thing a standing grant must not do on its own.
+GIT_PUBLISH_ACTIONS = frozenset({"push", "force_push_with_lease", "delete_remote_branch"})
+
+
+def git_standing_grant_allows(session_id: str, content: str) -> bool:
+    """Whether "Always allow manage_git" covers this call.
+
+    True only for a chat whose user chose "always" on a manage_git card, and
+    only for an action that does not publish. Unparseable arguments are refused:
+    the action is the thing being authorized, so an unknown one is not.
+    """
+    grants = _GRANTS.get(session_id or "") or {}
+    if not grants.get("git_local"):
+        return False
+    try:
+        args = json.loads(content or "")
+    except (ValueError, TypeError):
+        return False
+    if not isinstance(args, dict):
+        return False
+    action = str(args.get("action") or "").strip().lower()
+    return bool(action) and action not in GIT_PUBLISH_ACTIONS
+
+
 def has_once_grant(session_id: str, tool: str, content: str) -> bool:
     grants = _GRANTS.get(session_id or "") or {}
     return (grants.get("once") or {}).get(_key(tool, content), 0) >= time.time()
@@ -256,9 +287,49 @@ def consume_once_grant(session_id: str, tool: str, content: str) -> bool:
     return True
 
 
+def approved_unused_calls(session_id: str) -> list:
+    """Calls the user approved in this chat that have not been run yet.
+
+    A "once" grant is keyed on an exact hash of the call's arguments, and the
+    agent used to be told only "if they approve, issue exactly the same call
+    again". It routinely did not: on the approval turn it re-checked status and
+    branches first, then re-issued the merge with different arguments, which
+    hashed differently and was held again — the 2026-09-18 logs show the same
+    `manage_git` merge held, approved, and held a second time. For
+    `manage_git` the loop was inescapable from the UI, because `decide`
+    downgrades "always" to "once" for that tool. The exact call is already
+    stored on the pending record, so hand it back instead of hoping the model
+    reproduces it.
+
+    Only calls whose stored text still hashes to the granted key are returned:
+    `command` is capped at 4000 characters, and a truncated command could never
+    satisfy the grant.
+    """
+    grants = _GRANTS.get(session_id or "") or {}
+    once = grants.get("once") or {}
+    now = time.time()
+    out = []
+    for rec in sorted(_PENDING.values(), key=lambda r: r["created_at"]):
+        if rec["session_id"] != session_id or rec.get("decision") not in ("once", "always"):
+            continue
+        if once.get(rec["key"], 0) < now:
+            continue
+        if _key(rec["tool"], rec["command"]) != rec["key"]:
+            continue
+        out.append({"id": rec["id"], "tool": rec["tool"], "command": rec["command"]})
+    return out
+
+
 def chat_grants(session_id: str) -> list:
     grants = _GRANTS.get(session_id or "")
-    return sorted(grants["tools"]) if grants else []
+    if not grants:
+        return []
+    names = set(grants["tools"])
+    if grants.get("git_local"):
+        # Listed so the grant is visible and revocable like any other; the
+        # suffix says what it does and does not cover.
+        names.add("manage_git (local; pushes still ask)")
+    return sorted(names)
 
 
 def revoke_chat_grants(session_id: str) -> None:

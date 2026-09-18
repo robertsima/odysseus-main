@@ -71,7 +71,15 @@ def _resolve_ref(repo: Repo, ref: str | bytes) -> bytes:
     value = os.fsencode(ref).strip()
     candidates = [value]
     if not value.startswith(b"refs/"):
-        candidates = [b"refs/heads/" + value, b"refs/tags/" + value, value]
+        # `refs/remotes/` is the namespace `git log upstream/dev` resolves
+        # through, and it was missing from this list — so a remote-tracking
+        # branch could never be named, even right after a successful fetch. The
+        # 2026-09-18 logs show exactly that: the user fetched `upstream/dev`
+        # from their own shell, and the agent's `log ref="upstream/dev"` two
+        # minutes later still failed with "reference was not found". Order
+        # follows git's own: a local branch shadows a same-named remote one.
+        candidates = [b"refs/heads/" + value, b"refs/tags/" + value,
+                      b"refs/remotes/" + value, value]
     for candidate in candidates:
         try:
             return repo.refs[candidate]
@@ -81,7 +89,19 @@ def _resolve_ref(repo: Repo, ref: str | bytes) -> bytes:
                 and candidate.lower() in repo.object_store
             ):
                 return candidate.lower()
-    _fail("invalid_ref", "reference was not found")
+    shown = value.decode("utf-8", "replace")
+    if re.fullmatch(rb"[0-9a-fA-F]{40}", value):
+        _fail("invalid_ref",
+              f"commit {shown} is not in this repository's object store; it has not been fetched. "
+              "Fetch the branch that contains it with action='fetch_branch' first.")
+    if re.fullmatch(rb"[0-9a-fA-F]{4,39}", value):
+        _fail("invalid_ref",
+              f"reference {shown!r} was not found. Abbreviated commit ids are not resolved; "
+              "pass the full 40-character id, or a branch name.")
+    _fail("invalid_ref",
+          f"reference {shown!r} was not found as a local branch, tag, or remote-tracking branch "
+          f"(refs/remotes/{shown}). If it lives on a remote, fetch it first with "
+          "action='fetch_branch'; action='branches' lists what exists locally.")
 
 
 def _paths(raw: Any) -> list[tuple[str, bytes]]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,8 @@ from dulwich.repo import Repo
 
 from src.agent_worktree import repository_sync as sync
 from src.agent_worktree.repository_remote import _branch_name, _client
+
+logger = logging.getLogger(__name__)
 
 
 def _fail(code: str, message: str) -> None:
@@ -54,8 +57,10 @@ def _clone_sync(path: Path, *, source: object, token=None, branch=None, depth=No
         return {**result, "action": "clone", "source": url}
     except sync.RepositorySyncError:
         raise
-    except Exception:
-        _fail("clone_failed", "GitHub clone failed; the incomplete target was removed")
+    except Exception as exc:
+        code, message = sync.describe_remote_failure(exc, operation="clone", url=url)
+        logger.warning("[manage_git] clone of %s failed: %s", url, message, exc_info=True)
+        _fail(code, message + " The incomplete target was removed.")
     finally:
         if repo is not None:
             repo.close()

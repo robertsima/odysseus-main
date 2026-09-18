@@ -55,12 +55,89 @@ def _fail(code, message):
     raise RepositorySyncError(code, message)
 
 
+_SECRETISH = re.compile(
+    r"(?i)(gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"
+    r"|x-access-token:[^@\s]+|(?:authorization|token|password)[=:]\s*\S+"
+    r"|https?://[^/\s:@]+:[^/\s@]+@)"
+)
+
+
+def describe_remote_failure(exc: BaseException, *, operation: str, url: str = "") -> tuple:
+    """Turn a transport exception into (code, message) that says what went wrong.
+
+    Clone and fetch used to catch everything and report only "GitHub clone
+    failed" / "GitHub fetch failed". With no cause the agent could only retry
+    the identical call — three clones and a fetch in the 2026-09-18 logs, while
+    the user's own shell fetched the same remote fine. A 401, a 404, a DNS
+    failure and a TLS failure need four different next steps, so name which one
+    it was. The detail is bounded and scrubbed: the token travels as HTTP basic
+    auth rather than in the URL, but an exception message is still untrusted
+    text and is never returned without redaction.
+    """
+    from dulwich.client import HTTPProxyUnauthorized, HTTPUnauthorized
+    from dulwich.errors import GitProtocolError, HangupException, NotGitRepository
+
+    name = type(exc).__name__
+    detail = _SECRETISH.sub("[redacted]", " ".join(str(exc).split()))[:300]
+    where = f" for {url}" if url else ""
+    if isinstance(exc, (HTTPUnauthorized, HTTPProxyUnauthorized)):
+        return ("auth_failed",
+                f"GitHub {operation} was refused{where}: the credential was missing, expired or "
+                "lacks access to this repository. Reconnect GitHub or check the token's repository "
+                "access; retrying the same call will fail the same way.")
+    if isinstance(exc, NotGitRepository) or "404" in detail or "not found" in detail.lower():
+        return ("remote_not_found",
+                f"GitHub {operation} failed{where}: the repository or branch was not found. Check "
+                "the owner/name spelling, and note a private repository reports as not found "
+                f"without a token that can see it. ({name}: {detail})")
+    lowered = detail.lower()
+    if any(term in lowered for term in ("name or service not known", "getaddrinfo",
+                                        "temporary failure in name resolution", "nodename nor servname")):
+        return ("network_error", f"GitHub {operation} failed{where}: DNS lookup failed ({name}: {detail})")
+    if any(term in lowered for term in ("certificate", "ssl", "tls")):
+        return ("network_error", f"GitHub {operation} failed{where}: TLS/certificate error ({name}: {detail})")
+    if any(term in lowered for term in ("timed out", "timeout", "connection refused",
+                                        "connection reset", "max retries", "newconnectionerror")):
+        return ("network_error", f"GitHub {operation} failed{where}: connection problem ({name}: {detail})")
+    if isinstance(exc, (GitProtocolError, HangupException)):
+        return ("protocol_error", f"GitHub {operation} failed{where}: git protocol error ({name}: {detail})")
+    return ("remote_failed", f"GitHub {operation} failed{where} ({name}: {detail or 'no detail'})")
+
+
 def _inside(path: Path, root: Path) -> bool:
     try:
         path.relative_to(root)
         return True
     except ValueError:
         return False
+
+
+def git_repository_roots() -> tuple:
+    """Where `manage_git` may operate: the configured roots plus the harness's own
+    worktree root.
+
+    The roots are borrowed from the Claude Code delegation setting
+    (`claude_code_repository_roots`). Its built-in default covers
+    /app/data/agent_worktrees, but saving that setting for Claude Code's sake
+    REPLACES the default, and the harness's worktree root silently dropped out.
+    The 2026-09-18 logs show the result: `manage_git status` on a worktree that
+    `manage_agent_worktree` had just created was refused as "outside configured
+    repository roots", four calls in a row. The worktree root is one the harness
+    itself creates and writes, so admitting it widens nothing; every mutating
+    action is still behind `manage_git`'s own approval gate.
+    """
+    roots = list(repository_roots())
+    try:
+        from src.agent_worktree.config import load_config
+
+        worktree_root = Path(load_config().worktree_root)
+    except Exception:
+        worktree_root = None
+    if worktree_root is not None:
+        resolved = worktree_root.resolve(strict=False)
+        if not any(resolved == root.resolve(strict=False) for root in roots):
+            roots.append(worktree_root)
+    return tuple(roots)
 
 
 def _validate_path(raw) -> Path:
@@ -70,10 +147,14 @@ def _validate_path(raw) -> Path:
     if not given.is_absolute():
         _fail("invalid_path", "repository must be an absolute path")
     absolute = Path(os.path.abspath(given))
-    roots = tuple(r.resolve(strict=False) for r in repository_roots())
+    roots = tuple(r.resolve(strict=False) for r in git_repository_roots())
     lexical_root = next((root for root in roots if _inside(absolute, root)), None)
     if lexical_root is None:
-        _fail("outside_roots", "repository is outside configured repository roots")
+        # Name the roots. "Outside configured repository roots" alone sent the
+        # model round the same four calls; the list tells it where to look.
+        _fail("outside_roots",
+              "repository is outside configured repository roots ("
+              + ", ".join(str(root) for root in roots) + ")")
     cursor = lexical_root
     for part in absolute.relative_to(lexical_root).parts:
         cursor /= part
@@ -170,7 +251,7 @@ def _validate_new_path(raw, *, allow_empty_directory: bool = False) -> Path:
     if not given.is_absolute():
         _fail("invalid_path", "repository target must be an absolute path")
     absolute = Path(os.path.abspath(given))
-    roots = tuple(r.resolve(strict=False) for r in repository_roots())
+    roots = tuple(r.resolve(strict=False) for r in git_repository_roots())
     lexical_root = next((root for root in roots if _inside(absolute, root)), None)
     if lexical_root is None or absolute == lexical_root:
         _fail(
@@ -449,7 +530,9 @@ def _status_sync(path):
 async def list_repositories():
     def scan():
         out = []
-        for root in repository_roots():
+        # Same roots the path checks accept, or discovery would list fewer
+        # repositories than the tool can actually operate on.
+        for root in git_repository_roots():
             candidates = (
                 [root, *(p for p in root.iterdir() if p.is_dir())]
                 if root.is_dir()

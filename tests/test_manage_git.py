@@ -117,14 +117,47 @@ async def test_grant_is_not_canonicalized_across_whitespace_in_path(monkeypatch)
     assert tool_approvals.has_once_grant("s1", "manage_git", content)
 
 
-def test_manage_git_never_creates_broad_always_permission():
+def test_manage_git_always_never_authorizes_a_future_push():
+    """The invariant: "Always allow manage_git" must not become a standing
+    licence to publish. It used to be enforced by silently downgrading
+    "always" to "once" — which also made the button a lie for every local
+    merge, stash and switch, so the user was asked again and again. Now the
+    publication actions are carved out and everything else is honoured."""
     content = json.dumps(
         {"action": "push", "repository": "/r", "expected_head": "a" * 40}
     )
     pending = tool_approvals.request("s1", "manage_git", content, "push")
     decided = tool_approvals.decide("s1", pending["id"], "always")
-    assert decided["decision"] == "once"
+    assert decided["decision"] == "always"
+    # No blanket tool grant exists.
     assert "manage_git" not in tool_approvals.chat_grants("s1")
+    # The push the user actually approved runs once...
+    assert tool_approvals.consume_once_grant("s1", "manage_git", content)
+    assert not tool_approvals.consume_once_grant("s1", "manage_git", content)
+    # ...and no other push is covered by the standing grant.
+    for action in sorted(tool_approvals.GIT_PUBLISH_ACTIONS):
+        other = json.dumps({"action": action, "repository": "/r", "expected_head": "b" * 40})
+        assert not tool_approvals.git_standing_grant_allows("s1", other), action
+
+
+def test_manage_git_always_covers_local_history_work():
+    """What the user asked for when they clicked it: stop asking about merges,
+    stashes and switches in this chat."""
+    content = json.dumps({"action": "merge", "repository": "/r", "ref": "upstream/dev",
+                          "expected_head": "a" * 40, "expected_target": "c" * 40})
+    pending = tool_approvals.request("s2", "manage_git", content, "merges")
+    tool_approvals.decide("s2", pending["id"], "always")
+
+    for action in ("merge", "rebase", "reset", "stash_pop", "stash_drop", "delete_branch"):
+        later = json.dumps({"action": action, "repository": "/r",
+                            "expected_head": "d" * 40, "expected_target": "e" * 40})
+        assert tool_approvals.git_standing_grant_allows("s2", later), action
+    assert "manage_git (local; pushes still ask)" in tool_approvals.chat_grants("s2")
+    # And it is scoped to that chat.
+    assert not tool_approvals.git_standing_grant_allows("other-chat", content)
+    # Revoking the chat's grants removes it.
+    tool_approvals.revoke_chat_grants("s2")
+    assert not tool_approvals.git_standing_grant_allows("s2", content)
 
 
 @pytest.mark.asyncio
