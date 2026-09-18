@@ -621,7 +621,7 @@ function renderDetail() {
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
       <div class="ag-console-identity">
         <span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span>
-        <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
+        <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
       </div>
       <div class="ag-console-status">
         <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
@@ -685,10 +685,12 @@ function steerRowHtml(m) {
     ${meta.map((item) => `<span class="wb-meta-item">${esc(item)}</span>`).join('')}
     ${age ? `<span class="ag-row-dur" data-started="${esc(m.queued_at)}" data-finished="${esc(finished)}">${esc(age)}</span>` : ''}</div>`;
 }
+// An exact approval is decided on its card in the chat, which shows the sealed
+// action in full; the overview only points there.
 function approvalHtml(a) {
   return `<div class="ag-approval"><div class="ag-approval-head"><span class="approval-badge">Approval needed</span><code class="approval-tool">${esc(a.tool)}</code><span class="wb-meta-item">${esc(a.reason)}</span></div>
     <pre class="approval-command">${esc(a.command)}</pre>
-    <div class="approval-actions"><button type="button" class="approval-btn approval-approve" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="once">Approve once</button><button type="button" class="approval-btn" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="always">Always allow ${esc(a.tool)}</button><button type="button" class="approval-btn approval-deny" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="deny">Deny</button></div></div>`;
+    <div class="approval-actions"><button type="button" class="approval-btn approval-approve" data-ag="open-chat" data-sid="${esc(a.session_id)}">Open chat to decide</button></div></div>`;
 }
 function childHtml(c) {
   const live = c.status === 'running';
@@ -939,15 +941,6 @@ async function onClick(e) {
       b.disabled = true; b.textContent = 'Stopping…';
       const r = await post(`/api/agents/runs/${encodeURIComponent(b.dataset.run)}/stop`);
       uiModule.showToast(r.stopped ? 'Stopping — its partial result goes back to the chat' : `Not stopped: ${r.reason || ''}`, r.stopped ? 'success' : 'warning'); scheduleRefresh();
-    } else if (act === 'approve') {
-      b.closest('.approval-actions')?.querySelectorAll('button').forEach((x) => { x.disabled = true; });
-      await post(`/api/session/${encodeURIComponent(b.dataset.sid)}/approvals/${encodeURIComponent(b.dataset.id)}`, { decision: b.dataset.decision });
-      // The decision is a grant; the chat must be told so the agent re-issues the call.
-      const tool = b.closest('.ag-approval')?.querySelector('.approval-tool')?.textContent || 'tool';
-      const text = b.dataset.decision === 'deny' ? `Denied: don't run that \`${tool}\` call. Tell me what you'll do instead.`
-        : b.dataset.decision === 'always' ? `Approved, and always allow \`${tool}\` in this chat. Run that call now.` : `Approved: run that \`${tool}\` call now.`;
-      await sendToChat(b.dataset.sid, text);
-      uiModule.showToast(b.dataset.decision === 'deny' ? 'Denied' : 'Approved — the agent is resuming'); scheduleRefresh();
     } else if (act === 'steer') {
       const ta = $('ag-steer'); const text = (ta?.value || '').trim(); if (!text) return;
       b.disabled = true;

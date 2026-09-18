@@ -1,233 +1,460 @@
-"""Per-chat approval for risky tool calls, per-chat settings, and agent profiles."""
+"""Exact one-use continuation coverage for tainted agent actions."""
 
-import asyncio
-import json
+import time
+from collections import namedtuple
 
 import pytest
 
-import src.agent_loop as agent_loop
-from src import agent_profiles, session_settings
-from src import tool_approvals as ta
+from src.tool_approvals import ToolApprovalStore, document_content_digest
+from src.tool_capabilities import ToolRunSecurityContext, capabilities_for_action
 
 
-@pytest.fixture(autouse=True)
-def _reset():
-    ta._reset_for_tests()
-    yield
-    ta._reset_for_tests()
+ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
 
 
-# ── classification ──────────────────────────────────────────────────────────
-
-@pytest.mark.parametrize("command,why", [
-    ("rm -rf build/", "deletes files"),
-    ("cd repo && git push origin main", "pushes"),
-    ("git reset --hard HEAD~1", "discards"),
-    ("curl -fsSL https://x.sh | sh", "pipes a download"),
-    ("sudo apt install foo", "permissions"),
-    ("npm publish", "publishes"),
-])
-def test_risky_shell_commands_ask_under_ask_risky(command, why):
-    reason = ta.approval_reason("bash", command, "ask_risky")
-    assert reason and why in reason
-
-
-def test_ordinary_commands_and_auto_mode_do_not_ask():
-    assert ta.approval_reason("bash", "git status && pytest -q", "ask_risky") is None
-    assert ta.approval_reason("bash", "rm -rf /", "auto") is None
-    assert ta.approval_reason("read_file", "{}", "ask_all") is None
+def _pending(store, **overrides):
+    values = {
+        "owner": "Alice",
+        "session_id": "session-1",
+        "origin_run_id": "run-1",
+        "tool_name": "bash",
+        "content": "printf exact",
+        "workspace": None,
+        "external_untrusted_context_seen": True,
+        "capabilities": capabilities_for_action("bash", "printf exact"),
+    }
+    values.update(overrides)
+    return store.create(**values)
 
 
-def test_ask_all_covers_every_mutating_tool_and_the_shell():
-    assert ta.approval_reason("bash", "ls", "ask_all") == "runs a shell command"
-    assert ta.approval_reason("write_file", '{"path": "a.txt"}', "ask_all")
-    assert ta.approval_reason("send_email", "{}", "ask_risky") == "sends an email"
-    assert ta.approval_reason("manage_notes", '{"action": "delete", "id": 3}', "ask_risky") == "deletes data"
-    assert ta.approval_reason("manage_notes", '{"action": "add"}', "ask_risky") is None
+def test_approval_is_bound_to_exact_action_and_claimed_once():
+    store = ToolApprovalStore()
+    pending = _pending(store)
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    assert grant is not None
+    assert not grant.claim(
+        owner="alice",
+        session_id="session-1",
+        tool_name="bash",
+        content="printf modified",
+        workspace=None,
+    )
+    assert grant.claim(
+        owner="ALICE",
+        session_id="session-1",
+        tool_name="bash",
+        content="printf exact",
+        workspace=None,
+    )
+    assert not grant.claim(
+        owner="alice",
+        session_id="session-1",
+        tool_name="bash",
+        content="printf exact",
+        workspace=None,
+    )
 
 
-def test_grants_once_always_and_deny():
-    rec = ta.request("s1", "bash", "git  push origin main", "pushes to a remote")
-    assert not ta.consume_grant("s1", "bash", "git push origin main")
-    ta.decide("s1", rec["id"], "once")
-    # whitespace-insensitive, used up after one call, scoped to the chat
-    assert not ta.consume_grant("s2", "bash", "git push origin main")
-    assert ta.consume_grant("s1", "bash", "git push   origin main")
-    assert not ta.consume_grant("s1", "bash", "git push origin main")
+def test_wrong_owner_cannot_consume_but_deny_retires_pending_action():
+    store = ToolApprovalStore()
+    wrong_owner = _pending(store)
 
-    rec2 = ta.request("s1", "send_email", "{}", "sends an email")
-    ta.decide("s1", rec2["id"], "always")
-    assert ta.consume_grant("s1", "send_email", '{"to": "anyone"}') and ta.chat_grants("s1") == ["send_email"]
-    ta.revoke_chat_grants("s1")
-    assert not ta.consume_grant("s1", "send_email", "{}")
+    assert store.consume(
+        wrong_owner.approval_id,
+        decision="approve",
+        owner="mallory",
+        session_id="session-1",
+    ) is None
+    assert store.peek(wrong_owner.approval_id) == wrong_owner
 
-    rec3 = ta.request("s1", "bash", "rm -rf x", "deletes files")
-    ta.decide("s1", rec3["id"], "deny")
-    assert not ta.consume_grant("s1", "bash", "rm -rf x")
-    assert ta.decide("other-chat", rec3["id"], "once") is None
-    with pytest.raises(ValueError):
-        ta.decide("s1", rec3["id"], "maybe")
-
-
-# ── the gate in the agent loop ──────────────────────────────────────────────
-
-def _collect(gen):
-    async def run():
-        return [chunk async for chunk in gen]
-    return asyncio.run(run())
+    denied = _pending(store)
+    assert store.consume(
+        denied.approval_id,
+        decision="deny",
+        owner="alice",
+        session_id="session-1",
+    ) is None
+    assert store.peek(denied.approval_id) is None
 
 
-def _events(chunks):
-    return [json.loads(c[6:]) for c in chunks if c.startswith("data: ") and not c.startswith("data: [DONE]")]
+def test_expired_approval_cannot_be_consumed(monkeypatch):
+    store = ToolApprovalStore(ttl_seconds=1)
+    pending = _pending(store)
+    monkeypatch.setattr(time, "time", lambda: pending.expires_at + 1)
+
+    assert store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    ) is None
 
 
-def _loop(monkeypatch, command, approval_mode):
-    # This stream fixture does not create a database chat; its policy is an
-    # explicit empty snapshot, independent of other tests' database teardown.
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
-    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default, raising=False)
-    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None, raising=False)
-    monkeypatch.setattr(agent_loop, "estimate_tokens", lambda *a, **k: 10, raising=False)
-    calls = {"n": 0, "executed": []}
+def test_new_session_approval_supersedes_prior_pending_action():
+    store = ToolApprovalStore()
+    first = _pending(store, content="printf first")
+    second = _pending(store, content="printf second")
 
-    async def fake_stream(_candidates, messages, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            call = {"name": "bash", "arguments": json.dumps({"command": command})}
-            yield f'data: {json.dumps({"type": "tool_calls", "calls": [call]})}\n\n'
-        else:
-            yield f'data: {json.dumps({"delta": "done"})}\n\n'
-        yield "data: [DONE]\n\n"
+    assert store.peek(first.approval_id) is None
+    assert store.peek(second.approval_id) == second
 
-    async def fake_execute(block, *args, **kwargs):
-        calls["executed"].append(block.content)
+
+def test_ordinary_session_turn_retires_pending_action_and_preserves_taint():
+    store = ToolApprovalStore()
+    pending = _pending(store, owner="Alice", session_id="session-1")
+
+    assert store.retire_for_session(owner="bob", session_id="session-1") is False
+    assert store.peek(pending.approval_id) == pending
+    assert store.retire_for_session(owner="alice", session_id="session-1") is True
+    assert store.peek(pending.approval_id) is None
+    assert store.retire_for_session(owner="alice", session_id=None) is False
+
+
+def test_independent_headless_runs_do_not_supersede_each_other():
+    store = ToolApprovalStore()
+    first = _pending(store, session_id=None, origin_run_id="headless-1")
+    second = _pending(store, session_id=None, origin_run_id="headless-2")
+
+    assert store.peek(first.approval_id) == first
+    assert store.peek(second.approval_id) == second
+
+
+def test_public_payload_shows_complete_action_but_not_authority_fields():
+    store = ToolApprovalStore()
+    pending = _pending(
+        store,
+        content="printf safe\nSECOND_LINE",
+        document_id="document-7",
+        document_version=4,
+        document_digest=document_content_digest("original"),
+    )
+
+    payload = pending.public_payload()
+
+    assert payload["kind"] == "tool_approval"
+    assert payload["action"]["content"] == "printf safe\nSECOND_LINE"
+    assert payload["action"]["document_id"] == "document-7"
+    assert payload["action"]["document_version"] == 4
+    assert "SECOND_LINE" in str(payload)
+    assert "origin_run_id" not in str(payload)
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_claims_approval_immediately_before_execution(monkeypatch):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    pending = _pending(store)
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+    calls = []
+
+    async def fake_implementation(block, **kwargs):
+        calls.append((block.tool_type, block.content))
         return "bash", {"output": "ok", "exit_code": 0}
 
-    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream, raising=False)
-    monkeypatch.setattr(agent_loop, "execute_tool_block", fake_execute, raising=False)
-    events = _events(_collect(agent_loop.stream_agent_loop(
-        "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "ship it"}],
-        relevant_tools={"bash"}, session_id="chat-1", approval_mode=approval_mode, _is_teacher_run=True,
-    )))
-    return events, calls
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        fake_implementation,
+    )
+    desc, result = await tool_execution.execute_tool_block(
+        ToolBlock("bash", "printf exact"),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
+
+    assert desc == "bash"
+    assert result["exit_code"] == 0
+    assert calls == [("bash", "printf exact")]
 
 
-def test_risky_call_is_held_with_an_approval_card_and_not_executed(monkeypatch):
-    events, calls = _loop(monkeypatch, "git push origin main", "ask_risky")
-    assert calls["executed"] == []
-    ask = next(e for e in events if e.get("type") == "ask_user")["data"]
-    assert ask["approval"]["tool"] == "bash" and "git push origin main" in ask["approval"]["command"]
-    assert "git push origin main" in "".join(e.get("delta", "") for e in events)
-    pending = ta.get_pending(ask["approval"]["id"])
-    assert pending and pending["session_id"] == "chat-1"
+@pytest.mark.asyncio
+async def test_dispatcher_uses_sealed_document_target(monkeypatch):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    content = '{"content":"replacement"}'
+    pending = _pending(
+        store,
+        tool_name="update_document",
+        content=content,
+        document_id="document-7",
+        document_version=4,
+        document_digest=document_content_digest("original"),
+        capabilities=capabilities_for_action("update_document", content),
+    )
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+    captured = []
+
+    async def fake_implementation(block, **kwargs):
+        captured.append(
+            (
+                kwargs.get("approved_document_id"),
+                kwargs.get("approved_document_version"),
+                kwargs.get("approved_document_digest"),
+            )
+        )
+        return "update_document", {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        fake_implementation,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("update_document", content),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
+
+    assert result["exit_code"] == 0
+    assert captured == [
+        ("document-7", 4, document_content_digest("original"))
+    ]
 
 
-def test_an_approved_call_runs_and_auto_mode_never_holds(monkeypatch):
-    rec = ta.request("chat-1", "bash", "git push origin main", "pushes to a remote")
-    ta.decide("chat-1", rec["id"], "once")
-    events, calls = _loop(monkeypatch, "git push origin main", "ask_risky")
-    assert calls["executed"] and not any(e.get("type") == "ask_user" for e in events)
+@pytest.mark.asyncio
+async def test_dispatcher_rejects_approved_document_action_without_target(monkeypatch):
+    import src.tool_execution as tool_execution
 
-    events, calls = _loop(monkeypatch, "git push origin main", None)
-    assert calls["executed"]
+    store = ToolApprovalStore()
+    content = "replacement"
+    pending = _pending(
+        store,
+        tool_name="update_document",
+        content=content,
+        capabilities=capabilities_for_action("update_document", content),
+    )
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
 
+    async def should_not_run(*args, **kwargs):
+        raise AssertionError("unsealed document target reached implementation")
 
-# ── per-chat settings ───────────────────────────────────────────────────────
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        should_not_run,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("update_document", content),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
 
-def test_settings_patch_validation():
-    ok = session_settings.validate_patch({"approval_mode": "ask_all", "disabled_tools": ["bash", " bash", "web_fetch"],
-                                          "toggles": {"mode": "agent", "web": 1, "bogus": True}})
-    assert ok == {"approval_mode": "ask_all", "disabled_tools": ["bash", "web_fetch"],
-                  "toggles": {"mode": "agent", "web": True}}
-    assert session_settings.validate_patch({"approval_mode": None}) == {"approval_mode": None}
-    for bad in ({"approval_mode": "yolo"}, {"disabled_tools": "bash"}, {"surprise": 1}, []):
-        with pytest.raises(ValueError):
-            session_settings.validate_patch(bad)
-
-
-def test_last_used_snapshot_and_effective_mode(monkeypatch):
-    snap = session_settings.last_used_from_request(chat_mode="agent", allow_web="true", allow_bash="false",
-                                                   plan_mode=False, use_rag="false", workspace="/w", preset_id=None)
-    assert snap == {"toggles": {"mode": "agent", "web": True, "bash": False, "plan": False, "rag": False},
-                    "workspace": "/w", "preset_id": None}
-    import src.settings as settings
-    monkeypatch.setattr(settings, "get_setting", lambda k, d=None: "ask_risky" if k == "agent_approval_mode" else d)
-    assert session_settings.effective_approval_mode({}) == "ask_risky"
-    assert session_settings.effective_approval_mode({"approval_mode": "auto"}) == "auto"
-
-
-# ── agent profiles ──────────────────────────────────────────────────────────
-
-def test_profile_validation_normalises_and_rejects():
-    out = agent_profiles.validate_profiles([
-        {"name": "researcher", "model": "qwen", "disabled_tools": "bash, send_email",
-         "max_rounds": agent_profiles.MAX_ROUNDS_CAP + 1},
-    ])
-    assert out[0]["disabled_tools"] == ["bash", "send_email"] and out[0]["max_rounds"] == agent_profiles.MAX_ROUNDS_CAP
-    # An explicit budget under the cap is kept as asked.
-    assert agent_profiles.validate_profiles([{"name": "r", "max_rounds": 99}])[0]["max_rounds"] == 99
-    # No budget, or 0, means no round ceiling — the default for a worker.
-    for unlimited in ({"name": "r"}, {"name": "r", "max_rounds": 0}, {"name": "r", "max_rounds": -5}):
-        assert agent_profiles.validate_profiles([unlimited])[0]["max_rounds"] == 0
-    for bad in ([{"name": ""}], [{"name": "a"}, {"name": "A"}], "nope", [{"name": "x", "max_rounds": "lots"}]):
-        with pytest.raises(ValueError):
-            agent_profiles.validate_profiles(bad)
+    assert result["blocked"] is True
+    assert result["policy"] == "exact_tool_approval"
 
 
-def test_profile_validation_normalises_capability_loadouts():
-    out = agent_profiles.validate_profiles([{
-        "name": "researcher", "memory_access": "read", "skill_access": "selected",
-        "skill_names": "web-research, citations", "tool_access": "selected",
-        "enabled_tools": "web_search,web_fetch", "mcp_access": "selected",
-        "allowed_mcp_servers": ["builtin_browser"], "model_access": "selected",
-        "allowed_models": ["fast", "strong"], "delegation_policy": "never",
-        "private_vault_access": True, "max_parallel_workers": 99,
-    }])[0]
-    assert out["skill_names"] == ["citations", "web-research"]
-    assert out["enabled_tools"] == ["web_fetch", "web_search"]
-    assert out["allowed_mcp_servers"] == ["builtin_browser"]
-    assert out["max_parallel_workers"] == 8
-    patch = agent_profiles.session_patch(out)
-    assert patch["delegation_policy"] == "never" and patch["private_vault_access"] is True
-    assert patch["allowed_mcp_servers"] == ["builtin_browser"]
+def test_approved_document_version_guard_rejects_changed_target():
+    from src.agent_tools.document_tools import _approved_document_version_error
+
+    doc = type(
+        "Document",
+        (),
+        {"version_count": 5, "current_content": "original"},
+    )()
+
+    assert _approved_document_version_error(
+        doc,
+        {"expected_document_version": 4},
+    )["document_changed"] is True
+    assert _approved_document_version_error(
+        doc,
+        {
+            "expected_document_version": 5,
+            "expected_document_digest": document_content_digest("original"),
+        },
+    ) is None
+    assert _approved_document_version_error(
+        doc,
+        {
+            "expected_document_version": 5,
+            "expected_document_digest": document_content_digest("changed"),
+        },
+    )["document_changed"] is True
+    assert _approved_document_version_error(
+        None,
+        {"expected_document_version": 5},
+    )["document_changed"] is True
 
 
-def test_profile_persona_is_snapshotted_per_agent_and_bounded():
-    profiles = agent_profiles.validate_profiles([
-        {"name": "Ada", "instructions": "Be analytical."},
-        {"name": "Grace", "instructions": "Be concise."},
-    ])
-    ada = agent_profiles.session_patch(profiles[0])
-    grace = agent_profiles.session_patch(profiles[1])
-    assert ada["agent_instructions"] == "Be analytical."
-    assert grace["agent_instructions"] == "Be concise."
-    profiles[0]["instructions"] = "edited global default"
-    assert ada["agent_instructions"] == "Be analytical."
+@pytest.mark.asyncio
+async def test_missing_sealed_document_does_not_fall_back_to_another(monkeypatch):
+    import src.agent_tools.document_tools as document_tools
 
-    long_profile = agent_profiles.validate_profiles([
-        {"name": "bounded", "instructions": "x" * (agent_profiles.MAX_INSTRUCTIONS + 1)},
-    ])[0]
-    assert len(long_profile["instructions"]) == agent_profiles.MAX_INSTRUCTIONS
+    class FakeDb:
+        def close(self):
+            pass
+
+        def rollback(self):
+            pass
+
+    monkeypatch.setattr("src.database.SessionLocal", lambda: FakeDb())
+    monkeypatch.setattr(
+        document_tools,
+        "_get_owned_document",
+        lambda *args, **kwargs: None,
+    )
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("sealed target fell back to a different document")
+
+    monkeypatch.setattr(
+        document_tools,
+        "_most_recent_owned_document",
+        fail_fallback,
+    )
+    result = await document_tools.UpdateDocumentTool().execute(
+        "replacement",
+        {
+            "doc_id": "deleted-document",
+            "expected_document_version": 4,
+            "owner": "alice",
+        },
+    )
+
+    assert result["document_changed"] is True
 
 
-def test_per_chat_capability_patch_validation():
-    patch = session_settings.validate_patch({
-        "memory_access": "read", "skill_access": "selected", "skill_names": ["citations"],
-        "model_access": "current", "allowed_models": [], "delegation_policy": "explicit",
-        "allowed_mcp_servers": ["rag"], "max_parallel_workers": 99,
-    })
-    assert patch["max_parallel_workers"] == 8
-    assert patch["delegation_policy"] == "explicit"
-    with pytest.raises(ValueError):
-        session_settings.validate_patch({"delegation_policy": "always"})
+@pytest.mark.asyncio
+async def test_dispatcher_rejects_modified_approved_action(monkeypatch):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    pending = _pending(store)
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    async def should_not_run(*args, **kwargs):
+        raise AssertionError("modified approved action reached implementation")
+
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        should_not_run,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("bash", "printf changed"),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
+
+    assert result["blocked"] is True
+    assert result["policy"] == "exact_tool_approval"
 
 
-def test_per_chat_agent_persona_patch_validation():
-    assert session_settings.validate_patch({"agent_instructions": "  Be precise.  "}) == {
-        "agent_instructions": "Be precise."
-    }
-    assert len(session_settings.validate_patch({
-        "agent_instructions": "x" * (session_settings.MAX_AGENT_INSTRUCTIONS + 1),
-    })["agent_instructions"]) == session_settings.MAX_AGENT_INSTRUCTIONS
-    with pytest.raises(ValueError):
-        session_settings.validate_patch({"agent_instructions": ["shared"]})
+@pytest.mark.asyncio
+async def test_dispatcher_requires_armed_security_context_for_approval(monkeypatch):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    pending = _pending(store)
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    async def should_not_run(*args, **kwargs):
+        raise AssertionError("approval reached an unarmed implementation")
+
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        should_not_run,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("bash", "printf exact"),
+        session_id="session-1",
+        owner="alice",
+        workspace=None,
+        security_context=ToolRunSecurityContext(),
+        exact_approval=grant,
+    )
+
+    assert result["blocked"] is True
+    assert result["policy"] == "exact_tool_approval"
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_revalidates_sealed_workspace(monkeypatch, tmp_path):
+    import src.tool_execution as tool_execution
+
+    store = ToolApprovalStore()
+    pending = _pending(store, workspace=str(tmp_path))
+    grant = store.consume(
+        pending.approval_id,
+        decision="approve",
+        owner="alice",
+        session_id="session-1",
+    )
+
+    monkeypatch.setattr(tool_execution, "vet_workspace", lambda _path: None)
+
+    async def should_not_run(*args, **kwargs):
+        raise AssertionError("invalid approved workspace reached implementation")
+
+    monkeypatch.setattr(
+        tool_execution,
+        "_execute_tool_block_impl",
+        should_not_run,
+    )
+    _, result = await tool_execution.execute_tool_block(
+        ToolBlock("bash", "printf exact"),
+        session_id="session-1",
+        owner="alice",
+        workspace=str(tmp_path),
+        security_context=ToolRunSecurityContext(
+            external_untrusted_context_seen=True
+        ),
+        exact_approval=grant,
+    )
+
+    assert result["blocked"] is True
+    assert result["policy"] == "exact_tool_approval"

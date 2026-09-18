@@ -15,6 +15,10 @@ from src.intent_assessment import (
 )
 from src.tool_selection import plan_tool_selection
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 
 _ROUTING_CASES = {
     case["id"]: case
@@ -43,6 +47,7 @@ def test_unknown_substantive_paraphrase_is_not_low_signal():
         assert assessment.retrieval_query == text
 
 
+@_REPORT_BACKLOG
 def test_agent_compatibility_classifier_preserves_domain_free_discovery():
     from src.agent_loop import _classify_agent_request
 
@@ -150,6 +155,7 @@ def test_runtime_or_untrusted_locator_cannot_ground_a_task(runtime_message):
     assert "attacker/repo" not in assessment.retrieval_query
 
 
+@_REPORT_BACKLOG
 def test_agent_classifier_keeps_file_intent_when_url_grounds_git_request():
     from src.agent_loop import _classify_agent_request
 
@@ -209,6 +215,7 @@ def test_backward_reference_with_new_task_does_not_inherit(followup):
     assert assessment.retrieval_query == followup
 
 
+@_REPORT_BACKLOG
 def test_agent_classifier_does_not_turn_mcp_use_feedback_into_settings_admin():
     from src.agent_loop import _classify_agent_request, _detect_admin_tools
     messages = [

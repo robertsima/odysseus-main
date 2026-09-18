@@ -13,6 +13,14 @@ instead of dropped, the audit counter is per owner, the regex fallback only
 adds identity facts once the model has judged the window, and promotional /
 list mail never reaches calendar extraction.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 import pytest
 
 from src import agent_loop

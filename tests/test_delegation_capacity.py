@@ -3,6 +3,14 @@
 from src.tool_execution import _capacity_limited_tool_call, _worker_capacity_result
 
 
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
 def test_delegation_inspection_actions_are_never_capacity_blocked():
     for action in ("poll", "get", "cancel", "list", "status", "list_repositories"):
         assert not _capacity_limited_tool_call("delegate_to_agent", '{"action":"%s"}' % action)
@@ -73,7 +81,7 @@ async def test_empty_session_policy_still_blocks_start_at_queued_claude_capacity
     monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [])
     monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
     desc, result = await execute_tool_block(
-        ToolBlock("delegate_to_agent", '{"action":"start","prompt":"audit"}'), session_id="chat-1"
+        ToolBlock("delegate_to_agent", '{"action":"start","prompt":"audit"}'), session_id="chat-1", security_context=_no_security_context()
     )
 
     assert desc.endswith("BLOCKED")
@@ -96,7 +104,7 @@ async def test_poll_is_executed_while_empty_policy_is_at_capacity(monkeypatch):
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(execution, "_direct_fallback", fake_fallback)
     desc, result = await execute_tool_block(
-        ToolBlock("delegate_to_agent", '{"action":"poll","task_id":"queued-1"}'), session_id="chat-1"
+        ToolBlock("delegate_to_agent", '{"action":"poll","task_id":"queued-1"}'), session_id="chat-1", security_context=_no_security_context()
     )
 
     assert "BLOCKED" not in desc

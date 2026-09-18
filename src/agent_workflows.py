@@ -676,12 +676,12 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
             # Same standing grant the loop uses: a chat whose user has asked for
             # agents stays authorized until they say otherwise.
             from core.database import get_session_settings
-            from src.agent_loop import _delegation_intent_text, _explicit_delegation_requested
+            from src.delegation_intent import delegation_intent_text, explicit_delegation_requested
 
             delegation_authorized = bool(
                 (get_session_settings(session_id) or {}).get("delegation_granted")
-            ) or _explicit_delegation_requested(
-                _delegation_intent_text(parent.get_context_messages())
+            ) or explicit_delegation_requested(
+                delegation_intent_text(parent.get_context_messages())
             )
         if not delegation_authorized:
             raise ValueError(

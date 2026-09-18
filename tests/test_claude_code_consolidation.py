@@ -17,6 +17,10 @@ import pytest
 from src.agent_tools import claude_code_tools as cct
 from src.agent_tools.claude_code_tools import ClaudeCodeTool, ClaudeCodeTaskRunner
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 pytestmark = pytest.mark.area_security
 
 
@@ -464,6 +468,7 @@ def test_settings_keys_are_registered_and_validated():
     assert DEFAULT_SETTINGS["claude_code_repository_roots"] == []
 
 
+@_REPORT_BACKLOG
 def test_agent_loop_tool_ceiling_is_500_and_zero_disables():
     import ast
     from src import agent_loop

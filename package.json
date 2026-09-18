@@ -17,6 +17,6 @@
     "skills": "1.6.0"
   },
   "devDependencies": {
-    "@antithesishq/bombadil": "^0.6.1"
+    "@antithesishq/bombadil": "^0.7.0"
   }
 }

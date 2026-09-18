@@ -4,17 +4,24 @@ import html
 import json
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Form, HTTPException, Response, Request
+from fastapi import APIRouter, Form, HTTPException, Response, Request, Depends
 import logging
 
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
 from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
-from src.auth_helpers import effective_user, _auth_disabled, owner_filter
+from src.auth_helpers import (
+    effective_user,
+    _auth_disabled,
+    owner_filter,
+    is_delegated_credential,
+    require_chat_api_token_scope,
+)
 from src.session_image_cleanup import _generated_image_path_for_cleanup, session_image_refs
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
+from src.tool_approval_scopes import sanitize_client_message_metadata
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -124,9 +131,15 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["sessions"])
+router = APIRouter(
+    prefix="/api",
+    tags=["sessions"],
+    dependencies=[Depends(require_chat_api_token_scope)],
+)
 
 def _current_user_is_admin(request: Request, user: str | None) -> bool:
+    if is_delegated_credential(request):
+        return False
     if not user:
         return False
     auth_mgr = getattr(request.app.state, "auth_manager", None)
@@ -155,6 +168,22 @@ def _reject_raw_endpoint_url_for_non_admin(
     # endpoint validation have already happened.
     if user and not _current_user_is_admin(request, user):
         raise HTTPException(403, "Choose a registered model endpoint")
+
+
+def _reject_delegated_session_options(
+    request: Request,
+    *,
+    skip_validation: bool = False,
+    api_key: str | None = None,
+) -> None:
+    """Keep bearer credentials from exercising interactive-admin options."""
+    if is_delegated_credential(request) and (
+        skip_validation or bool((api_key or "").strip())
+    ):
+        raise HTTPException(
+            403,
+            "API tokens cannot supply endpoint credentials or skip endpoint validation",
+        )
 
 
 def _persist_session_headers(session_id: str, headers: dict | None) -> None:
@@ -343,6 +372,12 @@ def setup_session_routes(
     ):
         skip_val = str(skip_validation).lower() == "true"
         user = effective_user(request)
+        _reject_delegated_session_options(
+            request,
+            skip_validation=skip_val,
+            api_key=api_key,
+        )
+        endpoint_api_key = ""
         endpoint_base_url = ""
         # Headers built from the endpoint row with refreshable credentials
         # resolved. Session-backed providers (ChatGPT subscription, Copilot)
@@ -570,7 +605,11 @@ def setup_session_routes(
         except (AttributeError, TypeError, ValueError) as exc:
             raise HTTPException(400, "Invalid message attachment metadata") from exc
         for m in messages:
-            sess.add_message(ChatMessage(m["role"], m["content"], metadata=m.get("metadata")))
+            sess.add_message(ChatMessage(
+                m["role"],
+                m["content"],
+                metadata=sanitize_client_message_metadata(m.get("metadata")),
+            ))
         session_manager.save_sessions()
         return {"ok": True, "count": len(messages)}
 
@@ -807,15 +846,6 @@ def setup_session_routes(
         finally:
             db.close()
 
-    @router.get("/history/{sid}")
-    def get_history(request: Request, sid: str):
-        _verify_session_owner(request, sid)
-        try:
-            session = session_manager.get_session(sid)
-        except KeyError:
-            raise HTTPException(404, f"Session {sid} not found")
-        return {"history": [msg.to_dict() for msg in session.history]}
-    
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
         """Export conversation history as a downloadable file.
@@ -921,6 +951,8 @@ def setup_session_routes(
         model: str = Form("gpt-4o"),
         rag: str = Form(None)
     ):
+        if is_delegated_credential(request):
+            raise HTTPException(403, "This session type requires an interactive session")
         if not OPENAI_API_KEY:
             raise HTTPException(400, "Server missing OPENAI_API_KEY")
         sid = str(uuid.uuid4())
@@ -979,7 +1011,7 @@ def setup_session_routes(
     # ── Per-chat settings and tool approvals ──────────────────────────────
     def _settings_payload(session_id: str) -> dict:
         from core.database import get_session_settings
-        from src import session_settings, tool_approvals
+        from src import approval_modes, session_settings
 
         settings = get_session_settings(session_id)
         forked = None
@@ -1002,8 +1034,9 @@ def setup_session_routes(
         return {
             "settings": settings,
             "approval_mode": session_settings.effective_approval_mode(settings),
-            "approval_modes": list(tool_approvals.MODES),
-            "always_allowed_tools": tool_approvals.chat_grants(session_id),
+            # Empty until approval modes are enforced again; the chat settings
+            # UI hides its mode controls when there is nothing to choose from.
+            "approval_modes": list(approval_modes.MODES) if approval_modes.ENFORCED else [],
             "forked_from": forked,
             "parent_session": parent,
         }
@@ -1030,36 +1063,6 @@ def setup_session_routes(
         if update_session_settings(session_id, patch) is None:
             raise HTTPException(500, "Failed to save chat settings")
         return _settings_payload(session_id)
-
-    @router.post("/session/{session_id}/approvals/{approval_id}")
-    async def decide_tool_approval(request: Request, session_id: str, approval_id: str):
-        """Record the user's answer to a held tool call: ``once``, ``always``
-        (this tool, for the rest of this chat) or ``deny``."""
-        _verify_session_owner(request, session_id, session_manager)
-        from src import tool_approvals
-
-        try:
-            body = await request.json()
-        except Exception:
-            body = {}
-        try:
-            rec = tool_approvals.decide(session_id, approval_id, str((body or {}).get("decision") or ""))
-        except ValueError as exc:
-            raise HTTPException(400, str(exc))
-        if rec is None:
-            # Unknown after a server restart: the agent simply asks again.
-            raise HTTPException(404, "That approval request is no longer pending")
-        return {"id": rec["id"], "tool": rec["tool"], "decision": rec["decision"],
-                "always_allowed_tools": tool_approvals.chat_grants(session_id)}
-
-    @router.delete("/session/{session_id}/approvals")
-    async def revoke_tool_approvals(request: Request, session_id: str):
-        """Forget every "always allow" granted in this chat."""
-        _verify_session_owner(request, session_id, session_manager)
-        from src import tool_approvals
-
-        tool_approvals.revoke_chat_grants(session_id)
-        return {"always_allowed_tools": []}
 
     @router.post("/session/{session_id}/compact")
     async def compact_session(request: Request, session_id: str):

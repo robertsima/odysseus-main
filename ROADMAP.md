@@ -10,7 +10,7 @@ the codebase, you are probably right to stay away.
 - [x] Add scoped Git inspection, staging/commits, branches/tags, switching,
   fetch/pull/upstream configuration and confirmation-bound push/merge/deletion
   without a private-vault grant; preserve unresolved URL follow-ups.
-  See [local repository sync](docs/agent-worktree.md#updating-an-existing-checkout-scoped-git).
+  See [local repository sync](website/agent-worktree.md#updating-an-existing-checkout-scoped-git).
 - [x] Fix native Git calls rejected for unused empty parameters; preserve optional
   fields through Responses conversion, action guidance through schema compaction,
   exact single-use confirmations, and routing for pasted Git credential errors.
@@ -27,7 +27,7 @@ the codebase, you are probably right to stay away.
 - [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
   administration, defer irrelevant connected tools, and align advertised tools
   with private-vault execution permission. See
-  [September 17 log follow-up](docs/harness-log-review-2026-09-17.md).
+  [September 17 log follow-up](website/harness-log-review-2026-09-17.md).
 - [ ] Design genuinely isolated general repository execution so builds/tests can run
   without granting access to the mounted private vault. A working directory
   or prompt restriction is not an isolation boundary.
@@ -37,7 +37,7 @@ the codebase, you are probably right to stay away.
 
 - [x] Per-agent persisted personality/instructions, declarative capability plugins,
   pinned PromptScript/skills CLIs, and reviewed draft-only portable skill imports.
-  See [agent extensions guide](docs/agent-extensions.md).
+  See [agent extensions guide](website/agent-extensions.md).
 - [ ] Verify agent extension controls after deployment: two contrasting personas,
   plugin enable/remove with manual permission edits, local skill import/publish,
   and native/Docker CLI readiness.
@@ -46,7 +46,7 @@ the codebase, you are probably right to stay away.
   and execution authorization; add bounded per-turn capability discovery for
   native and fenced/MCP models. See
   [harness routing design](specs/harness-capability-routing.md).
-- [ ] Run the native/local-provider [routing acceptance matrix](docs/harness-routing-acceptance.md)
+- [ ] Run the native/local-provider [routing acceptance matrix](website/harness-routing-acceptance.md)
   after deployment; compare task success, total tokens, cached input and
   latency, including eight concurrent agents and revoked permissions.
 

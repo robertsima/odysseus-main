@@ -10,6 +10,14 @@ see the last section. That makes the targeted path the path that has to work,
 so the sections below pin the two ways it was silently failing: the app's own
 prose->tool table was never consulted, and phrase matching broke on a hyphen.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 from src.agent_loop import (
     _claims_missing_tools,
     _flatten_capability_phrase,

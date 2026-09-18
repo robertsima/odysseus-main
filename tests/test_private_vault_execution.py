@@ -10,6 +10,14 @@ from src.agent_tools.rag_tools import SearchDocumentsTool
 from src.tool_execution import execute_tool_block
 
 
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
 def test_private_vault_setting_is_explicit_boolean():
     from src.session_settings import validate_patch
 
@@ -87,7 +95,7 @@ async def test_dispatcher_carries_private_grant_into_dynamic_tools(monkeypatch):
         ToolBlock("read_file", "private.md"),
         session_id="sid",
         owner="alice",
-        allow_private=True,
+        allow_private=True,security_context=_no_security_context()
     )
     assert result["exit_code"] == 0, result
     assert seen and seen[0]["session_id"] == "sid"
@@ -107,7 +115,7 @@ async def test_fresh_private_revocation_overrides_request_grant(monkeypatch, too
     monkeypatch.setattr(execution, "_direct_fallback", lambda *a, **kw: pytest.fail("revoked call reached handler"))
     _, result = await execute_tool_block(
         ToolBlock(tool, "print('x')" if tool == "python" else "{}"),
-        session_id="sid", owner="admin", allow_private=True,
+        session_id="sid", owner="admin", allow_private=True,security_context=_no_security_context()
     )
     assert result["blocked_reason"] == "private_vault_grant_required"
     assert result["retryable"] is False
@@ -125,8 +133,8 @@ async def test_fresh_grant_does_not_escalate_request_or_disable_public_file_tool
         seen.append(ctx["allow_private"])
         return {"output": "public file", "exit_code": 0}
     monkeypatch.setitem(TOOL_HANDLERS, "read_file", handler)
-    _, public = await execute_tool_block(ToolBlock("read_file", "README.md"), session_id="sid", owner="admin")
-    _, shell = await execute_tool_block(ToolBlock("bash", "git pull"), session_id="sid", owner="admin")
+    _, public = await execute_tool_block(ToolBlock("read_file", "README.md"), session_id="sid", owner="admin", security_context=_no_security_context())
+    _, shell = await execute_tool_block(ToolBlock("bash", "git pull"), session_id="sid", owner="admin", security_context=_no_security_context())
     assert public["exit_code"] == 0
     assert seen == [False]
     assert shell["blocked_reason"] == "private_vault_grant_required"
@@ -137,7 +145,7 @@ async def test_sessionless_call_cannot_carry_a_private_grant(monkeypatch):
     import src.tool_execution as execution
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(execution, "_direct_fallback", lambda *a, **kw: pytest.fail("sessionless shell ran"))
-    _, result = await execute_tool_block(ToolBlock("bash", "git pull"), owner="admin", allow_private=True)
+    _, result = await execute_tool_block(ToolBlock("bash", "git pull"), owner="admin", allow_private=True, security_context=_no_security_context())
     assert result["blocked_reason"] == "private_vault_grant_required"
 
 
@@ -157,7 +165,7 @@ async def test_standard_mcp_filesystem_names_share_discovery_and_dispatch_gate(m
     monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {})
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(execution, "get_mcp_manager", lambda: pytest.fail("ungranted filesystem MCP dispatched"))
-    _, result = await execute_tool_block(ToolBlock(tool, "{}"), session_id="sid", owner="admin")
+    _, result = await execute_tool_block(ToolBlock(tool, "{}"), session_id="sid", owner="admin", security_context=_no_security_context())
     assert result["blocked_reason"] == "private_vault_grant_required"
 
 
@@ -173,7 +181,7 @@ async def test_unrestricted_subprocesses_require_private_grant(monkeypatch, tool
         ToolBlock(tool, "print('must not execute')" if tool == "python" else "echo must-not-execute"),
         session_id="sid",
         owner="admin",
-        allow_private=False,
+        allow_private=False,security_context=_no_security_context()
     )
     assert result["exit_code"] == 1
     assert "private vault access" in result["error"]
@@ -194,7 +202,7 @@ async def test_qualified_mcp_filesystem_read_requires_private_grant(monkeypatch)
         ToolBlock("mcp__filesystem__read_file", '{"path":"private.md"}'),
         session_id="sid",
         owner="admin",
-        allow_private=False,
+        allow_private=False,security_context=_no_security_context()
     )
     assert result["exit_code"] == 1
     assert "private vault access" in result["error"]
@@ -213,7 +221,7 @@ async def test_background_bash_requires_private_grant(monkeypatch):
         ToolBlock("bash", "#!bg\necho must-not-launch"),
         session_id="sid",
         owner="admin",
-        allow_private=False,
+        allow_private=False,security_context=_no_security_context()
     )
     assert result["exit_code"] == 1
     assert "private vault access" in result["error"]

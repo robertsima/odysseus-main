@@ -17,6 +17,14 @@ OTHER_READ = f"mcp__{SERVER}__get-posts"
 WRITE = f"mcp__{SERVER}__create-post"
 
 
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
 @pytest.fixture
 def manager():
     result = McpManager()
@@ -43,7 +51,7 @@ def _execute(tool, arguments=None):
     content = arguments if isinstance(arguments, str) else json.dumps(arguments or {})
     block = SimpleNamespace(tool_type=tool, content=content)
     return asyncio.run(tool_execution.execute_tool_block(
-        block, session_id="research-child", disabled_tools=set(), owner=None,
+        block, session_id="research-child", disabled_tools=set(), owner=None,security_context=_no_security_context()
     ))
 
 

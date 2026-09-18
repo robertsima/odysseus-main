@@ -136,35 +136,13 @@ class GitTool:
             return _err("Git operations require an admin user.", code="admin_required")
         error, args, action = self._validate(content)
         if error:
-            # An approval for a call that cannot run must not outlive it, or it
-            # is handed back at the start of every turn to fail again.
-            from src.tool_approvals import retire_approved_call
-
-            retire_approved_call(ctx.get("session_id"), "manage_git", content.strip())
             return error
         repository = args.get("repository")
         kwargs = {k: v for k, v in args.items() if k not in {"action", "repository"}}
-        if action in RISKY_ACTIONS:
-            from src.tool_approvals import consume_once_grant, git_standing_grant_allows
-
-            # The exact grant is consumed first (one approval, one call); a
-            # standing "Always allow" covers local actions but never publication.
-            if not (
-                consume_once_grant(ctx.get("session_id"), "manage_git", content.strip())
-                or git_standing_grant_allows(ctx.get("session_id"), content.strip())
-            ):
-                return _err(
-                    "This Git operation needs a fresh confirmation for these exact arguments. "
-                    "Ask the user through the tool approval card; an agent cannot approve itself.",
-                    code="approval_required",
-                    blocked=True,
-                )
-        else:
-            # ask_all can also require confirmation for a routine mutation.
-            # The loop peeks; the handler consumes so one grant runs one call.
-            from src.tool_approvals import consume_once_grant
-
-            consume_once_grant(ctx.get("session_id"), "manage_git", content.strip())
+        # Confirmation is the agent loop's job: manage_git has no capability
+        # classification, so it fails high and the loop's exact-approval gate
+        # holds it whenever untrusted content has influenced the run. Pushing
+        # this repository itself is still refused above (use_publish_flow).
         try:
             from src.agent_worktree import repository_sync as sync
         except ImportError:

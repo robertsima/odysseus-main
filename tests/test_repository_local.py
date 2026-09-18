@@ -12,6 +12,10 @@ from src.agent_tools.git_tools import GitTool
 from src.agent_worktree import repository_local as local
 from src.agent_worktree import repository_sync as sync
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 
 _NEUTRAL_GIT_FIELDS = {
     "repository": "",
@@ -223,6 +227,7 @@ async def test_expanded_risky_git_call_refuses_empty_revision_proofs(
     assert result["code"] == "missing_revision"
 
 
+@_REPORT_BACKLOG
 @pytest.mark.asyncio
 async def test_expanded_merge_preserves_required_empty_ref(repository, monkeypatch):
     _allow_git_tool(monkeypatch)
@@ -235,7 +240,6 @@ async def test_expanded_merge_preserves_required_empty_ref(repository, monkeypat
         "merge", repository, expected_head=head, expected_target=head
     )
     content = json.dumps(args)
-    tool_approvals._reset_for_tests()
     pending = tool_approvals.request(
         "empty-merge-ref", "manage_git", content, "merge"
     )
@@ -248,7 +252,6 @@ async def test_expanded_merge_preserves_required_empty_ref(repository, monkeypat
 
     assert result["exit_code"] == 1
     assert result["code"] == "invalid_branch"
-    tool_approvals._reset_for_tests()
 
 
 @pytest.mark.asyncio

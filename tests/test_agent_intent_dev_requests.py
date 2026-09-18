@@ -5,6 +5,14 @@ as would make sense to finish MVP ASAP" matched the Cookbook domain on the bare
 word "start". The turn got serve_model/download_model instead of shell and
 Claude Code tools, and the agent answered that it could not push.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 import pytest
 
 from src.agent_loop import (

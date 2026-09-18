@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, Tuple
 
 from core.auth import RESERVED_USERNAMES
+from src.owner_identity import REQUEST_SENTINEL_OWNERS
 from src.task_action_policy import (
     is_admin_only_task_action,
     owner_has_admin_task_privileges,
@@ -101,19 +102,30 @@ async def _cached(key: Tuple, ttl: float, fetch: Callable[[], Awaitable[Any]]) -
             pending = fut
             owner = True
     if not owner:
-        return await pending
+        # A cancelled waiter must not cancel the shared Future for the owner
+        # and every other waiter.
+        return await asyncio.shield(pending)
     try:
         val = await fetch()
         async with _shared_cache_lock:
             _shared_cache[key] = (time.monotonic() + ttl, val)
-            _shared_cache_pending.pop(key, None)
         pending.set_result(val)
         return val
+    except asyncio.CancelledError:
+        # Cancellation is a BaseException on supported Python versions, so it
+        # bypasses the Exception handler below. Wake all current waiters while
+        # allowing a later caller to retry the fetch.
+        pending.cancel()
+        raise
     except Exception as e:
-        async with _shared_cache_lock:
-            _shared_cache_pending.pop(key, None)
         pending.set_exception(e)
         raise
+    finally:
+        # Keep this cleanup synchronous so a second cancellation cannot
+        # interrupt it and leave a permanently pending Future behind. All
+        # access runs on the scheduler's event-loop thread.
+        if _shared_cache_pending.get(key) is pending:
+            _shared_cache_pending.pop(key, None)
 
 
 def compute_next_run(schedule: str, scheduled_time: str,
@@ -2617,6 +2629,7 @@ class TaskScheduler:
         full_text = ""
         tool_results = []
         stream_error = ""
+        approval_pause = None
 
         # Honor per-task max_steps (defense against runaway agent loops).
         # Falls back to 20 if not set — the historical default.
@@ -2670,16 +2683,55 @@ class TaskScheduler:
                         tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""
                         if isinstance(tool_summary, str) and tool_summary.strip():
                             tool_results.append(f"[{data.get('tool', '?')}] {tool_summary[:500]}")
+                        approval = data.get("ask_user")
+                        if (
+                            isinstance(approval, dict)
+                            and approval.get("kind") == "tool_approval"
+                        ):
+                            approval_pause = {
+                                "tool": data.get("tool") or "tool",
+                                "approval_id": approval.get("approval_id"),
+                            }
+                            # Scheduled tasks have no interactive surface that
+                            # can safely resume a one-use grant. Retire the
+                            # record immediately instead of leaving it pending
+                            # and report an explicit manual-action boundary.
+                            try:
+                                from src.tool_approvals import tool_approval_store
+                                tool_approval_store.consume(
+                                    approval_pause["approval_id"],
+                                    decision="deny",
+                                    owner=task.owner,
+                                    session_id=session_id,
+                                )
+                            except Exception:
+                                logger.debug(
+                                    "Could not retire scheduled-task approval",
+                                    exc_info=True,
+                                )
+                            break
                 except (json.JSONDecodeError, KeyError):
                     pass
 
+        if approval_pause is not None:
+            return (
+                "Scheduled task paused safely: "
+                f"{approval_pause['tool']} requested an exact action after "
+                "untrusted context. That action was not executed. Run this task "
+                "interactively to inspect and approve the action."
+            )
+
         # When a round produces nothing, stream_agent_loop synthesizes a
         # placeholder delta ("The model returned an empty response...") for the
-        # chat UI. For a task that is not a result — delivering it as one is how
-        # a 401/502 kept getting recorded as a completed run — so drop it and
+        # chat UI. For a task that is not a result -- delivering it as one is how
+        # a 401/502 kept getting recorded as a completed run -- so drop it and
         # let the guards below treat the round as the failure it was.
-        from src.agent_loop import EMPTY_RESPONSE_MESSAGE
-        if full_text.strip() == EMPTY_RESPONSE_MESSAGE:
+        # The agent loop emits this text inline; it is not an importable name
+        # there, so it is matched here verbatim.
+        if full_text.strip() == (
+            "The model returned an empty response. Please try again or switch "
+            "to a different model."
+        ):
             full_text = ""
 
         # An upstream error with nothing to show for the run is a failure, not a
@@ -3299,7 +3351,7 @@ class TaskScheduler:
         # check-ins seeded, which then double-fire alongside the human user's
         # check-ins. This was the root cause of the duplicate 'Morning check-in'
         # rows we had to manually clean up.
-        if not owner or owner in RESERVED_USERNAMES:
+        if not owner or owner in REQUEST_SENTINEL_OWNERS:
             logger.info(f"ensure_assistant_defaults: skip synthetic owner {owner!r}")
             return
         from core.database import SessionLocal, CrewMember

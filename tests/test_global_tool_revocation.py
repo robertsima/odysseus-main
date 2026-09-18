@@ -10,6 +10,14 @@ from src import settings
 from src.tool_execution import execute_tool_block
 
 
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
 def _block(name, content="{}"):
     return SimpleNamespace(tool_type=name, content=content)
 
@@ -46,7 +54,7 @@ def test_dispatcher_blocks_fresh_global_revocation_and_email_alias(tmp_path, mon
     path = tmp_path / "settings.json"
     path.write_text('{"disabled_tools":["mcp__email__send_email"]}', encoding="utf-8")
     monkeypatch.setattr(settings, "SETTINGS_FILE", str(path))
-    desc, result = asyncio.run(execute_tool_block(_block("send_email")))
+    desc, result = asyncio.run(execute_tool_block(_block("send_email"), security_context=_no_security_context()))
     assert desc == "send_email: BLOCKED"
     assert result["blocked_reason"] == "fresh_global_disabled"
 
@@ -56,7 +64,7 @@ def test_dispatcher_fails_closed_when_global_policy_read_fails(monkeypatch):
         settings, "load_disabled_tools_strict",
         lambda: (_ for _ in ()).throw(PermissionError("denied")),
     )
-    _, result = asyncio.run(execute_tool_block(_block("read_file", '{"path":"x"}')))
+    _, result = asyncio.run(execute_tool_block(_block("read_file", '{"path":"x"}'), security_context=_no_security_context()))
     assert result["blocked_reason"] == "global_policy_unavailable"
 
 
@@ -72,7 +80,7 @@ def test_discovery_receives_fresh_global_revocations(tmp_path, monkeypatch):
 
     content = json.dumps({"query": "web search", "max_results": 3})
     desc, result = asyncio.run(execute_tool_block(
-        _block("discover_tools", content), tool_discovery=Discovery(),
+        _block("discover_tools", content), tool_discovery=Discovery(),security_context=_no_security_context()
     ))
     assert desc.startswith("discover_tools:")
     assert result["loaded_names"] == []

@@ -105,8 +105,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 continue
             by_session.setdefault(sid, []).append(rec)
         pending: Dict[str, int] = {}
-        for rec in tool_approvals.pending_for(set(owned)):
-            pending[rec["session_id"]] = pending.get(rec["session_id"], 0) + 1
+        for rec in tool_approvals.tool_approval_store.pending_for_sessions(owner=user, session_ids=set(owned)):
+            pending[rec.session_id] = pending.get(rec.session_id, 0) + 1
         from core.database import get_session_settings
 
         rows = []
@@ -368,9 +368,21 @@ def setup_agents_routes(session_manager) -> APIRouter:
     async def approvals(request: Request):
         user, owned = _owned(request)
         rows = []
-        for rec in tool_approvals.pending_for(set(owned)):
-            sess = owned.get(rec["session_id"])
-            rows.append({**rec, "session_name": getattr(sess, "name", "") if sess else ""})
+        # Listed only: an exact approval is decided on its card in the chat,
+        # where the sealed action is shown in full.
+        for rec in tool_approvals.tool_approval_store.pending_for_sessions(owner=user, session_ids=set(owned)):
+            sess = owned.get(rec.session_id)
+            rows.append({
+                "id": rec.approval_id,
+                "session_id": rec.session_id,
+                "session_name": getattr(sess, "name", "") if sess else "",
+                "tool": rec.tool_name,
+                "command": rec.content,
+                "reason": "Untrusted content influenced this run" if rec.external_untrusted_context_seen
+                else "Waiting for an exact approval",
+                "created_at": rec.created_at,
+                "expires_at": rec.expires_at,
+            })
         return {"approvals": rows}
 
     def _active_archive_targets(owned: Dict[str, Any], session_id: str) -> list[str]:

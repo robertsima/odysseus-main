@@ -2,9 +2,10 @@
 
 Two kinds of keys live in ``sessions.settings_json``:
 
-* **Policy** the server enforces on every turn: ``approval_mode`` (see
-  :mod:`src.tool_approvals`) and ``disabled_tools`` (tools switched off for
-  this chat only, on top of the global and per-user denylists).
+* **Policy**: ``disabled_tools`` (tools switched off for this chat only, on
+  top of the global and per-user denylists), enforced on every turn, and
+  ``approval_mode`` (see :mod:`src.approval_modes`), stored but not yet
+  enforced by the current agent loop.
 * **Last used** state the frontend restores when the chat is reopened:
   ``toggles`` (agent/chat mode, web, shell, plan, knowledge base),
   ``workspace`` and ``preset_id``. The chat route records these from each turn,
@@ -16,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from src import tool_approvals
+from src import approval_modes
 
 _TOGGLE_KEYS = ("web", "bash", "plan", "rag")
 MAX_DISABLED_TOOLS = 300
@@ -38,8 +39,8 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
         if key == "approval_mode":
             if value is None:
                 out[key] = None
-            elif value not in tool_approvals.MODES:
-                raise ValueError(f"approval_mode must be one of {', '.join(tool_approvals.MODES)}")
+            elif value not in approval_modes.MODES:
+                raise ValueError(f"approval_mode must be one of {', '.join(approval_modes.MODES)}")
             else:
                 out[key] = value
         elif key == "disabled_tools":
@@ -121,14 +122,14 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
 def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
     """The chat's approval mode, else the global default, else ``auto``."""
     mode = (settings or {}).get("approval_mode")
-    if mode in tool_approvals.MODES:
+    if mode in approval_modes.MODES:
         return mode
     try:
         from src.settings import get_setting
 
-        return tool_approvals.normalize_mode(get_setting("agent_approval_mode", tool_approvals.DEFAULT_MODE))
+        return approval_modes.normalize_mode(get_setting("agent_approval_mode", approval_modes.DEFAULT_MODE))
     except Exception:
-        return tool_approvals.DEFAULT_MODE
+        return approval_modes.DEFAULT_MODE
 
 
 def effective_worker_limit(settings: Optional[Dict[str, Any]]) -> int:

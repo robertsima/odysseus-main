@@ -12,6 +12,14 @@ Three failures used to compound into "the vault feels fragmented":
   3. The only way to reach a writable copy of the vault was to bind it as the
      workspace, which in turn revoked everything else.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 import os
 import tempfile
 

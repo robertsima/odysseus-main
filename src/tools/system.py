@@ -38,10 +38,10 @@ def _unresolvable_toolsets_note(requested) -> str:
     if not names:
         return ""
     try:
-        from src.agent_loop import _skill_declared_tools
+        from src.skill_toolsets import skill_declared_tools
         from src.tool_utils import get_mcp_manager
 
-        _, unknown = _skill_declared_tools(
+        _, unknown = skill_declared_tools(
             [{"requires_toolsets": names}], set(), get_mcp_manager()
         )
     except Exception:
@@ -901,6 +901,7 @@ async def do_app_api(
                 "status_code": resp.status_code,
                 "body": preview,
                 "exit_code": 1,
+                "untrusted_content": True,
             }
         return {
             "output": f"{method} {path} -> {resp.status_code}\n{preview}",

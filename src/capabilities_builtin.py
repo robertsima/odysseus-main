@@ -223,5 +223,5 @@ register(Capability(
                               hint="Rebuild the image or install requirements.txt."),),
     default_enabled=True,
     tools=("manage_git",),
-    docs_url="docs/agent-worktree.md",
+    docs_url="website/agent-worktree.md",
 ))

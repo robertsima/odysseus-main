@@ -35,8 +35,8 @@ def test_exact_skills_sh_url_maps_without_fetching_page():
     )
     with pytest.raises(SkillImportError, match="require HTTPS"):
         parse_skill_source("http://skills.sh/acme/prompts/demo")
-    with pytest.raises(SkillImportError, match="must be"):
-        parse_skill_source("https://skills.sh/acme/prompts")
+    # A link that does not name a skill goes through the checked redirect path
+    # (tests/test_skill_importer_security.py).
 
 
 @pytest.mark.parametrize("path", [

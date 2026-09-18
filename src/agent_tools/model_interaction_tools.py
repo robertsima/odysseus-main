@@ -111,7 +111,10 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
         return {"model": model, "response": response}
     except Exception as e:
         logger.error(f"chat_with_model failed: {e}")
-        return {"error": f"Failed to get response from {model_spec}: {e}"}
+        return {
+            "error": f"Failed to get response from {model_spec}: {e}",
+            "untrusted_content": True,
+        }
 
 
 async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
@@ -185,7 +188,9 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     else:
         hint = (" Call list_models for exact model ids and retry with one of them, "
                 "or set teacher_model in settings and pass 'auto'.")
-    return {"error": f"Teacher call failed — tried {tried}.{hint}"}
+    # The failure text carries provider exception messages, so it is marked
+    # untrusted the same way chat_with_model's error is.
+    return {"error": f"Teacher call failed — tried {tried}.{hint}", "untrusted_content": True}
 
 
 async def list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:

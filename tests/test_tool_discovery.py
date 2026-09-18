@@ -8,6 +8,14 @@ from src import tool_execution
 from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 
 
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
 def schema(name, description="", annotations=None):
     item = {"type": "function", "function": {
         "name": name, "description": description,
@@ -251,7 +259,7 @@ def _execute(monkeypatch, discovery, settings, args=None):
     monkeypatch.setattr(tool_execution, "_owner_is_admin", lambda owner: True)
     block = SimpleNamespace(tool_type="discover_tools", content=json.dumps(args or {"query": "web search"}))
     return asyncio.run(tool_execution.execute_tool_block(
-        block, session_id="session", owner="owner", tool_discovery=discovery,
+        block, session_id="session", owner="owner", tool_discovery=discovery,security_context=_no_security_context()
     ))
 
 
@@ -283,7 +291,7 @@ def test_dispatcher_fresh_revocation_blocks_actual_tool_before_handler(monkeypat
     monkeypatch.setattr(tool_execution, "_direct_fallback", handler)
     block = SimpleNamespace(tool_type="read_file", content=json.dumps({"path": "README.md"}))
     desc, result = asyncio.run(tool_execution.execute_tool_block(
-        block, session_id="session", owner="owner", disabled_tools=set(),
+        block, session_id="session", owner="owner", disabled_tools=set(),security_context=_no_security_context()
     ))
     assert "BLOCKED" in desc
     assert result["blocked_reason"] == "fresh_session_disabled"

@@ -1,354 +1,531 @@
-"""Inline approval for risky tool calls.
+"""Opaque exact-action approvals with explicit task and chat scopes.
 
-A chat's approval mode decides which tool calls stop and ask first:
-
-* ``auto``      — nothing asks (the historical behaviour).
-* ``ask_risky`` — destructive or outward-facing actions ask: destructive shell
-  commands, ``git push``/publishing, sending or deleting email, deleting files.
-* ``ask_all``   — every tool that can change something asks (plan mode's
-  mutator list plus the shell).
-
-Asking does not hold the turn open. Like ``ask_user``, the gated call ends the
-turn with an approval card (the pending call is recorded here); the user's
-decision is recorded as a grant and sent back as the next message, and the
-agent re-issues the call, which the grant then lets through. A held-open
-generator would keep the run "running" and vanish on a server restart.
-
-Only interactive chat turns pass an approval mode; background tasks and
-sub-agents never prompt (nobody would answer).
+The server still seals and claims the first displayed action exactly once. The
+selected scope then bypasses only the automatic post-external-context approval
+gate for the rest of the resumed task or chat session. Browser-visible fields
+are display copies, never authority.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import re
+import os
+import secrets
+import threading
 import time
-import uuid
-from typing import Dict, Optional
+from dataclasses import dataclass, field
+from typing import Any
 
-MODES = ("auto", "ask_risky", "ask_all")
-DEFAULT_MODE = "auto"
-_PENDING_TTL_S = 24 * 3600
-_ONCE_TTL_S = 30 * 60
-
-_SHELL_TOOLS = {"bash", "python"}
-
-# Shell commands that destroy data, rewrite history, publish, or escalate.
-_RISKY_SHELL = [
-    (re.compile(r"\brm\s+(?:-[a-zA-Z]*[rf][a-zA-Z]*\s+)+"), "deletes files recursively or forcibly"),
-    (re.compile(r"\bgit\s+push\b"), "pushes to a remote"),
-    (re.compile(r"\bgit\s+(?:reset\s+--hard|clean\s+-[a-zA-Z]*f|checkout\s+--\s|branch\s+-D|stash\s+(?:drop|clear))"),
-     "discards git changes"),
-    (re.compile(r"\bgit\s+rebase\b|\bgit\s+commit\s+[^;&|]*--amend\b"), "rewrites git history"),
-    (re.compile(r"\b(?:npm|pnpm|yarn)\s+publish\b|\btwine\s+upload\b|\bgh\s+(?:pr\s+merge|release\s+create|repo\s+delete)\b"),
-     "publishes or merges"),
-    (re.compile(r"\bsudo\b|\bchmod\s+-R\b|\bchown\s+-R\b"), "changes system permissions"),
-    (re.compile(r"\b(?:mkfs|fdisk|parted)\b|\bdd\s+[^;&|]*\bof=|>\s*/dev/sd"), "writes to a disk device"),
-    (re.compile(r"\b(?:shutdown|reboot|halt|poweroff)\b"), "shuts the machine down"),
-    (re.compile(r"\bdocker\s+(?:rm|rmi|system\s+prune|volume\s+(?:rm|prune))\b|\bkubectl\s+delete\b"), "removes containers or resources"),
-    (re.compile(r"\b(?:curl|wget)\b[^|;&]*\|\s*(?:ba|z)?sh\b"), "pipes a download into a shell"),
-    (re.compile(r"\bDROP\s+(?:TABLE|DATABASE)\b|\bTRUNCATE\s+TABLE\b", re.I), "drops database data"),
-    (re.compile(r"\bkill\s+-9\b|\bpkill\b|\bkillall\b"), "kills processes"),
-    (re.compile(r"shutil\.rmtree|os\.remove\(|os\.unlink\("), "deletes files"),
-]
-
-# Non-shell tools that act on the outside world or destroy data.
-_RISKY_TOOLS = {
-    "send_email": "sends an email",
-    "reply_to_email": "sends an email reply",
-    "bulk_email": "acts on many emails at once",
-    "delete_email": "deletes email",
-    "unsubscribe_email": "unsubscribes from a mailing list",
-    "mcp__email__send_email": "sends an email",
-    "mcp__email__reply_to_email": "sends an email reply",
-    "mcp__email__bulk_email": "acts on many emails at once",
-    "mcp__email__delete_email": "deletes email",
-    "mcp__github_write__create_pull_request": "opens a pull request",
-    "manage_webhooks": "changes webhooks",
-    "manage_tokens": "changes API tokens",
-    "manage_settings": "changes app settings",
-    "manage_endpoints": "changes model endpoints",
-}
-
-_DELETE_ACTION_RE = re.compile(r'"action"\s*:\s*"(?:delete|remove|purge|clear)', re.I)
+from src.tool_approval_scopes import (
+    CHAT_SESSION_APPROVAL_DECISION,
+    DENY_APPROVAL_DECISION,
+    TASK_APPROVAL_DECISION,
+    ToolApprovalScope,
+    scope_for_decision,
+)
+from src.tool_capabilities import ToolCapabilities, capabilities_for_action
 
 
-def normalize_mode(value: Optional[str]) -> str:
-    value = str(value or "").strip().lower()
-    return value if value in MODES else DEFAULT_MODE
+DEFAULT_APPROVAL_TTL_SECONDS = 10 * 60
+DEFAULT_MAX_PENDING_APPROVALS = 2048
 
 
-def approval_reason(tool: str, content: str, mode: str) -> Optional[str]:
-    """Why this call needs approval under ``mode``, or None to let it run."""
-    if tool == "manage_git":
-        try:
-            action = str(json.loads(content).get("action", "repositories")).strip().lower()
-        except (ValueError, TypeError, AttributeError):
-            return "contains an invalid Git request"
-        # Repository publication/history changes always require an exact-call
-        # confirmation, including chats otherwise configured for automatic tools.
-        mandatory = {
-            "push": "publishes the displayed commit to GitHub",
-            "force_push_with_lease": "rewrites the displayed remote branch if its exact lease still matches",
-            "delete_remote_branch": "deletes the displayed remote branch if its exact lease still matches",
-            "merge": "merges the displayed revision into the current branch (fast-forward only)",
-            "delete_branch": "deletes the displayed local branch",
-            "stash_pop": "applies and deletes the displayed recovery stash",
-            "stash_drop": "deletes the displayed recovery stash",
-            "reset": "rewrites the current branch to the displayed revision and leaves a recovery ref",
-            "rebase": "rewrites local commits onto the displayed revision and leaves a recovery ref",
-        }
-        if action in mandatory:
-            return mandatory[action]
-        if action in {"repositories", "status", "log", "diff", "branches", "remotes"}:
-            return None
-    mode = normalize_mode(mode)
-    if mode == "auto":
-        return None
-    tool = str(tool or "")
-    text = str(content or "")
-    if tool == "manage_agent_worktree":
-        try:
-            action = str(json.loads(text).get("action", "status")).strip().lower()
-        except (ValueError, TypeError, AttributeError):
-            action = ""
-        if action in {"repo_list", "repo_status"}:
-            return None
-        if action == "repo_pull":
-            return "fast-forwards local repository files from their configured upstream"
-    if tool == "orchestrate_agents":
-        try:
-            action = json.loads(text).get("action", "status")
-        except (ValueError, TypeError, AttributeError):
-            action = "start"  # malformed requests must not bypass approval
-        if action in {"status", "wait"}:
-            return None
-    if tool in _SHELL_TOOLS:
-        for pattern, why in _RISKY_SHELL:
-            if pattern.search(text):
-                return why
-        return "runs a shell command" if mode == "ask_all" else None
-    if tool in _RISKY_TOOLS:
-        return _RISKY_TOOLS[tool]
-    if tool.startswith("manage_") and _DELETE_ACTION_RE.search(text):
-        return "deletes data"
-    if mode == "ask_all":
-        from src.tool_security import _PLAN_MODE_KNOWN_MUTATORS
-
-        if tool in _PLAN_MODE_KNOWN_MUTATORS or tool.startswith("mcp__github_write__"):
-            return "changes files or data"
-    return None
+def _normalized_owner(owner: Any) -> str:
+    return str(owner or "").strip().casefold()
 
 
-def _key(tool: str, content: str) -> str:
-    normalized = " ".join(str(content or "").split())
-    if tool == "manage_git":
-        try:
-            from src.git_tool_contract import normalize_git_arguments
-
-            normalized = json.dumps(
-                normalize_git_arguments(json.loads(content)),
-                sort_keys=True, separators=(",", ":"),
-            )
-        except (ValueError, TypeError):
-            normalized = str(content or "")
-    elif tool == "manage_agent_worktree":
-        try:
-            args = json.loads(content)
-            if isinstance(args, dict) and str(args.get("action") or "").strip().lower() in {
-                "repo_list", "repo_status", "repo_pull",
-            }:
-                from src.git_tool_contract import normalize_worktree_repo_arguments
-
-                normalized = json.dumps(
-                    normalize_worktree_repo_arguments(args),
-                    sort_keys=True, separators=(",", ":"),
-                )
-        except (ValueError, TypeError):
-            pass
-    return hashlib.sha256(f"{tool}\x00{normalized}".encode("utf-8", "replace")).hexdigest()[:32]
+def _normalized_workspace(workspace: Any) -> str:
+    if not isinstance(workspace, str) or not workspace.strip():
+        return ""
+    return os.path.realpath(os.path.expanduser(workspace))
 
 
-_PENDING: Dict[str, dict] = {}
-_GRANTS: Dict[str, dict] = {}   # session_id -> {"once": {key: expires_at}, "tools": set()}
+_MAX_APPROVAL_SELECTED_TOOLS = 512
+_MAX_APPROVAL_TOOL_NAME_CHARS = 512
+_MAX_APPROVAL_CONTINUATION_QUERY_CHARS = 4000
 
 
-def _prune(now: float) -> None:
-    for pid in [pid for pid, rec in _PENDING.items() if now - rec["created_at"] > _PENDING_TTL_S]:
-        _PENDING.pop(pid, None)
-    for grants in _GRANTS.values():
-        for key in [k for k, exp in grants["once"].items() if exp < now]:
-            grants["once"].pop(key, None)
-
-
-def request(session_id: str, tool: str, content: str, reason: str) -> dict:
-    """Record a call waiting for approval; returns the pending record."""
-    now = time.time()
-    _prune(now)
-    pid = uuid.uuid4().hex[:12]
-    rec = {"id": pid, "session_id": session_id, "tool": tool, "command": str(content or "")[:4000],
-           "reason": reason, "key": _key(tool, content), "created_at": now, "decision": None}
-    _PENDING[pid] = rec
-    return rec
-
-
-def get_pending(pid: str) -> Optional[dict]:
-    return _PENDING.get(pid)
-
-
-def pending_for(session_ids) -> list:
-    """Undecided requests for these chats, oldest first."""
-    _prune(time.time())
-    ids = set(session_ids or ())
-    rows = [dict(rec) for rec in _PENDING.values() if rec["session_id"] in ids and rec["decision"] is None]
-    rows.sort(key=lambda r: r["created_at"])
-    return rows
-
-
-def decide(session_id: str, pid: str, decision: str) -> Optional[dict]:
-    """Apply the user's decision: ``once``, ``always`` (this tool in this chat)
-    or ``deny``. Returns the updated record, or None when unknown."""
-    rec = _PENDING.get(pid)
-    if rec is None or rec["session_id"] != session_id:
-        return None
-    if decision not in ("once", "always", "deny"):
-        raise ValueError("decision must be once, always or deny")
-    rec["decision"] = decision
-    grants = _GRANTS.setdefault(session_id, {"once": {}, "tools": set()})
-    if decision == "once":
-        grants["once"][rec["key"]] = time.time() + _ONCE_TTL_S
-    elif decision == "always" and rec["tool"] == "manage_git":
-        # This tool mixes local history work with publication, and a tool-wide
-        # grant must never authorize a future push. It used to be downgraded to
-        # "once" for that reason — silently, so the card's "Always allow
-        # manage_git" button did nothing it said, and the user was asked again
-        # for every merge, stash and switch. Honour the choice for what stays on
-        # this machine; publication (GIT_PUBLISH_ACTIONS) still asks per call.
-        # The approved call itself also gets its exact grant, so it runs now.
-        grants["once"][rec["key"]] = time.time() + _ONCE_TTL_S
-        grants["git_local"] = True
-    elif decision == "always":
-        grants["tools"].add(rec["tool"])
-    return rec
-
-
-def consume_grant(session_id: str, tool: str, content: str) -> bool:
-    """True when the user already approved this call (a one-time grant is used
-    up) or approved the tool for the whole chat."""
-    grants = _GRANTS.get(session_id or "")
-    if not grants:
-        return False
-    if tool in grants["tools"]:
-        return True
-    key = _key(tool, content)
-    expires = grants["once"].get(key)
-    if expires and expires >= time.time():
-        grants["once"].pop(key, None)
-        return True
-    return False
-
-
-# Actions that change a remote. An "always" grant on manage_git never covers
-# these: publishing is the one thing a standing grant must not do on its own.
-GIT_PUBLISH_ACTIONS = frozenset({"push", "force_push_with_lease", "delete_remote_branch"})
-
-
-def git_standing_grant_allows(session_id: str, content: str) -> bool:
-    """Whether "Always allow manage_git" covers this call.
-
-    True only for a chat whose user chose "always" on a manage_git card, and
-    only for an action that does not publish. Unparseable arguments are refused:
-    the action is the thing being authorized, so an unknown one is not.
-    """
-    grants = _GRANTS.get(session_id or "") or {}
-    if not grants.get("git_local"):
-        return False
+def _normalized_selected_tools(
+    selected_tools: Any,
+    *,
+    required_tool: Any = None,
+) -> tuple[str, ...]:
+    if isinstance(selected_tools, str):
+        selected_tools = (selected_tools,)
     try:
-        args = json.loads(content or "")
-    except (ValueError, TypeError):
-        return False
-    if not isinstance(args, dict):
-        return False
-    action = str(args.get("action") or "").strip().lower()
-    return bool(action) and action not in GIT_PUBLISH_ACTIONS
+        values = selected_tools or ()
+        names = {
+            name.strip()
+            for name in values
+            if (
+                isinstance(name, str)
+                and name.strip()
+                and len(name.strip()) <= _MAX_APPROVAL_TOOL_NAME_CHARS
+            )
+        }
+        required_name = str(required_tool or "").strip()
+        if required_name and len(required_name) <= _MAX_APPROVAL_TOOL_NAME_CHARS:
+            names.add(required_name)
+        ordered = sorted(names)
+        if len(ordered) <= _MAX_APPROVAL_SELECTED_TOOLS:
+            return tuple(ordered)
+        kept = ordered[:_MAX_APPROVAL_SELECTED_TOOLS]
+        if required_name and required_name in names and required_name not in kept:
+            kept[-1] = required_name
+            kept.sort()
+        return tuple(kept)
+    except TypeError:
+        return ()
 
 
-def has_once_grant(session_id: str, tool: str, content: str) -> bool:
-    grants = _GRANTS.get(session_id or "") or {}
-    return (grants.get("once") or {}).get(_key(tool, content), 0) >= time.time()
+def _normalized_continuation_query(value: Any) -> str:
+    # The query is server-derived from the interrupted run and already lives in
+    # session history. Keep the pending copy bounded because approvals are held
+    # in memory until consumed or expired.
+    return str(value or "").strip()[:_MAX_APPROVAL_CONTINUATION_QUERY_CHARS]
 
 
-def consume_once_grant(session_id: str, tool: str, content: str) -> bool:
-    """Exact one-use confirmation; never accepts a tool-wide 'always' grant."""
-    if not has_once_grant(session_id, tool, content):
-        return False
-    _GRANTS[session_id]["once"].pop(_key(tool, content), None)
-    return True
+def _canonical_digest(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def approved_unused_calls(session_id: str) -> list:
-    """Calls the user approved in this chat that have not been run yet.
-
-    A "once" grant is keyed on an exact hash of the call's arguments, and the
-    agent used to be told only "if they approve, issue exactly the same call
-    again". It routinely did not: on the approval turn it re-checked status and
-    branches first, then re-issued the merge with different arguments, which
-    hashed differently and was held again — the 2026-09-18 logs show the same
-    `manage_git` merge held, approved, and held a second time. For
-    `manage_git` the loop was inescapable from the UI, because `decide`
-    downgrades "always" to "once" for that tool. The exact call is already
-    stored on the pending record, so hand it back instead of hoping the model
-    reproduces it.
-
-    Only calls whose stored text still hashes to the granted key are returned:
-    `command` is capped at 4000 characters, and a truncated command could never
-    satisfy the grant.
-    """
-    grants = _GRANTS.get(session_id or "") or {}
-    once = grants.get("once") or {}
-    now = time.time()
-    out = []
-    for rec in sorted(_PENDING.values(), key=lambda r: r["created_at"]):
-        if rec["session_id"] != session_id or rec.get("decision") not in ("once", "always"):
-            continue
-        if once.get(rec["key"], 0) < now:
-            continue
-        if _key(rec["tool"], rec["command"]) != rec["key"]:
-            continue
-        out.append({"id": rec["id"], "tool": rec["tool"], "command": rec["command"]})
-    return out
+def document_content_digest(content: Any) -> str:
+    """Return the stable server-side fingerprint used to seal a document."""
+    return hashlib.sha256(str(content or "").encode("utf-8")).hexdigest()
 
 
-def retire_approved_call(session_id: str, tool: str, content: str) -> bool:
-    """Revoke the once-grant for a call that was approved but cannot run.
+def _binding_payload(
+    *,
+    owner: Any,
+    session_id: Any,
+    origin_run_id: Any,
+    tool_name: Any,
+    content: Any,
+    workspace: Any,
+    document_id: Any,
+    document_version: Any,
+    document_digest: Any,
+    external_untrusted_context_seen: bool,
+    selected_tools: Any,
+    continuation_query: Any,
+    effects: tuple[str, ...],
+    result_integrity: str,
+) -> dict[str, Any]:
+    return {
+        "owner": _normalized_owner(owner),
+        "session_id": str(session_id or ""),
+        "origin_run_id": str(origin_run_id or ""),
+        "tool_name": str(tool_name or ""),
+        "content": str(content or ""),
+        "workspace": _normalized_workspace(workspace),
+        "document_id": str(document_id or ""),
+        "document_version": (
+            int(document_version) if document_version is not None else None
+        ),
+        "document_digest": str(document_digest or "").strip().lower(),
+        "external_untrusted_context_seen": bool(external_untrusted_context_seen),
+        "selected_tools": list(
+            _normalized_selected_tools(selected_tools, required_tool=tool_name)
+        ),
+        "continuation_query": _normalized_continuation_query(continuation_query),
+        "effects": list(effects),
+        "result_integrity": str(result_integrity),
+    }
 
-    A rejected call never reaches `consume_once_grant`, so its grant used to
-    survive and `approved_unused_calls` handed it back at the start of every
-    turn, where it failed the same way again -- three turns running on
-    2026-09-18 for a stash_drop missing its revision proof and a push with an
-    argument push does not take. Returns whether anything was retired.
-    """
-    grants = _GRANTS.get(session_id or "") or {}
-    return (grants.get("once") or {}).pop(_key(tool, content), None) is not None
+
+@dataclass(frozen=True)
+class PendingToolApproval:
+    approval_id: str
+    owner: str
+    session_id: str
+    origin_run_id: str
+    tool_name: str
+    content: str
+    workspace: str
+    document_id: str
+    document_version: int | None
+    document_digest: str
+    external_untrusted_context_seen: bool
+    effects: tuple[str, ...]
+    result_integrity: str
+    digest: str
+    created_at: float
+    expires_at: float
+    # Server-only continuation state. Both fields are digest-bound and never
+    # exposed in the browser payload.
+    selected_tools: tuple[str, ...] = ()
+    continuation_query: str = ""
+
+    def public_payload(self, *, reason: str | None = None) -> dict[str, Any]:
+        return {
+            "kind": "tool_approval",
+            "approval_id": self.approval_id,
+            # The browser already owns this chat id. Persisting it with the
+            # resolved card lets history-derived session grants remain bound to
+            # this exact chat and prevents inheritance by a forked session.
+            "session_id": self.session_id,
+            "question": "Allow this task to continue?",
+            "description": reason or (
+                "Untrusted context influenced this run, so continuing with "
+                "otherwise-gated actions needs your explicit approval."
+            ),
+            "options": [
+                {
+                    "label": "Allow for this task",
+                    "value": TASK_APPROVAL_DECISION,
+                    "description": (
+                        "Execute the sealed action and allow every otherwise-gated "
+                        "action needed to finish this request. Current tool, account, "
+                        "workspace, and sandbox restrictions still apply."
+                    ),
+                },
+                {
+                    "label": "Allow for this chat session",
+                    "value": CHAT_SESSION_APPROVAL_DECISION,
+                    "description": (
+                        "Execute the sealed action and stop asking at this gate for "
+                        "later requests in this chat. Current tool, account, workspace, "
+                        "and sandbox restrictions still apply."
+                    ),
+                },
+                {
+                    "label": "Deny",
+                    "value": DENY_APPROVAL_DECISION,
+                    "description": "Do not execute the proposed action.",
+                },
+            ],
+            "action": {
+                "tool": self.tool_name,
+                # Show the complete sealed input so approval never hides
+                # trailing lines.  This is not read back as authority.
+                "content": self.content,
+                "digest": self.digest[:16],
+                "effects": list(self.effects),
+                "workspace": self.workspace or None,
+                "document_id": self.document_id or None,
+                "document_version": self.document_version,
+            },
+        }
 
 
-def chat_grants(session_id: str) -> list:
-    grants = _GRANTS.get(session_id or "")
-    if not grants:
-        return []
-    names = set(grants["tools"])
-    if grants.get("git_local"):
-        # Listed so the grant is visible and revocable like any other; the
-        # suffix says what it does and does not cover.
-        names.add("manage_git (local; pushes still ask)")
-    return sorted(names)
+@dataclass
+class ExactToolApproval:
+    """A consumed exact first action plus an explicit continuation scope."""
+
+    pending: PendingToolApproval
+    scope: ToolApprovalScope = ToolApprovalScope.TASK
+    # The seam consumed by agent_loop. Both chat-card allow choices cover the
+    # complete resumed task, because one-action scope there immediately
+    # re-entered the same gate on the next round. Callers with no resumable
+    # chat still get SINGLE_ACTION, which leaves the gate armed behind the
+    # sealed action.
+    allow_remaining_actions: bool = True
+    _claimed: bool = field(default=False, init=False, repr=False)
+    _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
+
+    @property
+    def grants_chat_session(self) -> bool:
+        return self.scope is ToolApprovalScope.CHAT_SESSION
+
+    def _matches_unlocked(
+        self,
+        *,
+        owner: Any,
+        session_id: Any,
+        tool_name: Any,
+        content: Any,
+        workspace: Any,
+    ) -> bool:
+        if self._claimed:
+            return False
+        capabilities = capabilities_for_action(tool_name, content)
+        effects = tuple(sorted(effect.value for effect in capabilities.effects))
+        result_integrity = capabilities.result_integrity.value
+        if (
+            effects != self.pending.effects
+            or result_integrity != self.pending.result_integrity
+        ):
+            return False
+        expected = _binding_payload(
+            owner=owner,
+            session_id=session_id,
+            origin_run_id=self.pending.origin_run_id,
+            tool_name=tool_name,
+            content=content,
+            workspace=workspace,
+            document_id=self.pending.document_id,
+            document_version=self.pending.document_version,
+            document_digest=self.pending.document_digest,
+            external_untrusted_context_seen=(
+                self.pending.external_untrusted_context_seen
+            ),
+            selected_tools=self.pending.selected_tools,
+            continuation_query=self.pending.continuation_query,
+            effects=effects,
+            result_integrity=result_integrity,
+        )
+        return _canonical_digest(expected) == self.pending.digest
+
+    def matches(
+        self,
+        *,
+        owner: Any,
+        session_id: Any,
+        tool_name: Any,
+        content: Any,
+        workspace: Any,
+    ) -> bool:
+        with self._lock:
+            return self._matches_unlocked(
+                owner=owner,
+                session_id=session_id,
+                tool_name=tool_name,
+                content=content,
+                workspace=workspace,
+            )
+
+    def claim(
+        self,
+        *,
+        owner: Any,
+        session_id: Any,
+        tool_name: Any,
+        content: Any,
+        workspace: Any,
+    ) -> bool:
+        with self._lock:
+            if not self._matches_unlocked(
+                owner=owner,
+                session_id=session_id,
+                tool_name=tool_name,
+                content=content,
+                workspace=workspace,
+            ):
+                return False
+            self._claimed = True
+            return True
 
 
-def revoke_chat_grants(session_id: str) -> None:
-    _GRANTS.pop(session_id or "", None)
+class ToolApprovalStore:
+    """Thread-safe pending approval registry with destructive consumption."""
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: int = DEFAULT_APPROVAL_TTL_SECONDS,
+        max_pending: int = DEFAULT_MAX_PENDING_APPROVALS,
+    ):
+        self._ttl_seconds = max(1, int(ttl_seconds))
+        self._max_pending = max(1, int(max_pending))
+        self._pending: dict[str, PendingToolApproval] = {}
+        self._lock = threading.Lock()
+
+    def _purge_expired_locked(self, now: float) -> None:
+        expired = [
+            approval_id
+            for approval_id, pending in self._pending.items()
+            if pending.expires_at <= now
+        ]
+        for approval_id in expired:
+            self._pending.pop(approval_id, None)
+
+    def create(
+        self,
+        *,
+        owner: Any,
+        session_id: Any,
+        origin_run_id: Any,
+        tool_name: Any,
+        content: Any,
+        workspace: Any,
+        document_id: Any = None,
+        document_version: Any = None,
+        document_digest: Any = None,
+        selected_tools: Any = None,
+        continuation_query: Any = None,
+        external_untrusted_context_seen: bool,
+        capabilities: ToolCapabilities,
+    ) -> PendingToolApproval:
+        now = time.time()
+        effects = tuple(sorted(effect.value for effect in capabilities.effects))
+        result_integrity = capabilities.result_integrity.value
+        payload = _binding_payload(
+            owner=owner,
+            session_id=session_id,
+            origin_run_id=origin_run_id,
+            tool_name=tool_name,
+            content=content,
+            workspace=workspace,
+            document_id=document_id,
+            document_version=document_version,
+            document_digest=document_digest,
+            external_untrusted_context_seen=external_untrusted_context_seen,
+            selected_tools=selected_tools,
+            continuation_query=continuation_query,
+            effects=effects,
+            result_integrity=result_integrity,
+        )
+        pending = PendingToolApproval(
+            approval_id=secrets.token_urlsafe(32),
+            owner=payload["owner"],
+            session_id=payload["session_id"],
+            origin_run_id=payload["origin_run_id"],
+            tool_name=payload["tool_name"],
+            content=payload["content"],
+            workspace=payload["workspace"],
+            document_id=payload["document_id"],
+            document_version=payload["document_version"],
+            document_digest=payload["document_digest"],
+            external_untrusted_context_seen=payload[
+                "external_untrusted_context_seen"
+            ],
+            effects=effects,
+            result_integrity=result_integrity,
+            digest=_canonical_digest(payload),
+            created_at=now,
+            expires_at=now + self._ttl_seconds,
+            selected_tools=tuple(payload["selected_tools"]),
+            continuation_query=payload["continuation_query"],
+        )
+        with self._lock:
+            self._purge_expired_locked(now)
+            # The chat UI exposes one pending card per session, so supersede an
+            # older action there. Headless/manual-test callers use an empty
+            # session id; keep independent origin runs separate so two skill
+            # tests owned by the same user cannot invalidate each other.
+            superseded = [
+                approval_id
+                for approval_id, existing in self._pending.items()
+                if (
+                    existing.owner == pending.owner
+                    and existing.session_id == pending.session_id
+                    and (
+                        bool(pending.session_id)
+                        or existing.origin_run_id == pending.origin_run_id
+                    )
+                )
+            ]
+            for approval_id in superseded:
+                self._pending.pop(approval_id, None)
+            while len(self._pending) >= self._max_pending:
+                oldest_id = min(
+                    self._pending,
+                    key=lambda approval_id: self._pending[approval_id].created_at,
+                )
+                self._pending.pop(oldest_id, None)
+            self._pending[pending.approval_id] = pending
+        return pending
+
+    def consume(
+        self,
+        approval_id: Any,
+        *,
+        decision: Any,
+        owner: Any,
+        session_id: Any,
+        allow_continuation: bool = True,
+    ) -> ExactToolApproval | None:
+        """Consume a pending approval.
+
+        ``allow_continuation`` is the caller's assertion that it owns a
+        resumable conversation the granted scope can apply to. Callers without
+        one (the skill tester, unattended audits) pass ``False`` and get the
+        original one-use grant, so a button labelled "Allow once" cannot widen
+        into a run-long bypass just because the chat card reuses the same wire
+        value.
+        """
+        now = time.time()
+        with self._lock:
+            self._purge_expired_locked(now)
+            approval_key = str(approval_id or "")
+            pending = self._pending.get(approval_key)
+            if pending is None:
+                return None
+            if (
+                pending.owner != _normalized_owner(owner)
+                or pending.session_id != str(session_id or "")
+            ):
+                # Authentication is checked before destructive consumption so
+                # a leaked/guessed opaque id cannot be used to invalidate
+                # another owner's pending action.
+                return None
+            self._pending.pop(approval_key, None)
+        normalized_decision = str(decision or "").strip().lower()
+        scope = scope_for_decision(normalized_decision)
+        if scope is None:
+            return None
+        if not allow_continuation:
+            return ExactToolApproval(
+                pending,
+                scope=ToolApprovalScope.SINGLE_ACTION,
+                allow_remaining_actions=False,
+            )
+        return ExactToolApproval(
+            pending,
+            scope=scope,
+            allow_remaining_actions=True,
+        )
+
+    def peek(self, approval_id: Any) -> PendingToolApproval | None:
+        now = time.time()
+        with self._lock:
+            self._purge_expired_locked(now)
+            return self._pending.get(str(approval_id or ""))
+
+    def retire_for_session(self, *, owner: Any, session_id: Any) -> bool:
+        """Discard pending actions superseded by an ordinary user turn.
+
+        Returns whether any retired action carried external provenance, so the
+        caller can preserve that security state without treating the new user
+        message as an approval continuation.
+        """
+        now = time.time()
+        normalized_owner = _normalized_owner(owner)
+        normalized_session = str(session_id or "")
+        if not normalized_session:
+            return False
+        with self._lock:
+            self._purge_expired_locked(now)
+            retired_ids = [
+                approval_id
+                for approval_id, pending in self._pending.items()
+                if (
+                    pending.owner == normalized_owner
+                    and pending.session_id == normalized_session
+                )
+            ]
+            carried_taint = any(
+                self._pending[approval_id].external_untrusted_context_seen
+                for approval_id in retired_ids
+            )
+            for approval_id in retired_ids:
+                self._pending.pop(approval_id, None)
+        return carried_taint
+
+    def pending_for_sessions(self, *, owner: Any, session_ids: Any) -> list[PendingToolApproval]:
+        """Unexpired pending approvals in these chats, oldest first.
+
+        Read-only: listing never consumes or retires an approval. The Agents
+        overview uses it to show which chats are waiting on the user.
+        """
+        now = time.time()
+        normalized_owner = _normalized_owner(owner)
+        wanted = {str(sid) for sid in (session_ids or ()) if sid}
+        with self._lock:
+            self._purge_expired_locked(now)
+            rows = [
+                pending
+                for pending in self._pending.values()
+                if pending.owner == normalized_owner and pending.session_id in wanted
+            ]
+        return sorted(rows, key=lambda pending: pending.created_at)
 
 
-def _reset_for_tests() -> None:
-    _PENDING.clear()
-    _GRANTS.clear()
+tool_approval_store = ToolApprovalStore()

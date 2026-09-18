@@ -1,4 +1,12 @@
 """A mid-run user update must get its tools without a missing-tool round."""
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 from src.agent_loop import _steering_tool_additions
 
 

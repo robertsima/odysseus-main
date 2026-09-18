@@ -35,6 +35,13 @@ def guard_enabled(monkeypatch, tmp_path):
     monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     (tmp_path / "home").mkdir(exist_ok=True)
+    # The agent's working directory is DATA_DIR/agent_workspace, and agent_cwd
+    # refuses one that is not the canonical child of the current DATA_DIR.
+    from src import tool_execution
+    workspace = tmp_path / "home" / "agent_workspace"
+    workspace.mkdir(exist_ok=True)
+    monkeypatch.setattr(tool_execution, "AGENT_WORKSPACE_DIR", str(workspace))
+    monkeypatch.setattr(tool_execution, "_AGENT_WORKDIR", str(workspace))
 
 
 @pytest.fixture

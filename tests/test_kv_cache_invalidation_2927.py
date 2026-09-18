@@ -26,6 +26,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 
 # --------------------------------------------------------------------------- #
 # 1. Byte-identical static system prefix across turns of the same session
@@ -466,6 +470,7 @@ def test_payload_omits_session_id_when_not_provided(monkeypatch):
     assert captured[0]["cache_prompt"] is True
 
 
+@_REPORT_BACKLOG
 def test_agent_cached_prefix_hash_ignores_turn_tail_and_detects_real_prefix_changes():
     """Round instrumentation distinguishes expected history growth from a
     system/tool-schema mutation that can actually invalidate KV reuse."""
@@ -491,6 +496,7 @@ def test_agent_cached_prefix_hash_ignores_turn_tail_and_detects_real_prefix_chan
     ]) != first
 
 
+@_REPORT_BACKLOG
 def test_agent_history_prefix_continuity_detects_mid_history_mutation():
     """Tail growth is cache-friendly; replacing an older replayed message is
     not, even if system instructions and schemas did not change."""

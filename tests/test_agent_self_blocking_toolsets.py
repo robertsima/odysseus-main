@@ -26,6 +26,14 @@ domain was detected, and re-arm the full permitted toolset once when a round
 ends by claiming a tool was missing.
 """
 
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
+
 import os
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")

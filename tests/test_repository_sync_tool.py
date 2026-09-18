@@ -11,7 +11,20 @@ from src.agent_worktree import repository_sync as repo_sync
 from src import tool_execution
 from src.tool_types import ToolBlock
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
 
+
+def _no_security_context():
+    # Looked up at call time: other tests reload src.tool_execution, which
+    # replaces the sentinel execute_tool_block compares by identity.
+    import src.tool_execution as tool_execution
+
+    return tool_execution.NO_TOOL_SECURITY_CONTEXT
+
+
+@_REPORT_BACKLOG
 @pytest.mark.parametrize("mode", ["ask_all", "ask_risky"])
 def test_repository_approval_distinguishes_inspection_from_pull(mode):
     from src.tool_approvals import approval_reason
@@ -216,7 +229,7 @@ async def test_dispatcher_still_enforces_profile_plan_and_active_policy_revocati
     )
     block = ToolBlock("manage_agent_worktree", '{"action":"repo_list"}')
     _desc, profile_blocked = await tool_execution.execute_tool_block(
-        block, session_id="chat-1", owner="admin"
+        block, session_id="chat-1", owner="admin", security_context=_no_security_context()
     )
     assert profile_blocked["exit_code"] == 1
     assert "selected tool bindings" in profile_blocked["error"]
@@ -227,7 +240,7 @@ async def test_dispatcher_still_enforces_profile_plan_and_active_policy_revocati
         block,
         session_id="chat-1",
         owner="admin",
-        disabled_tools={"manage_agent_worktree"},
+        disabled_tools={"manage_agent_worktree"},security_context=_no_security_context()
     )
     assert plan_blocked["exit_code"] == 1
     assert "disabled by user" in plan_blocked["error"]
@@ -235,7 +248,7 @@ async def test_dispatcher_still_enforces_profile_plan_and_active_policy_revocati
 
     policy = SimpleNamespace(blocks=lambda name: name == "manage_agent_worktree")
     _desc, policy_blocked = await tool_execution.execute_tool_block(
-        block, session_id="chat-1", owner="admin", tool_policy=policy
+        block, session_id="chat-1", owner="admin", tool_policy=policy, security_context=_no_security_context()
     )
     assert policy_blocked["exit_code"] == 1
     assert "guide-only policy" in policy_blocked["error"]

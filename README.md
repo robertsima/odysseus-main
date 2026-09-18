@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/odysseus-wordmark.png" alt="Odysseus" width="238">
+  <img src="assets/branding/odysseus-wordmark.png" alt="Odysseus" width="238">
 </p>
 
 <p align="center">
@@ -8,9 +8,9 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> ·
-  <a href="docs/setup.md">Setup Guide</a> ·
-  <a href="docs/configuration.md">Configuration</a> ·
-  <a href="docs/">Docs</a> ·
+  <a href="website/setup.md">Setup Guide</a> ·
+  <a href="website/configuration.md">Configuration</a> ·
+  <a href="website/">Docs</a> ·
   <a href="CONTRIBUTING.md">Contributing</a> ·
   <a href="ROADMAP.md">Roadmap</a>
 </p>
@@ -20,7 +20,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/odysseus-browser.jpg" alt="Odysseus interface">
+  <img src="assets/branding/odysseus-browser.jpg" alt="Odysseus interface">
 </p>
 
 ---
@@ -38,7 +38,7 @@ docker compose up -d --build
 
 Open `http://localhost:7000` when the containers are healthy. The first admin password is printed in `docker compose logs odysseus`.
 
-Native installs, GPU notes, Windows/macOS instructions, and HTTPS live in the [setup guide](docs/setup.md). For what belongs in `.env` versus the Settings UI, see [Configuration](docs/configuration.md).
+Native installs, GPU notes, Windows/macOS instructions, and HTTPS live in the [setup guide](website/setup.md). For what belongs in `.env` versus the Settings UI, see [Configuration](website/configuration.md).
 
 ## Features
 
@@ -53,32 +53,37 @@ Native installs, GPU notes, Windows/macOS instructions, and HTTPS live in the [s
 
 ## Demo
 
-A full hover-to-play tour lives on the landing page: [`docs/index.html`](docs/index.html).
+A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).
 
 ## Contributing
 
 Help is welcome. The best entry points are fresh-install testing, provider setup bugs, mobile/editor polish, docs, and small focused refactors. See [CONTRIBUTING.md](CONTRIBUTING.md) and [ROADMAP.md](ROADMAP.md).
 
-To find your way around the code, start with [`docs/`](docs/README.md). Four
-documents cover the whole system: [architecture and runtime](docs/architecture-runtime.md)
+To find your way around the code, start with [`website/`](website/README.md). Four
+documents cover the whole system: [architecture and runtime](website/architecture-runtime.md)
 (what runs where, a request end to end, where state lives),
-[subsystems](docs/subsystems.md) (which files implement which feature),
-[the agent runtime](docs/agent-runtime.md) (how a turn picks its tools and
-keeps its context bounded), and [design patterns](docs/design-patterns.md)
+[subsystems](website/subsystems.md) (which files implement which feature),
+[the agent runtime](website/agent-runtime.md) (how a turn picks its tools and
+keeps its context bounded), and [design patterns](website/design-patterns.md)
 (why the code is written the way it is — worth reading before a refactor).
 `specs/` holds the behaviour rules the code has to satisfy.
 
 ## Security
 
-Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly. Deployment details are in the [setup guide](docs/setup.md#security-notes).
+Odysseus is a self-hosted workspace with powerful local tools. Keep auth enabled, keep private data out of Git, and do not expose raw model/service ports publicly.
+
+- Keep `AUTH_ENABLED=true` for any network-accessible deployment.
+- Keep `LOCALHOST_BYPASS=false` outside local development.
+
+Deployment details are in the [setup guide](website/setup.md#security-notes).
 
 ## Star History
 
-<a href="https://www.star-history.com/?repos=odysseus-dev%2Fodysseus&type=date&legend=top-left">
+<a href="https://star-history.dera.page/#odysseus-dev/odysseus&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://star-history.dera.page/svg?repos=odysseus-dev/odysseus&type=date&legend=top-left" />
  </picture>
 </a>
 
