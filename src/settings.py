@@ -211,8 +211,8 @@ DEFAULT_SETTINGS = {
     # for the single final envelope (the pre-2026-09 behaviour).
     "claude_code_stream_transcript": True,
     # Workbench (Settings > Tools): the docked agent activity / changes /
-    # commits / pull-request panel. `workbench_auto_open` pops it open when a
-    # delegated run starts in the current chat.
+    # commits / pull-request panel. `workbench_auto_open` opens the Agents
+    # panel (not the Workbench) when a delegated run starts in the current chat.
     "workbench_enabled": True,
     "workbench_auto_open": True,
     # Default approval mode for chats that have not chosen one

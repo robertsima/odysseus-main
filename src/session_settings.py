@@ -4,8 +4,8 @@ Two kinds of keys live in ``sessions.settings_json``:
 
 * **Policy**: ``disabled_tools`` (tools switched off for this chat only, on
   top of the global and per-user denylists), enforced on every turn, and
-  ``approval_mode`` (see :mod:`src.approval_modes`), stored but not yet
-  enforced by the current agent loop.
+  ``approval_mode`` (see :mod:`src.approval_modes`), which decides which
+  tool calls stop for an approval card.
 * **Last used** state the frontend restores when the chat is reopened:
   ``toggles`` (agent/chat mode, web, shell, plan, knowledge base),
   ``workspace`` and ``preset_id``. The chat route records these from each turn,

@@ -2649,10 +2649,19 @@ class TaskScheduler:
             )[1:]
         except Exception:
             _task_fallbacks = []
+        # A task follows its chat's approval mode, else the app-wide default.
+        # Nobody watches a scheduled run, so a call that would ask pauses it.
+        try:
+            from core.database import get_session_settings
+            from src.session_settings import effective_approval_mode
+            _task_approval_mode = effective_approval_mode(get_session_settings(session_id) or {})
+        except Exception:
+            _task_approval_mode = None
         async for event_str in stream_agent_loop(
             endpoint_url=endpoint_url,
             model=model,
             messages=messages,
+            approval_mode=_task_approval_mode,
             max_rounds=_task_max_rounds,
             session_id=session_id,
             owner=task.owner,
@@ -2716,9 +2725,10 @@ class TaskScheduler:
         if approval_pause is not None:
             return (
                 "Scheduled task paused safely: "
-                f"{approval_pause['tool']} requested an exact action after "
-                "untrusted context. That action was not executed. Run this task "
-                "interactively to inspect and approve the action."
+                f"{approval_pause['tool']} needs approval under the current "
+                "approval settings. That action was not executed. Run this task "
+                "interactively to inspect and approve the action, or loosen "
+                "Settings › Workbench › Default approvals."
             )
 
         # When a round produces nothing, stream_agent_loop synthesizes a

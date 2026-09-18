@@ -1427,10 +1427,10 @@ export async function init() {
   watchSession();
   watchVisibility();
   if (!state.enabled) return;
-  // Auto-open on the first sub-process run of the session (Claude Code, a
-  // sub-agent…), so the user sees the work as it happens.
-  // A minimized Workbench stays minimized: the user put it away on purpose.
-  document.addEventListener('workbench:run-started', () => { if (state.autoOpen && !isOpen() && !Modals.isMinimized(MODAL_ID)) open(); });
+  // A sub-process run starting in this chat (Claude Code, a sub-agent…)
+  // opens the Agents panel, not this window, so the user sees the work as it
+  // happens. The Workbench opens only when asked for.
+  document.addEventListener('workbench:run-started', () => { if (state.autoOpen) window.agentsDashboard?.openForRun?.(); });
 }
 
 export function refreshSettings() { return probeSettings(); }

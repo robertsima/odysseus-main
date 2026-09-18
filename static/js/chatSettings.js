@@ -2,8 +2,8 @@
  *
  * Each chat keeps its own setup (routes/session_routes.py /session/{id}/settings):
  *   · approval mode — whether risky tool calls stop for approval first
- *     (auto / ask_risky / ask_all; src/approval_modes.py). Shown only while
- *     the server enforces it: the settings API lists no modes otherwise.
+ *     (auto / ask_risky / ask_all; src/approval_modes.py). A chat with no
+ *     mode follows the app default (Settings › Workbench › Default approvals).
  *   · tools switched off for this chat only (enforced server-side)
  *   · the toggles and workspace it last ran with (recorded by the chat route on
  *     every turn and restored here when the chat is reopened, so a chat no
@@ -21,7 +21,7 @@ const API = '';
 const MODE_INFO = {
   auto: { label: 'Auto', desc: 'Tools run without asking.' },
   ask_risky: { label: 'Ask for risky', desc: 'Destructive or outward-facing actions ask first: deleting files, git push, publishing, sending or deleting email, sudo.' },
-  ask_all: { label: 'Ask for everything', desc: 'Every tool that can change something asks first, including any shell command.' },
+  ask_all: { label: 'Ask for everything', desc: 'Every tool that can change something asks first, including any shell command, and so does anything high-impact once web, email or file content has entered the run.' },
 };
 // Group tool names for the per-chat tools picker.
 const TOOL_GROUPS = [

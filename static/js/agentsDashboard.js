@@ -1023,7 +1023,7 @@ function bringToFront() {
   const root = $(MODAL_ID); if (!root) return;
   root.style.zIndex = String(nextToolWindowZ({ exclude: root, current: root.style.zIndex }));
 }
-export function open() {
+export function open({ focus = true } = {}) {
   const root = $('agents-dashboard'); if (!root) return;
   registerWithManager();
   if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }
@@ -1036,7 +1036,7 @@ export function open() {
   const cur = window.sessionModule?.getCurrentSessionId?.();
   if (cur && state.rows.some((r) => r.session_id === cur)) state.selected = cur;
   render(); refresh(); connect();
-  root.focus({ preventScroll: true });
+  if (focus) root.focus({ preventScroll: true });
   if (!state.tick) state.tick = setInterval(() => {
     if (!state.open) return;
     root.querySelectorAll('.ag-row-dur[data-started]').forEach((el) => {
@@ -1045,6 +1045,13 @@ export function open() {
       if (started) el.textContent = fmtDur(started, finished);
     });
   }, 1000);
+}
+/** Show the panel for work the current chat just started. Leaves it alone
+ * when it is already open or the user minimized it, and keeps focus in the
+ * composer so the user can keep typing. */
+export function openForRun() {
+  if (state.open || Modals.isMinimized(MODAL_ID)) return;
+  open({ focus: false });
 }
 export function close() {
   if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
@@ -1150,6 +1157,6 @@ function init() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
-const agentsDashboard = { open, close, toggle, refresh };
+const agentsDashboard = { open, openForRun, close, toggle, refresh };
 window.agentsDashboard = agentsDashboard;
 export default agentsDashboard;

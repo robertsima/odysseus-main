@@ -2469,6 +2469,7 @@ def setup_chat_routes(
                         exact_approval=exact_tool_approval,
                         allow_private=ctx.allow_private,
                         steer_run_id=_steer_run_id,
+                        approval_mode=_approval_mode,
                     ):
                         if chunk.startswith("data: ") and not chunk.startswith("data: [DONE]"):
                             try:

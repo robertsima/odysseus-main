@@ -673,6 +673,12 @@ class ToolRunSecurityContext:
     # Driven by a bearer API token, not a person at a browser. Privileged
     # tools are refused outright and no approval can lift that.
     delegated_credential: bool = False
+    # The chat's approval mode (src.approval_modes), or None for callers that
+    # pass none, which keep the untrusted-context gate below as their only
+    # prompt. With a mode, the mode decides: ``auto`` never asks, ``ask_risky``
+    # asks for destructive and outward-facing calls, and ``ask_all`` asks for
+    # every change and also keeps the untrusted-context gate.
+    approval_mode: str | None = None
 
     def observe_messages(self, messages: Iterable[dict]) -> None:
         """Apply server-owned chat scope and promote untrusted prompt context."""
@@ -711,6 +717,15 @@ class ToolRunSecurityContext:
             )
         if self.approval_gate_bypassed:
             return ToolGateDecision(True)
+        if self.approval_mode is not None:
+            from src.approval_modes import mode_reason, normalize_mode
+
+            mode = normalize_mode(self.approval_mode)
+            reason = mode_reason(mode, tool_name, content)
+            if reason:
+                return ToolGateDecision(False, reason)
+            if mode != "ask_all":
+                return ToolGateDecision(True)
         if not self.external_untrusted_context_seen:
             return ToolGateDecision(True)
         capabilities = capabilities_for_action(tool_name, content)

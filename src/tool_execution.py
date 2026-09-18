@@ -1237,10 +1237,15 @@ async def execute_tool_block(
 
     approval_claimed = False
     if exact_approval is not None:
+        # An approval raised by untrusted context must resume in an armed
+        # context. One raised by the chat's approval mode had no untrusted
+        # context to carry, so only the context itself is required.
         if (
             not isinstance(security_context, ToolRunSecurityContext)
-            or not security_context.external_untrusted_context_seen
-            or not exact_approval.pending.external_untrusted_context_seen
+            or (
+                exact_approval.pending.external_untrusted_context_seen
+                and not security_context.external_untrusted_context_seen
+            )
         ):
             return (
                 f"{getattr(block, 'tool_type', None)}: BLOCKED",

@@ -3501,6 +3501,9 @@ async def stream_agent_loop(
     # The run id steer messages for this turn are queued under (the Agents
     # dashboard, the chat composer, and other agents via agent_mailbox).
     steer_run_id: Optional[str] = None,
+    # The chat's resolved approval mode (src.approval_modes). None keeps
+    # upstream's behaviour: ask only after untrusted context.
+    approval_mode: Optional[str] = None,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -3526,6 +3529,9 @@ async def stream_agent_loop(
             exact_approval and exact_approval.allow_remaining_actions
         ),
         delegated_credential=bool(delegated_credential),
+        # A token-driven run has nobody to answer a card, so it keeps the
+        # untrusted-context gate whatever the chat's mode says.
+        approval_mode=None if delegated_credential else approval_mode,
     )
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
@@ -5855,6 +5861,7 @@ async def stream_agent_loop(
                             block.tool_type,
                             block.content,
                         ),
+                        reason=security_decision.reason,
                     )
                     desc = f"{block.tool_type}: APPROVAL REQUIRED"
                     result = {

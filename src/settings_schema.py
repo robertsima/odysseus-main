@@ -516,8 +516,12 @@ register_all([
 
     SettingSpec(
         key="agent_approval_mode", type="choice", label="Approval prompts",
-        help=("Choose when an agent must ask before acting. ‘Risky actions’ covers "
-              "destructive shell commands, publishing, sending email, and similar outside effects."),
+        help=("Choose when an agent must ask before acting. This is the default for "
+              "every chat and sub-agent; a chat or agent profile can pick its own. "
+              "‘Risky actions’ covers destructive shell commands, publishing, sending "
+              "email, deletes and admin changes. ‘Every change’ also asks for any write "
+              "or shell command, and for anything high-impact once web, email or file "
+              "content has entered the run."),
         group="Agents", choices=("auto", "ask_risky", "ask_all"),
         choice_labels=("Run automatically", "Ask for risky actions", "Ask for every change"),
     ),

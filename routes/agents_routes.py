@@ -378,8 +378,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "session_name": getattr(sess, "name", "") if sess else "",
                 "tool": rec.tool_name,
                 "command": rec.content,
-                "reason": "Untrusted content influenced this run" if rec.external_untrusted_context_seen
-                else "Waiting for an exact approval",
+                "reason": rec.reason or ("Untrusted content influenced this run"
+                                         if rec.external_untrusted_context_seen
+                                         else "Waiting for an exact approval"),
                 "created_at": rec.created_at,
                 "expires_at": rec.expires_at,
             })

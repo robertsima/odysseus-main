@@ -47,6 +47,12 @@ async def _drain_agent(sess, messages, *, run_id=None):
     and is not yet threaded into activity reporting (re-port backlog).
     """
     from src.agent_loop import stream_agent_loop
+    from src.session_settings import effective_approval_mode
+    try:
+        from core.database import get_session_settings
+        approval_mode = effective_approval_mode(get_session_settings(sess.id) or {})
+    except Exception:
+        approval_mode = None
     full = ""
     tool_events = []
     round_num = 1
@@ -57,6 +63,7 @@ async def _drain_agent(sess, messages, *, run_id=None):
         session_id=sess.id,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,
         owner=getattr(sess, "owner", None),
+        approval_mode=approval_mode,
     ):
         if not chunk.startswith("data: "):
             continue

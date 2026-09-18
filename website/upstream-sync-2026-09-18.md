@@ -78,14 +78,29 @@ the model.
   - `src/skill_toolsets.py` resolves a skill's `requires_toolsets`. The
     manage_skills author warning uses it.
 
+## Re-ported since
+
+- **Approval modes** (`a3a153e3`, `3c8c2654`). `src/approval_modes.py` now
+  drives upstream's gate through `ToolRunSecurityContext.approval_mode`:
+  - `auto` never asks, `ask_risky` asks for destructive and outward-facing
+    calls, and `ask_all` asks for every change and keeps the untrusted-context
+    gate as well.
+  - The chat route, headless sub-agents, background-job follow-ups and
+    scheduled tasks pass the chat's mode, else the app default
+    (`agent_approval_mode`). A run with no mode (the skill tester, teacher
+    escalation, API-token runs) keeps upstream's untrusted-context gate.
+  - A mode approval uses upstream's exact-action card. It carries no
+    untrusted context, so the executor accepts it in an unarmed run.
+  - A sub-agent's card is saved in its own chat and listed in the Agents
+    panel, with the reason it asked.
+
 ## Changed behaviour until re-ported
 
 | Area | Now | Fork commits to re-port |
 |---|---|---|
-| Approval modes (`ask_risky`, `ask_all`) | Stored and validated (`src/approval_modes.py`) but not enforced. The settings API lists no modes, so the chat UI hides the control. Upstream's gate asks for an exact approval only once untrusted content has influenced a run. | `a3a153e3`, `3c8c2654` |
 | Fork approval store (once/always grants, reissue, precheck before hold) | Replaced by upstream's `ToolApprovalStore`. The Agents overview lists pending approvals and links to the chat, where the card is decided. | `a3a153e3`, `3d8ed0fc`, `8927810b` |
 | `manage_git` risky actions | No per-call confirmation of its own. It is classified as a workspace write with network and external side effects (destructive for rewrites and discards), so upstream's exact-approval gate holds it once a run is tainted. Pushing this repository is still refused (`use_publish_flow`). | `3c8c2654`, `3d8ed0fc` |
-| Approval prompts from skills | A turn that shows any skill a user or agent wrote or edited arms upstream's gate, so the next high-impact call (bash, writes) asks for an exact approval. "Allow for this chat session" covers the rest of that chat. | Upstream design, kept |
+| Approval prompts from skills (runs with no approval mode only) | A turn that shows any skill a user or agent wrote or edited arms upstream's gate, so the next high-impact call (bash, writes) asks for an exact approval. "Allow for this chat session" covers the rest of that chat. | Upstream design, kept |
 | Per-agent profile instructions (`agent_instructions`) | Stored, but not placed into upstream's system prompt | `0ea6b80b`, `f2f9f83e` |
 | Tool routing: intent classes, domain routing, targeted self-unblock, protected admission budget, missing-tool re-arm, starved-domain repair | Upstream's selection | `8927810b`, `c62b6bac`, `cffc5f0d`, `d97fa0e7`, `32614be0`, `a654a09e`, `3e2a0eb5`, `f8882905`, `fc74bf51`, `5ee56c0a` |
 | `discover_tools` | Refused ("unavailable outside an active agent turn"); upstream's loop supplies no discovery context | `c62b6bac` |

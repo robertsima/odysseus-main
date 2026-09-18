@@ -208,11 +208,16 @@ async def run_headless(
         logger.warning("headless provider credential preflight failed for %s",
                        getattr(sess, "id", "?"), exc_info=True)
     from src.tool_security import owner_baseline_disabled_tools
+    from src.session_settings import effective_approval_mode
     try:
         from core.database import get_session_settings
-        allow_private = bool((get_session_settings(sess.id) or {}).get("private_vault_access", False))
+        chat_settings = get_session_settings(sess.id) or {}
     except Exception:
-        allow_private = False
+        chat_settings = {}
+    allow_private = bool(chat_settings.get("private_vault_access", False))
+    # The worker's own chat decides what asks (a profile's mode is stored
+    # there when the child is created), else the app-wide default.
+    approval_mode = effective_approval_mode(chat_settings)
 
     baseline = owner_baseline_disabled_tools(effective_owner)
     if disabled_tools is None:
@@ -228,7 +233,7 @@ async def run_headless(
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
-                                         allow_private=allow_private))
+                                         allow_private=allow_private, approval_mode=approval_mode))
     try:
         if stop_event is None:
             await drain
@@ -285,7 +290,8 @@ async def run_headless(
 
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
-                 source: str, on_event, allow_private: bool = False) -> None:
+                 source: str, on_event, allow_private: bool = False,
+                 approval_mode: Optional[str] = None) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -303,6 +309,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         owner=owner,
         disabled_tools=blocked,
         allow_private=allow_private,
+        approval_mode=approval_mode,
     ):
         event_error = _sse_error_payload(chunk)
         if event_error is not None:
@@ -386,6 +393,19 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             }
             if d.get("diff"):
                 ev["diff"] = d.get("diff")
+            approval = d.get("ask_user")
+            if isinstance(approval, dict):
+                # Saved with the reply, so the worker's chat shows the
+                # approval card and the user can decide it there.
+                ev["ask_user"] = approval
+                if activity_session_id and approval.get("approval_id"):
+                    activity.publish(activity_session_id, "status",
+                                     f"Waiting for approval: {d.get('tool')}",
+                                     source=source, run_id=run_id, owner=owner,
+                                     detail=str(approval.get("description") or "")[:2000] or None,
+                                     data={"approval_id": approval.get("approval_id"), "tool": d.get("tool"),
+                                           "target_session": str(getattr(sess, "id", ""))},
+                                     level="warning")
             tool_events.append(ev)
             if activity_session_id:
                 failed = d.get("exit_code") not in (0, None)

@@ -162,6 +162,9 @@ class PendingToolApproval:
     # exposed in the browser payload.
     selected_tools: tuple[str, ...] = ()
     continuation_query: str = ""
+    # Why the gate stopped this call, for the Agents panel's listing. Display
+    # only: not part of the digest.
+    reason: str = ""
 
     def public_payload(self, *, reason: str | None = None) -> dict[str, Any]:
         return {
@@ -172,7 +175,7 @@ class PendingToolApproval:
             # this exact chat and prevents inheritance by a forked session.
             "session_id": self.session_id,
             "question": "Allow this task to continue?",
-            "description": reason or (
+            "description": reason or self.reason or (
                 "Untrusted context influenced this run, so continuing with "
                 "otherwise-gated actions needs your explicit approval."
             ),
@@ -352,6 +355,7 @@ class ToolApprovalStore:
         continuation_query: Any = None,
         external_untrusted_context_seen: bool,
         capabilities: ToolCapabilities,
+        reason: str | None = None,
     ) -> PendingToolApproval:
         now = time.time()
         effects = tuple(sorted(effect.value for effect in capabilities.effects))
@@ -393,6 +397,7 @@ class ToolApprovalStore:
             expires_at=now + self._ttl_seconds,
             selected_tools=tuple(payload["selected_tools"]),
             continuation_query=payload["continuation_query"],
+            reason=str(reason or "")[:500],
         )
         with self._lock:
             self._purge_expired_locked(now)
