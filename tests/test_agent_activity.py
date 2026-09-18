@@ -167,6 +167,60 @@ def test_a_status_event_from_the_parent_side_closes_the_run(data_dir):
     # The run still belongs to the worker's chat; the parent only closed it.
     assert run["session_id"] == "worker-chat"
     assert not act.list_runs(session_id="parent-chat", active_only=True)
+    # A status event closes a run exactly as run_finished does, so it has to
+    # say WHEN. Both surfaces that show a finished agent -- the strip above the
+    # composer (which keeps a row for a few seconds after it ends) and the
+    # Agents dashboard (which windows recent rows) -- select on `finished_at`,
+    # so a terminal run without one is a row that vanishes the instant the work
+    # ends instead of being seen as incomplete.
+    assert run["finished_at"] >= run["started_at"]
+
+
+def test_a_run_rebuilt_from_a_status_event_still_belongs_to_its_parent_chat(data_dir):
+    """The chat that started a worker must not lose it when the record is gone.
+
+    A record can be missing when its ``run_started`` was evicted by the
+    registry cap or was written by an earlier process. ``_update_run`` rebuilds
+    one from whatever event arrives next -- and a rebuilt record with an empty
+    summary has no ``parent_session``, which is the only thing that lets the
+    launching chat list the run at all.
+    """
+    act.run_started("worker-chat", "session", "Worker · audit", run_id="session-9", owner="alice",
+                    data={"parent_session": "parent-chat", "target_session": "worker-chat"})
+    act._runs.pop("session-9")          # the record is gone; the worker is not
+
+    act.publish("parent-chat", "status", "Worker alpha failed", source="session", run_id="session-9",
+                owner="alice", level="error",
+                data={"status": "failed", "parent_session": "parent-chat",
+                      "target_session": "worker-chat", "error": "provider rejected the credential"})
+
+    rebuilt = act.get_run("session-9")
+    assert rebuilt["status"] == "failed" and rebuilt["finished_at"]
+    assert rebuilt["summary"]["parent_session"] == "parent-chat"
+    assert [r["run_id"] for r in act.list_runs(session_id="parent-chat")] == ["session-9"]
+
+
+def test_the_registry_cap_never_evicts_a_run_that_is_still_working(data_dir, monkeypatch):
+    """Eviction frees finished runs, oldest first -- never live ones.
+
+    The registry is the only server-side truth the agent strip has. Dropping a
+    live run to make room makes a working agent disappear from the chat that
+    started it, releases its slot in ``agent_control.live_children`` and makes
+    ``has_active_run`` report an in-flight chat as idle.
+    """
+    monkeypatch.setattr(act, "MAX_RUNS", 3)
+    live = act.run_started("worker-chat", "session", "Worker · long audit", owner="alice",
+                           data={"parent_session": "parent-chat"})
+    oldest_finished = act.run_started("chat", "bg_job", "job 0", owner="alice")
+    act.run_finished("chat", "bg_job", oldest_finished, "job 0 done", owner="alice")
+    for i in range(1, 5):
+        rid = act.run_started("chat", "bg_job", f"job {i}", owner="alice")
+        act.run_finished("chat", "bg_job", rid, f"job {i} done", owner="alice")
+
+    assert act.get_run(live)["status"] == "running"
+    assert act.has_active_run("worker-chat")
+    assert [r["run_id"] for r in act.list_runs(session_id="parent-chat")] == [live]
+    assert act.get_run(oldest_finished) is None, "finished runs are what makes room"
 
 
 def test_the_global_feed_has_history_not_just_live_events(data_dir):

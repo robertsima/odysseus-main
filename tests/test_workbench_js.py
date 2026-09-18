@@ -139,3 +139,26 @@ def test_workbench_run_cards_keep_management_controls():
     assert "case 'run-stop': stopWorkbenchRun" in src
     assert "/api/workbench/runs/${encodeURIComponent(runId)}/stop" in src
     assert "window.sessionModule.selectSession(target)" in src
+
+
+def test_agent_strip_reads_run_liveness_from_one_definition():
+    """The strip's running/finished split must not be a scattered ``=== 'running'``.
+
+    A row is kept on the strip while it is live and for a few seconds after it
+    ends; a run that reports a terminal status without a finish time (a worker
+    closed by a status event from the chat that started it, or a headless
+    stream failure) used to fall out of both halves and vanish on the tick it
+    completed. ``isLive`` mirrors ``src/agent_activity.LIVE_RUN_STATUSES`` and
+    ``stripEndedAt`` supplies the missing end time.
+    """
+    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
+    assert "const isLive = (status) => LIVE_STATUSES.has(status || 'running');" in src
+    assert "state.stripEndedAt.set(run.run_id, run.finished_at);" in src
+    assert "if (!isLive(run.status)) run.finished_at = run.finished_at || ev.ts;" in src
+    # The strip's heartbeat recomputes instead of closing over the render that
+    # armed it, so a run that starts while an older row is on screen is polled
+    # for too.
+    assert "const current = stripRuns();" in src
+    assert "if (current.some((r) => isLive(r.status))) refreshAgentRuns();" in src
+    strip = src[src.index("function stripRuns()"):src.index("function latestActivity")]
+    assert "=== 'running'" not in strip
