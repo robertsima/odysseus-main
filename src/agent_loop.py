@@ -543,7 +543,10 @@ _DOMAIN_TOOL_MAP = {
 
 _WORKSPACE_TERMINUS_TOOLS = (
     _DOMAIN_TOOL_MAP["files"]
-    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan"}
+    # read_app_logs: without it a "check the logs" turn in a workspace went
+    # hunting for log files in the checkout and read a stale copy (2026-09-18).
+    | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan",
+       "read_app_logs"}
 )
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
@@ -1089,43 +1092,80 @@ _ADMIN_KEYWORDS = [
     "note", "notes", "todo", "todos", "reminder", "reminders",
 ]
 
+_CONTEXT_ENVELOPE_PREFIXES = (
+    "UNTRUSTED SOURCE DATA", "[Context —", "[Tool execution results]", "[Harness directive —",
+)
+
+
+def _user_text(msg: Dict) -> str:
+    content = msg.get("content", "")
+    if isinstance(content, list):
+        content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
+def _is_context_envelope(msg: Dict) -> bool:
+    """A user-role message the harness added, not something a person or a
+    peer agent wrote: retrieval and memory context, the date line, prose tool
+    results, harness directives.
+
+    The chat builder appends request-local context AFTER the human turn (for
+    prompt caching), so "the last user message" used to be that context. On
+    2026-09-18 every turn's intent, retrieval query and domain detection ran on
+    the "UNTRUSTED SOURCE DATA …" wrapper text: nine keyword domains, 49
+    retrieved tools, and the file/terminal toolset for a question about logs.
+    """
+    if msg.get("role") != "user":
+        return False
+    if (msg.get("metadata") or {}).get("trusted") is False:
+        return True
+    text = _user_text(msg).lstrip()
+    return text.startswith(_CONTEXT_ENVELOPE_PREFIXES) or "<<<UNTRUSTED_SOURCE_DATA>>>" in text
+
+
+def _latest_user_message(messages: List[Dict]) -> Optional[Dict]:
+    """The most recent user message a person (or a peer agent) wrote, falling
+    back to the last user-role message when every one is harness context."""
+    last_any = None
+    for msg in reversed(messages or []):
+        if msg.get("role") != "user":
+            continue
+        if last_any is None:
+            last_any = msg
+        if not _is_context_envelope(msg):
+            return msg
+    return last_any
+
+
 def _detect_admin_intent(messages: List[Dict]) -> bool:
     """Check if the last user message suggests admin/management tool usage."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            content_lower = content.lower()
-            return any(kw in content_lower for kw in _ADMIN_KEYWORDS)
-    return False
+    msg = _latest_user_message(messages)
+    if msg is None:
+        return False
+    content_lower = _user_text(msg).lower()
+    return any(kw in content_lower for kw in _ADMIN_KEYWORDS)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
-    """Return the most recent user message as plain text."""
-    for msg in reversed(messages):
-        if msg.get("role") == "user":
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
-            return content
-    return ""
+    """Return the most recent human-written user message as plain text."""
+    msg = _latest_user_message(messages)
+    return _user_text(msg) if msg is not None else ""
 
 
 def _user_turn_count(messages: List[Dict]) -> int:
-    """Count real user turns in the message list."""
-    count = 0
-    for msg in messages or []:
-        if msg.get("role") == "user":
-            count += 1
-    return count
+    """Count user-role messages. Context envelopes count too: a first turn
+    that arrives with retrieved context has never taken the no-tools direct
+    path, and this keeps it that way."""
+    return sum(1 for msg in messages or [] if msg.get("role") == "user")
 
 
 def _insert_before_latest_user(messages: List[Dict], context_msg: Dict) -> List[Dict]:
-    """Insert a context message immediately before the latest user turn."""
+    """Insert a context message immediately before the latest user turn (the
+    one a person wrote, not context the harness appended after it)."""
     out = list(messages or [])
+    latest = _latest_user_message(out)
     for idx in range(len(out) - 1, -1, -1):
-        if out[idx].get("role") == "user":
+        if out[idx] is latest:
             out.insert(idx, context_msg)
             return out
     out.append(context_msg)
@@ -1369,6 +1409,8 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     seen_latest_user = False
     for msg in reversed(messages):
         role = msg.get("role")
+        if _is_context_envelope(msg):
+            continue
         if role == "user" and not seen_latest_user:
             seen_latest_user = True
             continue
@@ -2172,8 +2214,7 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
         # Skip injected envelopes — role=user but not human intent. Tool results
         # are now wrapped via untrusted_context_message (metadata.trusted=False);
         # keep the legacy "[Tool execution results]" prefix for older histories.
-        meta = msg.get("metadata") or {}
-        if not content or meta.get("trusted") is False or content.startswith("[Tool execution results]"):
+        if not content or _is_context_envelope(msg):
             continue
         collected.append(content)
         if len(collected) >= max_user:
@@ -2193,6 +2234,14 @@ def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
         elif not marker:
             stripped.append(dict(message))
     return stripped
+
+
+_PRIVATE_SHELL_NOTE = (
+    "bash and python are unavailable in this chat: they can read private vault files, so "
+    "they run only when the user turns on 'Allow private vault reads' in this chat's "
+    "settings. Use the file tools (read_file, grep, glob, ls) instead. If the task needs a "
+    "shell (running tests, builds, git commands), say so and name that setting."
+)
 
 
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
@@ -2450,14 +2499,7 @@ def _build_system_prompt(
         _doc_message["_protected"] = True
 
         # Auto-detect suggestion mode
-        _last_user_msg = ""
-        for msg in reversed(messages):
-            if msg.get("role") == "user":
-                _content = msg.get("content", "")
-                if isinstance(_content, list):
-                    _content = " ".join(b.get("text", "") for b in _content if isinstance(b, dict))
-                _last_user_msg = _content.lower()
-                break
+        _last_user_msg = _extract_last_user_message(messages).lower()
         _suggest_keywords = ["suggest", "review", "improve", "feedback", "critique", "proofread", "check my", "look over"]
         if any(kw in _last_user_msg for kw in _suggest_keywords):
             _doc_message["content"] += (
@@ -2553,14 +2595,7 @@ def _build_system_prompt(
     elif relevant_tools and (_EMAIL_TOOL_HINTS & set(relevant_tools)):
         # Avoid adding email style for unrelated UI-only requests unless the
         # user's words are email-ish.
-        _last_user_text = ""
-        for _msg in reversed(messages):
-            if _msg.get("role") == "user":
-                _c = _msg.get("content", "")
-                if isinstance(_c, list):
-                    _c = " ".join(b.get("text", "") for b in _c if isinstance(b, dict))
-                _last_user_text = str(_c).lower()
-                break
+        _last_user_text = _extract_last_user_message(messages).lower()
         _inject_style = any(tok in _last_user_text for tok in ("email", "mail", "reply", "send", "inbox"))
     if _inject_style and not suppress_local_context:
         try:
@@ -3637,6 +3672,18 @@ async def stream_agent_loop(
         # public/non-admin users rather than trying to enumerate every tool.
         mcp_mgr = None
 
+    if allow_private is not True:
+        # bash/python (and MCP tools that read files) are refused at execution
+        # without the chat's private-vault grant, because they can read the
+        # vault around the file tools' checks (tool_execution). Offering them
+        # anyway cost a wasted call or two per turn on 2026-09-18, so their
+        # schemas are not sent (_filter_route_tool_schemas) and the model is
+        # told why, so it can tell the user what to switch on. Execution still
+        # refuses them on its own; hiding is not the control.
+        _private_shell_note = bool({"bash", "python"} - disabled_tools)
+    else:
+        _private_shell_note = False
+
     if plan_mode:
         # Plan mode: investigate read-only, propose a plan, don't execute. The
         # route also unions the read-only-disabled set, but enforce here too so
@@ -4514,6 +4561,8 @@ async def stream_agent_loop(
             _prepend_agent_directive(route_messages, build_active_plan_note(approved_plan))
         if guide_only:
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
+        elif _private_shell_note and (route_tools is None or {"bash", "python"} & set(route_tools)):
+            _prepend_agent_directive(route_messages, _PRIVATE_SHELL_NOTE)
         return {
             "messages": route_messages,
             "mcp_schemas": route_mcp_schemas,
@@ -4656,7 +4705,15 @@ async def stream_agent_loop(
         # the exact call that the server will seal for user approval.  Schema
         # visibility is not authority: both the loop and dispatcher still gate
         # execution, and only a one-use server record can cross that boundary.
-        return schemas
+        # MCP tools that read files are the exception: without the private
+        # grant they are refused outright, so they are not offered.
+        if allow_private is True:
+            return schemas
+        from src.private_access import tool_requires_private_grant
+        return [
+            schema for schema in schemas
+            if not tool_requires_private_grant(schema.get("function", {}).get("name") or schema.get("name") or "")
+        ]
 
     def _tool_schemas_for_route(route_state):
         route_mcp_schemas = route_state["mcp_schemas"]

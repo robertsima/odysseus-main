@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from core.log_safety import redact_url
@@ -178,8 +178,14 @@ def read_log(
     lines: int = DEFAULT_LINES,
     contains: Optional[str] = None,
     level: Optional[str] = None,
+    since_minutes: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Return the tail of one log, filtered and redacted."""
+    """Return the tail of one log, filtered and redacted.
+
+    ``since_minutes`` keeps only entries written in that many recent minutes
+    (a traceback's continuation lines go with their entry). "Logs from the
+    last 10 minutes" used to mean guessing a line count.
+    """
     target = resolve(name)
     if target is None:
         available = [f.name for f in list_logs()]
@@ -194,7 +200,15 @@ def read_log(
 
     # Filtering happens before the tail is trimmed, so "last 100 ERROR lines"
     # means what it says instead of "errors within the last 100 lines".
-    raw = _tail_lines(target.path, 0 if (contains or level) else count)
+    since = None
+    if since_minutes not in (None, ""):
+        try:
+            since = datetime.now() - timedelta(minutes=max(0.0, float(since_minutes)))
+        except (TypeError, ValueError):
+            raise RuntimeError("since_minutes must be a number")
+    raw = _tail_lines(target.path, 0 if (contains or level or since) else count)
+    if since is not None:
+        raw = _entries_since(raw, since)
 
     needle = (contains or "").lower() or None
     wanted_level = (level or "").strip().upper() or None
@@ -206,7 +220,7 @@ def read_log(
         raw = [ln for ln in raw if any(f" - {lv} - " in ln or ln.startswith(lv) for lv in allowed)]
     if needle:
         raw = [ln for ln in raw if needle in ln.lower()]
-    if contains or wanted_level:
+    if contains or wanted_level or since is not None:
         raw = raw[-count:]
 
     return {
@@ -217,6 +231,27 @@ def read_log(
         "line_count": len(raw),
         "lines": [redact_line(ln) for ln in raw],
     }
+
+
+_ENTRY_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+
+
+def _entries_since(lines: List[str], since: datetime) -> List[str]:
+    """Lines of entries stamped at or after ``since`` (the app's formatter
+    writes local time, as datetime.now() reads it). Unstamped lines belong to
+    the entry above them."""
+    kept: List[str] = []
+    include = False
+    for line in lines:
+        match = _ENTRY_TIME_RE.match(line)
+        if match:
+            try:
+                include = datetime.fromisoformat(match.group(1).replace("T", " ")) >= since
+            except ValueError:
+                pass
+        if include:
+            kept.append(line)
+    return kept
 
 
 def logs_index() -> List[Dict[str, object]]:

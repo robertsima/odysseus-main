@@ -401,6 +401,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "name": {"type": "string", "description": "Log file name, e.g. app.log. Defaults to the app log."},
                     "lines": {"type": "integer", "description": "How many lines to return (1-500, default 100)"},
                     "contains": {"type": "string", "description": "Only lines containing this substring"},
+                    "since_minutes": {"type": "number", "description": "Only entries from the last N minutes, e.g. 10 for 'the last 10 minutes'"},
                     "level": {
                         "type": "string",
                         "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

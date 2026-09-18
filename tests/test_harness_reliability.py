@@ -344,3 +344,79 @@ def test_fetch_does_not_retry_a_missing_repository(monkeypatch):
     with pytest.raises(RepositorySyncError):
         rr._fetch_exact(repo, "https://github.com/o/r", b"refs/heads/dev", None)
     assert len(calls) == 1
+
+
+# ── the request, not the context appended after it ────────────────────────
+
+def _turn_with_trailing_context(text):
+    from src.prompt_security import untrusted_context_message
+
+    ctx = untrusted_context_message("research context", "notes about email, calendar, servers and tasks")
+    ctx.pop("metadata", None)  # the route's dict copy may drop it; the text alone must be enough
+    date = {"role": "user", "content": "[Context — current date/time: 2026-09-18 21:48 UTC]"}
+    return [{"role": "user", "content": "earlier question"},
+            {"role": "assistant", "content": "earlier answer"},
+            {"role": "user", "content": text}, ctx, date]
+
+
+def test_latest_user_message_skips_appended_context():
+    msgs = _turn_with_trailing_context("check the logs from the last 10 minutes")
+    assert al._extract_last_user_message(msgs) == "check the logs from the last 10 minutes"
+    intent = al._classify_agent_request(msgs, al._extract_last_user_message(msgs))
+    assert "email" not in intent["domains"] and "notes_calendar_tasks" not in intent["domains"]
+
+
+def test_a_peer_agents_message_still_counts_as_the_request():
+    msgs = [{"role": "user", "content": "[Message from agent session abc] please rerun the audit"}]
+    assert al._extract_last_user_message(msgs).endswith("please rerun the audit")
+
+
+def test_context_goes_before_the_human_turn_not_the_trailing_context():
+    msgs = _turn_with_trailing_context("do the thing")
+    out = al._insert_before_latest_user(msgs, {"role": "system", "content": "NOTE"})
+    idx = next(i for i, m in enumerate(out) if m.get("content") == "NOTE")
+    assert out[idx + 1]["content"] == "do the thing"
+
+
+def test_workspace_toolset_can_read_the_app_logs():
+    assert "read_app_logs" in al._WORKSPACE_TERMINUS_TOOLS
+
+
+# ── tools refused without the private grant are not offered ──────────────
+
+async def test_shell_tools_are_hidden_without_the_private_grant(monkeypatch):
+    sent = {}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        sent["tools"] = [t.get("function", {}).get("name") for t in (kwargs.get("tools") or [])]
+        sent["messages"] = messages
+        yield f'data: {json.dumps({"delta": "ok"})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    events = [e async for e in al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "run the tests with bash"}],
+        relevant_tools={"bash", "python", "read_file", "grep"}, max_rounds=1, allow_private=False,
+    )]
+    assert events
+    assert "bash" not in sent["tools"] and "python" not in sent["tools"]
+    assert "read_file" in sent["tools"]
+    assert any("Allow private vault reads" in str(m.get("content")) for m in sent["messages"])
+
+
+def test_read_log_keeps_only_recent_entries(tmp_path, monkeypatch):
+    from datetime import datetime, timedelta
+    from src import agent_logs
+
+    now = datetime.now()
+    old = (now - timedelta(minutes=30)).strftime("%Y-%m-%d %H:%M:%S,000")
+    new = (now - timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S,000")
+    log = tmp_path / "app.log"
+    log.write_text(f"{old} - x - ERROR - stale\n  stale traceback line\n"
+                   f"{new} - x - ERROR - fresh\n  fresh traceback line\n", encoding="utf-8")
+    monkeypatch.setattr(agent_logs, "log_roots", lambda: [str(tmp_path)])
+    out = agent_logs.read_log("app.log", since_minutes=10)
+    assert [ln.strip() for ln in out["lines"]] == [f"{new} - x - ERROR - fresh", "fresh traceback line"]

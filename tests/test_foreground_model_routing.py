@@ -3272,6 +3272,9 @@ def test_agent_builds_backup_prompt_and_tool_transport_before_attempt(monkeypatc
             headers=primary[2],
             max_rounds=1,
             relevant_tools={"bash"},
+            # bash needs the private grant; the prompt under test must not carry
+            # the "bash is unavailable" note.
+            allow_private=True,
             fallbacks=[backup],
             fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
             fallback_on_empty=False,
@@ -3395,6 +3398,9 @@ def test_agent_fallback_request_uses_candidate_context_budget(
             headers=primary[2],
             max_rounds=2,
             relevant_tools={"bash"},
+            # bash needs the private grant; the prompt under test must not carry
+            # the "bash is unavailable" note.
+            allow_private=True,
             fallbacks=[backup],
             fallback_statuses=FOREGROUND_AVAILABILITY_STATUSES,
             fallback_on_empty=False,

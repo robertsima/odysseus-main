@@ -241,6 +241,7 @@ class ReadAppLogsTool:
                 lines=args.get("lines", agent_logs.DEFAULT_LINES),
                 contains=args.get("contains"),
                 level=args.get("level"),
+                since_minutes=args.get("since_minutes"),
             )
         except RuntimeError as exc:
             return _err(f"read_app_logs: {exc}")
