@@ -541,6 +541,19 @@ exists for this.
 
 ## 8. Scoped research workflows
 
+Every workflow carries a structured `record` (`agent_workflows.build_record`),
+returned by `status`/`wait`, kept in the manifest once the run ends, and
+headlined in the chat hand-off and the activity detail: the objective, the
+selected agents with their bindings and outcome, the result summary with its
+source (the synthesis agent, the single specialist of a one-agent run, or
+nothing) and whether it is provisional, the specialists' raw outputs as
+pointers and sizes apart from that summary, the handoff artifacts, changed
+files (none: specialists are read-only), the checks the controller actually
+ran (preflight, evidence that bound tools executed, a non-empty result) with
+their outcome, and the unresolved issues — failed branches, timeouts, and the
+`open_questions` a handoff itself declared. `verified` on the summary is always
+false: none of those checks verifies the content of a claim.
+
 `orchestrate_agents` runs real specialist jobs through `launch_worker`, not a
 second agent runtime. `start` accepts an objective, one to eight named specialists
 with self-contained tasks, exact read-only tool bindings, optional selected skills

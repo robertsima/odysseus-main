@@ -309,6 +309,145 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
             "required": bool(raw.get("required", True)) if stage == "research" else False}
 
 
+# ── the run record ─────────────────────────────────────────────────────────
+# One bounded, structured account of a workflow, kept in the manifest beside
+# the raw trace: what was asked, which agents were selected, what each actually
+# produced, which checks the controller ran on it, and what is still open.
+# "Workflow completed" answered none of those without reading every child
+# chat. Raw specialist output is a pointer plus its size here -- the artifact
+# stays in the worker chat -- and the one excerpt kept is labelled as the
+# untrusted worker text it is, never as a verified result.
+RECORD_EXCERPT_CHARS = 600
+RECORD_MAX_UNRESOLVED = 20
+_HANDOFF_OPEN_KEYS = ("open_questions", "unresolved", "gaps")
+
+
+def _handoff_fields(text):
+    """The worker's JSON handoff as a dict when its result is one, else {}."""
+    raw = str(text or "").strip()
+    start, end = raw.find("{"), raw.rfind("}")
+    if start < 0 or end <= start:
+        return {}
+    try:
+        data = json.loads(raw[start:end + 1])
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def build_record(rec, snapshot):
+    """The structured record for ``rec`` from its public ``snapshot``.
+
+    ``result_summary`` says where the answer came from: the synthesis agent,
+    the single specialist of a one-agent run, or nowhere. ``raw_outputs`` are
+    the specialists' own texts, listed apart from that summary so a reader can
+    tell evidence from conclusion. ``verification`` lists only checks the
+    controller really ran (preflight, evidence of bound tools executing, a
+    non-empty result); ``verified`` on the summary stays False because none of
+    them verifies the content of a claim.
+    """
+    children = snapshot["children"]
+    research = [child for child in children if child["stage"] == "research"]
+    synthesis = next((child for child in children if child["stage"] == "synthesis"), None)
+    preflight = {row["name"]: row for row in snapshot.get("preflight") or []}
+    live = {"queued", "running"}
+
+    selected = [{
+        "name": child["name"], "stage": child["stage"], "model": child.get("model"),
+        "tools": list(child.get("tools") or []), "required": bool(child.get("required", child["stage"] == "research")),
+        "status": child.get("status"), "run_id": child.get("run_id"), "session_id": child.get("session_id"),
+        "attempts": int(child.get("attempt") or 0),
+    } for child in children]
+
+    if synthesis and synthesis.get("result"):
+        source, text = {"kind": "synthesis", "agent": synthesis["name"], "status": synthesis["status"]}, synthesis["result"]
+    elif not synthesis and len(research) == 1 and research[0].get("result"):
+        source, text = {"kind": "specialist", "agent": research[0]["name"], "status": research[0]["status"]}, research[0]["result"]
+    else:
+        source, text = {"kind": "none", "agent": None, "status": None}, ""
+    provisional = bool(text) and any(row.get("required", True) and row.get("status") != "completed" for row in research)
+    result_summary = {**source, "excerpt": text[:RECORD_EXCERPT_CHARS],
+                      "excerpt_truncated": len(text) > RECORD_EXCERPT_CHARS,
+                      "provisional": provisional, "verified": False}
+
+    raw_outputs = [{
+        "agent": child["name"], "status": child.get("status"), "chars": len(child.get("result") or ""),
+        "truncated": bool(child.get("result_truncated")),
+        "chat": f"#session-{child['session_id']}" if child.get("session_id") else None,
+        **({"reason": child["reason"]} if child.get("reason") else {}),
+    } for child in research]
+
+    artifacts = [{"artifact_id": child["run_id"], "agent": child["name"], "stage": child["stage"],
+                  "session_id": child.get("session_id"), "usable": bool(child["handoff"].get("usable"))}
+                 for child in children if child.get("handoff")]
+
+    verification = []
+    for child in children:
+        row = preflight.get(child["name"])
+        if row:
+            verification.append({"agent": child["name"], "check": "preflight: model, bindings, MCP health, credentials",
+                                 "passed": bool(row.get("ready", True)),
+                                 "detail": "; ".join(row.get("blockers") or []) or None})
+        if child["stage"] != "research" or not child.get("run_id") or child.get("status") in live:
+            continue
+        passed = child.get("status") == "completed"
+        observed = sum(1 for call in child.get("tool_calls") or []
+                       if call.get("exit_code") in (None, 0) and not call.get("error"))
+        verification.append({
+            "agent": child["name"],
+            "check": "evidence: bound research tools executed successfully and a result was returned",
+            "passed": passed,
+            "detail": child.get("reason") if not passed else f"{observed} successful bound tool call(s) observed",
+        })
+
+    unresolved = []
+    for child in children:
+        if child.get("status") not in live and child.get("status") != "completed":
+            unresolved.append({"agent": child["name"], "issue": f"{child['stage']} branch {child.get('status')}"
+                               + (f": {child['reason']}" if child.get("reason") else "")})
+        handoff = _handoff_fields(child.get("result"))
+        for key in _HANDOFF_OPEN_KEYS:
+            for item in (handoff.get(key) if isinstance(handoff.get(key), list) else [])[:5]:
+                unresolved.append({"agent": child["name"], "issue": str(item)[:300], "from": "handoff"})
+    for failure in rec.get("failures") or []:
+        if failure.get("error") and not failure.get("name"):
+            unresolved.append({"issue": str(failure["error"])[:300]})
+    unresolved = [dict(item, issue=item["issue"][:300]) for item in unresolved[:RECORD_MAX_UNRESOLVED]]
+
+    return {
+        "run_id": rec["workflow_id"], "objective": str(rec.get("task") or "")[:500], "status": rec["status"],
+        "selected_agents": selected, "result_summary": result_summary, "raw_outputs": raw_outputs,
+        "artifacts": artifacts,
+        # Specialists are bound to read-only tools by _prepare, so a research
+        # workflow changes nothing; the field is here so a reader (or a later
+        # writing workflow) does not have to infer that from silence.
+        "changed_files": [],
+        "verification": verification, "unresolved": unresolved,
+        "timing": {"started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
+                   "timeout_seconds": rec.get("timeout_seconds"), "timed_out": rec["status"] == "timed_out"},
+    }
+
+
+def render_record(record):
+    """The record's headline, for the chat message and the activity detail."""
+    summary = record["result_summary"]
+    if summary["kind"] == "none":
+        origin = "no result"
+    else:
+        origin = f"from {summary['kind']} '{summary['agent']}'" + (" (provisional)" if summary["provisional"] else "")
+    failed = [row for row in record["verification"] if not row["passed"]]
+    lines = [f"Run record: result {origin}, untrusted worker text; "
+             f"verification {len(record['verification'])} check(s), {len(failed)} failed; "
+             f"unresolved {len(record['unresolved'])}; artifacts {len(record['artifacts'])}; "
+             f"changed files: none (read-only workflow)."]
+    for row in failed[:6]:
+        lines.append(f"  Failed check — {row['agent']}: {row['check'].split(':', 1)[0]}"
+                     + (f" ({row['detail']})" if row.get("detail") else ""))
+    for item in record["unresolved"][:6]:
+        lines.append("  Unresolved" + (f" — {item['agent']}" if item.get("agent") else "") + f": {item['issue']}")
+    return "\n".join(lines)
+
+
 def _public(rec, *, research_limit=1800):
     children = []
     for child in rec["children"]:
@@ -342,7 +481,7 @@ def _public(rec, *, research_limit=1800):
     status = rec["status"]
     terminal = status not in {"queued", "running"}
     exit_code = 0 if not terminal or status == "completed" else (2 if status == "partial" else 1)
-    return {"workflow_id": rec["workflow_id"], "status": status, "outcome": status,
+    out = {"workflow_id": rec["workflow_id"], "status": status, "outcome": status,
             "ok": True if status == "completed" else (False if terminal else None),
             "degraded": status == "partial", "terminal": terminal,
             "requested_agents": len(rec["children"]),
@@ -361,6 +500,11 @@ def _public(rec, *, research_limit=1800):
             "preflight": copy.deepcopy(rec.get("preflight") or []),
             "preflight_blocked": [row["name"] for row in (rec.get("preflight") or []) if not row.get("ready", True)],
             "failures": list(rec["failures"]), "exit_code": exit_code}
+    # A finished workflow keeps the record it was closed with: the worker
+    # chats and the small run registry it was built from can rotate away
+    # while the manifest stays.
+    out["record"] = copy.deepcopy(rec["record"]) if terminal and rec.get("record") else build_record(rec, out)
+    return out
 
 
 # Failures a second identical attempt cannot fix. Retrying an expired bearer
@@ -736,6 +880,8 @@ async def _run(rec):
     finally:
         rec["finished_at"] = time.time()
         try:
+            rec.pop("record", None)
+            rec["record"] = _public(rec)["record"]
             _save(rec)
             _deliver(rec)
         except Exception as exc:
@@ -751,9 +897,12 @@ async def _run(rec):
                 snapshot = _public(rec)
                 artifacts = sum(bool(row.get("handoff")) for row in snapshot["children"])
                 handoffs = snapshot["usable_handoffs"]
+                record = snapshot["record"]
                 activity.run_finished(rec["parent_session"], "pipeline", rec["workflow_id"],
                                       f"Research workflow {rec['status']}", status=rec["status"], owner=rec["owner"],
                                       data={"workflow_id": rec["workflow_id"], "steps": sum(c["attempt"] for c in rec["children"]),
+                                            "unresolved_count": len(record["unresolved"]),
+                                            "verification_failed": sum(not row["passed"] for row in record["verification"]),
                                             "requested_agents": snapshot["requested_agents"],
                                             "launched_agents": snapshot["launched_agents"], "handoff_count": handoffs,
                                             "artifact_count": artifacts,
@@ -809,7 +958,9 @@ def render_result(snapshot):
     elif not synthesis:
         for row in snapshot["children"]:
             if row.get("result"):
-                lines.extend([f"{row['name']} result:", row["result"]])
+                lines.extend([f"{row['name']} result (raw specialist output, untrusted):", row["result"]])
+    if snapshot.get("record"):
+        lines.append(render_record(snapshot["record"]))
     blocked = [row for row in snapshot.get("preflight") or [] if not row.get("ready", True)]
     if blocked:
         lines.append("Preflight blockers (these agents could not do the work they were sent):")

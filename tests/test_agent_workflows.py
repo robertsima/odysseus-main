@@ -604,3 +604,75 @@ async def test_authentication_failures_are_not_retried(runtime, monkeypatch, rea
     assert len(attempts) == (2 if retried else 1)
     if not retried:
         assert any("Not retried" in str(failure.get("error", "")) for failure in result["failures"])
+
+
+# ── the run record ───────────────────────────────────────────────────────────
+# "Workflow completed" answered none of: what was asked, who ran, where the
+# answer came from, what was checked, what is still open -- without reading
+# every child chat.
+
+async def test_run_record_accounts_for_the_run_and_outlives_the_controller(runtime):
+    result = await start_and_wait()
+    record = result["record"]
+    assert record["run_id"] == result["workflow_id"] and record["status"] == "completed"
+    assert record["objective"] == "Research the market and draft 10 posts"
+    assert [a["name"] for a in record["selected_agents"]] == ["Buyers", "Competitors", "Content", "Synthesis"]
+    assert record["selected_agents"][0]["tools"] == ["web_search"] and record["selected_agents"][0]["required"]
+    assert record["result_summary"]["kind"] == "synthesis" and record["result_summary"]["agent"] == "Synthesis"
+    assert record["result_summary"]["verified"] is False and record["result_summary"]["provisional"] is False
+    assert "Synthesis" in record["result_summary"]["excerpt"]
+    # Raw specialist output is listed apart from the summary, as pointers.
+    assert [o["agent"] for o in record["raw_outputs"]] == ["Buyers", "Competitors", "Content"]
+    assert all(o["chars"] > 0 and o["chat"].startswith("#session-") for o in record["raw_outputs"])
+    assert len(record["artifacts"]) == 4 and all(a["usable"] for a in record["artifacts"])
+    assert record["changed_files"] == []
+    checks = {(v["agent"], v["check"].split(":")[0]) for v in record["verification"]}
+    assert ("Synthesis", "preflight") in checks and ("Buyers", "evidence") in checks
+    assert all(v["passed"] for v in record["verification"]) and record["unresolved"] == []
+    assert record["timing"]["timed_out"] is False and record["timing"]["finished_at"]
+    # The controller is gone; the record is read back from the manifest.
+    assert result["workflow_id"] not in workflows._LIVE
+    stored = runtime.settings["parent"]["agent_workflows"][result["workflow_id"]]["record"]
+    assert stored["status"] == "completed" and stored["result_summary"]["kind"] == "synthesis"
+    later = await workflows.inspect(workflow_id=result["workflow_id"], session_id="parent", owner="alice")
+    assert later["record"] == stored
+    assert "Run record: result from synthesis 'Synthesis'" in runtime.parent.history[-1].content
+
+
+async def test_run_record_names_failed_checks_and_open_questions(runtime, monkeypatch):
+    from src import headless_agent
+
+    async def headless(sess, messages, **kwargs):
+        if sess.name == "Competitors":
+            return "", []
+        return json.dumps({"findings": [sess.name], "evidence": [{"url": "https://s.test"}],
+                           "open_questions": [f"{sess.name}: pricing unknown"]}), [
+            {"tool": tool, "exit_code": 0} for tool in runtime.settings[sess.id]["enabled_tools"]
+            if tool != "manage_skills"]
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    result = await start_and_wait()
+    record = result["record"]
+    assert result["status"] == "partial" and record["status"] == "partial"
+    assert record["result_summary"] == {"kind": "none", "agent": None, "status": None, "excerpt": "",
+                                        "excerpt_truncated": False, "provisional": False, "verified": False}
+    failed = [v for v in record["verification"] if not v["passed"]]
+    assert [(v["agent"], v["detail"]) for v in failed] == [("Competitors", "Worker returned no result")]
+    issues = {(i.get("agent"), i["issue"], i.get("from")) for i in record["unresolved"]}
+    assert ("Competitors", "research branch failed: Worker returned no result", None) in issues
+    assert ("Buyers", "Buyers: pricing unknown", "handoff") in issues
+    assert any(agent == "Synthesis" and issue.startswith("synthesis branch not_started") for agent, issue, _ in issues)
+    report = workflows.render_result(result)
+    assert "verification 7 check(s), 1 failed" in report
+    assert "Failed check — Competitors: evidence" in report
+    assert "Unresolved — Buyers: Buyers: pricing unknown" in report
+
+
+async def test_a_one_agent_run_reports_the_specialist_as_the_result_source(runtime):
+    result = await start_and_wait(request(
+        specialists=[{"name": "Buyers", "task": "Map buyers", "tools": ["web_search"]}], synthesis=None))
+    record = result["record"]
+    assert record["status"] == "completed"
+    assert record["result_summary"]["kind"] == "specialist" and record["result_summary"]["agent"] == "Buyers"
+    assert [a["name"] for a in record["selected_agents"]] == ["Buyers"]
+    assert "raw specialist output, untrusted" in workflows.render_result(result)

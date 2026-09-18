@@ -324,6 +324,7 @@ _RUN_SUMMARY_KEYS = frozenset({
     "workflow_id", "parent_session", "parent_run_id", "stage", "workflow_controller",
     "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
     "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
+    "unresolved_count", "verification_failed",
 })
 
 
