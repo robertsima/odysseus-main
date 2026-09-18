@@ -57,6 +57,13 @@ KINDS = (
 
 MAX_EVENTS_PER_SESSION = 500
 MAX_RUNS = 300
+# A run in one of these states is still working. Everything else is terminal
+# and must carry a ``finished_at``: the agent strip above the composer keeps a
+# finished row visible for a few seconds by comparing that timestamp against
+# now, and the Agents dashboard windows its recent rows the same way. A
+# terminal run with no finish time is therefore invisible in both — the row
+# vanishes the moment the work ends instead of showing how it ended.
+LIVE_RUN_STATUSES = frozenset({"running", "queued", "pending", "in_progress"})
 MAX_TITLE_CHARS = 300
 MAX_DETAIL_CHARS = 4000
 MAX_DATA_CHARS = 12000
@@ -194,9 +201,9 @@ def _load_runs() -> None:
                     _runs[str(run_id)] = rec
     except (OSError, ValueError):
         pass
-    # A run that was "running" when the process died never finished.
+    # A run that was still live when the process died never finished.
     for rec in _runs.values():
-        if rec.get("status") == "running":
+        if rec.get("status") in LIVE_RUN_STATUSES:
             rec["status"] = "interrupted"
             rec["finished_at"] = rec.get("finished_at") or time.time()
 
@@ -207,8 +214,18 @@ def _save_runs() -> None:
     except Exception:  # pragma: no cover - core is always importable in the app
         atomic_write_json = None
     if len(_runs) > MAX_RUNS:
-        ordered = sorted(_runs.items(), key=lambda kv: kv[1].get("started_at") or 0)
-        for run_id, _ in ordered[: len(_runs) - MAX_RUNS]:
+        # Evict FINISHED runs, oldest first. A still-working run must never be
+        # dropped to make room: this registry is the only server-side truth the
+        # agent strip has, so evicting a live run makes a working agent vanish
+        # from the chat that started it, frees its slot in `live_children`, and
+        # makes `has_active_run` say an in-flight chat is idle. Chat turns are
+        # recorded here too, so on a busy day a long worker is exactly the
+        # oldest entry a purely age-ordered eviction would take first.
+        evictable = sorted(
+            (kv for kv in _runs.items() if kv[1].get("status") not in LIVE_RUN_STATUSES),
+            key=lambda kv: kv[1].get("started_at") or 0,
+        )
+        for run_id, _ in evictable[: len(_runs) - MAX_RUNS]:
             _runs.pop(run_id, None)
     try:
         os.makedirs(activity_dir(), exist_ok=True)
@@ -313,6 +330,20 @@ def _update_run(ev: dict) -> None:
         rec["summary"].update({k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS})
     elif ev["kind"] == "status" and data.get("status"):
         rec["status"] = str(data["status"])
+        # A status event closes a run just as a run_finished does — the chat
+        # that started a worker closes it this way, and a headless stream
+        # failure reports `failed` here before the caller's run_finished lands.
+        # Stamping the finish time is what keeps that row on the strip long
+        # enough to be read as failed/cancelled instead of disappearing.
+        if rec["status"] in LIVE_RUN_STATUSES:
+            rec["finished_at"] = None       # back to work (a worker earning another leg)
+        elif not rec.get("finished_at"):
+            rec["finished_at"] = ev["ts"]
+        # Keep the continuity that identifies the run. A record rebuilt from a
+        # status event (its run_started was evicted, or arrived in an earlier
+        # process) starts with an empty summary, and without `parent_session`
+        # the chat that started the worker can no longer list it at all.
+        rec["summary"].update({k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS})
     _save_runs()
 
 
@@ -376,7 +407,7 @@ def has_active_run(session_id: Optional[str]) -> bool:
     sid = str(session_id or "")
     with _lock:
         _load_runs()
-        return any(rec.get("session_id") == sid and rec.get("status") == "running"
+        return any(rec.get("session_id") == sid and rec.get("status") in LIVE_RUN_STATUSES
                    for rec in _runs.values())
 
 
@@ -448,7 +479,10 @@ def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
                 if r.get("session_id") == session_id
                 or (r.get("summary") or {}).get("parent_session") == session_id]
     if active_only:
-        rows = [r for r in rows if r.get("status") == "running"]
+        # The strip reconciles its rows against this list and marks anything it
+        # cannot find here as interrupted, so "active" has to mean every live
+        # state, not just `running`.
+        rows = [r for r in rows if r.get("status") in LIVE_RUN_STATUSES]
     rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
     return [dict(r) for r in rows[: max(1, min(int(limit or 50), MAX_RUNS))]]
 

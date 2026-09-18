@@ -43,6 +43,11 @@ const KIND_ICON = {
   run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←',
   file_change: '±', commit: '●', status: '·', error: '!', note: '~',
 };
+// Mirrors src/agent_activity.LIVE_RUN_STATUSES. Anything else is terminal and
+// carries a finish time, which is what decides whether a row is still working
+// or is lingering so the end of the run can be read.
+const LIVE_STATUSES = new Set(['running', 'queued', 'pending', 'in_progress']);
+const isLive = (status) => LIVE_STATUSES.has(status || 'running');
 
 const state = {
   inited: false,
@@ -79,6 +84,10 @@ const state = {
   agentRuns: new Map(),
   agentRunsAt: 0,
   agentRunsInFlight: null,
+  // run_id → when this browser first saw the run end, for rows that arrive
+  // terminal without a finish time. Without it such a row is filtered out on
+  // the same tick it completes, so the user never sees how it ended.
+  stripEndedAt: new Map(),
   // The strip is a chat affordance, not part of the Workbench window: it
   // keeps polling when the Workbench feature is switched off, and only stops
   // when the server says this user may not see runs (401/403).
@@ -209,7 +218,13 @@ function ingest(ev, { live = true } = {}) {
     if (ev.kind === 'run_finished') { run.status = (ev.data && ev.data.status) || 'completed'; run.finished_at = ev.ts; run.result = ev.title; Object.assign(run.data, ev.data || {}); }
     if (ev.kind === 'tool_start') run.tools += 1;
     if (ev.kind === 'error' || ev.level === 'error') run.errors += 1;
-    if (ev.kind === 'status' && ev.data && ev.data.status && ev.data.status !== 'running') run.status = ev.data.status;
+    if (ev.kind === 'status' && ev.data && ev.data.status && ev.data.status !== 'running') {
+      run.status = ev.data.status;
+      // A status event is how the chat that started a worker is told the run
+      // ended, and how a stream failure reports itself. Record the end here
+      // too, or the row is dropped before it can be read as failed/cancelled.
+      if (!isLive(run.status)) run.finished_at = run.finished_at || ev.ts;
+    }
   }
   if (live) {
     updateChatCard(ev);
@@ -249,6 +264,7 @@ const STRIP_LINGER_S = 8;
 const STRIP_PREVIEW = 3;
 let _stripTimer = null;
 let _stripTick = null;
+let _stripRowCount = 0;
 function scheduleStrip() {
   if (_stripTimer) return;
   _stripTimer = setTimeout(() => { _stripTimer = null; renderAgentStrip(); }, 150);
@@ -281,7 +297,16 @@ function stripWarn(key, message) {
 async function refreshAgentRuns({ force = false } = {}) {
   const sid = state.sessionId;
   if (!state.stripEnabled || !sid) { state.agentRuns.clear(); return; }
-  if (state.agentRunsInFlight) return state.agentRunsInFlight;
+  if (state.agentRunsInFlight) {
+    // A forced refresh means "this chat changed" (switched chat, tab back in
+    // view, stream reconnected). Dropping it because a poll for the PREVIOUS
+    // chat is still in flight left the new chat's agents unlisted until the
+    // next heartbeat — the "it only shows up after a reload" report. Wait for
+    // that poll (it discards itself on the session change) and then ask.
+    if (!force) return state.agentRunsInFlight;
+    try { await state.agentRunsInFlight; } catch (_) {}
+    if (state.sessionId !== sid || state.agentRunsInFlight) return;
+  }
   if (!force && Date.now() - state.agentRunsAt < AGENT_RUNS_MIN_MS) return;
   const run = (async () => {
     const ctl = typeof AbortController === 'function' ? new AbortController() : null;
@@ -342,9 +367,24 @@ function stripRuns() {
     existing.events = run.events;
     existing.data = { ...(run.data || {}), ...(existing.data || {}) };
   }
+  // A row can reach here terminal but without a finish time: a run closed by a
+  // status event in an older process, or one the server has not stamped yet.
+  // Linger it from when this browser first saw it end rather than dropping it,
+  // so the run is always seen finishing.
+  for (const run of rows.values()) {
+    if (isLive(run.status) || run.finished_at) continue;
+    run.finished_at = state.stripEndedAt.get(run.run_id) || now;
+    state.stripEndedAt.set(run.run_id, run.finished_at);
+  }
+  // Keyed on what the server still lists, not on age: expiring an entry whose
+  // run is still listed would re-stamp it as "just ended" and make the row
+  // reappear on a loop.
+  for (const runId of state.stripEndedAt.keys()) {
+    if (!rows.has(runId)) state.stripEndedAt.delete(runId);
+  }
   return Array.from(rows.values())
-    .filter((r) => r.status === 'running' || (r.finished_at && now - r.finished_at < STRIP_LINGER_S))
-    .sort((a, b) => (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) || (a.started_at || 0) - (b.started_at || 0));
+    .filter((r) => isLive(r.status) || (r.finished_at && now - r.finished_at < STRIP_LINGER_S))
+    .sort((a, b) => (isLive(a.status) ? 0 : 1) - (isLive(b.status) ? 0 : 1) || (a.started_at || 0) - (b.started_at || 0));
 }
 function latestActivity(run) {
   const events = run.events || [];
@@ -358,7 +398,7 @@ function latestActivity(run) {
 }
 function stripRowHtml(run) {
   const d = run.data || {};
-  const running = run.status === 'running';
+  const running = isLive(run.status);
   const end = run.finished_at || Date.now() / 1000;
   const openTitle = run.source === 'session' && d.target_session ? `Open the ${d.target_session_name || 'sub-agent'} chat`
     : run.source === 'claude_code' && d.task_id ? 'Open its changes in the Workbench' : 'Open its events in the Workbench';
@@ -382,10 +422,12 @@ function renderAgentStrip() {
   if (!runs.length) {
     box.hidden = true;
     box.innerHTML = '';
+    _stripRowCount = 0;
     if (_stripTick) { clearInterval(_stripTick); _stripTick = null; }
     return;
   }
-  const running = runs.filter((r) => r.status === 'running').length;
+  const running = runs.filter((r) => isLive(r.status)).length;
+  _stripRowCount = runs.length;
   const collapsed = !!state.prefs.stripCollapsed;
   const expanded = !!state.stripExpanded;
   const shown = collapsed ? [] : (expanded ? runs : runs.slice(0, STRIP_PREVIEW));
@@ -407,18 +449,22 @@ function renderAgentStrip() {
     _stripTick = setInterval(() => {
       const el = $('agent-strip');
       if (!el || el.hidden) return;
+      // Recomputed every tick, never closed over: this timer is armed once but
+      // the strip re-renders many times, so a captured list stops describing
+      // the chat after the first change — including a run that started while
+      // an older row was still on screen.
+      const current = stripRuns();
       // The server is the one that knows when a detached worker ended, so keep
       // asking while one is live rather than waiting for an event that may
       // never arrive on this chat's feed.
-      if (runs.some((r) => r.status === 'running')) refreshAgentRuns();
-      let lingering = false;
+      if (current.some((r) => isLive(r.status))) refreshAgentRuns();
       el.querySelectorAll('.agent-strip-time[data-running="1"]').forEach((t) => {
         const started = parseFloat(t.dataset.started);
         if (started) t.textContent = fmtDur(started, Date.now() / 1000);
       });
-      // Drop rows whose linger window ended.
-      for (const r of stripRuns()) if (r.status !== 'running') lingering = true;
-      if (el.querySelector('.agent-strip-row.done') || lingering) renderAgentStrip();
+      // Re-render to drop rows whose linger window ended, and whenever the set
+      // of runs no longer matches what is on screen.
+      if (current.length !== _stripRowCount || current.some((r) => !isLive(r.status))) renderAgentStrip();
     }, 1000);
   }
 }
@@ -544,6 +590,7 @@ function watchSession() {
       state.chatCards.clear();
       state.agentRuns.clear();
       state.agentRunsAt = 0;
+      state.stripEndedAt.clear();
       state.focusRun = null;
       state.stripExpanded = false;
       renderAgentStrip();
@@ -584,13 +631,15 @@ function watchVisibility() {
 // ── rendering: activity ───────────────────────────────────────────────────
 function statusClass(status) {
   const s = status || 'running';
-  if (s === 'running' || s === 'queued' || s === 'in_progress' || s === 'pending') return 'run';
+  if (isLive(s)) return 'run';
   if (s === 'completed' || s === 'succeeded' || s === 'done' || s === 'success' || s === 'open' || s === 'merged') return 'ok';
   // `incomplete` is a run that spent its round budget with the task
   // unfinished (agent_control.launch_worker). That is a partial result to
   // pick up, not a failure, so it reads amber like cancelled/interrupted
-  // rather than falling through to the red default.
-  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete') return 'warn';
+  // rather than falling through to the red default. `partial` is the same
+  // judgement for a research workflow: some branches produced usable evidence
+  // (agent_workflows._run), which is degraded, not failed.
+  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete' || s === 'partial') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {
