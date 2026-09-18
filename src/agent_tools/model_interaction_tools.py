@@ -102,7 +102,10 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
         return {"model": model, "response": response}
     except Exception as e:
         logger.error(f"chat_with_model failed: {e}")
-        return {"error": f"Failed to get response from {model_spec}: {e}"}
+        return {
+            "error": f"Failed to get response from {model_spec}: {e}",
+            "untrusted_content": True,
+        }
 
 
 async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:

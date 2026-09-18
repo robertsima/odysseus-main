@@ -67,7 +67,13 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    SecurityHeadersMiddleware,
+    get_application_route_path,
+    is_cors_preflight,
+    path_is_route_or_child,
+    with_asgi_root_path,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -78,6 +84,7 @@ import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.owner_identity import auth_disabled
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -249,7 +256,7 @@ from routes.auth_routes import setup_auth_routes, SESSION_COOKIE
 
 auth_manager = AuthManager()
 app.state.auth_manager = auth_manager
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
+AUTH_ENABLED = not auth_disabled()
 LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
 if LOCALHOST_BYPASS:
     logger.warning("LOCALHOST_BYPASS is enabled, loopback requests bypass authentication. Do not expose this instance to a network.")
@@ -285,7 +292,7 @@ if AUTH_ENABLED:
     def _is_auth_exempt(path: str) -> bool:
         if path in AUTH_EXEMPT_EXACT:
             return True
-        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
+        if any(path_is_route_or_child(path, p) for p in AUTH_EXEMPT_PREFIXES):
             return True
         return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
 
@@ -307,6 +314,7 @@ if AUTH_ENABLED:
 
     def _refresh_token_cache():
         """Rebuild the prefix→[(id,hash)] map from the DB."""
+        global _token_cache
         from collections import defaultdict
         new_map = defaultdict(list)
         db = SessionLocal()
@@ -325,8 +333,8 @@ if AUTH_ENABLED:
                 new_map[r.token_prefix].append((r.id, r.token_hash, owner_key, scopes))
         finally:
             db.close()
-        _token_cache.clear()
-        _token_cache.update(new_map)
+        _token_cache = dict(new_map)
+        app.state._token_cache = _token_cache
         app.state._token_cache_dirty = False
 
     # Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
@@ -356,7 +364,7 @@ if AUTH_ENABLED:
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            path = request.url.path
+            path = get_application_route_path(request.scope)
             # A genuine CORS preflight (OPTIONS + Access-Control-Request-Method)
             # carries no credentials by design and must reach CORSMiddleware to be
             # answered. AuthMiddleware is the outermost middleware, so gating the
@@ -400,7 +408,10 @@ if AUTH_ENABLED:
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
                 if not path.startswith("/api/"):
-                    return RedirectResponse(url="/login", status_code=302)
+                    return RedirectResponse(
+                        url=with_asgi_root_path(request.scope, "/login"),
+                        status_code=302,
+                    )
                 return JSONResponse(status_code=401, content={"error": "Setup required"})
 
             # --- Bearer token auth (API tokens for external integrations) ---
@@ -462,7 +473,10 @@ if AUTH_ENABLED:
             if not auth_manager.validate_token(token):
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-                return RedirectResponse(url="/login", status_code=302)
+                return RedirectResponse(
+                    url=with_asgi_root_path(request.scope, "/login"),
+                    status_code=302,
+                )
 
             # Attach current username to request state for downstream routes
             request.state.current_user = auth_manager.get_username_for_token(token)
@@ -631,13 +645,24 @@ app.include_router(auth_router)
 
 @app.post("/api/activity/heartbeat")
 async def activity_heartbeat():
-    from src.interactive_gate import mark_browser_activity
+    from src.interactive_gate import (
+        mark_browser_activity,
+        maybe_stop_background_tasks_for_heartbeat,
+    )
+
     await mark_browser_activity()
+
     async def _stop_background():
         try:
-            await task_scheduler.stop_background_tasks_for_foreground(reason="browser heartbeat")
+            await maybe_stop_background_tasks_for_heartbeat(
+                task_scheduler.stop_background_tasks_for_foreground
+            )
         except Exception:
-            logging.getLogger("app.foreground_gate").debug("heartbeat task stop failed", exc_info=True)
+            logging.getLogger("app.foreground_gate").debug(
+                "heartbeat task stop failed",
+                exc_info=True,
+            )
+
     asyncio.create_task(_stop_background())
     return {"ok": True}
 
@@ -761,7 +786,7 @@ from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager)
 from src.event_bus import set_task_scheduler
 set_task_scheduler(task_scheduler)
-from routes.task_routes import setup_task_routes
+from routes.task.task_routes import setup_task_routes
 app.include_router(setup_task_routes(task_scheduler))
 
 from routes.assistant_routes import setup_assistant_routes
@@ -810,7 +835,7 @@ app.include_router(setup_font_routes())
 # MCP (Model Context Protocol)
 from src.mcp_manager import McpManager
 from src.agent_tools import set_mcp_manager
-from routes.mcp_routes import setup_mcp_routes
+from routes.mcp.mcp_routes import setup_mcp_routes
 
 mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)

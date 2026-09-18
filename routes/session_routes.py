@@ -4,17 +4,24 @@ import html
 import json
 import uuid
 from datetime import datetime
-from fastapi import APIRouter, Form, HTTPException, Response, Request
+from fastapi import APIRouter, Form, HTTPException, Response, Request, Depends
 import logging
 
 from core.session_manager import SessionManager
 from core.models import ChatMessage
 from src.request_models import SessionResponse
 from core.database import Session as DbSession, SessionLocal, Document, GalleryImage, utcnow_naive
-from src.auth_helpers import effective_user, _auth_disabled, owner_filter
+from src.auth_helpers import (
+    effective_user,
+    _auth_disabled,
+    owner_filter,
+    is_delegated_credential,
+    require_chat_api_token_scope,
+)
 from src.session_image_cleanup import _generated_image_path_for_cleanup, session_image_refs
 from src.session_actions import is_session_recently_active
 from src.upload_handler import reserve_message_upload_references
+from src.tool_approval_scopes import sanitize_client_message_metadata
 
 
 def _sanitize_export_filename(name: str) -> str:
@@ -124,9 +131,15 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["sessions"])
+router = APIRouter(
+    prefix="/api",
+    tags=["sessions"],
+    dependencies=[Depends(require_chat_api_token_scope)],
+)
 
 def _current_user_is_admin(request: Request, user: str | None) -> bool:
+    if is_delegated_credential(request):
+        return False
     if not user:
         return False
     auth_mgr = getattr(request.app.state, "auth_manager", None)
@@ -155,6 +168,22 @@ def _reject_raw_endpoint_url_for_non_admin(
     # endpoint validation have already happened.
     if user and not _current_user_is_admin(request, user):
         raise HTTPException(403, "Choose a registered model endpoint")
+
+
+def _reject_delegated_session_options(
+    request: Request,
+    *,
+    skip_validation: bool = False,
+    api_key: str | None = None,
+) -> None:
+    """Keep bearer credentials from exercising interactive-admin options."""
+    if is_delegated_credential(request) and (
+        skip_validation or bool((api_key or "").strip())
+    ):
+        raise HTTPException(
+            403,
+            "API tokens cannot supply endpoint credentials or skip endpoint validation",
+        )
 
 
 def _persist_session_headers(session_id: str, headers: dict | None) -> None:
@@ -343,6 +372,12 @@ def setup_session_routes(
     ):
         skip_val = str(skip_validation).lower() == "true"
         user = effective_user(request)
+        _reject_delegated_session_options(
+            request,
+            skip_validation=skip_val,
+            api_key=api_key,
+        )
+        endpoint_api_key = ""
         endpoint_base_url = ""
         # Headers built from the endpoint row with refreshable credentials
         # resolved. Session-backed providers (ChatGPT subscription, Copilot)
@@ -570,7 +605,11 @@ def setup_session_routes(
         except (AttributeError, TypeError, ValueError) as exc:
             raise HTTPException(400, "Invalid message attachment metadata") from exc
         for m in messages:
-            sess.add_message(ChatMessage(m["role"], m["content"], metadata=m.get("metadata")))
+            sess.add_message(ChatMessage(
+                m["role"],
+                m["content"],
+                metadata=sanitize_client_message_metadata(m.get("metadata")),
+            ))
         session_manager.save_sessions()
         return {"ok": True, "count": len(messages)}
 
@@ -807,15 +846,6 @@ def setup_session_routes(
         finally:
             db.close()
 
-    @router.get("/history/{sid}")
-    def get_history(request: Request, sid: str):
-        _verify_session_owner(request, sid)
-        try:
-            session = session_manager.get_session(sid)
-        except KeyError:
-            raise HTTPException(404, f"Session {sid} not found")
-        return {"history": [msg.to_dict() for msg in session.history]}
-    
     @router.get("/session/{sid}/export")
     def export_session(request: Request, sid: str, fmt: str = "md", filename: str = ""):
         """Export conversation history as a downloadable file.
@@ -921,6 +951,8 @@ def setup_session_routes(
         model: str = Form("gpt-4o"),
         rag: str = Form(None)
     ):
+        if is_delegated_credential(request):
+            raise HTTPException(403, "This session type requires an interactive session")
         if not OPENAI_API_KEY:
             raise HTTPException(400, "Server missing OPENAI_API_KEY")
         sid = str(uuid.uuid4())

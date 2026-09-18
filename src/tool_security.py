@@ -341,3 +341,16 @@ def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
         if not privileges.get("can_manage_memory", True):
             out.update({"manage_memory", "manage_skills"})
     return out
+
+
+def delegated_credential_blocked_tools() -> Set[str]:
+    """Tools an agent run driven by a bearer API token must not reach.
+
+    Deliberately not owner-dependent. ``blocked_tools_for_owner`` asks whether
+    the OWNER is an admin, and for a token that question is always answered
+    yes: minting a token is an admin-only action, so the empty set comes back
+    for every token in existence. A token is a long-lived credential the owner
+    hands to a third party, so it is capped at the non-admin policy no matter
+    who minted it.
+    """
+    return set(NON_ADMIN_BLOCKED_TOOLS)
