@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from dulwich.index import (
+    ConflictedIndexEntry,
     IndexEntry,
     blob_from_path_and_stat,
     cleanup_mode,
@@ -141,6 +142,48 @@ def _sensitive(path: Path) -> bool:
     return _is_sensitive_path(str(path.resolve(strict=False)), allow_private=False)
 
 
+def _index_sides(entry) -> list:
+    """The concrete entries behind one index path.
+
+    A path git left conflicted is a `ConflictedIndexEntry` holding up to three
+    sides (ancestor, ours, theirs) and no `mode` of its own. Treating it as a
+    plain entry raised AttributeError, which `execute_local` swallowed into
+    "local repository operation failed safely" -- so `status` died at exactly
+    the moment it was needed: right after a merge stopped on conflicts
+    (2026-09-18).
+    """
+    if isinstance(entry, ConflictedIndexEntry):
+        return [side for side in (entry.ancestor, entry.this, entry.other) if side is not None]
+    return [entry]
+
+
+def _conflicted(index) -> list[str]:
+    return sorted(os.fsdecode(raw) for raw in index if isinstance(index[raw], ConflictedIndexEntry))
+
+
+def _merge_heads(repo: Repo) -> list[bytes]:
+    """Commits an in-progress merge is bringing in, from .git/MERGE_HEAD."""
+    path = Path(repo.controldir()) / "MERGE_HEAD"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return []
+    heads = []
+    for line in raw.splitlines():
+        oid = line.strip().lower()
+        if re.fullmatch(rb"[0-9a-f]{40}", oid) and oid in repo.object_store and oid not in heads:
+            heads.append(oid)
+    return heads
+
+
+def _clear_merge_state(repo: Repo) -> None:
+    for name in ("MERGE_HEAD", "MERGE_MSG", "MERGE_MODE", "AUTO_MERGE"):
+        try:
+            (Path(repo.controldir()) / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
 def _safe_index(repo: Repo, index) -> None:
     if getattr(index, "is_sparse", lambda: False)():
         _fail("unsupported_sparse_checkout", "sparse indexes are not supported")
@@ -148,9 +191,9 @@ def _safe_index(repo: Repo, index) -> None:
         rel = os.fsdecode(raw).replace("\\", "/")
         _paths([rel])
         _safe_local_target(Path(repo.path), rel)
-        entry = index[raw]
-        if not stat.S_ISREG(entry.mode):
-            _fail("unsafe_index", "index contains a non-regular file")
+        for side in _index_sides(index[raw]):
+            if not stat.S_ISREG(side.mode):
+                _fail("unsafe_index", "index contains a non-regular file")
 
 
 def _safe_local_target(
@@ -331,20 +374,42 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
         if head_id is not None:
             sync._validate_tree(repo, head_id)
         if action == "status":
-            _index(repo)
+            index = _index(repo)
             symbolic = repo.refs.read_ref(b"HEAD")
             branch = (
                 os.fsdecode(symbolic[len(b"ref: refs/heads/") :])
                 if symbolic and symbolic.startswith(b"ref: refs/heads/")
                 else None
             )
-            return {
+            conflicted = _conflicted(index)
+            merge_heads = _merge_heads(repo)
+            result = {
                 "repository": str(path),
                 "head": head_id.decode() if head_id else None,
                 "branch": branch,
-                "status": sync._status(repo),
                 "unborn": head_id is None,
+                "merge_in_progress": bool(merge_heads),
+                "merge_heads": [oid.decode() for oid in merge_heads],
+                "conflicted": conflicted,
             }
+            if conflicted:
+                # The staged/unstaged diff machinery cannot compare a path that
+                # has three sides. The conflicted list is the answer that
+                # matters here; the rest is reported once they are resolved.
+                result["status"] = None
+                result["next_step"] = (
+                    f"{len(conflicted)} path(s) still conflicted. Edit each to its resolved "
+                    "content, remove the conflict markers, stage it with action='stage', then "
+                    "commit -- the commit records the merge."
+                )
+            else:
+                result["status"] = sync._status(repo)
+                if merge_heads:
+                    result["next_step"] = (
+                        "All conflicts are resolved and staged; commit with action='commit' to "
+                        "record the merge."
+                    )
+            return result
         if action == "log":
             limit = args.get("limit", 20)
             if (
@@ -497,20 +562,34 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
                     "commit message is required and must be at most 10000 characters",
                 )
             index = _index(repo)
+            conflicted = _conflicted(index)
+            if conflicted:
+                shown = ", ".join(conflicted[:10]) + (" ..." if len(conflicted) > 10 else "")
+                _fail("unresolved_conflicts",
+                      f"{len(conflicted)} path(s) are still conflicted ({shown}); resolve each file "
+                      "and stage it with action='stage' before committing")
             parent = head_id
             symbolic = repo.refs.read_ref(b"HEAD")
             if not symbolic or not symbolic.startswith(b"ref: refs/heads/"):
                 _fail("detached_head", "commit requires an attached branch")
+            # A commit that concludes a merge must name what it merged. It used
+            # to take HEAD as its only parent, which turns "merge upstream and
+            # resolve the conflicts" into a squash git never recognises as a
+            # merge: the next merge from upstream conflicts on the same lines
+            # again, and a PR shows the whole upstream diff as new work.
+            merge_heads = _merge_heads(repo) if parent is not None else []
             tree = index.commit(repo.object_store)
             if parent is None and not len(index):
                 _fail("nothing_to_commit", "index has no changes to commit")
-            if parent is not None and tree == _commit(repo).tree:
+            # Resolving every conflict in favour of HEAD leaves HEAD's tree, and
+            # that is still a merge worth recording.
+            if parent is not None and not merge_heads and tree == _commit(repo).tree:
                 _fail("nothing_to_commit", "index has no changes to commit")
             ident = _identity(repo, args)
             now = int(time.time())
             commit = Commit()
             commit.tree = tree
-            commit.parents = [parent] if parent is not None else []
+            commit.parents = [parent, *merge_heads] if parent is not None else []
             commit.author = ident
             commit.committer = ident
             commit.author_time = now
@@ -530,7 +609,14 @@ def _operate(path: Path, action: str, args: dict[str, Any]) -> dict[str, Any]:
                     "changed_during_operation",
                     "branch changed before commit could be recorded",
                 )
-            return {"repository": str(path), "commit": commit.id.decode()}
+            if merge_heads:
+                # Only once the merge commit is on the branch: git itself stays
+                # "mid-merge" for as long as MERGE_HEAD exists.
+                _clear_merge_state(repo)
+            result = {"repository": str(path), "commit": commit.id.decode()}
+            if merge_heads:
+                result["merged"] = [oid.decode() for oid in merge_heads]
+            return result
         if action in {"branch", "tag"}:
             name = args.get("name")
             if not isinstance(name, str) or not name.strip():

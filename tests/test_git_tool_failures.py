@@ -187,3 +187,130 @@ def test_a_token_in_an_exception_message_is_redacted():
         operation="fetch")
     assert token not in message
     assert "[redacted]" in message
+
+
+def test_an_empty_exception_message_names_where_it_was_raised():
+    """A bare `assert` has no message; "AssertionError: no detail" was the
+    whole report on 2026-09-18, while the raising frame was the diagnosis."""
+    # Raised explicitly: pytest rewrites a literal `assert` to carry a message,
+    # which a library's plain assert (the urllib3-future case) does not.
+    try:
+        raise AssertionError()
+    except AssertionError as exc:
+        _code, message = repository_sync.describe_remote_failure(exc, operation="fetch")
+    assert "no detail" not in message
+    assert "raised at" in message and "test_git_tool_failures.py" in message
+
+
+# ── HTTP: git traffic stays on HTTP/1.1 ──────────────────────────────────────
+
+
+def test_git_http_is_pinned_to_http1_when_urllib3_future_is_installed():
+    """caldav -> niquests -> urllib3-future, which installs AS `urllib3`. Its
+    HTTP/2 backend asserted mid-stream on every GitHub clone and fetch; the same
+    fetch succeeds 3/3 on HTTP/1.1."""
+    try:
+        from urllib3 import HttpVersion
+    except ImportError:
+        pytest.skip("stock urllib3: no HTTP/2 to disable")
+    pool = repository_sync._http_pool()
+    assert pool.connection_pool_kw.get("disabled_svn") == {HttpVersion.h2, HttpVersion.h3}
+
+
+def test_the_http1_pin_is_a_no_op_on_stock_urllib3(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def no_http_version(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "urllib3" and fromlist and "HttpVersion" in fromlist:
+            raise ImportError("stock urllib3")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", no_http_version)
+    assert repository_sync._http1_only() == {}
+
+
+# ── merges: status reports a conflict, commit records the merge ──────────────
+
+
+def _git(cwd, *args):
+    import os
+    import subprocess
+
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=env)
+
+
+@pytest.fixture
+def conflicted_repo(tmp_path, monkeypatch):
+    """A repository left mid-merge on a conflict, as the user's shell merge left one."""
+    import shutil
+
+    if not shutil.which("git"):
+        pytest.skip("git CLI not available")
+    root = tmp_path / "development"
+    repo = root / "conflicted"
+    repo.mkdir(parents=True)
+    _git(repo, "init", "-q", "-b", "dev")
+    (repo / "f.txt").write_text("base\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "checkout", "-qb", "upstream")
+    (repo / "f.txt").write_text("theirs\n")
+    (repo / "new.txt").write_text("from upstream\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "theirs")
+    theirs = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "checkout", "-q", "dev")
+    (repo / "f.txt").write_text("ours\n")
+    _git(repo, "commit", "-qam", "ours")
+    ours = _git(repo, "rev-parse", "HEAD").stdout.strip()
+    _git(repo, "merge", "upstream")
+    assert (repo / ".git" / "MERGE_HEAD").exists()
+    monkeypatch.setattr(repository_sync, "git_repository_roots", lambda: (root,))
+    return SimpleNamespace(path=repo, ours=ours, theirs=theirs)
+
+
+IDENT = {"author_name": "t", "author_email": "t@x"}
+
+
+@pytest.mark.asyncio
+async def test_status_reports_a_conflicted_merge_instead_of_failing(conflicted_repo):
+    """A `ConflictedIndexEntry` has no `mode`; status raised AttributeError and
+    reported only "local repository operation failed safely"."""
+    status = await repository_local.execute_local("status", str(conflicted_repo.path))
+    assert status["merge_in_progress"] is True
+    assert status["merge_heads"] == [conflicted_repo.theirs]
+    assert status["conflicted"] == ["f.txt"]
+    assert "still conflicted" in status["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_commit_is_refused_while_a_conflict_remains(conflicted_repo):
+    with pytest.raises(repository_sync.RepositorySyncError) as excinfo:
+        await repository_local.execute_local("commit", str(conflicted_repo.path),
+                                             message="too early", **IDENT)
+    assert excinfo.value.code == "unresolved_conflicts"
+    assert "f.txt" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_resolving_and_committing_records_a_real_two_parent_merge(conflicted_repo):
+    """The commit used to take HEAD as its only parent — a squash git never
+    recognises as a merge, so upstream re-conflicts on the next merge."""
+    repo = conflicted_repo.path
+    (repo / "f.txt").write_text("resolved\n")
+    await repository_local.execute_local("stage", str(repo), paths=["f.txt"])
+    resolved = await repository_local.execute_local("status", str(repo))
+    assert resolved["conflicted"] == [] and resolved["merge_in_progress"] is True
+
+    result = await repository_local.execute_local("commit", str(repo), message="Merge upstream", **IDENT)
+
+    assert result["merged"] == [conflicted_repo.theirs]
+    parents = _git(repo, "rev-list", "--parents", "-n1", "HEAD").stdout.split()[1:]
+    assert parents == [conflicted_repo.ours, conflicted_repo.theirs]
+    assert not (repo / ".git" / "MERGE_HEAD").exists()
+    assert _git(repo, "show", "HEAD:new.txt").stdout == "from upstream\n"
+    assert "Already up to date" in _git(repo, "merge", "upstream").stdout

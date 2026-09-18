@@ -79,6 +79,17 @@ def describe_remote_failure(exc: BaseException, *, operation: str, url: str = ""
 
     name = type(exc).__name__
     detail = _SECRETISH.sub("[redacted]", " ".join(str(exc).split()))[:300]
+    if not detail:
+        # A bare `assert` carries no message. "AssertionError: no detail" told
+        # nobody anything on 2026-09-18; the frame that raised it was the whole
+        # diagnosis (urllib3-future's HTTP/2 backend, not GitHub). Name it.
+        import traceback
+
+        frames = traceback.extract_tb(exc.__traceback__) if exc.__traceback__ else []
+        if frames:
+            last = frames[-1]
+            origin = last.filename.replace("\\", "/").split("site-packages/")[-1]
+            detail = f"raised at {origin}:{last.lineno} in {last.name}"
     where = f" for {url}" if url else ""
     if isinstance(exc, (HTTPUnauthorized, HTTPProxyUnauthorized)):
         return ("auth_failed",
@@ -633,6 +644,27 @@ class _NoRedirectPool(urllib3.PoolManager):
         return super().request(method, url, *args, **kwargs)
 
 
+def _http1_only() -> dict:
+    """Pool options that pin git traffic to HTTP/1.1, when that needs saying.
+
+    `caldav` depends on `niquests`, which depends on `urllib3-future` — a fork
+    that installs itself AS `urllib3`, so dulwich (which requires real urllib3)
+    silently runs on it instead. The fork negotiates HTTP/2 with GitHub, and
+    streaming the smart-HTTP ref advertisement then dies inside the fork's own
+    backend (`urllib3/backend/hface.py`: `assert self.sock is not None`). Every
+    clone and fetch failed that way — reproduced 3/3 against a public repo —
+    while the user's shell `git fetch` worked, because git uses libcurl. Git's
+    smart-HTTP protocol is what dulwich is built and tested against on
+    HTTP/1.1, so pin it there. Stock urllib3 has no `HttpVersion` and needs
+    nothing.
+    """
+    try:
+        from urllib3 import HttpVersion
+    except ImportError:
+        return {}
+    return {"disabled_svn": {HttpVersion.h2, HttpVersion.h3}}
+
+
 def _http_pool():
     return _NoRedirectPool(
         timeout=urllib3.Timeout(connect=10.0, read=60.0),
@@ -640,6 +672,7 @@ def _http_pool():
             total=0, connect=0, read=0, redirect=0, raise_on_redirect=True
         ),
         cert_reqs="CERT_REQUIRED",
+        **_http1_only(),
     )
 
 
