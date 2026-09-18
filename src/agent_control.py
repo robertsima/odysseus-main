@@ -729,6 +729,9 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                     ]
             if outcome.get("stopped"):
                 status = "cancelled"
+            elif outcome.get("awaiting_approval"):
+                # Ended on an approval card in the worker's chat: paused, not done.
+                status = "waiting_approval"
             elif outcome.get("rounds_exhausted"):
                 # Every leg was spent and it is still not done. Reporting that
                 # as "completed" is what let a cut-off worker hand the parent an
@@ -897,10 +900,14 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     parent = manager.get_session(parent_id)
     if parent is None:
         return
-    headline = {"completed": "finished", "incomplete": "ran out of rounds"}.get(status, status)
+    headline = {"completed": "finished", "incomplete": "ran out of rounds",
+                "waiting_approval": "is waiting for the user's approval"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
               + ("The worker was cut off by its round budget, so the result above is partial — "
                  "pick the task up from where it stopped. " if status == "incomplete" else "")
+              + ("The worker paused on an approval card in its own chat, so the task is not done. "
+                 "Tell the user it needs their approval there; do not redo the work. "
+                 if status == "waiting_approval" else "")
               + "Continue the task using this result. Don't repeat work the worker already did. "
               "If the task is now complete, give the user the final result.")
     parent.add_message(ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,

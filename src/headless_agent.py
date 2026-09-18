@@ -285,6 +285,16 @@ async def run_headless(
             outcome["rounds_exhausted"] = True
             outcome["rounds"] = int(state.get("exhausted_rounds") or 0)
         full = (full.rstrip() + "\n\n" if full.strip() else "") + _rounds_exhausted_note(state)
+    elif state.get("awaiting_approval"):
+        # The run ended on an approval card, not because the work is done. Say
+        # so to whoever reads the result, and let the caller record the run as
+        # waiting rather than completed.
+        pending = state["awaiting_approval"]
+        if outcome is not None:
+            outcome["awaiting_approval"] = dict(pending)
+        full = ((full.rstrip() + "\n\n" if full.strip() else "")
+                + f"(paused: {pending.get('tool') or 'a tool call'} is waiting for the user's approval "
+                "in this worker's chat; the task is not finished)")
     return full, state["tool_events"]
 
 
@@ -398,6 +408,9 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                 # Saved with the reply, so the worker's chat shows the
                 # approval card and the user can decide it there.
                 ev["ask_user"] = approval
+                if approval.get("approval_id"):
+                    state["awaiting_approval"] = {"approval_id": approval.get("approval_id"),
+                                                  "tool": d.get("tool")}
                 if activity_session_id and approval.get("approval_id"):
                     activity.publish(activity_session_id, "status",
                                      f"Waiting for approval: {d.get('tool')}",

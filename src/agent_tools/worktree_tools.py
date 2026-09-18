@@ -27,6 +27,32 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
     return {"error": message, "exit_code": 1, **extra}
 
 
+# Actions that work on one named worktree, in the order an agent needs them.
+_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "remove")
+
+
+def _next_step(code: str, action: str, branch: str) -> Dict[str, Any]:
+    """The call that fixes a failure the agent caused, so it doesn't spend
+    rounds guessing the publish sequence (start → edit → commit →
+    request_publish)."""
+    if code == "MISSING_BRANCH":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "status"},
+                "hint": (f"'{action}' needs the worktree's name. Call status to list the "
+                         "agent worktrees, or start one with {\"action\": \"start\", \"name\": \"...\"}.")}
+    if code == "WORKTREE_NOT_STARTED":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "start", "name": branch},
+                "hint": ("Start the worktree first, make and commit the changes in it, "
+                         f"then call {action} again with the same name.")}
+    if code == "INVALID_BRANCH":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "status"},
+                "hint": ("Use a short task name such as 'cache-fix' (or the full "
+                         "agent/odysseus/<name> branch). Call status to list existing ones.")}
+    return {"code": code}
+
+
 def _repository_read_token(ctx: dict) -> str | None:
     """Borrow GitHub's read credential only within the live integration ceiling.
 
@@ -74,6 +100,10 @@ class AgentWorktreeTool:
 
         cfg = load_config()
         branch = str(args.get("branch") or args.get("name") or "").strip()
+
+        if action in _BRANCH_ACTIONS and not branch:
+            return _err(f"manage_agent_worktree {action}: 'name' is required",
+                        **_next_step("MISSING_BRANCH", action, branch))
 
         try:
             if action == "status":
@@ -138,7 +168,9 @@ class AgentWorktreeTool:
         except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
             # Messages from this package are already credential-scrubbed.
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)
-            return _err(f"manage_agent_worktree {action}: {exc}")
+            code = getattr(exc, "code", None)
+            return _err(f"manage_agent_worktree {action}: {exc}",
+                        **(_next_step(code, action, branch) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")
 

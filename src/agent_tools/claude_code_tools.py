@@ -27,6 +27,7 @@ import contextvars
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -1078,6 +1079,31 @@ _ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_rep
 # alternating `bash sleep 20..120` with poll for ten minutes until the
 # loop-breaker ended the turn; one poll that waits on the job replaces both.
 MAX_POLL_WAIT_S = 600
+# A model that polls without wait_seconds gets an answer at once and polls
+# again, one model round per check: the 2026-09-18 logs show nine rounds of
+# identical polls before the loop-breaker ended the turn. So a repeat poll of a
+# still-running task waits on the job itself, doubling each time (30s, 60s,
+# 120s…, capped so a steer or stop is still picked up within minutes). The
+# wait ends as soon as the task finishes.
+_POLL_BACKOFF_START_S = 30
+_POLL_BACKOFF_MAX_S = 240
+_POLL_REPEAT_WINDOW_S = 900
+_last_polls: dict[str, tuple[float, int]] = {}
+
+
+def _poll_wait(task_id: str, requested: int) -> int:
+    """Seconds this poll should wait: the caller's request, or the backoff
+    floor when it is polling the same task again soon after the last poll."""
+    now = time.monotonic()
+    last = _last_polls.get(task_id)
+    repeats = last[1] + 1 if last and now - last[0] < _POLL_REPEAT_WINDOW_S else 0
+    _last_polls[task_id] = (now, repeats)
+    for stale in [tid for tid, (ts, _) in _last_polls.items() if now - ts > _POLL_REPEAT_WINDOW_S]:
+        _last_polls.pop(stale, None)
+    if repeats == 0:
+        return requested
+    floor = min(_POLL_BACKOFF_MAX_S, _POLL_BACKOFF_START_S * 2 ** min(repeats - 1, 8))
+    return max(requested, floor)
 
 
 def _running_report(record: dict) -> dict:
@@ -1099,6 +1125,10 @@ def _running_report(record: dict) -> dict:
         out["recent_activity"] = progress[-6:]
     out["note"] = (f"Still {record.get('status')}. To wait, call poll again with wait_seconds (up to {MAX_POLL_WAIT_S}) — "
                    "do not sleep in bash. Or end your turn and tell the user; the result is kept for 24h.")
+    # The agent loop's stall detector reads this instead of the whole report,
+    # so a poll that only shows a larger elapsed time is not mistaken for
+    # progress. It is removed before the model sees the result.
+    out["progress_key"] = json.dumps([record.get("status"), progress[-6:]], default=str)
     out["exit_code"] = 0
     return out
 
@@ -1160,11 +1190,17 @@ class ClaudeCodeTool:
                     wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
                 except (TypeError, ValueError):
                     wait = 0
+                if action == "poll":
+                    wait = _poll_wait(task_id, wait)
                 record = await runner.wait(task_id, wait, owner=owner) if wait else runner.get(task_id, owner=owner)
             if record is None:
                 return {"error": _tool_error(f"task {task_id} not found", invoked_tool), "exit_code": 1}
             if record.get("status") in _ACTIVE_STATUSES:
-                return _running_report(record)
+                report = _running_report(record)
+                if action == "poll" and wait:
+                    report["waited_seconds"] = wait
+                return report
+            _last_polls.pop(task_id, None)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
             return {"tasks": runner.summaries(owner=owner), "exit_code": 0}

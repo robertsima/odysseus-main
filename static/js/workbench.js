@@ -639,7 +639,8 @@ function statusClass(status) {
   // rather than falling through to the red default. `partial` is the same
   // judgement for a research workflow: some branches produced usable evidence
   // (agent_workflows._run), which is degraded, not failed.
-  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete' || s === 'partial') return 'warn';
+  if (s === 'cancelled' || s === 'draft' || s === 'interrupted' || s === 'incomplete' || s === 'partial'
+      || s === 'waiting_approval') return 'warn';
   return 'bad';
 }
 function statusPill(status, label) {

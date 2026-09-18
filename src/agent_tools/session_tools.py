@@ -440,10 +440,20 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         activity.publish(session_id, "message", f"← {sess.name or target_sid}: {response[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=response[:2000])
         stopped = bool(outcome.get("stopped"))
+        # The reply alone doesn't say the work is done: a worker can end its
+        # turn on an approval card or run out of rounds.
+        if stopped:
+            run_status, verb = "cancelled", "stopped"
+        elif outcome.get("awaiting_approval"):
+            run_status, verb = "waiting_approval", "is waiting for approval"
+        elif outcome.get("rounds_exhausted"):
+            run_status, verb = "incomplete", "ran out of rounds"
+        else:
+            run_status, verb = "completed", "replied"
         activity.run_finished(
             session_id, "session", run_id,
-            f"Sub-agent · {sess.name or target_sid} {'stopped' if stopped else 'replied'}",
-            status="cancelled" if stopped else "completed",
+            f"Sub-agent · {sess.name or target_sid} {verb}",
+            status=run_status,
             owner=owner,
             data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
                   "steps": len(tool_events), "result_excerpt": response[:400]},
@@ -461,6 +471,14 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         }
         if stopped:
             out["stopped_by_user"] = True
+        if run_status != "completed":
+            out["status"] = run_status
+        if outcome.get("awaiting_approval"):
+            out["awaiting_approval"] = {
+                "tool": outcome["awaiting_approval"].get("tool"),
+                "note": ("The sub-agent stopped for the user's approval in its own chat. "
+                         "Tell the user; do not treat the task as done or retry it."),
+            }
         if tool_events:
             out["tool_calls"] = len(tool_events)
         return out

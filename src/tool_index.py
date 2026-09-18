@@ -9,6 +9,7 @@ relevant ones per user message.
 import logging
 import hashlib
 import re
+import threading
 import time
 from typing import Dict, List, Optional, Set
 
@@ -334,6 +335,15 @@ class ToolIndex:
         migrate_legacy_collection(COLLECTION_NAME, self._lanes)
         self._fingerprint = ""
         self._mcp_generation = -1
+        # MCP entries this process indexed ({id: indexed text}); None until the
+        # first refresh, which replaces whatever an earlier process left behind.
+        self._mcp_docs: Optional[Dict[str, str]] = None
+        self._mcp_indexed_at = 0.0
+        # One refresh at a time. A turn's wait for the refresh times out after
+        # a second or two but the thread keeps going, so without this the next
+        # turn started a second refresh whose delete could land after the
+        # first one's upsert and leave the index with no MCP tools at all.
+        self._mcp_index_lock = threading.Lock()
         self._healthy = True
         logger.info("ToolIndex initialized (lanes=%s)", [lane.name for lane in self._lanes])
 
@@ -397,8 +407,23 @@ class ToolIndex:
         ).hexdigest()
         logger.info(f"Indexed {len(docs)} built-in tools")
 
+    def mcp_index_state(self, mcp_mgr) -> Dict[str, object]:
+        """Whether the MCP part of the index matches the connected servers."""
+        gen = getattr(mcp_mgr, '_generation', 0) if mcp_mgr else 0
+        return {
+            "current": gen == self._mcp_generation,
+            "refreshing": self._mcp_index_lock.locked(),
+            "age_seconds": round(time.time() - self._mcp_indexed_at, 1) if self._mcp_indexed_at else None,
+            "tools": len(self._mcp_docs or {}),
+        }
+
     def index_mcp_tools(self, mcp_mgr, disabled_map: Optional[Dict] = None):
-        """Index MCP tool descriptions. Call after MCP servers connect/disconnect."""
+        """Index MCP tool descriptions. Call after MCP servers connect/disconnect.
+
+        Only tools whose indexed text changed are re-embedded, and tools that
+        are gone are deleted, so reconnecting one server doesn't re-embed every
+        server's tools. A refresh already in progress is left to finish.
+        """
         if not mcp_mgr:
             return
 
@@ -406,15 +431,26 @@ class ToolIndex:
         gen = getattr(mcp_mgr, '_generation', 0)
         if gen == self._mcp_generation:
             return
+        if not self._mcp_index_lock.acquire(blocking=False):
+            logger.info("[tool-rag] MCP index refresh already running; this turn uses the current index")
+            return
+        try:
+            self._index_mcp_tools_locked(mcp_mgr, disabled_map, gen)
+        finally:
+            self._mcp_index_lock.release()
 
-        # Remove old MCP entries
-        for lane in self._lanes:
-            try:
-                existing = lane.collection.get(where={"tool_type": "mcp"})
-                if existing and existing["ids"]:
-                    lane.collection.delete(ids=existing["ids"])
-            except Exception:
-                pass
+    def _index_mcp_tools_locked(self, mcp_mgr, disabled_map: Optional[Dict], gen: int) -> None:
+        started = time.time()
+        if self._mcp_docs is None:
+            # First refresh in this process: drop what a previous process left.
+            for lane in self._lanes:
+                try:
+                    existing = lane.collection.get(where={"tool_type": "mcp"})
+                    if existing and existing["ids"]:
+                        lane.collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+            self._mcp_docs = {}
 
         # Get current MCP tools
         try:
@@ -423,7 +459,10 @@ class ToolIndex:
             all_tools = ""
 
         if not all_tools:
+            self._remove_mcp_ids(set(self._mcp_docs))
+            self._mcp_docs = {}
             self._mcp_generation = gen
+            self._mcp_indexed_at = time.time()
             return
 
         # Parse MCP tool descriptions from the prompt text
@@ -452,27 +491,49 @@ class ToolIndex:
                     ids.append(f"mcp_{name}")
                     metadatas.append({"tool_name": name, "tool_type": "mcp"})
 
-        if not docs:
-            self._mcp_generation = gen
-            return
+        wanted = dict(zip(ids, docs))
+        removed = set(self._mcp_docs) - set(wanted)
+        changed = [i for i, doc_id in enumerate(ids) if self._mcp_docs.get(doc_id) != docs[i]]
+        self._remove_mcp_ids(removed)
+        for doc_id in removed:
+            self._mcp_docs.pop(doc_id, None)
 
-        indexed = False
+        if changed:
+            up_ids = [ids[i] for i in changed]
+            up_docs = [docs[i] for i in changed]
+            up_meta = [metadatas[i] for i in changed]
+            indexed = False
+            for lane in self._lanes:
+                try:
+                    lane.collection.upsert(
+                        ids=up_ids,
+                        documents=up_docs,
+                        embeddings=lane.encode(up_docs),
+                        metadatas=up_meta,
+                    )
+                    indexed = True
+                except Exception as e:
+                    logger.warning("MCP tool indexing failed in %s lane: %s", lane.name, e)
+            if not indexed:
+                logger.warning("MCP tool indexing failed in all embedding lanes")
+                return
+            for i in changed:
+                self._mcp_docs[ids[i]] = docs[i]
+        self._mcp_generation = gen
+        self._mcp_indexed_at = time.time()
+        logger.info(
+            "Indexed MCP tools: %d total, %d embedded, %d removed in %.1fs",
+            len(wanted), len(changed), len(removed), time.time() - started,
+        )
+
+    def _remove_mcp_ids(self, doc_ids) -> None:
+        if not doc_ids:
+            return
         for lane in self._lanes:
             try:
-                lane.collection.upsert(
-                    ids=ids,
-                    documents=docs,
-                    embeddings=lane.encode(docs),
-                    metadatas=metadatas,
-                )
-                indexed = True
+                lane.collection.delete(ids=sorted(doc_ids))
             except Exception as e:
-                logger.warning("MCP tool indexing failed in %s lane: %s", lane.name, e)
-        if not indexed:
-            logger.warning("MCP tool indexing failed in all embedding lanes")
-            return
-        self._mcp_generation = gen
-        logger.info(f"Indexed {len(docs)} MCP tools")
+                logger.warning("Removing stale MCP tools failed in %s lane: %s", lane.name, e)
 
     def retrieve(self, query: str, k: int = 8) -> List[str]:
         """Retrieve the top-K most relevant tool names for a query."""
@@ -893,3 +954,21 @@ def reset_tool_index() -> None:
     global _tool_index, _last_attempt
     _tool_index = None
     _last_attempt = 0.0
+
+
+def refresh_mcp_index_if_loaded(mcp_mgr) -> None:
+    """Bring the MCP part of an already-built index up to date.
+
+    Called off the request path after MCP servers connect, so the next agent
+    turn finds the index current instead of paying for the refresh inside its
+    tool-selection budget. Does nothing when the index was never built: the
+    first turn builds it anyway, and startup should not pay for the embedder.
+    """
+    index = _tool_index
+    if index is None or not index.healthy or not mcp_mgr:
+        return
+    try:
+        from src.agent_loop import _load_mcp_disabled_map
+        index.index_mcp_tools(mcp_mgr, _load_mcp_disabled_map())
+    except Exception as e:
+        logger.warning("Background MCP index refresh failed: %s", e)

@@ -218,6 +218,9 @@ DEFAULT_SETTINGS = {
     # Default approval mode for chats that have not chosen one
     # (auto | ask_risky | ask_all; see src/tool_approvals.py).
     "agent_approval_mode": "auto",
+    # Most tools one agent turn is offered from retrieval and keyword domains
+    # (src.agent_loop._apply_tool_budget). 0 = no limit.
+    "agent_tool_budget": 40,
     # Named sub-agent worker profiles (src/agent_profiles.py).
     "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the

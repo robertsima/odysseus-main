@@ -8,6 +8,7 @@ The LLM decides when to use tools by writing fenced code blocks.
 
 import asyncio
 import collections
+import hashlib
 import itertools
 import json
 import re
@@ -3447,6 +3448,81 @@ def build_active_plan_note(approved_plan: str) -> str:
     )
 
 
+# Tools a single turn may be offered from retrieval plus domain seeding
+# (``agent_tool_budget``, 0 = no limit). Domain detection is keyword-based, so a
+# long message that happens to mention "server", "task", "open" and "test"
+# seeds half the catalogue: the 2026-09-18 logs have turns sent 80 tools and
+# ~66k prompt tokens for a question about agent status and logs.
+DEFAULT_TOOL_BUDGET = 40
+
+# Tools each domain seeds beyond its _DOMAIN_TOOL_MAP entry (see the seeding
+# block in stream_agent_loop), so the budget can attribute them.
+_DOMAIN_EXTRA_TOOLS = {
+    "cookbook": {"list_served_models", "list_downloads", "list_cached_models",
+                 "list_cookbook_servers", "list_serve_presets"},
+    "email": {"ui_control"},
+    "ui": {"ui_control"},
+}
+
+
+def _tool_budget() -> int:
+    try:
+        return max(0, int(get_setting("agent_tool_budget", DEFAULT_TOOL_BUDGET)))
+    except (TypeError, ValueError):
+        return DEFAULT_TOOL_BUDGET
+
+
+def _apply_tool_budget(tools: Set[str], *, protected: Set[str], retrieved: Set[str],
+                       domains, budget: int) -> Dict[str, Set[str]]:
+    """Trim ``tools`` in place to ``budget`` by dropping whole seeded domains.
+
+    Only tools a domain seeded are candidates; retrieval's picks, forced tools
+    and anything else in ``protected`` always stay. The domains retrieval
+    agrees with least (fewest of their tools among the retrieved ones) go
+    first, the biggest first on a tie. Returns ``{domain: dropped tools}``.
+    """
+    if budget <= 0 or len(tools) <= budget:
+        return {}
+    def domain_tools(domain: str) -> Set[str]:
+        return set(_DOMAIN_TOOL_MAP.get(domain, set())) | _DOMAIN_EXTRA_TOOLS.get(domain, set())
+
+    names = sorted(str(d) for d in domains)
+    owned = {d: domain_tools(d) & tools - protected for d in names}
+    # A tool two domains seeded goes only when both are dropped.
+    ranked = sorted(names, key=lambda d: (len(domain_tools(d) & retrieved), -len(owned[d]), d))
+    dropped: Dict[str, Set[str]] = {}
+    kept_domains = set(names)
+    for domain in ranked:
+        if len(tools) <= budget:
+            break
+        kept_domains.discard(domain)
+        still_needed = set().union(*(owned[d] for d in kept_domains)) if kept_domains else set()
+        removable = owned[domain] - still_needed
+        if removable:
+            tools.difference_update(removable)
+            dropped[domain] = removable
+    return dropped
+
+
+def _result_progress_digest(result) -> str:
+    """What a tool result says about progress, for the loop-breaker.
+
+    A tool can name its own progress state (``progress_key``); a polled job
+    does, so a poll that reports new activity is progress while one that only
+    reports a larger elapsed time is not. Otherwise the whole result counts,
+    with digits dropped so clocks and counters alone don't read as progress.
+    """
+    if isinstance(result, dict) and result.get("progress_key") is not None:
+        basis = str(result.get("progress_key"))
+    else:
+        try:
+            basis = json.dumps(result, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            basis = str(result)
+        basis = re.sub(r"\d+", "", basis)
+    return hashlib.sha256(basis.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 def _detect_runaway_call(call_freq, threshold=15):
     """Tool name of a call signature repeated >= ``threshold`` times — a real
     runaway loop. Counts IDENTICAL repeated calls (same tool AND args), so a
@@ -3965,9 +4041,15 @@ async def stream_agent_loop(
                             timeout=_TOOL_SELECTION_TIMEOUT_SECONDS,
                         )
                     except asyncio.TimeoutError:
+                        # The refresh keeps running in its thread and finishes
+                        # for the next turn; this turn retrieves from the index
+                        # as it stood.
+                        _mcp_state = tool_idx.mcp_index_state(mcp_mgr)
                         logger.warning(
-                            "[tool-rag] MCP tool indexing exceeded %.1fs; continuing without reindex",
+                            "[tool-rag] MCP index refresh still running after %.1fs; this turn uses the "
+                            "previous index (age=%ss, mcp_tools=%s)",
                             _TOOL_SELECTION_TIMEOUT_SECONDS,
+                            _mcp_state.get("age_seconds"), _mcp_state.get("tools"),
                         )
                 if _retrieval_query:
                     try:
@@ -4009,6 +4091,8 @@ async def stream_agent_loop(
     # tool names. It prevents obvious requests like "last 5 emails" from
     # collapsing to only ask_user/manage_memory when vector retrieval misses or
     # times out.
+    _pre_domain_tools = set(_relevant_tools) if _relevant_tools is not None else None
+    _terminus_toolset = False
     if not guide_only and _relevant_tools is not None:
         for _domain in (_intent.get("domains") or set()):
             _relevant_tools.update(_DOMAIN_TOOL_MAP.get(str(_domain), set()))
@@ -4044,6 +4128,7 @@ async def stream_agent_loop(
             and not active_email
         ):
             _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
+            _terminus_toolset = True
             logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
 
     # If this turn targets the open document, keep editing tools available
@@ -4095,6 +4180,7 @@ async def stream_agent_loop(
     # (grep, read_file, ...) that aren't in its schema list. Keep the schemas
     # in lockstep: manage_skills is callable whenever any skill is indexed,
     # and a matched skill's declared requires_toolsets ride along with it.
+    _skill_required_tools: Set[str] = set()
     if not guide_only and _relevant_tools is not None and not _low_signal_turn:
         try:
             from services.memory.skills import SkillsManager
@@ -4119,12 +4205,41 @@ async def stream_agent_loop(
                         _retrieval_query, skills=_owner_skills,
                         threshold=0.25, max_items=3,
                     ):
-                        _relevant_tools.update(
+                        _sk_tools = {
                             t for t in (_sk.get("requires_toolsets") or [])
                             if t in _known
-                        )
+                        }
+                        _skill_required_tools |= _sk_tools
+                        _relevant_tools.update(_sk_tools)
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
+
+    if (
+        not guide_only
+        and _relevant_tools is not None
+        and _pre_domain_tools is not None
+        and not _terminus_toolset
+    ):
+        from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS
+        _protected = set(_ALWAYS) | set(_pre_domain_tools) | _skill_required_tools | {"manage_skills"}
+        _protected |= {t for t in (forced_tools or ()) if t not in disabled_tools}
+        if _active_document_relevant:
+            _protected |= {"edit_document", "update_document", "suggest_document"}
+        if uploaded_files:
+            _protected |= {"read_file", "grep", "ls", "manage_documents"}
+        _budget_dropped = _apply_tool_budget(
+            _relevant_tools,
+            protected=_protected,
+            retrieved=_pre_domain_tools,
+            domains=_intent.get("domains") or set(),
+            budget=_tool_budget(),
+        )
+        if _budget_dropped:
+            logger.info(
+                "[tool-rag] tool budget %d: dropped weakly-supported domains %s (%d tools); %d tools remain",
+                _tool_budget(), sorted(_budget_dropped), sum(len(v) for v in _budget_dropped.values()),
+                len(_relevant_tools),
+            )
 
     _intent_domains = set(_intent.get("domains") or set())
     _base_relevant_tools = None if _relevant_tools is None else set(_relevant_tools)
@@ -4494,6 +4609,10 @@ async def stream_agent_loop(
     # signatures + consecutive no-text tool rounds to bail early.
     _recent_call_sigs = collections.deque(maxlen=6)
     _stuck_rounds = 0
+    # Result digest of each call's last run, so a repeated call that returned
+    # something new (a polled job's fresh activity) counts as progress.
+    _last_call_digest: Dict[str, str] = {}
+    _last_round_progressed = False
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -5673,7 +5792,8 @@ async def stream_agent_loop(
         _real_text = _strip_think_blocks(cleaned_round).strip()
         # Circling = repeating a recent call with nothing written. Any
         # progress (a NEW distinct call, or actual answer text) resets it.
-        if _is_repeat and not _real_text:
+        _progressed, _last_round_progressed = _last_round_progressed, False
+        if _is_repeat and not _real_text and not _progressed:
             _stuck_rounds += 1
         else:
             _stuck_rounds = 0
@@ -5935,6 +6055,17 @@ async def stream_agent_loop(
                             pass
 
             run_security.observe_tool_result(block.tool_type, result, block.content)
+            if isinstance(result, dict):
+                _call_key = f"{block.tool_type}:{(block.content or '').strip()[:120]}"
+                _digest = _result_progress_digest(result)
+                result.pop("progress_key", None)
+                _prior_digest = _last_call_digest.get(_call_key)
+                _last_call_digest[_call_key] = _digest
+                if _prior_digest is not None and _prior_digest != _digest:
+                    # Same call, new answer: work is moving, so neither the
+                    # stall streak nor the runaway count should hold it.
+                    _last_round_progressed = True
+                    _call_freq[_call_key] = 1
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its

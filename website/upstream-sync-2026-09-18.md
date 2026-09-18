@@ -94,6 +94,21 @@ the model.
   - A sub-agent's card is saved in its own chat and listed in the Agents
     panel, with the reason it asked.
 
+## Added to upstream's loop since
+
+- **Tool budget** (`agent_tool_budget`, default 40). Keyword domain seeding
+  can offer most of the catalogue on a long message (80 tools, ~66k prompt
+  tokens in the 2026-09-18 logs). Past the budget,
+  `_apply_tool_budget` drops whole seeded domains, starting with the ones
+  retrieval agrees with least. Retrieved, forced, document, upload and
+  skill-required tools always stay.
+- **Result-aware loop-breaker**. A repeated call counts toward the stall
+  streak only if its result is unchanged too (`_result_progress_digest`; a
+  tool can name its own `progress_key`). A polled Claude Code job that shows
+  new activity is progress, and one that shows only a larger elapsed time is
+  not. Repeat polls also wait on the job (30s, doubling, capped at 240s)
+  instead of returning at once.
+
 ## Changed behaviour until re-ported
 
 | Area | Now | Fork commits to re-port |

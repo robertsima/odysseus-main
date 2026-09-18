@@ -27,7 +27,7 @@ import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 // Versioned like the other modules: this one was imported bare, so a browser
 // that had it cached kept the old strip logic across three rounds of fixes.
-import workbenchModule from './js/workbench.js?v=20260918approvals1';
+import workbenchModule from './js/workbench.js?v=20260918reliability1';
 // Per-chat settings + the status line under the composer (self-initialising).
 import './js/chatSettings.js?v=20260918approvals1';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).

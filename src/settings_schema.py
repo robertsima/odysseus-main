@@ -526,6 +526,14 @@ register_all([
         choice_labels=("Run automatically", "Ask for risky actions", "Ask for every change"),
     ),
     SettingSpec(
+        key="agent_tool_budget", type="int", label="Tools per turn",
+        help=("The most tools one agent turn is offered. Broad messages match many "
+              "keyword domains; past this limit the domains retrieval agrees with "
+              "least are dropped first. Tools you forced on, and the ones retrieval "
+              "picked, always stay. 0 = no limit."),
+        group="Agents", min_value=0, max_value=200, unit="tools", advanced=True,
+    ),
+    SettingSpec(
         key="agent_approval_ttl_seconds", type="int", label="Approval link lifetime",
         help="How long a one-time agent publishing approval remains valid.",
         group="Agents", min_value=60, max_value=3600, step=60, unit="seconds",

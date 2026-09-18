@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import asyncio 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
@@ -346,6 +347,89 @@ class _ServerLock:
         return False
 
 
+class _OwnedStack:
+    """An AsyncExitStack that one dedicated task both enters and exits.
+
+    The MCP clients open anyio task groups, and an anyio cancel scope may only
+    be exited by the task that entered it. The stack used to be entered by
+    whichever task ran the connect (a request, the startup task, a restart)
+    and closed by whichever task asked for the disconnect, which raised
+    "Attempted to exit cancel scope in a different task than it was entered
+    in" for every server at shutdown. Here the owner task runs ``setup``,
+    hands its result back, then waits for ``aclose`` and unwinds the stack
+    itself.
+    """
+
+    def __init__(self, label: str):
+        self._label = label
+        self._stop: Optional[asyncio.Event] = None
+        self._task: Optional[asyncio.Task] = None
+
+    async def open(self, setup):
+        """Run ``setup(stack)`` in the owner task and return its result.
+
+        If ``setup`` fails, the owner unwinds what it entered and the error is
+        raised here. If the caller is cancelled (a connect timeout), the owner
+        is cancelled too, so nothing is left half-open.
+        """
+        from contextlib import AsyncExitStack
+
+        loop = asyncio.get_running_loop()
+        ready = loop.create_future()
+        self._stop = asyncio.Event()
+        stop = self._stop
+
+        async def owner():
+            try:
+                setup_error: Optional[BaseException] = None
+                async with AsyncExitStack() as stack:
+                    try:
+                        result = await setup(stack)
+                    except BaseException as exc:  # noqa: BLE001 - re-raised to the caller below
+                        # Unwind without handing the error to the stack: a task
+                        # group would wrap it in an ExceptionGroup, and the
+                        # caller should see the handshake's own error.
+                        setup_error = exc
+                    else:
+                        if ready.done():
+                            return  # the caller gave up; unwind now
+                        ready.set_result(result)
+                        await stop.wait()
+                if setup_error is not None and not ready.done():
+                    if isinstance(setup_error, asyncio.CancelledError):
+                        ready.cancel()
+                    else:
+                        ready.set_exception(setup_error)
+            except asyncio.CancelledError:
+                if not ready.done():
+                    ready.cancel()
+            except BaseException as exc:  # noqa: BLE001 - reported to the caller or logged
+                if not ready.done():
+                    ready.set_exception(exc)
+                else:
+                    logger.warning("MCP server %s connection ended: %s", self._label, _describe_exception(exc))
+
+        self._task = loop.create_task(owner(), name=f"mcp-owner-{self._label}")
+        try:
+            return await ready
+        except asyncio.CancelledError:
+            self._task.cancel()
+            raise
+
+    async def aclose(self, timeout: float = 10.0) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        task = self._task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("MCP server %s did not close within %.0fs; cancelling it", self._label, timeout)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
 class McpManager:
     """Manages MCP server connections and tool routing."""
 
@@ -472,24 +556,14 @@ class McpManager:
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
         """Connect to an MCP server via stdio transport.
 
-        Known limitation: stdio_client() opens an anyio task group, and anyio
-        cancel scopes may only be exited by the task that entered them. The
-        AsyncExitStack built here therefore belongs to whichever task ran the
-        connect (a FastAPI request task, or restart_server's own task), while
-        disconnect_server() closes it from whatever task asks for the
-        disconnect later -- so `await stack.aclose()` can raise "Attempted to
-        exit cancel scope in a different task than it was entered in". That
-        warning is logged and swallowed; the subprocess still dies with its
-        pipes. Removing it entirely means owning each stdio server's stack in
-        one long-lived supervisor task per server and driving connect/
-        disconnect through a queue, which is a much larger change. Serializing
-        the callers (see restart_server) removes the state corruption and the
-        orphaned-subprocess storm that made the warning fire repeatedly.
+        stdio_client() opens an anyio task group, whose cancel scope may only
+        be exited by the task that entered it, so the stack lives in its own
+        owner task (_OwnedStack) and connect and disconnect can come from any
+        task.
         """
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from contextlib import AsyncExitStack
 
             server_params = StdioServerParameters(
                 command=command,
@@ -497,24 +571,27 @@ class McpManager:
                 env={**os.environ, **env} if env else None,
             )
 
-            stack = AsyncExitStack()
-            registered = False
+            # Capture the subprocess's stderr to a file instead of letting it
+            # vanish into the app's own stderr. When the process dies, the
+            # client-side exception is often anyio's ClosedResourceError with
+            # no message at all; this tail is the only thing that says *why*.
+            errlog = self._open_stderr_log(server_id)
 
-            try:
-                # Capture the subprocess's stderr to a file instead of letting it
-                # vanish into the app's own stderr. When the process dies, the
-                # client-side exception is often anyio's ClosedResourceError with
-                # no message at all; this tail is the only thing that says *why*.
-                errlog = self._open_stderr_log(server_id)
+            async def setup(stack):
                 if errlog is not None:
                     transport = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
                 else:
                     transport = await stack.enter_async_context(stdio_client(server_params))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
                 await session.initialize()
-                tools_result = await session.list_tools()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
+            registered = False
+
+            try:
 
                 tools = []
                 for tool in tools_result.tools:
@@ -572,18 +649,18 @@ class McpManager:
         try:
             from mcp import ClientSession
             from mcp.client.sse import sse_client
-            from contextlib import AsyncExitStack
 
-            stack = AsyncExitStack()
+            async def setup(stack):
+                read_stream, write_stream = await stack.enter_async_context(sse_client(url))
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
             registered = False
 
             try:
-                transport = await stack.enter_async_context(sse_client(url))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
 
                 tools = []
                 for tool in tools_result.tools:
@@ -657,7 +734,6 @@ class McpManager:
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
             from src.mcp_oauth import build_provider, clear_auth_url
 
             def _on_redirect(auth_url):
@@ -669,13 +745,16 @@ class McpManager:
                 }
 
             provider = build_provider(server_id, url, on_redirect=_on_redirect)
-            stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await session.initialize()
 
-            tools_result = await session.list_tools()
+            async def setup(stack):
+                transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+                read_stream, write_stream, _get_session_id = transport
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
             tools = []
             for tool in tools_result.tools:
                 tools.append({
@@ -825,18 +904,28 @@ class McpManager:
 
 
     async def connect_all_enabled(self):
+        # Read the rows and give the connection back before connecting: the
+        # connects take up to 20s each, and holding a pooled connection that
+        # long starved everything else (the 15-16s "long checkout" warnings
+        # at mcp_manager connect_all_enabled).
         db = SessionLocal()
         try:
-            servers = db.query(McpServer).filter(McpServer.is_enabled == True).all()
-
-            tasks = [
-                asyncio.create_task(self._connect_with_timeout(srv))
-                for srv in servers
+            servers = [
+                SimpleNamespace(id=srv.id, name=srv.name, transport=srv.transport, command=srv.command,
+                                args=srv.args, env=srv.env, url=srv.url)
+                for srv in db.query(McpServer).filter(McpServer.is_enabled == True).all()
             ]
-
-            await asyncio.gather(*tasks)
         finally:
             db.close()
+
+        await asyncio.gather(*(self._connect_with_timeout(srv) for srv in servers))
+        # Refresh the agent's tool index now, off the request path, so the
+        # next turn doesn't spend its tool-selection budget on it.
+        try:
+            from src.tool_index import refresh_mcp_index_if_loaded
+            await asyncio.to_thread(refresh_mcp_index_if_loaded, self)
+        except Exception as e:
+            logger.debug("MCP index refresh after connect skipped: %s", e)
 
 
     async def _connect_with_timeout(self, srv):
