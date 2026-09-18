@@ -82,6 +82,7 @@ class WebSearchTool:
             return {
                 "error": f"web_search failed: {type(e).__name__}: {str(e) or 'no details'}",
                 "exit_code": 1,
+                "untrusted_content": True,
             }
         if progress_cb:
             await progress_cb({

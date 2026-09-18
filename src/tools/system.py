@@ -901,6 +901,7 @@ async def do_app_api(
                 "status_code": resp.status_code,
                 "body": preview,
                 "exit_code": 1,
+                "untrusted_content": True,
             }
         return {
             "output": f"{method} {path} -> {resp.status_code}\n{preview}",
