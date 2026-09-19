@@ -2053,7 +2053,10 @@ class TaskScheduler:
             import httpx
             from src.integrations import load_integrations
             for integ in load_integrations():
-                if not integ.get("enabled"):
+                # Default True, matching get_integrations_prompt and
+                # execute_api_call. A bare .get() skipped every integration
+                # saved before `enabled` was written out.
+                if not integ.get("enabled", True):
                     continue
                 preset = integ.get("preset", "")
                 base_url = integ.get("base_url", "").rstrip("/")

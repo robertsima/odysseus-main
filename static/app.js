@@ -143,17 +143,30 @@ function _countLineBreaks(s) {
   return ((s || '').match(/\n/g) || []).length;
 }
 
+// The server stops background work while this heartbeat says a person is
+// using Odysseus. An OPEN tab is not a person: the keepalive below beats every
+// 15s while the page is merely visible, and the server treats a beat as
+// activity for 45s, so a tab parked on a second monitor used to hold the
+// foreground gate down forever and no scheduled task ever ran. Each beat now
+// reports whether a real pointer/key/scroll/focus event happened recently;
+// idle beats are liveness only and never pre-empt background work.
+const HEARTBEAT_IDLE_AFTER_MS = 60000;
+
 function initForegroundActivityHeartbeat() {
   let lastSent = 0;
+  let lastInteractionAt = Date.now();
   const minGapMs = 12000;
   const send = (force = false) => {
     if (document.visibilityState === 'hidden') return;
     const now = Date.now();
     if (!force && now - lastSent < minGapMs) return;
     lastSent = now;
+    const payload = JSON.stringify({
+      idle: now - lastInteractionAt > HEARTBEAT_IDLE_AFTER_MS,
+    });
     try {
       if (navigator.sendBeacon) {
-        const body = new Blob(['{}'], { type: 'application/json' });
+        const body = new Blob([payload], { type: 'application/json' });
         if (navigator.sendBeacon('/api/activity/heartbeat', body)) return;
       }
     } catch (_) {}
@@ -162,17 +175,21 @@ function initForegroundActivityHeartbeat() {
       credentials: 'same-origin',
       keepalive: true,
       headers: { 'Content-Type': 'application/json' },
-      body: '{}',
+      body: payload,
     }).catch(() => {});
   };
-  send(true);
-  window.addEventListener('focus', () => send(true));
+  // A beat the user caused: record when it happened, then report it.
+  const interacted = (force) => { lastInteractionAt = Date.now(); send(force); };
+  interacted(true);
+  window.addEventListener('focus', () => interacted(true));
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState !== 'hidden') send(true);
+    if (document.visibilityState !== 'hidden') interacted(true);
   });
   ['pointerdown', 'keydown', 'touchstart', 'scroll'].forEach(type => {
-    window.addEventListener(type, () => send(false), { passive: true, capture: true });
+    window.addEventListener(type, () => interacted(false), { passive: true, capture: true });
   });
+  // Keepalive only — deliberately not `interacted`, so going quiet for
+  // HEARTBEAT_IDLE_AFTER_MS lets the scheduler through.
   setInterval(() => send(false), 15000);
 }
 initForegroundActivityHeartbeat();

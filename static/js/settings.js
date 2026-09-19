@@ -4370,16 +4370,40 @@ async function initUnifiedIntegrations() {
     });
   }
 
-  function showForm(type, editId) {
-    formEl.style.display = '';
-    if (type === 'api') showApiForm(editId);
-    else if (type === 'caldav') showCalDavForm(editId);
-    else if (type === 'contacts' || type === 'carddav') showCardDavForm();
-    else if (type === 'email') showEmailForm(editId);
-    else if (type === 'mcp') showMcpForm(editId);
-    else if (type === 'codex') showAgentForm('codex', editId);
-    else if (type === 'claude') showAgentForm('claude', editId);
-    else if (type === 'vault') showVaultForm();
+  // The editor renders BELOW the whole integration list. With more than a
+  // couple of integrations configured, clicking a card opened it off-screen —
+  // which is why editing looked like it did not exist. Scroll to it once the
+  // (async) form body has actually been written.
+  function revealForm() {
+    try {
+      formEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (_) {
+      try { formEl.scrollIntoView(); } catch (__) {}
+    }
+  }
+
+  async function showForm(type, editId) {
+    // 'block', not '': the add-button observer above tests
+    // `formEl.style.display && ...`, and '' is falsy, so it never fired.
+    formEl.style.display = 'block';
+    try {
+      if (type === 'api') await showApiForm(editId);
+      else if (type === 'caldav') await showCalDavForm(editId);
+      else if (type === 'contacts' || type === 'carddav') await showCardDavForm();
+      else if (type === 'email') await showEmailForm(editId);
+      else if (type === 'mcp') await showMcpForm(editId);
+      else if (type === 'codex') await showAgentForm('codex', editId);
+      else if (type === 'claude') await showAgentForm('claude', editId);
+      else if (type === 'vault') await showVaultForm();
+    } catch (err) {
+      // A form that throws half-way used to leave an empty visible box with no
+      // hint of why. Say so instead.
+      try { console.error('[integrations] editor failed to open', err); } catch (_) {}
+      formEl.innerHTML = '<div class="admin-card" style="margin-top:8px;font-size:12px">'
+        + 'Could not open this editor: ' + esc((err && err.message) || String(err))
+        + '</div>';
+    }
+    revealForm();
   }
 
   // ── API form ──
@@ -4449,6 +4473,8 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Auth${_apiHint('How this service expects the credential to be sent. <b>Bearer</b> = sends "Authorization: Bearer YOUR_KEY" (most modern APIs, ntfy, OpenAI-style). <b>Header</b> = sends YOUR_KEY verbatim under a header name you choose (Miniflux uses X-Auth-Token). <b>Basic</b> = HTTP basic auth (user:pass). <b>None</b> = the API is open / no auth.')}</label><select id="uf-api-auth" class="settings-input"><option value="bearer">Bearer (most common)</option><option value="header">Header</option><option value="basic">Basic</option><option value="none">None</option></select></div>
           <div class="settings-row" id="uf-api-header-row"><label class="settings-label">Header${_apiHint('The HTTP header name the key goes under (Miniflux: X-Auth-Token; most others: Authorization). Only used when Auth = Header.')}</label><input id="uf-api-header" class="settings-input" placeholder="X-Auth-Token"></div>
           <div class="settings-row"><label class="settings-label">API Key${_apiHint('The secret token the service issued you (generated in its admin panel / settings). Used to prove your identity on each request. Required for any Auth mode except None.')}</label><input id="uf-api-key" class="settings-input" type="password" placeholder="Token/key"></div>
+          <div class="settings-row" style="align-items:flex-start"><label class="settings-label" style="padding-top:6px">Endpoints${_apiHint('What the assistant reads to know how to call this service. Picking a preset fills in its endpoint list; edit it freely to add your own paths, note which ones you actually use, or tell the assistant what not to touch. A custom integration with an empty description is one the assistant can reach but has no idea how to use.')}</label><textarea id="uf-api-desc" class="settings-input" rows="6" spellcheck="false" placeholder="GET /v1/things — list things&#10;POST /v1/things — create {&quot;name&quot;: &quot;...&quot;}" style="flex:1;min-width:0;font-family:var(--mono, ui-monospace, monospace);font-size:11px;line-height:1.45;resize:vertical;"></textarea></div>
+          <div class="settings-row"><label class="settings-label">Enabled${_apiHint('Off hides this integration from the assistant and from scheduled tasks without deleting it or losing the key.')}</label><label style="display:inline-flex;align-items:center;gap:7px;font-size:12px;cursor:pointer;"><input type="checkbox" id="uf-api-enabled" checked style="cursor:pointer"><span style="opacity:0.7">Available to the assistant</span></label></div>
           <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
             <span id="uf-api-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-api-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Test</button>
@@ -4458,6 +4484,9 @@ async function initUnifiedIntegrations() {
         </div>
       </div>`;
     // Custom preset dropdown wire-up (hidden select stays as data source).
+    // _setPresetTrigger is hoisted out so the edit prefill below can point the
+    // visible label at the stored preset; the <select> alone is invisible.
+    let _setPresetTrigger = () => {};
     (() => {
       const trig = el('uf-api-preset-trigger');
       const menu = el('uf-api-preset-menu');
@@ -4498,23 +4527,49 @@ async function initUnifiedIntegrations() {
           sel.dispatchEvent(new Event('change', { bubbles: true }));
         });
       });
+      _setPresetTrigger = _setFromKey;
       _setFromKey(sel.value || '');
     })();
 
     const preset = el('uf-api-preset'), name = el('uf-api-name'), url = el('uf-api-url'), auth = el('uf-api-auth'), header = el('uf-api-header'), key = el('uf-api-key'), ntfyHint = el('uf-api-ntfy-hint');
+    const desc = el('uf-api-desc'), enabled = el('uf-api-enabled');
     let _editId = editId && editId !== 'new' ? editId : null;
-    // Load existing
+    // Load existing. Every stored field is prefilled, including the preset —
+    // an edit used to open reading "Custom (no preset)" whatever it was saved
+    // as, and the description (the part the assistant actually reads) was
+    // neither shown nor editable at all.
     if (_editId) {
       try {
         const r = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
         const d = await r.json();
         const item = (d.integrations || []).find(i => i.id === _editId);
-        if (item) { name.value = item.name || ''; url.value = item.base_url || ''; auth.value = item.auth_type || 'none'; header.value = item.auth_header || ''; }
+        if (item) {
+          name.value = item.name || '';
+          url.value = item.base_url || '';
+          auth.value = item.auth_type || 'none';
+          header.value = item.auth_header || '';
+          if (desc) desc.value = item.description || '';
+          if (enabled) enabled.checked = item.enabled !== false;
+          if (item.preset && preset.querySelector(`option[value="${CSS.escape(item.preset)}"]`)) {
+            preset.value = item.preset;
+            try { _setPresetTrigger(item.preset); } catch (_) {}
+          }
+          // The list endpoint masks the key, so the field stays blank and
+          // blank means "keep what is stored". Without this the form looked
+          // like no key had ever been saved.
+          if (item.api_key) key.placeholder = 'Saved — leave blank to keep';
+        }
       } catch (_) {}
     }
     // Native <select>: the option `value` is the preset key directly, so
     // no typed-name → key lookup is needed (datalist-era leftover).
-    const _applyPreset = () => {
+    //
+    // Split in two. The visual half (hints, which rows are relevant) reflects
+    // the current preset and always runs. The defaults half OVERWRITES what is
+    // in the fields, so it runs only when the user actively picks a preset —
+    // running it on open would wipe the customisations of a saved integration
+    // the moment its editor appeared.
+    const _applyPresetVisuals = () => {
       const p = presets[preset.value];
       const isNtfy = preset.value === 'ntfy' || (p && (p.name || '').toLowerCase() === 'ntfy');
       const isUrlAuth = preset.value === 'discord_webhook'; // secret embedded in URL — no key/auth fields needed
@@ -4535,21 +4590,39 @@ async function initUnifiedIntegrations() {
       if (keyRow) keyRow.style.display = isUrlAuth ? 'none' : '';
       if (authRow) authRow.style.display = isUrlAuth ? 'none' : '';
       if (headerRow) headerRow.style.display = isUrlAuth ? 'none' : '';
+    };
+    const _applyPresetDefaults = () => {
+      const p = presets[preset.value];
       if (!p) return;
       name.value = p.name || '';
       auth.value = p.auth_type || 'none';
       header.value = p.auth_header || '';
+      // Seed the endpoint notes from the preset. It is a starting point, not a
+      // fixed value — everything here is editable and saved per integration.
+      if (desc) desc.value = p.description || '';
     };
-    preset.addEventListener('change', _applyPreset);
-    _applyPreset();
+    preset.addEventListener('change', () => { _applyPresetDefaults(); _applyPresetVisuals(); });
+    _applyPresetVisuals();
     el('uf-api-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('uf-api-save').addEventListener('click', async () => {
-      const presetKey = preset.value || undefined;
+      // Sent even when empty: '' is how you detach an integration from a
+      // preset, and undefined would be dropped by JSON.stringify.
+      const presetKey = preset.value || '';
       const nameValue = name.value.trim();
       const urlValue = url.value.trim();
       if (!nameValue) { el('uf-api-msg').textContent = 'Name required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
       if (!urlValue) { el('uf-api-msg').textContent = 'Base URL required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
-      const body = { name: nameValue, base_url: urlValue, auth_type: auth.value, auth_header: header.value, preset: presetKey };
+      const body = {
+        name: nameValue,
+        base_url: urlValue,
+        auth_type: auth.value,
+        auth_header: header.value,
+        preset: presetKey,
+        description: desc ? desc.value : '',
+        enabled: enabled ? !!enabled.checked : true,
+      };
+      // Blank key = keep the stored one. The list endpoint masks it, so the
+      // field is always blank on open and sending '' would wipe a working key.
       if (key.value) body.api_key = key.value;
       try {
         const u = _editId ? `/api/auth/integrations/${_editId}` : '/api/auth/integrations';
@@ -5295,6 +5368,7 @@ async function initUnifiedIntegrations() {
           sel.dispatchEvent(new Event('change', { bubbles: true }));
         });
       });
+      _setPresetTrigger = _setFromKey;
       _setFromKey(sel.value || '');
     })();
 
@@ -6397,7 +6471,6 @@ async function initUnifiedIntegrations() {
             window.location.href = '/api/calendar/oauth/google/authorize';
             return;
           }
-          formEl.style.display = '';
           showForm(k, 'new');
         });
       });

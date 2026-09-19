@@ -654,18 +654,33 @@ app.include_router(auth_router)
 
 
 @app.post("/api/activity/heartbeat")
-async def activity_heartbeat():
+async def activity_heartbeat(request: Request):
     from src.interactive_gate import (
         mark_browser_activity,
         maybe_stop_background_tasks_for_heartbeat,
     )
 
-    await mark_browser_activity()
+    # The client distinguishes a beat that followed a real pointer/key/scroll/
+    # focus event from the 15s keepalive it sends for as long as the tab is not
+    # hidden. Only the former is a person using Odysseus; treating the
+    # keepalive as activity is what stopped every scheduled task from running
+    # while a tab sat open. An unparseable or bodyless beat is read as
+    # interactive so an older cached client keeps its previous behaviour.
+    interactive = True
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and "idle" in body:
+            interactive = not bool(body.get("idle"))
+    except Exception:
+        pass
+
+    await mark_browser_activity(interactive)
 
     async def _stop_background():
         try:
             await maybe_stop_background_tasks_for_heartbeat(
-                task_scheduler.stop_background_tasks_for_foreground
+                task_scheduler.stop_background_tasks_for_foreground,
+                interactive=interactive,
             )
         except Exception:
             logging.getLogger("app.foreground_gate").debug(
@@ -673,7 +688,8 @@ async def activity_heartbeat():
                 exc_info=True,
             )
 
-    asyncio.create_task(_stop_background())
+    if interactive:
+        asyncio.create_task(_stop_background())
     return {"ok": True}
 
 
