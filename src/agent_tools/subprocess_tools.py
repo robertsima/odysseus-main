@@ -41,9 +41,16 @@ async def _create_bash_subprocess(command: str, **kwargs):
     return await asyncio.create_subprocess_shell(command, **kwargs)
 
 
-def _tmux_session_name(session_id: Optional[str]) -> str:
+def _tmux_session_name(session_id: Optional[str], sandbox_workspace: Optional[str] = None) -> str:
     raw = re.sub(r"[^A-Za-z0-9_.-]+", "-", str(session_id or "default")).strip("-")
-    return f"ody-agent-{raw[:80] or 'default'}"
+    name = f"ody-agent-{raw[:80] or 'default'}"
+    if sandbox_workspace:
+        # A sandboxed pane is bound to one workspace; a different workspace (or
+        # an unsandboxed run after the grant is switched on) gets its own pane.
+        import hashlib
+
+        name += "-sbx-" + hashlib.sha256(sandbox_workspace.encode("utf-8")).hexdigest()[:8]
+    return name
 
 
 async def _run_exec(*args: str, timeout: float = 10) -> Tuple[str, str, int]:
@@ -86,21 +93,29 @@ async def _tmux_send_line(name: str, line: str) -> None:
     await _run_exec("tmux", "send-keys", "-t", name, "C-m", timeout=5)
 
 
-async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict]) -> None:
+async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
+                               sandbox_workspace: Optional[str] = None) -> None:
     if await _tmux_has_session(name):
         await _run_exec("tmux", "send-keys", "-t", name, "stty -echo", "C-m", timeout=5)
         return
-    await _run_exec(
-        "tmux", "new-session", "-d", "-s", name, "-c", cwd,
-        "env",
-        f"TERM={env.get('TERM', 'xterm-256color') if env else 'xterm-256color'}",
-        f"COLUMNS={env.get('COLUMNS', '120') if env else '120'}",
-        f"LINES={env.get('LINES', '40') if env else '40'}",
-        "/bin/bash",
-        "--noprofile",
-        "--norc",
-        timeout=10,
-    )
+    if sandbox_workspace:
+        # The pane's shell is the sandbox itself, so every command sent to it
+        # runs confined. No --new-session: the shell needs tmux's terminal.
+        from src import shell_sandbox
+
+        pane = shell_sandbox.build_argv(["/bin/bash", "--noprofile", "--norc"],
+                                        workspace=sandbox_workspace, env=env, new_session=False)
+    else:
+        pane = [
+            "env",
+            f"TERM={env.get('TERM', 'xterm-256color') if env else 'xterm-256color'}",
+            f"COLUMNS={env.get('COLUMNS', '120') if env else '120'}",
+            f"LINES={env.get('LINES', '40') if env else '40'}",
+            "/bin/bash",
+            "--noprofile",
+            "--norc",
+        ]
+    await _run_exec("tmux", "new-session", "-d", "-s", name, "-c", cwd, *pane, timeout=10)
     if not await _tmux_has_session(name):
         raise RuntimeError(f"failed to create tmux session {name}")
     await _run_exec("tmux", "send-keys", "-t", name, "stty -echo", "C-m", timeout=5)
@@ -141,9 +156,10 @@ async def _run_tmux_bash(
     env: Optional[dict],
     timeout: float,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    sandbox_workspace: Optional[str] = None,
 ) -> Tuple[str, str, Optional[int], bool]:
-    name = _tmux_session_name(session_id)
-    await _ensure_tmux_session(name, cwd, env)
+    name = _tmux_session_name(session_id, sandbox_workspace)
+    await _ensure_tmux_session(name, cwd, env, sandbox_workspace)
 
     stamp = f"{int(time.time() * 1000)}-{abs(hash(content)) % 1000000}"
     start_marker = f"__ODYSSEUS_CMD_START_{stamp}__"
@@ -297,16 +313,37 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+def _sandbox_for(ctx) -> Tuple[Optional[str], Optional[dict]]:
+    """``(sandbox_workspace, refusal)`` for a bash/python call.
+
+    With the private-vault grant the shell runs as before. Without it, it runs
+    only when the dispatcher chose the workspace sandbox for this call
+    (src.shell_sandbox); otherwise it is refused.
+    """
+    from src.tool_execution import get_shell_sandbox_workspace
+
+    if isinstance(ctx, dict) and ctx.get("allow_private") is True:
+        return None, None
+    sandbox_ws = get_shell_sandbox_workspace()
+    if sandbox_ws:
+        return sandbox_ws, None
+    from src.private_access import private_tool_denial
+
+    tool = (ctx or {}).get("tool_name") if isinstance(ctx, dict) else None
+    return None, private_tool_denial(tool if tool in ("bash", "python") else "bash")
+
+
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
         # An unrestricted shell can read an absolute vault path or walk into it
         # through a command substitution, so prompt-only guidance is not a
         # privacy boundary. Missing context is denied too: a caller must carry
-        # the explicit per-chat grant all the way to the subprocess boundary.
-        if not isinstance(ctx, dict) or ctx.get("allow_private") is not True:
-            from src.private_access import private_tool_denial
-            return private_tool_denial("bash")
+        # the explicit per-chat grant, or the dispatcher's sandbox decision,
+        # all the way to the subprocess boundary.
+        sandbox_ws, refusal = _sandbox_for(ctx)
+        if refusal is not None:
+            return refusal
         if isinstance(content, dict):
             content = str(content.get("command") or content.get("cmd") or content.get("code") or "")
 
@@ -349,6 +386,7 @@ class BashTool:
                 env=_subproc_env,
                 timeout=DEFAULT_BASH_TIMEOUT,
                 progress_cb=progress_cb,
+                sandbox_workspace=sandbox_ws,
             )
             if timed_out:
                 return {
@@ -356,7 +394,7 @@ class BashTool:
                     "exit_code": 124,
                     "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
                     "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
-                    "tmux_session": _tmux_session_name(str(session_id)),
+                    "tmux_session": _tmux_session_name(str(session_id), sandbox_ws),
                 }
             output = stdout.rstrip()
             err = stderr.rstrip()
@@ -365,18 +403,30 @@ class BashTool:
             return {
                 "output": _truncate(output, MAX_OUTPUT_CHARS) or "(no output)",
                 "exit_code": rc or 0,
-                "tmux_session": _tmux_session_name(str(session_id)),
+                "tmux_session": _tmux_session_name(str(session_id), sandbox_ws),
+                **({"sandboxed": True} if sandbox_ws else {}),
             }
 
         try:
-            proc = await _create_bash_subprocess(
-                content,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=_subproc_env,
-                cwd=agent_cwd(),
-            )
-        except RuntimeError as e:
+            if sandbox_ws:
+                from src import shell_sandbox
+
+                proc = await asyncio.create_subprocess_exec(
+                    *shell_sandbox.build_argv(["/bin/bash", "-c", content], workspace=sandbox_ws,
+                                              env=_subproc_env),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=sandbox_ws,
+                )
+            else:
+                proc = await _create_bash_subprocess(
+                    content,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    env=_subproc_env,
+                    cwd=agent_cwd(),
+                )
+        except (RuntimeError, OSError) as e:
             return {"error": f"bash: {e}", "exit_code": 1}
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,
@@ -395,17 +445,26 @@ class BashTool:
 class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import agent_cwd, _truncate
-        if not isinstance(ctx, dict) or ctx.get("allow_private") is not True:
-            from src.private_access import private_tool_denial
-            return private_tool_denial("python")
+        sandbox_ws, refusal = _sandbox_for(dict(ctx or {}, tool_name="python") if isinstance(ctx, dict) else ctx)
+        if refusal is not None:
+            return refusal
         progress_cb = ctx.get("progress_cb")
         _subproc_env = ctx.get("subproc_env")
+        argv = [(sys.executable or "python"), "-I", "-c", content]
+        if sandbox_ws:
+            from src import shell_sandbox
+
+            # The sandbox shows /usr only; an interpreter elsewhere (a venv)
+            # would not exist inside it.
+            if not os.path.realpath(argv[0]).startswith("/usr/"):
+                argv[0] = "python3"
+            argv = shell_sandbox.build_argv(argv, workspace=sandbox_ws, env=_subproc_env)
         proc = await asyncio.create_subprocess_exec(
-            (sys.executable or "python"), "-I", "-c", content,
+            *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=_subproc_env,
-            cwd=agent_cwd(),
+            env=None if sandbox_ws else _subproc_env,
+            cwd=sandbox_ws or agent_cwd(),
         )
         stdout, stderr, rc, timed_out = await _run_subprocess_streaming(
             proc,

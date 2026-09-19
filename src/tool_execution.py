@@ -762,6 +762,19 @@ _active_workspace: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+# Set by the private-grant gate when bash/python may run without the grant
+# because src.shell_sandbox confines them to this workspace. The handlers
+# read it; None means "run as before" (grant present) or "refused".
+_shell_sandbox_workspace: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_shell_sandbox_workspace", default=None
+)
+
+
+def get_shell_sandbox_workspace() -> Optional[str]:
+    """The workspace bash/python must be sandboxed to for this call, if any."""
+    return _shell_sandbox_workspace.get()
+
+
 def get_active_workspace() -> Optional[str]:
     """The folder the agent is confined to this turn, or None."""
     return _active_workspace.get()
@@ -1734,11 +1747,31 @@ async def _execute_tool_block_impl(
     # per-chat private-vault grant is therefore a hard execution gate, not a
     # prompt hint.  Keep this before the detached-background branch and before
     # MCP dispatch so neither route can escape the same decision.
+    #
+    # Without the grant, bash and python may still run inside the bubblewrap
+    # sandbox (src/shell_sandbox.py), which sees only the workspace and the
+    # read-only system: no /app/data, no vault, no app environment.
+    _sandbox_ws = None
     if tool_requires_private_grant(tool) and allow_private is not True:
-        desc = f"{tool}: BLOCKED"
-        result = private_tool_denial(tool)
-        logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
-        return desc, result
+        _ws = get_active_workspace()
+        _sandbox_note = ""
+        if tool in ("bash", "python"):
+            from src import shell_sandbox
+
+            _why = await asyncio.to_thread(shell_sandbox.unavailable_reason, _ws)
+            if not _why:
+                _sandbox_ws = os.path.realpath(_ws)
+            else:
+                _sandbox_note = (" It can run without the grant only in the workspace sandbox, "
+                                 f"which is not possible here: {_why}.")
+        if _sandbox_ws is None:
+            desc = f"{tool}: BLOCKED"
+            result = private_tool_denial(tool)
+            if _sandbox_note:
+                result["error"] += _sandbox_note
+            logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
+            return desc, result
+    _shell_sandbox_workspace.set(_sandbox_ws)
 
 
     # Background execution: a `bash` block whose first line is the `#!bg`
@@ -1749,7 +1782,8 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd(),
+                                 sandbox_workspace=_sandbox_ws)
             short = _command_preview(_bg_cmd)
             desc = f"bash (background): {short}"
             result = {

@@ -106,6 +106,15 @@ services:
         condition: service_healthy
       chromadb:
         condition: service_started
+    # The agent's bash/python run in a bubblewrap sandbox that sees only the
+    # chat's workspace (src/shell_sandbox.py). bubblewrap needs unprivileged
+    # user namespaces, and Docker's default seccomp and AppArmor profiles block
+    # the calls that create them. Without these two lines the sandbox reports
+    # itself unavailable and the shell keeps requiring the private-vault grant.
+    # The container still runs as a non-root user with no added capabilities.
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
     restart: unless-stopped
 
   chromadb:

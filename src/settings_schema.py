@@ -526,6 +526,22 @@ register_all([
         choice_labels=("Run automatically", "Ask for risky actions", "Ask for every change"),
     ),
     SettingSpec(
+        key="shell_sandbox", type="choice", label="Workspace shell sandbox",
+        help=("Lets bash and python run in chats without private vault access, confined to "
+              "the chat's workspace: the sandbox cannot see the app's data, the vault, other "
+              "folders or the app's environment. Needs bubblewrap and a container allowed to "
+              "create user namespaces. Off = the shell needs 'Allow private vault reads'."),
+        group="Agents", choices=("auto", "off"),
+        choice_labels=("On when available", "Off"),
+    ),
+    SettingSpec(
+        key="shell_sandbox_network", type="bool", label="Sandbox network access",
+        help=("Whether the sandboxed shell may use the network (pip, npm, git fetch). Off also "
+              "stops it reaching services next to Odysseus, such as ChromaDB, whose index "
+              "holds vault excerpts."),
+        group="Agents", advanced=True,
+    ),
+    SettingSpec(
         key="agent_tool_budget", type="int", label="Tools per turn",
         help=("The most tools one agent turn is offered. Broad messages match many "
               "keyword domains; past this limit the domains retrieval agrees with "

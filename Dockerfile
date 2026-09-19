@@ -46,6 +46,9 @@ ENV PATH="/opt/odysseus-skill-tools/node_modules/.bin:${PATH}"
 # chromium provides the actual browser binary used by that MCP server.
 # gosu lets the entrypoint drop privileges cleanly so signals still reach
 # uvicorn directly (no extra shell layer like `su`/`sudo` would add).
+# bubblewrap confines the agent's bash/python to the chat's workspace when the
+# chat has no private-vault grant (src/shell_sandbox.py). It needs user
+# namespaces, which the compose files' security_opt allows.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -55,6 +58,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tmux \
     openssh-client \
     gosu \
+    bubblewrap \
     libgl1 \
     libglib2.0-0t64 \
     libxcb1 \

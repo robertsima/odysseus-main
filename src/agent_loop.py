@@ -11,6 +11,7 @@ import collections
 import hashlib
 import itertools
 import json
+import os
 import re
 import time
 import logging
@@ -2244,6 +2245,15 @@ _PRIVATE_SHELL_NOTE = (
 )
 
 
+_SANDBOXED_SHELL_NOTE = (
+    "bash and python run in a sandbox that contains only the workspace ({workspace}, "
+    "read-write) and the read-only system tools. Nothing else from this server exists "
+    "there: not the app's data, the vault, other checkouts, or the app's environment "
+    "variables. Network access is {network}. Work inside the workspace; to reach "
+    "anything outside it, use the dedicated tools."
+)
+
+
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
     """Attach a route-independent directive to the generated agent prompt."""
 
@@ -3680,9 +3690,24 @@ async def stream_agent_loop(
         # schemas are not sent (_filter_route_tool_schemas) and the model is
         # told why, so it can tell the user what to switch on. Execution still
         # refuses them on its own; hiding is not the control.
+        #
+        # With a workspace and a working bubblewrap sandbox they run confined
+        # to that workspace instead (src/shell_sandbox.py), so they stay offered.
+        from src import shell_sandbox as _shell_sandbox
+
+        _why = await asyncio.to_thread(_shell_sandbox.unavailable_reason, workspace)
+        _shell_sandboxed = not _why
         _private_shell_note = bool({"bash", "python"} - disabled_tools)
+        if _private_shell_note and not _shell_sandboxed:
+            _private_shell_text = _PRIVATE_SHELL_NOTE + f" They cannot run in the workspace sandbox either: {_why}."
+        elif _private_shell_note:
+            _private_shell_text = _SANDBOXED_SHELL_NOTE.format(
+                workspace=os.path.realpath(workspace),
+                network=("on" if _shell_sandbox.network_enabled() else "off"),
+            )
     else:
         _private_shell_note = False
+        _shell_sandboxed = False
 
     if plan_mode:
         # Plan mode: investigate read-only, propose a plan, don't execute. The
@@ -4562,7 +4587,7 @@ async def stream_agent_loop(
         if guide_only:
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
         elif _private_shell_note and (route_tools is None or {"bash", "python"} & set(route_tools)):
-            _prepend_agent_directive(route_messages, _PRIVATE_SHELL_NOTE)
+            _prepend_agent_directive(route_messages, _private_shell_text)
         return {
             "messages": route_messages,
             "mcp_schemas": route_mcp_schemas,
@@ -4710,9 +4735,11 @@ async def stream_agent_loop(
         if allow_private is True:
             return schemas
         from src.private_access import tool_requires_private_grant
+        _sandboxed = {"bash", "python"} if _shell_sandboxed else set()
         return [
             schema for schema in schemas
-            if not tool_requires_private_grant(schema.get("function", {}).get("name") or schema.get("name") or "")
+            if (schema.get("function", {}).get("name") or schema.get("name") or "") in _sandboxed
+            or not tool_requires_private_grant(schema.get("function", {}).get("name") or schema.get("name") or "")
         ]
 
     def _tool_schemas_for_route(route_state):

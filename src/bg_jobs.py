@@ -79,7 +79,8 @@ def _pid_alive(pid: Optional[int]) -> bool:
 
 
 def launch(command: str, session_id: str, cwd: Optional[str] = None,
-           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S) -> Dict[str, Any]:
+           max_runtime_s: int = DEFAULT_MAX_RUNTIME_S,
+           sandbox_workspace: Optional[str] = None) -> Dict[str, Any]:
     """Launch `command` detached. Returns the job record (status='running').
 
     Output + the final exit code are written to files so status survives a
@@ -110,8 +111,19 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
         cmd_path.write_text(command + "\n", encoding="utf-8")
         lp, xp, cp = (shlex.quote(git_bash_path(p)) for p in (log_path, exit_path, cmd_path))
         script_path = _JOBS_DIR / f"{job_id}.sh"
+        runner = f"bash {cp}"
+        if sandbox_workspace:
+            # Only the command runs sandboxed (src/shell_sandbox.py): its script
+            # is bound in read-only, and the log and exit files are written by
+            # this wrapper outside, where the monitor reads them.
+            from src import shell_sandbox
+
+            inner_script = "/tmp/.odysseus-job.sh"
+            runner = " ".join(shlex.quote(a) for a in shell_sandbox.build_argv(
+                ["/bin/bash", inner_script], workspace=sandbox_workspace,
+                extra_ro_binds={str(cmd_path): inner_script}))
         script_path.write_text(
-            f"bash {cp} > {lp} 2>&1\n"
+            f"{runner} > {lp} 2>&1\n"
             f"echo $? > {xp}\n",
             encoding="utf-8",
         )

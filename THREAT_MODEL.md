@@ -72,7 +72,7 @@ External content that reaches the LLM is treated as untrusted via `src/prompt_se
 
 These are open, acknowledged, and contributor help is welcome:
 
-1. **No shell/filesystem sandbox.** The agent `bash` and `read_file`/`write_file` tools run as the app process user with no network egress filtering or filesystem confinement. A successful prompt-injection reaching a shell-enabled admin session can make outbound requests to internal services. See #1058 for the sandbox proposal.
+1. **Shell sandbox is partial.** In a chat without the private-vault grant, `bash` and `python` run in a bubblewrap sandbox (`src/shell_sandbox.py`) that sees only the chat's workspace, the read-only system and its own `/tmp`: no app data, vault, Docker socket or app environment. Its network is shared unless `shell_sandbox_network` is off, so it can still reach internal services, ChromaDB included (Chroma 1.x has no built-in auth, and its index holds vault excerpts). With the grant, or where the sandbox is unavailable and the grant is given, the shell runs unconfined as the app process user. `read_file`/`write_file` are confined by path checks, not by the sandbox. See #1058 for the sandbox proposal.
 
 2. **SSRF via `/api/v1/chat` `base_url` parameter.** A chat-scoped API token can supply an arbitrary `base_url`; the server forwards the LLM request to that host without validating the scheme or address. PR #1039 fixes this.
 

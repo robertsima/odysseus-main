@@ -221,6 +221,12 @@ DEFAULT_SETTINGS = {
     # Most tools one agent turn is offered from retrieval and keyword domains
     # (src.agent_loop._apply_tool_budget). 0 = no limit.
     "agent_tool_budget": 40,
+    # bash/python without the private-vault grant run in a bubblewrap sandbox
+    # that sees only the chat's workspace (src/shell_sandbox.py). "off" keeps
+    # the old rule: no grant, no shell. The network toggle cuts the sandbox off
+    # from the network entirely (pip, npm and git fetch then fail too).
+    "shell_sandbox": "auto",
+    "shell_sandbox_network": True,
     # Named sub-agent worker profiles (src/agent_profiles.py).
     "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
