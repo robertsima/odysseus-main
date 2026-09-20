@@ -449,7 +449,8 @@ def pending_steer(session_id: str, *, run_id: Optional[str] = None) -> List[dict
     return [rec for (queued_session, _), queue in _STEER.items() if queued_session == sid for rec in queue]
 
 
-def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
+def clear_steer_records(session_id: Optional[str], *,
+                        run_id: Optional[str] = None) -> List[dict]:
     """Drop anything still queued for a turn that has ended, returning it.
 
     The queue is keyed by session and run, so a steer nobody drained would sit
@@ -458,6 +459,10 @@ def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> L
     that run really is over — each dropped message is marked ``cancelled`` with
     that reason, so "it never landed" is on the record instead of only in a
     server log line the operator never sees.
+
+    Records rather than bare strings, mirroring ``drain_steer_records``: the
+    client has to settle the pending chip for THIS message and hand its text
+    back to the user, and it can only do either if the id comes with it.
     """
     if not session_id:
         return []
@@ -466,7 +471,12 @@ def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> L
         return []
     for rec in queue:
         _steer_transition(rec, "cancelled", reason="the turn ended before it was drained")
-    return [rec["text"] for rec in queue]
+    return list(queue)
+
+
+def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
+    """``clear_steer_records`` for callers that only need the text."""
+    return [rec["text"] for rec in clear_steer_records(session_id, run_id=run_id)]
 
 
 def steer_history(session_id: str, *, limit: int = 20) -> List[dict]:

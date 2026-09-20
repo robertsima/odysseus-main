@@ -4768,6 +4768,16 @@ async def stream_agent_loop(
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
 
+    # A message the user sends mid-turn is queued as a steer and drained at the
+    # TOP of a round. If it lands while the final round is already running,
+    # nothing drains it again and clear_steer() cancels it once the turn ends —
+    # the message sits on "Steering" and then disappears. The turn extends
+    # itself once per pending steer so the message is actually read, which is
+    # the whole promise of steering. Each extension drains the entire queue, so
+    # this is self-limiting; the cap only bounds a client that steers forever.
+    _steer_extensions = 0
+    _MAX_STEER_EXTENSIONS = 8
+
     # "I said I would, then didn't" detector. The pattern that breaks debug
     # loops on weak models (deepseek-v4-flash mid-2026): the model writes
     # "Let me tail the output to see the error" and then ends the turn with
@@ -5922,6 +5932,23 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # A steer that landed *during* this round would otherwise be
+            # orphaned: the drain runs at the top of a round, and this is the
+            # turn ending. Leaving it queued means clear_steer() below cancels
+            # the user's message and the only trace is a `steer_dropped` event.
+            # Loop once more so it is actually read.
+            if (
+                agent_control.pending_steer(session_id, run_id=steer_run_id)
+                and _steer_extensions < _MAX_STEER_EXTENSIONS
+            ):
+                _steer_extensions += 1
+                logger.info(
+                    "[agent] round %d would end the turn but a steer is pending; "
+                    "continuing (extension %d/%d)",
+                    round_num, _steer_extensions, _MAX_STEER_EXTENSIONS,
+                )
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
             break  # no tools — done
 
         # ── Loop-breaker (Terminus-style stall detector) ──────────────
@@ -6697,13 +6724,23 @@ async def stream_agent_loop(
     # The turn is over, so nothing will drain the steer queue again. A steer
     # that raced the last round must not surface inside a later, unrelated
     # turn; drop it where the user can see that it was not read.
-    _dropped_steer = agent_control.clear_steer(session_id, run_id=steer_run_id)
+    _dropped_steer = agent_control.clear_steer_records(session_id, run_id=steer_run_id)
     if _dropped_steer:
         logger.warning(
             "[agent] turn ended with %d undrained steer message(s); dropping them",
             len(_dropped_steer),
         )
-        yield f'data: {json.dumps({"type": "steer_dropped", "messages": _dropped_steer})}\n\n'
+        # Carry the id and the full text: the client settles that message's
+        # pending chip and hands the text back to the user rather than letting
+        # a typed instruction vanish.
+        yield "data: " + json.dumps({
+            "type": "steer_dropped",
+            "messages": [
+                {"id": rec.get("id"), "text": rec.get("text") or "",
+                 "kind": rec.get("kind") or "user"}
+                for rec in _dropped_steer
+            ],
+        }) + "\n\n"
 
     # If the loop hit the round cap while still working, tell the client so it
     # can show a "Continue" affordance instead of the turn just stopping.

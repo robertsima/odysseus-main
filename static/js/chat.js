@@ -1286,6 +1286,43 @@ import { loadPanel } from './panels.js';
     });
   }
 
+  function _handleSteerDropped(sessionId, event) {
+    // The turn ended with this message still queued, so the model never read
+    // it. Nothing listened for this event before: the pending chip sat on
+    // "Steering" until the next history redraw silently removed it, and a
+    // typed instruction was simply gone. Settle the chip and hand the text
+    // back so the user can send it again without retyping it.
+    const dropped = Array.isArray(event && event.messages) ? event.messages : [];
+    const mine = dropped
+      .map((m) => (typeof m === 'string' ? { id: '', text: m, kind: 'user' } : (m || {})))
+      .filter((m) => (m.kind || 'user') !== 'peer' && String(m.text || '').trim());
+    if (!mine.length) return;
+
+    for (const msg of mine) {
+      const bubble = _steeredBubbles.get(String(sessionId || ''))?.get(String(msg.id || ''));
+      if (bubble?.parentNode) bubble.remove();
+      _forgetSteeredBubble(sessionId, String(msg.id || ''));
+    }
+
+    // Only restore into the composer for the chat the user is looking at, and
+    // never clobber something they have already started typing.
+    const texts = mine.map((m) => String(m.text || '').trim());
+    if (sessionModule.getCurrentSessionId?.() === String(sessionId || '')) {
+      const input = uiModule.el('message');
+      if (input && !String(input.value || '').trim()) {
+        input.value = texts.join('\n\n');
+        try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch (_) {}
+      }
+    }
+    const label = texts.length === 1 ? 'Your message' : `${texts.length} of your messages`;
+    try {
+      uiModule.showError && uiModule.showError(
+        `${label} arrived after the turn had finished, so the agent never read it. `
+        + 'It has been put back in the composer — send it again.',
+      );
+    } catch (_) {}
+  }
+
   function _scheduleSteerStatusCheck(sessionId, delay = 0) {
     const sid = String(sessionId || '');
     if (!sid || !_steeredBubbles.get(sid)?.size || _steerStatusTimers.has(sid)) return;
@@ -3184,6 +3221,10 @@ import { loadPanel } from './panels.js';
                 // status poll remains the reconciliation fallback after an SSE
                 // reconnect or an event the browser did not receive.
                 _handleSteerApplied(streamSessionId, json);
+                continue;
+              }
+              if (json.type === 'steer_dropped') {
+                _handleSteerDropped(streamSessionId, json);
                 continue;
               }
               if (json.delta || json.type === 'agent_prep' || json.type === 'tool_approval_resolved' || json.type === 'generated_image' || json.type === 'tool_start' || json.type === 'tool_output' || json.type === 'tool_progress' || json.type === 'agent_step' || json.type === 'loop_breaker_triggered' || json.type === 'intent_nudge_exhausted' || json.type === 'doc_stream_open' || json.type === 'doc_stream_delta' || json.type === 'research_progress') {
@@ -5352,6 +5393,8 @@ import { loadPanel } from './panels.js';
             // Resume replays the same event stream as the live reader, so it
             // must settle a local steer chip the same way.
             _handleSteerApplied(sessionId, json);
+          } else if (json.type === 'steer_dropped') {
+            _handleSteerDropped(sessionId, json);
           } else if (json.delta) {
             roundText += json.delta;
             if (!docFenceOpened && (roundText.includes('```create_document\n') || roundText.includes('```document\n') || roundText.includes('```documen\n'))) {
