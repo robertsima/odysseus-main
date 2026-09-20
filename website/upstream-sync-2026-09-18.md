@@ -96,6 +96,23 @@ the model.
 
 ## Added to upstream's loop since
 
+- **Terminus toolset retention** (`f8882905`, `3e2a0eb5`, `5181684e`).
+  `apply_terminus_toolset()` merges the local-machine toolset into the turn's
+  selection instead of replacing it whenever the user's own words also named
+  an assistant domain, and on the replace path it still carries across
+  whatever retrieval matched for this query (MCP tools included). The
+  `on|from <bare word>` branch of `_LOCAL_COMPUTER_REFERENCE_RE` now requires
+  the token to look like a host, so "confirmations from Gmail" is no longer
+  read as work targeted at a machine called Gmail. `audit_emails` was also
+  missing from the `email` domain map, leaving deterministic seeding with no
+  path to the whole-mailbox report tool.
+
+  Without these the scheduled "Applied Job Status Tracker" run ended with
+  "the email-audit tool/schema is not available in this run" (2026-09-19
+  logs). Covered by `tests/test_terminus_toolset_retention.py`; the rest of
+  `tests/test_agent_self_blocking_toolsets.py` (missing-tool re-arm,
+  starved-domain repair) stays skipped and on the backlog.
+
 - **Tool budget** (`agent_tool_budget`, default 40). Keyword domain seeding
   can offer most of the catalogue on a long message (80 tools, ~66k prompt
   tokens in the 2026-09-18 logs). Past the budget,
@@ -128,7 +145,6 @@ the model.
 | Git, research and MCP routing prompts | Upstream's | `e16d1ec5`, `94fa0d17`, `982e60eb`, `9f7062d0`, `836eb7d8` |
 | Knowledge-base and vault routing | Upstream's | `68646700`, `8dfacd08`, `4360acf2`, `98a4e3ff` |
 | Request self-heal, `site:` handling | Upstream's | `0611fa1e` |
-| Terminus toolset retention | Upstream's | `5181684e` |
 
 The fork tests for these features are skipped, at module level or per test,
 with a `Re-port backlog:` reason. Each follow-up PR re-enables the tests for

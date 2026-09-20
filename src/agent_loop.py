@@ -531,7 +531,11 @@ _DOMAIN_RULES = {
 _DOMAIN_TOOL_MAP = {
     "web": set(WEB_TOOL_NAMES),
     "documents": {"create_document", "edit_document", "update_document", "suggest_document", "manage_documents"},
-    "email": {"list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
+    # audit_emails is the whole-mailbox report tool ("roll up job application
+    # confirmations", "audit my inbox"). It was absent here, so an email turn
+    # whose vector retrieval missed it had no deterministic path to it — the
+    # exact tool the Rolling Job Application report task needs.
+    "email": {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "archive_email", "delete_email", "mark_email_read", "resolve_contact", "manage_contact"},
     "cookbook": {"download_model", "serve_model", "serve_preset", "list_serve_presets", "list_served_models", "stop_served_model", "tail_serve_output", "list_downloads", "cancel_download", "search_hf_models", "list_cached_models", "list_cookbook_servers", "adopt_served_model"},
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
@@ -549,6 +553,58 @@ _WORKSPACE_TERMINUS_TOOLS = (
     | {"manage_skills", "ask_teacher", "web_search", "web_fetch", "ask_user", "update_plan",
        "read_app_logs"}
 )
+
+# Domains that, when the user's own words name one alongside file/shell work,
+# mean the turn is mixed and Terminus must merge rather than swap.
+_TERMINUS_MERGE_DOMAINS = frozenset({
+    "email", "documents", "notes_calendar_tasks",
+    "contacts", "sessions", "cookbook", "integrations",
+})
+
+
+def apply_terminus_toolset(selected, *, query_matched, domains):
+    """Fold the local-machine (Terminus) toolset into this turn's selection.
+
+    Terminus mode used to REPLACE the selection outright. That is right for a
+    pure "fix the failing test" turn, but a single request can name file work
+    AND an assistant domain at once -- "audit my inbox for job applications ...
+    and update the Rolling Report in my vault" detects email + documents +
+    files. Replacing threw away every email and document tool, and the agent
+    truthfully reported it had no inbox tools and did nothing. So when another
+    domain was detected from the user's own words, ADD the Terminus tools.
+
+    On the swap path, whatever retrieval matched for THIS query rides across.
+    That carve-out started life as `mcp__`-only, because a user-added MCP
+    server has no domain to protect it -- "send a test notification" classifies
+    as domains=[], the ntfy tools were retrieved correctly, and the swap
+    dropped them. The same hole was open for built-ins: "do deep research on
+    why my iOS devices keep dropping off wifi ... pi-hole ... the router"
+    tripped the local-machine heuristic, the swap discarded the
+    `trigger_research` that retrieval had just matched, and the round opened
+    with "deep-research tooling is unavailable" and made zero tool calls.
+    A tool that scored against the user's words is evidence of intent in its
+    own right; the Terminus toolset is what gets ADDED here, never what that
+    evidence gets replaced by.
+    """
+    selected = set(selected or set())
+    if set(domains or set()) & _TERMINUS_MERGE_DOMAINS:
+        logger.info(
+            "[tool-rag] Workspace file/terminal request alongside %s; "
+            "adding Terminus toolset instead of replacing",
+            sorted(set(domains) & _TERMINUS_MERGE_DOMAINS),
+        )
+        return selected | set(_WORKSPACE_TERMINUS_TOOLS)
+
+    carried = {
+        tool for tool in selected
+        if tool.startswith("mcp__") or tool in set(query_matched or set())
+    }
+    logger.info(
+        "[tool-rag] Workspace file/terminal request; using Odysseus Terminus "
+        "toolset while preserving query-matched tools=%s",
+        sorted(carried),
+    )
+    return set(_WORKSPACE_TERMINUS_TOOLS) | carried
 
 def _domain_rules_for_tools(tool_names: set) -> list[str]:
     names = set(tool_names or set())
@@ -1227,7 +1283,17 @@ _EXPLICIT_WORKSPACE_REFERENCE_RE = re.compile(
 _LOCAL_COMPUTER_REFERENCE_RE = re.compile(
     r"\b(?:on|from|in|using|with)\s+(?:this|my|the)\s+(?:computer|machine|pc|laptop|device|system)\b"
     r"|\b(?:local|host)\s+(?:computer|machine|files?|system)\b"
-    r"|\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)(?:[a-z][a-z0-9_.-]{1,31})\b",
+    # A named target machine ("on gpu-box", "from pi4", "on 10.0.0.7"). The
+    # token after on/from must LOOK like a host - it has to carry a digit,
+    # dot, hyphen or underscore, or be a known machine word. Matching any
+    # bare word meant "job applications from LinkedIn", "rejections from
+    # Amazon" and "confirmations from Gmail" read as machine-targeted work,
+    # which switched the turn into the shell/file toolset and dropped the
+    # tools the request actually needed.
+    r"|\b(?:on|from)\s+(?!this\b|my\b|the\b|a\b|an\b)"
+    r"(?=[a-z][a-z0-9_.-]*[0-9_.\-])[a-z][a-z0-9_.-]{1,31}\b"
+    r"|\b(?:on|from)\s+(?:localhost|gpubox|workstation|homelab|nas|zimaos)\b"
+    r"|\b(?:on|from)\s+\d{1,3}(?:\.\d{1,3}){3}\b",
     re.IGNORECASE,
 )
 
@@ -4199,9 +4265,13 @@ async def stream_agent_loop(
             and not _active_document_relevant
             and not active_email
         ):
-            _relevant_tools = set(_WORKSPACE_TERMINUS_TOOLS)
+            _relevant_tools = apply_terminus_toolset(
+                _relevant_tools,
+                # What retrieval matched for THIS query, before domain seeding.
+                query_matched=_pre_domain_tools,
+                domains=_intent.get("domains") or set(),
+            )
             _terminus_toolset = True
-            logger.info("[tool-rag] Workspace file/terminal request; using Odysseus Terminus toolset")
 
     # If this turn targets the open document, keep editing tools available
     # regardless of which selection path (RAG, keyword, caller-provided) ran.
