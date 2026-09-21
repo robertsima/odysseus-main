@@ -363,6 +363,52 @@ def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
     return out
 
 
+def session_policy_disabled_tools(settings: Optional[dict], mcp_tools=()) -> Set[str]:
+    """Tools a chat's own saved policy denies, as the executor enforces them.
+
+    ``execute_tool_call`` re-reads the chat's settings for every call and
+    refuses ``disabled_tools``, anything outside a ``tool_access`` allowlist,
+    and MCP servers outside ``allowed_mcp_servers``. Only the chat route merged
+    ``disabled_tools`` into the schema list, so worker, workflow, scheduler and
+    skill turns were offered web_search/web_fetch/create_document their own
+    profile denied, and spent rounds calling them into "fresh session
+    revocation" blocks. The loop applies this set so offer and enforcement
+    agree whichever caller started the turn.
+    """
+    settings = settings or {}
+    out: Set[str] = {str(n) for n in (settings.get("disabled_tools") or ()) if n}
+    mcp_names = {
+        str(t.get("qualified_name"))
+        for t in (mcp_tools or ()) if isinstance(t, dict) and t.get("qualified_name")
+    }
+    access = settings.get("tool_access", "all")
+    if access in {"selected", "none"}:
+        from src.tool_policy import known_tool_names
+
+        enabled = {str(n) for n in (settings.get("enabled_tools") or ()) if n}
+        if access == "none":
+            enabled = set()
+        try:
+            from src.agent_profiles import expand_tool_aliases
+
+            enabled = set(expand_tool_aliases(enabled)) | enabled
+        except Exception:
+            pass
+        denied = (set(known_tool_names()) | mcp_names) - enabled
+        # The executor lets a selected-tools agent search its own bindings.
+        if access == "selected" and enabled:
+            denied.discard("discover_tools")
+        out |= denied
+    allowed_servers = settings.get("allowed_mcp_servers")
+    if isinstance(allowed_servers, list) and "*" not in allowed_servers:
+        allowed = {str(s) for s in allowed_servers}
+        for name in mcp_names:
+            parts = name.split("__", 2)
+            if len(parts) == 3 and parts[1] not in allowed:
+                out.add(name)
+    return out
+
+
 def delegated_credential_blocked_tools() -> Set[str]:
     """Tools an agent run driven by a bearer API token must not reach.
 

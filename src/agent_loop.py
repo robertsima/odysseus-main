@@ -2260,6 +2260,23 @@ def _document_stream_events(block: ToolBlock) -> list[dict]:
     return []
 
 
+_TOOL_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:__?[A-Za-z0-9]+)+")
+
+
+def _tools_named_by_user(messages: List[Dict], known: Set[str], *, include_previous: bool) -> Set[str]:
+    """Tool names the user typed out ("try again with manage_agent_loadout").
+
+    Naming a tool is the most explicit signal there is, but retrieval scores
+    the whole sentence, and a short follow-up like that is classed low-signal
+    and handed only the read-only defaults. The model then says it lacks the
+    tool while the user insists it exists. For a low-signal follow-up ("u do
+    have it") the previous user turn is read too. Only user text counts, never
+    the assistant's own replies.
+    """
+    text = _recent_context_for_retrieval(messages, max_user=2 if include_previous else 1, max_chars=2000)
+    return {tok for tok in _TOOL_NAME_TOKEN_RE.findall(text or "") if tok in known}
+
+
 def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
     """Build the tool-retrieval query from the last few USER turns, not just
     the latest one.
@@ -3723,6 +3740,20 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    if session_id:
+        # The chat's own saved policy, whichever caller started this turn. The
+        # executor refuses these per call; applying them here keeps them out of
+        # the schema list so the model is never offered a tool it cannot run.
+        try:
+            from core.database import get_session_settings
+            from src.tool_security import session_policy_disabled_tools
+
+            disabled_tools.update(session_policy_disabled_tools(
+                get_session_settings(session_id) or {},
+                mcp_mgr.get_all_tools() if mcp_mgr else (),
+            ))
+        except Exception as _policy_err:
+            logger.warning("[agent] could not apply session tool policy for %s: %s", session_id, _policy_err)
     route_descriptors = list(route_descriptors or [])
     while len(route_descriptors) < 1 + len(fallbacks or []):
         route_descriptors.append({})
@@ -4311,6 +4342,29 @@ async def stream_agent_loop(
             from src.tool_index import ALWAYS_AVAILABLE
             _relevant_tools = set(ALWAYS_AVAILABLE)
         _relevant_tools.update(forced_set)
+
+    if not guide_only:
+        try:
+            from src.tool_policy import known_tool_names
+
+            _known_names = set(known_tool_names())
+            if mcp_mgr:
+                _known_names.update(
+                    str(t.get("qualified_name")) for t in mcp_mgr.get_all_tools() if t.get("qualified_name")
+                )
+            _named = _tools_named_by_user(
+                messages, _known_names,
+                include_previous=_low_signal_turn and _existing_conversation,
+            ) - disabled_tools
+        except Exception as _named_err:
+            logger.debug("[tool-rag] named-tool scan failed: %s", _named_err)
+            _named = set()
+        if _named:
+            if _relevant_tools is None:
+                from src.tool_index import ALWAYS_AVAILABLE
+                _relevant_tools = set(ALWAYS_AVAILABLE)
+            _relevant_tools.update(_named)
+            logger.info("[tool-rag] User named tools: %s", sorted(_named))
 
     if not guide_only and _relevant_tools is not None:
         _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
