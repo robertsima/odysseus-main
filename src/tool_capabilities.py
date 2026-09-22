@@ -499,6 +499,20 @@ def _action_from_content(tool_name: str, content: Any) -> str | None:
     return _ACTION_ALIASES.get(tool_name, {}).get(normalized, normalized)
 
 
+# Umbrella tools a read-only worker may bind for their read actions only.
+# The executor checks every call with action_is_read; a planner can list
+# events without being handed a tool that can also create them.
+READ_ACTION_TOOLS = frozenset({"manage_calendar", "manage_notes", "manage_tasks", "manage_contact"})
+
+
+def action_is_read(tool_name: Any, content: Any) -> bool:
+    """Whether this call of an umbrella tool is one of its read actions."""
+    reads = _PRIVATE_ACTION_READS.get(tool_name) if isinstance(tool_name, str) else None
+    if not reads:
+        return False
+    return _action_from_content(tool_name, content) in reads
+
+
 def capabilities_for_action(tool_name: Any, content: Any) -> ToolCapabilities:
     """Classify a sealed multiplexed action; ambiguous actions fail high."""
     base = capabilities_for_tool(tool_name)

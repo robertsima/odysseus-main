@@ -334,3 +334,26 @@ def test_named_profile_for_existing_chat_refuses_without_starting_or_mutating(mo
     }), "parent"))
     assert "session_id: 'new'" in result["error"]
     headless.assert_not_awaited()
+
+
+# ── Read actions of umbrella tools in a read-only workflow (2026-09-22) ─────
+
+def test_readonly_worker_may_list_calendar_events_but_not_create(monkeypatch, manager):
+    _settings(monkeypatch, {
+        "workflow_readonly": True, "tool_access": "selected", "enabled_tools": ["manage_calendar"],
+    }, manager)
+    _, created = _execute("manage_calendar", {"action": "create_event", "title": "x"})
+    assert created.get("blocked_reason") == "workflow_readonly"
+    assert "may only read" in created["error"]
+    _, listed = _execute("manage_calendar", {"action": "list_events"})
+    assert listed.get("blocked_reason") != "workflow_readonly"
+
+
+def test_action_is_read_fails_closed():
+    from src.tool_capabilities import action_is_read
+
+    assert action_is_read("manage_calendar", '{"action": "list_events"}')
+    assert action_is_read("manage_calendar", '{}')  # its default action lists
+    assert not action_is_read("manage_calendar", '{"action": "create"}')
+    assert not action_is_read("manage_notes", 'not json')
+    assert not action_is_read("bash", '{"action": "list"}')

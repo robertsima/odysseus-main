@@ -534,10 +534,13 @@ def test_research_bindings_track_the_harness_read_only_classification():
     from src.tool_security import PLAN_MODE_READONLY_TOOLS, _PLAN_MODE_KNOWN_MUTATORS
 
     assert PLAN_MODE_READONLY_TOOLS <= workflows._READ_TOOLS
-    # `manage_skills` is the one deliberate exception: a specialist loads the
+    # `manage_skills` is a deliberate exception: a specialist loads the
     # procedures it was given with it, and `_prepare` attaches it whenever
-    # skills are requested. Nothing else that can change the world is here.
-    assert (workflows._READ_TOOLS & _PLAN_MODE_KNOWN_MUTATORS) == {"manage_skills"}
+    # skills are requested. The umbrella tools are the other: bound for their
+    # read actions only, which the executor enforces per call.
+    from src.tool_capabilities import READ_ACTION_TOOLS
+
+    assert (workflows._READ_TOOLS & _PLAN_MODE_KNOWN_MUTATORS) <= {"manage_skills"} | READ_ACTION_TOOLS
 
 
 def test_schema_points_at_the_rejection_rather_than_a_stale_list():

@@ -35,6 +35,9 @@ _LIVE: dict[str, dict] = {}
 _EXTRA_READ_TOOLS = frozenset({
     # Read-only, but not part of plan mode's allowlist.
     "vault_get", "vault_search", "manage_skills", "search_documents", "glob",
+    # Read actions only (list_events, list/search notes, ...); the executor
+    # refuses their write actions for a read-only worker.
+    "manage_calendar", "manage_notes", "manage_tasks", "manage_contact",
 })
 
 

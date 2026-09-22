@@ -1262,6 +1262,12 @@ async def _document_tool_dispatch(
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+def _READ_ACTION_TOOLS():
+    from src.tool_capabilities import READ_ACTION_TOOLS
+
+    return READ_ACTION_TOOLS
+
+
 async def execute_tool_block(
     block: Any,
     session_id: Optional[str] = None,
@@ -1589,6 +1595,15 @@ async def _execute_tool_block_impl(
                     _skill_action = ""
                 if _skill_action not in {"list", "index", "search", "view", "view_ref"}:
                     return f"{tool}: BLOCKED", {"error": "Research workers may load skills, not modify them.", "exit_code": 1}
+            elif tool in _READ_ACTION_TOOLS():
+                from src.tool_capabilities import action_is_read
+
+                if not action_is_read(tool, content):
+                    return f"{tool}: BLOCKED", {
+                        "error": f"This worker is read-only: {tool} may only read here (for example "
+                                 "list_events). Return the proposed change for the parent to apply.",
+                        "blocked": True, "blocked_reason": "workflow_readonly", "exit_code": 1,
+                    }
             elif tool.startswith("mcp__"):
                 from src.mcp_manager import mcp_call_is_readonly
                 _manager = get_mcp_manager()

@@ -62,7 +62,11 @@ def _is_readonly(name: str, schema: Dict[str, Any]) -> bool:
         # checks each call, so its schema may be offered to a reader.
         # Other unknown MCP annotations fail closed in a read-only workflow.
         return name in _MIXED_MCP_TOOLS
-    return name in PLAN_MODE_READONLY_TOOLS or name == "discover_tools"
+    from src.tool_capabilities import READ_ACTION_TOOLS
+
+    # Umbrella tools are offered to readers; the executor allows only their
+    # read actions in a read-only workflow.
+    return name in PLAN_MODE_READONLY_TOOLS or name == "discover_tools" or name in READ_ACTION_TOOLS
 
 
 def _compact_schema_cost(schema: Dict[str, Any]) -> int:
