@@ -56,6 +56,10 @@ ALWAYS_AVAILABLE = frozenset({
     # first is only emitted when the tool is selected, so the model was never
     # even told the vault existed. One schema, ambient like memory.
     "search_documents",
+    # Loads a permitted-but-unselected schema (a deferred MCP catalogue, a
+    # domain retrieval missed) into this same turn. The MCP prompt note tells
+    # the model to call it, so it must always be in the schema list.
+    "discover_tools",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled

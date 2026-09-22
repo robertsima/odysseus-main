@@ -126,6 +126,26 @@ the model.
   not. Repeat polls also wait on the job (30s, doubling, capped at 240s)
   instead of returning at once.
 
+- **Same-turn tool attachment** (2026-09-22). `discover_tools` works again:
+  the loop builds a `TurnToolDiscovery` over native and MCP schemas, hands it
+  to the executor, and attaches what it loads to the next round
+  (`continue_same_turn: true`). It is always offered, including on
+  caller-provided selections. A deterministic, exact-name form of the
+  missing-tool re-arm: a short final answer that says it lacks a named,
+  permitted tool gets that tool attached and one more round, at most twice a
+  turn (`_missing_tools_to_attach`). The fork's prose-shape detectors and
+  starved-domain repair are still on the backlog. Covered by
+  `tests/test_same_turn_tool_attachment.py`.
+- **Skill routing through `skill_declared_tools`**. Matched skills, a skill
+  loaded with `manage_skills view`, and a profile's selected skills resolve
+  `requires_toolsets` by exact name, MCP server name, or alias, instead of a
+  bare known-name match that dropped `todoist`, `lotus` and server names. A
+  chat's `skill_access`/`skill_names` now scope the skill index and matched
+  procedures, and a profile's selected skills bind their tools from round one.
+- **Offer matches enforcement**. The loop applies the chat's saved tool
+  policy (`session_policy_disabled_tools`) whichever caller started the
+  turn, and adds tools the user names outright.
+
 ## Changed behaviour until re-ported
 
 | Area | Now | Fork commits to re-port |
@@ -135,7 +155,6 @@ the model.
 | Approval prompts from skills (runs with no approval mode only) | A turn that shows any skill a user or agent wrote or edited arms upstream's gate, so the next high-impact call (bash, writes) asks for an exact approval. "Allow for this chat session" covers the rest of that chat. | Upstream design, kept |
 | Per-agent profile instructions (`agent_instructions`) | Stored, but not placed into upstream's system prompt | `0ea6b80b`, `f2f9f83e` |
 | Tool routing: intent classes, domain routing, targeted self-unblock, protected admission budget, missing-tool re-arm, starved-domain repair | Upstream's selection | `8927810b`, `c62b6bac`, `cffc5f0d`, `d97fa0e7`, `32614be0`, `a654a09e`, `3e2a0eb5`, `f8882905`, `fc74bf51`, `5ee56c0a` |
-| `discover_tools` | Refused ("unavailable outside an active agent turn"); upstream's loop supplies no discovery context | `c62b6bac` |
 | Continuation ("ok, continue" keeps the last turn's tools) | Upstream's handling | `8927810b`, `00b35dbd`, `a364f8f2` |
 | Delegation in the loop: policy gating, standing `delegation_granted`, plain-language "start an agent" routing | Workflows still check authorization. The loop does not hide or route delegation tools. | `ced11e62`, `7c9c03a2`, `16ad4e47`, `0ea6b80b` |
 | Steering beyond delivery: tools added because of a steer, and continuing a turn that would end while a steer is pending | Steers and peer-agent messages are delivered between rounds (see Kept). A steer that arrives after the last round is dropped with a visible `steer_dropped` event. | `75988e56`, `4c4ce597` |

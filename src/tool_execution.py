@@ -1590,12 +1590,16 @@ async def _execute_tool_block_impl(
                 if _skill_action not in {"list", "index", "search", "view", "view_ref"}:
                     return f"{tool}: BLOCKED", {"error": "Research workers may load skills, not modify them.", "exit_code": 1}
             elif tool.startswith("mcp__"):
-                from src.mcp_manager import mcp_tool_is_readonly
+                from src.mcp_manager import mcp_call_is_readonly
                 _manager = get_mcp_manager()
                 _metadata = next((t for t in (_manager.get_all_tools() if _manager else [])
                                   if t.get("qualified_name") == tool), None)
-                if _metadata is None or not mcp_tool_is_readonly(_metadata):
-                    return f"{tool}: BLOCKED", {"error": "Research workers may call only read-only MCP tools.", "exit_code": 1}
+                if not mcp_call_is_readonly(tool, content, _metadata):
+                    return f"{tool}: BLOCKED", {
+                        "error": "Research workers may call only read-only MCP tools. "
+                                 "Return the proposed change for the parent to apply.",
+                        "blocked": True, "blocked_reason": "workflow_readonly", "exit_code": 1,
+                    }
         # An explicit allowlist remains binding when new MCP tools connect
         # after the profile was saved; a snapshot denylist cannot do that.
         _tool_access = _agent_settings.get("tool_access", "all")

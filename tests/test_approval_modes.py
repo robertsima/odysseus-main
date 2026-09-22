@@ -151,3 +151,78 @@ async def test_tainted_approval_still_needs_an_armed_context(monkeypatch):
         exact_approval=grant,
     )
     assert result.get("blocked") is True
+
+
+# ── Integrations and calendar under ask_risky (2026-09-22 audit) ────────
+
+def test_ask_risky_asks_for_integration_writes_but_not_reads(monkeypatch):
+    import src.mcp_manager as mcp
+
+    lotus = {
+        "mcp__lotus__mood_summarize_period": {"name": "mood_summarize_period"},
+        "mcp__lotus__mood_detect_low_energy_patterns": {"name": "mood_detect_low_energy_patterns"},
+        "mcp__lotus__log_mood": {"name": "log_mood"},
+    }
+    monkeypatch.setattr(mcp, "mcp_tool_metadata", lambda name: lotus.get(name))
+    ctx = _ctx("ask_risky")
+    for args in (["today", "--json"], ["upcoming", "7"], ["task", "list", "--json"], ["project", "list"]):
+        assert ctx.decision_for("mcp__todoist__todoist", {"args": args}).allowed, args
+    assert ctx.decision_for("mcp__lotus__mood_summarize_period", "{}").allowed
+    assert ctx.decision_for("mcp__lotus__mood_detect_low_energy_patterns", "{}").allowed
+
+    for tool, content in (
+        ("mcp__todoist__todoist", {"args": ["task", "quickadd", "Finish report tomorrow p1"]}),
+        ("mcp__todoist__todoist", {"args": ["complete", "123"]}),
+        ("mcp__todoist__todoist", "not json"),
+        ("mcp__lotus__log_mood", "{}"),
+        ("mcp__unknown__anything", "{}"),
+    ):
+        decision = ctx.decision_for(tool, content)
+        assert not decision.allowed, (tool, content)
+        assert "integration" in decision.reason
+
+
+def test_ask_risky_asks_before_calendar_creates_and_edits():
+    ctx = _ctx("ask_risky")
+    assert ctx.decision_for("manage_calendar", '{"action": "list_events"}').allowed
+    for action in ("create_event", "create", "update_event", "delete_event"):
+        assert not ctx.decision_for("manage_calendar", '{"action": "%s"}' % action).allowed, action
+
+
+def test_ask_all_lets_integration_reads_run(monkeypatch):
+    import src.mcp_manager as mcp
+
+    monkeypatch.setattr(mcp, "mcp_tool_metadata", lambda name: {"name": name.rsplit("__", 1)[-1]})
+    ctx = _ctx("ask_all")
+    assert ctx.decision_for("mcp__todoist__todoist", {"args": ["today"]}).allowed
+    assert ctx.decision_for("mcp__lotus__mood_summarize_period", "{}").allowed
+    assert not ctx.decision_for("mcp__todoist__todoist", {"args": ["task", "add", "x"]}).allowed
+
+
+def test_todoist_read_classifier_fails_closed():
+    from src.mcp_manager import todoist_args_readonly
+
+    assert todoist_args_readonly(["today", "--json"])
+    assert todoist_args_readonly(["--help"])
+    assert not todoist_args_readonly(["task", "quickadd", "x"])
+    assert not todoist_args_readonly("today")
+    assert not todoist_args_readonly(None)
+
+
+def test_read_only_worker_may_list_todoist_but_not_write():
+    from src.mcp_manager import mcp_call_is_readonly
+
+    assert mcp_call_is_readonly("mcp__todoist__todoist", '{"args": ["today", "--json"]}')
+    assert not mcp_call_is_readonly("mcp__todoist__todoist", '{"args": ["task", "add", "x"]}')
+    # Unknown tool with no catalogue entry fails closed.
+    assert not mcp_call_is_readonly("mcp__x__y", "{}", None)
+
+
+def test_noun_first_names_read_only_when_no_write_verb():
+    from src.mcp_manager import mcp_tool_is_readonly
+
+    assert mcp_tool_is_readonly({"name": "mood_summarize_period"})
+    assert mcp_tool_is_readonly({"name": "mood_detect_low_energy_patterns"})
+    assert not mcp_tool_is_readonly({"name": "mood_log_entry"})
+    assert not mcp_tool_is_readonly({"name": "task_delete_list"})
+    assert not mcp_tool_is_readonly({"name": "mood_entries"})

@@ -277,7 +277,17 @@ def _format_mcp_params(input_schema: Any) -> str:
 _MCP_READONLY_VERBS = (
     "list", "get", "read", "search", "fetch", "query", "find", "describe",
     "show", "view", "lookup", "count", "status", "info", "inspect", "summar",
+    "detect", "analy", "estimate", "compare", "forecast",
 )
+_MCP_WRITE_VERBS = (
+    "create", "add", "insert", "update", "edit", "modify", "patch", "put", "set",
+    "delete", "remove", "clear", "reset", "purge", "drop", "archive", "move",
+    "rename", "send", "post", "publish", "upload", "write", "save", "log",
+    "record", "complete", "close", "cancel", "run", "exec", "start", "stop",
+    "kill", "restart", "deploy", "merge", "push", "approve", "reply", "follow",
+    "like", "repost", "block", "mute", "subscribe", "unsubscribe", "enable", "disable",
+)
+_VERB_ENDINGS = frozenset({"s", "d", "e", "es", "ed", "ing", "ion"})
 
 
 def mcp_tool_is_readonly(tool: Dict) -> bool:
@@ -303,9 +313,81 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
         return False
     if read_hint is True:
         return True
-    # No usable hint — heuristic on the tool name's leading verb.
+    # No usable hint — heuristic on the tool name's verbs. A leading read verb
+    # reads (`list_events`, `get-post-thread`). A noun-first name
+    # (`mood_summarize_period`) reads only when a read verb appears and no
+    # write verb does, so `mood_log_entry` and `delete_list_item` stay writes.
     name = (tool.get("name") or "").lower()
-    return name.startswith(_MCP_READONLY_VERBS)
+    if name.startswith(_MCP_READONLY_VERBS):
+        return True
+    words = [w for w in re.split(r"[_.-]+", name) if w]
+    if any(_is_write_word(w) for w in words):
+        return False
+    return any(w.startswith(_MCP_READONLY_VERBS) for w in words[1:])
+
+
+def _is_write_word(word: str) -> bool:
+    return any(
+        word == verb or (word.startswith(verb) and word[len(verb):] in _VERB_ENDINGS)
+        for verb in _MCP_WRITE_VERBS
+    )
+
+
+# Todoist is one MCP tool wrapping the whole `td` CLI, so whether a call reads
+# or writes is in its arguments, not its name. Reads: a view command (`today`,
+# `upcoming`, ...) or `<noun> list|view|show|get`. Everything else writes.
+_TODOIST_READ_COMMANDS = frozenset({
+    "today", "upcoming", "inbox", "completed", "search", "activity", "stats",
+    "help", "version", "whoami",
+})
+_TODOIST_READ_SUBCOMMANDS = frozenset({"list", "ls", "view", "show", "get", "browse", "search"})
+
+
+def todoist_args_readonly(args: Any) -> bool:
+    if not isinstance(args, (list, tuple)):
+        return False
+    words = [str(a).strip().lower() for a in args if str(a).strip() and not str(a).strip().startswith("-")]
+    if not words:
+        return True  # flags only: --help, --version
+    if words[0] in _TODOIST_READ_COMMANDS:
+        return True
+    return len(words) >= 2 and words[1] in _TODOIST_READ_SUBCOMMANDS
+
+
+_MIXED_MCP_TOOLS = {
+    "mcp__todoist__todoist": lambda payload: todoist_args_readonly(payload.get("args")),
+}
+
+
+def mcp_call_is_readonly(qualified_name: str, content: Any, metadata: Optional[Dict] = None) -> bool:
+    """Whether this particular MCP call only reads. Fails closed.
+
+    Per call rather than per tool: a CLI-wrapping tool such as Todoist reads
+    or writes depending on its arguments, so a read-only planner may list
+    tasks while a quick-add still counts as a write.
+    """
+    check = _MIXED_MCP_TOOLS.get(str(qualified_name or ""))
+    if check is not None:
+        try:
+            payload = json.loads(content) if isinstance(content, str) else dict(content or {})
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and bool(check(payload))
+    if metadata is None:
+        return False
+    return mcp_tool_is_readonly(metadata)
+
+
+def mcp_tool_metadata(qualified_name: str) -> Optional[Dict]:
+    """The connected catalogue's entry for a qualified MCP tool, if any."""
+    try:
+        from src.tool_utils import get_mcp_manager
+
+        manager = get_mcp_manager()
+        return next((t for t in (manager.get_all_tools() if manager else [])
+                     if t.get("qualified_name") == qualified_name), None)
+    except Exception:
+        return None
 
 
 class _ServerLock:
@@ -1603,8 +1685,10 @@ class McpManager:
                     f"  (CONNECTED AND WORKING, but this server's {len(server_tools)} call "
                     f"schemas are not attached this turn -- {_why}. Do NOT report these tools "
                     "as unavailable to the user, and do NOT substitute an unrelated tool. To "
-                    "get one attached, state that you do not have the exact tool available, by "
-                    "its full mcp__ name, and it will be attached for the next round.)"
+                    "get one attached, call `discover_tools` with its full mcp__ name, or state "
+                    "that you do not have the exact tool available by that full name; either "
+                    "way it is attached and this same turn continues, so never ask the user "
+                    "to repeat the request.)"
                 )
             for t in server_tools:
                 # One line per tool, truncated. A multi-line description

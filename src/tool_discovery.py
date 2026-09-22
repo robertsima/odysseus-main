@@ -56,8 +56,12 @@ def _is_readonly(name: str, schema: Dict[str, Any]) -> bool:
     if "readOnlyHint" in meta:
         return meta.get("readOnlyHint") is True
     if name.startswith("mcp__"):
-        # Unknown MCP annotations fail closed in a read-only workflow.
-        return False
+        from src.mcp_manager import _MIXED_MCP_TOOLS
+
+        # A CLI-wrapping tool reads or writes by its arguments; the executor
+        # checks each call, so its schema may be offered to a reader.
+        # Other unknown MCP annotations fail closed in a read-only workflow.
+        return name in _MIXED_MCP_TOOLS
     return name in PLAN_MODE_READONLY_TOOLS or name == "discover_tools"
 
 
@@ -159,6 +163,10 @@ class TurnToolDiscovery:
         """
         permitted = self._permitted(settings)
         return [copy.deepcopy(permitted[name]) for name in sorted(permitted)]
+
+    def permitted_names(self, settings: Optional[Dict[str, Any]] = None) -> Set[str]:
+        """Names of the currently permitted inventory, without activating any."""
+        return set(self._permitted(settings))
 
     def _permitted(self, settings: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
         settings = dict(settings or {})
@@ -328,9 +336,16 @@ class TurnToolDiscovery:
                 )
             )
         )
+        if chosen:
+            # The loop attaches these to the very next round of this turn, so
+            # say so: a model told only "loaded" used to stop and ask the user
+            # to repeat the request before it would call the tool.
+            output += (". They are attached to your next call in this same turn; "
+                       "call the tool now instead of asking the user to retry.")
         return {
             "output": output,
             "exit_code": 0,
+            "continue_same_turn": bool(chosen or already_attached),
             "loaded_names": list(chosen),
             "already_attached_names": already_attached,
             "loaded_tools": [copy.deepcopy(self._loaded[name]) for name in chosen],

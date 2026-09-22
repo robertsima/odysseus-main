@@ -87,6 +87,16 @@ _GIT_RISKY = {
 }
 
 
+# Umbrella tools whose individual actions reach other people. A calendar
+# event can send invitations; creating or moving one is outward-facing.
+_RISKY_ACTIONS = {
+    "manage_calendar": {
+        "create_event": "adds a calendar event",
+        "update_event": "changes a calendar event",
+    },
+}
+
+
 def _json_action(content: Any) -> str:
     try:
         payload = json.loads(content) if isinstance(content, str) else content
@@ -113,7 +123,22 @@ def risky_reason(tool_name: Any, content: Any) -> Optional[str]:
         return _RISKY_TOOLS[bare]
     if tool == "manage_git":
         return _GIT_RISKY.get(_json_action(text))
+    if tool in _RISKY_ACTIONS:
+        from src.tool_capabilities import _action_from_content
+
+        why = _RISKY_ACTIONS[tool].get(_action_from_content(tool, content) or "")
+        if why:
+            return why
     capabilities = capabilities_for_action(tool, content)
+    if tool.startswith("mcp__") and not capabilities.known:
+        # A connected integration (Todoist, Lotus, ...). Reads run; a call
+        # that is not clearly a read changes the user's data elsewhere.
+        from src.mcp_manager import mcp_call_is_readonly, mcp_tool_metadata
+
+        if mcp_call_is_readonly(tool, content, mcp_tool_metadata(tool)):
+            return None
+        server = tool.split("__", 2)[1] if tool.count("__") >= 2 else "an"
+        return f"may change data in the {server} integration"
     # Unknown tools (most MCP servers) declare every effect, destructive
     # included, so the flag says nothing about them. ask_all covers them.
     if capabilities.known and ToolEffect.DESTRUCTIVE in capabilities.effects:
@@ -138,6 +163,9 @@ def change_reason(tool_name: Any, content: Any) -> Optional[str]:
         return reason
     capabilities = capabilities_for_action(tool, content)
     if not capabilities.known:
+        if tool.startswith("mcp__"):
+            # risky_reason already asked for every MCP call that may write.
+            return None
         return "is a tool whose effects are not classified"
     effects = capabilities.effects
     if ToolEffect.EXECUTE_CODE in effects:

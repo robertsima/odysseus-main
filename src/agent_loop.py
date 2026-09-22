@@ -2260,7 +2260,7 @@ def _document_stream_events(block: ToolBlock) -> list[dict]:
     return []
 
 
-_TOOL_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9]*(?:__?[A-Za-z0-9]+)+")
+_TOOL_NAME_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9-]*(?:__?[A-Za-z0-9-]+)+")
 
 
 def _tools_named_by_user(messages: List[Dict], known: Set[str], *, include_previous: bool) -> Set[str]:
@@ -2369,6 +2369,71 @@ def _ody_qwen_temperature_cap(temperature):
         return 0.2
 
 
+_MAX_TOOL_REARMS = 2
+_REARM_MAX_CHARS = 1500
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+_TOOL_REFUSAL_CUE_RE = re.compile(
+    r"\b(?:do(?:n't| not)|does(?:n't| not)|not|cannot|can't|unable|unavailable|missing|"
+    r"lack(?:s|ing)?|isn't|aren't|no longer|without)\b",
+    re.I,
+)
+
+
+def _missing_tools_to_attach(text: str, *, sent: Set[str], permitted: Set[str]) -> Set[str]:
+    """Exact tool names a final answer says it lacks that policy permits.
+
+    Only a refusal counts: a short answer (a report that discusses tools is
+    not one) naming the tool in a sentence with a negation cue. Only exact
+    names count, and only names not already sent this round, so a final
+    answer that merely mentions a tool it used is not a request for it.
+    """
+    body = str(text or "").replace("\u2019", "'").strip()
+    if not body or len(body) > _REARM_MAX_CHARS:
+        return set()
+    named: Set[str] = set()
+    for sentence in _SENTENCE_SPLIT_RE.split(body):
+        if _TOOL_REFUSAL_CUE_RE.search(sentence):
+            named.update(_TOOL_NAME_TOKEN_RE.findall(sentence))
+    return (named & set(permitted)) - set(sent)
+
+
+def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], allow_private) -> Dict[str, Any]:
+    """The same permission view the executor gives `discover_tools`."""
+    settings: Dict[str, Any] = {}
+    if session_id:
+        try:
+            from core.database import get_session_settings
+
+            settings = dict(get_session_settings(session_id) or {})
+        except Exception:
+            settings = {"tool_access": "none"}
+    settings["_runtime_disabled_tools"] = sorted(disabled_tools or ())
+    settings["private_vault_access"] = allow_private is True
+    return settings
+
+
+def _skill_scope_from_settings(settings: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
+    """The skills a chat may use: None for all, else casefolded names.
+
+    ``skill_access``/``skill_names`` are what a profile or loadout saves. The
+    executor already refuses loading any other skill, so the prompt's skill
+    index and matched procedures follow the same scope instead of advertising
+    skills the agent is not allowed to open.
+    """
+    access = str((settings or {}).get("skill_access") or "all")
+    if access == "none":
+        return set()
+    if access == "selected":
+        return {str(n).casefold() for n in ((settings or {}).get("skill_names") or []) if n}
+    return None
+
+
+def _scope_skills(skills, scope: Optional[Set[str]]):
+    if scope is None:
+        return list(skills or [])
+    return [sk for sk in (skills or []) if str(sk.get("name") or "").casefold() in scope]
+
+
 def _build_system_prompt(
     messages: List[Dict],
     model: str,
@@ -2384,6 +2449,7 @@ def _build_system_prompt(
     suppress_skills: bool = False,
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
+    skill_scope: Optional[Set[str]] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -2411,6 +2477,7 @@ def _build_system_prompt(
             mcp_disabled_map=mcp_disabled_map, compact=compact, owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            skill_scope=skill_scope,
         )
     else:
         agent_prompt, _skill_index_block = _build_base_prompt(
@@ -2423,6 +2490,7 @@ def _build_system_prompt(
             owner=owner,
             suppress_local_context=suppress_local_context,
             suppress_skills=suppress_skills,
+            skill_scope=skill_scope,
         )
         if not active_document:
             _cached_base_prompt = agent_prompt
@@ -2795,7 +2863,7 @@ def _build_system_prompt(
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=sm.load(owner=owner),
+                    skills=_scope_skills(sm.load(owner=owner), skill_scope),
                     threshold=0.25,
                     max_items=_skill_max_injected,
                     min_confidence=_skill_min_conf,
@@ -3028,6 +3096,7 @@ def _build_base_prompt(
     owner: Optional[str] = None,
     suppress_local_context: bool = False,
     suppress_skills: bool = False,
+    skill_scope: Optional[Set[str]] = None,
 ):
     """Build the agent prompt with only relevant tools included.
 
@@ -3086,7 +3155,7 @@ def _build_base_prompt(
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
             active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
-            skill_idx = _sm.index_for(owner=owner, active_toolsets=active_tools)
+            skill_idx = _scope_skills(_sm.index_for(owner=owner, active_toolsets=active_tools), skill_scope)
             if skill_idx:
                 lines = ["## Available skills",
                          "Procedures the assistant should consult before doing domain work. "
@@ -3740,6 +3809,7 @@ async def stream_agent_loop(
     mcp_mgr = get_mcp_manager()
     prep_timings: Dict[str, float] = {}
     disabled_tools = set(disabled_tools or [])
+    _session_policy: Dict[str, Any] = {}
     if session_id:
         # The chat's own saved policy, whichever caller started this turn. The
         # executor refuses these per call; applying them here keeps them out of
@@ -3748,12 +3818,14 @@ async def stream_agent_loop(
             from core.database import get_session_settings
             from src.tool_security import session_policy_disabled_tools
 
+            _session_policy = get_session_settings(session_id) or {}
             disabled_tools.update(session_policy_disabled_tools(
-                get_session_settings(session_id) or {},
+                _session_policy,
                 mcp_mgr.get_all_tools() if mcp_mgr else (),
             ))
         except Exception as _policy_err:
             logger.warning("[agent] could not apply session tool policy for %s: %s", session_id, _policy_err)
+    _skill_scope = _skill_scope_from_settings(_session_policy)
     route_descriptors = list(route_descriptors or [])
     while len(route_descriptors) < 1 + len(fallbacks or []):
         route_descriptors.append({})
@@ -4388,25 +4460,40 @@ async def stream_agent_loop(
             except Exception:
                 pass
             _sm = SkillsManager(DATA_DIR)
-            _owner_skills = _sm.load(owner=owner) if _skills_on else []
+            _owner_skills = _scope_skills(_sm.load(owner=owner), _skill_scope) if _skills_on else []
             if _owner_skills:
                 _relevant_tools.add("manage_skills")
+                if _skill_scope:
+                    # A profile's selected skills are its specialty: bind what
+                    # they declare from round one rather than waiting for a
+                    # keyword match or a `manage_skills view`.
+                    from src.skill_toolsets import skill_declared_tools
+                    _profile_tools, _profile_unknown = skill_declared_tools(_owner_skills, disabled_tools, mcp_mgr)
+                    _skill_required_tools |= _profile_tools
+                    _relevant_tools.update(_profile_tools)
+                    if _profile_unknown:
+                        logger.info(
+                            "[tool-rag] profile skills declare toolsets that name nothing: %s",
+                            sorted(_profile_unknown),
+                        )
                 if _retrieval_query:
-                    # Validate against every known executable tool, not just
-                    # TOOL_SECTIONS — code-nav tools (grep/glob/ls) ship as
-                    # schemas without a prompt-prose section.
-                    from src.tool_policy import known_tool_names
-                    _known = known_tool_names()
-                    for _sk in _sm.get_relevant_skills(
+                    # skill_declared_tools resolves exact names, MCP server
+                    # names ("todoist", "lotus") and prose aliases; a bare
+                    # known-name match dropped every one of those, so a
+                    # matched skill's procedure named tools it never got.
+                    from src.skill_toolsets import skill_declared_tools
+                    _matched_skills = _sm.get_relevant_skills(
                         _retrieval_query, skills=_owner_skills,
                         threshold=0.25, max_items=3,
-                    ):
-                        _sk_tools = {
-                            t for t in (_sk.get("requires_toolsets") or [])
-                            if t in _known
-                        }
-                        _skill_required_tools |= _sk_tools
-                        _relevant_tools.update(_sk_tools)
+                    )
+                    _sk_tools, _sk_unknown = skill_declared_tools(_matched_skills, disabled_tools, mcp_mgr)
+                    _skill_required_tools |= _sk_tools
+                    _relevant_tools.update(_sk_tools)
+                    if _sk_unknown:
+                        logger.info(
+                            "[tool-rag] matched skills declare toolsets that name nothing: %s",
+                            sorted(_sk_unknown),
+                        )
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
@@ -4440,6 +4527,41 @@ async def stream_agent_loop(
     _intent_domains = set(_intent.get("domains") or set())
     _base_relevant_tools = None if _relevant_tools is None else set(_relevant_tools)
     _runtime_skill_tools: Set[str] = set()
+    # Turn-local discovery over every schema this turn could be authorized to
+    # use (native + MCP). The executor refuses `discover_tools` without it, and
+    # the missing-tool re-arm below uses the same permission view, so both
+    # attach only what policy already allows.
+    _turn_discovery = None
+    if not guide_only:
+        try:
+            from src.tool_discovery import TurnToolDiscovery
+
+            _turn_discovery = TurnToolDiscovery(
+                list(FUNCTION_TOOL_SCHEMAS)
+                + (mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {}) if mcp_mgr else []),
+                disabled_tools=disabled_tools,
+            )
+        except Exception as _disc_err:
+            logger.debug("[tool-rag] turn discovery unavailable: %s", _disc_err)
+            _turn_discovery = None
+    if (
+        _turn_discovery is not None
+        and _relevant_tools is not None
+        and "discover_tools" not in disabled_tools
+    ):
+        # Also for caller-provided selections (scheduler, workers): those
+        # choose relevance, not permission, and discovery loads only what the
+        # chat's policy already allows.
+        _relevant_tools.add("discover_tools")
+        _base_relevant_tools.add("discover_tools")
+    _tool_rearms = 0
+
+    def _attach_turn_tools(names: Set[str]) -> None:
+        """Make ``names`` part of this turn's schema list from the next round."""
+        _relevant_tools.update(names)
+        _runtime_skill_tools.update(names)
+        if _base_relevant_tools is not None:
+            _base_relevant_tools.update(names)
 
     def _route_finetune_modes(candidate_model: str):
         is_ody = _is_odysseus_qwen_model(candidate_model)
@@ -4684,6 +4806,7 @@ async def stream_agent_loop(
             suppress_skills=_low_signal_turn,
             active_email=active_email,
             workspace=workspace,
+            skill_scope=_skill_scope,
         )
         if doc_mode and not plan_mode and not approved_plan and not guide_only:
             route_messages = _minimal_odysseus_doc_messages(
@@ -5911,6 +6034,47 @@ async def stream_agent_loop(
                     # never re-verify an unchanged state in a loop.
                     _effectful_used = False
                     continue
+            # ── Missing-tool re-arm ──────────────────────────────────
+            # Deferred catalogues (large MCP servers, the builtin ones) list
+            # tools the model can see but has no schema for yet, and tell it
+            # to name the exact tool to get it attached. Nothing listened, so
+            # the turn ended on "I don't have mcp__todoist__todoist" and the
+            # user had to say "try again". Attach what it named — only exact
+            # names the chat's policy already permits — and run another round.
+            if (
+                _is_api_model
+                and not guide_only
+                and not _force_answer
+                and _relevant_tools is not None
+                and _turn_discovery is not None
+                and _tool_rearms < _MAX_TOOL_REARMS
+            ):
+                _rearm = _missing_tools_to_attach(
+                    _strip_think_blocks(cleaned_round),
+                    sent=set(_tool_names_sent),
+                    permitted=_turn_discovery.permitted_names(
+                        _rearm_policy_settings(session_id, disabled_tools, allow_private)
+                    ),
+                )
+                if _rearm:
+                    _tool_rearms += 1
+                    _attach_turn_tools(_rearm)
+                    logger.info(
+                        "[agent] round %d claimed missing tools %s; attached and continuing (re-arm %d/%d)",
+                        round_num, sorted(_rearm), _tool_rearms, _MAX_TOOL_REARMS,
+                    )
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            "These tools are now attached and callable: "
+                            + ", ".join(sorted(_rearm))
+                            + ". Continue the user's request with them now. Do not ask the user to "
+                            "retry, and do not repeat that the tools were unavailable."
+                        ),
+                    })
+                    yield f'data: {json.dumps({"type": "tools_attached", "tools": sorted(_rearm), "round": round_num + 1})}\n\n'
+                    yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                    continue
             # ── Intent-without-action supervisor ─────────────────────
             # Catch "Let me tail the output" / "I'll check the logs" /
             # "Let me investigate" patterns where the model announces an
@@ -6245,6 +6409,9 @@ async def stream_agent_loop(
                 async def _push_progress(payload):
                     await _progress_q.put(payload)
 
+                if block.tool_type == "discover_tools" and _turn_discovery is not None:
+                    _turn_discovery.set_attached(_tool_names_sent)
+
                 async def _run_tool():
                     try:
                         return await execute_tool_block(
@@ -6257,6 +6424,7 @@ async def stream_agent_loop(
                             workspace=workspace,
                             security_context=run_security,
                             allow_private=allow_private,
+                            tool_discovery=_turn_discovery,
                         )
                     finally:
                         # Sentinel so the drainer knows to stop.
@@ -6324,14 +6492,16 @@ async def stream_agent_loop(
                     try:
                         from services.memory.skills import SkillsManager as _SkM
                         from src.constants import DATA_DIR as _DD
-                        from src.tool_policy import known_tool_names as _ktn
-                        _known = _ktn()
+                        from src.skill_toolsets import skill_declared_tools
                         for _sk in _SkM(_DD).load(owner=owner):
                             if _sk.get("name") == _ms_name:
-                                _new = {
-                                    t for t in (_sk.get("requires_toolsets") or [])
-                                    if t in _known and t not in _relevant_tools
-                                }
+                                _declared, _sk_unknown = skill_declared_tools([_sk], disabled_tools, mcp_mgr)
+                                _new = _declared - set(_relevant_tools)
+                                if _sk_unknown:
+                                    logger.info(
+                                        "[tool-rag] skill '%s' declares toolsets that name nothing: %s",
+                                        _ms_name, sorted(_sk_unknown),
+                                    )
                                 if _new:
                                     _relevant_tools.update(_new)
                                     _runtime_skill_tools.update(_new)
@@ -6344,6 +6514,16 @@ async def stream_agent_loop(
                                 break
                     except Exception as _e:
                         logger.debug(f"skill requires_toolsets unlock skipped: {_e}")
+
+            if (
+                block.tool_type == "discover_tools"
+                and _relevant_tools is not None
+                and not result.get("error")
+            ):
+                _found = {str(n) for n in (result.get("loaded_names") or ()) if n} - disabled_tools
+                if _found:
+                    _attach_turn_tools(_found)
+                    logger.info("[tool-rag] discover_tools attached for next round: %s", sorted(_found))
 
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"
