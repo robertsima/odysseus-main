@@ -756,3 +756,34 @@ async def test_everything_granted_reads_ready(store, planning_mcp):
         ' "enabled_tools": ["read_file", "web_search"]}', "chat-1", owner="u")
     assert result["capabilities"]["status"] == "READY"
     assert result["capabilities"]["denied"] == []
+
+
+# ── preflight readiness ──────────────────────────────────────────────────────
+
+async def test_preflight_names_unresolved_skill_dependencies_and_a_stale_index(store, planning_mcp, monkeypatch):
+    class _Sm:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def load(self, owner=None):
+            return [{"name": "todoist-planning", "requires_toolsets": ["todoist", "no such toolset"]}]
+
+    monkeypatch.setattr("services.memory.skills.SkillsManager", _Sm)
+    monkeypatch.setattr("src.retrieval_health.cached_problems",
+                        lambda: ["AI Mind is not mounted (declared but not a directory)"])
+    monkeypatch.setattr("src.agent_profiles.get_profile", lambda name: {
+        "name": "Planner", "tool_access": "selected", "enabled_tools": ["read_file", "search_documents"],
+        "skill_access": "selected", "skill_names": ["todoist-planning", "missing-skill"],
+        "mcp_access": "all", "private_vault_access": False,
+    })
+    result = await manage_agent_loadout('{"action": "preflight", "name": "Planner"}', "chat-1", owner="u")
+    readiness = result["readiness"]
+    assert readiness["status"] == "DEGRADED"
+    failed = {row["check"]: row for row in readiness["checks"] if not row["ok"]}
+    assert "needs tools this profile does not bind: mcp__todoist__todoist" in failed["skill todoist-planning"]["detail"]
+    assert "no such toolset" in failed["skill todoist-planning"]["detail"]
+    assert "no skill with this name" in failed["skill missing-skill"]["detail"]
+    assert "not mounted" in failed["document index"]["detail"]
+    assert readiness["access"] == {"indexed_retrieval_public": True, "indexed_retrieval_private": False,
+                                   "raw_private_file_access": False, "index_current": False}
+    assert "DEGRADED" in result["response"] and "repair" in result["response"]

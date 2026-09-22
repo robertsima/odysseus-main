@@ -18,7 +18,7 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("list", "get", "capabilities", "create", "update", "delete", "start", "status")
+_ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status")
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
@@ -339,6 +339,17 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         return {"response": f"Loadout {profile['name']}", "loadout": agent_loadouts.summarize(profile),
                 "instructions": profile["instructions"], "exit_code": 0}
 
+    if action == "preflight":
+        profile = agent_profiles.get_profile(name)
+        if profile is None:
+            return {"error": f"no loadout named {name!r}", "exit_code": 1}
+        from src.profile_readiness import profile_readiness, render
+
+        readiness = profile_readiness(profile, policy, owner,
+                                      required_tools=args.get("required_tools") or [])
+        return {"response": f"Loadout {profile['name']}: {render(readiness)}",
+                "readiness": readiness, "exit_code": 0}
+
     if action == "delete":
         if not agent_loadouts.delete(name):
             return {"error": f"no loadout named {name!r}", "exit_code": 1}
@@ -431,10 +442,15 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         response = f"{'Updated' if action == 'update' else 'Created'} loadout {saved['name']!r}"
         if narrowed:
             response += f"; narrowed to this chat's own policy in {len(narrowed)} place(s)"
-        response += f". Capability status: {matrix['status']}"
-        if matrix["denied"]:
-            response += (" — not usable by its workers: "
-                         + "; ".join(f"{row['tool']} ({row['reason']})" for row in matrix["denied"][:8]))
+        try:
+            from src.profile_readiness import profile_readiness, render
+
+            readiness = profile_readiness(saved, policy, owner, required_tools=required_tools)
+            response += ". Readiness " + render(readiness)
+        except Exception as exc:
+            logger.warning("loadout: readiness check failed for %s", saved["name"], exc_info=True)
+            readiness = {"status": "UNKNOWN", "error": f"{type(exc).__name__}"}
+            response += f". Capability status: {matrix['status']} (readiness check failed)"
         readback = agent_profiles.get_profile(saved["name"])
         consistent = bool(readback) and (
             set(readback.get("enabled_tools") or []) == set(saved.get("enabled_tools") or [])
@@ -443,7 +459,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         if not consistent:
             response += ". WARNING: the stored loadout read back with different bindings"
         return {"response": response, "loadout": agent_loadouts.summarize(saved),
-                "capabilities": matrix, "readback_consistent": consistent,
+                "capabilities": matrix, "readiness": readiness, "readback_consistent": consistent,
                 "narrowed": narrowed, "exit_code": 0}
 
     # action == "start"

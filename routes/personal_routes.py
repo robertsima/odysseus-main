@@ -296,6 +296,14 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "children": children,
         }
     
+    @router.get("/retrieval-health")
+    def api_retrieval_health(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
+        """Per-source mount, file and vector-index state, and whether indexed
+        context can be presented as current. Read-only."""
+        from src.retrieval_health import retrieval_health
+
+        return retrieval_health(personal_docs_manager, get_rag_manager(), allow_private=True)
+
     @router.get("")
     def api_personal_list(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
         """Enhanced version that includes directories"""

@@ -162,7 +162,23 @@ class SearchDocumentsTool:
             "search_documents: %d/%d chunks above threshold %.2f for %r",
             len(relevant), len(results), threshold, query[:80],
         )
-        return {"results": "\n\n".join(parts)}
+        response = {"results": "\n\n".join(parts)}
+        try:
+            from src.retrieval_health import cached_problems
+
+            problems = await asyncio.to_thread(cached_problems)
+        except Exception:
+            problems = []
+        if problems:
+            # An index built from mounts that are gone still answers. Say so,
+            # so these excerpts are not presented as the user's current files.
+            response["index_health"] = problems
+            response["results"] = (
+                "INDEX HEALTH WARNING: " + "; ".join(problems[:4])
+                + ". These excerpts may be from an older copy of those files; do not present them "
+                "as current, and say the index is degraded.\n\n" + response["results"]
+            )
+        return response
 
 
 # Slice size for an ordered read of a stored output. Deliberately smaller than
