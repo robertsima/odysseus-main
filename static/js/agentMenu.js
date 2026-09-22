@@ -7,9 +7,15 @@
  *     one runs the open chat under it (POST /api/agents/sessions/{id}/loadout);
  *     picking Default clears it. A chat that does not exist yet (nothing sent)
  *     gets the loadout the moment it is created, before its first turn runs.
+ *   · Edit this agent's persona — the open chat's own loadout copy, in the
+ *     Agent Control Room's editor
  *   · Open the Agents panel (the Agent Control Room)
- *   · Prompts & personas — the same window the Chat-mode Prompt entry opens
+ *   · Shared prompt & personas — the Prompt window. It edits only the shared
+ *     prompt (Chat mode, and agents with no loadout); never an agent's own.
  *   · Manage loadouts — Settings › Workbench › Agent profiles
+ *
+ * One rule: the Prompt window edits the shared prompt; an agent's persona is
+ * edited with the agent. syncPromptScope labels the Prompt window accordingly.
  *
  * Which entry shows is a body class that follows the mode toggle
  * (`composer-agent-mode`), so it never fights the per-button display:none the
@@ -78,6 +84,39 @@ async function loadCurrent() {
     state.current = null;
     state.voice = null;
   }
+}
+
+/** Label the Prompt window: it edits the shared prompt, and says so plainly
+ *  when the open chat is an agent that uses its own persona instead. */
+export function syncPromptScope() {
+  const banner = $('preset-scope-agent');
+  if (!banner) return;
+  const agentVoice = sharedPersonaSuppressed();
+  banner.hidden = !agentVoice;
+  if (!agentVoice) return;
+  const who = state.current || state.voice.persona || 'a custom agent';
+  const name = $('preset-scope-agent-name');
+  if (name) name.textContent = who;
+  const edit = $('preset-scope-edit-agent');
+  if (edit) {
+    edit.hidden = !sessionId();
+    if (!edit._wired) {
+      edit._wired = true;
+      edit.addEventListener('click', () => {
+        document.getElementById('close-custom-preset')?.click();
+        editThisAgent();
+      });
+    }
+  }
+}
+
+function editThisAgent() {
+  const sid = sessionId();
+  if (!sid) {
+    uiModule.showToast('Send a message first. This agent\'s editor opens once the chat exists.');
+    return;
+  }
+  window.agentsDashboard?.editLoadout?.(sid);
 }
 
 /** True when the next turn runs as an agent under a loadout, so the shared
@@ -151,6 +190,7 @@ export async function applyPendingLoadout(newSessionId) {
 const ICONS = {
   panel: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>',
   prompt: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
+  shared: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>',
   gear: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>',
 };
 
@@ -187,14 +227,12 @@ function loadoutItem(name, title, detail) {
 /** The persona or custom prompt the next turn sends, if any. It applies in
  *  Agent mode too, alongside a loadout's own instructions. */
 function personaNote() {
-  if (state.voice) {
-    return `<small>Not used here: this agent has its own persona${state.voice.persona ? ` (${esc(state.voice.persona)})` : ''}</small>`;
-  }
+  if (state.voice) return '<small>Not used by this agent, which has its own</small>';
   const name = presetsModule.getCharacterName?.() || '';
-  if (name) return `<small>Persona: ${esc(name)}</small>`;
+  if (name) return `<small>Persona: ${esc(name)} · for chats and agents without a loadout</small>`;
   const custom = presetsModule.getSelectedPreset?.() && presetsModule.getPreset?.('custom');
-  if (custom && custom.enabled !== false && custom.system_prompt) return '<small>Custom prompt on</small>';
-  return '';
+  if (custom && custom.enabled !== false && custom.system_prompt) return '<small>Custom prompt on · for chats and agents without a loadout</small>';
+  return '<small>For chats and agents without a loadout</small>';
 }
 
 function menuHtml() {
@@ -202,7 +240,7 @@ function menuHtml() {
   let loadouts;
   if (!profiles) loadouts = '<div class="agent-menu-note">Loading loadouts…</div>';
   else {
-    loadouts = loadoutItem('', 'Default', 'This chat\'s own settings');
+    loadouts = loadoutItem('', 'Default', 'No loadout: uses the shared prompt and this chat\'s settings');
     // A chat can still carry a loadout that was since renamed or deleted.
     if (state.current && !profiles.some((p) => p.name === state.current)) {
       loadouts += loadoutItem(state.current, state.current, 'No longer configured');
@@ -214,11 +252,13 @@ function menuHtml() {
     if (!profiles.length) loadouts += '<div class="agent-menu-note">No loadouts configured yet.</div>';
   }
   return `<div class="agent-menu-head">Loadout${sessionId() ? '' : ' <small>for the next message</small>'}</div>
+    <p class="agent-menu-sub">A loadout sets what this agent may do (tools, memory, approvals) and how it sounds (persona, temperature).</p>
     <div class="agent-menu-loadouts" role="group" aria-label="Loadouts">${loadouts}</div>
     <div class="agent-menu-sep" role="separator"></div>
-    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="panel">${ICONS.panel}<span>Open Agents panel</span></button>
-    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="prompts">${ICONS.prompt}<span class="agent-menu-text"><span>Prompts &amp; personas</span>${personaNote()}</span></button>
-    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="manage">${ICONS.gear}<span>Manage loadouts</span></button>`;
+    ${state.voice ? `<button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="edit-agent">${ICONS.prompt}<span class="agent-menu-text"><span>Edit this agent's persona</span><small>${esc(state.voice.persona ? `Answers as ${state.voice.persona}` : 'Persona, instructions, temperature')}</small></span></button>` : ''}
+    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="panel">${ICONS.panel}<span class="agent-menu-text"><span>Open Agents panel</span><small>Watch, steer and approve running agents</small></span></button>
+    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="prompts">${ICONS.shared}<span class="agent-menu-text"><span>Shared prompt &amp; personas</span>${personaNote()}</span></button>
+    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="manage">${ICONS.gear}<span class="agent-menu-text"><span>Manage loadouts</span><small>Create and edit reusable agent presets</small></span></button>`;
 }
 
 function render() {
@@ -284,7 +324,8 @@ function onMenuClick(e) {
   const action = e.target.closest('[data-agent-action]')?.dataset.agentAction;
   if (!action) return;
   closeMenu();
-  if (action === 'panel') window.agentsDashboard?.open?.();
+  if (action === 'edit-agent') editThisAgent();
+  else if (action === 'panel') window.agentsDashboard?.open?.();
   else if (action === 'prompts') presetsModule.openCustomPresetModal?.();
   else if (action === 'manage') openLoadoutSettings();
 }
@@ -343,6 +384,6 @@ function init() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 else init();
 
-const agentMenu = { applyMode, openMenu, closeMenu, applyPendingLoadout, sharedPersonaSuppressed, loadoutPersonaName };
+const agentMenu = { applyMode, openMenu, closeMenu, applyPendingLoadout, sharedPersonaSuppressed, loadoutPersonaName, syncPromptScope };
 window.agentMenuModule = agentMenu;
 export default agentMenu;

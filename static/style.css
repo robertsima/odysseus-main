@@ -42906,3 +42906,17 @@ body:not(.composer-agent-mode) #overflow-agents-btn { display: none !important; 
 /* A chat running as an agent under a loadout uses the loadout's persona, so the
    shared persona chip would be misleading there. */
 body.composer-agent-mode.loadout-voice #character-indicator-btn { display: none !important; }
+
+/* Prompt window scope (shared prompt vs an agent's own persona). */
+.preset-scope { margin: 0 0 10px; font-size: 11.5px; line-height: 1.45; opacity: .72; }
+.preset-scope-agent { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0 0 12px; padding: 8px 10px; border: 1px solid color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border)); border-radius: 8px; background: color-mix(in srgb, var(--accent, var(--red)) 8%, transparent); font-size: 12px; }
+.preset-scope-agent[hidden] { display: none; }
+.preset-scope-agent > span { flex: 1 1 220px; }
+
+/* One-line explanations under menus and tabs. */
+.agent-menu-sub { margin: 0 12px 4px; font-size: 11px; line-height: 1.35; opacity: .6; white-space: normal; }
+.agent-menu .overflow-menu-item { align-items: flex-start; text-align: left; }
+.agent-menu .overflow-menu-item > svg { flex-shrink: 0; margin-top: 1px; }
+.preset-tab-sub { margin: 2px 0 10px; font-size: 11.5px; line-height: 1.4; opacity: .65; }
+
+.ag-panel-heading-sub { margin-top: 14px; }

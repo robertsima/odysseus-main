@@ -74,6 +74,8 @@ const state = {
   detailDrafts: new Map(),
   // Parent session ids whose worker chats are unfolded under them in Recent.
   expandedParents: new Set(),
+  // Saved personas the loadout editor can copy from (loadPersonaSources).
+  personaSources: null,
   compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
 
@@ -558,14 +560,16 @@ function configEditorHtml(row) {
   const tab = state.configTab || 'general';
   const tabButton = (id, label, summary) => `<button type="button" class="ag-config-tab${tab === id ? ' active' : ''}" data-ag="config-tab" data-tab="${id}" aria-selected="${tab === id ? 'true' : 'false'}"><span>${label}</span><small>${summary}</small></button>`;
   const generalPanel = `<div class="ag-config-panel ag-config-general" data-config-panel="general">
-    <div class="ag-panel-heading"><div><b>Behavior</b><span>Decide how independently this agent may operate.</span></div></div>
+    <div class="ag-panel-heading"><div><b>Persona</b><span>How this agent sounds. It replaces the shared prompt from the Prompt window whenever this chat runs as an agent.</span></div></div>
+    <label class="ag-field"><span>Start from persona</span><select class="wb-select" data-config-persona><option value="">Copy a saved persona…</option>${(state.personaSources || []).map((src, i) => `<option value="${i}">${esc(src.name)}</option>`).join('')}</select><small>Copies its name, personality and temperature into this agent. Later edits to the saved persona don't change this agent.</small></label>
     <div class="ag-voice-grid">
       <label class="ag-field"><span>Persona name</span><input class="wb-input" type="text" maxlength="60" data-config="agent_persona_name" value="${esc(c.agent_persona_name || '')}" placeholder="None"><small>The name this agent answers as.</small></label>
       <label class="ag-field"><span>Temperature</span><input class="wb-input" type="number" min="0" max="2" step="0.05" data-config="agent_temperature" data-config-optional value="${c.agent_temperature == null ? '' : esc(c.agent_temperature)}" placeholder="Default"></label>
       <label class="ag-field"><span>Max tokens</span><input class="wb-input" type="number" min="0" max="65536" step="1" data-config="agent_max_tokens" data-config-optional value="${c.agent_max_tokens == null ? '' : esc(c.agent_max_tokens)}" placeholder="Default"></label>
     </div>
-    <small class="ag-voice-note">This agent's own voice. It replaces the shared persona from the Prompt window while this chat runs as an agent.</small>
+    <small class="ag-voice-note">Blank temperature or max tokens use the app default.</small>
     <label class="ag-field"><span>Personality & instructions</span><textarea class="wb-input ag-textarea" rows="5" maxlength="8000" data-config="agent_instructions" placeholder="How this agent should communicate and approach its work">${esc(c.agent_instructions || '')}</textarea><small>Scoped to this agent. Platform security and capability policy always take priority.</small></label>
+    <div class="ag-panel-heading ag-panel-heading-sub"><div><b>Behavior</b><span>How independently this agent may act.</span></div></div>
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
       <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
@@ -804,6 +808,20 @@ function onConfigChange(e) {
   const editor = e.target.closest('.ag-loadout-editor');
   const row = state.rows.find((item) => item.session_id === state.selected);
   if (!editor || !row) return;
+  if (e.target.matches('[data-config-persona]')) {
+    // Copy a saved persona into this agent's own loadout (unsaved until Save).
+    const src = (state.personaSources || [])[Number(e.target.value)];
+    if (!src || e.target.value === '') return;
+    const draft = configFor(row);
+    draft.agent_persona_name = src.persona_name || '';
+    draft.agent_instructions = src.instructions || '';
+    if (src.temperature != null) draft.agent_temperature = src.temperature;
+    if (src.max_tokens) draft.agent_max_tokens = src.max_tokens;
+    render();
+    const msg = $('ag-config-msg');
+    if (msg) msg.textContent = `Copied ${src.name}. Not saved yet.`;
+    return;
+  }
   const field = e.target.dataset.config;
   const profile = field === 'agent_profile' && state.profiles.find((item) => item.name === e.target.value);
   if (profile) {
@@ -964,7 +982,7 @@ async function onClick(e) {
       state.configOpen = true;
       state.configTab = 'general';
       render();
-      try { await loadCatalog(); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+      try { await Promise.all([loadCatalog(), loadPersonaSources()]); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
       render();
       syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
     }
@@ -1147,6 +1165,44 @@ export function toggle() {
   state.open ? close() : open();
 }
 
+/** Saved personas an agent can copy from: built-ins and user templates. */
+async function loadPersonaSources() {
+  if (state.personaSources) return;
+  const [builtins, saved] = await Promise.all([
+    import('./presets.js').then((m) => m.PROMPT_TEMPLATES || []).catch(() => []),
+    api('/api/presets/templates').catch(() => []),
+  ]);
+  const out = builtins.map((t) => ({ name: t.name, persona_name: t.noName ? '' : t.name, instructions: t.prompt || '', temperature: t.temperature }));
+  (Array.isArray(saved) ? saved : []).forEach((t) => {
+    if (t?.name && !out.some((src) => src.name === t.name)) {
+      out.push({ name: t.name, persona_name: t.name, instructions: t.system_prompt || '', temperature: t.temperature, max_tokens: t.max_tokens || null });
+    }
+  });
+  state.personaSources = out;
+}
+
+/** Open this chat's own loadout editor (persona first). Used by the composer's
+ *  Agents menu and the Prompt window's "Edit this agent's persona". */
+export async function editLoadout(sessionId) {
+  open();
+  // open() starts a refresh; wait for the chat's row rather than racing it.
+  for (let i = 0; i < 30 && !state.rows.some((r) => r.session_id === sessionId); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (i % 5 === 4) refresh();
+  }
+  if (!state.rows.some((r) => r.session_id === sessionId)) {
+    uiModule.showToast('This chat is not in the Agents panel yet', 'warning');
+    return;
+  }
+  state.selected = sessionId;
+  state.configOpen = true;
+  state.configTab = 'general';
+  render();
+  try { await Promise.all([loadCatalog(), loadPersonaSources()]); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+  render();
+  syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === sessionId)));
+}
+
 function setFleetWidth(body, width) {
   if (!body) return;
   const max = Math.max(250, body.getBoundingClientRect().width - 390);
@@ -1242,6 +1298,6 @@ function init() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
-const agentsDashboard = { open, openForRun, close, toggle, refresh };
+const agentsDashboard = { open, openForRun, close, toggle, refresh, editLoadout };
 window.agentsDashboard = agentsDashboard;
 export default agentsDashboard;

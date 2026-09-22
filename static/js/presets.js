@@ -560,6 +560,8 @@ export function setActivePreset(presetId) {
 export function openCustomPresetModal() {
   const modal = document.getElementById('custom-preset-modal');
   if (!modal) return;
+  // Say whose prompt this is: the shared one, not the open agent's own.
+  try { window.agentMenuModule?.syncPromptScope?.(); } catch (_) {}
 
   const savedConfig = presets.custom || {
     character_name: "",

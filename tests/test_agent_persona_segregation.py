@@ -129,3 +129,23 @@ def test_browser_keeps_the_shared_prompt_out_of_loadout_agents():
     for key in ('data-config="agent_persona_name"', 'data-config="agent_temperature"', "agent_max_tokens: draft.agent_max_tokens"):
         assert key in dashboard
     assert "odysseus:loadout-changed" in dashboard and "odysseus:loadout-changed" in menu
+
+
+def test_prompt_window_edits_the_shared_prompt_and_points_agents_elsewhere():
+    """One rule: the Prompt window edits the shared prompt; an agent's persona
+    is edited with the agent. Both surfaces say so."""
+    index = (ROOT / "static/index.html").read_text(encoding="utf-8")
+    presets = (ROOT / "static/js/presets.js").read_text(encoding="utf-8")
+    menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
+    dashboard = (ROOT / "static/js/agentsDashboard.js").read_text(encoding="utf-8")
+    assert 'id="preset-scope"' in index and "<b>Shared prompt.</b>" in index
+    assert 'id="preset-scope-agent"' in index and 'id="preset-scope-edit-agent"' in index
+    assert "agentMenuModule?.syncPromptScope?.()" in presets
+    assert "export function syncPromptScope()" in menu
+    # The Agents menu separates this agent's persona from the shared prompt.
+    assert 'data-agent-action="edit-agent"' in menu
+    assert "Shared prompt &amp; personas" in menu
+    assert "editLoadout" in dashboard.rsplit("const agentsDashboard", 1)[1]
+    assert "data-config-persona" in dashboard
+    # Every Prompt window tab explains itself.
+    assert index.count('class="preset-tab-sub"') == 3

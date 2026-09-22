@@ -1225,7 +1225,7 @@
                 <span>TTS Mode</span>
                 <span class="overflow-active-dot"></span>
               </button>
-              <button type="button" class="overflow-menu-item" id="overflow-preset-btn">
+              <button type="button" class="overflow-menu-item" id="overflow-preset-btn" title="Shared prompt: persona, message prefix/suffix and temperature for chats (and agents without a loadout)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/>
                 </svg>
@@ -1233,7 +1233,7 @@
               </button>
               <!-- Agent mode shows this in place of Prompt (js/agentMenu.js):
                    loadouts, the Agents panel, and prompts & personas. -->
-              <button type="button" class="overflow-menu-item" id="overflow-agents-btn">
+              <button type="button" class="overflow-menu-item" id="overflow-agents-btn" title="Choose this chat's agent loadout, edit its persona, or open the Agents panel">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>
                 <span>Agents</span>
                 <span id="overflow-agents-current" class="overflow-agents-current"></span>
@@ -1319,6 +1319,17 @@
           <button class="close-btn" id="close-custom-preset" aria-label="Close prompt">✖</button>
         </div>
         <div class="modal-body preset-modal-body">
+          <!-- Scope: this window edits the SHARED prompt only. An agent with a
+               loadout keeps its own persona, edited in the Agents panel
+               (js/agentMenu.js syncPromptScope fills the banner). -->
+          <p class="preset-scope" id="preset-scope">
+            <b>Shared prompt.</b> Used in Chat mode, and in Agent mode when the chat has no loadout.
+            Agents with a loadout have their own persona, set in the Agents panel.
+          </p>
+          <div class="preset-scope-agent" id="preset-scope-agent" role="status" hidden>
+            <span>This chat runs as <b id="preset-scope-agent-name">an agent</b>, which has its own persona. Changes here won't affect it.</span>
+            <button type="button" class="char-action-btn" id="preset-scope-edit-agent">Edit this agent's persona</button>
+          </div>
           <div id="char-fields-wrap">
             <div class="preset-tabs">
               <button class="preset-tab active" data-chartab="inject"><svg class="preset-tab-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/></svg><span>Inject</span></button>
@@ -1327,6 +1338,7 @@
             </div>
             <!-- Inject tab (also holds model tuning: temperature + max tokens) -->
             <div class="preset-chartab" data-chartab-panel="inject">
+              <p class="preset-tab-sub">Text wrapped around every message you send, plus how creative and how long replies are.</p>
               <label for="inject-prefix">Prefix</label>
               <textarea id="inject-prefix" rows="2" placeholder="Added before your message" style="margin-bottom:8px"></textarea>
               <label for="inject-suffix">Suffix</label>
@@ -1349,6 +1361,7 @@
             </div>
             <!-- Prompt (character/persona) tab -->
             <div class="preset-chartab" data-chartab-panel="character" style="display:none">
+              <p class="preset-tab-sub">Who the assistant is: a name and a personality it keeps for the whole chat. Saved personas can also be copied into an agent's loadout.</p>
               <label>Persona</label>
               <div class="char-name-combo">
                 <select id="char-template-select" class="char-template-select">
@@ -1375,6 +1388,7 @@
             </div>
             <!-- Group tab -->
             <div class="preset-chartab" data-chartab-panel="group" style="display:none">
+              <p class="preset-tab-sub">Several personas in one chat, answering in turn or all at once.</p>
               <div style="display:flex;gap:4px;margin-bottom:8px;">
                 <button type="button" class="compare-parallel-toggle" id="group-mode-btn" style="flex:1;height:auto;width:auto;">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor"/><circle cx="4" cy="12" r="1.5" fill="currentColor"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/></svg>
@@ -2639,7 +2653,7 @@
               <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
             </div>
             <h3 class="agent-profiles-title">Agent profiles</h3>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. A preset can choose instructions, primary and fallback models, tool and skill allowlists, MCP/integration access, memory permissions, private-vault access, approval behavior, delegation policy, and worker limits. Apply one from the Agent Control Room; the selected agent receives its own editable copy.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. Each one sets what an agent may do (tools, skills, MCP connections, memory, private-vault access, approvals, delegation, worker limits, models) and how it sounds (its own persona name, personality, temperature and reply length). Pick one for a chat from the composer&rsquo;s Agents menu in Agent mode, or from the Agent Control Room. The chat gets its own copy, so editing a loadout here does not change agents already running with it. The shared prompt in the Prompt window is used only by chats and agents without a loadout.</div>
             <div id="set-agentProfiles" class="agent-profiles"></div>
             <div class="agent-profiles-actions">
               <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
