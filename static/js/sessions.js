@@ -277,6 +277,7 @@ const _researchingSessions = new Set();
 const _streamingSessions = new Set();   // Background chat streams (not polled against research API)
 const _completedSessions = new Set();   // Sessions with completed background streams
 const _serverRunning = new Set();       // Chats the server reports as working (see _pollServerRuns)
+const _serverBackgroundRunning = new Set(); // ...of those, working on a run this tab did not stream (worker, sub-agent)
 const _serverAgents = new Map();        // session id -> sub-agents / jobs running
 let _researchPollTimer = null;
 
@@ -2743,10 +2744,31 @@ async function _pollServerRuns() {
       const sid = run.session_id;
       if (!sid) continue;
       if (run.agents_running) _serverAgents.set(sid, run.agents_running);
-      if (run.status === 'running') { running.add(sid); continue; }
+      if (run.status === 'running') {
+        running.add(sid);
+        // Remember which of this chat's runs are not the tab's own streamed turn.
+        if (run.source && run.source !== 'chat') _serverBackgroundRunning.add(sid);
+        continue;
+      }
       if (!run.finished_at || run.status === 'stopped' || run.status === 'idle' || sid === currentSessionId) continue;
       const since = seen[sid] || (_pageOpenedAt - 1800);
       if (run.finished_at > since) _completedSessions.add(sid);
+    }
+    // The open chat can gain messages this tab did not stream: a worker's
+    // result handed back to it, and the turn that continues from it. They were
+    // only visible after leaving the chat and coming back, so a finished
+    // worker looked like it had produced nothing. Reload once when such a
+    // server-side run in this chat ends.
+    // Only background runs count; the tab's own streamed turns already render.
+    const cur = currentSessionId;
+    if (cur && _serverBackgroundRunning.has(cur) && !running.has(cur)) {
+      _serverBackgroundRunning.delete(cur);
+      if (!window.chatModule?.hasActiveStream?.(cur)) {
+        selectSession(cur, { keepSidebar: true, showLoading: false }).catch(() => {});
+      }
+    }
+    for (const sid of [..._serverBackgroundRunning]) {
+      if (!running.has(sid)) _serverBackgroundRunning.delete(sid);
     }
     _serverRunning.clear();
     running.forEach((sid) => _serverRunning.add(sid));

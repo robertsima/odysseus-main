@@ -2811,10 +2811,13 @@ export function addMessage(role, content, modelName, metadata) {
     // Messages exchanged between agents (send_to_session) carry
     // source='agent'. Label them by the sending chat instead of "You" so a
     // reader can follow who said what, and link back to that chat.
-    const isAgentMsg = metadata?.source === 'agent';
+    // A finished worker's result handed back to the chat that started it
+    // (source='worker') is also not the user's own message.
+    const isWorkerMsg = metadata?.source === 'worker' && role === 'user';
+    const isAgentMsg = metadata?.source === 'agent' || isWorkerMsg;
     const agentFrom = isAgentMsg ? String(metadata.from_session_name || metadata.from_session || 'another chat') : '';
     var _roleText = role === 'user'
-      ? (isAgentMsg ? 'Agent · ' + agentFrom : 'You')
+      ? (isAgentMsg ? (isWorkerMsg ? 'Worker · ' : 'Agent · ') + agentFrom : 'You')
       : (isSlash || isCompacted) ? 'Odysseus' : modelRouteLabel(
         replyModels.requestedModel,
         resolvedModel,

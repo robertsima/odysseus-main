@@ -917,6 +917,12 @@ def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Opti
 
 
 _HANDOFF_MAX_ROUNDS = 12
+# A worker that finishes while its parent chat is mid-turn waits for that turn
+# to end, then the parent continues with the result. Bounded, so a chat that
+# never goes idle does not hold a task open forever.
+_HANDOFF_IDLE_POLL_S = 2.0
+_HANDOFF_IDLE_WAIT_S = 30 * 60
+_PENDING_HANDOFFS: set = set()
 
 
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
@@ -945,14 +951,68 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
                  if status == "waiting_approval" else "")
               + "Continue the task using this result. Don't repeat work the worker already did. "
               "If the task is now complete, give the user the final result.")
-    parent.add_message(ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
-                                                    "from_session_name": worker.name, "direction": "inbound"}))
+    inject_msg = ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
+                                              "from_session_name": worker.name, "direction": "inbound"})
+    parent.add_message(inject_msg)
     manager.save_sessions()
     if agent_runs.is_busy(parent_id):
-        # Mid-turn: the message waits in history for the next turn.
-        activity.publish(parent_id, "note", f"Worker result saved for the next turn: {worker.name}",
+        # Mid-turn. That turn built its context before this message existed,
+        # so it will not read the result. Previously the result just sat in
+        # history until the user happened to send something, and the worker
+        # looked like it had produced nothing. Continue once the turn ends.
+        activity.publish(parent_id, "note",
+                         f"Worker {worker.name} finished; this chat continues with its result when the current turn ends",
                          source="session", owner=owner)
+        task = asyncio.create_task(_continue_when_idle(manager, parent_id, parent, worker, inject_msg, owner))
+        _PENDING_HANDOFFS.add(task)
+        task.add_done_callback(_PENDING_HANDOFFS.discard)
         return
+    await _continue_parent(manager, parent_id, parent, worker, owner)
+
+
+def _result_already_read(parent, inject_msg) -> bool:
+    """Whether a turn after the hand-off already had the result in context:
+    a message the user (not a worker) sent after it started that turn."""
+    history = list(getattr(parent, "history", None) or [])
+    try:
+        start = next(i for i, m in enumerate(history) if m is inject_msg)
+    except StopIteration:
+        return False
+    for m in history[start + 1:]:
+        meta = getattr(m, "metadata", None) or {}
+        if getattr(m, "role", None) == "user" and meta.get("source") != "worker":
+            return True
+    return False
+
+
+async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_msg, owner: Optional[str]) -> None:
+    from src import agent_runs
+
+    deadline = time.monotonic() + _HANDOFF_IDLE_WAIT_S
+    try:
+        while agent_runs.is_busy(parent_id):
+            if time.monotonic() > deadline:
+                activity.publish(parent_id, "note",
+                                 f"Worker {worker.name}'s result is waiting in this chat; it was busy too long to continue automatically",
+                                 source="session", owner=owner)
+                return
+            await asyncio.sleep(_HANDOFF_IDLE_POLL_S)
+        if _result_already_read(parent, inject_msg):
+            return
+        await _continue_parent(manager, parent_id, parent, worker, owner)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("deferred worker hand-off to %s failed", parent_id, exc_info=True)
+
+
+async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optional[str]) -> None:
+    """Run the parent chat's agent on the worker's result (it is already in
+    the parent's history) and save its reply there."""
+    from core.models import ChatMessage
+    from src import agent_runs
+    from src.headless_agent import run_headless
+
     run_id = activity.run_started(parent_id, "session", f"Continuing after worker {worker.name}", owner=owner,
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})
