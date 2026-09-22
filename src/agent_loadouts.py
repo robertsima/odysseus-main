@@ -149,6 +149,105 @@ def unusable_reason(profile: Dict[str, Any]) -> Optional[str]:
     )
 
 
+def _mcp_state() -> Tuple[Dict[str, Tuple[str, str]], Set[str]]:
+    """({qualified: (server_id, connection status)}, deferred qualified names)."""
+    try:
+        from src.tool_utils import get_mcp_manager
+
+        manager = get_mcp_manager()
+        if manager is None:
+            return {}, set()
+        rows = {}
+        for tool in manager.get_all_tools():
+            name = tool.get("qualified_name")
+            if name:
+                status = str((manager.get_server_status(tool["server_id"]) or {}).get("status") or "unknown")
+                rows[name] = (str(tool["server_id"]), status)
+        try:
+            deferred = set(manager.gated_tool_names())
+        except Exception:
+            deferred = set()
+        return rows, deferred
+    except Exception:
+        logger.debug("loadout: MCP state unavailable for the capability matrix", exc_info=True)
+        return {}, set()
+
+
+def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
+                      policy: Dict[str, Any], owner: Optional[str] = None) -> Dict[str, Any]:
+    """Every state a requested tool can be in, and why each missing one is missing.
+
+    "Available" used to mean any of five things: the name exists, its MCP
+    server is connected, the calling chat may grant it, the profile kept it,
+    or its schema is sent every turn. A profile could save "successfully"
+    while a tool its mission depended on was dropped by the clamp, and the
+    worker then said the capability did not exist. ``required_tools`` names
+    what the mission cannot do without; any of those denied is BLOCKED.
+    """
+    from src.private_access import tool_requires_private_grant
+    from src.tool_security import owner_baseline_disabled_tools
+
+    mcp, deferred_names = _mcp_state()
+    requested = sorted({str(t) for t in (requested_tools or []) if t})
+    required = sorted({str(t) for t in (required_tools or []) if t})
+    wanted = sorted(set(requested) | set(required))
+    known = set(policy.get("known_tools") or ()) | set(mcp)
+    authorized = agent_profiles.expand_tool_aliases(policy.get("allowed_tools") or ())
+    owner_denied = owner_baseline_disabled_tools(owner)
+    selected = set(profile.get("enabled_tools") or []) if profile.get("tool_access") == "selected" else (
+        set() if profile.get("tool_access") == "none" else set(wanted) & authorized)
+    # Mirrors agent_profiles.session_patch: "all" is stored as ["*"] on the
+    # worker chat whatever allowed_mcp_servers holds.
+    server_limited = profile.get("mcp_access") in {"selected", "none"}
+    permitted_servers = (set(profile.get("allowed_mcp_servers") or [])
+                         if profile.get("mcp_access") == "selected" else set())
+
+    def mcp_problem(tool):
+        if tool not in mcp:
+            return None
+        server, status = mcp[tool]
+        if server_limited and server not in permitted_servers:
+            return f"MCP server {server} is not in this profile's allowed servers"
+        if status != "connected":
+            return f"MCP server {server} is {status}"
+        return None
+
+    denied, effective, conditional = [], [], []
+    for tool in wanted:
+        if tool in selected and not mcp_problem(tool):
+            effective.append(tool)
+            if tool_requires_private_grant(tool) and not profile.get("private_vault_access"):
+                conditional.append({"tool": tool, "condition": (
+                    "no private-vault grant: bash/python run only in the workspace sandbox; "
+                    "other private-boundary tools are refused")})
+            continue
+        if tool not in known:
+            reason, detail = "unknown", "no native tool or connected MCP tool has this name"
+        elif tool in owner_denied:
+            reason, detail = "owner_policy", "switched off for this user or by the operator"
+        elif mcp_problem(tool):
+            reason, detail = "mcp_server", mcp_problem(tool)
+        elif tool not in authorized:
+            reason, detail = "parent_policy", "the calling chat may not use it, so it cannot grant it"
+        else:
+            reason, detail = "not_requested", "not in this profile's enabled_tools"
+        denied.append({"tool": tool, "reason": reason, "detail": detail})
+    missing = [row["tool"] for row in denied if row["tool"] in required]
+    return {
+        "status": "BLOCKED" if missing else ("DEGRADED" if denied else "READY"),
+        "requested": requested,
+        "required": required,
+        "known": [t for t in wanted if t in known],
+        "connected": [t for t in wanted if t in known and (t not in mcp or mcp[t][1] == "connected")],
+        "authorized": [t for t in wanted if t in authorized],
+        "selected_for_profile": sorted(effective),
+        "deferred_schema": sorted(set(effective) & deferred_names),
+        "conditional": conditional,
+        "denied": denied,
+        "mission_critical_missing": missing,
+    }
+
+
 def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -> None:
     known: Set[str] = policy["known_tools"]
     explicit_denied = agent_profiles.expand_tool_aliases(prof.get("disabled_tools") or [])

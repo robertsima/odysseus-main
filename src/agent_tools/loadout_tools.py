@@ -380,11 +380,35 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                         "available_models": available,
                         "exit_code": 1,
                     }
+        requested_tools = list(requested.get("enabled_tools") or [])
+        required_tools = args.get("required_tools") or (args.get("loadout") or {}).get("required_tools") or []
+        if not isinstance(required_tools, list):
+            return {"error": "required_tools must be a list of exact tool names", "exit_code": 1}
+        if required_tools and requested.get("tool_access") == "selected":
+            requested["enabled_tools"] = sorted(set(requested_tools) | {str(t) for t in required_tools})
+            requested_tools = requested["enabled_tools"]
         try:
             profile, narrowed = agent_loadouts.clamp(requested, policy)
         except ValueError as exc:
             return {"error": f"manage_agent_loadout: {exc}", "exit_code": 1}
         narrowed = [*scope_notes, *narrowed]
+        matrix = agent_loadouts.capability_matrix(requested_tools, required_tools, profile, policy, owner)
+        if matrix["mission_critical_missing"]:
+            # A profile that saves without what its mission needs is the
+            # failure this refuses: it only moves the error to every worker
+            # it would ever start.
+            return {
+                "error": (
+                    f"{action}: {requested['name']!r} was not saved; required tool(s) unavailable: "
+                    + "; ".join(f"{row['tool']} ({row['reason']}: {row['detail']})"
+                                for row in matrix["denied"] if row["tool"] in matrix["mission_critical_missing"])
+                    + ". Fix the cause (reconnect the server, widen this chat's policy) or drop the "
+                    "requirement."
+                ),
+                "capabilities": matrix,
+                "narrowed": narrowed,
+                "exit_code": 1,
+            }
         if agent_loadouts.tool_starved(narrowed):
             # Storing it would only defer the failure to every worker it ever
             # starts. Refuse here, where the author can still fix it.
@@ -407,7 +431,19 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         response = f"{'Updated' if action == 'update' else 'Created'} loadout {saved['name']!r}"
         if narrowed:
             response += f"; narrowed to this chat's own policy in {len(narrowed)} place(s)"
+        response += f". Capability status: {matrix['status']}"
+        if matrix["denied"]:
+            response += (" — not usable by its workers: "
+                         + "; ".join(f"{row['tool']} ({row['reason']})" for row in matrix["denied"][:8]))
+        readback = agent_profiles.get_profile(saved["name"])
+        consistent = bool(readback) and (
+            set(readback.get("enabled_tools") or []) == set(saved.get("enabled_tools") or [])
+            and readback.get("tool_access") == saved.get("tool_access")
+            and set(readback.get("skill_names") or []) == set(saved.get("skill_names") or []))
+        if not consistent:
+            response += ". WARNING: the stored loadout read back with different bindings"
         return {"response": response, "loadout": agent_loadouts.summarize(saved),
+                "capabilities": matrix, "readback_consistent": consistent,
                 "narrowed": narrowed, "exit_code": 0}
 
     # action == "start"

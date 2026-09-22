@@ -685,3 +685,74 @@ async def test_start_without_a_task_spells_out_the_call_shape(store):
     assert result["exit_code"] == 1
     assert '"task": "<the whole assignment>"' in result["error"]
     assert "'detail'" in result["error"]
+
+
+# ── the capability matrix (2026-09-22) ───────────────────────────────────────
+
+class _Mcp:
+    def __init__(self, tools, statuses, gated=()):
+        self._tools, self._statuses, self._gated = tools, statuses, set(gated)
+
+    def get_all_tools(self, *_a, **_k):
+        return list(self._tools)
+
+    def get_server_status(self, server_id):
+        return {"status": self._statuses.get(server_id, "disconnected")}
+
+    def gated_tool_names(self, *_a, **_k):
+        return set(self._gated)
+
+
+@pytest.fixture
+def planning_mcp(monkeypatch):
+    mcp = _Mcp(
+        [{"qualified_name": "mcp__todoist__todoist", "server_id": "todoist"},
+         {"qualified_name": "mcp__lotus__mood_summarize_period", "server_id": "lotus"}],
+        {"todoist": "connected", "lotus": "disconnected"},
+        gated={"mcp__todoist__todoist"},
+    )
+    monkeypatch.setattr("src.tool_utils.get_mcp_manager", lambda: mcp)
+    monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: set())
+    caller = policy(allowed_tools={"read_file", "web_search", "mcp__todoist__todoist",
+                                   "mcp__lotus__mood_summarize_period"})
+    monkeypatch.setattr(agent_loadouts, "caller_policy", lambda sid, owner: caller)
+    return mcp
+
+
+async def test_required_tool_on_a_disconnected_server_blocks_the_save(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Planner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "mcp__todoist__todoist"],'
+        ' "required_tools": ["mcp__todoist__todoist", "mcp__lotus__mood_summarize_period"]}',
+        "chat-1", owner="u")
+    assert result["exit_code"] == 1
+    assert "was not saved" in result["error"] and "lotus is disconnected" in result["error"]
+    assert result["capabilities"]["status"] == "BLOCKED"
+    assert result["capabilities"]["mission_critical_missing"] == ["mcp__lotus__mood_summarize_period"]
+    assert store["profiles"] == []
+
+
+async def test_optional_losses_save_as_degraded_with_a_reason_each(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Planner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "bash", "no_such_tool", "mcp__lotus__mood_summarize_period"],'
+        ' "required_tools": ["mcp__todoist__todoist"]}',
+        "chat-1", owner="u")
+    assert result["exit_code"] == 0, result
+    matrix = result["capabilities"]
+    assert matrix["status"] == "DEGRADED"
+    reasons = {row["tool"]: row["reason"] for row in matrix["denied"]}
+    assert reasons == {"bash": "parent_policy", "no_such_tool": "unknown",
+                       "mcp__lotus__mood_summarize_period": "mcp_server"}
+    assert "mcp__todoist__todoist" in matrix["selected_for_profile"]
+    assert matrix["deferred_schema"] == ["mcp__todoist__todoist"]
+    assert result["readback_consistent"] is True
+    assert "DEGRADED" in result["response"]
+
+
+async def test_everything_granted_reads_ready(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "web_search"]}', "chat-1", owner="u")
+    assert result["capabilities"]["status"] == "READY"
+    assert result["capabilities"]["denied"] == []

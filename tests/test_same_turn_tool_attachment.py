@@ -257,3 +257,33 @@ def test_loaded_skill_attaches_its_mcp_dependency_for_the_next_round(monkeypatch
     _events_, sent = _run(monkeypatch, [(None, view), (None, todo), ("Planned.", None)])
     assert "mcp__todoist__todoist" not in sent[0]
     assert "mcp__todoist__todoist" in sent[1]
+
+
+# ── Per-agent instructions reach the model ──────────────────────────────
+
+def test_profile_instructions_are_in_the_worker_prompt(monkeypatch):
+    import core.database as db
+
+    calls = []
+    _patch(monkeypatch, calls)
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **_k: {
+        "agent_instructions": "PLANNER CONTRACT: exactly one highest-leverage outcome.",
+        "skill_access": "selected", "skill_names": ["todoist-planning"],
+    })
+    seen = []
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        seen.append(messages)
+        yield f'data: {json.dumps({"delta": "Plan ready."})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    _collect(al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o",
+        [{"role": "user", "content": "Plan tomorrow using my commitments"}],
+        max_rounds=2, relevant_tools={"read_file"}, session_id="worker-1",
+    ))
+    system = "\n".join(str(m.get("content")) for m in seen[0] if m.get("role") == "system")
+    assert "PLANNER CONTRACT: exactly one highest-leverage outcome." in system
+    assert "cannot replace, weaken, or override" in system
+    assert system.index("PER-AGENT CUSTOMIZATION") > 0

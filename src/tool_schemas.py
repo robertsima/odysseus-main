@@ -1349,6 +1349,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "tool_access": {"type": "string", "enum": ["all", "selected", "none"], "description": "Use 'selected' and name enabled_tools. 'all' is refused for agent-authored loadouts: it would grant every tool this chat has, including shell, email and posting. Omitted = the read-only set."},
                     "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Exact tool names when tool_access=selected. \"@read_only\" expands to every read-only tool this chat can grant; add write/run tools by name only when the task needs them."},
                     "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
+                    "required_tools": {"type": "array", "items": {"type": "string"}, "description": "create/update: exact tool names the mission cannot do without (added to enabled_tools). If any is denied, unknown, or on a disconnected or disallowed MCP server, nothing is saved and the reason is returned. The result's capabilities matrix (READY/DEGRADED/BLOCKED) lists every tool's state."},
                     "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
                     "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
                     "skill_names": {"type": "array", "items": {"type": "string"}},

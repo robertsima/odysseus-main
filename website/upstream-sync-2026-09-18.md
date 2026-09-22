@@ -142,6 +142,10 @@ the model.
   bare known-name match that dropped `todoist`, `lotus` and server names. A
   chat's `skill_access`/`skill_names` now scope the skill index and matched
   procedures, and a profile's selected skills bind their tools from round one.
+- **Per-agent profile instructions** (`0ea6b80b`, `f2f9f83e`). A worker
+  chat's `agent_instructions` are appended to the system prompt after the
+  platform contract, bounded and labelled as unable to override it, and kept
+  out of the cached base prompt (`_scoped_agent_customization`).
 - **Offer matches enforcement**. The loop applies the chat's saved tool
   policy (`session_policy_disabled_tools`) whichever caller started the
   turn, and adds tools the user names outright.
@@ -153,7 +157,6 @@ the model.
 | Fork approval store (once/always grants, reissue, precheck before hold) | Replaced by upstream's `ToolApprovalStore`. The Agents overview lists pending approvals and links to the chat, where the card is decided. | `a3a153e3`, `3d8ed0fc`, `8927810b` |
 | `manage_git` risky actions | No per-call confirmation of its own. It is classified as a workspace write with network and external side effects (destructive for rewrites and discards), so upstream's exact-approval gate holds it once a run is tainted. Pushing this repository is still refused (`use_publish_flow`). | `3c8c2654`, `3d8ed0fc` |
 | Approval prompts from skills (runs with no approval mode only) | A turn that shows any skill a user or agent wrote or edited arms upstream's gate, so the next high-impact call (bash, writes) asks for an exact approval. "Allow for this chat session" covers the rest of that chat. | Upstream design, kept |
-| Per-agent profile instructions (`agent_instructions`) | Stored, but not placed into upstream's system prompt | `0ea6b80b`, `f2f9f83e` |
 | Tool routing: intent classes, domain routing, targeted self-unblock, protected admission budget, missing-tool re-arm, starved-domain repair | Upstream's selection | `8927810b`, `c62b6bac`, `cffc5f0d`, `d97fa0e7`, `32614be0`, `a654a09e`, `3e2a0eb5`, `f8882905`, `fc74bf51`, `5ee56c0a` |
 | Continuation ("ok, continue" keeps the last turn's tools) | Upstream's handling | `8927810b`, `00b35dbd`, `a364f8f2` |
 | Delegation in the loop: policy gating, standing `delegation_granted`, plain-language "start an agent" routing | Workflows still check authorization. The loop does not hide or route delegation tools. | `ced11e62`, `7c9c03a2`, `16ad4e47`, `0ea6b80b` |

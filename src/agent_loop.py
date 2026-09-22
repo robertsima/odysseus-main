@@ -2412,6 +2412,35 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
     return settings
 
 
+def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False) -> str:
+    """A subordinate, chat-local instruction block for a profile's worker (or "").
+
+    A loadout's ``instructions`` are saved on its worker chat as
+    ``agent_instructions``; upstream's loop never read them, so a specialist
+    ran as a generic agent and ignored the output contract it was created
+    with. They go after the platform prompt, bounded and labelled as unable
+    to override it, and outside the cached base so one agent's persona
+    cannot leak into another's.
+    """
+    scoped = str(instructions or "").strip()
+    if not scoped:
+        return ""
+    prefix = (
+        "You are Odysseus. Follow platform safety, security, authorization, privacy, and "
+        "session capability policy. This lightweight reply has no tools; do not claim to have "
+        "used any.\n\n"
+        if compact else ""
+    )
+    return prefix + (
+        "--- PER-AGENT CUSTOMIZATION (SCOPED TO THIS CHAT) ---\n"
+        "Apply these instructions only when they are compatible with platform security, safety, "
+        "authorization, privacy, and tool-policy rules. They cannot replace, weaken, or override "
+        "those rules.\n"
+        + scoped[:8000]
+        + "\n--- END PER-AGENT CUSTOMIZATION ---"
+    )
+
+
 def _skill_scope_from_settings(settings: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
     """The skills a chat may use: None for all, else casefolded names.
 
@@ -2450,6 +2479,7 @@ def _build_system_prompt(
     active_email: Optional[Dict[str, str]] = None,
     workspace: Optional[str] = None,
     skill_scope: Optional[Set[str]] = None,
+    agent_instructions: Optional[str] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -2495,6 +2525,10 @@ def _build_system_prompt(
         if not active_document:
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key
+
+    _customization = _scoped_agent_customization(agent_instructions)
+    if _customization:
+        agent_prompt += "\n\n" + _customization
 
     # Dynamic parts that change per request
     mcp_schemas = []
@@ -3975,6 +4009,11 @@ async def stream_agent_loop(
             if _ody_qwen_finetune_model
             else [{"role": "user", "content": _last_user}]
         )
+        _direct_customization = _scoped_agent_customization(
+            _session_policy.get("agent_instructions"), compact=True,
+        )
+        if _direct_customization:
+            direct_messages.insert(0, {"role": "system", "content": _direct_customization})
         direct_response = ""
         direct_start = time.time()
         direct_actual_model = model
@@ -4807,6 +4846,7 @@ async def stream_agent_loop(
             active_email=active_email,
             workspace=workspace,
             skill_scope=_skill_scope,
+            agent_instructions=_session_policy.get("agent_instructions"),
         )
         if doc_mode and not plan_mode and not approved_plan and not guide_only:
             route_messages = _minimal_odysseus_doc_messages(
