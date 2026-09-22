@@ -2412,7 +2412,8 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
     return settings
 
 
-def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False) -> str:
+def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False,
+                                 has_persona: bool = False) -> str:
     """A subordinate, chat-local instruction block for a profile's worker (or "").
 
     A loadout's ``instructions`` are saved on its worker chat as
@@ -2425,8 +2426,11 @@ def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = 
     scoped = str(instructions or "").strip()
     if not scoped:
         return ""
+    # The compact form names the assistant, unless the chat has a persona,
+    # whose own name must not be contradicted.
     prefix = (
-        "You are Odysseus. Follow platform safety, security, authorization, privacy, and "
+        ("" if has_persona else "You are Odysseus. ")
+        + "Follow platform safety, security, authorization, privacy, and "
         "session capability policy. This lightweight reply has no tools; do not claim to have "
         "used any.\n\n"
         if compact else ""
@@ -4001,19 +4005,32 @@ async def stream_agent_loop(
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
-        direct_messages = (
-            _minimal_odysseus_general_messages(
-                messages,
-                include_memory=True,
-            )
-            if _ody_qwen_finetune_model
-            else [{"role": "user", "content": _last_user}]
-        )
+        # A short reply ("hi", "thanks") still answers as the chat's persona and
+        # under its loadout's instructions. Both used to be lost here: the
+        # persona was never copied over, and the loadout block was added to a
+        # list the per-candidate factory below then replaced.
+        _direct_persona = [
+            {"role": "system", "content": m.get("content") or ""}
+            for m in messages
+            if m.get("role") == "system" and m.get("_persona") and m.get("content")
+        ]
         _direct_customization = _scoped_agent_customization(
             _session_policy.get("agent_instructions"), compact=True,
+            has_persona=bool(_direct_persona),
         )
-        if _direct_customization:
-            direct_messages.insert(0, {"role": "system", "content": _direct_customization})
+
+        def _direct_messages_for(candidate_is_qwen: bool) -> List[Dict]:
+            if candidate_is_qwen:
+                # The Odysseus finetune is trained on its own fixed prompt; a
+                # persona would fight it, but the loadout's limits still apply.
+                out = _minimal_odysseus_general_messages(messages, include_memory=True)
+            else:
+                out = _direct_persona + [{"role": "user", "content": _last_user}]
+            if _direct_customization:
+                out.insert(0, {"role": "system", "content": _direct_customization})
+            return out
+
+        direct_messages = _direct_messages_for(bool(_ody_qwen_finetune_model))
         direct_response = ""
         direct_start = time.time()
         direct_actual_model = model
@@ -4029,11 +4046,7 @@ async def stream_agent_loop(
 
         def _direct_candidate_request(_index, _url, candidate_model, _headers):
             candidate_is_qwen = _is_odysseus_qwen_model(candidate_model)
-            candidate_messages = (
-                _minimal_odysseus_general_messages(messages, include_memory=True)
-                if candidate_is_qwen
-                else [{"role": "user", "content": _last_user}]
-            )
+            candidate_messages = _direct_messages_for(candidate_is_qwen)
             direct_candidate_messages[_index] = candidate_messages
             return {
                 "messages": candidate_messages,

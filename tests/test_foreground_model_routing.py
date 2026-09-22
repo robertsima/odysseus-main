@@ -3661,3 +3661,56 @@ def test_skill_activation_reaches_later_fallback_request_and_pinned_round(monkey
         for message in round_three_requests[0]["messages"]
     )
     assert any('"delta": "pinned backup answer"' in chunk for chunk in chunks)
+
+
+def test_direct_low_signal_keeps_the_persona_and_loadout_instructions(monkeypatch):
+    """A short agent-mode turn ("hi") answers as the chat's persona and under its
+    loadout's instructions, for the selected model and for every fallback."""
+    primary = ("https://selected.example/v1", "generic-model", {})
+    backup = ("https://backup.example/v1", "other-model", {})
+    sent = []
+
+    monkeypatch.setattr(agent_loop, "get_setting", lambda key, default=None: default)
+    monkeypatch.setattr(agent_loop, "get_mcp_manager", lambda: None)
+    monkeypatch.setattr(
+        agent_loop,
+        "_classify_agent_request",
+        lambda messages, latest: {
+            "low_signal": True, "continuation": False, "domains": [], "retrieval_query": latest,
+        },
+    )
+    monkeypatch.setattr(agent_loop, "_is_casual_low_signal", lambda latest: True)
+    monkeypatch.setattr(database, "get_session_settings",
+                        lambda sid, **kwargs: {"agent_instructions": "Always sign off as Scout."})
+
+    async def fake_stream(candidates, messages, **kwargs):
+        sent.append(messages)
+        for index, candidate in enumerate(candidates):
+            sent.append(kwargs["candidate_request_factory"](index, *candidate)["messages"])
+        yield 'data: {"delta": "Well met."}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_llm_with_fallback", fake_stream)
+
+    _collect(agent_loop.stream_agent_loop(
+        primary[0], primary[1],
+        [
+            {"role": "system", "content": "Your name is Socrates. Answer with questions.", "_persona": True},
+            {"role": "system", "content": "untrusted context policy"},
+            {"role": "user", "content": "hi"},
+        ],
+        relevant_tools=set(),
+        fallbacks=[backup],
+        session_id="s1",
+        _is_teacher_run=True,
+    ))
+
+    assert len(sent) == 3
+    for request in sent:
+        text = "\n".join(m["content"] for m in request if m["role"] == "system")
+        assert "Your name is Socrates" in text
+        assert "Always sign off as Scout." in text
+        assert "untrusted context policy" not in text
+        assert "You are Odysseus" not in text  # the persona's name is not contradicted
+        assert request[-1] == {"role": "user", "content": "hi"}
+        assert all("_persona" not in m for m in request)

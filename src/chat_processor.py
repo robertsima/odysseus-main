@@ -436,11 +436,14 @@ class ChatProcessor:
         rag_sources = []
         retrieval_query = (retrieval_query or message).strip()
 
-        # Add preset system prompt if specified
+        # Add preset system prompt if specified. `_persona` marks it so paths
+        # that rebuild the message list (the agent's short-reply path) can
+        # carry it over; llm_core strips underscore keys before sending.
         if preset_system_prompt:
             preface.append({
                 "role": "system",
-                "content": preset_system_prompt
+                "content": preset_system_prompt,
+                "_persona": True,
             })
         preface.append({
             "role": "system",

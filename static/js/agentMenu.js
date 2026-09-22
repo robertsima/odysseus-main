@@ -166,6 +166,16 @@ function loadoutItem(name, title, detail) {
   </button>`;
 }
 
+/** The persona or custom prompt the next turn sends, if any. It applies in
+ *  Agent mode too, alongside a loadout's own instructions. */
+function personaNote() {
+  const name = presetsModule.getCharacterName?.() || '';
+  if (name) return `<small>Persona: ${esc(name)}</small>`;
+  const custom = presetsModule.getSelectedPreset?.() && presetsModule.getPreset?.('custom');
+  if (custom && custom.enabled !== false && custom.system_prompt) return '<small>Custom prompt on</small>';
+  return '';
+}
+
 function menuHtml() {
   const profiles = state.profiles;
   let loadouts;
@@ -184,7 +194,7 @@ function menuHtml() {
     <div class="agent-menu-loadouts" role="group" aria-label="Loadouts">${loadouts}</div>
     <div class="agent-menu-sep" role="separator"></div>
     <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="panel">${ICONS.panel}<span>Open Agents panel</span></button>
-    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="prompts">${ICONS.prompt}<span>Prompts &amp; personas</span></button>
+    <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="prompts">${ICONS.prompt}<span class="agent-menu-text"><span>Prompts &amp; personas</span>${personaNote()}</span></button>
     <button type="button" class="overflow-menu-item" role="menuitem" data-agent-action="manage">${ICONS.gear}<span>Manage loadouts</span></button>`;
 }
 
