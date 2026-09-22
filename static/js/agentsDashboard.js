@@ -72,6 +72,8 @@ const state = {
   detailTab: 'overview',
   archiveView: false,
   detailDrafts: new Map(),
+  // Parent session ids whose worker chats are unfolded under them in Recent.
+  expandedParents: new Set(),
   compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
 
@@ -339,17 +341,38 @@ function fleetHtml() {
   // Do not turn the fleet into an unbounded scroll just because a user has a
   // long history.  Filtering still searches every visible row, while paging
   // limits the expensive, interactive cards that need to stay easy to scan.
-  const candidates = rows.filter((row) => shown.some(([, , match]) => match(row)));
+  // Recent lists top-level agents only. A finished worker chat folds under its
+  // parent's card when that parent is listed in Recent too; otherwise (parent
+  // still running, archived, or filtered out) it stays visible on its own.
+  // Needs you / Active stay flat so a blocked or live worker is never hidden.
+  const recentMatch = BUCKETS.find(([k]) => k === 'recent')[2];
+  const recentIds = new Set(rows.filter(recentMatch).map((row) => row.session_id));
+  const workersOf = new Map();
+  rows.forEach((row) => {
+    if (!recentMatch(row) || !row.parent_session || !recentIds.has(row.parent_session)) return;
+    if (!workersOf.has(row.parent_session)) workersOf.set(row.parent_session, []);
+    workersOf.get(row.parent_session).push(row);
+  });
+  const nested = new Set([...workersOf.values()].flat().map((row) => row.session_id));
+  const listed = (key, row) => key !== 'recent' || !nested.has(row.session_id);
+  const candidates = rows.filter((row) => shown.some(([key, , match]) => match(row) && listed(key, row)));
   const pages = Math.max(1, Math.ceil(candidates.length / FLEET_PAGE_SIZE));
   state.fleetPage = Math.min(Math.max(0, state.fleetPage), pages - 1);
   const pageRows = new Set(candidates.slice(state.fleetPage * FLEET_PAGE_SIZE, (state.fleetPage + 1) * FLEET_PAGE_SIZE).map((row) => row.session_id));
   const html = shown.map(([key, label, match]) => {
-    const items = rows.filter((row) => match(row) && pageRows.has(row.session_id));
+    const items = rows.filter((row) => match(row) && listed(key, row) && pageRows.has(row.session_id));
     if (!items.length) return '';
     const solo = shown.length === 1;
+    const cards = items.map((row) => {
+      const workers = key === 'recent' ? (workersOf.get(row.session_id) || []) : [];
+      if (!workers.length) return rowHtml(row);
+      const open = state.expandedParents.has(row.session_id);
+      return `${rowHtml(row, { workers: workers.length, open })}${open
+        ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${workers.map((w) => rowHtml(w)).join('')}</div>` : ''}`;
+    }).join('');
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
       solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
-    }<div class="ag-card-grid">${items.map(rowHtml).join('')}</div></div>`;
+    }<div class="ag-card-grid">${cards}</div></div>`;
   }).join('');
   if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
   if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
@@ -525,7 +548,7 @@ function configEditorHtml(row) {
   </div>`;
   const panels = { general: generalPanel, tools: toolsPanel, knowledge: knowledgePanel, connections: connectionsPanel };
   return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><small>Choosing a preset loads its settings; this agent keeps its own copy once saved.</small></div>
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
     <div data-ag-plugin-picker></div>
@@ -543,7 +566,7 @@ function loadoutWorkspaceHtml() {
     ${configEditorHtml(row)}
   </section>`;
 }
-function rowHtml(r) {
+function rowHtml(r, nest = {}) {
   const sel = r.session_id === state.selected;
   const dur = r.status === 'running' && r.started_at ? fmtDur(r.started_at) : '';
   // Two lines, not three. The model/profile/worker chips used to occupy a whole
@@ -568,6 +591,7 @@ function rowHtml(r) {
       <div class="ag-card-status">${pill(status)}${blocked}</div>
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
+      ${nest.workers ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}">${nest.open ? '▾' : '▸'} ${nest.workers} worker${nest.workers === 1 ? '' : 's'}</button>` : ''}
     </div>
     <div class="ag-card-actions"><button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
   </div>`;
@@ -737,8 +761,19 @@ function onConfigChange(e) {
   const editor = e.target.closest('.ag-loadout-editor');
   const row = state.rows.find((item) => item.session_id === state.selected);
   if (!editor || !row) return;
-  const draft = configFor(row);
   const field = e.target.dataset.config;
+  const profile = field === 'agent_profile' && state.profiles.find((item) => item.name === e.target.value);
+  if (profile) {
+    // Choosing a preset loads its whole loadout. Recording only the name left
+    // every field as it was, and saving then stored the old settings under
+    // the new preset's label.
+    state.configDrafts.set(row.session_id, profileConfig(profile));
+    render();
+    const msg = $('ag-config-msg');
+    if (msg) msg.textContent = `Loaded ${profile.name} — unsaved`;
+    return;
+  }
+  const draft = configFor(row);
   if (field) {
     draft[field] = e.target.type === 'checkbox' ? !!e.target.checked
       : e.target.type === 'number' ? Number(e.target.value || 0) : e.target.value;
@@ -856,6 +891,11 @@ async function onClick(e) {
       }
       updateStats(); renderFleetOnly(); renderDetail();
     }
+    else if (act === 'toggle-workers') {
+      const sid = b.dataset.sid;
+      state.expandedParents.has(sid) ? state.expandedParents.delete(sid) : state.expandedParents.add(sid);
+      renderFleetOnly();
+    }
     else if (act === 'fleet-page') {
       state.fleetPage = Math.max(0, Number(b.dataset.page || 0));
       renderFleetOnly();
@@ -886,15 +926,6 @@ async function onClick(e) {
       state.configTab = b.dataset.tab || 'general';
       render();
       syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
-    }
-    else if (act === 'apply-profile') {
-      const row = state.rows.find((item) => item.session_id === state.selected);
-      const selectedName = document.querySelector('.ag-loadout-editor [data-config="agent_profile"]')?.value || '';
-      const profile = state.profiles.find((item) => item.name === selectedName);
-      if (!row || !profile) { uiModule.showToast('Choose a preset first', 'warning'); return; }
-      state.configDrafts.set(row.session_id, profileConfig(profile));
-      state.configOpen ? render() : renderDetail();
-      uiModule.showToast(`Loaded ${profile.name}; save to apply it to this agent`);
     }
     else if (act === 'save-config') {
       const row = state.rows.find((item) => item.session_id === state.selected);
