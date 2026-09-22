@@ -812,6 +812,33 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key == "claude_code_restricted":
                 current[key] = bool(val) if not isinstance(val, str) else val.strip().lower() in ("1", "true", "yes", "on")
                 continue
+            if key == "claude_code_backend":
+                val = str(val or "local").strip().lower()
+                if val not in ("local", "cloud"):
+                    raise HTTPException(400, f"{key} must be local or cloud")
+                current[key] = val
+                continue
+            if key == "claude_cloud_repositories":
+                items = val if isinstance(val, list) else re.split(r"[\s,]+", str(val or ""))
+                cleaned = []
+                for item in items:
+                    slug = str(item or "").strip().strip("/")
+                    if slug.lower().startswith("https://github.com/"):
+                        slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
+                    if not slug:
+                        continue
+                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", slug):
+                        raise HTTPException(400, f"{key}: {slug!r} is not an owner/repo slug")
+                    if slug.lower() not in {c.lower() for c in cleaned}:
+                        cleaned.append(slug)
+                current[key] = cleaned[:50]
+                continue
+            if key == "claude_cloud_workflow":
+                val = str(val or "").strip() or "odysseus-claude.yml"
+                if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}\.ya?ml", val):
+                    raise HTTPException(400, f"{key} must be a workflow file name like odysseus-claude.yml")
+                current[key] = val
+                continue
             if key == "agent_profiles":
                 from src.agent_profiles import validate_profiles
 

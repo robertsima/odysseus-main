@@ -71,6 +71,16 @@ judgment.
 - Read `result`, `changed_files`, `branch`, `commit`, and
   `permission_denials` from the reply; verify the diff with the workspace file
   tools; publish only through `manage_agent_worktree`.
+- **Cloud runner.** When nobody should sign in inside the container, Claude
+  Code runs in GitHub Actions instead (`src/claude_cloud.py`). Odysseus
+  dispatches `integrations/claude/github/odysseus-claude.yml` in an
+  allowlisted repository (`claude_cloud_repositories`). Anthropic's official
+  action runs Claude with the operator's credential from the repository's
+  secrets, on a `claude/odysseus-<id>` branch. The workflow itself commits,
+  pushes and opens a draft PR, and Odysseus follows the run and reports the
+  result, branch and PR. Delegate with `repository: "owner/repo"` or
+  `via: "cloud"`; `start` + `poll` as usual, and `status` includes a `cloud`
+  section.
 - Configuration lives in Settings > Tools > Claude Code (`claude_code_*`
   settings, admin-only) with `CLAUDE_CODE_*` environment variables as the
   fallback. The bundled `claude-code-delegation` skill carries the full

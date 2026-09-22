@@ -204,6 +204,13 @@ DEFAULT_SETTINGS = {
     "claude_code_max_concurrent_tasks": 0,
     "claude_code_model": "",
     "claude_code_restricted": True,
+    # Cloud runner (src/claude_cloud.py): Claude Code in GitHub Actions on
+    # these owner/repo slugs, with the operator's credential kept in each
+    # repository's secrets. "local" (default) or "cloud" decides where a
+    # delegation without an explicit `via` or cloud repository goes.
+    "claude_code_backend": "local",
+    "claude_cloud_repositories": [],
+    "claude_cloud_workflow": "odysseus-claude.yml",
     "claude_code_odysseus_url": "",
     "claude_code_odysseus_token_file": "",
     # Ask a stream-json-capable Claude Code for its transcript as it runs, so

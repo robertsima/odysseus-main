@@ -2712,6 +2712,28 @@
                 <span id="set-ccMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></span>
               </div>
             </div>
+            <h3 class="agent-profiles-title" style="margin-top:14px">Cloud runner (GitHub Actions)</h3>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs Claude Code in GitHub's cloud with Anthropic's official GitHub Action, so nothing has to be signed in inside this container. Your Claude credential lives only in each repository's secrets (<code>CLAUDE_CODE_OAUTH_TOKEN</code> from <code>claude setup-token</code>, or <code>ANTHROPIC_API_KEY</code>); Odysseus never sees it. Claude works on a <code>claude/odysseus-*</code> branch and the result comes back as a draft pull request. Uses the GitHub credential configured for the agent worktree.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label" title="Where a delegation goes when it names neither via nor a cloud repository.">Default runner</label>
+                <select id="set-ccBackend" class="settings-select" style="width:220px;"><option value="local">This container (local)</option><option value="cloud">GitHub Actions (cloud)</option></select>
+              </div>
+              <div class="settings-row" style="align-items:flex-start;">
+                <label class="settings-label" title="owner/repo slugs Claude may be dispatched to. Each needs the workflow file and a Claude secret.">Cloud repositories<br><span style="font-weight:normal;opacity:.7">owner/repo, one per line</span></label>
+                <textarea id="set-ccCloudRepos" rows="3" placeholder="robertsima/odysseus-main" class="settings-select" style="width:320px;font-family:var(--mono, ui-monospace, monospace);font-size:12px;"></textarea>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="File name under .github/workflows/ in each repository.">Workflow file</label>
+                <input id="set-ccCloudWorkflow" type="text" placeholder="odysseus-claude.yml" class="settings-select" style="width:220px;">
+              </div>
+              <div class="settings-row" style="gap:8px;">
+                <a class="btn btn-secondary" href="/api/claude-code/cloud/workflow.yml" download>Download workflow</a>
+                <button type="button" id="set-ccCloudCheck" class="btn btn-secondary">Check cloud setup</button>
+              </div>
+              <div class="admin-toggle-sub">Per repository: commit the workflow to <code>.github/workflows/</code>, add the Claude secret (or run <code>/install-github-app</code> in Claude Code), and under Actions › General allow read/write and "Allow GitHub Actions to create and approve pull requests".</div>
+              <div id="set-ccCloudStatus" class="cc-status"></div>
+            </div>
             <div class="admin-toggle-sub" style="margin:12px 0 6px">Recent delegations (chat and API). Prompts are never stored; each row is what git reported afterwards.</div>
             <div id="set-ccTasks" class="admin-user-list cc-tasks"></div>
           </div>

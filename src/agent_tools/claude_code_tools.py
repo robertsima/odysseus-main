@@ -428,6 +428,84 @@ def _canonical_allowed_tool(value: str) -> str:
     return value
 
 
+def _cloud_repositories() -> list[str]:
+    try:
+        from src import claude_cloud
+        return claude_cloud.repositories()
+    except Exception:
+        return []
+
+
+def _wants_cloud(args: dict) -> bool:
+    """Whether this delegation goes to the GitHub Actions cloud runner.
+
+    ``via: "cloud"`` (or ``"github"``) asks for it; ``via: "local"`` never.
+    Otherwise an allowlisted ``owner/repo`` repository means cloud, and the
+    ``claude_code_backend`` setting ("local" default, or "cloud") decides the
+    rest.
+    """
+    via = str(args.get("via") or "").strip().lower()
+    if via in ("cloud", "github", "actions"):
+        return True
+    if via == "local":
+        return False
+    repos = _cloud_repositories()
+    requested = str(args.get("repository") or "").strip()
+    if requested and any(requested.lower() == r.lower() for r in repos):
+        return True
+    return bool(repos) and str(_setting("claude_code_backend", "local") or "local").lower() == "cloud"
+
+
+async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name: str) -> Optional[dict]:
+    """Handle the action on the cloud runner, or return None for the local one."""
+    task_id = str(args.get("task_id") or "").strip()
+    if action in ("poll", "get", "cancel"):
+        from src import claude_cloud
+        if not claude_cloud.is_cloud_task(task_id):
+            return None
+        try:
+            if action == "cancel":
+                record = await claude_cloud.cancel(task_id, owner=owner)
+            else:
+                try:
+                    wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
+                except (TypeError, ValueError):
+                    wait = 0
+                if claude_cloud.get(task_id, owner) is None:
+                    record = None
+                else:
+                    record = await claude_cloud.wait(task_id, wait) if wait else await claude_cloud.refresh(task_id)
+        except Exception as exc:
+            return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
+        if record is None:
+            return {"error": _tool_error(f"task {task_id} not found", tool_name), "exit_code": 1}
+        return claude_cloud.report(record)
+    if action not in ("run", "start") or not _wants_cloud(args):
+        return None
+    from src import claude_cloud
+    repos = claude_cloud.repositories()
+    repository = str(args.get("repository") or "").strip()
+    if not repository or repository.lower() == "auto":
+        if len(repos) != 1:
+            return {"error": _tool_error("repository is required for the cloud runner; one of: "
+                                         + (", ".join(repos) or "none configured"), tool_name), "exit_code": 1}
+        repository = repos[0]
+    label = str(args.get("label") or "").strip()[:120] or None
+    try:
+        record = await claude_cloud.dispatch(repository, str(args.get("prompt") or ""),
+                                             base_branch=str(args.get("base_branch") or ""),
+                                             owner=owner, session_id=session_id, label=label)
+        if action == "run":
+            try:
+                timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
+            except (TypeError, ValueError):
+                timeout = 900
+            record = await claude_cloud.wait(record["task_id"], timeout)
+    except Exception as exc:
+        return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
+    return claude_cloud.report(record)
+
+
 def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
     """Validate a delegation request. Returns either
     {"repository": Path, "prompt": str, "timeout": int, "tools": list[str], "model": str|None}
@@ -631,7 +709,10 @@ async def status_report() -> dict:
         hints.append(info["error"])
     if info["available"] and auth.get("logged_in") is False:
         hints.append("The binary is not signed in. Run `claude` once as the container user "
-                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY." % _claude_home())
+                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY. "
+                     "To avoid signing in inside the container, use the cloud runner instead: Settings > Tools > "
+                     "Claude Code > Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
+                     "the repository's secrets." % _claude_home())
     if info["available"] and "--permission-prompts" not in info["flags"]:
         hints.append("Claude Code is older than 2.1.259; upgrade for --permission-prompts none "
                      "(prompts are still denied in headless mode, but Claude may retry them).")
@@ -1161,7 +1242,17 @@ class ClaudeCodeTool:
         owner = (ctx or {}).get("owner") if isinstance(ctx, dict) else None
         session_id = (ctx or {}).get("session_id") if isinstance(ctx, dict) else None
         if action == "status":
-            return await status_report()
+            report = await status_report()
+            if _cloud_repositories():
+                try:
+                    from src import claude_cloud
+                    report["cloud"] = await claude_cloud.status()
+                except Exception as exc:
+                    report["cloud"] = {"ready": False, "hints": [str(exc)]}
+            return report
+        cloud = await _cloud_action(action, args, owner=owner, session_id=session_id, tool_name=invoked_tool)
+        if cloud is not None:
+            return cloud
         if action in ("list_repositories", "repositories"):
             repos = discover_repositories()
             default_repo, how = default_repository()
@@ -1203,7 +1294,11 @@ class ClaudeCodeTool:
             _last_polls.pop(task_id, None)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
-            return {"tasks": runner.summaries(owner=owner), "exit_code": 0}
+            tasks = runner.summaries(owner=owner)
+            if _cloud_repositories():
+                from src import claude_cloud
+                tasks = tasks + claude_cloud.summaries(owner=owner)
+            return {"tasks": tasks, "exit_code": 0}
         parsed = _parse_args(args, invoked_tool)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}

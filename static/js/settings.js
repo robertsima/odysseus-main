@@ -2737,6 +2737,7 @@ async function initClaudeCodeSettings() {
     binary: el('set-ccBinary'), home: el('set-ccHome'), roots: el('set-ccRoots'),
     defaultRepo: el('set-ccDefaultRepo'), concurrency: el('set-ccConcurrency'),
     model: el('set-ccModel'), restricted: el('set-ccRestricted'),
+    backend: el('set-ccBackend'), cloudRepos: el('set-ccCloudRepos'), cloudWorkflow: el('set-ccCloudWorkflow'),
     callbackUrl: el('set-ccCallbackUrl'), tokenFile: el('set-ccTokenFile'),
   };
   var msg = el('set-ccMsg');
@@ -2753,6 +2754,9 @@ async function initClaudeCodeSettings() {
     if (f.concurrency) f.concurrency.value = settings.claude_code_max_concurrent_tasks ? settings.claude_code_max_concurrent_tasks : '';
     if (f.model) f.model.value = settings.claude_code_model || '';
     if (f.restricted) f.restricted.checked = settings.claude_code_restricted !== false;
+    if (f.backend) f.backend.value = settings.claude_code_backend === 'cloud' ? 'cloud' : 'local';
+    if (f.cloudRepos) f.cloudRepos.value = Array.isArray(settings.claude_cloud_repositories) ? settings.claude_cloud_repositories.join('\n') : '';
+    if (f.cloudWorkflow) f.cloudWorkflow.value = settings.claude_cloud_workflow || '';
     if (f.callbackUrl) f.callbackUrl.value = settings.claude_code_odysseus_url || '';
     if (f.tokenFile) f.tokenFile.value = settings.claude_code_odysseus_token_file || '';
   }
@@ -2773,6 +2777,9 @@ async function initClaudeCodeSettings() {
       claude_code_max_concurrent_tasks: Math.min(conc, 16),
       claude_code_model: (f.model && f.model.value.trim()) || '',
       claude_code_restricted: f.restricted ? !!f.restricted.checked : true,
+      claude_code_backend: (f.backend && f.backend.value) || 'local',
+      claude_cloud_repositories: f.cloudRepos ? f.cloudRepos.value.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
+      claude_cloud_workflow: (f.cloudWorkflow && f.cloudWorkflow.value.trim()) || 'odysseus-claude.yml',
       claude_code_odysseus_url: (f.callbackUrl && f.callbackUrl.value.trim()) || '',
       claude_code_odysseus_token_file: (f.tokenFile && f.tokenFile.value.trim()) || '',
     };
@@ -2860,6 +2867,30 @@ async function initClaudeCodeSettings() {
   }
 
   Object.keys(f).forEach(function (k) { if (f[k]) f[k].addEventListener('change', save); });
+  // Cloud runner: credential, allowlisted repositories, and whether each has
+  // the workflow file (GET /api/claude-code/cloud/status).
+  var cloudBox = el('set-ccCloudStatus');
+  async function checkCloud() {
+    if (!cloudBox) return;
+    cloudBox.textContent = 'Checking…';
+    try {
+      var r = await fetch('/api/claude-code/cloud/status', { credentials: 'same-origin' });
+      var s = await r.json();
+      if (!r.ok) throw new Error(s.detail || r.status);
+      var rows = ['<div class="cc-status-line"><span class="cc-pill ' + (s.ready ? 'ok' : 'bad') + '">' + (s.ready ? 'ready' : 'not ready') + '</span> '
+        + 'GitHub credential: ' + _e(s.credential === 'github_app' ? 'GitHub App' : s.credential === 'token' ? 'token' : 'none') + '</div>'];
+      (s.repositories || []).forEach(function (row) {
+        rows.push('<div class="cc-status-line">' + (row.workflow ? '<span class="cc-pill ok">workflow found</span> ' : '<span class="cc-pill bad">not set up</span> ')
+          + '<code>' + _e(row.repository) + '</code>' + (row.error ? ' <span class="cc-hint">' + _e(row.error) + '</span>' : '') + '</div>');
+      });
+      (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });
+      cloudBox.innerHTML = rows.join('');
+    } catch (e) {
+      cloudBox.innerHTML = '<span style="color:var(--red)">' + _e('Cloud status unavailable: ' + (e.message || e)) + '</span>';
+    }
+  }
+  var cloudCheckBtn = el('set-ccCloudCheck');
+  if (cloudCheckBtn) cloudCheckBtn.addEventListener('click', checkCloud);
   var checkBtn = el('set-ccCheck');
   if (checkBtn) checkBtn.addEventListener('click', function () { checkStatus(); loadTasks(); });
   var refreshBtn = el('set-ccRefreshTasks');
