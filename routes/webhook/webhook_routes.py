@@ -378,6 +378,12 @@ def setup_webhook_routes(
 
         messages = [{"role": m.role, "content": m.content} for m in sess.history]
 
+        # Refresh session-backed provider credentials, as the chat route does.
+        try:
+            from routes.chat_helpers import resolve_session_auth
+            resolve_session_auth(sess, session_id, getattr(sess, "owner", None))
+        except Exception:
+            pass
         reply = await llm_call_async(
             sess.endpoint_url, sess.model, messages,
             headers=sess.headers, timeout=120,

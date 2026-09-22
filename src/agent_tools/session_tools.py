@@ -473,6 +473,16 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                     if not response.strip() and tool_events:
                         response = "(the sub-agent finished with tool calls but no closing text)"
                 else:
+                    # Same request-local refresh the chat route and headless
+                    # workers do. The chat's saved headers can hold a bearer
+                    # that has since rotated (ChatGPT subscription, Copilot),
+                    # which 401'd here while the calling chat kept working.
+                    try:
+                        from routes.chat_helpers import resolve_session_auth
+                        await asyncio.to_thread(resolve_session_auth, sess, target_sid,
+                                                owner if owner is not None else getattr(sess, "owner", None))
+                    except Exception:
+                        logger.warning("send_to_session: credential refresh failed for %s", target_sid, exc_info=True)
                     response = await llm_call_async(
                         sess.endpoint_url, sess.model, context,
                         headers=sess.headers,

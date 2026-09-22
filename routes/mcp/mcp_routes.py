@@ -333,6 +333,87 @@ def setup_mcp_routes(mcp_manager: McpManager):
         finally:
             db.close()
 
+    @router.put("/servers/{server_id}")
+    async def update_server(
+        server_id: str,
+        request: Request,
+        name: str = Form(...),
+        transport: str = Form("stdio"),
+        command: str = Form(None),
+        args: str = Form("[]"),
+        env: str = Form("{}"),
+        url: str = Form(None),
+    ):
+        """Change an existing server's connection (name, transport, command,
+        args, env, URL) and reconnect it with the new settings. Tool
+        enable/disable choices and OAuth configuration are kept. Admin-only,
+        like adding a server: a stdio command runs on the host."""
+        require_admin(request)
+        name = (name or "").strip()
+        transport = (transport or "stdio").strip().lower()
+        command = (command or "").strip() or None
+        url = (url or "").strip() or None
+        if not name:
+            raise HTTPException(400, "name is required")
+        if transport not in ("stdio", "sse", "http"):
+            raise HTTPException(400, "transport must be stdio, sse or http")
+        if transport == "stdio" and not command:
+            raise HTTPException(400, "command is required for stdio transport")
+        if transport in ("sse", "http") and not url:
+            raise HTTPException(400, f"url is required for {transport.upper()} transport")
+        try:
+            parsed_args = json.loads(args) if args else []
+        except json.JSONDecodeError:
+            raise HTTPException(400, "args must be valid JSON, e.g. [\"-y\", \"pkg\"]")
+        if not isinstance(parsed_args, list):
+            raise HTTPException(400, "args must be a JSON array, e.g. [\"-y\", \"pkg\"]")
+        # Unlike add, a bad env is an error here: silently storing {} would
+        # wipe the server's existing keys.
+        try:
+            parsed_env = json.loads(env) if env else {}
+        except json.JSONDecodeError:
+            raise HTTPException(400, "env must be a JSON object, e.g. {\"API_KEY\": \"...\"}")
+        if not isinstance(parsed_env, dict):
+            raise HTTPException(400, "env must be a JSON object, e.g. {\"API_KEY\": \"...\"}")
+
+        db = SessionLocal()
+        try:
+            srv = db.query(McpServer).filter(McpServer.id == server_id).first()
+            if not srv:
+                raise HTTPException(404, "Server not found")
+            oauth_cfg = json.loads(srv.oauth_config) if srv.oauth_config else None
+            _apply_mcp_oauth_env(parsed_env, oauth_cfg)
+            srv.name = name
+            srv.transport = transport
+            srv.command = command if transport == "stdio" else None
+            srv.args = json.dumps(parsed_args)
+            srv.env = json.dumps(parsed_env)
+            srv.url = url if transport != "stdio" else None
+            enabled = bool(srv.is_enabled)
+            db.commit()
+        finally:
+            db.close()
+
+        connected = False
+        if enabled:
+            connected = await mcp_manager.restart_server(
+                server_id=server_id, name=name, transport=transport,
+                command=command if transport == "stdio" else None,
+                args=parsed_args, env=parsed_env,
+                url=url if transport != "stdio" else None,
+            )
+        status = mcp_manager.get_server_status(server_id)
+        return {
+            "id": server_id,
+            "name": name,
+            "connected": connected,
+            "status": status.get("status", "disconnected"),
+            "tool_count": status.get("tool_count", 0),
+            "error": status.get("error"),
+            "auth_url": status.get("auth_url"),
+            "needs_auth": status.get("status") == "needs_auth",
+        }
+
     @router.patch("/servers/{server_id}")
     async def toggle_server(server_id: str, request: Request, is_enabled: str = Form(...)):
         """Enable or disable an MCP server."""

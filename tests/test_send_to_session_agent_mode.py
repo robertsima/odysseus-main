@@ -201,3 +201,32 @@ async def test_profile_cannot_transiently_override_an_existing_agents_persona(en
     }), owner="alice")
     assert "requires a fresh child chat" in out["error"]
     assert "session_id: 'new'" in out["error"]
+
+
+async def test_chat_mode_refreshes_rotating_credentials_before_calling(env, monkeypatch):
+    """A chat's saved bearer can rotate (ChatGPT subscription). The chat route
+    refreshes it per request; send_to_session's chat mode must too, or it 401s
+    while the calling chat keeps working."""
+    sess, mgr = env
+    sess.headers = {"Authorization": "Bearer stale"}
+    order = []
+
+    def fake_refresh(target, sid, owner=None):
+        order.append(("refresh", sid, owner))
+        target.headers = {"Authorization": "Bearer fresh"}
+
+    async def fake_call(url, model, messages, headers=None, **kwargs):
+        order.append(("call", headers))
+        return "done"
+
+    import routes.chat_helpers as chat_helpers
+    monkeypatch.setattr(chat_helpers, "resolve_session_auth", fake_refresh)
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+
+    out = await st.send_to_session(json.dumps({"session_id": "child-1", "message": "hi", "mode": "chat"}),
+                                   session_id="parent-1", owner="alice")
+
+    assert out.get("response") == "done", out
+    assert order[0] == ("refresh", "child-1", "alice")
+    assert order[1] == ("call", {"Authorization": "Bearer fresh"})

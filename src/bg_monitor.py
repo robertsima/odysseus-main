@@ -53,6 +53,14 @@ async def _drain_agent(sess, messages, *, run_id=None):
         approval_mode = effective_approval_mode(get_session_settings(sess.id) or {})
     except Exception:
         approval_mode = None
+    # Refresh session-backed provider credentials first, as the chat route
+    # does; the chat's saved bearer may have rotated since it was stored.
+    try:
+        import asyncio
+        from routes.chat_helpers import resolve_session_auth
+        await asyncio.to_thread(resolve_session_auth, sess, str(getattr(sess, "id", "")), getattr(sess, "owner", None))
+    except Exception:
+        pass
     full = ""
     tool_events = []
     round_num = 1

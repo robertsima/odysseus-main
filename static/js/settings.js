@@ -5861,6 +5861,7 @@ async function initUnifiedIntegrations() {
         const srv = servers.find(s => (s.id || s.name) === editId);
         if (!srv) { formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Server not found</div>'; return; }
         const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+        const escAttr = s => esc(s).replace(/"/g, '&quot;');
         const statusColor = srv.needs_oauth ? '#e5a33a' : srv.status === 'connected' ? 'var(--green,#50fa7b)' : srv.status === 'error' ? 'var(--red)' : 'var(--fg)';
         const toolInfo = srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : '';
         const statusText = srv.needs_oauth ? 'Needs authorization' : srv.status === 'connected' ? `Connected (${toolInfo})` : srv.status === 'error' ? `Error: ${esc(srv.error || 'unknown')}` : 'Disconnected';
@@ -5878,8 +5879,79 @@ async function initUnifiedIntegrations() {
               <button class="admin-btn-add" id="uf-mcp-toggle" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">${srv.is_enabled ? 'Disable' : 'Enable'}</button>
               <button class="admin-btn-add" id="uf-mcp-cancel" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Close</button>
             </div>
+            <details class="uf-mcp-conn"${srv.status === 'connected' ? '' : ' open'}>
+              <summary>Connection settings</summary>
+              <div class="uf-mcp-conn-sub">How Odysseus starts or reaches this server. Saving reconnects it with the new settings; your tool choices below are kept.</div>
+              <div class="settings-row"><label class="settings-label">Name</label><input id="uf-mcp-edit-name" class="settings-input" value="${escAttr(srv.name)}"></div>
+              <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-edit-transport" class="settings-input">
+                <option value="stdio"${srv.transport === 'stdio' ? ' selected' : ''}>stdio (runs a local command)</option>
+                <option value="sse"${srv.transport === 'sse' ? ' selected' : ''}>SSE (remote URL)</option>
+                <option value="http"${srv.transport === 'http' ? ' selected' : ''}>Streamable HTTP (remote URL)</option>
+              </select></div>
+              <div data-mcp-edit-for="stdio">
+                <div class="settings-row"><label class="settings-label">Command</label><input id="uf-mcp-edit-cmd" class="settings-input" value="${escAttr(srv.command || '')}" placeholder="npx"></div>
+                <div class="settings-row"><label class="settings-label">Args</label><textarea id="uf-mcp-edit-args" class="settings-input" rows="2" placeholder='["-y", "@modelcontextprotocol/server-filesystem"]'>${esc(JSON.stringify(srv.args || []))}</textarea></div>
+                <div class="uf-mcp-conn-hint">A JSON list, one entry per argument.</div>
+              </div>
+              <div data-mcp-edit-for="remote">
+                <div class="settings-row"><label class="settings-label">URL</label><input id="uf-mcp-edit-url" class="settings-input" value="${escAttr(srv.url || '')}" placeholder="http://localhost:3001/sse"></div>
+              </div>
+              <div class="settings-row"><label class="settings-label">Env</label><textarea id="uf-mcp-edit-env" class="settings-input" rows="3" placeholder='{"API_KEY": "..."}'>${esc(JSON.stringify(srv.env || {}, null, 2))}</textarea></div>
+              <div class="uf-mcp-conn-hint">Environment variables as a JSON object: API keys, tokens, paths. Stored on the server.</div>
+              <div class="uf-mcp-conn-actions"><span id="uf-mcp-conn-msg"></span><button type="button" class="admin-btn-add" id="uf-mcp-save-conn">Save &amp; reconnect</button></div>
+            </details>
             <div id="uf-mcp-tools-panel"></div>
           </div>`;
+        // Connection settings: show the fields for the chosen transport, then
+        // save through PUT /api/mcp/servers/{id}, which reconnects.
+        const _syncMcpEditTransport = () => {
+          const remote = el('uf-mcp-edit-transport').value !== 'stdio';
+          formEl.querySelector('[data-mcp-edit-for="stdio"]').style.display = remote ? 'none' : '';
+          formEl.querySelector('[data-mcp-edit-for="remote"]').style.display = remote ? '' : 'none';
+        };
+        el('uf-mcp-edit-transport').addEventListener('change', _syncMcpEditTransport);
+        _syncMcpEditTransport();
+        el('uf-mcp-save-conn').addEventListener('click', async (ev) => {
+          const btn = ev.currentTarget;
+          if (btn.disabled) return;
+          const msg = el('uf-mcp-conn-msg');
+          const transport = el('uf-mcp-edit-transport').value;
+          let args = '[]';
+          let env = '{}';
+          try {
+            const parsedArgs = JSON.parse(el('uf-mcp-edit-args').value.trim() || '[]');
+            if (!Array.isArray(parsedArgs)) throw new Error();
+            args = JSON.stringify(parsedArgs);
+          } catch (_) { msg.textContent = 'Args must be a JSON list, e.g. ["-y", "pkg"]'; return; }
+          try {
+            const parsedEnv = JSON.parse(el('uf-mcp-edit-env').value.trim() || '{}');
+            if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) throw new Error();
+            env = JSON.stringify(parsedEnv);
+          } catch (_) { msg.textContent = 'Env must be a JSON object, e.g. {"API_KEY": "..."}'; return; }
+          const fd = new FormData();
+          fd.append('name', el('uf-mcp-edit-name').value.trim());
+          fd.append('transport', transport);
+          fd.append('command', el('uf-mcp-edit-cmd').value.trim());
+          fd.append('args', args);
+          fd.append('env', env);
+          fd.append('url', el('uf-mcp-edit-url').value.trim());
+          _setBtnLoading(btn, true, 'Saving…');
+          msg.textContent = '';
+          try {
+            const r = await fetch(`/api/mcp/servers/${srv.id}`, { method: 'PUT', body: fd, credentials: 'same-origin' });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) { msg.textContent = d.detail || `Not saved (${r.status})`; return; }
+            msg.textContent = !srv.is_enabled ? 'Saved (server is disabled)'
+              : d.connected ? `Saved. Connected (${d.tool_count} tools)` : `Saved, but not connected: ${d.error || d.status || 'unknown'}`;
+            await renderList();
+            notifyIntegrationsChanged();
+            if (d.needs_auth && d.auth_url) _handleMcpAuth(srv.id, d.auth_url);
+          } catch (e) {
+            msg.textContent = 'Failed to save';
+          } finally {
+            _setBtnLoading(btn, false, 'Save & reconnect');
+          }
+        });
         // Reconnect
         // Reconnecting a stdio server takes a couple of seconds. Without an
         // in-flight guard an impatient second/third click fired another
