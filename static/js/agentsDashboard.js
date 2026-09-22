@@ -76,6 +76,8 @@ const state = {
   expandedParents: new Set(),
   // Saved personas the loadout editor can copy from (loadPersonaSources).
   personaSources: null,
+  // The user closed the room this page session; runs no longer reopen it.
+  dismissed: false,
   compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
 
@@ -1094,6 +1096,21 @@ async function selectChat(sid) {
 }
 async function openChat(sid) {
   await selectChat(sid);
+  // The room fills the chat area, so opening a chat from it used to switch the
+  // chat hidden underneath: nothing seemed to happen, and only the chat's title
+  // and status line showed around the room's edges. Make the opened chat
+  // visible: dock the room beside it, or on narrow screens, where the room is
+  // a full-screen sheet, tuck it into the dock.
+  showChatBesideRoom();
+}
+function isDocked(root) {
+  return root.classList.contains('modal-left-docked') || root.classList.contains('modal-right-docked');
+}
+function showChatBesideRoom() {
+  const root = $(MODAL_ID);
+  if (!root || !state.open || isDocked(root)) return;
+  if (window.innerWidth <= 900) { Modals.minimize(MODAL_ID); return; }
+  applyEdgeDock(root, 'right');
 }
 
 // ── open / close ──────────────────────────────────────────────────────────
@@ -1109,6 +1126,8 @@ function registerWithManager() {
 }
 function hideWindow() {
   const root = $(MODAL_ID); if (!root) return;
+  // Closed by the user (close button, Escape, rail toggle): stop auto-opening.
+  if (state.open) state.dismissed = true;
   const restoreFocus = root.contains(document.activeElement);
   state.open = false;
   root.hidden = true;
@@ -1126,8 +1145,9 @@ function bringToFront() {
   const root = $(MODAL_ID); if (!root) return;
   root.style.zIndex = String(nextToolWindowZ({ exclude: root, current: root.style.zIndex }));
 }
-export function open({ focus = true } = {}) {
+export function open({ focus = true, auto = false } = {}) {
   const root = $('agents-dashboard'); if (!root) return;
+  if (!auto) state.dismissed = false;
   registerWithManager();
   if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }
   if (!state.open) returnFocus = document.activeElement;
@@ -1153,8 +1173,13 @@ export function open({ focus = true } = {}) {
  * when it is already open or the user minimized it, and keeps focus in the
  * composer so the user can keep typing. */
 export function openForRun() {
-  if (state.open || Modals.isMinimized(MODAL_ID)) return;
-  open({ focus: false });
+  // Once the user has closed the room, a run starting is not a reason to put it
+  // back over their chat. Every worker leg, sub-agent and hand-off starts a run,
+  // so it kept reappearing. Opening it by hand clears this.
+  if (state.open || state.dismissed || Modals.isMinimized(MODAL_ID)) return;
+  open({ focus: false, auto: true });
+  // Opened for them, not by them: sit beside the chat rather than on top of it.
+  showChatBesideRoom();
 }
 export function close() {
   if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);

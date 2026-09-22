@@ -103,3 +103,26 @@ async def test_gives_up_after_the_wait_limit(busy, monkeypatch):
     await asyncio.gather(*list(agent_control._PENDING_HANDOFFS))
     assert not ran
     assert parent.history[-1].metadata["source"] == "worker"  # still saved for later
+
+
+async def test_a_running_worker_chat_shows_its_task(monkeypatch):
+    """The task used to be saved only when the run ended, so opening a running
+    worker's chat showed an empty "New chat ready" screen."""
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    worker_chat = _Chat("w-2")
+    seen = {}
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _Manager(worker_chat))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen["history_during_run"] = [m.content for m in sess.history]
+        return "A poem.", []
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+    rec = await agent_control.launch_worker(owner="alice", task="write a poem", preflight=False)
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen["history_during_run"] == ["write a poem"]
+    assert [m.content for m in worker_chat.history] == ["write a poem", "A poem."]  # not saved twice

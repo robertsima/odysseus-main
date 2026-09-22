@@ -691,6 +691,15 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     # on this first turn and every reopened turn. Keep it out of history so it
     # cannot be duplicated or drift from the saved agent configuration.
     context: List[Dict[str, Any]] = [{"role": "user", "content": task}]
+    # Show the task in the worker's chat from the start. It was saved only when
+    # the run ended, so opening a running worker's chat showed an empty "New
+    # chat ready" screen. The run reads `context`, not the chat history.
+    try:
+        from core.models import ChatMessage as _ChatMessage
+        sess.add_message(_ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
+        manager.save_sessions()
+    except Exception:
+        logger.debug("worker task persist failed", exc_info=True)
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
     # The loadout's own round budget, or 0 for no ceiling (the default). It is
     # recorded on the run and returned to the caller because it is the number a
@@ -780,7 +789,6 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             error_detail = str(exc)[:2000]
             logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
         try:
-            sess.add_message(ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
             if error_detail:

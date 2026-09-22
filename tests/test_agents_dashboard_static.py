@@ -288,3 +288,20 @@ def test_agent_mode_swaps_prompt_for_an_agents_menu():
     assert "openCustomPresetModal" in menu and "agentsDashboard?.open" in menu
     # A loadout picked before the chat exists is applied before its first turn.
     assert "await window.agentMenuModule.applyPendingLoadout(payload.id)" in sessions
+
+
+def test_opening_a_chat_from_the_room_shows_it_beside_the_room():
+    """The room fills the chat area, so ↗ used to switch the chat hidden under
+    it. It now docks beside the opened chat (or tucks away on narrow screens)."""
+    open_chat = AGENTS.split("async function openChat(sid)", 1)[1].split("function isDocked", 1)[0]
+    assert "showChatBesideRoom()" in open_chat
+    beside = AGENTS.split("function showChatBesideRoom()", 1)[1].split("\n}\n", 1)[0]
+    assert "applyEdgeDock(root, 'right')" in beside and "Modals.minimize(MODAL_ID)" in beside
+
+
+def test_a_closed_room_is_not_reopened_by_every_run():
+    for_run = AGENTS.split("export function openForRun()", 1)[1].split("export function close()", 1)[0]
+    assert "state.dismissed" in for_run and "showChatBesideRoom()" in for_run
+    hide = AGENTS.split("function hideWindow()", 1)[1].split("function workspaceRect()", 1)[0]
+    assert "state.dismissed = true" in hide
+    assert "if (!auto) state.dismissed = false;" in AGENTS
