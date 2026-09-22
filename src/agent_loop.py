@@ -2412,6 +2412,61 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
     return settings
 
 
+def _sticky_trim(dropped_by_route: Dict[tuple, Set[int]], key, route_messages, trim):
+    """Keep a trim's cut in place across rounds instead of re-cutting.
+
+    The loop's history only grows, and each round's request was trimmed
+    from scratch. Trimming stops as soon as the request fits, so the cut
+    point moved forward every round. The prompt's start changed each time,
+    and the provider's prefix cache missed on every round: a research turn
+    re-prefilled ~150k tokens per round, 12-43 s before the first token.
+    Now what a trim removed stays removed, the kept window grows by
+    appending (a cacheable prefix), and a new, deeper cut happens only when
+    that window outgrows the budget again.
+
+    Only drops of ordinary history are remembered. The trimmer may shorten
+    rather than remove the system prompt, protected messages (the open
+    document), the latest user request and the newest message; a shortened
+    copy must not make the original look dropped.
+    """
+    dropped = dropped_by_route.get(key)
+    source = [m for m in route_messages if id(m) not in dropped] if dropped else route_messages
+    trimmed = trim(source)
+    if trimmed is source or not source:
+        return trimmed
+    from src.intent_assessment import human_user_text
+
+    exempt = {id(source[-1])}
+    # trim_for_context's anchor is the last user-role message (in textual
+    # transcripts that can be a tool-results message); the user's request
+    # is the last human one. Either may come back shortened, not removed.
+    prior_users = [m for m in source[:-1] if isinstance(m, dict) and m.get("role") == "user"]
+    if prior_users:
+        exempt.add(id(prior_users[-1]))
+    for m in reversed(prior_users):
+        if human_user_text(m) is not None:
+            exempt.add(id(m))
+            break
+    kept = {id(m) for m in trimmed}
+    newly = {
+        id(m) for m in source
+        if isinstance(m, dict)
+        and id(m) not in kept
+        and id(m) not in exempt
+        and m.get("role") != "system"
+        and not m.get("_protected")
+    }
+    if newly:
+        dropped_by_route.setdefault(key, set()).update(newly)
+    return trimmed
+
+
+# When the agent's request must be trimmed, cut to this share of the budget so
+# the kept window can grow for many rounds before it needs cutting again (each
+# cut invalidates the provider's cached prefix). See _sticky_trim.
+_AGENT_TRIM_TARGET_RATIO = 0.6
+
+
 def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False,
                                  has_persona: bool = False, persona_name: Optional[str] = None) -> str:
     """A subordinate, chat-local instruction block for a profile's worker (or "").
@@ -4787,6 +4842,9 @@ async def stream_agent_loop(
 
     _t2 = time.time()
     _route_context_lengths = {}
+    # Messages a route's trim removed, by identity, per (url, model), for the
+    # rest of this turn. See _sticky_trim below.
+    _route_trim_dropped: Dict[tuple, Set[int]] = {}
 
     def _trim_route_request_messages(candidate_url, candidate_model, route_messages):
         """Apply the candidate route's own context budget to its request."""
@@ -4833,10 +4891,18 @@ async def stream_agent_loop(
                 budget_is_explicit,
                 hard_max=hard_max,
             )
-            trimmed_messages = trim_for_context(
+            trimmed_messages = _sticky_trim(
+                _route_trim_dropped,
+                (candidate_url, candidate_model),
                 route_messages,
-                effective_budget,
-                reserve_tokens=reserve_tokens,
+                # Cut to 60% of the budget when a cut is needed, so the kept
+                # window has room to grow for many rounds before the next one.
+                lambda msgs: trim_for_context(
+                    msgs,
+                    effective_budget,
+                    reserve_tokens=reserve_tokens,
+                    target_ratio=_AGENT_TRIM_TARGET_RATIO,
+                ),
             )
             after_trim_tokens = estimate_tokens(trimmed_messages)
             if after_trim_tokens < before_trim_tokens:
