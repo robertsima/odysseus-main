@@ -5617,6 +5617,7 @@ async def stream_agent_loop(
         _round_actual_endpoint_id = actual_endpoint_id
         _round_actual_endpoint_label = actual_endpoint_label
         _round_real_input_tokens = 0
+        _round_cached_input_tokens = 0
         _round_real_output_tokens = 0
         _round_has_real_usage = False
         _round_usage_finalized = False
@@ -5804,6 +5805,12 @@ async def stream_agent_loop(
                             continue
                         round_input = normalized_usage["input_tokens"]
                         round_output = normalized_usage["output_tokens"]
+                        # Prompt-cache hits the provider reported (every path
+                        # in llm_core names them cached_input_tokens).
+                        try:
+                            _round_cached_input_tokens += max(0, int(u.get("cached_input_tokens") or 0))
+                        except (TypeError, ValueError):
+                            pass
                         real_input_tokens += round_input
                         real_output_tokens += round_output
                         _round_real_input_tokens += round_input
@@ -5961,6 +5968,19 @@ async def stream_agent_loop(
             _round_first_event_logged,
             _round_first_token_logged,
         )
+        if _round_has_real_usage:
+            # Whether the provider served this round's prompt from its cache.
+            # A long turn whose rounds read ~0% cached is re-prefilling its
+            # whole prompt every round, which is where round latency goes.
+            logger.info(
+                "[agent-usage] round=%s model=%s input=%s cached=%s (%s%%) output=%s",
+                round_num,
+                _round_actual_model or model,
+                _round_real_input_tokens,
+                _round_cached_input_tokens,
+                round(100 * _round_cached_input_tokens / _round_real_input_tokens) if _round_real_input_tokens else 0,
+                _round_real_output_tokens,
+            )
         _finalize_round_usage()
         _normalized_doc_round = (
             _normalize_stream_document_fences(

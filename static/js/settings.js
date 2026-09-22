@@ -1506,6 +1506,7 @@ async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var foldInput = el('set-agentFoldAfter');
+  var capInput = el('set-agentContextCap');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
@@ -1516,6 +1517,7 @@ async function initAgentSettings() {
     if (settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (foldInput && settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
+    if (capInput && settings.agent_input_token_hard_max) capInput.value = settings.agent_input_token_hard_max;
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -1536,6 +1538,8 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     var fold = foldInput ? clampInt(foldInput.value, 0, 500, 12) : null;
     if (foldInput) { foldInput.value = fold; payload.chat_tool_fold_after = fold; }
+    var cap = capInput ? clampInt(capInput.value, 16000, 1000000, 200000) : null;
+    if (capInput) { capInput.value = cap; payload.agent_input_token_hard_max = cap; }
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
       await _postSettings(payload);
@@ -1543,6 +1547,7 @@ async function initAgentSettings() {
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
         (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
         (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
+        (cap != null ? ' · context cap ' + Math.round(cap / 1000) + 'k' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1550,6 +1555,7 @@ async function initAgentSettings() {
 
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
+  if (capInput) capInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;

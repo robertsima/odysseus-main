@@ -736,6 +736,9 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 500),
             "agent_max_tool_calls": (0, 2000),  # 0 = unlimited
+            # Ceiling on the agent's per-round prompt when the budget scales to
+            # the model's window (src/context_budget.py).
+            "agent_input_token_hard_max": (16_000, 1_000_000),
             "chat_tool_fold_after": (0, 500),  # 0 = never fold
             "claude_code_max_concurrent_tasks": (0, 16),  # 0 = env default
             "agent_approval_ttl_seconds": (60, 3600),

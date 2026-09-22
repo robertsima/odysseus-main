@@ -2635,6 +2635,10 @@
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="100" class="settings-select" style="width:120px;">
               </div>
               <div class="settings-row">
+                <label class="settings-label" title="Most context the agent sends the model per step. The budget is 85% of the model's window, up to this cap. Higher keeps more history in view on long-context models; lower is faster and cheaper per step. Old tool results are condensed and oversized ones stored for recall either way.">Agent context cap (tokens)</label>
+                <input id="set-agentContextCap" type="text" inputmode="numeric" placeholder="200000" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
                 <label class="settings-label" title="In chat, fold the middle of a tool timeline once a turn has made this many calls. 0 = never fold.">Fold tool timeline after</label>
                 <input id="set-agentFoldAfter" type="text" inputmode="numeric" placeholder="12 (0 = never)" class="settings-select" style="width:120px;">
               </div>
