@@ -145,6 +145,70 @@ _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _S
 _SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
 
 
+# ── walk-scoped policy snapshot ────────────────────────────────────────────
+# A directory walk (glob, grep, ls) checks every directory and file against the
+# path policy. The policy's inputs come from config: the agent-worktree config
+# file (read and parsed twice per check), settings lookups, and realpath calls
+# on the same few roots. On a large tree that was ~2 ms per check locally and
+# far more on the server's overlay filesystem, where two globs over /app took
+# 97 s each. Inside a snapshot those inputs are computed once for the walk;
+# outside one (every single-path check) nothing is cached, so no decision is
+# ever made on stale config across calls.
+_POLICY_SNAPSHOT: contextvars.ContextVar = contextvars.ContextVar("_tool_policy_snapshot", default=None)
+
+
+def _policy_memo(key: str, compute):
+    memo = _POLICY_SNAPSHOT.get()
+    if memo is None:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return memo[key]
+
+
+def run_with_policy_snapshot(fn, *args, **kwargs):
+    """Call ``fn`` with the path-policy inputs computed once for its duration.
+    For the worker function of a directory walk (runs inside to_thread)."""
+    token = _POLICY_SNAPSHOT.set({})
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _POLICY_SNAPSHOT.reset(token)
+
+
+def _vault_realpath() -> Optional[str]:
+    def compute():
+        from src.rag_sensitivity import vault_root
+        try:
+            return os.path.realpath(vault_root())
+        except (OSError, ValueError):
+            return None
+    return _policy_memo("vault_realpath", compute)
+
+
+def _worktree_config_paths() -> tuple:
+    """(approval state dir, configured signing-key path), both canonical."""
+    def compute():
+        try:
+            from src.agent_worktree.config import load_config
+            cfg = load_config()
+        except Exception:
+            return (None, None)
+        state = None
+        key = None
+        try:
+            state = os.path.normcase(os.path.realpath(cfg.state_dir))
+        except Exception:
+            state = None
+        try:
+            if cfg.private_key_path:
+                key = os.path.normcase(os.path.realpath(cfg.private_key_path))
+        except Exception:
+            key = None
+        return (state, key)
+    return _policy_memo("worktree_config", compute)
+
+
 def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
     """Return True if *resolved* falls under a sensitive directory or
     matches a sensitive filename — regardless of what root it sits under.
@@ -179,13 +243,14 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
         )
 
         in_vault = False
+        vault = None
         try:
-            vault = os.path.realpath(vault_root())
-            in_vault = resolved == vault or os.path.commonpath([resolved, vault]) == vault
+            vault = _vault_realpath()
+            in_vault = bool(vault) and (resolved == vault or os.path.commonpath([resolved, vault]) == vault)
         except (OSError, ValueError):
             pass
         if not allow_private and (
-            path_is_under_private_directory(resolved)
+            path_is_under_private_directory(resolved, vault_real=vault)
             or (in_vault and resolve_sensitivity(resolved) == "private")
         ):
             return True
@@ -213,30 +278,21 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
 
 def _is_configured_signing_key(resolved: str) -> bool:
     """True for the GitHub App private key, whatever the operator named it."""
-    try:
-        from src.agent_worktree.config import load_config
-
-        configured = load_config().private_key_path
-    except Exception:
-        return False
+    configured = _worktree_config_paths()[1]
     if not configured:
         return False
     try:
-        return os.path.normcase(os.path.realpath(configured)) == os.path.normcase(resolved)
+        return configured == os.path.normcase(resolved)
     except (OSError, ValueError):
         return False
 
 
 def _is_under_agent_worktree_state(resolved: str) -> bool:
     """True when *resolved* sits in the agent worktree's approval state dir."""
-    try:
-        from src.agent_worktree.config import load_config
-
-        root = os.path.realpath(load_config().state_dir)
-    except Exception:
+    b = _worktree_config_paths()[0]
+    if not b:
         return False
     a = os.path.normcase(resolved)
-    b = os.path.normcase(root)
     return a == b or a.startswith(b + os.sep)
 
 
@@ -363,6 +419,10 @@ def _path_within_conservative(resolved: str, root: str) -> bool:
 
 
 def _agent_readable_data_subdirs() -> tuple[str, ...]:
+    return _policy_memo("readable_data_subdirs", _agent_readable_data_subdirs_uncached)
+
+
+def _agent_readable_data_subdirs_uncached() -> tuple[str, ...]:
     """The only parts of DATA_DIR the agent's file tools may reach.
 
     The agent's own scratch folder, plus the directories of user content whose
@@ -509,7 +569,8 @@ def _is_app_state_path(resolved: str) -> bool:
     own settings.json or app.db inside a real workspace is not caught.
     """
     from src.constants import DATA_DIR
-    if not _path_within_conservative(resolved, os.path.realpath(DATA_DIR)):
+    data_real = _policy_memo("data_dir_realpath", lambda: os.path.realpath(DATA_DIR))
+    if not _path_within_conservative(resolved, data_real):
         return False
     return not any(
         _path_within(resolved, d)

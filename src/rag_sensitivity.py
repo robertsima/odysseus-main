@@ -132,16 +132,17 @@ def private_directories() -> Tuple[str, ...]:
     return _private_dirs_cache["dirs"]
 
 
-def path_is_under_private_directory(path: str) -> bool:
+def path_is_under_private_directory(path: str, vault_real: Optional[str] = None) -> bool:
     """True when ``path`` is inside (or is) a directory labelled private.
 
     Path-boundary match, not a prefix match, so a private ``/docs`` does not
-    also capture ``/docs2``.
+    also capture ``/docs2``. ``vault_real`` is the already-resolved vault root,
+    passed by callers that check many paths in one walk.
     """
     if not isinstance(path, str) or not path:
         return False
     abs_path = os.path.abspath(path)
-    root = os.path.realpath(vault_root())
+    root = vault_real or os.path.realpath(vault_root())
     candidate = os.path.realpath(abs_path)
     try:
         inside_vault = os.path.commonpath([candidate, root]) == root

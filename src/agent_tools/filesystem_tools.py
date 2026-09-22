@@ -15,6 +15,13 @@ _CODENAV_SKIP_DIRS = frozenset({
     ".next", ".cache", "site-packages", ".idea", ".tox",
 })
 _CODENAV_MAX_HITS = 200
+
+
+def run_with_policy_snapshot(fn):
+    """Run a walk's worker with the path policy's inputs computed once
+    (src.tool_execution; imported lazily like the other helpers here)."""
+    from src.tool_execution import run_with_policy_snapshot as _run
+    return _run(fn)
 _CODENAV_MAX_LINE = 400
 _GREP_TIMEOUT_SECONDS = 20
 _GREP_STDERR_PREFIX = 20_000
@@ -619,7 +626,7 @@ class LsTool:
                 lines.append("  (empty)")
             return "\n".join(lines), None
 
-        out, err = await asyncio.to_thread(_ls)
+        out, err = await asyncio.to_thread(run_with_policy_snapshot, _ls)
         if err:
             return {"error": err, "exit_code": 1}
         return {"output": _truncate(out), "exit_code": 0}
@@ -725,7 +732,7 @@ class GlobTool:
             matched.sort(key=lambda t: t[0], reverse=True)
             return [pth for _, pth in matched[:_CODENAV_MAX_HITS]], None
 
-        paths, err = await asyncio.to_thread(_glob)
+        paths, err = await asyncio.to_thread(run_with_policy_snapshot, _glob)
         if err:
             return {"error": err, "exit_code": 1}
         if not paths:
@@ -1075,7 +1082,7 @@ class GrepTool:
                 return None, f"grep: fallback worker exited {worker.exitcode}"
             return lines, None
 
-        lines, err = await asyncio.to_thread(_grep)
+        lines, err = await asyncio.to_thread(run_with_policy_snapshot, _grep)
         if err:
             return {"error": err, "exit_code": 1}
         if not lines:
