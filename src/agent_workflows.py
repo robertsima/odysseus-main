@@ -414,14 +414,28 @@ def build_record(rec, snapshot):
             unresolved.append({"issue": str(failure["error"])[:300]})
     unresolved = [dict(item, issue=item["issue"][:300]) for item in unresolved[:RECORD_MAX_UNRESOLVED]]
 
+    persist = rec.get("persist") or {}
+    documents = ([{"document_id": persist["document_id"], "title": persist.get("title"),
+                   "verified": bool(persist.get("verified"))}]
+                 if persist.get("document_id") else [])
     return {
         "run_id": rec["workflow_id"], "objective": str(rec.get("task") or "")[:500], "status": rec["status"],
         "selected_agents": selected, "result_summary": result_summary, "raw_outputs": raw_outputs,
+        # Handoffs live in worker chats; they are not editor documents. A
+        # parent that read "artifacts: 3" as "three documents" reported files
+        # that were never written.
         "artifacts": artifacts,
+        "handoff_artifacts": len(artifacts),
+        "editor_documents_created": documents,
+        "persistence": {key: persist.get(key) for key in ("requested", "status", "reason", "document_id", "title", "verified")}
+                       if persist else {"requested": False},
+        "resumed_from": rec.get("resumed_from"),
+        "reused_handoffs": list(rec.get("reused_handoffs") or []),
         # Specialists are bound to read-only tools by _prepare, so a research
         # workflow changes nothing; the field is here so a reader (or a later
         # writing workflow) does not have to infer that from silence.
         "changed_files": [],
+        "repository_files_changed": [],
         "verification": verification, "unresolved": unresolved,
         "timing": {"started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
                    "timeout_seconds": rec.get("timeout_seconds"), "timed_out": rec["status"] == "timed_out"},
@@ -436,10 +450,23 @@ def render_record(record):
     else:
         origin = f"from {summary['kind']} '{summary['agent']}'" + (" (provisional)" if summary["provisional"] else "")
     failed = [row for row in record["verification"] if not row["passed"]]
+    documents = record.get("editor_documents_created") or []
     lines = [f"Run record: result {origin}, untrusted worker text; "
              f"verification {len(record['verification'])} check(s), {len(failed)} failed; "
-             f"unresolved {len(record['unresolved'])}; artifacts {len(record['artifacts'])}; "
+             f"unresolved {len(record['unresolved'])}; handoff artifacts {len(record['artifacts'])} "
+             f"(worker chats, not documents); editor documents created {len(documents)}; "
              f"changed files: none (read-only workflow)."]
+    if record.get("resumed_from"):
+        lines.append(f"Resumed from {record['resumed_from']}; reused handoffs from its completed branches: "
+                     + (", ".join(record.get("reused_handoffs") or []) or "none") + ".")
+    persistence = record.get("persistence") or {}
+    if persistence.get("requested"):
+        if persistence.get("document_id"):
+            lines.append(f"Saved the final result as document {persistence['document_id']} "
+                         f"({persistence.get('title')!r}); read back and verified: {bool(persistence.get('verified'))}.")
+        else:
+            lines.append(f"Document persistence {persistence.get('status')}: {persistence.get('reason')}. "
+                         "No document exists for this workflow; do not say one was created.")
     for row in failed[:6]:
         lines.append(f"  Failed check — {row['agent']}: {row['check'].split(':', 1)[0]}"
                      + (f" ({row['detail']})" if row.get("detail") else ""))
@@ -710,6 +737,7 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
         children.append(_prepare(args["synthesis"], policy, catalog, blocked, stage="synthesis"))
     if len({child["name"].casefold() for child in children}) != len(children):
         raise ValueError("Agent names must be unique within the workflow")
+    persist = _persist_request(args.get("persist_document"), policy, task)
     preflight = _preflight(children, parent, owner)
     for row in preflight:
         logger.info("[agent-workflow] preflight name=%s stage=%s model=%s auth=%s tools=%s mcp=%s ready=%s%s",
@@ -732,6 +760,8 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
            "status": "running", "started_at": time.time(), "timeout_seconds": timeout,
            "retries": retries, "allow_partial_synthesis": bool(args.get("allow_partial_synthesis", False)),
            "children": children, "failures": [], "preflight": preflight}
+    if persist:
+        rec["persist"] = persist
     _save(rec)
     _LIVE[wid] = rec
     activity.run_started(session_id, "pipeline", f"Research workflow · {task[:100]}", run_id=wid,
@@ -892,6 +922,7 @@ async def _run(rec):
                 rec["status"] = "completed" if all(child["status"] == "completed" for child in rec["children"]) else "partial"
                 if not any(child["status"] in {"completed", "incomplete"} for child in rec["children"]):
                     rec["status"] = "failed"
+                await _persist_final(rec)
                 break
             active = [agent_control._WORKERS[child["run_id"]] for child in rec["children"]
                       if child.get("run_id") in agent_control._WORKERS]
@@ -1022,4 +1053,178 @@ async def inspect(*, workflow_id: str, session_id: str, owner: Optional[str], ac
         timeout = max(0, min(60, float(wait_seconds)))
         if timeout:
             await asyncio.wait({task}, timeout=timeout)
+    return _public(rec)
+
+
+# ── persisting the final artifact (parent-owned) ───────────────────────────
+# Research and synthesis workers stay read-only. When the parent asks for the
+# result as a document, the controller writes it on the parent's behalf after
+# a normal finish, then reads it back. This is the parent's own capability
+# (checked against its policy at start) and not a grant to any worker.
+
+def _persist_request(value, policy, task):
+    if not value:
+        return None
+    if value is True:
+        value = {}
+    if not isinstance(value, dict):
+        raise ValueError("persist_document must be true or an object with an optional title")
+    if "create_document" not in policy["allowed_tools"]:
+        raise ValueError("persist_document was requested, but this chat may not create documents")
+    title = str(value.get("title") or "").strip()[:200] or f"Research: {task[:80]}"
+    if policy.get("approval_mode") == "ask_all":
+        # Every change asks in this chat; the parent saves it through its own
+        # approval card instead of the controller writing silently.
+        return {"requested": True, "title": title, "status": "needs_parent",
+                "reason": "approvals are set to ask for every change; call create_document with the result"}
+    return {"requested": True, "title": title, "status": "pending"}
+
+
+def _final_result(rec):
+    """(text, source) of the workflow's final artifact, or (None, reason)."""
+    synthesis = next((child for child in rec["children"] if child["stage"] == "synthesis"), None)
+    research = [child for child in rec["children"] if child["stage"] == "research"]
+    source = synthesis if synthesis else (research[0] if len(research) == 1 else None)
+    if source is None:
+        return None, "several specialists and no synthesis agent: there is no single final result"
+    if source["status"] != "completed" or not source.get("run_id"):
+        return None, f"{source['stage']} '{source['name']}' did not complete ({source['status']})"
+    actual = agent_control.collect_worker_result(source["run_id"], owner=rec["owner"],
+                                                 session_id=source.get("session_id"))
+    text = str(actual.get("result") or "").strip()
+    if not text:
+        return None, f"{source['stage']} '{source['name']}' returned no text"
+    if actual.get("result_truncated"):
+        text += ("\n\n_The worker's result was longer than the handoff limit; the full text "
+                 f"remains in its chat (#session-{source.get('session_id')})._")
+    return text, None
+
+
+async def _persist_final(rec):
+    persist = rec.get("persist")
+    if not persist or persist.get("status") != "pending":
+        return
+    try:
+        text, reason = _final_result(rec)
+        if text is None:
+            persist.update(status="skipped", reason=reason)
+            return
+        from core.database import get_session_settings
+        from src.tool_security import session_policy_disabled_tools
+
+        if "create_document" in session_policy_disabled_tools(
+                get_session_settings(rec["parent_session"], strict=True) or {}):
+            persist.update(status="denied", reason="create_document was switched off for this chat after start")
+            return
+        from src.agent_tools.document_tools import CreateDocumentTool
+
+        created = await CreateDocumentTool().execute(
+            f"<title>{persist['title']}</title><language>markdown</language><content>{text}</content>",
+            {"session_id": rec["parent_session"], "owner": rec["owner"]},
+        )
+        if created.get("error") or not created.get("doc_id"):
+            persist.update(status="failed", reason=str(created.get("error") or "no document id returned")[:300])
+            return
+        persist.update(status="created", document_id=created["doc_id"],
+                       verified=_document_matches(created["doc_id"], rec["owner"], text), reason=None)
+        if not persist["verified"]:
+            persist["reason"] = "the saved document could not be read back with the same content"
+        logger.info("[agent-workflow] persisted workflow=%s document=%s verified=%s",
+                    rec["workflow_id"], created["doc_id"], persist["verified"])
+    except Exception as exc:
+        persist.update(status="failed", reason=f"{type(exc).__name__}: {str(exc)[:200]}")
+        logger.warning("[agent-workflow] persistence failed workflow=%s", rec["workflow_id"], exc_info=True)
+
+
+def _document_matches(doc_id, owner, text):
+    from src.database import Document, SessionLocal
+
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        return bool(doc and (owner is None or doc.owner == owner) and (doc.current_content or "") == text)
+    finally:
+        db.close()
+
+
+# ── resuming a terminal workflow ───────────────────────────────────────────
+_RESUMABLE = {"cancelled", "partial", "failed", "timed_out", "interrupted"}
+_RELAUNCH_STAGES = {"synthesis", "research"}
+
+
+async def resume(*, session_id: str, owner: Optional[str], args: dict):
+    """Start a new workflow that reuses a finished one's completed handoffs.
+
+    The original manifest is not changed except for a ``resumed_by`` pointer,
+    so its cancellation or failure history stays as it was. Completed research
+    is reused as-is (the same worker chats), never rerun by default; only the
+    synthesis stage, or the branches named in ``retry_children``, launch again.
+    Launching re-checks the parent's current policy, exactly as ``start`` does.
+    """
+    source_id = resolve_workflow_id(args.get("workflow_id"), session_id, owner)
+    source = _load(source_id, session_id, owner)
+    if source_id in _TASKS or source.get("status") not in _RESUMABLE:
+        raise ValueError(f"Workflow {source_id} is {source.get('status')}; only a finished workflow that did not "
+                         "complete can be resumed")
+    policy = agent_loadouts.caller_policy(session_id, owner)
+    if policy["delegation_policy"] == "never":
+        raise ValueError("This chat forbids delegation")
+    if policy["max_parallel_workers"] <= 0:
+        raise ValueError("This chat's Child workers limit is zero; only the user may raise it")
+    stages = set(_strings(args.get("stages") or ["synthesis"], "stages", 2))
+    if not stages <= _RELAUNCH_STAGES:
+        raise ValueError("stages may contain only synthesis and research")
+    retry = {name.casefold() for name in _strings(args.get("retry_children") or [], "retry_children", MAX_SPECIALISTS)}
+    known = {child["name"].casefold() for child in source["children"]}
+    if retry - known:
+        raise ValueError("retry_children names no agent in that workflow: " + ", ".join(sorted(retry - known)))
+
+    children, reused = [], []
+    for old in source["children"]:
+        child = copy.deepcopy(old)
+        relaunch = (
+            child["name"].casefold() in retry
+            or (child["stage"] == "synthesis" and "synthesis" in stages)
+            or (child["stage"] == "research" and "research" in stages and child["status"] != "completed")
+        )
+        if relaunch:
+            for key in ("run_id", "session_id", "reason", "handoff", "result", "tool_calls"):
+                child.pop(key, None)
+            child.update(status="queued", attempt=0, attempts=[])
+        elif child["stage"] == "research" and child["status"] == "completed":
+            reused.append(child["name"])
+        children.append(child)
+    if not any(child["status"] == "queued" for child in children):
+        raise ValueError("Nothing to resume: no stage or branch was selected to launch again")
+    if not reused and any(c["stage"] == "synthesis" and c["status"] == "queued" for c in children) \
+            and not any(c["stage"] == "research" and c["status"] == "queued" for c in children):
+        raise ValueError("No completed research handoffs to synthesize; retry the research branches instead")
+
+    _, parent = _manager_parent(session_id, owner)
+    wid = f"workflow-{uuid.uuid4().hex[:12]}"
+    rec = {"workflow_id": wid, "parent_session": session_id, "owner": owner,
+           "parent_run_id": activity.active_turn(session_id), "task": source["task"],
+           "status": "running", "started_at": time.time(),
+           "timeout_seconds": float(args.get("timeout_seconds") or source.get("timeout_seconds") or 600),
+           "retries": int(source.get("retries") or 0),
+           "allow_partial_synthesis": bool(args.get("allow_partial_synthesis", source.get("allow_partial_synthesis"))),
+           "children": children, "failures": [],
+           "preflight": _preflight([c for c in children if c["status"] == "queued"], parent, owner),
+           "resumed_from": source_id, "reused_handoffs": reused}
+    persist = _persist_request(args.get("persist_document") or (source.get("persist") or {}).get("requested") and
+                               {"title": (source.get("persist") or {}).get("title")}, policy, rec["task"])
+    if persist:
+        rec["persist"] = persist
+    source["resumed_by"] = wid
+    _save(source)
+    _save(rec)
+    _LIVE[wid] = rec
+    activity.run_started(session_id, "pipeline", f"Resumed research workflow · {rec['task'][:90]}", run_id=wid,
+                         owner=owner, data={"workflow_controller": True, "workflow_id": wid,
+                                            "resumed_from": source_id, "reused_handoffs": reused,
+                                            "parent_run_id": rec["parent_run_id"], "mode": "agent"})
+    logger.info("[agent-workflow] resume workflow=%s from=%s reused=%s relaunch=%s",
+                wid, source_id, reused, [c["name"] for c in children if c["status"] == "queued"])
+    _TASKS[wid] = asyncio.create_task(_run(rec))
+    await asyncio.sleep(0)
     return _public(rec)

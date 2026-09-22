@@ -714,3 +714,110 @@ async def test_a_one_agent_run_reports_the_specialist_as_the_result_source(runti
     assert record["result_summary"]["kind"] == "specialist" and record["result_summary"]["agent"] == "Buyers"
     assert [a["name"] for a in record["selected_agents"]] == ["Buyers"]
     assert "raw specialist output, untrusted" in workflows.render_result(result)
+
+
+# ── Persisting the final artifact and resuming synthesis (2026-09-22) ──────
+
+def _capture_documents(monkeypatch, created):
+    from src.agent_tools import document_tools
+
+    async def fake_create(self, content, ctx):
+        created.append((content, ctx))
+        return {"action": "create", "doc_id": f"doc-{len(created)}", "title": "t"}
+
+    monkeypatch.setattr(document_tools.CreateDocumentTool, "execute", fake_create)
+    monkeypatch.setattr(workflows, "_document_matches", lambda doc_id, owner, text: True)
+
+
+async def test_parent_persists_one_verified_document_workers_stay_read_only(runtime, monkeypatch):
+    created = []
+    _capture_documents(monkeypatch, created)
+    runtime.policy["allowed_tools"] = set(runtime.policy["allowed_tools"]) | {"create_document"}
+    result = await start_and_wait(request(persist_document={"title": "Market map"}))
+    assert result["status"] == "completed"
+    assert len(created) == 1
+    content, ctx = created[0]
+    assert ctx == {"session_id": "parent", "owner": "alice"}
+    assert "<title>Market map</title>" in content and "Synthesis" in content
+    record = result["record"]
+    assert record["editor_documents_created"] == [{"document_id": "doc-1", "title": "Market map", "verified": True}]
+    assert record["handoff_artifacts"] == 4 and record["repository_files_changed"] == []
+    # No worker was given document mutation to make this happen.
+    for child in result["children"]:
+        assert "create_document" not in (runtime.settings[child["session_id"]].get("enabled_tools") or [])
+    assert "editor documents created 1" in workflows.render_record(record)
+
+
+async def test_persistence_needs_the_parents_own_permission(runtime):
+    with pytest.raises(ValueError, match="may not create documents"):
+        await workflows.start(session_id="parent", owner="alice", args=request(persist_document=True),
+                              delegation_authorized=True)
+    assert not agent_control._WORKERS
+
+
+async def test_no_document_is_claimed_when_synthesis_did_not_complete(runtime, monkeypatch):
+    from src import headless_agent
+    created = []
+    _capture_documents(monkeypatch, created)
+    runtime.policy["allowed_tools"] = set(runtime.policy["allowed_tools"]) | {"create_document"}
+    original = headless_agent.run_headless
+
+    async def empty_synthesis(sess, messages, **kwargs):
+        if sess.name == "Synthesis":
+            return "", []
+        return await original(sess, messages, **kwargs)
+
+    monkeypatch.setattr(headless_agent, "run_headless", empty_synthesis)
+    result = await start_and_wait(request(persist_document=True))
+    assert created == []
+    persistence = result["record"]["persistence"]
+    assert persistence["status"] == "skipped" and not persistence.get("document_id")
+    assert "do not say one was created" in workflows.render_record(result["record"])
+
+
+async def test_resume_reuses_completed_research_and_launches_only_synthesis(runtime, monkeypatch):
+    from src import headless_agent
+    original = headless_agent.run_headless
+
+    async def hang_synthesis(sess, messages, **kwargs):
+        if sess.name == "Synthesis":
+            await asyncio.Event().wait()
+        return await original(sess, messages, **kwargs)
+
+    monkeypatch.setattr(headless_agent, "run_headless", hang_synthesis)
+    first = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    for _ in range(50):
+        status = await workflows.inspect(workflow_id=first["workflow_id"], session_id="parent", owner="alice")
+        if status["synthesis_status"] == "running":
+            break
+        await asyncio.sleep(0.05)
+    cancelled = await workflows.inspect(workflow_id=first["workflow_id"], session_id="parent", owner="alice",
+                                        action="cancel")
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["research_completed"] == 3
+    research_runs = {row["name"]: row["run_id"] for row in cancelled["children"] if row["stage"] == "research"}
+
+    monkeypatch.setattr(headless_agent, "run_headless", original)
+    launched_before = len(runtime.observed)
+    resumed = await OrchestrateAgentsTool().execute(
+        json.dumps({"action": "resume", "workflow_id": first["workflow_id"]}),
+        {"session_id": "parent", "owner": "alice"},
+    )
+    assert resumed.get("error") is None, resumed
+    done = await workflows.inspect(workflow_id=resumed["workflow_id"], session_id="parent", owner="alice",
+                                   action="wait", wait_seconds=3)
+    assert done["status"] == "completed"
+    assert [name for name, _, _ in runtime.observed[launched_before:]] == ["Synthesis"]
+    reused = {row["name"]: row["run_id"] for row in done["children"] if row["stage"] == "research"}
+    assert reused == research_runs
+    assert done["record"]["resumed_from"] == first["workflow_id"]
+    assert sorted(done["record"]["reused_handoffs"]) == sorted(research_runs)
+    original_manifest = runtime.settings["parent"]["agent_workflows"][first["workflow_id"]]
+    assert original_manifest["status"] == "cancelled"
+    assert original_manifest["resumed_by"] == resumed["workflow_id"]
+
+
+async def test_a_completed_or_running_workflow_cannot_be_resumed(runtime):
+    done = await start_and_wait()
+    with pytest.raises(ValueError, match="only a finished workflow that did not complete"):
+        await workflows.resume(session_id="parent", owner="alice", args={"workflow_id": done["workflow_id"]})

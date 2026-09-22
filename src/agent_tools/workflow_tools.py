@@ -39,8 +39,15 @@ class OrchestrateAgentsTool:
                        "do not report their branches as researched. " if blocked else "")
                     + "Use wait/status to collect actual results; queued or running is not completed."
                 )}
+            if action == "resume":
+                result = await agent_workflows.resume(**common, args=args)
+                return {**result, "action": "resume", "response": (
+                    f"Workflow {result['workflow_id']} resumes {args.get('workflow_id') or 'the latest workflow'}: "
+                    f"reusing {len(result['record'].get('reused_handoffs') or [])} completed handoff(s), "
+                    f"{result['launched_agents']} child run(s) launched. Use wait/status on the new ID."
+                )}
             if action not in {"status", "wait", "cancel"}:
-                raise ValueError("action must be start, status, wait, or cancel")
+                raise ValueError("action must be start, status, wait, cancel, or resume")
             workflow_id = agent_workflows.resolve_workflow_id(
                 args.get("workflow_id"), **common,
             )

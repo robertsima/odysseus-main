@@ -1376,7 +1376,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel"]},
+                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel", "resume"], "description": "resume: start a new workflow from a finished one that did not complete, reusing its completed research handoffs and launching only synthesis (or the stages/retry_children named)."},
                     "task": {"type": "string", "description": "Overall objective, deliverables and constraints; start only."},
                     "specialists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
                         "type": "object", "properties": {
@@ -1396,7 +1396,10 @@ FUNCTION_TOOL_SCHEMAS = [
                     "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
                     "allow_partial_synthesis": {"type": "boolean", "description": "start only. Defaults false. When true, synthesis may run with missing required branches but must label its result provisional and identify the gaps."},
-                    "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."}
+                    "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."},
+                    "persist_document": {"description": "start/resume. true or {title}: after a normal finish, save the final result (the synthesis, or a lone specialist's) as one editor document owned by this chat, and read it back. Workers stay read-only; this uses this chat's own create_document permission. The record's editor_documents_created lists what was actually saved; handoff artifacts are worker chats, not documents.", "anyOf": [{"type": "boolean"}, {"type": "object", "properties": {"title": {"type": "string"}}}]},
+                    "stages": {"type": "array", "items": {"type": "string", "enum": ["synthesis", "research"]}, "description": "resume only. Which stages launch again; default [synthesis]. research relaunches only branches that did not complete."},
+                    "retry_children": {"type": "array", "items": {"type": "string"}, "description": "resume only. Exact agent names to launch again even if they completed."}
                 }, "required": ["action"]
             }
         }
