@@ -264,3 +264,59 @@ def logs_index() -> List[Dict[str, object]]:
         }
         for f in list_logs()
     ]
+
+
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{5,80}$")
+
+
+def trace(correlation_id: str, *, lines: int = 200, owner: Optional[str] = None) -> Dict[str, object]:
+    """Everything recorded under one workflow, run, or session ID.
+
+    The app log, its rotated siblings (oldest first), and the activity
+    store's run records, in one place: auditing a worker used to mean
+    grepping each file by hand and still missing the run registry.
+    Redacted like ``read_log``; the activity rows are the owner's only.
+    """
+    needle = str(correlation_id or "").strip()
+    if not _TRACE_ID_RE.match(needle):
+        raise RuntimeError("id must be a workflow-, run or session ID (6-80 letters, digits, - _ . :)")
+    try:
+        count = max(1, min(MAX_LINES, int(lines)))
+    except (TypeError, ValueError):
+        count = DEFAULT_LINES
+    files = sorted((f for f in list_logs() if f.name.startswith("app.log")),
+                   key=lambda f: f.modified)
+    matched: List[str] = []
+    for log in files:
+        try:
+            with open(log.path, "rb") as fh:
+                for raw in fh:
+                    text = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    if needle in text:
+                        matched.append(f"{log.name}: {redact_line(text)}")
+        except OSError:
+            continue
+    runs: List[Dict[str, object]] = []
+    try:
+        from src import agent_activity
+
+        rec = agent_activity.get_run(needle)
+        rows = [rec] if rec else []
+        rows += agent_activity.list_runs(session_id=needle, limit=50)
+        seen = set()
+        for row in rows:
+            if not row or row.get("run_id") in seen:
+                continue
+            if owner is not None and row.get("owner") not in (owner, None):
+                continue
+            seen.add(row.get("run_id"))
+            summary = row.get("summary") or {}
+            runs.append({key: row.get(key) for key in ("run_id", "session_id", "kind", "status", "title",
+                                                         "started_at", "finished_at")}
+                        | {"parent_session": summary.get("parent_session"),
+                           "workflow_id": summary.get("workflow_id"),
+                           "profile": summary.get("profile"), "error": summary.get("error")})
+    except Exception as exc:  # the activity store is optional evidence here
+        runs.append({"error": f"activity store unavailable: {type(exc).__name__}"})
+    return {"id": needle, "log_files": [f.name for f in files], "line_count": len(matched),
+            "lines": matched[-count:], "truncated": len(matched) > count, "runs": runs}

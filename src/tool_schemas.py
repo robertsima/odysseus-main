@@ -391,13 +391,16 @@ FUNCTION_TOOL_SCHEMAS = [
             "description": (
                 "Read Odysseus's own application logs to debug or troubleshoot the running app. "
                 "action='list' enumerates available log files; action='tail' returns the last N "
-                "lines of one, optionally filtered by substring or minimum level. Read-only, and "
+                "lines of one, optionally filtered by substring or minimum level; action='trace' with "
+                "id (a workflow-, run or session ID) gathers every app-log line mentioning it across "
+                "rotated logs plus that ID's activity run records. Read-only, and "
                 "credential material is redacted before you see it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "tail"], "description": "Default: tail"},
+                    "action": {"type": "string", "enum": ["list", "tail", "trace"], "description": "Default: tail"},
+                    "id": {"type": "string", "description": "trace only: the workflow-, run or session ID to audit."},
                     "name": {"type": "string", "description": "Log file name, e.g. app.log. Defaults to the app log."},
                     "lines": {"type": "integer", "description": "How many lines to return (1-500, default 100)"},
                     "contains": {"type": "string", "description": "Only lines containing this substring"},

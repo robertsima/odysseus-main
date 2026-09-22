@@ -3650,14 +3650,14 @@ def test_skill_activation_reaches_later_fallback_request_and_pinned_round(monkey
     assert "grep" in primary_schema_names
     assert round_two_requests[1]["kwargs"]["tools"] is None
     assert any(
-        "route=odysseus-qwen-backup; tools=grep,manage_skills" in (message.get("content") or "")
+        "route=odysseus-qwen-backup; tools=discover_tools,grep,manage_skills" in (message.get("content") or "")
         for message in round_two_requests[1]["messages"]
     )
 
     round_three_candidates, round_three_requests = requests_by_round[2]
     assert round_three_candidates == [backup]
     assert any(
-        "route=odysseus-qwen-backup; tools=grep,manage_skills" in (message.get("content") or "")
+        "route=odysseus-qwen-backup; tools=discover_tools,grep,manage_skills" in (message.get("content") or "")
         for message in round_three_requests[0]["messages"]
     )
     assert any('"delta": "pinned backup answer"' in chunk for chunk in chunks)

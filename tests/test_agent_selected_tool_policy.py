@@ -342,11 +342,19 @@ def test_readonly_worker_may_list_calendar_events_but_not_create(monkeypatch, ma
     _settings(monkeypatch, {
         "workflow_readonly": True, "tool_access": "selected", "enabled_tools": ["manage_calendar"],
     }, manager)
+    ran = []
+
+    async def fake_calendar(content, owner=None):
+        ran.append(json.loads(content)["action"])
+        return {"output": "[]", "exit_code": 0}
+
+    monkeypatch.setattr("src.tool_implementations.do_manage_calendar", fake_calendar)
     _, created = _execute("manage_calendar", {"action": "create_event", "title": "x"})
     assert created.get("blocked_reason") == "workflow_readonly"
     assert "may only read" in created["error"]
     _, listed = _execute("manage_calendar", {"action": "list_events"})
     assert listed.get("blocked_reason") != "workflow_readonly"
+    assert ran == ["list_events"]
 
 
 def test_action_is_read_fails_closed():

@@ -11,6 +11,7 @@ status) is local and side-effect-free outside the worktree directory.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
@@ -234,8 +235,19 @@ class ReadAppLogsTool:
         try:
             if action == "list":
                 return {"exit_code": 0, "logs": agent_logs.logs_index()}
+            if action == "trace":
+                found = agent_logs.trace(args.get("id") or args.get("contains") or "",
+                                         lines=args.get("lines", agent_logs.DEFAULT_LINES),
+                                         owner=ctx.get("owner"))
+                body = "\n".join(found["lines"]) or "(no log lines mention this id)"
+                runs = "\n".join(json.dumps(r, default=str) for r in found["runs"]) or "(no activity runs)"
+                return {"exit_code": 0, "trace": found,
+                        "output": (f"Trace {found['id']}: {found['line_count']} log line(s) across "
+                                   f"{', '.join(found['log_files']) or 'no log files'}"
+                                   + (" (showing the newest)" if found["truncated"] else "")
+                                   + f"\n{body}\n\nActivity runs:\n{runs}")}
             if action != "tail":
-                return _err(f"read_app_logs: unknown action {action!r} (use 'list' or 'tail')")
+                return _err(f"read_app_logs: unknown action {action!r} (use 'list', 'tail' or 'trace')")
             result = agent_logs.read_log(
                 args.get("name"),
                 lines=args.get("lines", agent_logs.DEFAULT_LINES),

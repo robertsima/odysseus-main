@@ -103,7 +103,15 @@ _console_h = logging.StreamHandler()
 _console_h.setFormatter(_formatter)
 _root_logger.addHandler(_console_h)
 
+# A test run must not write into the deployment's log. Tests that import this
+# module used to install the file handler on the root logger for the whole
+# session, so every later test's fixture failures ("boom", "kaboom",
+# "simulated db unavailable") landed in data/logs/app.log, and a log audit read
+# them as live incidents.
+_file_logging = os.environ.get("ODYSSEUS_FILE_LOG", "1") != "0" and "pytest" not in sys.modules
 try:
+    if not _file_logging:
+        raise RuntimeError("file logging disabled for this process (tests or ODYSSEUS_FILE_LOG=0)")
     _log_dir = os.path.join(DATA_DIR, "logs")
     os.makedirs(_log_dir, exist_ok=True)
     _log_file = os.path.join(_log_dir, "app.log")
@@ -117,9 +125,18 @@ try:
     _file_h.setFormatter(_formatter)
     _root_logger.addHandler(_file_h)
 except Exception as e:
-    _root_logger.warning(f"Failed to initialize file logging handler (falling back to console-only): {e}")
+    if _file_logging:
+        _root_logger.warning(f"Failed to initialize file logging handler (falling back to console-only): {e}")
 
 logger = logging.getLogger(__name__)
+# One line that says which process wrote what follows: which deployment,
+# which data directory. An audit of a log file otherwise cannot tell this
+# runtime from another instance or checkout sharing the path.
+logger.info(
+    "[runtime] start pid=%s mode=runtime deployment=%s data_dir=%s",
+    os.getpid(), os.environ.get("ODYSSEUS_DEPLOYMENT_ID") or os.environ.get("HOSTNAME") or "local",
+    os.path.realpath(DATA_DIR),
+)
 
 # ========= APP =========
 # Lifespan is defined below (after all helpers it references are in scope)
