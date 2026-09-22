@@ -76,7 +76,9 @@ const state = {
   expandedParents: new Set(),
   // Saved personas the loadout editor can copy from (loadPersonaSources).
   personaSources: null,
-  // The user closed the room this page session; runs no longer reopen it.
+  // The user closed the room during the current turn; that turn's runs
+  // (worker legs, sub-agents, hand-offs) no longer reopen it. Cleared when the
+  // user starts a new turn or opens the room by hand.
   dismissed: false,
   compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
@@ -642,7 +644,7 @@ function rowHtml(r, nest = {}) {
       ${crew}
       ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>
-    <div class="ag-card-actions"><button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
+    <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
   </div>`;
 }
 function renderDetail() {
@@ -701,8 +703,10 @@ function renderDetail() {
       </div>
       <div class="ag-console-status">
         <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
-        <span class="ag-console-actions"><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>${
-          r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="Parent agent: ${esc(r.parent_name || r.parent_session)}">↳ ${esc(r.parent_name || 'parent')}</button>` : ''}${
+        <span class="ag-console-actions">${isCurrentChat(r.session_id)
+          ? '<span class="ag-this-chat" title="This is the chat you have open">This chat</span>'
+          : `<button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>`}${
+          r.parent_session && !isCurrentChat(r.parent_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="Parent agent: ${esc(r.parent_name || r.parent_session)}">↳ ${esc(r.parent_name || 'parent')}</button>` : ''}${
           r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}${
           r.archived ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-agent" data-sid="${esc(r.session_id)}">Restore</button>` : !running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="archive-agent" data-sid="${esc(r.session_id)}" title="Hide this idle chat; its chat and run history stay preserved">Archive</button>` : ''}</span>
       </div>
@@ -766,14 +770,14 @@ function steerRowHtml(m) {
 function approvalHtml(a) {
   return `<div class="ag-approval"><div class="ag-approval-head"><span class="approval-badge">Approval needed</span><code class="approval-tool">${esc(a.tool)}</code><span class="wb-meta-item">${esc(a.reason)}</span></div>
     <pre class="approval-command">${esc(a.command)}</pre>
-    <div class="approval-actions"><button type="button" class="approval-btn approval-approve" data-ag="open-chat" data-sid="${esc(a.session_id)}">Open chat to decide</button></div></div>`;
+    <div class="approval-actions">${isCurrentChat(a.session_id) ? '<span class="ag-this-chat">Decide in this chat</span>' : `<button type="button" class="approval-btn approval-approve" data-ag="open-chat" data-sid="${esc(a.session_id)}">Open chat to decide</button>`}</div></div>`;
 }
 function childHtml(c) {
   const live = c.status === 'running';
   const s = c.summary || {};
   const title = String(c.title || '').replace(/^(Sub-agent|Claude Code|Background job|Worker)\s*[·:]\s*/, '');
   return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
-    ${s.target_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
+    ${s.target_session && !isCurrentChat(s.target_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="inspect-run" data-run="${esc(c.run_id)}" data-sid="${esc(state.selected || '')}">Inspect</button>
     ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="hide-run" data-run="${esc(c.run_id)}" title="Hide this completed card; activity history remains">Hide</button>`}</div>`;
 }
@@ -1094,8 +1098,14 @@ async function selectChat(sid) {
   const current = window.sessionModule.getCurrentSessionId?.();
   if (current && current !== sid) throw new Error('Could not open the selected chat');
 }
+/** The chat the user has open. Offering to "open" it just reloaded the same
+ *  chat, so its Open controls are left out. */
+function isCurrentChat(sid) {
+  return !!sid && sid === window.sessionModule?.getCurrentSessionId?.();
+}
 async function openChat(sid) {
   await selectChat(sid);
+  if (state.open) { renderFleetOnly(); renderDetail(); }
   // The room fills the chat area, so opening a chat from it used to switch the
   // chat hidden underneath: nothing seemed to happen, and only the chat's title
   // and status line showed around the room's edges. Make the opened chat
@@ -1173,9 +1183,10 @@ export function open({ focus = true, auto = false } = {}) {
  * when it is already open or the user minimized it, and keeps focus in the
  * composer so the user can keep typing. */
 export function openForRun() {
-  // Once the user has closed the room, a run starting is not a reason to put it
-  // back over their chat. Every worker leg, sub-agent and hand-off starts a run,
-  // so it kept reappearing. Opening it by hand clears this.
+  // Once the user has closed the room, the rest of that turn's runs are not a
+  // reason to put it back: every worker leg, sub-agent and hand-off starts a
+  // run, so it kept reappearing. A new message the user sends clears this, so
+  // the next request that delegates shows it again.
   if (state.open || state.dismissed || Modals.isMinimized(MODAL_ID)) return;
   open({ focus: false, auto: true });
   // Opened for them, not by them: sit beside the chat rather than on top of it.
@@ -1275,6 +1286,14 @@ function init() {
   registerWithManager();
   Modals.injectMinimizeButton(root, MODAL_ID);
   $('close-agents-dashboard')?.addEventListener('click', close);
+  // A new turn in the chat: auto-open may show the room again for its runs.
+  // Only the idle -> busy edge counts; the signal repeats while a turn streams.
+  let chatBusy = !!window.__odysseusChatBusy;
+  window.addEventListener('odysseus:chat-busy-change', (e) => {
+    const active = !!e.detail?.active;
+    if (active && !chatBusy) state.dismissed = false;
+    chatBusy = active;
+  });
   $('ag-dock-left')?.addEventListener('click', () => applyEdgeDock(root, 'left'));
   $('ag-dock-right')?.addEventListener('click', () => applyEdgeDock(root, 'right'));
   $('ag-maximize')?.addEventListener('click', () => snapModalToZone(root, { name: 'maximize', rect: workspaceRect() }));

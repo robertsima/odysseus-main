@@ -400,15 +400,19 @@ function stripRowHtml(run) {
   const d = run.data || {};
   const running = isLive(run.status);
   const end = run.finished_at || Date.now() / 1000;
-  const openTitle = run.source === 'session' && d.target_session ? `Open the ${d.target_session_name || 'sub-agent'} chat`
+  // In the sub-agent's own chat its run points back at this chat, where "Open"
+  // only reloaded it; offer its events instead.
+  const opensOtherChat = run.source === 'session' && d.target_session && d.target_session !== state.sessionId;
+  const openTitle = opensOtherChat ? `Open the ${d.target_session_name || 'sub-agent'} chat`
     : run.source === 'claude_code' && d.task_id ? 'Open its changes in the Workbench' : 'Open its events in the Workbench';
+  const openLabel = opensOtherChat || (run.source === 'claude_code' && d.task_id) || run.source !== 'session' ? 'Open' : 'Events';
   return `<div class="agent-strip-row${running ? '' : ' done'}" data-run="${esc(run.run_id)}">
     ${statusPill(run.status)}
     ${sourceChip(run.source)}
     <span class="agent-strip-title" title="${esc(run.detail || run.title || '')}">${esc(String(run.title || '').replace(/^(Sub-agent|Claude Code|Background job)\s*[·:]\s*/, ''))}</span>
     <span class="agent-strip-activity" title="${esc(latestActivity(run))}">${esc(latestActivity(run))}</span>
     <span class="agent-strip-time" data-started="${run.started_at || ''}" data-running="${running ? 1 : 0}">${esc(fmtDur(run.started_at, end))}</span>
-    <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="open" data-run="${esc(run.run_id)}" title="${esc(openTitle)}">Open</button>
+    <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="open" data-run="${esc(run.run_id)}" title="${esc(openTitle)}">${openLabel}</button>
     ${running ? `<button type="button" class="wb-btn wb-btn-sm" data-strip-act="stop" data-run="${esc(run.run_id)}" title="Stop this run; its partial result goes back to the chat">Stop</button>` : ''}
   </div>`;
 }
@@ -478,7 +482,7 @@ async function onStripAction(btn) {
   if (!run) return;
   const d = run.data || {};
   if (act === 'open') {
-    if (run.source === 'session' && d.target_session && window.sessionModule?.selectSession) {
+    if (run.source === 'session' && d.target_session && d.target_session !== state.sessionId && window.sessionModule?.selectSession) {
       window.sessionModule.selectSession(d.target_session);
     } else if (run.source === 'claude_code' && d.task_id) {
       open(); loadTask(d.task_id);

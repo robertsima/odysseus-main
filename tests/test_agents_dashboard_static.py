@@ -305,3 +305,15 @@ def test_a_closed_room_is_not_reopened_by_every_run():
     hide = AGENTS.split("function hideWindow()", 1)[1].split("function workspaceRect()", 1)[0]
     assert "state.dismissed = true" in hide
     assert "if (!auto) state.dismissed = false;" in AGENTS
+    # Only for the rest of that turn: the next message the user sends (the
+    # idle -> busy edge) lets the next delegation show the room again.
+    assert "odysseus:chat-busy-change" in AGENTS and "if (active && !chatBusy) state.dismissed = false;" in AGENTS
+
+
+def test_no_open_control_for_the_chat_already_open():
+    """Opening the chat you are in only reloaded it."""
+    assert "function isCurrentChat(sid)" in AGENTS
+    assert AGENTS.count("isCurrentChat(") >= 6
+    assert 'class="ag-this-chat"' in AGENTS
+    strip = WORKBENCH.split("function stripRowHtml(run)", 1)[1].split("\n}\n", 1)[0]
+    assert "d.target_session !== state.sessionId" in strip and "'Events'" in strip

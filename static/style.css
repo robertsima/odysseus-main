@@ -42930,3 +42930,5 @@ body.composer-agent-mode.loadout-voice #character-indicator-btn { display: none 
 .uf-mcp-conn textarea { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.5px; resize: vertical; }
 .uf-mcp-conn-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 .uf-mcp-conn-actions > span { flex: 1; font-size: 11px; }
+
+.ag-this-chat { display: inline-flex; align-items: center; padding: 2px 8px; border: 1px dashed var(--wb-line); border-radius: 999px; color: var(--wb-muted); font-size: 11px; }
