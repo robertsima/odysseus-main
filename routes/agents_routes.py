@@ -14,6 +14,9 @@ stop and launch their agents.
   state each one reached (queued / acknowledged / injected / cancelled / failed).
 * ``GET  /approvals``           — pending tool approvals across the caller's chats.
 * ``POST /launch``              — start a worker profile in a fresh chat.
+* ``GET  /profiles``            — the configured loadouts, for pickers.
+* ``POST /sessions/{id}/loadout`` — run an existing chat under a loadout, or
+  (``profile: null``) return it to the default setup.
 * ``POST /sessions/{id}/archive`` — safely hide an idle chat without deleting
   its transcript or run history (and restore it with ``/unarchive``).
 """
@@ -520,6 +523,48 @@ def setup_agents_routes(session_manager) -> APIRouter:
         if saved is None:
             raise HTTPException(500, "Could not save cleanup preference")
         return {"ok": True, "restored_run_ids": sorted(restored), "history_preserved": True}
+
+    # The per-chat keys a loadout writes (agent_profiles.session_patch). Clearing
+    # a loadout removes these; approval_mode is left alone because the chat's
+    # settings panel also sets it, and a stricter leftover mode is harmless.
+    _LOADOUT_KEYS = ("agent_profile", "agent_instructions", "tool_access", "enabled_tools",
+                     "disabled_tools", "memory_access", "skill_access", "skill_names",
+                     "model_access", "allowed_models", "delegation_policy",
+                     "max_parallel_workers", "allowed_mcp_servers", "private_vault_access")
+
+    @router.get("/profiles")
+    async def profiles(request: Request):
+        """Configured loadouts, trimmed to what a picker shows."""
+        _owned(request)
+        from src import agent_profiles
+        return {"profiles": [{"name": p["name"], "description": p.get("description") or "",
+                              "model": p.get("model") or "", "tool_access": p.get("tool_access", "all"),
+                              "memory_access": p.get("memory_access", "read"),
+                              "delegation_policy": p.get("delegation_policy", "explicit")}
+                             for p in agent_profiles.load_profiles()]}
+
+    @router.post("/sessions/{session_id}/loadout")
+    async def apply_loadout(request: Request, session_id: str):
+        """Run this chat under a loadout, or clear it with ``{"profile": null}``."""
+        _require_owned(request, session_id)
+        from core.database import update_session_settings
+        from src import agent_profiles
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        name = str((body or {}).get("profile") or "").strip()
+        if name:
+            profile = agent_profiles.get_profile(name)
+            if not profile:
+                raise HTTPException(404, f"No loadout named {name!r}")
+            patch = agent_profiles.session_patch(profile)
+        else:
+            patch = {key: None for key in _LOADOUT_KEYS}
+        saved = update_session_settings(session_id, patch)
+        if saved is None:
+            raise HTTPException(500, "Could not save the chat's loadout")
+        return {"ok": True, "agent_profile": saved.get("agent_profile")}
 
     @router.post("/launch")
     async def launch(request: Request):

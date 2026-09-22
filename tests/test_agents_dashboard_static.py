@@ -263,3 +263,28 @@ def test_a_cut_off_worker_reads_as_partial_work_not_a_failure():
     assert "s === 'incomplete'" in WORKBENCH
     workbench_class = WORKBENCH.split("function statusClass(status)", 1)[1].split("\n}", 1)[0]
     assert "'incomplete'" in workbench_class.split("return 'warn'", 1)[0]
+
+
+def test_fleet_lists_top_level_agents_and_keeps_live_workers_visible():
+    """Every bucket lists parents; live workers show under them, finished ones fold."""
+    fleet = AGENTS.split("function fleetHtml()", 1)[1].split("function renderFleetOnly()", 1)[0]
+    assert "fleetTree(rows)" in fleet
+    assert "recentMatch" not in fleet
+    tree = AGENTS.split("function treeHtml(", 1)[1].split("function fleetHtml()", 1)[0]
+    assert "isLiveAgent(node) || node.session_id === state.selected" in tree
+    assert "open ? workers : workers.filter(pinned)" in tree
+    assert "finished worker" in AGENTS
+
+
+def test_agent_mode_swaps_prompt_for_an_agents_menu():
+    menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static/js/sessions.js").read_text(encoding="utf-8")
+    assert 'id="overflow-agents-btn"' in INDEX
+    assert "body.composer-agent-mode #overflow-preset-btn" in STYLE
+    assert "body:not(.composer-agent-mode) #overflow-agents-btn" in STYLE
+    assert "import './js/agentMenu.js';" in app
+    assert "/api/agents/profiles" in menu and "/loadout`" in menu
+    assert "openCustomPresetModal" in menu and "agentsDashboard?.open" in menu
+    # A loadout picked before the chat exists is applied before its first turn.
+    assert "await window.agentMenuModule.applyPendingLoadout(payload.id)" in sessions

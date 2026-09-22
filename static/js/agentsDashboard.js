@@ -332,6 +332,48 @@ function filteredRows() {
   const q = state.filter.trim().toLowerCase();
   return state.rows.filter((r) => !q || (r.name || '').toLowerCase().includes(q) || (r.latest || '').toLowerCase().includes(q));
 }
+/** Parent → worker rows among `rows`, and the rows with no listed parent.
+ *  A worker whose parent is filtered out or archived stands on its own. */
+function fleetTree(rows) {
+  const byId = new Map(rows.map((row) => [row.session_id, row]));
+  const kids = new Map();
+  rows.forEach((row) => {
+    const parent = row.parent_session;
+    if (!parent || parent === row.session_id || !byId.has(parent)) return;
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(row);
+  });
+  const roots = rows.filter((row) => !row.parent_session || row.parent_session === row.session_id || !byId.has(row.parent_session));
+  // A parent loop would leave its members with no root; list them flat.
+  const reached = new Set();
+  roots.forEach((root) => { reached.add(root.session_id); descendants(root, kids).forEach((row) => reached.add(row.session_id)); });
+  rows.forEach((row) => { if (!reached.has(row.session_id)) { roots.push(row); reached.add(row.session_id); } });
+  return { roots, kids };
+}
+function descendants(row, kids, seen = new Set([row.session_id])) {
+  const out = [];
+  (kids.get(row.session_id) || []).forEach((child) => {
+    if (seen.has(child.session_id)) return;
+    seen.add(child.session_id);
+    out.push(child, ...descendants(child, kids, seen));
+  });
+  return out;
+}
+function isLiveAgent(row) { return row.status === 'running' || row.status === 'waiting_approval'; }
+/** A card plus the workers under it: live (or selected) ones always, the rest
+ *  only while the parent is unfolded. */
+function treeHtml(row, kids, seen = new Set()) {
+  seen.add(row.session_id);
+  const workers = (kids.get(row.session_id) || []).filter((child) => !seen.has(child.session_id));
+  if (!workers.length) return rowHtml(row);
+  const pinned = (child) => [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
+  const open = state.expandedParents.has(row.session_id);
+  const folded = workers.filter((child) => !pinned(child)).length;
+  const visible = open ? workers : workers.filter(pinned);
+  const inner = visible.map((child) => treeHtml(child, kids, seen)).join('');
+  return `${rowHtml(row, { folded, open })}${inner
+    ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${inner}</div>` : ''}`;
+}
 function fleetHtml() {
   const rows = filteredRows();
   // The segmented control is a real filter now. It used to only jump the
@@ -341,35 +383,27 @@ function fleetHtml() {
   // Do not turn the fleet into an unbounded scroll just because a user has a
   // long history.  Filtering still searches every visible row, while paging
   // limits the expensive, interactive cards that need to stay easy to scan.
-  // Recent lists top-level agents only. A finished worker chat folds under its
-  // parent's card when that parent is listed in Recent too; otherwise (parent
-  // still running, archived, or filtered out) it stays visible on its own.
-  // Needs you / Active stay flat so a blocked or live worker is never hidden.
-  const recentMatch = BUCKETS.find(([k]) => k === 'recent')[2];
-  const recentIds = new Set(rows.filter(recentMatch).map((row) => row.session_id));
-  const workersOf = new Map();
-  rows.forEach((row) => {
-    if (!recentMatch(row) || !row.parent_session || !recentIds.has(row.parent_session)) return;
-    if (!workersOf.has(row.parent_session)) workersOf.set(row.parent_session, []);
-    workersOf.get(row.parent_session).push(row);
-  });
-  const nested = new Set([...workersOf.values()].flat().map((row) => row.session_id));
-  const listed = (key, row) => key !== 'recent' || !nested.has(row.session_id);
-  const candidates = rows.filter((row) => shown.some(([key, , match]) => match(row) && listed(key, row)));
+  //
+  // Every bucket lists top-level agents; workers sit under their parent's card.
+  // A live worker (running or waiting on you) is always shown there, and so is
+  // the selected one. Finished workers fold behind a "N workers" toggle. A
+  // parent is filed under the most urgent status anywhere in its tree, so a
+  // finished chat whose worker is still running is listed once, under Active.
+  const { roots, kids } = fleetTree(rows);
+  const bucketOf = new Map(roots.map((root) => {
+    const tree = [root, ...descendants(root, kids)];
+    return [root.session_id, (BUCKETS.find(([, , match]) => tree.some(match)) || BUCKETS[BUCKETS.length - 1])[0]];
+  }));
+  const shownKeys = new Set(shown.map(([key]) => key));
+  const candidates = roots.filter((root) => shownKeys.has(bucketOf.get(root.session_id)));
   const pages = Math.max(1, Math.ceil(candidates.length / FLEET_PAGE_SIZE));
   state.fleetPage = Math.min(Math.max(0, state.fleetPage), pages - 1);
   const pageRows = new Set(candidates.slice(state.fleetPage * FLEET_PAGE_SIZE, (state.fleetPage + 1) * FLEET_PAGE_SIZE).map((row) => row.session_id));
-  const html = shown.map(([key, label, match]) => {
-    const items = rows.filter((row) => match(row) && listed(key, row) && pageRows.has(row.session_id));
+  const html = shown.map(([key, label]) => {
+    const items = candidates.filter((row) => bucketOf.get(row.session_id) === key && pageRows.has(row.session_id));
     if (!items.length) return '';
     const solo = shown.length === 1;
-    const cards = items.map((row) => {
-      const workers = key === 'recent' ? (workersOf.get(row.session_id) || []) : [];
-      if (!workers.length) return rowHtml(row);
-      const open = state.expandedParents.has(row.session_id);
-      return `${rowHtml(row, { workers: workers.length, open })}${open
-        ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${workers.map((w) => rowHtml(w)).join('')}</div>` : ''}`;
-    }).join('');
+    const cards = items.map((row) => treeHtml(row, kids)).join('');
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
       solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
     }<div class="ag-card-grid">${cards}</div></div>`;
@@ -591,7 +625,7 @@ function rowHtml(r, nest = {}) {
       <div class="ag-card-status">${pill(status)}${blocked}</div>
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
-      ${nest.workers ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}">${nest.open ? '▾' : '▸'} ${nest.workers} worker${nest.workers === 1 ? '' : 's'}</button>` : ''}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>
     <div class="ag-card-actions"><button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
   </div>`;

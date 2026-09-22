@@ -2341,6 +2341,11 @@ export async function materializePendingSession() {
     }
     _pendingChat = null;
     currentSessionId = payload.id;
+    // A loadout picked from the Agents menu before this chat existed must be
+    // in place before its first turn runs (js/agentMenu.js).
+    if (window.agentMenuModule?.applyPendingLoadout) {
+      try { await window.agentMenuModule.applyPendingLoadout(payload.id); } catch (_) {}
+    }
     if (!isIncognito) {
       Storage.set('lastSessionId', payload.id);
       history.replaceState(null, '', '#' + payload.id);

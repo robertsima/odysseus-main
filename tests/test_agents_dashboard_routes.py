@@ -416,3 +416,42 @@ async def test_finished_worker_hands_its_result_to_the_parent_chat_which_continu
     assert parent.history[1].content == "parent continued"
     assert calls[1][-1].startswith("[Worker")
     assert act.list_runs(session_id="a1")[0]["status"] == "completed"
+
+
+async def test_chat_can_be_put_under_a_loadout_and_back_to_default(env, monkeypatch):
+    """The composer's Agents menu lists loadouts and applies one to the open chat."""
+    from fastapi import HTTPException
+
+    from src import agent_profiles
+
+    mgr, eps = env
+    profile = agent_profiles.validate_profiles([{
+        "name": "Researcher", "description": "Reads, never writes",
+        "memory_access": "read", "tool_access": "selected", "enabled_tools": ["web_search"],
+    }])[0]
+    monkeypatch.setattr(agent_profiles, "load_profiles", lambda: [profile])
+    writes = []
+    import core.database as db
+    monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: writes.append((sid, patch)) or dict(patch))
+
+    listed = await eps[("GET", "/api/agents/profiles")](_req())
+    assert [p["name"] for p in listed["profiles"]] == ["Researcher"]
+    assert listed["profiles"][0]["description"] == "Reads, never writes"
+
+    out = await eps[("POST", "/api/agents/sessions/{session_id}/loadout")](_req({"profile": "researcher"}), "a1")
+    assert out["agent_profile"] == "Researcher"
+    sid, patch = writes[-1]
+    assert sid == "a1" and patch == agent_profiles.session_patch(profile)
+
+    out = await eps[("POST", "/api/agents/sessions/{session_id}/loadout")](_req({"profile": None}), "a1")
+    assert out["agent_profile"] is None
+    cleared = writes[-1][1]
+    assert cleared["agent_profile"] is None and cleared["allowed_mcp_servers"] is None
+    assert "approval_mode" not in cleared  # the chat's own approval choice survives
+
+    with pytest.raises(HTTPException) as missing:
+        await eps[("POST", "/api/agents/sessions/{session_id}/loadout")](_req({"profile": "Nope"}), "a1")
+    assert missing.value.status_code == 404
+    with pytest.raises(HTTPException) as foreign:
+        await eps[("POST", "/api/agents/sessions/{session_id}/loadout")](_req({"profile": "Researcher"}), "b1")
+    assert foreign.value.status_code == 404

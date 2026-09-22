@@ -42868,3 +42868,27 @@ body.settings-sidebar-resize-active {
     display: none;
   }
 }
+
+/* Composer Agents menu (js/agentMenu.js). Agent mode shows Agents in place of
+   Prompt in the chevron menu; the body class follows the mode toggle. */
+body.composer-agent-mode #overflow-preset-btn,
+body:not(.composer-agent-mode) #overflow-agents-btn { display: none !important; }
+#overflow-agents-btn .overflow-agents-current { margin-left: auto; max-width: 110px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; opacity: .75; }
+#overflow-agents-btn.has-loadout { opacity: 1; }
+#overflow-agents-btn.has-loadout .overflow-agents-current { color: var(--accent, var(--red)); opacity: 1; }
+#overflow-agents-btn .overflow-agents-chevron { flex-shrink: 0; opacity: .6; }
+#overflow-agents-btn:not(.has-loadout) .overflow-agents-chevron { margin-left: auto; }
+.agent-menu { min-width: 230px; max-width: min(320px, calc(100vw - 16px)); }
+.agent-menu-head { padding: 6px 12px 2px; font-size: 10px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; opacity: .55; }
+.agent-menu-head small { font-weight: 400; letter-spacing: 0; text-transform: none; }
+.agent-menu-loadouts { max-height: 240px; overflow-y: auto; }
+.agent-menu-loadout { align-items: flex-start; text-align: left; }
+.agent-menu-loadout.active { opacity: 1; }
+.agent-menu-text { display: flex; flex-direction: column; min-width: 0; gap: 1px; }
+.agent-menu-text > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-menu-text small { font-size: 11px; opacity: .65; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-menu-radio { flex-shrink: 0; width: 12px; height: 12px; margin-top: 3px; border: 1.5px solid currentColor; border-radius: 50%; opacity: .6; box-sizing: border-box; }
+.agent-menu-loadout.active .agent-menu-radio { opacity: 1; border-color: var(--accent, var(--red)); background: radial-gradient(circle, var(--accent, var(--red)) 0 3px, transparent 3.5px); }
+.agent-menu-note { padding: 6px 12px; font-size: 12px; opacity: .6; }
+.agent-menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
+.agent-menu .overflow-menu-item:focus-visible { outline: 2px solid var(--accent, var(--red)); outline-offset: -2px; opacity: 1; }
