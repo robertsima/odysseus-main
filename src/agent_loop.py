@@ -3401,6 +3401,31 @@ def _append_tool_results(
             )
         )
 
+    # Execution ledger, re-ported from the fork (lost in the 2026-09-18 upstream
+    # sync, which left `recall_tool_output` offered with nothing to recall).
+    # Completed tool exchanges older than the keep window collapse to what is
+    # still true (the path read, the query run, ids, outcome) plus a
+    # `toolout-...` ref to the verbatim text. Without it every result stayed in
+    # the loop's history in full: a research turn grew to 700k tokens and the
+    # per-round trim to the context budget dropped whole results, so the agent
+    # re-read what it had lost and every round was a full-prompt cache miss.
+    # Batched (see the design note in context_compactor) so it invalidates the
+    # cached prefix once per window, not every round. Never raises.
+    try:
+        from src.context_compactor import compact_tool_exchanges
+
+        _ledger_stats = compact_tool_exchanges(messages)
+        if _ledger_stats.get("entries"):
+            logger.info(
+                "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
+                "%s -> %s chars (round %s)",
+                _ledger_stats["entries"], _ledger_stats["groups"],
+                _ledger_stats["chars_before"], _ledger_stats["chars_after"],
+                round_num,
+            )
+    except Exception as _ledger_exc:
+        logger.warning("[agent] execution ledger skipped: %s", _ledger_exc)
+
 
 def _compute_final_metrics(
     messages: List[Dict],
@@ -6947,6 +6972,30 @@ async def stream_agent_loop(
                 _effectful_used = True
 
             formatted = format_tool_result(desc, result)
+            # Re-ported from the fork (lost in the 2026-09-18 upstream sync): a
+            # tool result is replayed on every remaining round of the turn, so
+            # one oversized result (a GitHub code search, a log dump; MCP output
+            # has no size cap of its own) is paid for again every round. Past the
+            # inline limit it goes to the overflow store and a head/tail excerpt
+            # naming a `toolout-...` ref stays, which `recall_tool_output` pages
+            # through on demand. ask_user stays verbatim: it ends the turn and
+            # carries the live question.
+            if not _awaiting_user and "ask_user" not in result:
+                try:
+                    from src.tool_output_store import maybe_offload as _maybe_offload
+
+                    formatted, _offload_record = _maybe_offload(
+                        formatted,
+                        tool=block.tool_type,
+                        command=cmd_display,
+                        session_id=session_id,
+                        round_num=round_num,
+                    )
+                    if _offload_record is not None and isinstance(_relevant_tools, set):
+                        # The excerpt tells the model to call this; offer it.
+                        _relevant_tools.add("recall_tool_output")
+                except Exception as _offload_exc:
+                    logger.warning("[tool-output] offload skipped: %s", _offload_exc)
             tool_results.append(formatted)
             tool_result_texts.append(formatted)
             tool_result_records.append(

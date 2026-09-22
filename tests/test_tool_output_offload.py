@@ -148,3 +148,17 @@ def test_a_huge_read_still_offloads(store):
     out, record = store.maybe_offload(body, tool="read_file")
     assert record is not None
     assert len(out) < len(body) / 4
+
+
+def test_the_agent_loop_offloads_each_formatted_result():
+    """The wiring: an oversized result (MCP output has no size cap of its own)
+    is offloaded where the loop formats it, before it joins the history, and
+    the recall tool is offered for the excerpt's ref. Lost in the 2026-09-18
+    upstream sync; a GitHub research turn then grew to 700k tokens."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "src" / "agent_loop.py").read_text(encoding="utf-8")
+    block = src.split("formatted = format_tool_result(desc, result)", 1)[1].split("tool_results.append(formatted)", 1)[0]
+    assert "maybe_offload" in block
+    assert 'not _awaiting_user and "ask_user" not in result' in block
+    assert '_relevant_tools.add("recall_tool_output")' in block

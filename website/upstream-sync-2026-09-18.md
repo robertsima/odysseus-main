@@ -93,6 +93,18 @@ the model.
     untrusted context, so the executor accepts it in an unarmed run.
   - A sub-agent's card is saved in its own chat and listed in the Agents
     panel, with the reason it asked.
+- **Execution ledger and tool-output offload** (`6131859d`, `ddb518ef`).
+  Both modules had survived the sync, but nothing in upstream's loop called
+  them. As a result, every tool result stayed in the history in full: a
+  GitHub research turn grew to 700k tokens. The per-round trim then dropped
+  whole results, the agent re-read what it had lost, and each round was a
+  full-prompt cache miss. Now:
+  - A formatted result over the inline limit is offloaded where the loop
+    formats it. This matters most for MCP output, which has no size cap of
+    its own.
+  - `_append_tool_results` collapses completed exchanges in batches.
+  - `tests/test_execution_ledger.py::test_the_agent_loop_actually_calls_it`
+    runs again.
 
 ## Added to upstream's loop since
 
@@ -161,7 +173,6 @@ the model.
 | Continuation ("ok, continue" keeps the last turn's tools) | Upstream's handling | `8927810b`, `00b35dbd`, `a364f8f2` |
 | Delegation in the loop: policy gating, standing `delegation_granted`, plain-language "start an agent" routing | Workflows still check authorization. The loop does not hide or route delegation tools. | `ced11e62`, `7c9c03a2`, `16ad4e47`, `0ea6b80b` |
 | Steering beyond delivery: tools added because of a steer, and continuing a turn that would end while a steer is pending | Steers and peer-agent messages are delivered between rounds (see Kept). A steer that arrives after the last round is dropped with a visible `steer_dropped` event. | `75988e56`, `4c4ce597` |
-| Execution ledger (`recall_tool_output` references) | The ledger is not written, so there is nothing to recall | `6131859d` |
 | Prompt and schema efficiency: stable prefix, schema ledger, cache-shard affinity, reasoning replay, context accounting | Upstream's | `97b6691c`, `913a605d`, `f4bdeed2`, `c129bbcc`, `8cca5a1e`, `d47e5160` |
 | Schema-level hiding: private-grant tools, Lotus, loadout-disallowed tools | Offered to the model but refused at execution | `da53f2c4`, `0ea6b80b`, `cabbe6d1` |
 | Git, research and MCP routing prompts | Upstream's | `e16d1ec5`, `94fa0d17`, `982e60eb`, `9f7062d0`, `836eb7d8` |

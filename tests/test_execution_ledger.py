@@ -360,7 +360,6 @@ def test_textual_transcripts_are_handled_too():
         assert "Execution ledger" in msg["content"]
 
 
-@_REPORT_BACKLOG
 def test_the_agent_loop_actually_calls_it():
     """The wiring, not just the mechanism: _append_tool_results is the one caller.
 
