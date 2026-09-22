@@ -28,6 +28,11 @@ _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
 _LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
 MAX_AGENT_INSTRUCTIONS = 8000
+MAX_AGENT_PERSONA_NAME = 60
+# Keys that make a chat run under its own loadout voice rather than the shared
+# persona (see loadout_voice).
+_LOADOUT_VOICE_KEYS = ("agent_profile", "agent_instructions", "agent_persona_name",
+                       "agent_temperature", "agent_max_tokens")
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -114,9 +119,45 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError("agent_instructions must be a string")
             out[key] = (value or "").strip()[:MAX_AGENT_INSTRUCTIONS] or None
+        elif key == "agent_persona_name":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_persona_name must be a string")
+            out[key] = (value or "").strip()[:MAX_AGENT_PERSONA_NAME] or None
+        elif key in ("agent_temperature", "agent_max_tokens"):
+            if value is None or (isinstance(value, str) and not value.strip()):
+                out[key] = None
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"{key} must be a number")
+            try:
+                number = float(value) if key == "agent_temperature" else int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number")
+            out[key] = max(0.0, min(2.0, number)) if key == "agent_temperature" else max(0, min(65536, number))
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out
+
+
+def loadout_voice(settings: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The persona, instructions and sampling a chat's loadout gives it, or
+    None when the chat has no loadout and uses the shared Prompt-window persona.
+
+    Personas are shared across users, but each agent keeps its own: a chat under
+    a loadout never picks up the shared persona, its prompt or its temperature.
+    ``temperature``/``max_tokens`` are None when the loadout leaves them to the
+    app default.
+    """
+    settings = settings or {}
+    if not any(settings.get(key) not in (None, "") for key in _LOADOUT_VOICE_KEYS):
+        return None
+    return {
+        "profile": settings.get("agent_profile") or None,
+        "persona_name": settings.get("agent_persona_name") or "",
+        "instructions": settings.get("agent_instructions") or "",
+        "temperature": settings.get("agent_temperature"),
+        "max_tokens": settings.get("agent_max_tokens"),
+    }
 
 
 def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:

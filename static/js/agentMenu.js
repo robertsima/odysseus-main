@@ -25,7 +25,10 @@ const state = {
   current: null,       // loadout the open chat runs under
   pending: null,       // { name } chosen before the chat existed
   pendingFor: null,    // pending chat object it was chosen for
+  voice: null,         // { persona } when the open chat has its own loadout voice
 };
+// Settings that give a chat its own voice (src/session_settings.loadout_voice).
+const VOICE_KEYS = ['agent_profile', 'agent_instructions', 'agent_persona_name', 'agent_temperature', 'agent_max_tokens'];
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -60,14 +63,27 @@ function prunePending() {
 async function loadCurrent() {
   prunePending();
   const sid = sessionId();
-  if (!sid) { state.current = state.pending?.name || null; return; }
+  if (!sid) {
+    state.current = state.pending?.name || null;
+    const profile = state.current && (state.profiles || []).find((p) => p.name === state.current);
+    state.voice = state.current ? { persona: profile?.persona_name || '' } : null;
+    return;
+  }
   try {
-    const data = await api(`/api/session/${encodeURIComponent(sid)}/settings`);
-    state.current = data?.settings?.agent_profile || null;
+    const settings = (await api(`/api/session/${encodeURIComponent(sid)}/settings`))?.settings || {};
+    state.current = settings.agent_profile || null;
+    state.voice = VOICE_KEYS.some((key) => settings[key] != null && settings[key] !== '')
+      ? { persona: settings.agent_persona_name || '' } : null;
   } catch (_) {
     state.current = null;
+    state.voice = null;
   }
 }
+
+/** True when the next turn runs as an agent under a loadout, so the shared
+ *  persona, prompt and inject text from the Prompt window stay out of it. */
+export function sharedPersonaSuppressed() { return state.mode === 'agent' && !!state.voice; }
+export function loadoutPersonaName() { return state.voice?.persona || ''; }
 
 async function loadProfiles() {
   try {
@@ -84,6 +100,8 @@ function syncButton() {
   // Not `.active`: the chevron's dot counts active items even while this one
   // is hidden in Chat mode.
   $('overflow-agents-btn')?.classList.toggle('has-loadout', !!state.current);
+  // The shared persona chip would claim a persona this chat is not using.
+  document.body.classList.toggle('loadout-voice', !!state.voice);
 }
 
 async function choose(name) {
@@ -92,7 +110,7 @@ async function choose(name) {
     // No chat yet: remember it and apply it when the first send creates one.
     state.pending = name ? { name } : null;
     state.pendingFor = name ? (window.sessionModule?.getPendingChat?.() || null) : null;
-    state.current = name || null;
+    await loadCurrent();
     syncButton();
     uiModule.showToast(name ? `${name} will run this chat once you send` : 'This chat will use the default setup');
     return;
@@ -102,6 +120,7 @@ async function choose(name) {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: name || null }),
     });
     state.current = result?.agent_profile || null;
+    await loadCurrent();
     syncButton();
     try { window.chatSettingsModule?.refresh?.(); } catch (_) {}
     uiModule.showToast(name ? `This chat now runs as ${name}` : 'Loadout cleared — default setup', 'success');
@@ -121,11 +140,10 @@ export async function applyPendingLoadout(newSessionId) {
     await api(`/api/agents/sessions/${encodeURIComponent(newSessionId)}/loadout`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ profile: pending.name }),
     });
-    state.current = pending.name;
   } catch (err) {
-    state.current = null;
     uiModule.showToast(`${pending.name} was not applied: ${err.message}`, 'error');
   }
+  await loadCurrent();
   syncButton();
 }
 
@@ -169,6 +187,9 @@ function loadoutItem(name, title, detail) {
 /** The persona or custom prompt the next turn sends, if any. It applies in
  *  Agent mode too, alongside a loadout's own instructions. */
 function personaNote() {
+  if (state.voice) {
+    return `<small>Not used here: this agent has its own persona${state.voice.persona ? ` (${esc(state.voice.persona)})` : ''}</small>`;
+  }
   const name = presetsModule.getCharacterName?.() || '';
   if (name) return `<small>Persona: ${esc(name)}</small>`;
   const custom = presetsModule.getSelectedPreset?.() && presetsModule.getPreset?.('custom');
@@ -187,7 +208,9 @@ function menuHtml() {
       loadouts += loadoutItem(state.current, state.current, 'No longer configured');
     }
     loadouts += profiles.map((p) => loadoutItem(p.name, p.name,
-      p.description || [p.tool_access === 'all' ? 'all tools' : `${p.tool_access} tools`, `${p.memory_access} memory`].join(' · '))).join('');
+      [p.persona_name ? `as ${p.persona_name}` : '',
+        p.description || [p.tool_access === 'all' ? 'all tools' : `${p.tool_access} tools`, `${p.memory_access} memory`].join(' · ')]
+        .filter(Boolean).join(' — '))).join('');
     if (!profiles.length) loadouts += '<div class="agent-menu-note">No loadouts configured yet.</div>';
   }
   return `<div class="agent-menu-head">Loadout${sessionId() ? '' : ' <small>for the next message</small>'}</div>
@@ -306,9 +329,10 @@ function init() {
   });
   window.addEventListener('resize', () => { const m = $('agent-menu'); if (m && !m.classList.contains('hidden')) position(m); });
   // Keep the entry's loadout label in step with the open chat.
+  // Tracked in both modes, so switching to Agent already knows the voice.
   let lastSid;
+  document.addEventListener('odysseus:loadout-changed', () => { loadCurrent().then(syncButton); });
   setInterval(() => {
-    if (state.mode !== 'agent') return;
     const sid = sessionId();
     if (sid === lastSid) return;
     lastSid = sid;
@@ -319,6 +343,6 @@ function init() {
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
 else init();
 
-const agentMenu = { applyMode, openMenu, closeMenu, applyPendingLoadout };
+const agentMenu = { applyMode, openMenu, closeMenu, applyPendingLoadout, sharedPersonaSuppressed, loadoutPersonaName };
 window.agentMenuModule = agentMenu;
 export default agentMenu;

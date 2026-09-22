@@ -2413,7 +2413,7 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
 
 
 def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = False,
-                                 has_persona: bool = False) -> str:
+                                 has_persona: bool = False, persona_name: Optional[str] = None) -> str:
     """A subordinate, chat-local instruction block for a profile's worker (or "").
 
     A loadout's ``instructions`` are saved on its worker chat as
@@ -2424,12 +2424,17 @@ def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = 
     cannot leak into another's.
     """
     scoped = str(instructions or "").strip()
+    # A loadout's persona name is part of its segregated voice (it replaces the
+    # shared Prompt-window persona for this chat).
+    name = re.sub(r"\s+", " ", str(persona_name or "")).strip()[:60]
+    if name:
+        scoped = f"Your name is {name}." + (f"\n{scoped}" if scoped else "")
     if not scoped:
         return ""
     # The compact form names the assistant, unless the chat has a persona,
     # whose own name must not be contradicted.
     prefix = (
-        ("" if has_persona else "You are Odysseus. ")
+        ("" if (has_persona or name) else "You are Odysseus. ")
         + "Follow platform safety, security, authorization, privacy, and "
         "session capability policy. This lightweight reply has no tools; do not claim to have "
         "used any.\n\n"
@@ -2484,6 +2489,7 @@ def _build_system_prompt(
     workspace: Optional[str] = None,
     skill_scope: Optional[Set[str]] = None,
     agent_instructions: Optional[str] = None,
+    agent_persona_name: Optional[str] = None,
 ) -> List[Dict]:
     """Build agent system prompt, inject MCP/document context, merge consecutive system msgs."""
     global _cached_base_prompt, _cached_base_prompt_key
@@ -2530,7 +2536,7 @@ def _build_system_prompt(
             _cached_base_prompt = agent_prompt
             _cached_base_prompt_key = cache_key
 
-    _customization = _scoped_agent_customization(agent_instructions)
+    _customization = _scoped_agent_customization(agent_instructions, persona_name=agent_persona_name)
     if _customization:
         agent_prompt += "\n\n" + _customization
 
@@ -3864,6 +3870,18 @@ async def stream_agent_loop(
         except Exception as _policy_err:
             logger.warning("[agent] could not apply session tool policy for %s: %s", session_id, _policy_err)
     _skill_scope = _skill_scope_from_settings(_session_policy)
+    # A loadout's own sampling wins over whatever the caller passed: the chat
+    # route already resolved it, but headless workers pass the defaults.
+    if _session_policy.get("agent_temperature") is not None:
+        try:
+            temperature = float(_session_policy["agent_temperature"])
+        except (TypeError, ValueError):
+            pass
+    if _session_policy.get("agent_max_tokens") is not None:
+        try:
+            max_tokens = int(_session_policy["agent_max_tokens"])
+        except (TypeError, ValueError):
+            pass
     route_descriptors = list(route_descriptors or [])
     while len(route_descriptors) < 1 + len(fallbacks or []):
         route_descriptors.append({})
@@ -4017,6 +4035,7 @@ async def stream_agent_loop(
         _direct_customization = _scoped_agent_customization(
             _session_policy.get("agent_instructions"), compact=True,
             has_persona=bool(_direct_persona),
+            persona_name=_session_policy.get("agent_persona_name"),
         )
 
         def _direct_messages_for(candidate_is_qwen: bool) -> List[Dict]:
@@ -4860,6 +4879,7 @@ async def stream_agent_loop(
             workspace=workspace,
             skill_scope=_skill_scope,
             agent_instructions=_session_policy.get("agent_instructions"),
+            agent_persona_name=_session_policy.get("agent_persona_name"),
         )
         if doc_mode and not plan_mode and not approved_plan and not guide_only:
             route_messages = _minimal_odysseus_doc_messages(

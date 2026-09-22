@@ -22,7 +22,8 @@ _ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "del
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
-    "name", "description", "instructions", "model", "model_fallbacks", "model_access",
+    "name", "description", "instructions", "persona_name", "temperature", "max_tokens",
+    "model", "model_fallbacks", "model_access",
     "allowed_models", "tool_access", "enabled_tools", "disabled_tools", "memory_access",
     "skill_access", "skill_names", "mcp_access", "allowed_mcp_servers",
     "private_vault_access", "approval_mode", "delegation_policy",
@@ -34,7 +35,9 @@ _FIELDS = (
 # filling in a blank rather than a setting. `max_parallel_workers` is pointedly
 # NOT here: 0 is a real value there and means "this worker may start no
 # children of its own".
-_ZERO_MEANS_UNSET = frozenset({"max_rounds"})
+# `temperature`/`max_tokens` join them: a filled-in 0 would pin a loadout to
+# greedy sampling, and max_tokens 0 already means "server decides".
+_ZERO_MEANS_UNSET = frozenset({"max_rounds", "temperature", "max_tokens"})
 
 
 def _is_blank(key: str, value: Any) -> bool:

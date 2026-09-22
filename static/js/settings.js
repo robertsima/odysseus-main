@@ -2556,6 +2556,27 @@ function initAgentProfilesEditor(initial) {
   if (!list || list.dataset.wired) return;
   list.dataset.wired = '1';
   var profiles = (initial || []).map(function (p) { return Object.assign({}, p); });
+  // Saved personas a loadout can start from. Choosing one copies it into the
+  // loadout, which then keeps its own persona: editing the shared persona
+  // later does not change agents built from it.
+  // Built-ins load lazily: this editor is the only part of Settings that needs
+  // presets.js, and the same module instance is already loaded by app.js.
+  var personaSources = [];
+  Promise.all([
+    import('./presets.js').then(function (m) { return m.PROMPT_TEMPLATES || []; }).catch(function () { return []; }),
+    fetch('/api/presets/templates', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : []; }).catch(function () { return []; }),
+  ]).then(function (sources) {
+    sources[0].forEach(function (t) {
+      personaSources.push({ name: t.name, persona_name: t.noName ? '' : t.name, instructions: t.prompt || '', temperature: t.temperature });
+    });
+    var rows = sources[1];
+    (Array.isArray(rows) ? rows : []).forEach(function (t) {
+      if (!t || !t.name || personaSources.some(function (s) { return s.name === t.name; })) return;
+      personaSources.push({ name: t.name, persona_name: t.name, instructions: t.system_prompt || '',
+        temperature: t.temperature, max_tokens: t.max_tokens || null });
+    });
+    if (!list.contains(document.activeElement)) render();
+  }).catch(function () {});
 
   function field(label, input, hint) {
     var wrap = document.createElement('label');
@@ -2587,7 +2608,7 @@ function initAgentProfilesEditor(initial) {
         inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
         inp.addEventListener('input', function () {
           var listKeys = ['disabled_tools', 'enabled_tools', 'skill_names', 'allowed_mcp_servers', 'allowed_models', 'model_fallbacks'];
-          p[key] = (key === 'max_rounds' || key === 'max_parallel_workers') ? inp.value : (listKeys.indexOf(key) >= 0
+          p[key] = (key === 'max_rounds' || key === 'max_parallel_workers' || key === 'temperature' || key === 'max_tokens') ? inp.value : (listKeys.indexOf(key) >= 0
             ? inp.value.split(/[\n,]+/).map(function (v) { return v.trim(); }).filter(Boolean) : inp.value);
           note.textContent = 'Unsaved changes';
           note.style.color = 'var(--fg)';
@@ -2620,7 +2641,31 @@ function initAgentProfilesEditor(initial) {
       head.appendChild(remove);
       card.appendChild(head);
       card.appendChild(field('Description', mk('input', 'description', { placeholder: 'What this worker is for (shown to the agent)', maxlength: '300' })));
-      card.appendChild(field('Instructions', mk('textarea', 'instructions', { rows: '3', placeholder: 'System instructions for this worker' })));
+      // Each loadout's own voice. A chat running under it uses these instead
+      // of the shared persona from the Prompt window.
+      var voice = document.createElement('div'); voice.className = 'agent-profile-voice';
+      var from = document.createElement('select'); from.className = 'settings-select';
+      from.innerHTML = '<option value="">Copy a persona…</option>';
+      personaSources.forEach(function (src, idx) {
+        var opt = document.createElement('option'); opt.value = String(idx); opt.textContent = src.name; from.appendChild(opt);
+      });
+      from.addEventListener('change', function () {
+        var src = personaSources[Number(from.value)];
+        if (!src) return;
+        p.persona_name = src.persona_name || '';
+        p.instructions = src.instructions || '';
+        if (src.temperature != null) p.temperature = src.temperature;
+        if (src.max_tokens) p.max_tokens = src.max_tokens;
+        render();
+        note.textContent = 'Copied ' + src.name + ' — unsaved';
+        note.style.color = 'var(--fg)';
+      });
+      voice.appendChild(field('Start from persona', from, 'Copies a saved persona into this loadout'));
+      voice.appendChild(field('Persona name', mk('input', 'persona_name', { placeholder: 'none', maxlength: '60' }), 'The name this agent answers as'));
+      voice.appendChild(field('Temperature', mk('input', 'temperature', { type: 'number', min: '0', max: '2', step: '0.05', placeholder: 'default' })));
+      voice.appendChild(field('Max tokens', mk('input', 'max_tokens', { type: 'number', min: '0', max: '65536', step: '1', placeholder: 'default' }), '0 or blank lets the server decide'));
+      card.appendChild(voice);
+      card.appendChild(field('Instructions / personality', mk('textarea', 'instructions', { rows: '3', placeholder: 'How this agent thinks, speaks and works' })));
       var policies = document.createElement('div'); policies.className = 'agent-profile-policy-grid';
       policies.appendChild(field('Delegation', choice('delegation_policy', [['explicit','Only when asked'],['never','Never'],['auto','Agent decides']]), 'When this worker may create or hand off to other agents.'));
       policies.appendChild(field('Approvals', choice('approval_mode', [['inherit','Global default'],['ask_risky','Ask for risky'],['ask_all','Ask for every change'],['auto','Automatic']])));
@@ -2652,7 +2697,8 @@ function initAgentProfilesEditor(initial) {
     profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
       max_rounds: 12, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
-      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '' });
+      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
+      persona_name: '', temperature: null, max_tokens: null });
     render();
     var inputs = list.querySelectorAll('.agent-profile:last-child input');
     if (inputs[0]) inputs[0].focus();

@@ -146,6 +146,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
             config = {
                 "agent_profile": settings.get("agent_profile"),
                 "agent_instructions": settings.get("agent_instructions"),
+                "agent_persona_name": settings.get("agent_persona_name"),
+                "agent_temperature": settings.get("agent_temperature"),
+                "agent_max_tokens": settings.get("agent_max_tokens"),
                 "approval_mode": settings.get("approval_mode"),
                 "disabled_tools": settings.get("disabled_tools") or [],
                 "memory_access": settings.get("memory_access", "write"),
@@ -527,7 +530,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
     # The per-chat keys a loadout writes (agent_profiles.session_patch). Clearing
     # a loadout removes these; approval_mode is left alone because the chat's
     # settings panel also sets it, and a stricter leftover mode is harmless.
-    _LOADOUT_KEYS = ("agent_profile", "agent_instructions", "tool_access", "enabled_tools",
+    _LOADOUT_KEYS = ("agent_profile", "agent_instructions", "agent_persona_name",
+                     "agent_temperature", "agent_max_tokens", "tool_access", "enabled_tools",
                      "disabled_tools", "memory_access", "skill_access", "skill_names",
                      "model_access", "allowed_models", "delegation_policy",
                      "max_parallel_workers", "allowed_mcp_servers", "private_vault_access")
@@ -539,6 +543,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
         from src import agent_profiles
         return {"profiles": [{"name": p["name"], "description": p.get("description") or "",
                               "model": p.get("model") or "", "tool_access": p.get("tool_access", "all"),
+                              "persona_name": p.get("persona_name") or "",
+                              "temperature": p.get("temperature"),
                               "memory_access": p.get("memory_access", "read"),
                               "delegation_policy": p.get("delegation_policy", "explicit")}
                              for p in agent_profiles.load_profiles()]}

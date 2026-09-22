@@ -493,7 +493,8 @@ function configFor(row) {
   }
   const stored = row.config || {};
   const base = Object.assign({
-    agent_profile: '', agent_instructions: '', approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
+    agent_profile: '', agent_instructions: '', agent_persona_name: '', agent_temperature: null, agent_max_tokens: null,
+    approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
     allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
   }, stored);
@@ -523,7 +524,9 @@ function profileConfig(profile) {
     // MCP access (or a narrowed list) rendered correctly, then saved as full
     // access: the editor showed one policy and the server stored another.
     mcp_access: profile.mcp_access || 'all',
-    agent_profile: profile.name || '', agent_instructions: profile.instructions || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
+    agent_profile: profile.name || '', agent_instructions: profile.instructions || '',
+    agent_persona_name: profile.persona_name || '', agent_temperature: profile.temperature ?? null, agent_max_tokens: profile.max_tokens ?? null,
+    approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
     memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
     delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
@@ -556,6 +559,12 @@ function configEditorHtml(row) {
   const tabButton = (id, label, summary) => `<button type="button" class="ag-config-tab${tab === id ? ' active' : ''}" data-ag="config-tab" data-tab="${id}" aria-selected="${tab === id ? 'true' : 'false'}"><span>${label}</span><small>${summary}</small></button>`;
   const generalPanel = `<div class="ag-config-panel ag-config-general" data-config-panel="general">
     <div class="ag-panel-heading"><div><b>Behavior</b><span>Decide how independently this agent may operate.</span></div></div>
+    <div class="ag-voice-grid">
+      <label class="ag-field"><span>Persona name</span><input class="wb-input" type="text" maxlength="60" data-config="agent_persona_name" value="${esc(c.agent_persona_name || '')}" placeholder="None"><small>The name this agent answers as.</small></label>
+      <label class="ag-field"><span>Temperature</span><input class="wb-input" type="number" min="0" max="2" step="0.05" data-config="agent_temperature" data-config-optional value="${c.agent_temperature == null ? '' : esc(c.agent_temperature)}" placeholder="Default"></label>
+      <label class="ag-field"><span>Max tokens</span><input class="wb-input" type="number" min="0" max="65536" step="1" data-config="agent_max_tokens" data-config-optional value="${c.agent_max_tokens == null ? '' : esc(c.agent_max_tokens)}" placeholder="Default"></label>
+    </div>
+    <small class="ag-voice-note">This agent's own voice. It replaces the shared persona from the Prompt window while this chat runs as an agent.</small>
     <label class="ag-field"><span>Personality & instructions</span><textarea class="wb-input ag-textarea" rows="5" maxlength="8000" data-config="agent_instructions" placeholder="How this agent should communicate and approach its work">${esc(c.agent_instructions || '')}</textarea><small>Scoped to this agent. Platform security and capability policy always take priority.</small></label>
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
@@ -809,8 +818,10 @@ function onConfigChange(e) {
   }
   const draft = configFor(row);
   if (field) {
+    // Optional numbers (temperature, max tokens) read blank as "app default".
     draft[field] = e.target.type === 'checkbox' ? !!e.target.checked
-      : e.target.type === 'number' ? Number(e.target.value || 0) : e.target.value;
+      : e.target.type === 'number' ? (e.target.value === '' && 'configOptional' in e.target.dataset ? null : Number(e.target.value || 0))
+      : e.target.value;
     if (field === 'mcp_access') {
       if (e.target.value === 'all') draft.allowed_mcp_servers = ['*'];
       else if (e.target.value === 'none') draft.allowed_mcp_servers = [];
@@ -853,6 +864,9 @@ async function saveAgentConfig(row) {
   const payload = {
     agent_profile: draft.agent_profile || null,
     agent_instructions: draft.agent_instructions || null,
+    agent_persona_name: draft.agent_persona_name || null,
+    agent_temperature: draft.agent_temperature ?? null,
+    agent_max_tokens: draft.agent_max_tokens ?? null,
     approval_mode: draft.approval_mode || null,
     disabled_tools: disabledTools,
     tool_access: draft.tool_access,
@@ -871,6 +885,8 @@ async function saveAgentConfig(row) {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });
   row.config = Object.assign({}, result.settings || payload);
+  // The composer's Agents menu decides whether the shared persona applies.
+  document.dispatchEvent(new CustomEvent('odysseus:loadout-changed', { detail: { sessionId: row.session_id } }));
   row.approval_mode = result.approval_mode;
   state.configDrafts.set(row.session_id, Object.assign({}, draft, row.config, {
     tool_access: draft.tool_access, enabled_tools: draft.enabled_tools || [], mcp_access: draft.mcp_access,

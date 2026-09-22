@@ -42892,3 +42892,17 @@ body:not(.composer-agent-mode) #overflow-agents-btn { display: none !important; 
 .agent-menu-note { padding: 6px 12px; font-size: 12px; opacity: .6; }
 .agent-menu-sep { height: 1px; margin: 4px 6px; background: var(--border); }
 .agent-menu .overflow-menu-item:focus-visible { outline: 2px solid var(--accent, var(--red)); outline-offset: -2px; opacity: 1; }
+
+/* Per-loadout persona and sampling (Settings › Workbench › Agent profiles). */
+.agent-profile-voice { display: grid; grid-template-columns: minmax(130px, 1.2fr) minmax(120px, 1.2fr) 90px 100px; gap: 8px; align-items: end; }
+.agent-profile-voice .settings-select { width: 100%; min-width: 0; }
+@media (max-width: 600px) { .agent-profile-voice { grid-template-columns: 1fr 1fr; } }
+
+/* Control Room loadout editor: this agent's persona and sampling. */
+.ag-voice-grid { display: grid; grid-template-columns: minmax(140px, 1.6fr) minmax(90px, 1fr) minmax(90px, 1fr); gap: 10px; }
+.ag-voice-note { display: block; margin: -2px 0 10px; color: var(--wb-faint); font-size: 10px; }
+@media (max-width: 600px) { .ag-voice-grid { grid-template-columns: 1fr 1fr; } }
+
+/* A chat running as an agent under a loadout uses the loadout's persona, so the
+   shared persona chip would be misleading there. */
+body.composer-agent-mode.loadout-voice #character-indicator-btn { display: none !important; }

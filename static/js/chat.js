@@ -39,6 +39,16 @@ import {
 import { createTerminalStreamError, isRecoverableStreamError } from './chatStreamErrors.js';
 import { loadPanel } from './panels.js';
 
+// An agent chat running under a loadout uses the loadout's persona, not the
+// shared one from the Prompt window (js/agentMenu.js knows which applies).
+function _sharedPersonaSuppressed() {
+  try { return !!window.agentMenuModule?.sharedPersonaSuppressed?.(); } catch (_) { return false; }
+}
+function _personaNameForTurn() {
+  if (_sharedPersonaSuppressed()) return window.agentMenuModule?.loadoutPersonaName?.() || '';
+  return presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
+}
+
   const RESEARCH_TIMEOUT_MS = 360000;
   const DEFAULT_TIMEOUT_MS = 120000;
   const RUN_ID_ABORT_GRACE_MS = 2000; // timeout waits this long for a run-id header before hard-aborting
@@ -2164,8 +2174,9 @@ import { loadPanel } from './panels.js';
         }
       }
 
-      // Apply inject prefix/suffix
-      const _inject = presetsModule.getInject ? presetsModule.getInject() : { prefix: '', suffix: '' };
+      // Apply inject prefix/suffix. The shared prompt stays out of an agent
+      // chat running under a loadout, which has its own voice (agentMenu.js).
+      const _inject = (!_sharedPersonaSuppressed() && presetsModule.getInject) ? presetsModule.getInject() : { prefix: '', suffix: '' };
       let _finalMsgWithInject = finalMsg;
       if (_inject.prefix) _finalMsgWithInject = _inject.prefix + ' ' + _finalMsgWithInject;
       if (_inject.suffix) _finalMsgWithInject = _finalMsgWithInject + ' ' + _inject.suffix;
@@ -2372,7 +2383,7 @@ import { loadPanel } from './panels.js';
       }
 
       var roleLabel = _modelRouteLabel(modelName, modelName);
-      var _charNameInit = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
+      var _charNameInit = _personaNameForTurn();
       if (_charNameInit) roleLabel = _charNameInit;
       const roleTs = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
       holder.innerHTML = `<div class="role">${uiModule.esc(roleLabel)} <span class="role-timestamp">${roleTs}</span></div><div class="body"></div>`;
@@ -3613,7 +3624,7 @@ import { loadPanel } from './panels.js';
                     holder._actualEndpointLabel = json.endpoint_label || holder._actualEndpointLabel || holder._requestedEndpointLabel;
                     if (json.suffix) holder._roleSuffix = json.suffix;
                     // Prepend character name if sent by server or set locally
-                    var _charName = json.character_name || (presetsModule.getCharacterName ? presetsModule.getCharacterName() : '');
+                    var _charName = json.character_name || _personaNameForTurn();
                     if (_charName) holder._characterName = _charName;
                     _setRoleModelLabel(roleEl, holder._requestedModel, holder._actualModel, {
                       suffix: holder._roleSuffix,
@@ -4361,7 +4372,7 @@ import { loadPanel } from './panels.js';
         const _finalActualModel = _finalModelHolder._actualModel || finalMeta?.model;
         const _finalRequestedModel = _finalModelHolder._requestedModel || finalMeta?.model || _finalActualModel;
         // Prepend character name if set
-        var _charNameFinal = presetsModule.getCharacterName ? presetsModule.getCharacterName() : '';
+        var _charNameFinal = _personaNameForTurn();
         const roleEl = _finalModelHolder.querySelector('.role');
         if (roleEl) {
           _setRoleModelLabel(roleEl, _finalRequestedModel, _finalActualModel, {

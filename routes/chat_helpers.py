@@ -553,6 +553,34 @@ def extract_preset(chat_handler, preset_id) -> PresetInfo:
     )
 
 
+def loadout_preset(session_id, shared: PresetInfo) -> PresetInfo:
+    """In Agent mode, a chat under a loadout speaks with the loadout's voice.
+
+    The shared persona (Prompt window) is dropped, including its system prompt,
+    name and sampling, so each agent keeps its own. The loadout's persona name
+    and instructions reach the model through the agent loop's per-agent block,
+    which also covers workers that never pass through here. A chat without a
+    loadout keeps the shared persona.
+    """
+    try:
+        from core.database import get_session_settings
+        from src.session_settings import loadout_voice
+
+        voice = loadout_voice(get_session_settings(session_id) if session_id else None)
+    except Exception:
+        voice = None
+    if not voice:
+        return shared
+    from src.constants import DEFAULT_MAX_TOKENS, DEFAULT_TEMPERATURE
+
+    return PresetInfo(
+        temperature=DEFAULT_TEMPERATURE if voice["temperature"] is None else voice["temperature"],
+        max_tokens=DEFAULT_MAX_TOKENS if voice["max_tokens"] is None else voice["max_tokens"],
+        system_prompt=None,
+        character_name=voice["persona_name"],
+    )
+
+
 async def preprocess(
     chat_handler, message, att_ids, sess,
     auto_opened_docs: Optional[list] = None,
@@ -862,6 +890,8 @@ async def build_chat_context(
     """
     # Preset
     preset = extract_preset(chat_handler, preset_id)
+    if agent_mode:
+        preset = loadout_preset(session_id, preset)
 
     # Preprocess message (CoT, YouTube, VL images, build content). The
     # auto_opened_docs collector captures any docs created server-side
