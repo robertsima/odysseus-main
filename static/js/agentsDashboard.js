@@ -353,14 +353,31 @@ function updateOpenView() {
   const error = $('ag-refresh-error');
   if (error) { error.textContent = state.error; error.hidden = !state.error; }
 }
+// The chat's tool allowlist, read as an allowlist. A chat saved before
+// allowlists were stored carries only the denylist this editor used to compute
+// and PATCH, so that is still read back — but it is never written again: saving
+// replaces it with `tool_access`/`enabled_tools`, which the server inverts
+// against the tools that exist at the time rather than against a snapshot.
+function readToolAccess(config) {
+  const names = (state.catalog?.tools || []).map((tool) => tool.name);
+  const stored = String(config.tool_access || '');
+  if (stored === 'all' || stored === 'none' || stored === 'selected') {
+    return {
+      tool_access: stored,
+      enabled_tools: stored === 'all' ? names : (config.enabled_tools || []).filter((name) => names.includes(name)),
+    };
+  }
+  const disabled = new Set(config.disabled_tools || []);
+  return {
+    tool_access: !disabled.size ? 'all' : (names.length && disabled.size >= names.length ? 'none' : 'selected'),
+    enabled_tools: names.filter((name) => !disabled.has(name)),
+  };
+}
 function configFor(row) {
   if (state.configDrafts.has(row.session_id)) {
     const existing = state.configDrafts.get(row.session_id);
     if (state.catalog && !existing._catalogReady) {
-      const disabled = new Set(existing.disabled_tools || []);
-      const names = state.catalog.tools.map((tool) => tool.name);
-      existing.tool_access = !disabled.size ? 'all' : disabled.size >= names.length ? 'none' : 'selected';
-      existing.enabled_tools = names.filter((name) => !disabled.has(name));
+      Object.assign(existing, readToolAccess(existing));
       existing.mcp_access = existing.allowed_mcp_servers?.includes('*') ? 'all' : existing.allowed_mcp_servers?.length ? 'selected' : 'none';
       existing._catalogReady = true;
     }
@@ -371,10 +388,7 @@ function configFor(row) {
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
     allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
   }, row.config || {});
-  const totalTools = state.catalog?.tools?.length || 0;
-  base.tool_access = !base.disabled_tools?.length ? 'all'
-    : (totalTools && base.disabled_tools.length >= totalTools ? 'none' : 'selected');
-  base.enabled_tools = state.catalog ? state.catalog.tools.filter((tool) => !(base.disabled_tools || []).includes(tool.name)).map((tool) => tool.name) : [];
+  Object.assign(base, state.catalog ? readToolAccess(base) : { tool_access: base.tool_access || 'all', enabled_tools: [] });
   base.mcp_access = base.allowed_mcp_servers?.includes('*') ? 'all' : base.allowed_mcp_servers?.length ? 'selected' : 'none';
   base._catalogReady = !!state.catalog;
   state.configDrafts.set(row.session_id, base);
@@ -678,20 +692,31 @@ function onConfigChange(e) {
 }
 async function saveAgentConfig(row) {
   const draft = configFor(row);
-  const allTools = (state.catalog?.tools || []).map((tool) => tool.name);
-  let disabledTools = [];
-  if (draft.tool_access === 'none') disabledTools = allTools;
-  else if (draft.tool_access === 'selected') {
-    const enabled = new Set(draft.enabled_tools || []);
-    disabledTools = allTools.filter((name) => !enabled.has(name));
-  }
+  // Send the allowlist, not its inverse. This used to PATCH `disabled_tools`
+  // computed here from `state.catalog.tools` — a third registry, holding no MCP
+  // names, sampled in the browser at save time. Anything the install gained
+  // afterwards was missing from that list and therefore allowed. `null` clears
+  // whichever snapshot an earlier save left behind, so a chat edited here stops
+  // carrying two disagreeing descriptions of its own policy.
   let allowedMcp = ['*'];
   if (draft.mcp_access === 'none') allowedMcp = [];
   else if (draft.mcp_access === 'selected') allowedMcp = [...(draft.allowed_mcp_servers || [])];
+  // The allowlist covers MCP, so the connection choice on screen has to be
+  // written into it as a wildcard — otherwise narrowing the native tool grid
+  // would silently take this chat's MCP servers away while still showing them
+  // as connected. `mcp__<id>__*` / `mcp__*` are how a grant over runtime-named
+  // tools is spelled; see src/tool_policy.py.
+  const enabledTools = draft.tool_access === 'selected' ? [...(draft.enabled_tools || [])] : [];
+  if (draft.tool_access === 'selected') {
+    if (draft.mcp_access === 'all') enabledTools.push('mcp__*');
+    else if (draft.mcp_access === 'selected') enabledTools.push(...allowedMcp.map((id) => `mcp__${id}__*`));
+  }
   const payload = {
     agent_profile: draft.agent_profile || null,
     approval_mode: draft.approval_mode || null,
-    disabled_tools: disabledTools,
+    disabled_tools: null,
+    tool_access: draft.tool_access || 'all',
+    enabled_tools: enabledTools,
     memory_access: draft.memory_access,
     skill_access: draft.skill_access,
     skill_names: draft.skill_access === 'selected' ? (draft.skill_names || []) : [],

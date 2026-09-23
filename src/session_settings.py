@@ -3,8 +3,13 @@
 Two kinds of keys live in ``sessions.settings_json``:
 
 * **Policy** the server enforces on every turn: ``approval_mode`` (see
-  :mod:`src.tool_approvals`) and ``disabled_tools`` (tools switched off for
-  this chat only, on top of the global and per-user denylists).
+  :mod:`src.tool_approvals`), ``tool_access``/``enabled_tools`` (this chat's
+  tool allowlist, stored as an allowlist and inverted where it is evaluated —
+  :func:`src.tool_policy.allowlist_permits`) and ``disabled_tools`` (tools
+  switched off for this chat only, on top of the global and per-user
+  denylists). ``tool_access`` is absent on chats written before allowlists were
+  stored, and resolves to ``"all"`` — those chats keep being governed by the
+  ``disabled_tools`` their loadout wrote at the time.
 * **Last used** state the frontend restores when the chat is reopened:
   ``toggles`` (agent/chat mode, web, shell, plan, knowledge base),
   ``workspace`` and ``preset_id``. The chat route records these from each turn,
@@ -25,7 +30,7 @@ _ACCESS_MODES = frozenset({"none", "read", "write"})
 _SELECTION_MODES = frozenset({"all", "selected", "none"})
 _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
-_LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers"})
+_LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -78,6 +83,10 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
         elif key == "memory_access":
             if value not in _ACCESS_MODES:
                 raise ValueError(f"memory_access must be one of {', '.join(sorted(_ACCESS_MODES))}")
+            out[key] = value
+        elif key == "tool_access":
+            if value not in _SELECTION_MODES:
+                raise ValueError(f"tool_access must be one of {', '.join(sorted(_SELECTION_MODES))}")
             out[key] = value
         elif key == "skill_access":
             if value not in _SELECTION_MODES:

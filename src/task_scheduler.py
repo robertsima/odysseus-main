@@ -2146,9 +2146,20 @@ class TaskScheduler:
             try:
                 enabled = json.loads(crew.enabled_tools)
                 if isinstance(enabled, list) and enabled:
-                    from src.tool_index import BUILTIN_TOOL_DESCRIPTIONS
-                    all_tools = set(BUILTIN_TOOL_DESCRIPTIONS.keys())
-                    disabled_tools |= all_tools - set(enabled)
+                    # One definition, imported. This used to invert the
+                    # allowlist here by hand against BUILTIN_TOOL_DESCRIPTIONS
+                    # while agent_profiles inverted it against
+                    # known_tool_names() — two registries, two answers, and
+                    # neither of them held a single MCP name, so a crew
+                    # restricted to a handful of tools still reached every tool
+                    # of every connected server. `live_tool_names()` is the
+                    # tools that exist on this run, MCP included, and the
+                    # inversion is the shared one.
+                    from src.tool_policy import denied_by_allowlist, live_tool_names
+
+                    disabled_tools |= denied_by_allowlist(
+                        live_tool_names(), tool_access="selected", enabled_tools=enabled
+                    )
             except Exception:
                 pass
         try:

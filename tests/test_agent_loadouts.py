@@ -49,12 +49,15 @@ def test_tool_access_all_means_all_the_caller_has_not_every_tool_that_exists():
     caller = policy(allowed_tools={"read_file", "grep"})
     profile, _ = agent_loadouts.clamp(request(tool_access="all"), caller)
     assert profile["tool_access"] == "selected"
-    assert profile["enabled_tools"] == ["grep", "read_file"]
+    # `mcp__*` carries the caller's own MCP reach: "all the tools I have"
+    # includes its MCP tools, whose names are generated at runtime and cannot be
+    # enumerated into the list.
+    assert profile["enabled_tools"] == ["grep", "mcp__*", "read_file"]
     assert "bash" in profile["disabled_tools"]
 
 
 def test_a_loadout_with_nothing_left_is_stored_as_no_tools():
-    caller = policy(allowed_tools=set())
+    caller = policy(allowed_tools=set(), allowed_mcp_servers=[])
     profile, _ = agent_loadouts.clamp(request(tool_access="all"), caller)
     assert profile["tool_access"] == "none"
     assert profile["enabled_tools"] == []
@@ -440,3 +443,49 @@ async def test_update_does_not_rename_by_recapitalising(store):
     await manage_agent_loadout(
         '{"action": "update", "name": "reviewer", "description": "x"}', "c", owner="u")
     assert [p["name"] for p in store["profiles"]] == ["Reviewer"]
+
+
+def test_caller_policy_reads_the_chats_allowlist_not_just_its_denylist(monkeypatch):
+    """A chat narrowed by an allowlist has an EMPTY `disabled_tools`. Reading
+    only the denylist would see an unrestricted caller and let it mint a worker
+    with every tool — the escalation this module exists to stop."""
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {
+        "tool_access": "selected",
+        "enabled_tools": ["read_file", "grep"],
+    })
+    monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: set())
+    result = agent_loadouts.caller_policy("chat-1", "owner")
+    assert result["allowed_tools"] == {"read_file", "grep"}
+    assert "bash" not in result["allowed_tools"]
+
+    profile, notes = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["read_file", "bash"]), result)
+    assert profile["enabled_tools"] == ["read_file"]
+    assert any("bash" in note for note in notes)
+
+
+def test_a_loadout_cannot_grant_an_mcp_tool_the_calling_chat_lacks():
+    caller = policy(allowed_mcp_servers=["email"])
+    profile, notes = agent_loadouts.clamp(
+        request(tool_access="selected",
+                enabled_tools=["mcp__email__list_emails", "mcp__github__merge_pr"]),
+        caller)
+    assert profile["enabled_tools"] == ["mcp__email__list_emails"]
+    assert profile["allowed_mcp_servers"] == ["email"]
+    assert any("mcp__github__merge_pr" in note for note in notes)
+
+
+def test_a_whole_server_grant_needs_the_caller_to_hold_the_whole_server():
+    """`mcp__email__*` is a wildcard over names generated at runtime, so it may
+    only be handed on by a caller that holds the server itself."""
+    narrow = policy(allowed_mcp_servers=["email"], tool_access="selected",
+                    enabled_tools=["mcp__email__list_emails"])
+    profile, _ = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["mcp__email__*"]), narrow)
+    assert profile["enabled_tools"] == []
+
+    wide = policy(allowed_mcp_servers=["email"])
+    profile, _ = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["mcp__email__*"]), wide)
+    assert profile["enabled_tools"] == ["mcp__email__*"]
+    assert profile["allowed_mcp_servers"] == ["email"]

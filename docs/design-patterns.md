@@ -89,6 +89,14 @@ logic, move it somewhere neutral that both can import — not into whichever
 module happened to write it first, which inverts the dependency and is why the
 duplication looked reasonable at the time.
 
+The agent tool allowlist had grown *three* copies of the same inversion —
+`agent_profiles.session_patch`, `task_scheduler`, and `saveAgentConfig` in the
+browser — each subtracting the allowed set from a different registry, and none
+of those registries holding an MCP name. They now share
+`src/tool_policy.py::allowlist_permits`, which also fixed the second half of the
+bug: the rule is applied where the decision is made, not baked into a stored
+denylist that a later-added tool is simply missing from.
+
 ## Recognise by shape when names are not yours to enumerate
 
 An allowlist works when you own every name. MCP tool names carry a per-server

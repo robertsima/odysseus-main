@@ -117,6 +117,14 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "model_access": policy["model_access"],
                 "allowed_models": sorted(policy["allowed_models"]),
                 "allowed_mcp_servers": list(policy["allowed_mcp_servers"]),
+                # `tools` above lists only the native names, because MCP tool
+                # names are generated at runtime. Say how to grant them rather
+                # than leaving the agent to find out by being refused.
+                "mcp_tools": (
+                    "enabled_tools also takes mcp__<server>__<tool> for one tool, "
+                    "mcp__<server>__* for a whole server and mcp__* for all of them, "
+                    "limited to allowed_mcp_servers above"
+                ),
                 "private_vault_access": policy["private_vault_access"],
                 "delegation_policy": policy["delegation_policy"],
                 "max_parallel_workers": policy["max_parallel_workers"],

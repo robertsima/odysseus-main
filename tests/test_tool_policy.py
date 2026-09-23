@@ -473,3 +473,287 @@ def test_guide_only_skips_teacher_escalation(monkeypatch):
     )
 
     assert any("Could you tell me" in chunk for chunk in chunks)
+
+
+# ── tool allowlists: stored as allowlists, inverted at evaluation ────────────
+#
+# Each of these fails against the previous implementation, which inverted a
+# role's allowlist into a denylist in `agent_profiles.session_patch` and
+# persisted the result on the session.
+
+
+class _FakeMCP:
+    """Enough of MCPManager for the loop's gates, with two servers connected."""
+
+    TOOLS = [
+        {"server_id": "email", "server_name": "Email", "name": "list_emails"},
+        {"server_id": "email", "server_name": "Email", "name": "send_email"},
+        {"server_id": "github", "server_name": "GitHub", "name": "merge_pr"},
+    ]
+
+    def get_all_tools(self, disabled_map=None):
+        return [
+            dict(tool, qualified_name=f"mcp__{tool['server_id']}__{tool['name']}",
+                 description="", input_schema={"type": "object", "properties": {}},
+                 is_disabled=tool["name"] in (disabled_map or {}).get(tool["server_id"], set()))
+            for tool in self.TOOLS
+        ]
+
+    def get_all_openai_schemas(self, disabled_map=None):
+        return [
+            {"type": "function",
+             "function": {"name": tool["qualified_name"], "description": "",
+                          "parameters": {"type": "object", "properties": {}}}}
+            for tool in self.get_all_tools(disabled_map) if not tool["is_disabled"]
+        ]
+
+    def get_tool_descriptions_for_prompt(self, disabled_map=None):
+        return ""
+
+    def gated_tool_names(self, disabled_map=None):
+        return set()
+
+    def demoted_servers(self, disabled_map=None):
+        return []
+
+    def plan_mode_blocked_mcp(self):
+        return {}, set()
+
+
+def _run_loop_with_settings(monkeypatch, settings, *, relevant_tools, mcp=None):
+    """Run one round with `settings` as the chat's stored policy; return the schemas sent."""
+    import core.database as core_db
+
+    _patch_loop_basics(monkeypatch)
+    if mcp is not None:
+        monkeypatch.setattr(al, "get_mcp_manager", lambda: mcp, raising=False)
+        # The per-server MCP toggle map comes from the database; this test is
+        # about policy, not about whichever schema the rest of the suite left
+        # behind.
+        monkeypatch.setattr(al, "_load_mcp_disabled_map", lambda: {}, raising=False)
+    # Without this the loop treats an owner-less turn as public, blocks half the
+    # registry and drops the MCP manager entirely — which would make the MCP
+    # assertions below pass for the wrong reason.
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    monkeypatch.setattr(core_db, "get_session_settings", lambda sid: dict(settings), raising=False)
+    sent_tools = []
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        sent_tools.append(kwargs.get("tools"))
+        yield _delta_chunk("ok")
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    _collect(
+        al.stream_agent_loop(
+            "https://api.openai.com/v1",
+            "gpt-test",
+            [{"role": "user", "content": "read my inbox and search the web"}],
+            max_rounds=1,
+            session_id="chat-1",
+            relevant_tools=set(relevant_tools),
+        )
+    )
+    assert sent_tools
+    return _schema_names(sent_tools[0])
+
+
+def test_selected_tools_does_not_leave_every_mcp_tool_reachable(monkeypatch):
+    """Defect 1. A role narrowed to three native tools kept every tool of every
+    connected MCP server, because the denylist was built from a native-only
+    registry — `known_tool_names()` holds no `mcp__` name at all."""
+    from src.tool_policy import known_tool_names
+
+    assert not any(name.startswith("mcp__") for name in known_tool_names())
+
+    selection = {"web_search", "read_file", "mcp__github__merge_pr"}
+    # Control: with no allowlist the connected server's tools really are sent,
+    # so the assertion below cannot pass for the wrong reason.
+    unrestricted = _run_loop_with_settings(
+        monkeypatch, {"allowed_mcp_servers": ["*"]},
+        relevant_tools=selection, mcp=_FakeMCP(),
+    )
+    assert "mcp__github__merge_pr" in unrestricted
+
+    sent = _run_loop_with_settings(
+        monkeypatch,
+        {"tool_access": "selected",
+         "enabled_tools": ["web_search", "create_document", "manage_memory"],
+         "allowed_mcp_servers": ["*"]},
+        relevant_tools=selection,
+        mcp=_FakeMCP(),
+    )
+    assert "web_search" in sent
+    assert not any(name.startswith("mcp__") for name in sent), sent
+    assert "read_file" not in sent
+
+
+def test_selected_tools_ignores_a_wide_open_mcp_access():
+    """Defect 2. `mcp_access` defaults to "all", so `tool_access="selected"`
+    produced `allowed_mcp_servers: ["*"]`. A default is not consent: the tool
+    allowlist decides, and `["*"]` cannot widen past it."""
+    from src.agent_profiles import session_patch, validate_profiles
+    from src.tool_policy import allowlist_permits
+
+    profile = validate_profiles([{
+        "name": "researcher", "tool_access": "selected",
+        "enabled_tools": ["web_search", "create_document", "manage_memory"],
+    }])[0]
+    assert profile["mcp_access"] == "all"  # the default nobody chose
+    patch = session_patch(profile)
+    assert patch["allowed_mcp_servers"] == []
+    assert allowlist_permits("mcp__email__list_emails", patch["tool_access"], patch["enabled_tools"]) is False
+
+
+def test_an_explicitly_chosen_mcp_server_survives_the_upgrade():
+    """The other side of defect 2: `mcp_access="selected"` with named servers is
+    someone ticking boxes, so it is translated into the allowlist rather than
+    dropped. An install upgrading keeps exactly the MCP reach it had."""
+    from src.agent_profiles import session_patch, validate_profiles
+    from src.tool_policy import allowlist_permits
+
+    patch = session_patch(validate_profiles([{
+        "name": "browser", "tool_access": "selected", "enabled_tools": ["web_fetch"],
+        "mcp_access": "selected", "allowed_mcp_servers": ["builtin_browser"],
+    }])[0])
+    assert patch["allowed_mcp_servers"] == ["builtin_browser"]
+    assert allowlist_permits("mcp__builtin_browser__open", patch["tool_access"], patch["enabled_tools"]) is True
+    assert allowlist_permits("mcp__email__list_emails", patch["tool_access"], patch["enabled_tools"]) is False
+
+
+def test_an_allowlist_excludes_tools_that_did_not_exist_when_it_was_saved():
+    """Defect 3. The denylist was a snapshot taken at apply time, so a builtin
+    added by an upgrade or a server connected the next day was absent from it
+    and therefore allowed — policy failing open."""
+    from src.agent_profiles import session_patch, validate_profiles
+    from src.tool_policy import allowlist_permits
+
+    patch = session_patch(validate_profiles([{
+        "name": "narrow", "tool_access": "selected", "enabled_tools": ["web_search"],
+    }])[0])
+    # Stored as an allowlist, not as its inverse.
+    assert patch["tool_access"] == "selected"
+    assert patch["enabled_tools"] == ["web_search"]
+    assert not patch["disabled_tools"]
+
+    assert allowlist_permits("web_search", patch["tool_access"], patch["enabled_tools"]) is True
+    for newcomer in ("a_builtin_shipped_next_release", "mcp__newly_connected__anything"):
+        assert allowlist_permits(newcomer, patch["tool_access"], patch["enabled_tools"]) is False
+
+
+def test_an_allowlist_can_grant_one_mcp_tool_without_its_server(monkeypatch):
+    from src.tool_policy import allowlist_permits
+
+    access, enabled = "selected", ["web_search", "mcp__email__list_emails"]
+    assert allowlist_permits("mcp__email__list_emails", access, enabled) is True
+    assert allowlist_permits("mcp__email__send_email", access, enabled) is False
+    assert allowlist_permits("mcp__github__merge_pr", access, enabled) is False
+
+    sent = _run_loop_with_settings(
+        monkeypatch,
+        {"tool_access": access, "enabled_tools": enabled, "allowed_mcp_servers": ["*"]},
+        relevant_tools={"web_search", "mcp__email__list_emails", "mcp__email__send_email",
+                        "mcp__github__merge_pr"},
+        mcp=_FakeMCP(),
+    )
+    assert "mcp__email__list_emails" in sent
+    assert "mcp__email__send_email" not in sent
+    assert "mcp__github__merge_pr" not in sent
+
+
+def test_wildcards_are_how_an_allowlist_widens_to_mcp():
+    """MCP names are generated at runtime and can never be enumerated, so the
+    allowlist grants a whole server, or all of them, by shape."""
+    from src.tool_policy import allowlist_permits
+
+    one_server = ["mcp__email__*"]
+    assert allowlist_permits("mcp__email__send_email", "selected", one_server) is True
+    assert allowlist_permits("mcp__github__merge_pr", "selected", one_server) is False
+    assert allowlist_permits("web_search", "selected", one_server) is False
+
+    everything = ["mcp__*"]
+    assert allowlist_permits("mcp__github__merge_pr", "selected", everything) is True
+    assert allowlist_permits("mcp__anything_at_all__new_tool", "selected", everything) is True
+    assert allowlist_permits("web_search", "selected", everything) is False
+
+
+def test_allowlist_fails_closed_on_an_access_mode_it_does_not_know():
+    from src.tool_policy import allowlist_permits
+
+    assert allowlist_permits("web_search", "none", ["web_search"]) is False
+    assert allowlist_permits("web_search", "everything_please", ["web_search"]) is False
+    assert allowlist_permits("web_search", "selected", []) is False
+    # "all" is the absence of an allowlist, including for a chat that has none
+    # stored at all.
+    assert allowlist_permits("anything", "all", []) is True
+    assert allowlist_permits("anything", None, None) is True
+
+
+def test_allowlist_matches_both_spellings_of_an_email_tool():
+    """A bare built-in email name and its mcp__email__ form dispatch to the same
+    thing; an allowlist written in one spelling must not be bypassable by the
+    other, nor defeated by it."""
+    from src.tool_policy import allowlist_permits
+
+    assert allowlist_permits("mcp__email__list_emails", "selected", ["list_emails"]) is True
+    assert allowlist_permits("list_emails", "selected", ["mcp__email__list_emails"]) is True
+
+
+def test_executor_blocks_a_tool_the_chats_allowlist_does_not_name(monkeypatch):
+    """Defense in depth: a stale or hand-written call must be refused even when
+    the schema layer already hid the tool."""
+    import core.database as core_db
+
+    monkeypatch.setattr(core_db, "get_session_settings", lambda sid: {
+        "tool_access": "selected", "enabled_tools": ["web_search"], "allowed_mcp_servers": ["*"],
+    }, raising=False)
+
+    desc, result = asyncio.run(execute_tool_block(
+        ToolBlock("bash", "echo should-not-run"), session_id="chat-1"))
+    assert desc == "bash: BLOCKED" and result["exit_code"] == 1
+    assert "allowlist" in result["error"]
+
+    desc, result = asyncio.run(execute_tool_block(
+        ToolBlock("mcp__email__send_email", '{"to":"x"}'), session_id="chat-1"))
+    assert desc == "mcp__email__send_email: BLOCKED" and result["exit_code"] == 1
+
+
+def test_a_chat_with_no_stored_allowlist_keeps_its_denylist(monkeypatch):
+    """Backward compatibility. Chats saved before allowlists were stored carry
+    only the inverted snapshot; they must be neither widened nor crippled."""
+    sent = _run_loop_with_settings(
+        monkeypatch,
+        {"disabled_tools": ["read_file", "bash"]},
+        relevant_tools={"web_search", "read_file", "bash"},
+    )
+    assert "web_search" in sent
+    assert "read_file" not in sent and "bash" not in sent
+
+
+def test_a_profiles_own_disabled_tools_still_deny_on_top_of_an_allowlist():
+    """A profile saved with a persisted denylist — including a complement an
+    earlier version of `agent_loadouts` wrote — keeps denying what it denied."""
+    from src.agent_profiles import session_patch, validate_profiles
+
+    patch = session_patch(validate_profiles([{
+        "name": "legacy", "tool_access": "selected",
+        "enabled_tools": ["web_search", "bash"], "disabled_tools": ["bash"],
+    }])[0])
+    assert patch["disabled_tools"] == ["bash"]
+    assert patch["enabled_tools"] == ["bash", "web_search"]
+
+
+def test_task_scheduler_and_profiles_share_one_inversion(monkeypatch):
+    """Two copies of a rule are two rules: the scheduler inverted crew
+    allowlists against BUILTIN_TOOL_DESCRIPTIONS while profiles used
+    known_tool_names(), and neither registry held an MCP name."""
+    import src.tool_policy as tp
+
+    monkeypatch.setattr(tp, "connected_mcp_tool_names",
+                        lambda: {"mcp__email__list_emails", "mcp__github__merge_pr"}, raising=False)
+    denied = tp.denied_by_allowlist(
+        tp.live_tool_names(), tool_access="selected", enabled_tools=["web_search"])
+    assert "mcp__email__list_emails" in denied
+    assert "mcp__github__merge_pr" in denied
+    assert "bash" in denied
+    assert "web_search" not in denied

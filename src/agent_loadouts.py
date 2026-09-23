@@ -67,7 +67,7 @@ def _rank_down(value: str, ceiling: str, ranks: Dict[str, int], label: str, note
 def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, Any]:
     """The effective policy of the chat an agent is calling from."""
     from src.session_settings import effective_approval_mode
-    from src.tool_policy import known_tool_names
+    from src.tool_policy import allowlist_permits, known_tool_names
     from src.tool_security import owner_baseline_disabled_tools
 
     settings: Dict[str, Any] = {}
@@ -80,9 +80,23 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
             logger.warning("loadout: could not read policy for %s: %s", session_id, exc)
     known = set(known_tool_names())
     denied = set(settings.get("disabled_tools") or []) | set(owner_baseline_disabled_tools(owner))
+    # The caller's own allowlist has to be read here too, not just its
+    # denylist. Once a chat's policy is stored as `tool_access`/`enabled_tools`
+    # rather than as a pre-inverted denylist, a chat narrowed to three tools has
+    # an *empty* `disabled_tools` — so an authoring clamp that looked only at
+    # the denylist would see an unrestricted caller and let it mint a worker
+    # with every tool. That is the escalation this module exists to stop.
+    caller_access = settings.get("tool_access") or "all"
+    caller_enabled = list(settings.get("enabled_tools") or [])
     return {
-        "allowed_tools": known - denied,
+        "allowed_tools": {
+            name for name in known
+            if name not in denied and allowlist_permits(name, caller_access, caller_enabled)
+        },
         "known_tools": known,
+        "tool_access": caller_access,
+        "enabled_tools": caller_enabled,
+        "denied_tools": denied,
         "memory_access": settings.get("memory_access") or _POLICY_DEFAULTS["memory_access"],
         "skill_access": settings.get("skill_access") or _POLICY_DEFAULTS["skill_access"],
         "skill_names": set(settings.get("skill_names") or []),
@@ -97,7 +111,71 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
     }
 
 
+def _caller_may_grant_mcp(entry: str, policy: Dict[str, Any]) -> bool:
+    """Whether the calling chat may write an MCP grant into a worker's allowlist.
+
+    An `enabled_tools` entry can now name an MCP tool (`mcp__email__list_emails`),
+    a whole server (`mcp__email__*`) or every server (`mcp__*`). The clamp rule
+    is unchanged — never author more than you hold — so a grant is kept only
+    when the caller could make the same call itself: its own allowlist permits
+    it and its own connection list covers the server.
+    """
+    from src.tool_policy import (
+        ALL_MCP_WILDCARD,
+        allowlist_is_active,
+        allowlist_permits,
+        split_mcp_tool_name,
+    )
+
+    if entry in (policy.get("denied_tools") or set()):
+        return False
+    servers = policy.get("allowed_mcp_servers") or ["*"]
+    any_server = "*" in servers
+    access = policy.get("tool_access", "all")
+    enabled = set(policy.get("enabled_tools") or [])
+
+    if entry == ALL_MCP_WILDCARD:
+        # "every connected server" may only be handed on by a caller that has
+        # every connected server itself.
+        return any_server and (not allowlist_is_active(access) or ALL_MCP_WILDCARD in enabled)
+    if entry.startswith("mcp__") and entry.endswith("__*"):
+        server = entry[len("mcp__"):-len("__*")]
+        if not server or not (any_server or server in set(servers)):
+            return False
+        # A whole-server grant needs the caller to hold the whole server, not
+        # merely one tool on it.
+        return (
+            not allowlist_is_active(access)
+            or ALL_MCP_WILDCARD in enabled
+            or entry in enabled
+        )
+    parts = split_mcp_tool_name(entry)
+    if not parts:
+        return False
+    if not (any_server or parts[0] in set(servers)):
+        return False
+    return allowlist_permits(entry, access, enabled)
+
+
+def _caller_mcp_grants(policy: Dict[str, Any]) -> Set[str]:
+    """Wildcard entries standing for the calling chat's own MCP reach.
+
+    ``tool_access: "all"`` means "everything the calling chat has", and the
+    calling chat's MCP tools are part of that — but those names are generated
+    at runtime and carry a per-server id, so they cannot be enumerated into an
+    allowlist. The reach is carried as a wildcard instead.
+    """
+    servers = policy.get("allowed_mcp_servers")
+    if servers is None:
+        servers = ["*"]
+    if "*" in servers:
+        return {"mcp__*"}
+    return {f"mcp__{str(s).strip()}__*" for s in servers if str(s).strip()}
+
+
 def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -> None:
+    from src.tool_policy import denied_by_allowlist, is_mcp_tool_name
+
     known: Set[str] = policy["known_tools"]
     explicit_denied = set(prof.get("disabled_tools") or [])
     if prof["tool_access"] == "none":
@@ -105,15 +183,31 @@ def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str])
     elif prof["tool_access"] == "selected":
         wanted = set(prof.get("enabled_tools") or []) - explicit_denied
     else:
-        wanted = known - explicit_denied
-    granted = wanted & policy["allowed_tools"]
+        wanted = (known | _caller_mcp_grants(policy)) - explicit_denied
+
+    def _mcp_shaped(name: str) -> bool:
+        return is_mcp_tool_name(name) or (name.startswith("mcp__") and name.endswith("*"))
+
+    native_wanted = {name for name in wanted if not _mcp_shaped(name)}
+    mcp_wanted = wanted - native_wanted
+    granted = (native_wanted & policy["allowed_tools"]) | {
+        name for name in mcp_wanted if _caller_may_grant_mcp(name, policy)
+    }
     refused = sorted(wanted - granted)
     if refused:
         notes.append(
             f"tools: dropped {len(refused)} the calling chat cannot use itself "
             f"({', '.join(refused[:8])}{'…' if len(refused) > 8 else ''})"
         )
-    complement = sorted(known - granted)
+    # Belt-and-braces only, and built from the shared inversion rather than a
+    # second hand-written subtraction: `launch_worker()` hands the profile's own
+    # `disabled_tools` straight to `run_headless()`. The allowlist itself is
+    # what binds, through the worker chat's stored `tool_access`/`enabled_tools`
+    # (`agent_profiles.session_patch`), so this list going stale can no longer
+    # widen anything — it can only deny.
+    complement = sorted(
+        denied_by_allowlist(known, tool_access="selected", enabled_tools=granted)
+    )
     if len(complement) > MAX_DISABLED_TOOLS_IN_PROFILE:
         # Never store a truncated denylist: the entries that fell off the end
         # would read back as "allowed".
@@ -169,6 +263,36 @@ def _clamp_mcp(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -
         prof["mcp_access"] = "none"
 
 
+def _align_mcp_with_tool_allowlist(prof: Dict[str, Any], notes: List[str]) -> None:
+    """Make the stored connection list say what the tool allowlist will permit.
+
+    The tool allowlist is the gate that decides; `allowed_mcp_servers` is what
+    the prompt advertises. A loadout narrowed to named tools that still listed
+    every connected server would advertise servers whose every tool the gate
+    rejects — the phantom-tool failure `docs/design-patterns.md` names under
+    "the offer and the enforcement must agree". Report the narrowing rather
+    than performing it silently.
+    """
+    from src.tool_policy import reconcile_tool_and_mcp_access
+
+    before = list(prof.get("allowed_mcp_servers") or [])
+    enabled, after = reconcile_tool_and_mcp_access(
+        tool_access=prof.get("tool_access", "all"),
+        enabled_tools=prof.get("enabled_tools") or [],
+        mcp_access=prof.get("mcp_access", "all"),
+        allowed_mcp_servers=before,
+    )
+    prof["enabled_tools"] = enabled
+    if sorted(before) == sorted(after):
+        return
+    prof["allowed_mcp_servers"] = after
+    prof["mcp_access"] = "selected" if after and "*" not in after else ("all" if after else "none")
+    notes.append(
+        "allowed_mcp_servers: narrowed to the servers this loadout's tool "
+        "allowlist can reach (add mcp__<server>__* or mcp__* to enabled_tools to widen)"
+    )
+
+
 def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
     """Normalise a requested loadout and narrow it to ``policy``.
 
@@ -181,6 +305,7 @@ def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, 
     _clamp_tools(prof, policy, notes)
     _clamp_models(prof, policy, notes)
     _clamp_mcp(prof, policy, notes)
+    _align_mcp_with_tool_allowlist(prof, notes)
 
     prof["memory_access"] = _rank_down(prof["memory_access"], policy["memory_access"],
                                        _MEMORY_RANK, "memory_access", notes)

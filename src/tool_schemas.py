@@ -1267,7 +1267,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "model_access": {"type": "string", "enum": ["current", "selected", "all"], "description": "Whether the worker may switch model."},
                     "allowed_models": {"type": "array", "items": {"type": "string"}},
                     "tool_access": {"type": "string", "enum": ["all", "selected", "none"]},
-                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names when tool_access=selected."},
+                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Every tool name the worker may call when tool_access=selected, MCP included. Use mcp__<server>__<tool> for one MCP tool, mcp__<server>__* for a whole server, mcp__* for all of them. Anything not listed is denied, including tools added later."},
                     "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
                     "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
                     "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
