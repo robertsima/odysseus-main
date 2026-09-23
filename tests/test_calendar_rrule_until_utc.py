@@ -27,7 +27,9 @@ from types import SimpleNamespace
 from tests.helpers.calendar_routes import import_calendar_routes
 
 
-_MOCK_CAL = SimpleNamespace(name="Personal", color="#5b8abf")
+# See tests/test_calendar_recurrence.py: `_event_to_dict` reads `calendar.source`,
+# which a real CalendarCal always has and this fake did not.
+_MOCK_CAL = SimpleNamespace(name="Personal", color="#5b8abf", source="local")
 
 
 def _make_event(**overrides):

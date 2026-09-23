@@ -44,7 +44,11 @@ def test_resolve_base_uid_rejects_missing_base():
 
 # ── _expand_rrule ──────────────────────────────────────────────────────
 
-_MOCK_CAL = SimpleNamespace(name="Personal", color="#5b8abf")
+# `source` is read by `_event_to_dict` (routes/calendar_routes.py:669) to tell a
+# CalDAV-backed calendar from a local one. A real CalendarCal always carries
+# it; this fake did not, so every expansion test died on the attribute rather
+# than on anything about recurrence.
+_MOCK_CAL = SimpleNamespace(name="Personal", color="#5b8abf", source="local")
 
 
 def _make_event(**overrides):
