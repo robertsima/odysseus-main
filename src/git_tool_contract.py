@@ -5,6 +5,8 @@ known unused/defaultable neutral placeholders are interchangeable with omission.
 Required fields, meaningful overrides and unknown keys retain their exact meaning.
 """
 
+import re
+
 LOCAL_ACTIONS = {
     "status": set(),
     "log": {"limit", "ref"},
@@ -67,6 +69,52 @@ REQUIRED_REVISIONS = {
     "reset": {"expected_head", "expected_target"},
     "rebase": {"expected_head", "expected_target"},
 }
+# Operator policy: agents may inspect, commit, create branches and tags, and
+# push fast-forward, but never delete or discard anything. These actions keep
+# their contracts above (the service code and approval copy still exist) so
+# old approvals and arguments parse the same way, but dispatch refuses them
+# outright -- before validation and before any approval is requested. No
+# approval, standing grant or approval mode re-enables them.
+POLICY_FORBIDDEN_ACTIONS = {
+    "delete_branch": "deleting a local branch",
+    "delete_remote_branch": "deleting a remote branch",
+    "force_push_with_lease": "force-pushing (rewriting a remote branch)",
+    "stash_drop": "deleting a stash entry",
+}
+# Unknown actions are already unsupported; these words only make the refusal
+# say "policy" instead of "unsupported" for the deletes/discards models tend to
+# invent (force_push, clean, reflog_expire, worktree_remove, gc_prune, ...).
+_FORBIDDEN_ACTION_WORDS = frozenset(
+    {
+        "delete", "del", "remove", "rm", "drop", "clear", "prune", "purge",
+        "clean", "force", "expire", "destroy", "wipe", "gc", "mirror",
+        "discard", "hard", "restore", "checkout",
+    }
+)
+
+
+def policy_refusal(action):
+    """The policy error text for a delete/discard action, or None."""
+    name = str(action or "").strip().lower()
+    reason = POLICY_FORBIDDEN_ACTIONS.get(name)
+    known = any(
+        name in group
+        for group in (LOCAL_ACTIONS, CREATION_ACTIONS, HISTORY_ACTIONS, REMOTE_ACTIONS)
+    )
+    if reason is None and not known:
+        words = set(re.split(r"[^a-z0-9]+", name))
+        if words & _FORBIDDEN_ACTION_WORDS or any(w.startswith("filter") for w in words):
+            reason = "deleting, force-updating or discarding repository data"
+    if reason is None:
+        return None
+    return (
+        f"Git action {name!r} is not permitted by policy: {reason} is refused. "
+        "Agents may inspect, stage, commit, create branches/tags and push "
+        "fast-forward to non-protected branches, but must not delete, force-push "
+        "or discard work. Ask the user to do it themselves if it is really needed."
+    )
+
+
 # These fields have explicit service defaults; required targets/revision proofs
 # never belong here. A zero log limit is a neutral sentinel, not unbounded output.
 DEFAULTABLE_FIELDS = {
