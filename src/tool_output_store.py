@@ -57,6 +57,16 @@ _TOOL_INLINE_LIMITS = {
     "edit_file": 20_000,
 }
 
+# The same, by tool-name prefix. GitHub MCP returns compact JSON where one
+# issue with its body and user objects is already ~2-4k characters, so at 4k a
+# search page or an issue_read kept a head/tail excerpt cut mid-object and the
+# agent spent extra rounds paging it back with recall_tool_output. The ledger
+# still compacts these once they fall out of the keep window.
+_TOOL_PREFIX_INLINE_LIMITS = (
+    ("mcp__github_read__", 16_000),
+    ("mcp__github__", 16_000),
+)
+
 # Tools whose result is never offloaded, whatever its size.
 #
 # `recall_tool_output` exists to bring a slice of an ALREADY-offloaded result
@@ -109,7 +119,12 @@ def inline_limit(tool: str = "", profile=None) -> int:
         profile, "tool_output_inline_limit",
         "ODYSSEUS_TOOL_OUTPUT_INLINE_LIMIT", DEFAULT_INLINE_LIMIT,
     )
-    return max(base, _TOOL_INLINE_LIMITS.get(str(tool or ""), 0))
+    name = str(tool or "")
+    per_tool = _TOOL_INLINE_LIMITS.get(name, 0)
+    for prefix, limit in _TOOL_PREFIX_INLINE_LIMITS:
+        if name.startswith(prefix):
+            per_tool = max(per_tool, limit)
+    return max(base, per_tool)
 
 
 def head_chars(profile=None) -> int:

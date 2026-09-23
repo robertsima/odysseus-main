@@ -4700,6 +4700,20 @@ async def stream_agent_loop(
         except Exception as _e:
             logger.debug(f"[tool-rag] skill-aware tool include skipped: {_e}")
 
+    # Selection chooses relevance, not permission, so it can pick tools this
+    # chat's policy denies (a loadout's allowed MCP servers, the operator's
+    # disabled list). Those could never be sent, yet they counted toward the
+    # tool budget below and showed up as "relevant" in the logs, which made a
+    # worker that was never offered GitHub search look like it had it.
+    if not guide_only and _relevant_tools is not None and disabled_tools:
+        _denied_relevant = _relevant_tools & set(disabled_tools)
+        if _denied_relevant:
+            _relevant_tools.difference_update(_denied_relevant)
+            logger.info(
+                "[tool-rag] dropped %d selected tool(s) the chat's policy disables: %s",
+                len(_denied_relevant), sorted(_denied_relevant)[:15],
+            )
+
     if (
         not guide_only
         and _relevant_tools is not None
@@ -5539,6 +5553,7 @@ async def stream_agent_loop(
         logger.debug("[agent] max_rounds=%s is advisory; rounds do not end a run", max_rounds)
     from src import agent_control
 
+    _offload_profile = None  # context profile for tool-output offload, resolved on first use
     for round_num in itertools.count(1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -7143,12 +7158,24 @@ async def stream_agent_loop(
                 try:
                     from src.tool_output_store import maybe_offload as _maybe_offload
 
+                    # The endpoint's context profile carries its own inline
+                    # limit (larger for large-context models). Without it every
+                    # agent turn fell back to the 4k env default. Resolved once
+                    # per turn; a failure leaves the default in place.
+                    if _offload_profile is None:
+                        try:
+                            from src.context_profiles import resolve as _resolve_ctx_profile
+
+                            _offload_profile = _resolve_ctx_profile(endpoint_url, model, context_length or 0)
+                        except Exception:
+                            _offload_profile = {}
                     formatted, _offload_record = _maybe_offload(
                         formatted,
                         tool=block.tool_type,
                         command=cmd_display,
                         session_id=session_id,
                         round_num=round_num,
+                        profile=_offload_profile or None,
                     )
                     if _offload_record is not None and isinstance(_relevant_tools, set):
                         # The excerpt tells the model to call this; offer it.
