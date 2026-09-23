@@ -178,6 +178,12 @@ DEFAULT_SETTINGS = {
     # the repeat/stall detectors still catch a genuinely stuck loop.
     "agent_max_tool_calls": 500,
     "agent_max_rounds": 100,  # per-message agent step cap (clamped 1..500)
+    # When a session's own policy (a loadout's `tool_access="selected"`, a
+    # restricted owner) leaves this many tools allowed or fewer, the harness
+    # binds that whole set for the turn instead of re-deriving a subset of it
+    # per turn — see `agent_loop._pinned_policy_toolset` for why 25. 0 disables
+    # pinning and restores per-turn selection for every session.
+    "agent_pinned_toolset_max_tools": 25,
     # Chat UI: fold an agent tool timeline after this many calls in one turn
     # (the first and last few stay visible; a summary bar expands the rest).
     # 0 = never fold.

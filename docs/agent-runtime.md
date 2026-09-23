@@ -75,6 +75,33 @@ rounds steering the design tool.
 So each turn selects a subset. Selection is a union of several sources, and
 the `[tool-routing]` log line reports which one dominated.
 
+### 2.0 Pinned toolsets
+
+None of that runs when the session's own policy has already named the toolset.
+A loadout with `tool_access="selected"` reaches the loop as its *complement* —
+`agent_profiles.session_patch` stores every known tool minus the enabled ones
+in `disabled_tools` — so `_pinned_policy_toolset` reads the allowlist back out
+of the denies and binds it whole whenever it holds no more than
+`agent_pinned_toolset_max_tools` (25) tools. Retrieval, the embedding call and
+domain seeding are skipped, and `_reassert_pinned_toolset` puts the set back
+after the shaping passes that run for every selection (§2.2), so the schema
+list is byte-identical across the rounds of a turn and across turns and the
+cached prefix holds. `[tool-routing] source=pinned` says it happened.
+
+Before this, a role's bound set varied per turn *inside* its own allowlist: one
+session's schema block walked 3846 → 4246 → 4500 → 4787 → 5418 tokens across
+consecutive turns, and `use ntfy to send a notification to odysseus` retrieved
+21 tools including the whole email suite, because the index has no similarity
+floor (§2.2). Computing a subset of a declared list, differently each turn, is
+work that can only make the answer worse.
+
+Two consequences worth knowing. A pinned role's missing-tool self-unblock (§5)
+finds nothing to re-arm — the pin already holds every builtin the policy allows
+— so the round lands in the "nothing left to re-arm" branch, which is the
+honest answer: what it is asking for is denied, not merely unselected. Gated
+MCP catalogs are the exception and still re-arm, because an allowlist expressed
+over `known_tool_names()` never denied them.
+
 ### 2.1 Intent classification
 
 `_classify_agent_request(messages, last_user)` returns:
@@ -129,7 +156,7 @@ and selection was invisible.
 
 | gate | effect |
 | --- | --- |
-| delegation policy | `never`, or `explicit` without an explicit request, disables the delegation tools |
+| delegation policy | `never`, or `explicit` without an explicit request, disables the delegation tools — including `manage_agent_loadout`, whose `start` action launches a worker. It cannot reach a remote-execution MCP tool; that is `mcp_access`'s job, and `_DELEGATION_TOOLS` says why |
 | tool allowlist | the chat's `tool_access`/`enabled_tools` (§6), inverted against the tools that exist on *this* turn |
 | model / memory / skill access | the chat's loadout (§6) removes what it is not allowed |
 | plan mode | allowlist of read-only tools only |
