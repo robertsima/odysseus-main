@@ -568,28 +568,110 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
             raise ValueError(f"{label}: hunk {idx} context not found")
     return updated
 
+_OUTLINE_MAX_DEPTH = 4
+_OUTLINE_MAX_LINES = 300
+
+
+def _outline(root: str, depth: int, allow_private: bool, can_traverse) -> tuple:
+    """A bounded folder tree: directories to `depth`, each with the number of
+    files directly inside it rather than every file. It is the cheap first
+    look at an unfamiliar tree (one call instead of a glob over everything)
+    and skips the same build/vendor/cache folders and denied paths as grep and
+    glob (so under the data directory only the agent-readable folders show)."""
+    if not os.path.isdir(root):
+        return None, f"ls: {root}: not a directory"
+    lines = [f"{root}: (outline to depth {depth}; counts are direct children)"]
+    truncated = False
+
+    def scan(path):
+        dirs, files = [], 0
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in _CODENAV_SKIP_DIRS:
+                                continue
+                            if not can_traverse(os.path.realpath(entry.path), allow_private=allow_private):
+                                continue
+                            dirs.append(entry)
+                        else:
+                            files += 1
+                    except OSError:
+                        continue
+        except OSError:
+            return [], 0, False
+        return sorted(dirs, key=lambda e: e.name.lower()), files, True
+
+    def walk(path, level):
+        nonlocal truncated
+        dirs, _files, _ok = scan(path)
+        for entry in dirs:
+            if len(lines) >= _OUTLINE_MAX_LINES:
+                truncated = True
+                return
+            indent = "  " * level
+            sub_dirs, sub_files, ok = scan(entry.path)
+            if not ok:
+                lines.append(f"{indent}{entry.name}/  (unreadable)")
+                continue
+            note = f"{sub_files} files" + (f", {len(sub_dirs)} dirs" if sub_dirs else "")
+            lines.append(f"{indent}{entry.name}/  ({note})")
+            if level < depth and sub_dirs:
+                walk(entry.path, level + 1)
+
+    _dirs, top_files, _ok = scan(root)
+    walk(root, 1)
+    if top_files:
+        lines.insert(1, f"  ({top_files} files at the top level)")
+    if truncated:
+        lines.append(
+            f"  ... [outline stopped at {_OUTLINE_MAX_LINES} lines; "
+            "ls a subfolder with depth for more]"
+        )
+    return "\n".join(lines), None
+
+
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.private_access import context_allows_private
         from src.tool_execution import (
+            _can_traverse_tool_path,
             _is_denied_tool_path,
             _resolve_search_root,
             _truncate,
         )
         allow_private = context_allows_private(ctx)
         raw_path = ""
+        depth = 1
         _s = (content or "").strip()
         if _s.startswith("{"):
             try:
-                raw_path = str(json.loads(_s).get("path", "")).strip()
-            except json.JSONDecodeError:
-                raw_path = ""
+                _args = json.loads(_s)
+                raw_path = str(_args.get("path", "")).strip()
+                depth = int(_args.get("depth") or 1)
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                pass
         else:
             raw_path = _s.split("\n", 1)[0].strip()
+        depth = max(1, min(depth, _OUTLINE_MAX_DEPTH))
         try:
             root = _resolve_search_root(raw_path, allow_private=allow_private)
         except ValueError as e:
             return {"error": f"ls: {e}", "exit_code": 1}
+
+        if depth > 1:
+            out, err = await asyncio.to_thread(
+                run_with_policy_snapshot,
+                lambda: _outline(root, depth, allow_private, _can_traverse_tool_path),
+            )
+            if err:
+                return {"error": err, "exit_code": 1}
+            return {"output": _truncate(out), "exit_code": 0}
 
         def _ls():
             if not os.path.isdir(root):
@@ -635,8 +717,10 @@ class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import (
             _SENSITIVE_BASENAMES,
+            _agent_readable_data_subdirs,
             _can_traverse_tool_path,
             _is_denied_tool_path,
+            _path_within,
             _resolve_tool_path,
             _resolve_search_root,
             _truncate,
@@ -695,8 +779,23 @@ class GlobTool:
             regex = _glob_to_regex(norm_pat)
             matched = []
             cap = _CODENAV_MAX_HITS * 5
+            # Inside the data directory only the agent-readable folders (the
+            # workspace, uploads, personal docs, mail attachments) can match, so
+            # prune straight to them instead of walking and policy-checking
+            # every other folder there (a glob over /app used to visit all of
+            # the user's data first). The per-directory check below still runs.
+            from src.constants import DATA_DIR as _DATA_DIR
+            data_real = os.path.realpath(_DATA_DIR)
+            readable = _agent_readable_data_subdirs()
+
+            def _leads_to_readable(path):
+                return any(_path_within(r, path) or _path_within(path, r) for r in readable)
+
             try:
                 for dp, dns, fns in os.walk(base):
+                    dp_real = os.path.realpath(dp)
+                    if _path_within(dp_real, data_real) and not any(_path_within(dp_real, r) for r in readable):
+                        dns[:] = [d for d in dns if _leads_to_readable(os.path.realpath(os.path.join(dp, d)))]
                     if not _can_traverse_tool_path(os.path.realpath(dp), allow_private=allow_private):
                         dns[:] = []
                         continue

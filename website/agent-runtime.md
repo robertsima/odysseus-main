@@ -70,10 +70,10 @@ control, which stays live for the whole run. An agent that is genuinely working
 runs until it finishes; one that is stuck is caught by the thing that can
 actually tell it is stuck.
 
-`agent_control.CONTINUATION_LEGS` remains as the recovery path if a ceiling is
-ever reintroduced: a worker that exhausts a budget while still executing tools
-is handed another, carrying its previous leg's work and an instruction not to
-redo it, and a leg that executes no tools earns nothing.
+Workers get exactly one run. The automatic "continuation legs" that once
+handed a worker up to four extra budgets were removed (2026-09-22): with no
+ceiling they never fired, and against an explicit budget they multiplied it.
+A run that ever reports its rounds exhausted ends as `incomplete`.
 
 ---
 
@@ -196,6 +196,24 @@ overrides a contradictory read-only annotation.
 The `[agent-debug]` line reports `tools_sent`, `selected`, `admin_selected`,
 `schema_without_selection` and `mcp_demoted` for exactly this audit. A hints-only
 selection is labelled that way rather than being reported as embedding retrieval.
+
+### 2.5 A chat's tool set only grows
+
+The tool list, and the system prompt keyed on it, sit ahead of the whole
+history in the provider's prefix cache, so any change to them re-bills the
+entire chat. Selection is re-ranked every turn, so a second turn that picked
+one different tool, or a tool that `discover_tools` loaded and the next turn
+dropped, used to cost a full cache miss.
+
+`_sticky_tool_selection` keeps a per-chat union: each turn offers what earlier
+turns (and `discover_tools` / the missing-tool re-arm) offered, plus this
+turn's selection, in the fixed schema order. Stale tools are still never
+offered. Whatever the current policy disables, whatever a turn deliberately
+prunes (the email-draft fetch tools) and whatever no longer exists (a removed
+MCP server) is dropped every turn. Past 48 tools the set restarts from the
+turn's own selection: one miss rather than an ever-growing list. A tool
+attached mid-turn still changes that round's prefix once; after that it stays.
+The `[tool-cache]` log line reports when earlier tools were kept.
 
 ---
 

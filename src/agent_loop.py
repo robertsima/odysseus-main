@@ -2412,6 +2412,54 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
     return settings
 
 
+# Tool selection is re-ranked every turn, and every change to the tool list
+# (and to the system prompt, which is keyed on it) re-bills the whole cached
+# prefix: a long chat whose second turn picked one different tool paid for its
+# entire history again. So a chat's offered tools only grow: each turn offers
+# what earlier turns (and discover_tools) already offered plus what this turn
+# needs, in the fixed schema order. Stale tools cannot leak through: what the
+# current policy disables, a turn deliberately prunes, or no longer exists
+# (an MCP server removed) is dropped every turn, and past a size cap the set
+# restarts from this turn's selection (one cache miss instead of a bloated
+# tool list).
+_STICKY_TOOLS: "collections.OrderedDict[str, Set[str]]" = collections.OrderedDict()
+_STICKY_TOOLS_MAX = 48
+_STICKY_TOOLS_SESSIONS = 512
+
+
+def _sticky_tool_selection(
+    session_id,
+    selected: Set[str],
+    disabled=(),
+    excluded=(),
+    offerable: Optional[Set[str]] = None,
+) -> Set[str]:
+    if not session_id or selected is None:
+        return selected
+    drop = set(disabled or ()) | set(excluded or ())
+    previous = _STICKY_TOOLS.get(session_id, set())
+    if offerable is not None:
+        previous = previous & offerable
+    union = (previous | set(selected)) - drop
+    if len(union) > _STICKY_TOOLS_MAX:
+        logger.info(
+            "[tool-cache] session=%s tool set passed %d; restarting from this turn's %d",
+            session_id, _STICKY_TOOLS_MAX, len(selected),
+        )
+        union = set(selected) - drop
+    _STICKY_TOOLS[session_id] = set(union)
+    _STICKY_TOOLS.move_to_end(session_id)
+    while len(_STICKY_TOOLS) > _STICKY_TOOLS_SESSIONS:
+        _STICKY_TOOLS.popitem(last=False)
+    return union
+
+
+def _remember_attached_tools(session_id, names) -> None:
+    """Tools attached mid-turn (discover_tools, re-arm) stay offered later."""
+    if session_id and session_id in _STICKY_TOOLS:
+        _STICKY_TOOLS[session_id].update(names)
+
+
 def _sticky_trim(dropped_by_route: Dict[tuple, Set[int]], key, route_messages, trim):
     """Keep a trim's cut in place across rounds instead of re-cutting.
 
@@ -4044,6 +4092,9 @@ async def stream_agent_loop(
     _existing_conversation = _user_turn_count(messages) > 1
     _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
     _active_email_draft_relevant = _active_document_relevant and _is_email_document_obj(active_document)
+    # Tools this turn deliberately leaves out; the sticky per-chat tool set
+    # (_sticky_tool_selection) must not bring them back.
+    _turn_pruned_tools: Set[str] = set()
     if _active_email_draft_relevant:
         disabled_tools.update({
             "list_email_accounts", "list_emails", "read_email", "scan_email_unsubscribes",
@@ -4543,6 +4594,7 @@ async def stream_agent_loop(
                 "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
             }
             removed = sorted(_relevant_tools & _email_fetch_tools)
+            _turn_pruned_tools.update(_email_fetch_tools)
             if removed:
                 _relevant_tools.difference_update(_email_fetch_tools)
                 logger.info("[agent-intent] active email draft pruned fetch tools=%s", removed)
@@ -4705,11 +4757,32 @@ async def stream_agent_loop(
         # chat's policy already allows.
         _relevant_tools.add("discover_tools")
         _base_relevant_tools.add("discover_tools")
+    if not guide_only and _base_relevant_tools is not None:
+        _offerable = {
+            schema.get("function", {}).get("name") for schema in FUNCTION_TOOL_SCHEMAS
+        }
+        if mcp_mgr:
+            _offerable.update(
+                schema.get("function", {}).get("name")
+                for schema in mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {})
+            )
+        _before = len(_base_relevant_tools)
+        _base_relevant_tools = _sticky_tool_selection(
+            session_id, _base_relevant_tools, disabled_tools,
+            excluded=_turn_pruned_tools, offerable=_offerable,
+        )
+        _relevant_tools = set(_base_relevant_tools)
+        if len(_base_relevant_tools) != _before:
+            logger.info(
+                "[tool-cache] session=%s kept %d earlier tools offered (now %d) so the prompt prefix stays cached",
+                session_id, len(_base_relevant_tools) - _before, len(_base_relevant_tools),
+            )
     _tool_rearms = 0
 
     def _attach_turn_tools(names: Set[str]) -> None:
         """Make ``names`` part of this turn's schema list from the next round."""
         _relevant_tools.update(names)
+        _remember_attached_tools(session_id, names)
         _runtime_skill_tools.update(names)
         if _base_relevant_tools is not None:
             _base_relevant_tools.update(names)

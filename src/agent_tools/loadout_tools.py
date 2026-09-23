@@ -292,8 +292,8 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         return {
             "response": (
                 f"{len(rows)} worker run(s) for this chat; {running} still running."
-                + (f" Cut off by their round budget: {', '.join(cut_off)} — these did NOT finish their task; "
-                   "restart them with a larger max_rounds rather than reporting their partial work as done."
+                + (f" Cut off before finishing: {', '.join(cut_off)} — these did NOT finish their task; "
+                   "restart them with a narrower task rather than reporting their partial work as done."
                    if cut_off else "")
                 + " A result_excerpt is the worker's own claim, not verified work."
             ),

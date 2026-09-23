@@ -411,13 +411,9 @@ async def test_the_chat_that_started_a_worker_sees_it_start_and_finish(monkeypat
     assert listed[0]["status"] == "incomplete"
 
 
-async def test_a_worker_that_runs_out_of_rounds_is_continued_rather_than_abandoned(monkeypatch):
-    """An explicit round budget is a safety stop, not a deadline for the work.
-
-    A worker still executing tools when it hits its budget used to just stop
-    with the task unfinished. It now earns another budget, carrying what it
-    already did, for as long as it keeps making progress.
-    """
+async def test_an_exhausted_run_is_never_extended(monkeypatch):
+    """Automatic continuation legs were reverted: a 20-round loadout could run
+    ~100 rounds. A run that reports its rounds exhausted ends as incomplete."""
     from src import agent_control
     import src.agent_tools.session_tools as session_tools
     import src.ai_interaction as ai_interaction
@@ -430,25 +426,18 @@ async def test_a_worker_that_runs_out_of_rounds_is_continued_rather_than_abandon
 
     async def fake_headless(sess, messages, **kwargs):
         legs.append(list(messages))
-        if len(legs) < 3:
-            kwargs["outcome"]["rounds_exhausted"] = True
-            return f"leg {len(legs)} partial", [{"tool": "read_file"}]
-        return "Finished the audit.", [{"tool": "read_file"}]
+        kwargs["outcome"]["rounds_exhausted"] = True
+        return "leg 1 partial", [{"tool": "read_file"}]
 
     monkeypatch.setattr(headless, "run_headless", fake_headless)
 
     rec = await agent_control.launch_worker(
         owner="alice", task="audit the handler", model=None, profile_name=None)
-    # An explicit budget, so exhaustion is reachable at all.
     await agent_control._WORKERS[rec["run_id"]]
 
-    assert len(legs) == 3, "the worker should have been continued twice"
-    # Each continuation carries the previous leg's work and an explicit
-    # instruction not to redo it.
-    assert legs[1][-1]["content"] == agent_control._CONTINUE_NOTE
-    assert "leg 1 partial" in legs[1][-2]["content"]
-    assert act.get_run(rec["run_id"])["status"] == "completed"
-    assert worker_chat.messages[-1].content == "Finished the audit."
+    assert len(legs) == 1, "an explicit budget must not be extended"
+    assert act.get_run(rec["run_id"])["status"] == "incomplete"
+    assert not hasattr(agent_control, "CONTINUATION_LEGS")
 
 
 async def test_a_worker_making_no_progress_is_not_handed_another_budget(monkeypatch):

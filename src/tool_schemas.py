@@ -163,7 +163,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output.",
+            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output. In an unfamiliar tree, run `ls` with depth first and pass the narrowest `path`; a search rooted above the data directory does not search user data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -181,7 +181,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots.",
+            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots. To learn a tree's layout use `ls` with depth instead of a broad '**/*' glob, then glob inside the folder that matters.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -196,11 +196,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ls",
-            "description": "List the entries of a directory (folders first, then files with sizes). PREFER this over `bash ls` — confined to the allowed roots.",
+            "description": "List the entries of a directory (folders first, then files with sizes). With depth 2-4 it returns a folder outline instead: the directory tree with file counts, skipping build/vendor/cache folders. Use the outline as the first look at an unfamiliar codebase, then grep/glob the folder that matters. PREFER this over `bash ls`/`find` — confined to the allowed roots.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"},
+                    "depth": {"type": "integer", "description": "1 (default) lists entries; 2-4 returns a folder outline to that depth"}
                 },
                 "required": []
             }

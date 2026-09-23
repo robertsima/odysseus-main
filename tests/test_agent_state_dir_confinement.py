@@ -1042,3 +1042,62 @@ def test_no_rg_worker_exit_before_first_record_is_reported_promptly(tmp_path, mo
 
     assert result == {"error": "grep: fallback worker exited 71", "exit_code": 1}
     assert time.monotonic() - started < 1
+
+
+def test_ls_depth_returns_a_bounded_outline_without_state(tmp_path, monkeypatch):
+    """`ls` with depth is the cheap first look at a tree: folders with file
+    counts, no vendor/build folders, and nothing from the data directory
+    beyond the agent-readable folders."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    readable = _configure_test_data_tree(monkeypatch, data_dir)
+    (readable["AGENT_WORKSPACE_DIR"] / "proj").mkdir(parents=True)
+    (data_dir / "vault_private").mkdir()
+    (data_dir / "vault_private" / "diary.md").write_text("x", encoding="utf-8")
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "a.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "pkg" / "b.py").write_text("", encoding="utf-8")
+    (tmp_path / "node_modules" / "lib").mkdir(parents=True)
+    monkeypatch.setattr("src.settings.get_setting", lambda *_a, **_k: [str(tmp_path)])
+
+    out = asyncio.run(LsTool().execute(
+        json.dumps({"path": str(tmp_path), "depth": 3}), {}
+    ))["output"]
+
+    assert "src/  (1 files, 1 dirs)" in out
+    assert "    pkg/  (1 files)" in out
+    assert "agent_workspace/" in out and "proj/" in out
+    assert "node_modules" not in out
+    assert "vault_private" not in out
+    assert "diary.md" not in out
+    # depth 1 (the default) is still the plain listing
+    flat = asyncio.run(LsTool().execute(json.dumps({"path": str(tmp_path)}), {}))["output"]
+    assert "outline" not in flat and "src/" in flat
+
+
+def test_glob_over_a_parent_prunes_the_data_dir_to_readable_folders(tmp_path, monkeypatch):
+    """A glob rooted above the data directory used to walk (and policy-check)
+    every folder of user data before reaching the code."""
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    readable = _configure_test_data_tree(monkeypatch, data_dir)
+    readable["AGENT_WORKSPACE_DIR"].mkdir()
+    (readable["AGENT_WORKSPACE_DIR"] / "keep.txt").write_text("", encoding="utf-8")
+    for i in range(5):
+        (data_dir / "chroma" / f"seg{i}").mkdir(parents=True)
+    monkeypatch.setattr("src.settings.get_setting", lambda *_a, **_k: [str(tmp_path)])
+    current_execution = importlib.import_module("src.tool_execution")
+    real_check = current_execution._can_traverse_tool_path
+    visited = []
+
+    def counting(path, **kw):
+        visited.append(path)
+        return real_check(path, **kw)
+
+    monkeypatch.setattr(current_execution, "_can_traverse_tool_path", counting)
+    out = asyncio.run(GlobTool().execute(
+        json.dumps({"pattern": "**/*.txt", "path": str(tmp_path)}), {}
+    ))["output"]
+
+    assert "keep.txt" in out
+    assert not any("chroma" in p for p in visited)
