@@ -735,6 +735,11 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     # "ran out of rounds" result has to be read against — otherwise a cap that
     # ended a worker is invisible until someone reopens the loadout in Settings.
     rounds = int(profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS)
+    # A saved loadout's positive budget is one its author chose, so at that
+    # round the worker is asked to wrap up and hand back what it has. A
+    # workflow's inline profile carries a default (12) nobody picked, and a
+    # model-only worker has none; both stay advisory.
+    wrap_up_round = rounds if profile_name and rounds > 0 else 0
     run_id = activity.run_started(
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
@@ -765,6 +770,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                     outcome=outcome,
                     workspace=checked.workspace if checked else None,
                     forced_tools=checked.forced_tools if checked else None,
+                    wrap_up_round=wrap_up_round,
                 )
             if outcome.get("stopped"):
                 status = "cancelled"

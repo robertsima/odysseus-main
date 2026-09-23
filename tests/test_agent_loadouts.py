@@ -558,6 +558,8 @@ async def test_start_reports_the_model_and_tools_it_actually_launched(monkeypatc
     # A round count never ends a run, so the response must not imply one will.
     assert "round budget" not in result["response"]
     assert "runs until the task is done" in result["response"]
+    # The loadout's explicit budget is a wrap-up point, and the caller is told.
+    assert "at round 4 it is asked to wrap up" in result["response"]
 
 
 async def test_an_unknown_loadout_name_is_not_an_invitation_to_pick_a_near_miss(store):

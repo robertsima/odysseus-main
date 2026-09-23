@@ -218,6 +218,7 @@ async def run_headless(
     outcome: Optional[Dict[str, Any]] = None,
     workspace: Optional[str] = None,
     forced_tools: Optional[Set[str]] = None,
+    wrap_up_round: int = 0,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Drain ``stream_agent_loop`` for ``sess`` over ``messages``.
 
@@ -237,6 +238,12 @@ async def run_headless(
     ``{"rounds_exhausted": True, "rounds": n}`` there, and says so in the prose
     it returns, so the caller can report a cut-off run as such rather than as a
     finished one.
+
+    ``wrap_up_round`` (an agent profile's explicit ``max_rounds``; 0 = none) is
+    passed to the loop, which makes that round a tool-free final answer. A run
+    that wraps up that way and answers is a completed run, recorded in
+    ``outcome`` as ``{"round_budget_reached": n}``; if the forced answer comes
+    back empty it is reported as ``rounds_exhausted``, like a cut-off run.
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
     # Foreground requests refresh session-backed provider credentials in the
@@ -284,7 +291,8 @@ async def run_headless(
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
                                          allow_private=allow_private, approval_mode=approval_mode,
-                                         workspace=workspace, forced_tools=forced_tools))
+                                         workspace=workspace, forced_tools=forced_tools,
+                                         wrap_up_round=wrap_up_round))
     try:
         if stop_event is None:
             await drain
@@ -354,6 +362,10 @@ async def run_headless(
         full = ((full.rstrip() + "\n\n" if full.strip() else "")
                 + f"(paused: {pending.get('tool') or 'a tool call'} is waiting for the user's approval "
                 "in this worker's chat; the task is not finished)")
+    elif state.get("round_budget") and outcome is not None:
+        # Wrapped up at the profile's round budget and wrote its answer: a
+        # finished run whose text says what is left, not a cut-off one.
+        outcome["round_budget_reached"] = int(state["round_budget"])
     return full, state["tool_events"]
 
 
@@ -398,7 +410,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
                  source: str, on_event, allow_private: bool = False,
                  approval_mode: Optional[str] = None, workspace: Optional[str] = None,
-                 forced_tools: Optional[Set[str]] = None) -> None:
+                 forced_tools: Optional[Set[str]] = None, wrap_up_round: int = 0) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -420,6 +432,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         approval_mode=approval_mode,
         workspace=workspace,
         forced_tools=set(forced_tools) if forced_tools else None,
+        wrap_up_round=wrap_up_round,
     ):
         event_error = _sse_error_payload(chunk)
         if event_error is not None:
@@ -490,6 +503,20 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                                  data={"rounds": state["exhausted_rounds"],
                                        "tool_calls": d.get("tool_calls")},
                                  level="warning")
+        elif d.get("type") == "round_budget_reached":
+            # The profile's round budget: the loop runs this round without
+            # tools so the worker writes up what it has and what is left.
+            state["round_budget"] = int(d.get("budget") or 0)
+            if activity_session_id:
+                activity.publish(activity_session_id, "note",
+                                 f"Reached its round budget of {state['round_budget']} — wrapping up with what it has",
+                                 source=source, run_id=run_id, owner=owner,
+                                 data={"rounds": state["round_budget"], "round": d.get("round")})
+        elif d.get("type") == "round_budget_unanswered":
+            # The wrap-up round wrote nothing of its own (the loop filled in a
+            # canned line), so hand back as incomplete, like a cut-off run.
+            state["exhausted"] = True
+            state["exhausted_rounds"] = int(d.get("budget") or 0)
         elif d.get("type") == "budget_exceeded":
             # The loop stops right after this frame with no closing answer, so
             # the run must hand back as incomplete, like a rounds_exhausted one.

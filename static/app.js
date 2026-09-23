@@ -44,7 +44,7 @@ import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js?v=20260915vaulttree3';
 import lotusModule from './js/lotus.js';
 import adminModule from './js/admin.js?v=20260918upsync1';
-import settingsModule from './js/settings.js?v=20260923profilexfer1';
+import settingsModule from './js/settings.js?v=20260923roundbudget1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
