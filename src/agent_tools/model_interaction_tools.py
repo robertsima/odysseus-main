@@ -86,17 +86,17 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
 
     lines = content.strip().split("\n", 1)
     if not lines or not lines[0].strip():
-        return {"error": "First line must be the model name"}
+        return {"error": "First line must be the model name", "exit_code": 1}
 
     model_spec = lines[0].strip()
     message = lines[1].strip() if len(lines) > 1 else ""
     if not message:
-        return {"error": "No message provided (line 2+ is the message)"}
+        return {"error": "No message provided (line 2+ is the message)", "exit_code": 1}
 
     try:
         url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError as e:
-        return {"error": str(e) + _claude_code_hint(model_spec)}
+        return {"error": str(e) + _claude_code_hint(model_spec), "exit_code": 1}
 
     try:
         response = await llm_call_async(
@@ -111,7 +111,7 @@ async def chat_with_model(content: str, session_id: Optional[str] = None, owner:
         return {"model": model, "response": response}
     except Exception as e:
         logger.error(f"chat_with_model failed: {e}")
-        return {"error": f"Failed to get response from {model_spec}: {e}"}
+        return {"error": f"Failed to get response from {model_spec}: {e}", "exit_code": 1}
 
 
 async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
@@ -135,13 +135,14 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     problem = lines[1].strip() if len(lines) > 1 else ""
 
     if not problem:
-        return {"error": "No problem description provided"}
+        return {"error": "No problem description provided", "exit_code": 1}
 
     configured = str(get_setting("teacher_model", "") or "").strip()
     if model_spec.lower() in _TEACHER_AUTO_ALIASES:
         if not configured:
             return {"error": ("No teacher model configured. Specify a model name from list_models "
-                              "on line 1, or set teacher_model in settings.")}
+                              "on line 1, or set teacher_model in settings."),
+                    "exit_code": 1}
         candidates = [configured]
     else:
         candidates = [model_spec]
@@ -185,7 +186,7 @@ async def ask_teacher(content: str, session_id: Optional[str] = None, owner: Opt
     else:
         hint = (" Call list_models for exact model ids and retry with one of them, "
                 "or set teacher_model in settings and pass 'auto'.")
-    return {"error": f"Teacher call failed — tried {tried}.{hint}"}
+    return {"error": f"Teacher call failed — tried {tried}.{hint}", "exit_code": 1}
 
 
 async def list_models(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
@@ -264,7 +265,7 @@ async def list_models(content: str, session_id: Optional[str] = None, owner: Opt
         return {"results": header + "\n".join(result_lines)}
     except Exception as e:
         logger.error(f"list_models failed: {e}")
-        return {"error": str(e)}
+        return {"error": str(e), "exit_code": 1}
     finally:
         db.close()
 
@@ -310,9 +311,9 @@ async def message_agent(content: str, session_id: Optional[str] = None, owner: O
 
     target_sid, message = _parse_message_agent_args(content)
     if not target_sid or not message:
-        return {"error": "Need a session_id and a message (JSON {session_id, message}, or 2 lines)"}
+        return {"error": "Need a session_id and a message (JSON {session_id, message}, or 2 lines)", "exit_code": 1}
     if not session_id:
-        return {"error": "message_agent must be called from within a running session"}
+        return {"error": "message_agent must be called from within a running session", "exit_code": 1}
 
     from_name = ""
     try:
@@ -327,7 +328,7 @@ async def message_agent(content: str, session_id: Optional[str] = None, owner: O
     result = agent_mailbox.send(target_sid, message, from_session=session_id, owner=owner,
                                 from_session_name=from_name)
     if not result.get("ok"):
-        return {"error": result.get("reason") or "message_agent failed"}
+        return {"error": result.get("reason") or "message_agent failed", "exit_code": 1}
 
     return {
         "delivered": True,

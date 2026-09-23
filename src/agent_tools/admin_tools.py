@@ -498,7 +498,90 @@ async def do_manage_tokens(content: str, owner: Optional[str] = None) -> Dict:
 # Settings/preferences management tool
 # ---------------------------------------------------------------------------
 
-async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
+def _audit_settings_write(action: str, key: str, before, after, *,
+                          owner: Optional[str], session_id: Optional[str],
+                          refused: str = "") -> None:
+    """Record one settings write on the activity timeline.
+
+    ``data/settings.json`` is global on a multi-user install, so a write here
+    changes behaviour for everyone, and until now nothing said who did it or
+    what it was before. It goes on ``src.agent_activity`` rather than into a
+    new audit store for the reason ``docs/design-patterns.md`` gives under
+    "One timeline": persistence, owner tagging, streaming and pruning already
+    exist there, and the Workbench renders it next to the run that did it.
+
+    Values are redacted by the shared classifier, so an audit line can never
+    become the place a credential leaks. Never raises.
+    """
+    try:
+        from src import agent_activity
+        from src.config_provenance import safe_value
+
+        agent_activity.publish(
+            session_id or agent_activity.GLOBAL_FEED,
+            "note",
+            (f"Settings write refused: {key}" if refused
+             else f"Setting changed: {key}"),
+            source="system",
+            owner=owner,
+            level="warning" if refused else "info",
+            data={
+                "event": "settings_write_refused" if refused else "settings_write",
+                "action": action,
+                "key": key,
+                "before": safe_value(key, before),
+                "after": safe_value(key, after),
+                "by_session": session_id or None,
+                "by_owner": owner or None,
+                "global_store": "data/settings.json (shared by every user)",
+                "refused_because": refused or None,
+            },
+        )
+    except Exception:
+        logger.debug("settings audit note failed", exc_info=True)
+
+
+def _tools_the_caller_may_not_grant_itself(targets, owner, session_id):
+    """Which of `targets` the CALLING CHAT'S OWN policy has switched off.
+
+    ``enable_tool`` removes names from the GLOBAL ``disabled_tools`` list, so
+    an agent scoped away from a tool could hand that tool back to itself — and
+    to every other user of the install at the same time. Same rule as an
+    authored loadout: never grant yourself what you do not already hold
+    (``src/agent_loadouts.py``, "clamp and report").
+
+    The comparison is deliberately against the chat's *own* stored policy and
+    nothing else. Owner-level and non-admin denials are enforced independently
+    at dispatch (``src/tool_security.py``), so folding them in here would add
+    no protection while making the answer depend on whether an auth manager
+    happens to be resolvable in this process.
+
+    ``src.session_settings.stored_disabled_tools`` is the single reader of the
+    stored shape, and the only one that handles BOTH: a chat narrowed by an
+    allowlist keeps an EMPTY ``disabled_tools`` and records
+    ``tool_access``/``enabled_tools`` instead, so reading that field directly
+    would see an unrestricted chat and permit exactly the escalation this
+    function exists to stop. It raises rather than under-report an allowlist it
+    cannot invert, and that raise must refuse the write.
+
+    A chat that states no policy of its own (and a caller with no chat at all —
+    an agent turn always has one) narrows nothing.
+    """
+    if not session_id:
+        return []
+    try:
+        from core.database import get_session_settings
+        from src.session_settings import stored_disabled_tools
+
+        denied = stored_disabled_tools(get_session_settings(session_id) or {})
+    except Exception:
+        logger.warning("manage_settings: chat policy unreadable; refusing to widen")
+        return list(targets)
+    return [t for t in targets if t in denied]
+
+
+async def do_manage_settings(content: str, owner: Optional[str] = None,
+                             session_id: Optional[str] = None) -> Dict:
     """Manage user settings and preferences."""
     try:
         args = _parse_tool_args(content)
@@ -531,14 +614,16 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             "vault_folder_sensitivity",
         }
         def _is_secret(k):
-            # `token` must be a suffix, not a substring: otherwise the int
-            # setting `agent_input_token_budget` (which even has a "token budget"
-            # alias to set it from chat) is wrongly classified as a credential.
-            return (
-                k in _SECRET_KEYS
-                or k.endswith("token")
-                or any(t in k for t in ("api_key", "_key", "secret", "password"))
-            )
+            # The name-shape rule lives in src/config_provenance.py so the
+            # thing that REFUSES to write a credential and the thing that
+            # REFUSES to show one cannot drift apart (one definition,
+            # imported). `_SECRET_KEYS` stays unioned on top: it holds keys
+            # this write path treats as operator-owned for reasons other than
+            # their name (`app_public_url`, `google_pse_cx`), and dropping them
+            # would widen what the agent may write.
+            from src.config_provenance import is_secret_key
+
+            return k in _SECRET_KEYS or is_secret_key(k)
 
         # Friendly aliases → real keys, so natural phrasing resolves.
         _ALIASES_SET = {
@@ -680,6 +765,7 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             if key in _ENUMS and str(value).lower() not in _ENUMS[key]:
                 return {"error": f"{key} must be one of: {', '.join(_ENUMS[key])}.", "exit_code": 1}
             s = load_settings()
+            _before = s.get(key, DEFAULT_SETTINGS.get(key))
             s[key] = value
             if key in {"default_model", "research_model", "utility_model", "task_model", "vision_model", "image_model"}:
                 resolved = _endpoint_model_from_cache(str(value))
@@ -689,6 +775,8 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                     s[key] = resolved["model"]
                     value = resolved["model"]
             save_settings(s)
+            _audit_settings_write("set", key, _before, s.get(key),
+                                  owner=owner, session_id=session_id)
             if key.endswith("_model") and s.get(f"{key[:-6]}_endpoint_id"):
                 return {"response": f"Set {key} = {value} (endpoint {s.get(f'{key[:-6]}_endpoint_id')}).", "exit_code": 0}
             return {"response": f"Set {key} = {value}.", "exit_code": 0}
@@ -708,8 +796,11 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
             if _is_secret(key):
                 return {"response": f"'{key}' is a credential. Reset it in the panel.", "exit_code": 0}
             s = load_settings()
+            _before = s.get(key, DEFAULT_SETTINGS.get(key))
             s[key] = DEFAULT_SETTINGS[key]
             save_settings(s)
+            _audit_settings_write(action, key, _before, DEFAULT_SETTINGS[key],
+                                  owner=owner, session_id=session_id)
             return {"response": f"Reset {key} to default ({DEFAULT_SETTINGS[key]}).", "exit_code": 0}
 
         elif action in ("disable_tool", "enable_tool", "list_tools"):
@@ -771,6 +862,32 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
                     if t not in current:
                         current.append(t)
             else:  # enable_tool
+                # This is the widening direction, on a GLOBAL list: removing a
+                # name here hands that tool back to this agent AND to every
+                # other user of the install. Clamp it the way an authored
+                # loadout is clamped - never grant yourself what you do not
+                # already hold (src/agent_loadouts.py, "clamp and report").
+                narrowed = _tools_the_caller_may_not_grant_itself(
+                    targets, owner, session_id)
+                if narrowed:
+                    for t in narrowed:
+                        _audit_settings_write(
+                            action, "disabled_tools", sorted(before), sorted(before),
+                            owner=owner, session_id=session_id,
+                            refused=f"this chat's own policy does not allow {t}",
+                        )
+                    return {
+                        "response": (
+                            f"Refused: {', '.join(sorted(narrowed))} "
+                            f"{'is' if len(narrowed) == 1 else 'are'} switched off for this "
+                            "chat, so I cannot switch it back on globally - that would "
+                            "widen my own policy, and data/settings.json is shared by "
+                            "every user of this install. Ask the operator to change it in "
+                            "Settings."
+                        ),
+                        "refused": sorted(narrowed),
+                        "exit_code": 1,
+                    }
                 current = [t for t in current if t not in targets]
             after = set(current)
             settings["disabled_tools"] = current
@@ -778,6 +895,9 @@ async def do_manage_settings(content: str, owner: Optional[str] = None) -> Dict:
 
             verb = "Disabled" if action == "disable_tool" else "Enabled"
             changed = sorted(after.symmetric_difference(before))
+            if changed:
+                _audit_settings_write(action, "disabled_tools", sorted(before),
+                                      sorted(after), owner=owner, session_id=session_id)
             return {
                 "response": (
                     f"{verb} {tool_name} ({', '.join(targets)}). "
@@ -811,10 +931,23 @@ def _owner_adapter(fn):
     return _execute
 
 
+def _settings_adapter(fn):
+    """manage_settings also needs the CALLING CHAT, not just its owner.
+
+    Its ``enable_tool`` action edits the global tool denylist, so the clamp has
+    to know which chat is asking - ``caller_policy`` is keyed on the session.
+    The other four admin tools take no such decision, so they keep the plain
+    owner adapter rather than all four growing an argument they ignore.
+    """
+    async def _execute(content: str, ctx: dict) -> dict:
+        return await fn(content, ctx.get("owner"), ctx.get("session_id"))
+    return _execute
+
+
 ADMIN_TOOL_HANDLERS = {
     "manage_endpoints": _owner_adapter(do_manage_endpoints),
     "manage_mcp": _owner_adapter(do_manage_mcp),
     "manage_webhooks": _owner_adapter(do_manage_webhooks),
     "manage_tokens": _owner_adapter(do_manage_tokens),
-    "manage_settings": _owner_adapter(do_manage_settings),
+    "manage_settings": _settings_adapter(do_manage_settings),
 }

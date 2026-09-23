@@ -145,16 +145,29 @@ _URL_WITH_USERINFO = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s\"'<>]*@[^\s\"'<>]*
 _URL_WITH_QUERY = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s\"'<>]*\?[^\s\"'<>]*")
 
 
-def redact_line(line: str) -> str:
-    """Remove credential material from one log line."""
-    out = line or ""
+def redact_text(text: str) -> str:
+    """Remove credential material from arbitrary text, with no length cap.
+
+    The substitutions, not the log-line framing. Callers that scrub something
+    that is not a log line — a scheduled task's run output, a prompt — need
+    exactly these patterns without :data:`MAX_LINE_CHARS` quietly truncating
+    the content they are scrubbing. Splitting the text and scrubbing per line
+    is not equivalent: a single very long line would still be clipped, and
+    clipping a value you are redacting is not redaction, it is data loss.
+    """
+    out = text or ""
     # URLs first: userinfo and query strings carry keys, and redact_url strips
     # both while keeping scheme/host/path readable.
     for pattern in (_URL_WITH_USERINFO, _URL_WITH_QUERY):
         out = pattern.sub(lambda m: redact_url(m.group(0)), out)
     for pattern, replacement in _REDACTIONS:
         out = pattern.sub(replacement, out)
-    return out[:MAX_LINE_CHARS]
+    return out
+
+
+def redact_line(line: str) -> str:
+    """Remove credential material from one log line, clipped to a sane width."""
+    return redact_text(line)[:MAX_LINE_CHARS]
 
 
 def _tail_lines(path: str, limit: int) -> List[str]:

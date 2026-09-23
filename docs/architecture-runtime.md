@@ -477,6 +477,15 @@ The tables and their owners:
 | `documents`, `document_versions` | `routes/document/` | `documents.owner` |
 | `memories` | **writer not established** — read by `src/builtin_actions.py`; the live memory store is `data/memory.json` (see below) | yes (column exists) |
 | `scheduled_tasks`, `task_runs` | `src/task_scheduler.py`, `routes/task_routes.py` | `scheduled_tasks.owner`; `task_runs` inherits |
+
+`task_runs.steps` holds one JSON object per run — the lane it was dispatched
+into and why, how late it started against its intended `next_run`, the prompt
+as actually sent, the tool/approval policy it resolved, and the endpoint
+breaker's verdict. It is written best-effort by `src/task_scheduler.py` and
+read by `src/runtime_introspection.py`; a run with no record predates it. The
+scheduler's decisions *not* to run a task leave no row at all and are published
+to `src/agent_activity.py` instead.
+
 | `crew_members` | scheduler + agents routes | yes |
 | `model_endpoints`, `provider_auth_sessions` | `routes/model_routes.py` | yes |
 | `email_accounts` | `routes/email_routes.py` (read by the email MCP child) | yes |

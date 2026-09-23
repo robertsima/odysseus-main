@@ -44,6 +44,35 @@ latest review comments into the composer.
 
 ![Pull request review](workbench-prs.png)
 
+## Scheduled-task forensics
+
+The Activity feed answers "what did that run do" for chat turns and delegated
+jobs. The same question about a *scheduled* task is answered by
+`src/runtime_introspection.py`, reachable over the API above and, for the agent
+itself, through the `inspect_runtime` tool. For one task it returns:
+
+- the prompt each recent run **actually sent** — the system half is composed at
+  run time from the crew member's personality, its linked agent profile's
+  instructions and any character persona, none of which are on the task row, so
+  it can differ from the prompt you see in the editor;
+- whether each run succeeded, errored, was skipped or was aborted — and for an
+  abort, which of the three causes it was (a user stop, the foreground gate
+  interrupting it, or a server restart);
+- the tool calls those runs made, email sends included, correlated from the
+  Activity feed by the task's chat and the run's time window;
+- the tool/approval policy, resolved model and endpoint the run executed under,
+  plus the circuit-breaker verdict for that endpoint;
+- **why it did not run** when it did not: the foreground gate pushing a due task
+  out 15 minutes, and the boot-time 60-second push for an overdue `next_run`,
+  are both recorded on the Activity timeline now rather than happening silently.
+
+Runs persist these facts as JSON on `task_runs.steps`; older runs predate the
+record and say so rather than guessing.
+
+Everything returned is owner-scoped: another user's task reports as missing,
+with the same message as a task that does not exist. Secrets are never
+included — see `src/config_provenance.py`.
+
 ## Agents dashboard
 
 The Agents rail/sidebar entry opens the owner-scoped fleet view. It groups chats by approval, running, failed, finished, and stopped state. Select a chat to approve or deny tool calls, steer an active turn, stop a chat or child run, send the next message, or launch a worker profile. Every child run also has an **Inspect** action that opens its event history in the Workbench.
@@ -76,6 +105,9 @@ All routes require an admin session.
 | `GET /api/workbench/activity?session_id=&since=&limit=` | bounded history of a session's events |
 | `GET /api/workbench/activity/stream?session_id=&since=` | server-sent events; `session_id=*` for all sessions |
 | `GET /api/workbench/runs`, `/runs/{run_id}` | run registry and one run's events |
+| `GET /api/workbench/tasks` | the caller's scheduled tasks with each one's scheduler lane and why |
+| `GET /api/workbench/tasks/{task_id}?runs=&include_traces=` | one task: the prompt each recent run actually sent, its outcome, its tool calls, the policy it ran under, and every time the scheduler decided not to run it |
+| `GET /api/workbench/config?keys=&only_non_default=` | where each effective setting's value came from (env pin, `settings.json`, user prefs, legacy env, code default) |
 | `GET /api/workbench/repo/roots` | inspectable repositories |
 | `GET /api/workbench/repo/status|changes|diff|file|commits|commit` | git inspection, path-confined to approved roots |
 | `GET /api/workbench/prs/config`, `/prs`, `/prs/{n}`, `/prs/{n}/diff` | pull requests via the worktree credential |

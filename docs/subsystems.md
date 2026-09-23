@@ -413,10 +413,17 @@ built-in action that needs no model at all.
 | | |
 |---|---|
 | Routes | `routes/task_routes.py` (`/api/tasks/...`, including `/{task_id}/webhook/{token}`), `routes/assistant_routes.py` (`/api/assistant`) |
-| Server | `src/task_scheduler.py`, `src/builtin_actions.py` (the action registry), `src/task_action_policy.py`, `src/task_endpoint.py`, `src/interactive_gate.py`, `src/bg_monitor.py` |
+| Server | `src/task_scheduler.py`, `src/builtin_actions.py` (the action registry), `src/task_action_policy.py`, `src/task_endpoint.py`, `src/interactive_gate.py`, `src/bg_monitor.py`, `src/runtime_introspection.py` |
 | Frontend | `static/js/tasks.js`, `static/js/assistant.js` |
-| Data | `scheduled_tasks`, `task_runs`, `crew_members` tables |
-| Agent tools | `manage_tasks` |
+| Data | `scheduled_tasks`, `task_runs` (including the per-run execution record on `task_runs.steps`), `crew_members` tables |
+| Agent tools | `manage_tasks`, `inspect_runtime` |
+
+`src/runtime_introspection.py` answers the after-the-fact questions: what a run
+actually sent, whether it failed and how, which tools it called, what policy it
+ran under, and why the scheduler chose not to run it at all. See
+[`workbench.md`](workbench.md) for what it returns and
+[`configuration.md`](configuration.md) for the configuration half
+(`src/config_provenance.py`).
 
 `task_type` selects the engine. `"llm"` runs the agent against `prompt`;
 `"action"` looks `action` up in `BUILTIN_ACTIONS` in `src/builtin_actions.py`

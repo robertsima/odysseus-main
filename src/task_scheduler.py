@@ -450,6 +450,62 @@ LANE_CONCURRENCY_SETTINGS = {
 LANE_CONCURRENCY_MAX = 8
 
 
+def classify_lane(task_type: str | None, action: str | None) -> Tuple[str, str]:
+    """``(lane, reason)`` for a task's ``task_type``/``action`` pair.
+
+    The pure half of ``TaskScheduler._lane_for_task``: no database, no
+    scheduler instance, so introspection and the dispatcher share one rule
+    instead of growing a second opinion about lanes (docs/design-patterns.md,
+    "One definition, imported"). The reason string is written for the person
+    reading it at 2am — it names the set that matched, or says plainly that
+    nothing did.
+    """
+    task_type = (task_type or "llm").strip() or "llm"
+    action = (action or "").strip()
+    if task_type != "action":
+        return LANE_MODEL, f"task_type={task_type!r} is model work, not a built-in action"
+    if action in TaskScheduler._MODEL_BACKED_ACTIONS:
+        return LANE_MODEL, f"action {action!r} is in _MODEL_BACKED_ACTIONS (it calls a model)"
+    if action in TaskScheduler._MAINTENANCE_ACTIONS:
+        return LANE_MAINTENANCE, f"action {action!r} is in _MAINTENANCE_ACTIONS"
+    if action in TaskScheduler._EXTERNAL_ACTIONS:
+        return LANE_EXTERNAL, f"action {action!r} is in _EXTERNAL_ACTIONS"
+    return LANE_MODEL, (
+        f"action {action!r} is in none of _MODEL_BACKED_ACTIONS, _MAINTENANCE_ACTIONS "
+        f"or _EXTERNAL_ACTIONS, so it falls through to the cap-1 {LANE_MODEL} lane — "
+        "it queues behind LLM work whether or not it uses a model"
+    )
+
+
+def _note_scheduler_event(task, *, title: str, reason: str, data: dict) -> None:
+    """Record a scheduler decision on the one activity timeline.
+
+    Deferrals, boot-time schedule pushes and orphan aborts produce no
+    ``task_runs`` row, which is why "it just never fired" was unanswerable.
+    They go to ``src.agent_activity`` rather than to a new store, for the
+    reason ``docs/design-patterns.md`` gives under "One timeline": the feed
+    already has persistence, owner tags, streaming and pruning.
+
+    Never raises: observability must not be able to stop the work it observes.
+    """
+    try:
+        from src import agent_activity
+
+        payload = {"task_id": getattr(task, "id", None), "reason": reason}
+        payload.update(data or {})
+        agent_activity.publish(
+            getattr(task, "session_id", None) or agent_activity.GLOBAL_FEED,
+            "note",
+            title,
+            source="system",
+            owner=getattr(task, "owner", None),
+            data=payload,
+            level="info",
+        )
+    except Exception:
+        logger.debug("scheduler activity note failed", exc_info=True)
+
+
 class TaskScheduler:
     def __init__(self, session_manager):
         self._session_manager = session_manager
@@ -589,6 +645,17 @@ class TaskScheduler:
         it loads a model onto the same GPU the model lane is rationing, and
         under the old code it bypassed the slot entirely.
         """
+        return self.lane_for_task_with_reason(task_id)[0]
+
+    def lane_for_task_with_reason(self, task_id: str) -> Tuple[str, str]:
+        """``(lane, reason)`` — the classification and the rule that produced it.
+
+        The reason is the half that was missing: a task queued behind an LLM
+        job because its action is in none of the three sets looks exactly like
+        a task that is merely slow, and neither the UI nor the logs could tell
+        them apart. Introspection reads this; `_lane_for_task` keeps its
+        single-value signature for every existing caller.
+        """
         from core.database import SessionLocal, ScheduledTask
 
         db = SessionLocal()
@@ -596,25 +663,17 @@ class TaskScheduler:
             task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
             if not task:
                 # Row gone or unreadable: we know nothing, so assume the worst.
-                return LANE_MODEL
-            task_type = getattr(task, "task_type", "") or "llm"
-            if task_type != "action":
-                return LANE_MODEL
-            action = (getattr(task, "action", "") or "").strip()
-            if action in self._MODEL_BACKED_ACTIONS:
-                return LANE_MODEL
-            if action in self._MAINTENANCE_ACTIONS:
-                return LANE_MAINTENANCE
-            if action in self._EXTERNAL_ACTIONS:
-                return LANE_EXTERNAL
-            logger.debug(
-                "Task %s action %r is unclassified — running it in the %s lane",
-                task_id, action, LANE_MODEL,
+                return LANE_MODEL, "task row missing or unreadable — assumed model work"
+            lane, reason = classify_lane(
+                getattr(task, "task_type", "") or "llm",
+                getattr(task, "action", "") or "",
             )
-            return LANE_MODEL
+            if lane == LANE_MODEL and "falls through" in reason:
+                logger.debug("Task %s: %s", task_id, reason)
+            return lane, reason
         except Exception:
             logger.debug("Lane lookup failed for task %s", task_id, exc_info=True)
-            return LANE_MODEL
+            return LANE_MODEL, "lane lookup raised — assumed model work"
         finally:
             db.close()
 
@@ -742,7 +801,7 @@ class TaskScheduler:
         # this, a server crash leaves rows stuck running indefinitely and the
         # _executing in-memory set forgets them, so the UI shows phantoms.
         try:
-            from core.database import SessionLocal, TaskRun
+            from core.database import SessionLocal, ScheduledTask, TaskRun
             db = SessionLocal()
             try:
                 # Zombies from a prior server crash. Tagged "aborted" (not
@@ -753,13 +812,30 @@ class TaskScheduler:
                 ).all()
                 if stale:
                     now = _utcnow()
+                    aborted = []
                     for r in stale:
                         old_status = r.status or "running"
                         r.status = "aborted"
                         r.error = "Server restarted while task was " + old_status
                         r.finished_at = now
+                        aborted.append((r.task_id, old_status))
                     db.commit()
                     logger.info(f"Cleared {len(stale)} stale task_runs from previous run")
+                    # "aborted" on its own reads as "someone stopped it". Say
+                    # on the timeline that this was a restart, per task, so a
+                    # later "why did my run abort?" has an answer.
+                    for task_id, old_status in aborted:
+                        task = db.query(ScheduledTask).filter(
+                            ScheduledTask.id == task_id
+                        ).first()
+                        if task is None:
+                            continue
+                        _note_scheduler_event(
+                            task,
+                            title=f"Run of '{task.name}' aborted by a server restart",
+                            reason="server_restart",
+                            data={"event": "run_aborted", "was_status": old_status},
+                        )
             finally:
                 db.close()
         except Exception as e:
@@ -780,13 +856,33 @@ class TaskScheduler:
                     _ST.next_run < now,
                 ).all()
                 if overdue:
+                    pushed = []
                     for t in overdue:
+                        pushed.append((t, t.next_run))
                         t.next_run = now + timedelta(seconds=60)
                     db.commit()
                     logger.info(
                         "Pushed next_run forward by 60s for %d overdue active tasks on startup",
                         len(overdue),
                     )
+                    # Schedule drift the operator can otherwise only infer:
+                    # the run that "was due at 09:00" actually started at
+                    # 09:00 + however long the process was down + 60s.
+                    for t, was_due_at in pushed:
+                        _note_scheduler_event(
+                            t,
+                            title=f"'{t.name}' was overdue at startup — next run pushed 60s",
+                            reason="overdue_at_startup",
+                            data={
+                                "event": "next_run_pushed",
+                                "was_due_at": was_due_at.isoformat() if was_due_at else None,
+                                "deferred_to": t.next_run.isoformat() if t.next_run else None,
+                                "overdue_by_seconds": (
+                                    round((now - was_due_at).total_seconds())
+                                    if was_due_at else None
+                                ),
+                            },
+                        )
             finally:
                 db.close()
         except Exception as e:
@@ -1030,16 +1126,38 @@ class TaskScheduler:
                     ScheduledTask.id.notin_(executing_snapshot) if executing_snapshot else True,
                 ).all()
                 to_dispatch = []
+                deferred = []
                 for task in due:
                     if task.id in self._executing:
                         continue
                     if foreground_active:
+                        was_due_at = task.next_run
                         task.next_run = now + timedelta(minutes=15)
+                        # The most confusing case in the whole scheduler: a due
+                        # task that simply never fires, with nothing anywhere
+                        # saying why. No run row is created here, so the only
+                        # place this can be recorded is the activity timeline.
+                        deferred.append((task, was_due_at, task.next_run))
                         continue
                     self._executing.add(task.id)
                     to_dispatch.append(task.id)
                 if foreground_active and due:
                     db.commit()
+            # Outside the dispatch lock: publishing writes a JSONL line per
+            # deferred task, and nothing else needs to wait on that.
+            for task, was_due_at, pushed_to in deferred:
+                _note_scheduler_event(
+                    task,
+                    title=f"Task '{task.name}' did not run — Odysseus was active",
+                    reason="foreground_active",
+                    data={
+                        "event": "deferred",
+                        "was_due_at": was_due_at.isoformat() if was_due_at else None,
+                        "deferred_to": pushed_to.isoformat() if pushed_to else None,
+                        "deferred_by_minutes": 15,
+                        "gate": "interactive_gate.has_foreground_activity",
+                    },
+                )
             for task_id in to_dispatch:
                 asyncio.create_task(self._execute_task(task_id))
         finally:
@@ -1238,6 +1356,166 @@ class TaskScheduler:
         counts[task_id] = used + 1
         return self._TRANSIENT_RETRY_DELAYS[used]
 
+    #: Cap on the prompt text kept per run. A task prompt is normally a
+    #: paragraph; the cap exists so a pathological one cannot bloat the row.
+    _RECORD_PROMPT_CHARS = 8000
+
+    def _prompt_facts(self, system_content: str, user_content: str, task,
+                      has_datetime_context: bool) -> dict:
+        """The composed prompt, capped and scrubbed, plus how it differs from the row."""
+        from src.config_provenance import scrub_text
+
+        stored = (getattr(task, "prompt", None) or "")
+        sent = user_content or ""
+        cap = self._RECORD_PROMPT_CHARS
+        return {
+            "system": scrub_text(system_content or "", limit=cap),
+            "user": scrub_text(sent, limit=cap),
+            "datetime_context_message": bool(has_datetime_context),
+            "system_chars": len(system_content or ""),
+            "user_chars": len(sent),
+            "stored_prompt_chars": len(stored),
+            "differs_from_stored": sent.strip() != stored.strip(),
+            "note": (
+                "The system half is composed at run time from the crew member's "
+                "personality, its linked agent profile's instructions and any "
+                "character persona. None of it is stored on the task row."
+            ),
+        }
+
+    def _policy_facts(self, task, crew, session_id: str, endpoint_url: str,
+                      model: str, disabled_tools) -> dict:
+        """What this run is allowed to do, resolved at the moment it runs.
+
+        Every field is named explicitly. Nothing here reads a settings row, a
+        crew row or a session row wholesale, so no credential can ride along;
+        the endpoint keeps only scheme/host/path (`core.log_safety.redact_url`
+        drops `user:pass@` userinfo and the query string, which is where API
+        keys live).
+
+        `disabled_tools` comes from the caller because that is the set actually
+        passed into the agent loop. The chat's own stored policy is read back
+        through `session_settings.stored_disabled_tools`, the single reader
+        that understands BOTH stored shapes — a chat narrowed by an allowlist
+        keeps an EMPTY `disabled_tools` and records `tool_access`/
+        `enabled_tools` instead, so reading that field directly would report a
+        tightly scoped run as unrestricted.
+        """
+        from core.log_safety import redact_url
+
+        facts: dict = {
+            "model": model or None,
+            "endpoint": redact_url(endpoint_url) if endpoint_url else None,
+            "disabled_tools": sorted(str(t) for t in (disabled_tools or ())),
+            "disabled_tools_count": len(disabled_tools or ()),
+        }
+        try:
+            from core.database import get_session_settings
+            from src.session_settings import effective_approval_mode, stored_disabled_tools
+
+            settings = get_session_settings(session_id) or {} if session_id else {}
+            facts["approval_mode"] = effective_approval_mode(settings)
+            facts["session_tool_access"] = settings.get("tool_access") or "all"
+            facts["session_enabled_tools"] = sorted(settings.get("enabled_tools") or [])
+            facts["memory_access"] = settings.get("memory_access")
+            facts["skill_access"] = settings.get("skill_access")
+            facts["model_access"] = settings.get("model_access")
+            facts["allowed_mcp_servers"] = list(settings.get("allowed_mcp_servers") or [])
+            facts["private_vault_access"] = bool(settings.get("private_vault_access", False))
+            facts["delegation_policy"] = settings.get("delegation_policy")
+            try:
+                facts["session_disabled_tools"] = sorted(stored_disabled_tools(settings))
+            except Exception:
+                # stored_disabled_tools raises rather than under-report an
+                # allowlist it cannot invert. Say so instead of writing an
+                # empty list that would read as "unrestricted".
+                facts["session_disabled_tools"] = None
+                facts["session_disabled_tools_error"] = (
+                    "chat allowlist could not be inverted against the live tool registry"
+                )
+        except Exception:
+            logger.debug("session policy facts unavailable for %s", session_id, exc_info=True)
+        if crew is not None:
+            facts["crew"] = {
+                "id": getattr(crew, "id", None),
+                "name": getattr(crew, "name", None),
+                "agent_profile": (getattr(crew, "agent_profile", None) or None),
+                "is_default_assistant": bool(getattr(crew, "is_default_assistant", False)),
+            }
+            try:
+                from src import crew_profile as _cp
+
+                profile = _cp.profile_for_crew(crew)
+                facts["crew"]["profile_resolved"] = profile is not None
+                if profile is None and getattr(crew, "agent_profile", None):
+                    facts["crew"]["profile_missing"] = True
+            except Exception:
+                logger.debug("crew profile resolution failed", exc_info=True)
+        return facts
+
+    def _breaker_facts(self, endpoint_url: str) -> dict | None:
+        """The model-endpoint breaker's verdict for this run's endpoint.
+
+        "The task produced nothing" and "the task was never dialled because the
+        breaker was open" are different failures with different fixes, and only
+        the log said which. Keyed exactly as `_guarded_model_call` keys it.
+        """
+        if not endpoint_url:
+            return None
+        try:
+            key = _endpoint_breaker_key(endpoint_url)
+            snap = _model_endpoint_breaker().snapshot().get(key)
+            if not snap:
+                return {"key": key, "state": "closed"}
+            out = {"key": key}
+            out.update({k: v for k, v in snap.items() if k != "last_error"})
+            if snap.get("last_error"):
+                from src.config_provenance import scrub_text
+
+                out["last_error"] = scrub_text(snap["last_error"], limit=300)
+            return out
+        except Exception:
+            logger.debug("breaker snapshot unavailable", exc_info=True)
+            return None
+
+    def _write_execution_record(self, db, run, facts: dict, *, commit: bool = True) -> None:
+        """Persist what this run actually executed with, onto ``task_runs.steps``.
+
+        ``steps`` was declared as "JSON log of agent tool calls" and never
+        written by anything — so there is a column for exactly this and no
+        migration to pay for. What goes in is an explicit allowlist of fields
+        built one at a time: nothing here iterates a settings dict or a
+        database row, so a credential cannot arrive by accident. Free text
+        (the prompt, the endpoint) is scrubbed on the way in as well.
+
+        Never raises, and never rolls back: this is bookkeeping running inside
+        the caller's own transaction, so discarding that transaction on a
+        bookkeeping failure would throw away the run's real status. A run that
+        works and records nothing beats a run that fails because its
+        bookkeeping did.
+        """
+        # Tests (and any future trimmed model) may define a TaskRun without the
+        # column. Attribute-check the class rather than assume.
+        if run is None or not hasattr(type(run), "steps"):
+            return
+        try:
+            existing = {}
+            if run.steps:
+                try:
+                    existing = json.loads(run.steps) or {}
+                except (ValueError, TypeError):
+                    existing = {}
+            if not isinstance(existing, dict):
+                existing = {}
+            existing.update(facts)
+            existing["v"] = 1
+            run.steps = json.dumps(existing, default=str)[:60000]
+            if commit:
+                db.commit()
+        except Exception:
+            logger.debug("execution record write failed for run %s", getattr(run, "id", "?"),
+                         exc_info=True)
+
     async def _execute_task_locked(
         self,
         task_id: str,
@@ -1300,6 +1578,11 @@ class TaskScheduler:
             # actual execution start so queue wait time is visible from
             # created_at vs started_at if we ever surface that.
             run = db.query(TaskRun).filter(TaskRun.id == run_id).first()
+            # Facts that only exist BEFORE the run row is rewritten: when the
+            # row was queued, and what time the task was supposed to fire at
+            # (task.next_run is recomputed at the end of this function).
+            _queued_at = run.started_at if run else None
+            _intended_at = task.next_run
             if run:
                 run.status = "running"
                 run.started_at = _utcnow()
@@ -1326,6 +1609,39 @@ class TaskScheduler:
             # previous llm/research run's model. The executors set it once the
             # model is resolved.
             self._last_run_model = None
+            # Same reason, same lifetime: the prompt actually sent and the
+            # policy actually in force, filled in by the LLM executor below.
+            self._last_run_prompt = None
+            self._last_run_policy = None
+            # Cleared too, or an action task's record would carry the breaker
+            # verdict for whatever endpoint the PREVIOUS run happened to dial.
+            self._last_run_endpoint = None
+
+            # Write the dispatch facts now, not at the end, so a run that is
+            # cancelled, times out or takes the process down with it still says
+            # which lane it was in and how late it started.
+            _lane, _lane_reason = self.lane_for_task_with_reason(task_id)
+            _started = run.started_at or _utcnow()
+            self._write_execution_record(db, run, {
+                "lane": _lane,
+                "lane_reason": _lane_reason,
+                "manual": bool(manual),
+                "foreground_gate_applied": bool(gate_foreground),
+                "waited_for_idle": bool(gate_foreground),
+                "queued_at": _queued_at.isoformat() if _queued_at else None,
+                "started_at": _started.isoformat() if _started else None,
+                "scheduled_for": _intended_at.isoformat() if _intended_at else None,
+                "queued_seconds": (
+                    round((_started - _queued_at).total_seconds(), 3)
+                    if (_started and _queued_at) else None
+                ),
+                "drift_seconds": (
+                    round((_started - _intended_at).total_seconds(), 3)
+                    if (_started and _intended_at) else None
+                ),
+                "task_type": task_type,
+                "action": (task.action or "") or None,
+            })
             foreground_cancel = {"hit": False}
             foreground_monitor = None
             if gate_foreground:
@@ -1457,6 +1773,17 @@ class TaskScheduler:
                         pass
 
             run.finished_at = _utcnow()
+
+            # Second half of the execution record: what the run turned out to
+            # have used. Written after the executor so the prompt and policy
+            # are the resolved ones, not a guess made before resolution.
+            self._write_execution_record(db, run, {
+                "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+                "outcome": run.status,
+                "prompt": getattr(self, "_last_run_prompt", None),
+                "policy": getattr(self, "_last_run_policy", None),
+                "breaker": self._breaker_facts(getattr(self, "_last_run_endpoint", "")),
+            }, commit=False)  # the task update below commits everything at once
 
             # Update task
             task.last_run = _utcnow()
@@ -2073,6 +2400,7 @@ class TaskScheduler:
         # the run (tasks rarely pin a model, so this is the only record of
         # which model actually produced the output).
         self._last_run_model = model
+        self._last_run_endpoint = endpoint_url
 
         # Ensure a session exists for output
         session_id = task.session_id
@@ -2175,6 +2503,15 @@ class TaskScheduler:
                 disabled_tools.update(_global_disabled)
         except Exception:
             pass
+
+        # Record the policy this run is about to execute under, while every
+        # part of it is still in scope. Reconstructing it afterwards is what
+        # made "why did the task use that tool" unanswerable: the crew row, the
+        # profile and the global disabled_tools list can all change between the
+        # run and the question.
+        self._last_run_policy = self._policy_facts(
+            task, crew, session_id, endpoint_url, model, disabled_tools,
+        )
 
         # RAG-select relevant tools for this prompt + always-available assistant tools.
         # Without this, all 40+ tools get sent and models hit their tool limit.
@@ -2473,6 +2810,15 @@ class TaskScheduler:
         if datetime_context_msg:
             messages.append(datetime_context_msg)
         messages.append({"role": "user", "content": user_content})
+        # The prompt as SENT, which is not the prompt as stored: the system
+        # half is composed from the crew member's personality plus its linked
+        # agent profile's instructions plus any character persona, none of
+        # which live on the task row, and all of which can be edited after the
+        # run. `differs_from_stored` is the flag that answers "is the prompt I
+        # am looking at in the editor the one that ran?".
+        self._last_run_prompt = self._prompt_facts(
+            system_content, user_content, task, bool(datetime_context_msg),
+        )
 
         # Resolve headers for the endpoint, refreshing session-backed tokens.
         headers = self._resolve_endpoint_headers(endpoint_url, task.owner)
@@ -2637,6 +2983,7 @@ class TaskScheduler:
         endpoint_url = _normalize_chat_endpoint(endpoint_url)
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
+        self._last_run_endpoint = endpoint_url
 
         # Resolve headers, refreshing session-backed tokens.
         if not headers_from_resolver:
