@@ -11,7 +11,7 @@ from contextlib import contextmanager
 import pytest
 from dulwich.repo import Repo
 
-from src import tool_execution
+import importlib
 from src.agent_worktree import repository_sync as rs
 from src.github_credentials import github_git_host, token_for_git_host
 
@@ -25,9 +25,8 @@ def roots(tmp_path, monkeypatch):
     development.mkdir()
     monkeypatch.setattr(rs, "git_repository_roots", lambda: (development,))
     monkeypatch.setattr(rs, "DATA_DIR", str(tmp_path / "data"))
-    # vet_workspace refuses anything under the global DATA_DIR as app state.
-    # Pin it here too: the full suite can leave it pointing at a parent of the
-    # pytest temp dir, which made every workspace below look like app state.
+    # vet_workspace refuses anything under the global DATA_DIR as app state, so
+    # keep that pointed at this test's own data dir as well.
     import src.constants as constants
     monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(rs, "PERSONAL_DIR", str(tmp_path / "data" / "personal"))
@@ -41,8 +40,21 @@ def _checkout(path):
     return path
 
 
+def _tool_execution():
+    """The live src.tool_execution module.
+
+    repository_sync imports it at call time, so this test must set the
+    workspace on that same module. A module-level import is not enough: some
+    test files replace src.tool_execution in sys.modules while the suite is
+    being collected, which left this file holding a stale copy whose
+    workspace variable the code never read.
+    """
+    return importlib.import_module("src.tool_execution")
+
+
 @contextmanager
 def _workspace(path):
+    tool_execution = _tool_execution()
     token = tool_execution._active_workspace.set(str(path))
     try:
         yield
@@ -105,7 +117,7 @@ def test_paths_escaping_the_workspace_are_refused(roots):
 
 def test_a_sensitive_or_root_workspace_is_never_admitted(roots, monkeypatch):
     project = _checkout(roots / "project")
-    monkeypatch.setattr(tool_execution, "vet_workspace", lambda raw: None)
+    monkeypatch.setattr(_tool_execution(), "vet_workspace", lambda raw: None)
     with _workspace(project):
         assert rs.workspace_repository() is None
         assert project.resolve() not in rs._operating_roots()
