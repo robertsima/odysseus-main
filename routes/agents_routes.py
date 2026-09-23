@@ -52,6 +52,29 @@ def setup_agents_routes(session_manager) -> APIRouter:
             raise HTTPException(404, "Session not found")
         return user
 
+    def _crew_roles(session_ids: Set[str]) -> Dict[str, Dict[str, Any]]:
+        """``{session_id: {id, name, agent_profile}}`` for chats that are a crew
+        member's own chat. One query for the whole page, not one per row."""
+        if not session_ids:
+            return {}
+        try:
+            from core.database import CrewMember, Session as DbSession, get_db_session
+
+            out: Dict[str, Dict[str, Any]] = {}
+            with get_db_session() as db:
+                rows = (
+                    db.query(DbSession.id, CrewMember.id, CrewMember.name, CrewMember.agent_profile)
+                    .join(CrewMember, CrewMember.id == DbSession.crew_member_id)
+                    .filter(DbSession.id.in_(list(session_ids)))
+                    .all()
+                )
+            for sid, crew_id, crew_name, profile in rows:
+                out[sid] = {"id": crew_id, "name": crew_name, "agent_profile": profile or ""}
+            return out
+        except Exception:
+            logger.debug("crew role lookup failed", exc_info=True)
+            return {}
+
     @router.get("/overview")
     async def overview(request: Request, current_session: Optional[str] = Query(default=None)):
         user, owned = _owned(request)
@@ -75,6 +98,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
         visible_ids = set(chat_runs) | set(by_session) | set(pending)
         if current_session in owned:
             visible_ids.add(current_session)
+        crew_roles = _crew_roles(visible_ids & set(owned))
         for sid in visible_ids:
             sess = owned.get(sid)
             if sess is None:
@@ -119,6 +143,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "steer_queued": len(agent_control.pending_steer(sid)),
                 "steer": agent_control.steer_status(sid, limit=5),
                 "profile": settings.get("agent_profile"),
+                # The crew member this chat *is*, when it is one, and the agent
+                # profile that crew member names. This is the durable role link
+                # (crew_members.agent_profile) — unlike `config`, which is this
+                # one chat's copy of a loadout. Absent for an ordinary chat.
+                "crew": crew_roles.get(sid),
                 "parent_session": settings.get("parent_session"),
                 "approval_mode": settings.get("approval_mode"),
                 "is_current": sid == current_session,
@@ -310,6 +339,47 @@ def setup_agents_routes(session_manager) -> APIRouter:
             sess = owned.get(rec["session_id"])
             rows.append({**rec, "session_name": getattr(sess, "name", "") if sess else ""})
         return {"approvals": rows}
+
+    @router.post("/sessions/{session_id}/crew_profile")
+    async def set_crew_profile(request: Request, session_id: str):
+        """Point this chat's crew member at a named agent profile (or clear it).
+
+        One role, one definition: the same link is what scopes that crew
+        member's scheduled tasks, so this is not a per-chat override — it is
+        editable here because this is where the user already looks at what an
+        agent may do.
+        """
+        user = _require_owned(request, session_id)
+        body = await request.json()
+        name = str((body or {}).get("profile") or "").strip()
+        if name:
+            from src import agent_profiles
+
+            found = agent_profiles.get_profile(name)
+            if found is None:
+                raise HTTPException(400, f"No agent profile named {name!r}")
+            # Store the profile's own spelling (get_profile matches case-
+            # insensitively) so the link reads back as the select's option value.
+            name = found["name"]
+        from core.database import CrewMember, Session as DbSession, get_db_session
+
+        with get_db_session() as db:
+            crew_id = db.query(DbSession.crew_member_id).filter(DbSession.id == session_id).scalar()
+            if not crew_id:
+                raise HTTPException(404, "This chat does not belong to an agent")
+            crew = db.query(CrewMember).filter(CrewMember.id == crew_id).first()
+            if crew is None or (crew.owner and user and crew.owner != user):
+                raise HTTPException(404, "This chat does not belong to an agent")
+            crew.agent_profile = name or None
+        # Push the new role onto the chat immediately, so the loadout the user
+        # is looking at is the one the next turn will run under.
+        try:
+            from src.crew_profile import apply_crew_profile_to_session
+
+            apply_crew_profile_to_session(session_id)
+        except Exception:
+            logger.warning("crew profile sync failed for %s", session_id, exc_info=True)
+        return {"session_id": session_id, "crew_member_id": crew_id, "profile": name}
 
     @router.post("/launch")
     async def launch(request: Request):

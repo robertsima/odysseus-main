@@ -457,8 +457,14 @@ function configEditorHtml(row) {
     <section class="ag-connection-section"><div class="ag-connection-head"><div><b>MCP & integrations</b><small>${c.allowed_mcp_servers?.includes('*') ? 'All connected servers' : `${c.allowed_mcp_servers?.length || 0} selected`}</small></div><select class="wb-select" data-config="mcp_access">${option('all','All connected',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('selected','Selected connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}${option('none','No connections',c.allowed_mcp_servers?.includes('*') ? 'all' : c.allowed_mcp_servers?.length ? 'selected' : 'none')}</select></div><div class="ag-cap-grid" data-show-when="mcp_access:selected"${!c.allowed_mcp_servers?.includes('*') && c.allowed_mcp_servers?.length ? '' : ' hidden'}>${capabilityChecks(catalog.mcp_servers, mcpSelected, 'allowed_mcp_servers', 'name')}</div></section>
   </div>`;
   const panels = { general: generalPanel, tools: toolsPanel, knowledge: knowledgePanel, connections: connectionsPanel };
+  // A chat that *is* a crew member can name a profile as its role. That link
+  // lives on the crew member, so it also scopes its scheduled tasks — unlike
+  // the preset beside it, which is copied into this one chat. Rendered as one
+  // more field in the row that is already here rather than a panel of its own.
+  const roleOptions = state.profiles.map((p) => option(p.name, p.name, row.crew?.agent_profile || '')).join('');
+  const rolePicker = row.crew ? `<label class="ag-preset-role"><span>Role profile</span><select class="wb-select" data-ag-crew-profile data-sid="${esc(row.session_id)}"><option value="">No linked role</option>${roleOptions}</select><small>Applies to ${esc(row.crew.name || 'this agent')} everywhere — chat and its scheduled tasks.</small></label>` : '';
   return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button><small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button>${rolePicker}<small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
     <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
@@ -645,7 +651,30 @@ function syncConfigVisibility(editor, draft) {
     node.hidden = String(draft[key] || '') !== expected;
   });
 }
+async function saveCrewProfile(select) {
+  const sid = select.dataset.sid;
+  const name = select.value || '';
+  select.disabled = true;
+  try {
+    await post(`/api/agents/sessions/${encodeURIComponent(sid)}/crew_profile`, { profile: name });
+    const row = state.rows.find((item) => item.session_id === sid);
+    if (row?.crew) row.crew.agent_profile = name;
+    // Linking a role rewrites the chat's stored loadout server-side, so drop
+    // the local draft rather than showing the pre-link copy back to the user.
+    state.configDrafts.delete(sid);
+    uiModule.showToast(name ? `Role set to ${name}` : 'Role cleared', 'success');
+    await refresh();
+  } catch (err) {
+    uiModule.showToast(err.message || 'Could not set the role', 'error');
+  } finally {
+    select.disabled = false;
+  }
+}
 function onConfigChange(e) {
+  if (e.target.matches('[data-ag-crew-profile]')) {
+    saveCrewProfile(e.target);
+    return;
+  }
   if (e.target.matches('[data-config-agent]')) {
     state.selected = e.target.value;
     state.configTab = 'general';

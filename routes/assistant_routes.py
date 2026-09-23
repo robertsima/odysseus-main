@@ -35,6 +35,10 @@ class AssistantSettingsUpdate(BaseModel):
     model: Optional[str] = None
     endpoint_url: Optional[str] = None
     enabled_tools: Optional[list[str]] = None
+    # Name of an agent profile (Settings › Workbench) this assistant runs as.
+    # "" clears the link. See src/crew_profile.py for what it does and how it
+    # composes with `personality` / `enabled_tools` above.
+    agent_profile: Optional[str] = None
     allow_autonomous_email: Optional[bool] = None  # convenience toggle
     timezone: Optional[str] = None
     check_ins: Optional[list[CheckInUpdate]] = None
@@ -60,6 +64,7 @@ def _crew_to_dict(c: CrewMember) -> dict:
         "session_id": c.session_id,
         "is_default_assistant": bool(c.is_default_assistant),
         "timezone": c.timezone,
+        "agent_profile": c.agent_profile or "",
         "allow_autonomous_email": any(t in _EMAIL_TOOLS for t in tools),
     }
 
@@ -180,6 +185,17 @@ def setup_assistant_routes(task_scheduler) -> APIRouter:
                 crew_db.endpoint_url = payload.endpoint_url or None
             if payload.timezone is not None:
                 crew_db.timezone = payload.timezone or None
+            if payload.agent_profile is not None:
+                name = payload.agent_profile.strip()
+                if name:
+                    from src import agent_profiles
+
+                    found = agent_profiles.get_profile(name)
+                    if found is None:
+                        raise HTTPException(status_code=400,
+                                            detail=f"No agent profile named {name!r}")
+                    name = found["name"]
+                crew_db.agent_profile = name or None
 
             # Tool list: either explicit list, or implicit toggle.
             if payload.enabled_tools is not None:

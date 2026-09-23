@@ -671,6 +671,13 @@ class CrewMember(TimestampMixin, Base):
     sort_order    = Column(Integer, default=0)
     is_default_assistant = Column(Boolean, default=False)   # singleton per-owner "personal assistant"
     timezone      = Column(String, nullable=True)           # IANA tz name (e.g. "America/New_York") for scheduled check-ins
+    # Optional link to a named agent profile (loadout) in the `agent_profiles`
+    # setting — by name, because profiles live in settings.json and have no
+    # row to point a foreign key at.  When set, that profile's runtime policy
+    # is applied to this crew member's chat *and* to its scheduled tasks; see
+    # src/crew_profile.py for the precedence rule against the crew's own
+    # `personality` / `enabled_tools`.  NULL = unlinked, behaves as before.
+    agent_profile = Column(String, nullable=True)
 
     session = relationship("Session", foreign_keys=[session_id],
                            backref=backref("crew_member", uselist=False))
@@ -1748,6 +1755,19 @@ def _migrate_add_assistant_columns():
         logging.getLogger(__name__).warning(f"assistant columns migration: {e}")
 
 
+def _migrate_add_crew_agent_profile():
+    """Add crew_members.agent_profile — the link to a named agent profile."""
+    try:
+        with engine.connect() as conn:
+            cols = [r[1] for r in conn.execute(text("PRAGMA table_info(crew_members)"))]
+            if "agent_profile" not in cols:
+                conn.execute(text("ALTER TABLE crew_members ADD COLUMN agent_profile TEXT"))
+                conn.commit()
+                logging.getLogger(__name__).info("Added agent_profile column to crew_members")
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"crew agent_profile migration: {e}")
+
+
 
 
 
@@ -2010,6 +2030,7 @@ def init_db():
     _migrate_add_crew_member_id()
     _migrate_add_session_settings_columns()
     _migrate_add_assistant_columns()
+    _migrate_add_crew_agent_profile()
     _migrate_add_email_smtp_security()
     _migrate_seed_email_account()
     _migrate_add_calendar_metadata()

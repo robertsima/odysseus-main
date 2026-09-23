@@ -1222,7 +1222,22 @@ def setup_chat_routes(
         # risky tool calls stop for approval.
         from core.database import get_session_settings, update_session_settings
         from src import session_settings as _session_settings
-        _chat_settings = get_session_settings(session) if session else {}
+        # A chat that belongs to a crew member which names an agent profile runs
+        # under that profile's loadout — the same policy a delegated worker gets
+        # from src.agent_profiles.session_patch(). Applied here, before the tool
+        # policy is built and before any mode dispatch, and *persisted* onto the
+        # chat rather than held in this frame: the agent loop, tool execution and
+        # the private-vault gate each re-read these settings during the turn, so
+        # writing them where those readers look is what stops the role being
+        # bypassed by entering the loop another way. No linked profile → this is
+        # a plain read and nothing changes. Precedence against the crew's own
+        # personality/enabled_tools lives in src/crew_profile.py.
+        try:
+            from src.crew_profile import apply_crew_profile_to_session
+            _crew_member, _chat_settings = apply_crew_profile_to_session(session) if session else (None, {})
+        except Exception:
+            logger.warning("crew profile sync failed for session %s", session, exc_info=True)
+            _crew_member, _chat_settings = None, (get_session_settings(session) if session else {})
         disabled_tools.update(_chat_settings.get("disabled_tools") or [])
         _approval_mode = _session_settings.effective_approval_mode(_chat_settings)
 
