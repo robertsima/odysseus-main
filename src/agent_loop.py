@@ -36,7 +36,15 @@ from src.tool_security import (
     # a second copy of 40 tool names here would drift within a release.
     _PLAN_MODE_KNOWN_MUTATORS as _KNOWN_MUTATING_TOOLS,
 )
-from src.tool_policy import GUIDE_ONLY_DIRECTIVE, WEB_TOOL_NAMES, ToolPolicy
+from src.tool_policy import (
+    GUIDE_ONLY_DIRECTIVE,
+    WEB_TOOL_NAMES,
+    ToolPolicy,
+    allowlist_is_active,
+    allowlist_permits,
+    denied_by_allowlist,
+    known_tool_names as _known_tool_names,
+)
 from src.tool_utils import _truncate, get_mcp_manager
 from src.tool_schemas import compact_function_tool_schemas
 from src.agent_tools import (
@@ -5301,6 +5309,23 @@ async def stream_agent_loop(
     _agent_disabled = _agent_settings.get("disabled_tools") or []
     disabled_tools.update(_agent_disabled)
     _mark_dropped(_agent_disabled, "agent-setting")
+    # The chat's tool allowlist, inverted *here* rather than where it was
+    # saved. A loadout stores `tool_access`/`enabled_tools`; the complement is
+    # taken against the tools that exist on this turn, so a builtin added by an
+    # upgrade or a server connected since the loadout was written is excluded
+    # by default instead of slipping through a stale denylist. Chats saved
+    # before allowlists were stored have no `tool_access` and resolve to "all",
+    # which changes nothing for them: their loadout's `disabled_tools` above is
+    # still the whole of their tool policy.
+    _tool_access = _agent_settings.get("tool_access") or "all"
+    _enabled_tools = _agent_settings.get("enabled_tools") or []
+    _allowlist_on = allowlist_is_active(_tool_access)
+    if _allowlist_on:
+        _allowlist_denied = denied_by_allowlist(
+            _known_tool_names(), tool_access=_tool_access, enabled_tools=_enabled_tools
+        )
+        disabled_tools.update(_allowlist_denied)
+        _mark_dropped(_allowlist_denied, f"tool-access:{_tool_access}")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
     if _delegation_policy == "never" or (
         _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
@@ -5412,16 +5437,33 @@ async def stream_agent_loop(
         )
     _mcp_disabled_map = _load_mcp_disabled_map() if mcp_mgr else {}
     _allowed_mcp_servers = _agent_settings.get("allowed_mcp_servers")
-    if mcp_mgr and isinstance(_allowed_mcp_servers, list) and "*" not in _allowed_mcp_servers:
-        _allowed_mcp = set(_allowed_mcp_servers)
+    # Two independent MCP gates, both evaluated against the servers connected
+    # right now. The server gate ("may this chat reach server X at all") is the
+    # coarse one; the tool allowlist is the one that fails closed, because a
+    # chat restricted to named tools must not inherit every tool of a server
+    # merely because the server list says "*".
+    _mcp_server_gate = (
+        set(_allowed_mcp_servers)
+        if isinstance(_allowed_mcp_servers, list) and "*" not in _allowed_mcp_servers
+        else None
+    )
+    if mcp_mgr and (_mcp_server_gate is not None or _allowlist_on):
         for _mcp_tool in mcp_mgr.get_all_tools():
             _server_id = str(_mcp_tool.get("server_id") or "")
-            if _server_id not in _allowed_mcp:
+            _qualified = str(_mcp_tool.get("qualified_name") or "")
+            _blocked_by_server = _mcp_server_gate is not None and _server_id not in _mcp_server_gate
+            _blocked_by_allowlist = _allowlist_on and not allowlist_permits(
+                _qualified, _tool_access, _enabled_tools
+            )
+            if _blocked_by_server or _blocked_by_allowlist:
                 _tool_name = str(_mcp_tool.get("name") or "")
                 _mcp_disabled_map.setdefault(_server_id, set()).add(_tool_name)
-                _qualified = str(_mcp_tool.get("qualified_name") or "")
                 if _qualified:
                     disabled_tools.add(_qualified)
+                    _mark_dropped(
+                        {_qualified},
+                        f"tool-access:{_tool_access}" if _blocked_by_allowlist else "mcp-server-access",
+                    )
     # Runs unconditionally: the native wellbeing tool needs the same gate as
     # the Lotus MCP tools, and it exists whether or not an MCP manager does.
     _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools, owner=owner)

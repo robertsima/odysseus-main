@@ -2815,7 +2815,7 @@ function initAgentProfilesEditor(initial) {
       var advanced = document.createElement('details'); advanced.className = 'agent-profile-capabilities';
       var summary = document.createElement('summary'); summary.textContent = 'Capability allowlists'; advanced.appendChild(summary);
       var advancedGrid = document.createElement('div'); advancedGrid.className = 'agent-profile-cap-grid';
-      advancedGrid.appendChild(field('Enabled tools', mk('textarea', 'enabled_tools', { rows: '2', placeholder: 'One or comma-separated tool names; used when Tools = Selected' })));
+      advancedGrid.appendChild(field('Enabled tools', mk('textarea', 'enabled_tools', { rows: '2', placeholder: 'Used when Tools = Selected. Every tool the worker may call, MCP included: web_search, mcp__email__list_emails, mcp__github__* (whole server), mcp__* (all servers). Anything unlisted is denied, including tools added later.' })));
       advancedGrid.appendChild(field('Extra denied tools', mk('textarea', 'disabled_tools', { rows: '2', placeholder: 'Always denied, e.g. bash, send_email' })));
       advancedGrid.appendChild(field('Selected skills', mk('textarea', 'skill_names', { rows: '2', placeholder: 'Skill names; used when Skills = Selected' })));
       advancedGrid.appendChild(field('Selected MCP servers', mk('textarea', 'allowed_mcp_servers', { rows: '2', placeholder: 'Server IDs; used when MCP = Selected' })));

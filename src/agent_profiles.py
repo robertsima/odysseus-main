@@ -95,10 +95,43 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
 
 
 def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """Persist the runtime parts of a profile on the worker chat itself."""
+    """Persist the runtime parts of a profile on the worker chat itself.
+
+    An allowlist is stored **as an allowlist** — ``tool_access`` plus
+    ``enabled_tools`` — and inverted where it is evaluated
+    (:func:`src.tool_policy.allowlist_permits`, applied by the agent loop and
+    again at execution). This used to write the inversion here instead: the
+    complement of ``known_tool_names()`` at save time, persisted on the
+    session. That was wrong three ways. It listed no MCP names, because that
+    registry holds only native ones, so a role narrowed to three tools kept
+    every tool of every connected server. It was a snapshot, so a builtin added
+    by an upgrade or a server connected the next day was missing from the
+    stored denylist and read back as *allowed* — policy failing open. And it
+    made the stored policy unreadable: 89 denied names where the operator wrote
+    three allowed ones.
+
+    ``disabled_tools`` keeps its own meaning: extra names denied on top of
+    ``tool_access``, whatever that is. It is passed through unchanged, so a
+    profile saved before this change — including one whose ``disabled_tools``
+    is a complement written by :mod:`src.agent_loadouts` — keeps denying
+    exactly what it denied before.
+    """
+    from src.tool_policy import reconcile_tool_and_mcp_access
+
+    tool_access = profile.get("tool_access", "all")
+    # `tool_access` and `mcp_access` are reconciled into one allowlist here, so
+    # what the chat stores is the whole answer to "what may this role call".
+    enabled_tools, mcp_servers = reconcile_tool_and_mcp_access(
+        tool_access=tool_access,
+        enabled_tools=profile.get("enabled_tools") or [],
+        mcp_access=profile.get("mcp_access", "all"),
+        allowed_mcp_servers=profile.get("allowed_mcp_servers") or [],
+    )
     patch = {
         "agent_profile": profile.get("name"),
         "disabled_tools": profile.get("disabled_tools") or None,
+        "tool_access": tool_access,
+        "enabled_tools": enabled_tools,
         "memory_access": profile.get("memory_access", "read"),
         "skill_access": profile.get("skill_access", "all"),
         "skill_names": profile.get("skill_names") or [],
@@ -106,24 +139,11 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
         "allowed_models": profile.get("allowed_models") or [],
         "delegation_policy": profile.get("delegation_policy", "explicit"),
         "max_parallel_workers": profile.get("max_parallel_workers", 1),
-        "allowed_mcp_servers": (
-            profile.get("allowed_mcp_servers") or []
-            if profile.get("mcp_access") == "selected"
-            else (["*"] if profile.get("mcp_access", "all") == "all" else [])
-        ),
+        "allowed_mcp_servers": mcp_servers,
         "private_vault_access": bool(profile.get("private_vault_access", False)),
     }
     if profile.get("approval_mode") != "inherit":
         patch["approval_mode"] = profile.get("approval_mode")
-    if profile.get("tool_access") in {"selected", "none"}:
-        try:
-            from src.tool_policy import known_tool_names
-            enabled = set(profile.get("enabled_tools") or []) if profile.get("tool_access") == "selected" else set()
-            patch["disabled_tools"] = sorted(
-                (set(known_tool_names()) - enabled) | set(profile.get("disabled_tools") or [])
-            )
-        except Exception:
-            pass
     return patch
 
 

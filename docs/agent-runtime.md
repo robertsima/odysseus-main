@@ -130,6 +130,7 @@ and selection was invisible.
 | gate | effect |
 | --- | --- |
 | delegation policy | `never`, or `explicit` without an explicit request, disables the delegation tools |
+| tool allowlist | the chat's `tool_access`/`enabled_tools` (§6), inverted against the tools that exist on *this* turn |
 | model / memory / skill access | the chat's loadout (§6) removes what it is not allowed |
 | plan mode | allowlist of read-only tools only |
 | owner baseline | the operator's global `disabled_tools`, the user's privileges, and the non-admin blocklist |
@@ -322,6 +323,30 @@ settings are the effective policy.
 Starting a worker (`agent_control.launch_worker`) creates a fresh chat, applies
 the profile via `session_patch`, and runs it headless and detached. Progress
 appears on the worker's own activity feed and on its parent's.
+
+### The tool allowlist
+
+`tool_access="selected"` plus `enabled_tools` is stored **as an allowlist** on
+the chat and inverted where it is evaluated —
+`src/tool_policy.py::allowlist_permits`, applied by the gate table in §2.3 and
+again at execution in `src/tool_execution.py`. Three places used to invert it at
+save time instead, each against a different registry (`known_tool_names()`,
+`BUILTIN_TOOL_DESCRIPTIONS`, and `state.catalog.tools` in the browser), and all
+three shared the same two holes: none of those registries holds an MCP name, so
+a role narrowed to three tools kept every tool of every connected server; and a
+denylist frozen at save time cannot mention a tool added afterwards, so a new
+builtin or a newly connected server read back as *allowed*.
+
+`enabled_tools` names everything the role may call, MCP included:
+`mcp__<server>__<tool>` for one tool of a server, `mcp__<server>__*` for the
+whole server, `mcp__*` for all of them — MCP names are generated at runtime and
+cannot be enumerated, so widening is by shape. `allowed_mcp_servers` is the
+coarse server gate and cannot widen past the allowlist; `mcp_access="all"` is
+the default nobody chose and grants nothing on its own, while
+`mcp_access="selected"` with named servers is someone ticking boxes and is
+carried into the allowlist as `mcp__<server>__*`. A chat saved before allowlists
+were stored has no `tool_access`, resolves to `"all"`, and stays governed by the
+`disabled_tools` its loadout wrote at the time.
 
 An agent can author loadouts too (`manage_agent_loadout`). The rule that makes
 that safe is in `src/agent_loadouts.py`: **every capability in a loadout an

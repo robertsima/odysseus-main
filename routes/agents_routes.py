@@ -126,6 +126,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
                     "agent_profile": settings.get("agent_profile"),
                     "approval_mode": settings.get("approval_mode"),
                     "disabled_tools": settings.get("disabled_tools") or [],
+                    # The chat's allowlist as stored. Absent on chats written
+                    # before allowlists were stored, where the editor still has
+                    # to read it back out of `disabled_tools`.
+                    "tool_access": settings.get("tool_access") or "",
+                    "enabled_tools": settings.get("enabled_tools") or [],
                     "memory_access": settings.get("memory_access", "write"),
                     "skill_access": settings.get("skill_access", "all"),
                     "skill_names": settings.get("skill_names") or [],

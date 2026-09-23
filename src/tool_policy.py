@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Iterable, Mapping, Optional, Set, Tuple
+from typing import Iterable, List, Mapping, Optional, Set, Tuple
 
 
 GUIDE_ONLY_DIRECTIVE = (
@@ -206,6 +206,260 @@ def known_tool_names() -> Set[str]:
     except Exception:
         pass
     return names
+
+
+# ---------------------------------------------------------------------------
+# Tool allowlists
+#
+# One definition, imported (docs/design-patterns.md). Three places used to
+# invert a role's allowlist into a denylist by hand — `agent_profiles.
+# session_patch`, `task_scheduler` (against a *different* registry) and
+# `agent_loadouts._clamp_tools`. Every copy inherited the same two holes: the
+# registry it subtracted from held only native names, so MCP was never covered,
+# and the subtraction was a snapshot, so a tool that appeared afterwards was
+# absent from the stored denylist and therefore allowed.
+#
+# The allowlist is now STORED as an allowlist and inverted here, against the
+# tools that exist at the moment of the check. `allowlist_permits` is the
+# single rule; everything else in this section is a convenience over it.
+# ---------------------------------------------------------------------------
+
+MCP_TOOL_PREFIX = "mcp__"
+#: Grants every tool on every connected MCP server. The only way to say "all
+#: MCP" inside an allowlist, and it has to be written out: MCP tool names are
+#: generated at runtime and carry a per-server id, so they can never be
+#: enumerated in advance (docs/design-patterns.md, "recognise by shape").
+ALL_MCP_WILDCARD = "mcp__*"
+#: Suffix of a per-server grant: ``mcp__<server>__*``.
+_MCP_SERVER_WILDCARD_SUFFIX = "__*"
+
+
+def split_mcp_tool_name(name: object) -> Optional[Tuple[str, str]]:
+    """``('server', 'tool')`` for a qualified MCP name, else ``None``.
+
+    Uses the same ``split("__", 2)`` convention as the execution gate in
+    :mod:`src.tool_execution`, so the two cannot disagree about which part of
+    ``mcp__<server>__<tool>`` is the server.
+    """
+
+    parts = str(name or "").split("__", 2)
+    if len(parts) == 3 and parts[0] == "mcp" and parts[1] and parts[2]:
+        return parts[1], parts[2]
+    return None
+
+
+def is_mcp_tool_name(name: object) -> bool:
+    """Whether this name is a qualified MCP tool name."""
+
+    return split_mcp_tool_name(name) is not None
+
+
+def _allowlist_entries(enabled_tools: Optional[Iterable[str]]) -> Set[str]:
+    return {str(t).strip() for t in (enabled_tools or []) if str(t).strip()}
+
+
+def allowlist_permits(
+    tool_name: object,
+    tool_access: object,
+    enabled_tools: Optional[Iterable[str]],
+) -> bool:
+    """Whether a role whose policy is ``tool_access``/``enabled_tools`` may call ``tool_name``.
+
+    This is a **policy** decision, so it fails closed (docs/design-patterns.md):
+    an access mode this build does not recognise grants nothing, and a tool
+    nobody listed is denied whether or not it existed when the role was saved.
+
+    ``tool_access`` of ``"all"`` — which is also what a chat with no stored
+    allowlist resolves to — means "no allowlist"; the separate ``disabled_tools``
+    denylist still applies on top and is not this function's business.
+
+    Accepted entries in ``enabled_tools``:
+
+    * a native tool name (``web_search``);
+    * a qualified MCP tool name (``mcp__email__list_emails``), so a role can be
+      granted one tool of a server without the rest of it;
+    * ``mcp__<server>__*`` for a whole server, and ``mcp__*`` for every
+      connected server — the explicit way to widen, since runtime-generated
+      names cannot be listed.
+    """
+
+    access = str(tool_access or "all").strip().lower()
+    if access == "all":
+        return True
+    if access != "selected":
+        # "none", and anything unrecognised. The unknown case goes in the
+        # restrictive bucket: wrong this way costs a refused tool call the user
+        # can see and fix, wrong the other way hands an unreviewed capability
+        # to a role someone deliberately narrowed.
+        return False
+    allowed = _allowlist_entries(enabled_tools)
+    if not allowed:
+        return False
+    # Match every policy-equivalent spelling. A bare built-in email tool name
+    # and its mcp__email__ form dispatch to the same thing, and an allowlist
+    # written in one spelling must not be bypassable — or defeated — by the
+    # other.
+    try:
+        from src.tool_security import email_tool_policy_names
+
+        names = set(email_tool_policy_names(str(tool_name)))
+    except Exception:
+        names = {str(tool_name)}
+    if names & allowed:
+        return True
+    if ALL_MCP_WILDCARD in allowed:
+        if any(is_mcp_tool_name(n) for n in names):
+            return True
+    for name in names:
+        parts = split_mcp_tool_name(name)
+        if parts and f"{MCP_TOOL_PREFIX}{parts[0]}{_MCP_SERVER_WILDCARD_SUFFIX}" in allowed:
+            return True
+    return False
+
+
+def allowlist_is_active(tool_access: object) -> bool:
+    """Whether ``tool_access`` restricts anything at all."""
+
+    return str(tool_access or "all").strip().lower() != "all"
+
+
+def denied_by_allowlist(
+    candidates: Iterable[str],
+    *,
+    tool_access: object,
+    enabled_tools: Optional[Iterable[str]] = None,
+    disabled_tools: Optional[Iterable[str]] = None,
+) -> Set[str]:
+    """Invert an allowlist over ``candidates``, unioned with an explicit denylist.
+
+    Callers that need a concrete denylist (a schema filter, a headless worker's
+    ``disabled_tools`` argument) build it here rather than open-coding the
+    subtraction, and pass the tools that exist *now* as ``candidates`` —
+    :func:`live_tool_names` is the usual source and includes connected MCP.
+    """
+
+    denied = {str(t).strip() for t in (disabled_tools or []) if str(t).strip()}
+    for name in candidates or ():
+        text = str(name).strip()
+        if text and not allowlist_permits(text, tool_access, enabled_tools):
+            denied.add(text)
+    return denied
+
+
+def connected_mcp_tool_names() -> Set[str]:
+    """Qualified names of every tool on every connected MCP server, best effort."""
+
+    names: Set[str] = set()
+    try:
+        from src.mcp_manager import get_mcp_manager
+
+        manager = get_mcp_manager()
+        if manager is None:
+            return names
+        for tool in manager.get_all_tools() or ():
+            qualified = str(tool.get("qualified_name") or "")
+            if qualified:
+                names.add(qualified)
+    except Exception:
+        # Best effort by design: an unreadable MCP manager must not turn into
+        # an empty *universe* that reads as "nothing to deny". Every gate that
+        # uses this also checks `allowlist_permits` per call at execution time,
+        # which needs no universe at all.
+        pass
+    return names
+
+
+def live_tool_names() -> Set[str]:
+    """Every tool name callable right now: native plus connected MCP."""
+
+    return known_tool_names() | connected_mcp_tool_names()
+
+
+def mcp_servers_named_in_allowlist(enabled_tools: Optional[Iterable[str]]) -> Optional[Set[str]]:
+    """Servers an allowlist reaches: ``None`` for "all of them" (``mcp__*``)."""
+
+    servers: Set[str] = set()
+    for entry in _allowlist_entries(enabled_tools):
+        if entry == ALL_MCP_WILDCARD:
+            return None
+        if entry.endswith(_MCP_SERVER_WILDCARD_SUFFIX):
+            head = entry[: -len(_MCP_SERVER_WILDCARD_SUFFIX)]
+            if head.startswith(MCP_TOOL_PREFIX) and head != MCP_TOOL_PREFIX:
+                servers.add(head[len(MCP_TOOL_PREFIX):])
+                continue
+        parts = split_mcp_tool_name(entry)
+        if parts:
+            servers.add(parts[0])
+    return servers
+
+
+def reconcile_tool_and_mcp_access(
+    *,
+    tool_access: object,
+    enabled_tools: Optional[Iterable[str]] = None,
+    mcp_access: object = "all",
+    allowed_mcp_servers: Optional[Iterable[str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """The effective ``(enabled_tools, allowed_mcp_servers)`` for a role.
+
+    ``tool_access`` and ``mcp_access`` used to be fully independent knobs, and
+    ``mcp_access`` defaults to ``"all"``. So ``tool_access="selected"`` with
+    three named tools still produced ``allowed_mcp_servers: ["*"]`` and the
+    worker kept every tool of every connected server — a user who narrows
+    "tools" reasonably reads that as covering everything the agent can call.
+
+    The rule here, and the reasoning for it:
+
+    * **The tool allowlist is the whole answer.** ``enabled_tools`` names
+      everything the role may call, MCP included, so ``allowed_mcp_servers``
+      can no longer widen past it. That is the gate that fails closed, and it
+      needs no agreement from ``mcp_access``.
+    * **``mcp_access="all"`` grants nothing by itself**, because it is the
+      *default* — it is what a role that never thought about MCP carries, and a
+      default is not consent. Widening is written in the allowlist instead,
+      where it is explicit and local: ``mcp__<server>__*`` for one server,
+      ``mcp__*`` for all of them.
+    * **``mcp_access="selected"`` with named servers IS consent**, so it is
+      preserved rather than dropped: someone ticked those servers. It is
+      translated into the equivalent ``mcp__<server>__*`` entries, so an
+      install upgrading from the old behaviour keeps exactly the MCP reach it
+      had, and the allowlist stays the single place that says what is callable.
+      A role that already names MCP tools in ``enabled_tools`` is left alone —
+      it was written against the new rule and means what it says, including
+      "one tool of a server, not the server".
+    * **The server list is then narrowed to what the allowlist can reach**, so
+      the offer matches the enforcement (docs/design-patterns.md). A server
+      advertised in the prompt whose every tool the gate rejects is the
+      phantom-tool failure that rule exists to stop.
+    """
+
+    access = str(tool_access or "all").strip().lower()
+    entries = sorted(_allowlist_entries(enabled_tools))
+    mcp = str(mcp_access or "all").strip().lower()
+    if mcp == "selected":
+        base: Optional[Set[str]] = {str(s).strip() for s in (allowed_mcp_servers or []) if str(s).strip()}
+    elif mcp == "none":
+        base = set()
+    else:
+        base = None  # "all": no server-level restriction.
+
+    if access == "all":
+        return entries, (sorted(base) if base is not None else ["*"])
+    if access != "selected":
+        return [], []  # "none", and anything unrecognised: nothing is callable.
+
+    if base and not any(
+        entry == ALL_MCP_WILDCARD or entry.startswith(MCP_TOOL_PREFIX) for entry in entries
+    ):
+        entries = sorted(set(entries) | {f"{MCP_TOOL_PREFIX}{server}{_MCP_SERVER_WILDCARD_SUFFIX}"
+                                         for server in base})
+
+    reachable = mcp_servers_named_in_allowlist(entries)
+    if reachable is None:  # mcp__* — the allowlist imposes no server limit.
+        return entries, (sorted(base) if base is not None else ["*"])
+    if base is not None:
+        reachable &= base
+    return entries, sorted(reachable)
 
 
 def build_effective_tool_policy(

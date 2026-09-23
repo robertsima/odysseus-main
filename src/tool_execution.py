@@ -1029,6 +1029,22 @@ async def _execute_tool_block_impl(
         except Exception:
             pass
     if _agent_settings:
+        # The chat's tool allowlist. Checked per call rather than against a
+        # denylist computed when the loadout was saved, so a tool the registry
+        # gained afterwards — a new builtin, a newly connected MCP server — is
+        # refused by default instead of being absent from a stale list and
+        # therefore allowed. `allowlist_permits` matches qualified MCP names
+        # and the mcp__<server>__* / mcp__* grants, so this one gate covers
+        # native and MCP tools alike.
+        from src.tool_policy import allowlist_permits as _allowlist_permits
+
+        _tool_access = _agent_settings.get("tool_access") or "all"
+        if not _allowlist_permits(tool, _tool_access, _agent_settings.get("enabled_tools") or []):
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is not in this agent's tool allowlist.",
+                "exit_code": 1,
+            }
+
         _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
         if tool.startswith("mcp__") and isinstance(_allowed_mcp, list) and "*" not in _allowed_mcp:
             _parts = tool.split("__", 2)
