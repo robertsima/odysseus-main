@@ -18,11 +18,11 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status")
+_ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop")
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
-    "name", "description", "instructions", "persona_name", "temperature", "max_tokens",
+    "name", "description", "instructions", "persona_name", "temperature", "max_tokens", "reasoning_effort",
     "model", "model_fallbacks", "model_access",
     "allowed_models", "tool_access", "enabled_tools", "disabled_tools", "memory_access",
     "skill_access", "skill_names", "mcp_access", "allowed_mcp_servers",
@@ -301,6 +301,43 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "running": running,
             "exit_code": 0,
         }
+
+    if action == "stop":
+        # Actually stop a worker this chat started. Without it, "stop the
+        # scout" reached the worker only as a message (message_agent), which
+        # it read and ignored for ten more rounds until the user cancelled it
+        # by hand. Same path as the Agents panel's Stop button.
+        from src import agent_activity
+        from src import agent_control
+
+        run_id = str(args.get("run_id") or "").strip()
+        worker = str(args.get("worker_session") or args.get("session_id") or "").strip()
+        mine = agent_activity.list_runs(session_id=session_id, limit=100)
+        candidates = [
+            run for run in mine
+            if run.get("status") == "running"
+            and (not run_id or run.get("run_id") == run_id)
+            and (not worker or (run.get("summary") or {}).get("target_session") == worker
+                 or run.get("session_id") == worker)
+        ]
+        if not run_id and not worker:
+            if len(candidates) != 1:
+                running = [{"run_id": r["run_id"], "title": r.get("title")} for r in candidates]
+                return {"error": "stop needs run_id (see action=status); "
+                                 f"{len(running)} worker(s) running: {running}", "exit_code": 1}
+        if not candidates:
+            return {"error": "No running worker started by this chat matches; see action=status.", "exit_code": 1}
+        stopped = []
+        for run in candidates:
+            try:
+                result = await agent_control.stop_run(run["run_id"])
+            except (LookupError, ValueError) as exc:
+                result = {"stopped": False, "reason": str(exc)}
+            stopped.append({"run_id": run["run_id"], "title": run.get("title"), **result})
+        ok = any(item.get("stopped") for item in stopped)
+        return {"response": ("Stopped: " if ok else "Not stopped: ") + ", ".join(
+                    f"{item['run_id']} ({item.get('how') or item.get('reason') or item.get('status')})" for item in stopped),
+                "runs": stopped, "exit_code": 0 if ok else 1}
 
     if action == "capabilities":
         # What a loadout authored from this chat may contain at most. Without

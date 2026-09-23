@@ -2078,6 +2078,9 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       chatHistory.style.opacity = '1';
       chatHistory.classList.remove('no-animate');
     }
+    // Live cards (sub-agents, workers, Claude Code) are not part of the saved
+    // history, so re-rendering wiped them; the Workbench puts them back.
+    try { document.dispatchEvent(new CustomEvent('odysseus:history-rendered', { detail: { sessionId: id } })); } catch (_) {}
     if (window.hljs) {
       document.querySelectorAll('pre code:not(.hljs)').forEach(block => {
         window.hljs.highlightElement(block);

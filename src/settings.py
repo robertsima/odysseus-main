@@ -209,6 +209,9 @@ DEFAULT_SETTINGS = {
     # repository's secrets. "local" (default) or "cloud" decides where a
     # delegation without an explicit `via` or cloud repository goes.
     "claude_code_backend": "local",
+    # ChatGPT-subscription reasoning effort for chats whose loadout sets none
+    # ("" = provider default; minimal/low/medium/high).
+    "chatgpt_reasoning_effort": "",
     "claude_cloud_repositories": [],
     "claude_cloud_workflow": "odysseus-claude.yml",
     "claude_code_odysseus_url": "",

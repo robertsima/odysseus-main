@@ -119,6 +119,11 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError("agent_instructions must be a string")
             out[key] = (value or "").strip()[:MAX_AGENT_INSTRUCTIONS] or None
+        elif key == "agent_reasoning_effort":
+            value = str(value or "").strip().lower()
+            if value and value not in ("minimal", "low", "medium", "high"):
+                raise ValueError("agent_reasoning_effort must be minimal, low, medium or high (or empty)")
+            out[key] = value or None
         elif key == "agent_persona_name":
             if value is not None and not isinstance(value, str):
                 raise ValueError("agent_persona_name must be a string")

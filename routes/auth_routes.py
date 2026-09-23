@@ -812,6 +812,12 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             if key == "claude_code_restricted":
                 current[key] = bool(val) if not isinstance(val, str) else val.strip().lower() in ("1", "true", "yes", "on")
                 continue
+            if key == "chatgpt_reasoning_effort":
+                val = str(val or "").strip().lower()
+                if val and val not in ("minimal", "low", "medium", "high"):
+                    raise HTTPException(400, f"{key} must be minimal, low, medium or high (or empty)")
+                current[key] = val
+                continue
             if key == "claude_code_backend":
                 val = str(val or "local").strip().lower()
                 if val not in ("local", "cloud"):

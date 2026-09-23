@@ -552,6 +552,7 @@ async function connect(force = false) {
     await refreshAgentRuns({ force: true });
     if (gen !== _connectGen) return;
     renderAgentStrip();
+    restoreChatCards();
   } catch (e) {
     if (gen !== _connectGen) return;
     if (e.status === 403) { state.enabled = false; hideRail(); return; }
@@ -1143,6 +1144,24 @@ function popout(title, html) {
 
 // ── chat run cards ────────────────────────────────────────────────────────
 function chatHistory() { return $('chat-history'); }
+/** Put this chat's agent cards back after its history was re-rendered, and
+ *  draw one for any run in it that is still going. The cards are live DOM,
+ *  not saved history, so opening a chat whose worker was already running,
+ *  switching away and back, or the reload after a background run finished all
+ *  left the parent chat with no agent box. */
+function restoreChatCards() {
+  const hist = chatHistory(); if (!hist) return;
+  for (const card of state.chatCards.values()) {
+    if (!card.isConnected) hist.appendChild(card);
+  }
+  for (const run of state.runs.values()) {
+    if (run.session_id !== state.sessionId || !CHAT_CARD_SOURCES.has(run.source)) continue;
+    if (state.chatCards.has(run.run_id) || !isLive(run.status)) continue;
+    const events = (run.events || []).filter((ev) => ev.session_id === state.sessionId).slice(-30);
+    if (events.length) events.forEach((ev) => updateChatCard(ev));
+    else updateChatCard({ run_id: run.run_id, source: run.source, session_id: run.session_id, kind: 'restore' });
+  }
+}
 function updateChatCard(ev) {
   if (!ev.run_id || !CHAT_CARD_SOURCES.has(ev.source)) return;
   if (ev.session_id !== state.sessionId) return;
@@ -1436,6 +1455,9 @@ export async function init() {
   // opens the Agents panel, not this window, so the user sees the work as it
   // happens. The Workbench opens only when asked for.
   document.addEventListener('workbench:run-started', () => { if (state.autoOpen) window.agentsDashboard?.openForRun?.(); });
+  document.addEventListener('odysseus:history-rendered', (e) => {
+    if (e.detail && e.detail.sessionId === state.sessionId) restoreChatCards();
+  });
 }
 
 export function refreshSettings() { return probeSettings(); }

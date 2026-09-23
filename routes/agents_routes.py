@@ -149,6 +149,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "agent_persona_name": settings.get("agent_persona_name"),
                 "agent_temperature": settings.get("agent_temperature"),
                 "agent_max_tokens": settings.get("agent_max_tokens"),
+                "agent_reasoning_effort": settings.get("agent_reasoning_effort"),
                 "approval_mode": settings.get("approval_mode"),
                 "disabled_tools": settings.get("disabled_tools") or [],
                 "memory_access": settings.get("memory_access", "write"),
@@ -531,7 +532,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
     # a loadout removes these; approval_mode is left alone because the chat's
     # settings panel also sets it, and a stricter leftover mode is harmless.
     _LOADOUT_KEYS = ("agent_profile", "agent_instructions", "agent_persona_name",
-                     "agent_temperature", "agent_max_tokens", "tool_access", "enabled_tools",
+                     "agent_temperature", "agent_max_tokens", "agent_reasoning_effort",
+                     "tool_access", "enabled_tools",
                      "disabled_tools", "memory_access", "skill_access", "skill_names",
                      "model_access", "allowed_models", "delegation_policy",
                      "max_parallel_workers", "allowed_mcp_servers", "private_vault_access")

@@ -1507,6 +1507,7 @@ async function initAgentSettings() {
   var roundsInput = el('set-agentMaxRounds');
   var foldInput = el('set-agentFoldAfter');
   var capInput = el('set-agentContextCap');
+  var reasonInput = el('set-agentReasoning');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
@@ -1518,6 +1519,7 @@ async function initAgentSettings() {
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (foldInput && settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
     if (capInput && settings.agent_input_token_hard_max) capInput.value = settings.agent_input_token_hard_max;
+    if (reasonInput) reasonInput.value = settings.chatgpt_reasoning_effort || '';
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -1540,6 +1542,7 @@ async function initAgentSettings() {
     if (foldInput) { foldInput.value = fold; payload.chat_tool_fold_after = fold; }
     var cap = capInput ? clampInt(capInput.value, 16000, 1000000, 200000) : null;
     if (capInput) { capInput.value = cap; payload.agent_input_token_hard_max = cap; }
+    if (reasonInput) payload.chatgpt_reasoning_effort = reasonInput.value || '';
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
       await _postSettings(payload);
@@ -1556,6 +1559,7 @@ async function initAgentSettings() {
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
   if (capInput) capInput.addEventListener('change', save);
+  if (reasonInput) reasonInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
@@ -2670,6 +2674,8 @@ function initAgentProfilesEditor(initial) {
       voice.appendChild(field('Persona name', mk('input', 'persona_name', { placeholder: 'none', maxlength: '60' }), 'The name this agent answers as'));
       voice.appendChild(field('Temperature', mk('input', 'temperature', { type: 'number', min: '0', max: '2', step: '0.05', placeholder: 'default' })));
       voice.appendChild(field('Max tokens', mk('input', 'max_tokens', { type: 'number', min: '0', max: '65536', step: '1', placeholder: 'default' }), '0 or blank lets the server decide'));
+      voice.appendChild(field('Reasoning effort', choice('reasoning_effort', [['', 'Default'], ['minimal', 'Minimal'], ['low', 'Low (faster)'], ['medium', 'Medium'], ['high', 'High (slower)']]),
+        'How much a ChatGPT-subscription model thinks before each step. Low makes skim-and-collect workers much faster per round.'));
       card.appendChild(voice);
       card.appendChild(field('Instructions / personality', mk('textarea', 'instructions', { rows: '3', placeholder: 'How this agent thinks, speaks and works' })));
       var policies = document.createElement('div'); policies.className = 'agent-profile-policy-grid';

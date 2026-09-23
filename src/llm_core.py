@@ -1504,10 +1504,41 @@ def _build_chatgpt_responses_payload(
     # field for the same reason.
     if cache_key and _responses_prompt_cache_key_enabled():
         payload["prompt_cache_key"] = str(cache_key)[:128]
+    # How much the model thinks before each step. Unset, the provider default
+    # applied to every round of every agent, including workers that only skim
+    # search results, and a round's first event took 4-16 s even at 95%+ cache
+    # hits. Opt-in: the chat's loadout (agent_reasoning_effort), else the
+    # chatgpt_reasoning_effort setting, else nothing is sent.
+    effort = _chatgpt_reasoning_effort(cache_key)
+    if effort:
+        payload["reasoning"] = {"effort": effort}
     # ChatGPT Subscription Codex API does not support max_output_tokens —
     # passing it returns HTTP 400 "Unsupported parameter: max_output_tokens".
     # Do not include it in the payload.
     return payload
+
+
+_REASONING_EFFORTS = ("minimal", "low", "medium", "high")
+
+
+def _chatgpt_reasoning_effort(session_id: Optional[str]) -> str:
+    """The reasoning effort for this chat's requests, or "" for the default."""
+    try:
+        if session_id:
+            from core.database import get_session_settings
+
+            value = str((get_session_settings(str(session_id)) or {}).get("agent_reasoning_effort") or "").strip().lower()
+            if value in _REASONING_EFFORTS:
+                return value
+    except Exception:
+        pass
+    try:
+        from src.settings import get_setting
+
+        value = str(get_setting("chatgpt_reasoning_effort", "") or "").strip().lower()
+        return value if value in _REASONING_EFFORTS else ""
+    except Exception:
+        return ""
 
 
 def _responses_prompt_cache_key_enabled() -> bool:

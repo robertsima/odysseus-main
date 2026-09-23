@@ -32,6 +32,9 @@ _MEMORY_ACCESS = {"none", "read", "write"}
 _SELECTION_ACCESS = {"all", "selected", "none"}
 _MODEL_ACCESS = {"current", "selected", "all"}
 _DELEGATION = {"never", "explicit", "auto"}
+# How much a ChatGPT-subscription model thinks before each step ("" = provider
+# default). Lower is markedly faster per round for skim-and-collect workers.
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
 
 
 def _names(raw: Any, field: str, profile: str, limit: int = 300) -> List[str]:
@@ -60,6 +63,13 @@ def _optional_number(raw: Any, field: str, profile: str, lo: float, hi: float, c
     except (TypeError, ValueError):
         raise ValueError(f"profile {profile!r}: {field} must be a number")
     return max(lo, min(hi, value))
+
+
+def _reasoning_effort(raw: Any, profile: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value and value not in REASONING_EFFORTS:
+        raise ValueError(f"profile {profile!r}: reasoning_effort must be one of {', '.join(REASONING_EFFORTS)} (or empty)")
+    return value
 
 
 def validate_profiles(value: Any) -> List[Dict[str, Any]]:
@@ -104,6 +114,7 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
             "persona_name": str(raw.get("persona_name") or "").strip()[:MAX_PERSONA_NAME],
             "temperature": _optional_number(raw.get("temperature"), "temperature", name, 0.0, 2.0, float),
             "max_tokens": _optional_number(raw.get("max_tokens"), "max_tokens", name, 0, MAX_TOKENS_CAP, int),
+            "reasoning_effort": _reasoning_effort(raw.get("reasoning_effort"), name),
             "model": str(raw.get("model") or "").strip()[:300],
             "model_fallbacks": _names(raw.get("model_fallbacks"), "model_fallbacks", name, 12),
             "model_access": _choice(raw.get("model_access"), "model_access", name, _MODEL_ACCESS, "current"),
@@ -145,6 +156,7 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
         "agent_persona_name": profile.get("persona_name") or None,
         "agent_temperature": profile.get("temperature"),
         "agent_max_tokens": profile.get("max_tokens"),
+        "agent_reasoning_effort": profile.get("reasoning_effort") or None,
         "tool_access": profile.get("tool_access", "all"),
         "enabled_tools": profile.get("enabled_tools") or [],
         "disabled_tools": profile.get("disabled_tools") or None,

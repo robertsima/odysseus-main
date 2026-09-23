@@ -499,7 +499,7 @@ function configFor(row) {
   }
   const stored = row.config || {};
   const base = Object.assign({
-    agent_profile: '', agent_instructions: '', agent_persona_name: '', agent_temperature: null, agent_max_tokens: null,
+    agent_profile: '', agent_instructions: '', agent_persona_name: '', agent_temperature: null, agent_max_tokens: null, agent_reasoning_effort: '',
     approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
     allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
@@ -532,6 +532,7 @@ function profileConfig(profile) {
     mcp_access: profile.mcp_access || 'all',
     agent_profile: profile.name || '', agent_instructions: profile.instructions || '',
     agent_persona_name: profile.persona_name || '', agent_temperature: profile.temperature ?? null, agent_max_tokens: profile.max_tokens ?? null,
+    agent_reasoning_effort: profile.reasoning_effort || '',
     approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
     memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
@@ -570,6 +571,7 @@ function configEditorHtml(row) {
       <label class="ag-field"><span>Persona name</span><input class="wb-input" type="text" maxlength="60" data-config="agent_persona_name" value="${esc(c.agent_persona_name || '')}" placeholder="None"><small>The name this agent answers as.</small></label>
       <label class="ag-field"><span>Temperature</span><input class="wb-input" type="number" min="0" max="2" step="0.05" data-config="agent_temperature" data-config-optional value="${c.agent_temperature == null ? '' : esc(c.agent_temperature)}" placeholder="Default"></label>
       <label class="ag-field"><span>Max tokens</span><input class="wb-input" type="number" min="0" max="65536" step="1" data-config="agent_max_tokens" data-config-optional value="${c.agent_max_tokens == null ? '' : esc(c.agent_max_tokens)}" placeholder="Default"></label>
+      <label class="ag-field"><span>Reasoning effort</span><select class="wb-select" data-config="agent_reasoning_effort">${option('', 'Default', c.agent_reasoning_effort || '')}${option('minimal', 'Minimal', c.agent_reasoning_effort || '')}${option('low', 'Low (faster)', c.agent_reasoning_effort || '')}${option('medium', 'Medium', c.agent_reasoning_effort || '')}${option('high', 'High (slower)', c.agent_reasoning_effort || '')}</select></label>
     </div>
     <small class="ag-voice-note">Blank temperature or max tokens use the app default.</small>
     <label class="ag-field"><span>Personality & instructions</span><textarea class="wb-input ag-textarea" rows="5" maxlength="8000" data-config="agent_instructions" placeholder="How this agent should communicate and approach its work">${esc(c.agent_instructions || '')}</textarea><small>Scoped to this agent. Platform security and capability policy always take priority.</small></label>
@@ -891,6 +893,7 @@ async function saveAgentConfig(row) {
     agent_persona_name: draft.agent_persona_name || null,
     agent_temperature: draft.agent_temperature ?? null,
     agent_max_tokens: draft.agent_max_tokens ?? null,
+    agent_reasoning_effort: draft.agent_reasoning_effort || null,
     approval_mode: draft.approval_mode || null,
     disabled_tools: disabledTools,
     tool_access: draft.tool_access,
