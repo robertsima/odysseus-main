@@ -10,7 +10,6 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from dulwich.client import get_transport_and_path_from_url
 from dulwich.file import FileLocked, GitFile
 from dulwich.graph import can_fast_forward
 from dulwich.objects import ZERO_SHA
@@ -23,7 +22,6 @@ from src.agent_worktree.push_guard import is_odysseus_repository
 from src.agent_worktree.repository_sync import (
     RepositorySyncError,
     _branch_upstream,
-    _http_pool,
     _https_url,
     _status,
     _validate_tree,
@@ -48,13 +46,8 @@ def _branch_name(value: object, *, field: str = "branch") -> str:
 
 
 def _client(url: str, token: Optional[str]):
-    return get_transport_and_path_from_url(
-        url,
-        config=None,
-        username="x-access-token" if token else None,
-        password=token,
-        pool_manager=_http_pool(),
-    )
+    # sync._transport binds the token to its own host; see there.
+    return sync._transport(url, token)
 
 
 # A network failure (a 60s read timeout in the 2026-09-18 logs) is retried

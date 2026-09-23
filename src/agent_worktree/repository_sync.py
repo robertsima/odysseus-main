@@ -38,7 +38,7 @@ from src.rag_sensitivity import vault_root
 
 _LOCKS: dict[str, asyncio.Lock] = {}
 _SCP_GITHUB = re.compile(
-    r"^git@github\.com:([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)$"
+    r"^git@([A-Za-z0-9.-]+):([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?)$"
 )
 
 
@@ -62,6 +62,23 @@ _SECRETISH = re.compile(
 )
 
 
+def _scrub_credential(text: str) -> str:
+    """Remove the shared GitHub token (and its basic-auth form) by value.
+
+    _SECRETISH only knows GitHub's own token shapes; an Enterprise token can
+    look like anything, so the configured value itself is struck out too.
+    """
+    import base64
+
+    from src.github_credentials import GITHUB_TOKEN_ENV
+
+    token = os.environ.get(GITHUB_TOKEN_ENV, "").strip()
+    if len(token) < 8:
+        return text
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode("ascii")
+    return text.replace(basic, "[redacted]").replace(token, "[redacted]")
+
+
 def describe_remote_failure(exc: BaseException, *, operation: str, url: str = "") -> tuple:
     """Turn a transport exception into (code, message) that says what went wrong.
 
@@ -78,7 +95,7 @@ def describe_remote_failure(exc: BaseException, *, operation: str, url: str = ""
     from dulwich.errors import GitProtocolError, HangupException, NotGitRepository
 
     name = type(exc).__name__
-    detail = _SECRETISH.sub("[redacted]", " ".join(str(exc).split()))[:300]
+    detail = _SECRETISH.sub("[redacted]", _scrub_credential(" ".join(str(exc).split())))[:300]
     if not detail:
         # A bare `assert` carries no message. "AssertionError: no detail" told
         # nobody anything on 2026-09-18; the frame that raised it was the whole
@@ -151,6 +168,60 @@ def git_repository_roots() -> tuple:
     return tuple(roots)
 
 
+def _active_workspace() -> Path | None:
+    """The bound workspace, re-vetted, or None.
+
+    Headless workers get one (headless_agent → vet_workspace) and their file
+    tools are confined to it, but manage_git consulted only the configured
+    roots, so `status` on the very checkout a worker was reading was refused
+    as outside the roots. The workspace is already the agent's working area;
+    admitting it for Git widens nothing the file tools do not already reach.
+    """
+    try:
+        from src.tool_execution import get_active_workspace, vet_workspace
+    except ImportError:
+        return None
+    vetted = vet_workspace(get_active_workspace() or "")
+    return Path(vetted) if vetted else None
+
+
+def workspace_repository() -> Path | None:
+    """The Git checkout the active workspace is in: its top level, or None.
+
+    A workspace is often a subfolder of a repository, so walk up to the
+    nearest .git. That top level is admitted as that one repository only
+    (see _validate_path), not as a root: a workspace inside a home-directory
+    dotfiles checkout must not make every repository under $HOME operable.
+    The top level has to pass the same bind-time vetting as a workspace
+    (not sensitive, not app state, not a filesystem root).
+    """
+    workspace = _active_workspace()
+    if workspace is None:
+        return None
+    from src.tool_execution import vet_workspace
+
+    for candidate in (workspace, *workspace.parents):
+        if (candidate / ".git").exists() or (candidate / ".git").is_symlink():
+            return candidate if vet_workspace(str(candidate)) == str(candidate) else None
+    return None
+
+
+def _operating_roots() -> tuple:
+    """git_repository_roots() plus this turn's workspace.
+
+    Kept out of git_repository_roots() itself: that one is context-free and
+    cached by the file tools (tool_execution._repository_data_subdirs), where one
+    run's workspace must not leak into another's readable roots.
+    """
+    roots = list(git_repository_roots())
+    workspace = _active_workspace()
+    if workspace is not None and not any(
+        workspace == Path(root).resolve(strict=False) for root in roots
+    ):
+        roots.append(workspace)
+    return tuple(roots)
+
+
 def _validate_path(raw) -> Path:
     if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
         _fail("invalid_path", "repository is required")
@@ -158,8 +229,11 @@ def _validate_path(raw) -> Path:
     if not given.is_absolute():
         _fail("invalid_path", "repository must be an absolute path")
     absolute = Path(os.path.abspath(given))
-    roots = tuple(r.resolve(strict=False) for r in git_repository_roots())
+    roots = tuple(r.resolve(strict=False) for r in _operating_roots())
     lexical_root = next((root for root in roots if _inside(absolute, root)), None)
+    if lexical_root is None and absolute == workspace_repository():
+        # The checkout enclosing the workspace, admitted as itself only.
+        lexical_root = absolute
     if lexical_root is None:
         # Name the roots. "Outside configured repository roots" alone sent the
         # model round the same four calls; the list tells it where to look.
@@ -192,9 +266,15 @@ def _validate_path(raw) -> Path:
         _fail("private_path", "data, vault, and private paths cannot be synchronized")
     gitdir = resolved / ".git"
     if not gitdir.is_dir():
+        enclosing = workspace_repository()
+        hint = (
+            f"; the workspace's checkout is {enclosing}"
+            if enclosing is not None and _inside(resolved, enclosing) and resolved != enclosing
+            else ""
+        )
         _fail(
             "unsupported_checkout",
-            "only physical checkouts with a .git directory are supported",
+            "only physical checkouts with a .git directory are supported" + hint,
         )
     if gitdir.is_symlink() or (
         hasattr(os.path, "isjunction") and os.path.isjunction(gitdir)
@@ -262,7 +342,7 @@ def _validate_new_path(raw, *, allow_empty_directory: bool = False) -> Path:
     if not given.is_absolute():
         _fail("invalid_path", "repository target must be an absolute path")
     absolute = Path(os.path.abspath(given))
-    roots = tuple(r.resolve(strict=False) for r in git_repository_roots())
+    roots = tuple(r.resolve(strict=False) for r in _operating_roots())
     lexical_root = next((root for root in roots if _inside(absolute, root)), None)
     if lexical_root is None or absolute == lexical_root:
         _fail(
@@ -328,14 +408,23 @@ def _branch_upstream(repo: Repo):
     return local_ref, branch.decode(), remote.decode(), merge_ref, remote_url
 
 
+def _github_hosts() -> set:
+    """github.com, plus the Enterprise host GITHUB_HOST names (if valid)."""
+    from src.github_credentials import github_git_host
+
+    return {"github.com", github_git_host() or "github.com"}
+
+
 def _https_url(raw: str) -> str:
+    hosts = _github_hosts()
     m = _SCP_GITHUB.fullmatch(raw.strip())
-    if m:
-        raw = "https://github.com/" + m.group(1)
+    if m and m.group(1).casefold() in hosts:
+        raw = f"https://{m.group(1).casefold()}/{m.group(2)}"
     p = urlparse(raw)
+    host = (p.hostname or "").casefold()
     if (
         p.scheme != "https"
-        or (p.hostname or "").casefold() != "github.com"
+        or host not in hosts
         or p.username
         or p.password
         or p.query
@@ -344,7 +433,8 @@ def _https_url(raw: str) -> str:
     ):
         _fail(
             "unsupported_remote",
-            "only credential-free https://github.com remotes are supported",
+            "only credential-free https:// remotes on "
+            + " or ".join(sorted(hosts)) + " are supported",
         )
     if not re.fullmatch(r"/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(?:\.git)?", p.path):
         _fail("unsupported_remote", "GitHub remote path must be owner/repository")
@@ -354,7 +444,28 @@ def _https_url(raw: str) -> str:
         _fail(
             "unsupported_remote", "GitHub owner and repository names must be explicit"
         )
-    return urlunparse(("https", "github.com", p.path, "", "", ""))
+    return urlunparse(("https", host, p.path, "", "", ""))
+
+
+def _transport(url: str, token=None):
+    """The dulwich client for a validated remote URL.
+
+    Every clone, fetch, pull and push builds its client here, so this is where
+    the credential is bound to a host: the token rides as in-process HTTP basic
+    auth (never argv, never the URL, so never .git/config), and only when the
+    URL's host is the one it was issued for. A github.com checkout on an
+    Enterprise install -- or the reverse -- goes anonymous.
+    """
+    from src.github_credentials import token_for_git_host
+
+    token = token_for_git_host(urlparse(url).hostname, token)
+    return get_transport_and_path_from_url(
+        url,
+        config=None,
+        username="x-access-token" if token else None,
+        password=token,
+        pool_manager=_http_pool(),
+    )
 
 
 def _status(repo: Repo):
@@ -541,18 +652,22 @@ def _status_sync(path):
 async def list_repositories():
     def scan():
         out = []
+        seen = set()
         # Same roots the path checks accept, or discovery would list fewer
         # repositories than the tool can actually operate on.
-        for root in git_repository_roots():
-            candidates = (
-                [root, *(p for p in root.iterdir() if p.is_dir())]
-                if root.is_dir()
-                else []
-            )
+        enclosing = workspace_repository()
+        scans = [
+            [root, *(p for p in root.iterdir() if p.is_dir())] if root.is_dir() else []
+            for root in map(Path, _operating_roots())
+        ]
+        if enclosing is not None:
+            scans.append([enclosing])
+        for candidates in scans:
             for candidate in candidates[: 100 - len(out)]:
                 marker = candidate / ".git"
-                if not marker.exists():
+                if not marker.exists() or candidate in seen:
                     continue
+                seen.add(candidate)
                 try:
                     out.append(_status_sync(candidate))
                 except RepositorySyncError as exc:
@@ -897,13 +1012,7 @@ def _pull_sync(repository, token=None, *, allow_untracked=False, protected_paths
             _fail("dirty_tree", "working tree must be completely clean before pull")
         before = repo.refs[local_ref]
         _validate_tree(repo, before)
-        client, remote_path = get_transport_and_path_from_url(
-            url,
-            config=None,
-            username="x-access-token" if token else None,
-            password=token,
-            pool_manager=_http_pool(),
-        )
+        client, remote_path = _transport(url, token)
 
         def wants(refs, depth=None):
             if merge_ref not in refs:

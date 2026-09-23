@@ -71,9 +71,12 @@ def _repository_read_token(ctx: dict) -> str | None:
         not isinstance(allowed, list) or not {"*", "github_read"}.intersection(allowed)
     ):
         return None
+    # The token GitHub MCP uses, for the host it uses (github.com or
+    # GITHUB_HOST). Which remote actually receives it is decided per URL by
+    # repository_sync._transport: only that same host, never another.
     from src.github_credentials import github_token_from_env
 
-    return github_token_from_env(public_only=True)
+    return github_token_from_env()
 
 
 class AgentWorktreeTool:
