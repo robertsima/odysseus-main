@@ -26,6 +26,7 @@ agent through ``read_file``.
 """
 import json
 import logging
+import ntpath
 import os
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
@@ -232,7 +233,13 @@ def _looks_absolute(path: str) -> bool:
     """
     if os.path.isabs(path):
         return True
-    if os.path.splitdrive(path)[0]:
+    # ntpath, not os.path: on Linux `os.path` is posixpath, whose splitdrive
+    # has no concept of a drive and returns "" for "C:/Windows" — so a
+    # drive-qualified key written on a Windows install (or synced from one)
+    # sailed through this gate on the server that matters. ntpath.splitdrive
+    # answers for both shapes on every platform, including UNC "//server/share".
+    # The docstring above already claimed we reject these; now we do.
+    if ntpath.splitdrive(path)[0]:
         return True
     return path.replace("\\", "/").startswith("/")
 
