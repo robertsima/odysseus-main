@@ -1223,7 +1223,7 @@ def setup_chat_routes(
         from core.database import get_session_settings, update_session_settings
         from src import session_settings as _session_settings
         _chat_settings = get_session_settings(session) if session else {}
-        disabled_tools.update(_chat_settings.get("disabled_tools") or [])
+        disabled_tools.update(_session_settings.stored_disabled_tools(_chat_settings))
         _approval_mode = _session_settings.effective_approval_mode(_chat_settings)
 
         # Light auto-escalation: the user is in chat mode and just expressed a

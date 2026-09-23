@@ -29,16 +29,20 @@ async def _drain_agent(sess, messages, *, run_id=None):
     (final_prose, tool_events) — tool_events in the same shape the live chat
     saves, so the frontend rebuilds them as standard agent-thread tool cards.
     The drain itself lives in :mod:`src.headless_agent` (shared with
-    ``send_to_session`` in agent mode); the follow-up keeps every tool the
-    chat had, since it is the same chat continuing."""
+    ``send_to_session`` in agent mode); the follow-up runs under the chat's
+    own policy, since it is the same chat continuing."""
     from src.headless_agent import run_headless
 
     return await run_headless(
         sess, messages,
         max_rounds=_FOLLOWUP_MAX_ROUNDS,
-        # A continuation of the user's own chat, not a sub-agent: nothing is
-        # blocked beyond what the chat already had.
-        disabled_tools=None,
+        # A continuation of the user's own chat, not a sub-agent: the
+        # anti-fan-out set does not apply, and the chat's own policy does —
+        # the tools it has switched off and its approval mode, which
+        # `run_headless` resolves from the chat itself. This is the same
+        # hand-off shape as a finished worker's continuation
+        # (`agent_control._hand_off`), and it gets the same answer.
+        subagent=False,
         activity_session_id=getattr(sess, "id", None) if run_id else None,
         run_id=run_id,
         source="bg_job",

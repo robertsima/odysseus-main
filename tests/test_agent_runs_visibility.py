@@ -119,8 +119,9 @@ async def test_headless_children_get_the_global_disabled_tools(monkeypatch):
     await headless_agent.run_headless(_Sess(), [], run_id=None)
     assert {"bash", "web_fetch", "send_to_session"} <= set(seen["disabled_tools"])
 
-    # A chat continuing itself (disabled_tools=None) still honours the operator.
-    await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
+    # A chat continuing itself (subagent=False) still honours the operator, and
+    # is not handed the anti-fan-out set: it is the parent, not a child.
+    await headless_agent.run_headless(_Sess(), [], subagent=False)
     assert set(seen["disabled_tools"]) == {"bash", "web_fetch"}
 
 
@@ -141,7 +142,7 @@ async def test_a_non_admin_headless_child_is_denied_the_public_blocklist(monkeyp
     monkeypatch.setattr(settings, "get_setting", lambda key, default=None: [] if key == "disabled_tools" else default)
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: False)
 
-    await headless_agent.run_headless(_Sess(), [], disabled_tools=None)
+    await headless_agent.run_headless(_Sess(), [], subagent=False)
     assert NON_ADMIN_BLOCKED_TOOLS <= set(seen["disabled_tools"])
 
 
@@ -187,6 +188,10 @@ def _manager(sessions):
 class _Chat:
     def __init__(self, sid):
         self.id, self.name, self.model = sid, sid, "m"
+        # A real `run_headless` reads both off the session: the endpoint to call
+        # and a window, the latter so `_resolve_context_length` does not go to
+        # the network probing for one.
+        self.endpoint_url, self.context_length = "http://llm.test/v1", 200_000
         self.messages = []
 
     def add_message(self, message):
@@ -253,3 +258,114 @@ async def test_a_finished_worker_hand_off_is_unchanged(monkeypatch):
 
     inject = parent.messages[-1].content
     assert "[Worker Runner finished]" in inject and "cut off" not in inject
+
+
+# ── a worker finishing must not widen the chat it reports back to ─────────
+#
+# The hand-off resumes the PARENT — the user's own foreground chat — headlessly.
+# It used to pass `disabled_tools=None`, an argument that meant both "no extra
+# denials" and "not a sub-agent" at once, so the chat's own `disabled_tools`
+# never reached the loop; and it never passed an approval mode at all. A chat
+# with `bash` switched off and `approval_mode: ask_all` therefore ran `bash`,
+# ungated, the moment a worker reported back.
+
+
+def _capture_loop(monkeypatch, seen):
+    """Stand in for the agent loop and record the policy kwargs it was given."""
+    import src.agent_loop as agent_loop
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield _sse({"delta": "continued"})
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+
+
+def _pin_owner_baseline(monkeypatch):
+    """Pin the owner-level merge so these tests measure the chat's own policy.
+
+    `owner_baseline_disabled_tools` reads the operator's global setting and
+    fails closed on the public-user blocklist, so without pinning both, the
+    assertions below would be measuring the test runner's environment.
+    """
+    import src.settings as settings
+    import src.tool_security as tool_security
+
+    monkeypatch.setattr(settings, "get_setting",
+                        lambda key, default=None: [] if key == "disabled_tools" else default)
+    monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
+
+
+async def test_a_worker_hand_off_keeps_the_parent_chats_own_policy(monkeypatch):
+    import core.database as core_db
+    from src import agent_control
+
+    seen = {}
+    _capture_loop(monkeypatch, seen)
+    _pin_owner_baseline(monkeypatch)
+    monkeypatch.setattr(core_db, "get_session_settings",
+                        lambda sid: {"disabled_tools": ["bash", "write_file"],
+                                     "approval_mode": "ask_all"} if sid == "parent" else {})
+    # Idle, so the hand-off continues the chat rather than parking the message.
+    monkeypatch.setattr(agent_runs, "is_busy", lambda sid: False)
+
+    parent = _Chat("parent")
+    await agent_control._hand_off(_manager({"parent": parent}), "parent", _Worker(),
+                                  "audit the handler", "Read five files.", "completed", "alice")
+
+    # The chat's own denials are in force for the continuation ...
+    assert {"bash", "write_file"} <= set(seen["disabled_tools"])
+    # ... and so is its approval mode, which was previously never passed at all,
+    # so a chat that asks before every change executed without asking.
+    assert seen["approval_mode"] == "ask_all"
+    # But this is the parent, not a child: the anti-fan-out set is for children,
+    # and a chat that delegated once may delegate again.
+    assert not (headless_agent.SUBAGENT_BLOCKED_TOOLS & set(seen["disabled_tools"]))
+    # It really did run — an assertion on kwargs alone would pass on a no-op.
+    assert parent.messages[-1].content == "continued"
+
+
+async def test_a_detached_worker_is_still_never_gated_for_approval(monkeypatch):
+    """The other half of the same decision.
+
+    `stream_agent_loop` documents that headless callers are not gated because
+    "nobody would be there to answer". That holds for a detached child, which
+    runs in a chat the user did not open — so a sub-agent run must keep passing
+    no approval mode even when the chat it runs in has one stored.
+    """
+    import core.database as core_db
+
+    seen = {}
+    _capture_loop(monkeypatch, seen)
+    _pin_owner_baseline(monkeypatch)
+    monkeypatch.setattr(core_db, "get_session_settings",
+                        lambda sid: {"approval_mode": "ask_all", "disabled_tools": ["bash"]})
+
+    await headless_agent.run_headless(_Sess(), [])
+    assert seen["approval_mode"] is None
+
+
+async def test_a_headless_child_cannot_start_a_worker_via_the_loadout_tool(monkeypatch):
+    """`manage_agent_loadout` with action="start" calls `launch_worker`.
+
+    It starts another agent, which is exactly what SUBAGENT_BLOCKED_TOOLS is
+    for. The second half of this test checks that the tool's own gates are open
+    for a fresh child, i.e. that the entry in the blocked set is what does the
+    work rather than being belt-and-braces.
+    """
+    import core.database as core_db
+    from src import agent_control, agent_loadouts
+
+    seen = {}
+    _capture_loop(monkeypatch, seen)
+    _pin_owner_baseline(monkeypatch)
+    monkeypatch.setattr(core_db, "get_session_settings", lambda sid: {})
+
+    await headless_agent.run_headless(_Sess(), [])
+    assert "manage_agent_loadout" in set(seen["disabled_tools"])
+
+    # A fresh child passes the tool's own gates: `delegation_policy` defaults to
+    # "explicit" (only "never" refuses) and nothing has been started from it.
+    assert agent_loadouts.caller_policy("child", "alice")["delegation_policy"] != "never"
+    assert agent_control.live_children("child") == 0

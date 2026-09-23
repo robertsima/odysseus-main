@@ -621,9 +621,16 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     followup: Dict[str, Any] = {}
     try:
         with agent_runs.track_external(parent_id, source="worker", owner=owner):
-            reply, events = await run_headless(parent, parent.get_context_messages(), max_rounds=_HANDOFF_MAX_ROUNDS,
-                                               disabled_tools=None, activity_session_id=parent_id, run_id=run_id,
-                                               source="session", owner=owner, outcome=followup)
+            reply, events = await run_headless(
+                parent, parent.get_context_messages(), max_rounds=_HANDOFF_MAX_ROUNDS,
+                # Not a sub-agent: this is the parent's own chat continuing
+                # itself, so `run_headless` runs it under that chat's own
+                # stored policy — the tools it has switched off and its
+                # approval mode. A chat does not lose its own restrictions
+                # because a worker happened to finish.
+                subagent=False,
+                activity_session_id=parent_id, run_id=run_id,
+                source="session", owner=owner, outcome=followup)
         status = "incomplete" if followup.get("rounds_exhausted") else "completed"
     except Exception as exc:
         reply, status = f"Could not continue after the worker: {exc}", "failed"

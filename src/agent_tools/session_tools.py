@@ -25,6 +25,37 @@ logger = logging.getLogger(__name__)
 SUBAGENT_MAX_ROUNDS = 12
 
 
+# A loadout means two different things depending on the target, and it used to
+# mean them silently.
+#
+# `session_id: "new"` creates the chat, so `agent_profiles.session_patch` writes
+# the loadout's WHOLE policy onto it: memory, skills, MCP, private vault,
+# delegation policy, worker limit, approval mode. Nothing of the user's is
+# overwritten, because nothing of the user's is there.
+#
+# An existing target is a chat the user owns and may be reading. Patching a
+# loadout's policy onto it would silently and permanently re-police somebody
+# else's chat off the back of one delegated message — an agent could revoke a
+# chat's memory access by sending it a note. So the loadout is applied as far as
+# it can be applied for the duration of ONE exchange (instructions, model, round
+# budget, tool denials, and a private-vault denial, which narrows and so is
+# safe), and the rest is reported rather than pretended.
+#
+# The offer and the enforcement must agree: the tool says which half it did.
+_PROFILE_SCOPE_NEW = (
+    "This chat was created for the loadout, so its full policy applies — tools, memory, "
+    "skills, MCP access, private vault, delegation policy, and the approval mode when "
+    "the loadout sets one."
+)
+_PROFILE_SCOPE_EXISTING = (
+    "This chat already existed and is the user's, so its stored policy was NOT changed. "
+    "The loadout applied to this exchange only: instructions, model, round budget, tool "
+    "denials, and its private-vault denial. Memory, skill and MCP access, delegation "
+    "policy and approval mode came from the target chat's own settings. Send to "
+    "session_id 'new' if the loadout's full policy has to apply."
+)
+
+
 def _parse_send_extras(content: str) -> Dict:
     """``profile`` from the JSON form (the legacy two-line form has none)."""
     raw = (content or "").strip()
@@ -110,22 +141,22 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
     """
     _session_manager = get_session_manager()
     if not _session_manager:
-        return {"error": "Session manager not available"}
+        return {"error": "Session manager not available", "exit_code": 1}
 
     lines = content.strip().split("\n")
     if len(lines) < 2:
-        return {"error": "Need 2 lines: session name, then model spec"}
+        return {"error": "Need 2 lines: session name, then model spec", "exit_code": 1}
 
     name = lines[0].strip()
     model_spec = lines[1].strip()
 
     if not name:
-        return {"error": "Session name cannot be empty"}
+        return {"error": "Session name cannot be empty", "exit_code": 1}
 
     try:
         url, model, headers = await asyncio.to_thread(_resolve_model, model_spec, owner=owner)
     except ValueError as e:
-        return {"error": str(e)}
+        return {"error": str(e), "exit_code": 1}
 
     sid = str(uuid.uuid4())[:8]
     try:
@@ -150,7 +181,7 @@ async def create_session(content: str, session_id: Optional[str] = None, owner: 
         return {"session_id": sid, "name": name, "model": model, "endpoint_url": url}
     except Exception as e:
         logger.error(f"create_session failed: {e}")
-        return {"error": f"Failed to create session: {e}"}
+        return {"error": f"Failed to create session: {e}", "exit_code": 1}
 
 async def list_sessions(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """List sessions sorted by most-recently-active first.
@@ -163,7 +194,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
     """
     _session_manager = get_session_manager()
     if not _session_manager:
-        return {"error": "Session manager not available"}
+        return {"error": "Session manager not available", "exit_code": 1}
 
     keyword = content.strip().lower() if content.strip() else None
 
@@ -239,7 +270,7 @@ async def list_sessions(content: str, session_id: Optional[str] = None, owner: O
         }
     except Exception as e:
         logger.error(f"list_sessions failed: {e}")
-        return {"error": str(e)}
+        return {"error": str(e), "exit_code": 1}
 
 def _session_display_name(session_manager, session_id: Optional[str]) -> str:
     """Best-effort name of the calling session for the agent-origin tag."""
@@ -264,14 +295,14 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     from core.models import ChatMessage
 
     if not _session_manager:
-        return {"error": "Session manager not available"}
+        return {"error": "Session manager not available", "exit_code": 1}
 
     target_sid, message, mode = _parse_send_args(content)
     extras = _parse_send_extras(content)
     if not target_sid:
-        return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)"}
+        return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)", "exit_code": 1}
     if mode not in ("chat", "agent"):
-        return {"error": "mode must be 'chat' (one model reply) or 'agent' (the chat's agent runs with its tools)"}
+        return {"error": "mode must be 'chat' (one model reply) or 'agent' (the chat's agent runs with its tools)", "exit_code": 1}
 
     profile = None
     if extras.get("profile"):
@@ -280,22 +311,22 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         profile = agent_profiles.get_profile(extras["profile"])
         if profile is None:
             names = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined (Settings › Workbench)"
-            return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}"}
+            return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}", "exit_code": 1}
         mode = "agent"  # a profile is a worker definition: it always runs with tools
 
     if target_sid.lower() == "new":
         if not message:
-            return {"error": "No message provided"}
+            return {"error": "No message provided", "exit_code": 1}
         sess, err = _new_child_session(_session_manager, session_id, owner, message, profile)
         if err:
-            return {"error": err}
+            return {"error": err, "exit_code": 1}
         target_sid = sess.id
         mode = "agent"
         extras["_child_created"] = True  # already on the profile's model
     else:
         sess = _session_manager.get_session(target_sid)
     if not sess:
-        return {"error": f"Session '{target_sid}' not found"}
+        return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
 
     # Owner-scope: reject access to another user's session. When the caller is
     # authenticated, a null-owner (legacy / auth-was-off) session is not theirs
@@ -303,10 +334,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     # exclude those, so treating it as reachable here let an authenticated agent
     # read/write a session the other tools hide. Require an exact owner match.
     if owner and getattr(sess, "owner", None) != owner:
-        return {"error": f"Session '{target_sid}' not found"}
+        return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
 
     if not message:
-        return {"error": "No message provided"}
+        return {"error": "No message provided", "exit_code": 1}
 
     try:
         # Build context from session history
@@ -356,7 +387,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                                              owner=getattr(sess, "owner", None),
                                              context_length=getattr(sess, "context_length", 0))
                 except ValueError as exc:
-                    return {"error": f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}"}
+                    return {"error": f"Profile {profile['name']!r} model {profile['model']!r} is unavailable: {exc}", "exit_code": 1}
 
         # The exchange is one run on the calling chat's activity feed, so the
         # Workbench shows the hand-off, the child's tool calls (agent mode)
@@ -385,6 +416,12 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         runner, context,
                         max_rounds=profile["max_rounds"] if profile else SUBAGENT_MAX_ROUNDS,
                         disabled_tools=set(profile["disabled_tools"]) if profile else frozenset(),
+                        # The one part of the gap that is a privilege escalation
+                        # rather than a difference: without this, a loadout that
+                        # denies the private vault still read it whenever the
+                        # target chat happened to have the grant. Narrowing is
+                        # always safe, so it is closed here rather than reported.
+                        deny_private_vault=bool(profile) and not profile.get("private_vault_access", False),
                         activity_session_id=session_id,
                         run_id=run_id,
                         source="session",
@@ -446,6 +483,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             "response": response,
             "mode": mode,
         }
+        if profile:
+            created = bool(extras.get("_child_created"))
+            out["profile"] = profile["name"]
+            out["profile_scope"] = "chat" if created else "exchange"
+            out["profile_note"] = _PROFILE_SCOPE_NEW if created else _PROFILE_SCOPE_EXISTING
         if stopped:
             out["stopped_by_user"] = True
         if tool_events:
@@ -453,7 +495,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         return out
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")
-        return {"error": f"Failed to send to session: {e}"}
+        return {"error": f"Failed to send to session: {e}", "exit_code": 1}
 
 async def manage_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage sessions: rename, archive, delete, important, truncate, fork.
@@ -465,7 +507,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     """
     _session_manager = get_session_manager()
     if not _session_manager:
-        return {"error": "Session manager not available"}
+        return {"error": "Session manager not available", "exit_code": 1}
 
     from src.database import SessionLocal, Session as DbSession
 
@@ -498,14 +540,14 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     else:
         lines = _raw.split("\n")
         if not lines or not lines[0].strip():
-            return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)"}
+            return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)", "exit_code": 1}
         action = lines[0].strip().lower()
         target_sid = lines[1].strip() if len(lines) >= 2 else ""
         value = lines[2].strip() if len(lines) >= 3 else None
         _list_filter = "\n".join(lines[1:]).strip()
 
     if not action:
-        return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)"}
+        return {"error": "Missing action (rename|archive|delete|important|truncate|fork|list|switch)", "exit_code": 1}
 
     # `list` alias - dispatch to list_sessions so the agent's natural
     # first guess (every other manage_* tool has a `list` action) works.
@@ -513,7 +555,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         return await list_sessions(_list_filter, session_id, owner=owner)
 
     if not target_sid:
-        return {"error": "Need a session_id (or 'current' for the active chat)"}
+        return {"error": "Need a session_id (or 'current' for the active chat)", "exit_code": 1}
 
     # Allow "current" to refer to the active session
     if target_sid.lower() == "current" and session_id:
@@ -537,7 +579,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         try:
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             name = db_sess.name or target_sid
         finally:
             db.close()
@@ -552,11 +594,11 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     try:
         if action == "rename":
             if not value:
-                return {"error": "rename needs a new name (the `value` arg, or line 3 in the legacy format)"}
+                return {"error": "rename needs a new name (the `value` arg, or line 3 in the legacy format)", "exit_code": 1}
             new_name = value
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             db_sess.name = new_name
             db.commit()
             _session_manager.update_session_name(target_sid, new_name)
@@ -566,7 +608,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "archive":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             db_sess.archived = True
             db.commit()
             return {"action": "archive", "session_id": target_sid,
@@ -575,7 +617,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "unarchive":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             db_sess.archived = False
             db.commit()
             return {"action": "unarchive", "session_id": target_sid,
@@ -583,29 +625,29 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
 
         elif action == "delete":
             if target_sid == session_id:
-                return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first."}
+                return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first.", "exit_code": 1}
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions."}
+                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions.", "exit_code": 1}
             if db_sess and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting."}
+                return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting.", "exit_code": 1}
             try:
                 ok = _session_manager.delete_session(target_sid)
                 if not ok:
-                    return {"error": f"Session '{target_sid}' was not deleted because it no longer exists."}
+                    return {"error": f"Session '{target_sid}' was not deleted because it no longer exists.", "exit_code": 1}
                 return {"action": "delete", "session_id": target_sid,
                         "results": f"Session '{db_sess.name or target_sid}' deleted"}
             except Exception as e:
-                return {"error": f"Failed to delete session: {e}"}
+                return {"error": f"Failed to delete session: {e}", "exit_code": 1}
 
         elif action in ("important", "unimportant"):
             is_important = action == "important"
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             # Prevent AI from unstarring sessions - only the user can do that manually
             if not is_important and db_sess.is_important:
-                return {"error": f"Session '{db_sess.name}' is starred by the user. Only the user can unstar sessions manually."}
+                return {"error": f"Session '{db_sess.name}' is starred by the user. Only the user can unstar sessions manually.", "exit_code": 1}
             db_sess.is_important = is_important
             db.commit()
             status = "marked as important" if is_important else "unmarked as important"
@@ -615,7 +657,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "truncate":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             keep_count = 10
             if value:
                 try:
@@ -626,12 +668,12 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             if success:
                 return {"action": "truncate", "session_id": target_sid,
                         "results": f"Session truncated to last {keep_count} messages"}
-            return {"error": f"Failed to truncate session '{target_sid}'"}
+            return {"error": f"Failed to truncate session '{target_sid}'", "exit_code": 1}
 
         elif action == "fork":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned."}
+                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
             keep_count = 0  # 0 = all messages
             if value:
                 try:
@@ -641,7 +683,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
 
             source = _session_manager.get_session(target_sid)
             if not source:
-                return {"error": f"Session '{target_sid}' not found"}
+                return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
 
             new_sid = str(uuid.uuid4())[:8]
             _session_manager.create_session(
@@ -671,10 +713,10 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                     "results": f"Forked session '{source.name}' -> new session {new_sid} ({len(history)} messages)"}
 
         else:
-            return {"error": f"Unknown action '{action}'. Use: list, switch, rename, archive, unarchive, delete, important, unimportant, truncate, fork"}
+            return {"error": f"Unknown action '{action}'. Use: list, switch, rename, archive, unarchive, delete, important, unimportant, truncate, fork", "exit_code": 1}
     except Exception as e:
         logger.error(f"manage_session failed: {e}")
-        return {"error": str(e)}
+        return {"error": str(e), "exit_code": 1}
     finally:
         db.close()
 

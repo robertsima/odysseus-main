@@ -570,7 +570,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
                     "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
                     "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
-                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent."}
+                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent. How much of the profile applies depends on the target: with session_id 'new' the whole policy applies (memory, skills, MCP, vault, delegation); with an existing chat only instructions, model, round budget, tool denials and a vault denial apply for that one exchange — the chat keeps its own settings, and the result says which happened in profile_scope."}
                 },
                 "required": ["session_id", "message"]
             }
