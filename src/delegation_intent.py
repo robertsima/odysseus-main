@@ -98,6 +98,22 @@ _USE_AGENTS_RE = re.compile(
 )
 
 
+# The singular of the above, for a user pointing at ONE agent they already
+# have: "use the design agent to create a small penpot test" (2026-09-23) read
+# as no request, because _USE_AGENTS_RE only knew plurals and "use" is not an
+# orchestration verb. The default `explicit` policy then gated the launcher and
+# the turn answered that the chat's policy denied it. A determiner is required
+# ("use the/my/that ... agent") so "use agent mode" stays ordinary prose, and
+# the head-noun lookahead keeps "use the agent tools" out. `have`/`ask` join
+# here with the same shape: _ORCHESTRATION_VERB only takes them with a/an,
+# which missed "have the design agent do it".
+_USE_AN_AGENT_RE = re.compile(
+    r"\b(?:use|employ|have|ask|get)\s+(?:the|my|our|your|that|this)\s+"
+    r"(?:[\w-]+\s+){0,3}?(?:agent|specialist|worker)\b" + _HEAD_NOUN_FOLLOWERS,
+    re.IGNORECASE,
+)
+
+
 # Prohibition, not mere co-occurrence of a negative word and an agent noun.
 #
 # The old form was `(do not|don't|never|without|no) ... {0,65} ... agents`
@@ -116,7 +132,7 @@ _USE_AGENTS_RE = re.compile(
 _NO_DELEGATION_RE = re.compile(
     r"(?:"
     r"\b(?:do\s+not|do\s*n'?t|never|please\s+do\s*n'?t)\b[^.!?\n]{0,65}"
-    r"\b(?:delegat\w*|sub[ -]?agents?|agents|workers|specialists)\b"
+    r"\b(?:delegat\w*|sub[ -]?agents?|agents?|workers?|specialists?)\b"
     r"|"
     r"\b(?:without|no)\s+(?:any\s+|more\s+|further\s+|additional\s+|other\s+|new\s+)*"
     r"(?:delegation|sub[ -]?agents?|agents|workers|specialists)\b"
@@ -171,6 +187,7 @@ def _clause_orchestration(clause: str) -> bool:
         or _AGENT_RUN_RE.search(clause)
         or _USING_AGENTS_RE.search(clause)
         or _USE_AGENTS_RE.search(clause)
+        or _USE_AN_AGENT_RE.search(clause)
     )
 
 

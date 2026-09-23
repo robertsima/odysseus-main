@@ -162,6 +162,28 @@ def test_ordinary_prose_still_keeps_delegation_off(text):
     assert _explicit_delegation_requested(text) is False
 
 
+@pytest.mark.parametrize("text", [
+    # The 2026-09-23 turn: refused because only plural "use ... agents" counted.
+    "use the design agent to create a small penpot test and export to chat or something",
+    "ask my research agent to look into this, please",
+    "use that penpot specialist for the mockup",
+])
+def test_pointing_at_one_existing_agent_passes_the_explicit_delegation_gate(text):
+    assert _explicit_delegation_requested(text) is True
+    assert "manage_agent_loadout" not in _delegation_gated_tools("explicit", text)
+
+
+@pytest.mark.parametrize("text", [
+    "use agent mode for this",
+    "use the agent tools to check my calendar",
+    "ask the agent why it stopped",
+    "I have the agent running already",
+    "don't use the design agent for this",
+])
+def test_singular_agent_prose_keeps_delegation_off(text):
+    assert _explicit_delegation_requested(text) is False
+
+
 def test_selected_delegation_tools_reach_the_round_schemas():
     """End of the pipeline: what admin routing picked for the incident phrase
     is what the model is actually offered."""
