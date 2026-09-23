@@ -698,11 +698,17 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s",
                 preflight["loadout"], result.get("run_id"), result.get("session_id"),
                 preflight["model"], preflight["max_rounds"], tool_note)
+    try:
+        wrap_up = int(result.get("max_rounds") or 0) if name else 0
+    except (TypeError, ValueError):
+        wrap_up = 0
+    wrap_note = (f"; at round {wrap_up} it is asked to wrap up and hand back what it has, "
+                 "including what is left" if wrap_up > 0 else "")
     return {
         "response": (
             f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
             f"with these tools: {tool_note}. It runs until the task is done — a round count never "
-            "ends it — and it runs detached, so its progress appears on this chat's activity feed "
+            f"cuts it off{wrap_note} — and it runs detached, so its progress appears on this chat's activity feed "
             "and in action='status'. If those tools cannot do the task you just described, stop it "
             "and fix the loadout instead of waiting for the result."
         ),

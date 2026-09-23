@@ -20,7 +20,10 @@ MAX_PROFILES = 40
 # bounds a run is unchanged and is not a counter -- the per-run tool-call ceiling
 # (`agent_max_tool_calls`, default 500), the request timeout, the worker's own
 # tool policy, and the user's stop control. An explicit positive budget is still
-# honoured for anyone who wants one, up to MAX_ROUNDS_CAP.
+# honoured for anyone who wants one, up to MAX_ROUNDS_CAP, as a wrap-up point
+# rather than a cutoff: at that round the worker's tools are switched off and it
+# is asked to write its final answer from what it has and name what is left
+# (stream_agent_loop's `wrap_up_round`).
 MAX_ROUNDS_CAP = 200
 UNLIMITED_ROUNDS = 0
 DEFAULT_ROUNDS = UNLIMITED_ROUNDS
@@ -92,8 +95,9 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
         seen.add(key)
         tools = _names(raw.get("disabled_tools"), "disabled_tools", name, 200)
         try:
-            # 0 (and a missing value) mean "no round ceiling"; anything positive
-            # is an explicit budget the author chose.
+            # 0 (and a missing value) mean "no round budget"; anything positive
+            # is an explicit budget the author chose: the round at which the
+            # worker is asked to wrap up and hand back what it has.
             rounds = int(raw.get("max_rounds") or DEFAULT_ROUNDS)
         except (TypeError, ValueError):
             raise ValueError(f"profile {name!r}: max_rounds must be a number")

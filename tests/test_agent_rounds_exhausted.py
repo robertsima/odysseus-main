@@ -111,3 +111,108 @@ def test_emits_loop_breaker_triggered_when_loop_breaker_trips(monkeypatch):
     guard = next((e for e in events if e.get("type") == "loop_breaker_triggered"), None)
     assert guard is not None, events
     assert guard["reason"] == "loop_breaker_stall"
+
+
+# ── Round-budget wrap-up (an agent profile's explicit max_rounds) ─────────
+
+
+def _run_budget_loop(monkeypatch, *, wrap_up_round, answer_round=None, synth=""):
+    """A native tool-calling model that calls a new tool every round (never
+    stuck, so the loop-breaker stays quiet) until `answer_round`, if any,
+    where it answers instead."""
+    calls = []
+    executed = []
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        calls.append({"tools": kwargs.get("tools"), "messages": list(messages)})
+        n = len(calls)
+        if answer_round and n >= answer_round:
+            yield f'data: {json.dumps({"delta": "All done: here is the answer."})}\n\n'
+        else:
+            call = {"name": "update_plan", "arguments": json.dumps({"plan": f"- [ ] step {n}"})}
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": [call]})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    async def _fake_exec(block, *a, **k):
+        executed.append(len(calls))
+        return (block.tool_type, {"output": f"ok {len(calls)}", "exit_code": 0})
+
+    async def _fake_synth(**kwargs):
+        return synth
+
+    import src.llm_core as llm_core
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
+    monkeypatch.setattr(llm_core, "llm_call_async", _fake_synth)
+
+    gen = al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o",
+        [{"role": "user", "content": "do a long multi-step task"}],
+        max_rounds=wrap_up_round,
+        relevant_tools={"update_plan"},
+        wrap_up_round=wrap_up_round,
+    )
+    return _types(_collect(gen)), calls, executed
+
+
+def test_round_budget_wraps_up_with_a_tool_free_answer_round(monkeypatch):
+    _patch_common(monkeypatch)
+    events, calls, executed = _run_budget_loop(
+        monkeypatch, wrap_up_round=3, synth="Found A and B. Unfinished: C was not checked.")
+
+    budget = [e for e in events if e.get("type") == "round_budget_reached"]
+    assert budget == [{"type": "round_budget_reached", "round": 3, "budget": 3}], events
+    # Rounds 1 and 2 ran their tools; round 3 was the last model call and its
+    # tool call (the model kept trying) was discarded, not executed.
+    assert len(calls) == 3
+    assert executed == [1, 2]
+    assert calls[0]["tools"] and calls[1]["tools"] and not calls[2]["tools"]
+    wrap_msg = calls[2]["messages"][-1]
+    assert wrap_msg["role"] == "system" and "round budget (3 rounds)" in wrap_msg["content"]
+    assert "unfinished" in wrap_msg["content"]
+    # It ends with an answer, not a cut-off.
+    text = "".join(e.get("delta", "") for e in events if isinstance(e.get("delta"), str))
+    assert "Unfinished: C was not checked." in text
+    assert not any(e.get("type") in ("rounds_exhausted", "round_budget_unanswered", "loop_breaker_triggered")
+                   for e in events), events
+
+
+def test_round_budget_with_no_answer_says_so(monkeypatch):
+    _patch_common(monkeypatch)
+    events, calls, _executed = _run_budget_loop(monkeypatch, wrap_up_round=2, synth="")
+
+    assert len(calls) == 2
+    assert any(e.get("type") == "round_budget_unanswered" and e.get("budget") == 2 for e in events), events
+    # The loop's existing fallback line still closes the turn.
+    assert any("couldn't pull a clean" in (e.get("delta") or "") for e in events)
+
+
+def test_no_wrap_up_round_keeps_rounds_advisory(monkeypatch):
+    _patch_common(monkeypatch)
+    events, calls, executed = _run_budget_loop(monkeypatch, wrap_up_round=0, answer_round=6)
+
+    assert not any(str(e.get("type", "")).startswith("round_budget") for e in events), events
+    assert len(calls) == 6 and executed == [1, 2, 3, 4, 5]
+    assert all(c["tools"] for c in calls)
+    assert not any("round budget" in str(m.get("content")) for m in calls[-1]["messages"])
+
+
+def test_max_rounds_alone_does_not_wrap_up(monkeypatch):
+    """Foreground chat passes max_rounds only; it must stay advisory."""
+    _patch_common(monkeypatch)
+    calls = []
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        calls.append(1)
+        text = ("done." if len(calls) >= 4
+                else '```update_plan\n{"plan":"- [ ] step %d"}\n```' % len(calls))
+        yield f'data: {json.dumps({"delta": text})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    events = _types(_collect(al.stream_agent_loop(
+        "http://x/v1", "m", [{"role": "user", "content": "go"}],
+        max_rounds=2, relevant_tools={"update_plan"},
+    )))
+    assert len(calls) == 4
+    assert not any(str(e.get("type", "")).startswith("round_budget") for e in events), events

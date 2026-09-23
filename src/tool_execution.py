@@ -39,6 +39,7 @@ from src.constants import (
     AGENT_WORKSPACE_DIR,
 )
 from src.tool_utils import _truncate, get_mcp_manager
+from src.github_mcp_shaping import compact_github_mcp_result, github_mcp_request_defaults
 
 
 class _MissingToolSecurityContext:
@@ -2169,7 +2170,11 @@ async def _execute_tool_block_impl(
                 elif tool.startswith("mcp__lotus__"):
                     args = dict(args)
                     args[_LOTUS_MCP_OWNER_ARG] = owner or "__single_user__"
+                # GitHub list/search tools: default a small page and trim each
+                # item, so results stay inline instead of being offloaded.
+                args, injected_per_page = github_mcp_request_defaults(tool, args, mcp)
                 result = await mcp.call_tool(tool, args)
+                result = compact_github_mcp_result(tool, result, injected_per_page)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}

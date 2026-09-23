@@ -3949,6 +3949,11 @@ async def stream_agent_loop(
     # The chat's resolved approval mode (src.approval_modes). None keeps
     # upstream's behaviour: ask only after untrusted context.
     approval_mode: Optional[str] = None,
+    # An explicit round budget from an agent profile (headless workers only;
+    # 0 = none). Reaching it does not stop the run: that round is forced
+    # tool-free and the model is told to write its final answer from what it
+    # has and name what is unfinished. Fires at most once per run.
+    wrap_up_round: int = 0,
 ) -> AsyncGenerator[str, None]:
     """Streaming agent loop generator.
 
@@ -5190,6 +5195,7 @@ async def stream_agent_loop(
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
+    _round_budget_hit = False  # set once when `wrap_up_round` forces the answer round
     # Supervisor: how many times we've nudged the model after it announced
     # an action without emitting the tool call. Capped to prevent a model
     # that *can't* call the tool from looping forever.
@@ -5549,6 +5555,10 @@ async def stream_agent_loop(
     # callers and stored loadouts keep working, and is reported, but it is
     # advisory. The fork's `MAX_AGENT_ROUNDS` is 0 for that reason; iterating
     # `range(1, max_rounds + 1)` over it would run no rounds at all.
+    # The one thing a round count can do is `wrap_up_round`: a budget someone
+    # set on an agent profile on purpose. It still does not cut the run off --
+    # it turns that round into the same tool-free answer round the
+    # loop-breaker forces, so the worker hands back what it has.
     if max_rounds and max_rounds > 0:
         logger.debug("[agent] max_rounds=%s is advisory; rounds do not end a run", max_rounds)
     from src import agent_control
@@ -5587,6 +5597,38 @@ async def stream_agent_loop(
                 _steer_event.update(from_session=_steer_rec.get("from_session"),
                                     from_session_name=_steer_rec.get("from_session_name"))
             yield f'data: {json.dumps(_steer_event)}\n\n'
+
+        # ── Round-budget wrap-up ──────────────────────────────────────
+        # The worker's profile gave it an explicit round budget and it is still
+        # working when it gets there. Rather than stopping it with nothing to
+        # show, run this round without tools (the loop-breaker's force-answer
+        # path, with its grace synthesis) and have it write up what it has and
+        # what is left. Round 1 has nothing to wrap up yet, so a budget of 1
+        # takes effect on round 2.
+        if (
+            (wrap_up_round or 0) > 0
+            and not _round_budget_hit
+            and not _force_answer
+            and round_num > 1
+            and round_num >= wrap_up_round
+        ):
+            _round_budget_hit = True
+            _force_answer = True
+            logger.info(
+                "[agent] round budget (%d) reached on round %d; forcing a tool-free wrap-up round",
+                wrap_up_round, round_num,
+            )
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"You have reached your round budget ({wrap_up_round} rounds). Tools are now "
+                    "off. Write your final answer NOW from the information already gathered: "
+                    "give the results you have, then list plainly what is unfinished or "
+                    "unverified so whoever picks this up can continue from there. Do not call "
+                    "any tools."
+                ),
+            })
+            yield f'data: {json.dumps({"type": "round_budget_reached", "round": round_num, "budget": wrap_up_round})}\n\n'
 
         _active_route_state = {
             "messages": messages,
@@ -6217,6 +6259,10 @@ async def stream_agent_loop(
                     round_response += _synth
                     full_response += _synth
                 else:
+                    if _round_budget_hit:
+                        # The wrap-up round wrote no answer of its own; say so,
+                        # so a headless caller reports the run as incomplete.
+                        yield f'data: {json.dumps({"type": "round_budget_unanswered", "round": round_num, "budget": wrap_up_round})}\n\n'
                     _fb = ("I gathered some search results but couldn't pull a clean "
                            "answer together. Want me to try a more specific question, "
                            "or summarize what I did find?")
@@ -6368,6 +6414,9 @@ async def stream_agent_loop(
             # happen to contain "let me know" are not stalls.
             _looks_like_promise = (
                 not guide_only
+                # A wrap-up answer that lists what is left ("need to verify
+                # X") is not a dropped tool call, and its round has no tools.
+                and not _round_budget_hit
                 and _intent_match is not None
                 and len(_intent_text) < 400
                 and "```" not in _intent_text
