@@ -6069,6 +6069,10 @@ async def stream_agent_loop(
                 round(100 * _round_cached_input_tokens / _round_real_input_tokens) if _round_real_input_tokens else 0,
                 _round_real_output_tokens,
             )
+            # The same numbers as a frame, so a detached run's Workbench row can
+            # show them live. The chat route's allowlist drops it; the headless
+            # drain folds it into the run's progress.
+            yield f'data: {json.dumps({"type": "round_usage", "round": round_num, "input": _round_real_input_tokens, "cached": _round_cached_input_tokens, "output": _round_real_output_tokens})}\n\n'
         _finalize_round_usage()
         _normalized_doc_round = (
             _normalize_stream_document_fences(

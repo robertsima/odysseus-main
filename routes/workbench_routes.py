@@ -140,6 +140,22 @@ def setup_workbench_routes() -> APIRouter:
         except ValueError as exc:
             raise HTTPException(409, str(exc))
 
+    @router.post("/runs/{run_id}/wrap-up")
+    async def wrap_up_run(request: Request, run_id: str):
+        """Ask a live agent run to finish from what it already has: a steer
+        the loop reads between rounds, so the run writes its own hand-back
+        instead of being cut off mid-tool the way Stop does."""
+        owner = _admin(request)
+        from src import agent_control
+
+        try:
+            rec = agent_control.wrap_up(run_id, owner=owner)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {"queued": True, "id": rec["id"], "state": rec["state"]}
+
     # ── repository inspection ───────────────────────────────────────────────
 
     @router.get("/repo/roots")

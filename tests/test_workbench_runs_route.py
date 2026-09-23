@@ -47,3 +47,64 @@ def test_runs_without_a_session_filter_is_not_logged(client, monkeypatch, caplog
     with caplog.at_level(logging.INFO, logger=wb.__name__):
         client.get("/api/workbench/runs")
     assert not [r for r in caplog.records if "[workbench] runs" in r.getMessage()]
+
+
+# ── wrap up: a soft stop delivered as a steer ────────────────────────────────
+
+
+@pytest.fixture
+def activity_dir(tmp_path, monkeypatch):
+    from src import constants
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+    wb.activity._reset_for_tests()
+    yield tmp_path
+    wb.activity._reset_for_tests()
+
+
+def test_wrap_up_unknown_run_is_404(client, activity_dir):
+    assert client.post("/api/workbench/runs/nope/wrap-up").status_code == 404
+
+
+def test_wrap_up_finished_run_is_409(client, activity_dir):
+    rid = wb.activity.run_started("w-done", "session", "Worker: done")
+    wb.activity.run_finished("w-done", "session", rid, "Worker finished")
+    assert client.post(f"/api/workbench/runs/{rid}/wrap-up").status_code == 409
+
+
+def test_wrap_up_run_without_agent_rounds_is_409(client, activity_dir):
+    # Live, but nothing drains a steer for it (a background shell job).
+    rid = wb.activity.run_started("w-job", "bg_job", "sleep 600")
+    assert client.post(f"/api/workbench/runs/{rid}/wrap-up").status_code == 409
+
+
+def test_wrap_up_queues_a_steer_bound_to_the_worker_run(client, activity_dir, monkeypatch):
+    from src import agent_control, headless_agent
+
+    rid = wb.activity.run_started("w-live", "session", "Worker: long task")
+    # run_headless registers its wrapper run as the session's steering target.
+    monkeypatch.setitem(headless_agent._STEER_RUNS, "w-live", {rid})
+    try:
+        res = client.post(f"/api/workbench/runs/{rid}/wrap-up")
+        assert res.status_code == 200 and res.json()["queued"] is True
+        queued = agent_control.pending_steer("w-live", run_id=rid)
+        assert [r["text"] for r in queued] == [agent_control.WRAP_UP_TEXT]
+        assert queued[0]["owner"] == "alice" and queued[0]["run_id"] == rid
+    finally:
+        agent_control.clear_steer("w-live", run_id=rid)
+
+
+def test_wrap_up_a_chat_turn_goes_to_the_queue_its_stream_drains(client, activity_dir, monkeypatch):
+    from src import agent_control
+
+    rid = wb.activity.run_started("chat-live", "odysseus", "Turn")
+    # A foreground turn drains the queue its stream allocated, not the
+    # activity run id; `steer` resolves that itself.
+    monkeypatch.setattr(agent_control, "is_steerable", lambda sid: True)
+    monkeypatch.setattr(agent_control, "_live_run_id", lambda sid: "steer-abc")
+    try:
+        assert client.post(f"/api/workbench/runs/{rid}/wrap-up").status_code == 200
+        assert [r["text"] for r in agent_control.pending_steer("chat-live", run_id="steer-abc")] == [
+            agent_control.WRAP_UP_TEXT]
+    finally:
+        agent_control.clear_steer("chat-live", run_id="steer-abc")
