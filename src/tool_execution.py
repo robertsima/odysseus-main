@@ -142,6 +142,9 @@ _SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
 # case before comparing — the sibling resolver already normcases paths for the
 # same reason. casefold (not os.path.normcase) because normcase is a no-op on
 # POSIX, which is exactly where the macOS read-exfil path lives.
+_ENV_TEMPLATE_NAMES_CF: frozenset[str] = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults",
+})
 _SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSITIVE_BASENAMES)
 _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
 _SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
@@ -235,6 +238,12 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
     # and writing it can set hooks/fsmonitor commands. manage_git's `remotes`
     # action reports remotes credential-free; the raw file stays off limits.
     if len(parts) >= 2 and filename == "config" and parts[-2] == ".git":
+        return True
+
+    # `.env` is listed above; its per-environment variants (.env.local,
+    # .env.production, ...) hold the same secrets. Committed templates carry
+    # placeholders only and are what an agent needs to learn the variables.
+    if filename.startswith(".env.") and filename not in _ENV_TEMPLATE_NAMES_CF:
         return True
 
     # Documents the user labelled private. These live under PERSONAL_DIR, which

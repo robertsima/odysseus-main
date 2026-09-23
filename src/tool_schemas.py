@@ -365,7 +365,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "remove",
+                                 "publish", "list_requests", "show_request",
                                  "repo_list", "repo_status", "repo_pull"],
                         "description": "Operation to perform (default: status)"
                     },

@@ -260,3 +260,26 @@ def test_file_tools_deny_repository_secret_stores(path, sensitive):
     from src.tool_execution import _is_sensitive_path
 
     assert _is_sensitive_path(path) is sensitive
+
+
+async def test_worktree_remove_is_refused_by_policy_and_not_advertised():
+    """`remove` ran `git worktree remove --force`, discarding uncommitted work."""
+    from src.agent_tools import worktree_tools
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    out = await worktree_tools.AgentWorktreeTool().execute('{"action": "remove", "name": "x"}', {})
+    assert out["exit_code"] == 1 and out["code"] == "forbidden_by_policy"
+    assert "not permitted by policy" in out["error"]
+    schema = next(s for s in FUNCTION_TOOL_SCHEMAS if s["function"]["name"] == "manage_agent_worktree")
+    assert "remove" not in schema["function"]["parameters"]["properties"]["action"]["enum"]
+
+
+@pytest.mark.parametrize("name, sensitive", [
+    (".env.local", True), (".env.production", True), (".ENV.Staging", True),
+    (".env.example", False), (".env.sample", False), (".env.template", False),
+    ("env.py", False),
+])
+def test_env_variants_are_sensitive_but_templates_are_not(name, sensitive):
+    from src.tool_execution import _is_sensitive_path
+
+    assert _is_sensitive_path(f"/srv/app/{name}") is sensitive
