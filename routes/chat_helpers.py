@@ -890,6 +890,23 @@ async def build_chat_context(
     # Preset
     preset = extract_preset(chat_handler, preset_id)
 
+    # Crew role: when this chat belongs to a crew member that names an agent
+    # profile, that role's prompt joins the preset's. Composition, not
+    # replacement — the crew's `personality` says who this agent is and the
+    # profile's `instructions` say how the role works, and the preset is still
+    # the voice the user picked for this chat. Gated on the link existing, so a
+    # crew member with only a personality is untouched. See src/crew_profile.py.
+    try:
+        from src.crew_profile import role_system_prompt_for_session
+
+        _role_prompt = role_system_prompt_for_session(session_id)
+    except Exception:
+        _role_prompt = ""
+    if _role_prompt:
+        preset.system_prompt = "\n\n".join(
+            part for part in ((preset.system_prompt or "").strip(), _role_prompt) if part
+        )
+
     # Preprocess message (CoT, YouTube, VL images, build content). The
     # auto_opened_docs collector captures any docs created server-side
     # (e.g. fillable PDF → markdown editor doc) so the chat route can

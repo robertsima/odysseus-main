@@ -2034,9 +2034,13 @@ class TaskScheduler:
             "Use tools to take action if needed. Keep it concise — no raw data dumps."
         )
 
+        from src import crew_profile
+
         return await self._run_agent_loop(
             endpoint_url, model, task, session_id,
-            system_prompt=(crew.personality or "").strip() if crew else None,
+            # personality + the linked profile's instructions, one rule shared
+            # with the chat path (src/crew_profile.py).
+            system_prompt=crew_profile.role_system_prompt(crew) or None,
             disabled_tools=None, relevant_tools=None,
             override_user_message=context,
         )
@@ -2102,15 +2106,20 @@ class TaskScheduler:
         if is_checkin:
             return await self._execute_checkin(task, crew, db, session_id, endpoint_url, model)
 
-        # Build system prompt: crew member persona overrides the default.
+        # Build system prompt: the crew member's role replaces the default —
+        # its own persona plus, when it names one, its agent profile's
+        # instructions, composed rather than one overriding the other. Same
+        # helper the chat path uses, so a role reads identically on both
+        # surfaces (precedence rule 3 in src/crew_profile.py).
         # Built-in character_id (Socrates, Razor, etc.) further biases the
         # voice — it prepends to whichever base prompt we landed on so the
         # task still knows it's executing a scheduled task but in that
         # character's tone.
+        from src import crew_profile
+
         system_prompt = (
-            (crew.personality or "").strip()
-            if crew and crew.personality
-            else "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+            crew_profile.role_system_prompt(crew)
+            or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         )
         char_id = (getattr(task, "character_id", None) or "").strip()
         if char_id:
@@ -2135,33 +2144,30 @@ class TaskScheduler:
             _dt_msg = None
 
         # Compute the disabled-tools set: the crew's enabled_tools allowlist
-        # (inverted) plus the operator's global disabled_tools setting. The
-        # global list must be merged here — chat does the same merge before
-        # entering the agent loop (routes/chat_routes.py) — otherwise an admin
-        # or AUTH_ENABLED=false scheduled task would still see and call shell/
+        # (inverted) unioned with the denials of the agent profile it names,
+        # plus the operator's global disabled_tools setting. The global list
+        # must be merged here — chat does the same merge before entering the
+        # agent loop (routes/chat_routes.py) — otherwise an admin or
+        # AUTH_ENABLED=false scheduled task would still see and call shell/
         # file tools after the operator disabled them globally, because the
         # prompt/schema/execution gates only enforce what is passed in.
-        disabled_tools: set[str] = set()
-        if crew and crew.enabled_tools:
-            try:
-                enabled = json.loads(crew.enabled_tools)
-                if isinstance(enabled, list) and enabled:
-                    # One definition, imported. This used to invert the
-                    # allowlist here by hand against BUILTIN_TOOL_DESCRIPTIONS
-                    # while agent_profiles inverted it against
-                    # known_tool_names() — two registries, two answers, and
-                    # neither of them held a single MCP name, so a crew
-                    # restricted to a handful of tools still reached every tool
-                    # of every connected server. `live_tool_names()` is the
-                    # tools that exist on this run, MCP included, and the
-                    # inversion is the shared one.
-                    from src.tool_policy import denied_by_allowlist, live_tool_names
-
-                    disabled_tools |= denied_by_allowlist(
-                        live_tool_names(), tool_access="selected", enabled_tools=enabled
-                    )
-            except Exception:
-                pass
+        #
+        # The crew/profile part is precedence rule 1 in src/crew_profile.py:
+        # the two allowlists intersect, so linking a role can only narrow this
+        # crew member, never widen it. The chat path applies the identical rule
+        # through the same helper, and the helper inverts through
+        # tool_policy.denied_by_allowlist over live_tool_names() — MCP names
+        # included, which a builtin-only registry would have let straight past.
+        disabled_tools: set[str] = set(crew_profile.effective_disabled_tools(crew))
+        # The rest of the profile's loadout — memory/skill/model/MCP access,
+        # private-vault reads, approvals, delegation — is persisted onto this
+        # task's chat, because the agent loop and the tool layer read it back
+        # from the session's own settings mid-turn rather than from anything
+        # passed in here. A crew member with no linked profile writes nothing.
+        try:
+            crew_profile.apply_crew_profile_to_session(session_id, crew=crew)
+        except Exception:
+            logger.debug("crew profile sync failed for task session %s", session_id, exc_info=True)
         try:
             from src.settings import get_setting
             _global_disabled = get_setting("disabled_tools", [])

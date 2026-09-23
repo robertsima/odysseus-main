@@ -42286,6 +42286,10 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-preset-row { display: grid; grid-template-columns: minmax(220px,1fr) auto; align-items: end; gap: 7px; margin-bottom: 12px; padding: 9px 10px; border: 1px solid var(--wb-line); border-radius: 8px; background: var(--bg); }
 .ag-preset-row label { display: flex; flex-direction: column; gap: 3px; color: var(--wb-muted); font-size: 10px; }
 .ag-preset-row small { grid-column: 1 / -1; color: var(--wb-faint); font-size: 10px; }
+/* The crew role picker sits on its own line inside the preset row it
+   shares, so the link reads as a second field rather than a new panel. */
+.ag-preset-row .ag-preset-role { grid-column: 1 / -1; }
+.ag-preset-row .ag-preset-role small { color: var(--wb-faint); font-size: 10px; }
 .ag-policy-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
 .ag-policy-grid .ag-field { padding: 7px; border: 1px solid var(--wb-line); border-radius: 8px; background: var(--bg); }
 .ag-policy-grid .ag-field > span { color: var(--fg); font-weight: 650; }

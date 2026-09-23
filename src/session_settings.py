@@ -139,13 +139,38 @@ def stored_disabled_tools(settings: Optional[Dict[str, Any]]) -> Set[str]:
     :func:`src.tool_security.owner_baseline_disabled_tools` owns those, and
     every agent turn merges the two.
     """
-    names = (settings or {}).get("disabled_tools") or []
+    settings = settings or {}
+    names = settings.get("disabled_tools") or []
     if not isinstance(names, list):
         # Policy fails closed, but there is no safe non-empty guess to make from
         # a malformed row: say "nothing is recorded here" and let the owner
         # baseline (which is read from a different store) still apply.
-        return set()
-    return {str(name).strip() for name in names if str(name).strip()}
+        denied: Set[str] = set()
+    else:
+        denied = {str(name).strip() for name in names if str(name).strip()}
+
+    # The second stored shape, as anticipated above. A chat narrowed by an
+    # allowlist keeps `disabled_tools` EMPTY and records `tool_access` /
+    # `enabled_tools` instead, so a reader that looks only at the field above
+    # sees an unrestricted chat and admits everything the allowlist excludes.
+    # Inverted here, on this turn's live registry, so a tool that did not exist
+    # when the allowlist was saved is excluded rather than admitted.
+    access = settings.get("tool_access")
+    if access and access != "all":
+        try:
+            from src.tool_policy import denied_by_allowlist, live_tool_names
+
+            denied |= denied_by_allowlist(
+                live_tool_names(),
+                tool_access=access,
+                enabled_tools=settings.get("enabled_tools") or [],
+            )
+        except Exception:
+            # Unlike the malformed-row case, an allowlist we cannot invert is a
+            # restriction we know exists and cannot express. Raising is the only
+            # answer that fails closed; the callers both guard this.
+            raise
+    return denied
 
 
 def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:

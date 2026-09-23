@@ -593,14 +593,18 @@ PINNED_TURNS = [
 def _role_disabled_tools(loadout):
     """The deny set this loadout really reaches the agent loop as.
 
-    `agent_profiles.session_patch` is the production path, and it stores an
-    allowlist as its complement — every known tool minus the enabled ones — so
-    by the time `stream_agent_loop` sees the policy there is nothing left to
-    tell it apart from any other deny. That is why the pipeline kept running
-    underneath it, and why the pin reads the allowlist back out of the denies.
+    `agent_profiles.session_patch` is the production path. It stores an
+    allowlist AS an allowlist (`tool_access`/`enabled_tools`) and leaves
+    `disabled_tools` holding only the loadout's extra denials, so reading that
+    field alone reports a scoped role as unrestricted. `stored_disabled_tools`
+    is the single reader that resolves both stored shapes, and it is what the
+    chat route and `run_headless` feed the loop — so it is what the pin sees,
+    and inverting on the live registry is what keeps a later-added tool out.
     """
+    from src.session_settings import stored_disabled_tools
+
     profile = agent_profiles.validate_profiles([dict(loadout)])[0]
-    return set(agent_profiles.session_patch(profile)["disabled_tools"])
+    return stored_disabled_tools(agent_profiles.session_patch(profile))
 
 
 def _shaped_for_turn(selection, text):
