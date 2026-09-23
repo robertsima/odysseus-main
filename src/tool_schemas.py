@@ -1367,7 +1367,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
                     "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
-                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."},
+                    "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
                     "run_id": {"type": "string", "description": "stop only: the worker run to stop (from start/status). Omit when exactly one worker is running."},
                     "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},
                     "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},

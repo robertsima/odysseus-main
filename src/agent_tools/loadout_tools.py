@@ -273,7 +273,8 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         from src import agent_activity
 
         rows = []
-        for run in agent_activity.list_runs(session_id=session_id, limit=int(args.get("limit") or 20)):
+        for run in agent_activity.list_runs(session_id=session_id, limit=int(args.get("limit") or 20),
+                                            include_descendants=True):
             summary = run.get("summary") or {}
             row = {
                 "run_id": run["run_id"], "status": run["status"], "title": run["title"],
@@ -312,7 +313,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
 
         run_id = str(args.get("run_id") or "").strip()
         worker = str(args.get("worker_session") or args.get("session_id") or "").strip()
-        mine = agent_activity.list_runs(session_id=session_id, limit=100)
+        mine = agent_activity.list_runs(session_id=session_id, limit=100, include_descendants=True)
         candidates = [
             run for run in mine
             if run.get("status") == "running"
@@ -574,11 +575,22 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "exit_code": 1,
         }
 
-    # Report to the calling chat unless the agent explicitly asks for a
-    # standalone worker (parent_session: ""), so a worker is not orphaned by
-    # default.
-    parent = args.get("parent_session", session_id)
-    parent = str(parent).strip() if parent else None
+    # A worker always reports to the chat that started it. `parent_session`
+    # used to accept "" (standalone) or any chat the user owns, and a model
+    # that filled the optional field -- empty, or with an id it had seen
+    # earlier -- orphaned the worker: no card in the chat that started it, no
+    # row in action='status', and no hand-off when it finished (2026-09-23).
+    # Another chat is accepted only when it is one of this chat's own workers.
+    requested = str(args.get("parent_session") or "").strip()
+    parent = session_id or None
+    if requested and requested != session_id:
+        from src import agent_activity as _activity
+        if session_id and requested in _activity._descendant_sessions(
+                _activity.list_runs(owner=owner, limit=400), session_id):
+            parent = requested
+        else:
+            logger.info("[agent-loadout] ignoring parent_session=%s; reporting to calling chat %s",
+                        requested, session_id)
     if parent and parent != session_id:
         # /api/agents/launch owner-checks its parent chat; this path has to do
         # the same, or an agent could name someone else's chat and have the

@@ -104,7 +104,9 @@ def setup_workbench_routes() -> APIRouter:
     async def runs(request: Request, session_id: Optional[str] = None, limit: int = 50,
                    active: bool = False):
         _admin(request)
-        rows = activity.list_runs(session_id=session_id, limit=limit, active_only=active)
+        # The chat's strip also shows workers its workers started.
+        rows = activity.list_runs(session_id=session_id, limit=limit, active_only=active,
+                                  include_descendants=bool(session_id))
         if session_id:
             # The agent strip polls this every few seconds, so log a line only
             # when the answer changes. One line per change is enough to tell,

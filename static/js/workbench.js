@@ -342,6 +342,7 @@ async function refreshAgentRuns({ force = false } = {}) {
   state.agentRunsInFlight = run;
   await run;
   renderAgentStrip();
+  restoreChatCards();
 }
 
 function stripRuns() {
@@ -1160,6 +1161,18 @@ function restoreChatCards() {
     const events = (run.events || []).filter((ev) => ev.session_id === state.sessionId).slice(-30);
     if (events.length) events.forEach((ev) => updateChatCard(ev));
     else updateChatCard({ run_id: run.run_id, source: run.source, session_id: run.session_id, kind: 'restore' });
+  }
+  // Workers the server files for this chat (its own, and ones they started)
+  // whose events this browser never saw on this chat's feed: a worker started
+  // by a worker publishes only to its own parent, so without this it had a
+  // strip row but no card in the chat at the top of the tree.
+  for (const row of state.agentRuns.values()) {
+    if (state.chatCards.has(row.run_id) || !isLive(row.status) || !CHAT_CARD_SOURCES.has(row.source)) continue;
+    const known = state.runs.get(row.run_id);
+    if (known) known.session_id = state.sessionId;
+    else state.runs.set(row.run_id, { run_id: row.run_id, source: row.source, session_id: state.sessionId, title: row.title,
+      status: row.status, started_at: row.started_at, finished_at: null, events: [], data: { ...(row.summary || {}) }, tools: 0, errors: 0 });
+    updateChatCard({ run_id: row.run_id, source: row.source, session_id: state.sessionId, kind: 'restore' });
   }
 }
 function updateChatCard(ev) {

@@ -344,29 +344,59 @@ def launcher(monkeypatch, store):
     return seen
 
 
-async def test_start_refuses_another_owners_chat_as_the_parent(monkeypatch, launcher):
+async def test_start_never_reports_to_another_owners_chat(monkeypatch, launcher):
     monkeypatch.setattr("src.ai_interaction.get_session_manager",
                         lambda: _manager({"theirs": _Chat("someone-else")}))
     result = await manage_agent_loadout(
         '{"action": "start", "task": "go", "parent_session": "theirs"}', "mine", owner="me")
-    assert result["exit_code"] == 1 and "not found" in result["error"]
-    assert launcher == {}
+    assert result["exit_code"] == 0
+    assert launcher["parent_session"] == "mine"
 
 
-async def test_start_accepts_another_chat_the_caller_does_own(monkeypatch, launcher):
+async def test_start_reports_to_the_calling_chat_not_an_unrelated_one(monkeypatch, launcher):
+    """2026-09-23: a worker whose parent_session named some other chat (or
+    was sent empty) finished with no card, no status row and no hand-off in
+    the chat that started it."""
     monkeypatch.setattr("src.ai_interaction.get_session_manager",
                         lambda: _manager({"other": _Chat("me")}))
-    result = await manage_agent_loadout(
-        '{"action": "start", "task": "go", "parent_session": "other"}', "mine", owner="me")
-    assert result["exit_code"] == 0
-    assert launcher["parent_session"] == "other"
+    for value in ('"other"', '""', "null"):
+        launcher.clear()
+        result = await manage_agent_loadout(
+            '{"action": "start", "task": "go", "parent_session": %s}' % value, "mine", owner="me")
+        assert result["exit_code"] == 0
+        assert launcher["parent_session"] == "mine", value
 
 
-async def test_start_can_be_asked_for_a_standalone_worker(launcher):
+async def test_start_may_report_to_one_of_this_chats_workers(monkeypatch, launcher):
+    from src import agent_activity
+
+    runs = [{"run_id": "r-0", "session_id": "w-9", "owner": "me", "status": "running",
+             "summary": {"parent_session": "mine", "target_session": "w-9"}}]
+    monkeypatch.setattr(agent_activity, "list_runs", lambda **kw: runs)
+    monkeypatch.setattr("src.ai_interaction.get_session_manager",
+                        lambda: _manager({"w-9": _Chat("me")}))
     result = await manage_agent_loadout(
-        '{"action": "start", "task": "go", "parent_session": ""}', "mine", owner="me")
+        '{"action": "start", "task": "go", "parent_session": "w-9"}', "mine", owner="me")
     assert result["exit_code"] == 0
-    assert launcher["parent_session"] is None
+    assert launcher["parent_session"] == "w-9"
+
+
+def test_list_runs_can_include_workers_started_by_workers(monkeypatch):
+    from src import agent_activity
+
+    rows = {
+        "a": {"run_id": "a", "session_id": "w1", "owner": "me", "status": "completed", "started_at": 1,
+              "summary": {"parent_session": "top", "target_session": "w1"}},
+        "b": {"run_id": "b", "session_id": "w2", "owner": "me", "status": "running", "started_at": 2,
+              "summary": {"parent_session": "w1", "target_session": "w2"}},
+        "c": {"run_id": "c", "session_id": "x", "owner": "me", "status": "running", "started_at": 3,
+              "summary": {"parent_session": "elsewhere", "target_session": "x"}},
+    }
+    monkeypatch.setattr(agent_activity, "_runs", rows)
+    monkeypatch.setattr(agent_activity, "_load_runs", lambda: None)
+    direct = {r["run_id"] for r in agent_activity.list_runs(session_id="top")}
+    tree = {r["run_id"] for r in agent_activity.list_runs(session_id="top", include_descendants=True)}
+    assert direct == {"a"} and tree == {"a", "b"}
 
 
 # ── update must not wipe fields the caller never set ─────────────────────────

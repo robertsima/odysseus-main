@@ -461,14 +461,40 @@ def last_seq(session_id: str) -> int:
         return _seq.get(sid, 0)
 
 
+def _descendant_sessions(rows: List[dict], session_id: str, max_depth: int = 4) -> set:
+    """Chats of workers started by ``session_id``, and by those workers in
+    turn. A worker that starts its own worker reports to the worker, so the
+    chat at the top of the tree could neither see nor list the nested one."""
+    children: Dict[str, set] = {}
+    for r in rows:
+        summary = r.get("summary") or {}
+        parent = summary.get("parent_session")
+        child = summary.get("target_session") or r.get("session_id")
+        if parent and child and child != parent:
+            children.setdefault(parent, set()).add(child)
+    found, frontier = set(), {session_id}
+    for _ in range(max_depth):
+        frontier = {c for s in frontier for c in children.get(s, ())} - found - {session_id}
+        if not frontier:
+            break
+        found |= frontier
+    return found
+
+
 def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
-              limit: int = 50, active_only: bool = False) -> List[dict]:
+              limit: int = 50, active_only: bool = False,
+              include_descendants: bool = False) -> List[dict]:
     with _lock:
         _load_runs()
         rows = list(_runs.values())
     if owner is not None:
         rows = [r for r in rows if r.get("owner") in (owner, None)]
-    if session_id:
+    if session_id and include_descendants:
+        tree = {session_id} | _descendant_sessions(rows, session_id)
+        rows = [r for r in rows
+                if r.get("session_id") in tree
+                or (r.get("summary") or {}).get("parent_session") in tree]
+    elif session_id:
         # A worker's run is filed under the WORKER's chat, but the chat that
         # started it has to be able to find it: the agent strip above the
         # composer reconciles the rows it drew from the parent's own feed
