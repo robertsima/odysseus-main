@@ -102,9 +102,18 @@ def _rounds_exhausted_note(state: Dict[str, Any]) -> str:
 
 # Tools a headless child must never get: each one starts *another* agent, so
 # without this a sub-agent could fan out sub-sub-agents without bound.
+#
+# `manage_agent_loadout` is in the set for its `action="start"`, which calls
+# `agent_control.launch_worker` — it starts another agent, which is the whole
+# reason this set exists. Its own gates do not stop a child: `caller_policy`
+# hands a fresh child chat the "explicit" delegation default (only "never"
+# refuses), and `live_children` is 0 because the child has started nothing yet,
+# so both gates pass on the first call. The set is enforced by tool name, so
+# the loadout CRUD actions go with it; a child that may not start a worker has
+# no use for authoring one.
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
     "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
-    "manage_session", "manage_agent_worktree",
+    "manage_session", "manage_agent_worktree", "manage_agent_loadout",
 })
 
 
@@ -114,6 +123,8 @@ async def run_headless(
     *,
     max_rounds: int = 12,
     disabled_tools: Optional[Set[str]] = frozenset(),
+    subagent: bool = True,
+    deny_private_vault: bool = False,
     activity_session_id: Optional[str] = None,
     run_id: Optional[str] = None,
     source: str = "session",
@@ -128,10 +139,22 @@ async def run_headless(
     agent-thread cards. When ``activity_session_id`` is given, every tool
     call is also published to that session's activity feed under ``run_id``.
 
-    ``disabled_tools`` is added to :data:`SUBAGENT_BLOCKED_TOOLS`; pass
-    ``None`` for a chat continuing itself rather than a child. Either way the
-    owner's baseline (the global disabled-tools setting and their privileges)
-    applies — these turns never pass through the chat route that enforces it.
+    Two separate questions decide this run's policy, and they used to share one
+    argument. ``disabled_tools`` is only *extra* denials the caller wants on top
+    of everything else; ``None`` and ``frozenset()`` both mean "none supplied"
+    and neither says anything about what kind of run this is. ``subagent`` says
+    that: ``True`` (the default, because policy fails closed) for a detached
+    child of another agent, which additionally gets
+    :data:`SUBAGENT_BLOCKED_TOOLS` so it cannot fan out grandchildren; ``False``
+    for a chat continuing *itself*, which instead runs under that chat's own
+    stored policy — the tools it has switched off and its approval mode.
+
+    ``deny_private_vault`` narrows only: it forces private-vault access off for
+    this run whatever the chat's own grant says. It can never turn access on.
+
+    Either way the owner's baseline (the global disabled-tools setting and their
+    privileges) applies — these turns never pass through the chat route that
+    enforces it.
 
     With a ``run_id``, :func:`request_stop` ends the run early; ``outcome``
     (when given) receives ``{"stopped": True}`` in that case. A run that instead
@@ -141,18 +164,51 @@ async def run_headless(
     finished one.
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
+    from src.session_settings import effective_approval_mode, stored_disabled_tools
     from src.tool_security import owner_baseline_disabled_tools
     try:
         from core.database import get_session_settings
-        allow_private = bool((get_session_settings(sess.id) or {}).get("private_vault_access", False))
+        chat_settings = get_session_settings(getattr(sess, "id", None)) or {}
     except Exception:
+        chat_settings = {}
+    allow_private = bool(chat_settings.get("private_vault_access", False))
+    if deny_private_vault:
+        # A narrowing, never a grant: a caller may take private-vault access
+        # away from this run, but may not hand it to a chat that has none.
         allow_private = False
 
     baseline = owner_baseline_disabled_tools(effective_owner)
-    if disabled_tools is None:
-        blocked = baseline or None
+    extra = set(disabled_tools or ())
+    if subagent:
+        blocked = set(SUBAGENT_BLOCKED_TOOLS) | extra | baseline
+        # A detached child runs in a chat the user did not open; an approval
+        # card raised there really would have nobody to answer it.
+        approval_mode: Optional[str] = None
     else:
-        blocked = set(SUBAGENT_BLOCKED_TOOLS) | set(disabled_tools) | baseline
+        # A chat continuing ITSELF — after a worker it launched finished, or
+        # after a background job it started did. It is the user's own chat, so
+        # it runs under the user's own chat policy. Not doing this is how a
+        # chat with `bash` switched off came to run `bash` the moment a worker
+        # reported back.
+        #
+        # Resolving the tension with `src/agent_loop.py`'s note that headless
+        # callers "are never gated — nobody would be there to answer": that is
+        # right for the branch above and wrong for this one. This run continues
+        # the user's foreground chat, in that chat, and writes its answer into
+        # that chat's transcript; the user is exactly as present as they were
+        # for the turn that launched the worker. So a chat set to `ask_all`
+        # keeps asking. A gated call is recorded by `tool_approvals.request`
+        # and listed by the Agent Control Room (`routes/agents_routes.py`), so
+        # the question is answerable rather than dropped — and a call that is
+        # never answered is one that never ran, which is the direction policy
+        # is supposed to fail.
+        #
+        # SUBAGENT_BLOCKED_TOOLS is deliberately NOT added here. It exists to
+        # stop a *child* minting grandchildren; the parent delegating is the
+        # normal case, not the thing being prevented.
+        blocked = extra | stored_disabled_tools(chat_settings) | baseline
+        approval_mode = effective_approval_mode(chat_settings)
+    blocked = blocked or None
 
     state: Dict[str, Any] = {"full": "", "tool_events": [], "round": 1}
     stop_event = asyncio.Event() if run_id else None
@@ -161,7 +217,7 @@ async def run_headless(
     drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
-                                         allow_private=allow_private))
+                                         allow_private=allow_private, approval_mode=approval_mode))
     try:
         if stop_event is None:
             await drain
@@ -206,7 +262,8 @@ async def run_headless(
 
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
-                 source: str, on_event, allow_private: bool = False) -> None:
+                 source: str, on_event, allow_private: bool = False,
+                 approval_mode: Optional[str] = None) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -220,6 +277,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         owner=owner,
         disabled_tools=blocked,
         allow_private=allow_private,
+        approval_mode=approval_mode,
     ):
         if not chunk.startswith("data: "):
             continue

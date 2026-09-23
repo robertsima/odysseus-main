@@ -196,3 +196,105 @@ def test_dispatched_via_registry_not_dispatch_ai_tool():
     legacy_tuple = source[branch_head:idx]
     for name in _SESSION_TOOLS:
         assert f'"{name}"' not in legacy_tuple, f"{name} still routed via dispatch_ai_tool"
+
+
+# ── a failed hand-off must not read as a success ──────────────────────────
+#
+# The agent loop and the activity feed both decide a tool failed with
+# `result.get("exit_code") not in (0, None)`, so an error return with no
+# exit_code at all reads as "done": a `send_to_session` that never delivered
+# rendered as a finished tool bubble and a green activity row.
+
+
+def _failed(result):
+    """The exact predicate src/agent_loop.py applies to a tool result."""
+    return result.get("exit_code") not in (0, None)
+
+
+def test_send_to_session_errors_report_as_failures(monkeypatch):
+    monkeypatch.setattr(st, "get_session_manager", lambda: _FakeMgr({}))
+
+    # An unknown target, a missing message and a bad mode are all real failures
+    # the agent has to see as failures.
+    for content in ('{"session_id": "nope", "message": "hi"}',
+                    '{"session_id": "nope", "message": ""}',
+                    '{"session_id": "nope", "message": "hi", "mode": "sideways"}'):
+        res = asyncio.run(st.send_to_session(content, owner="alice"))
+        assert "error" in res, content
+        assert _failed(res), f"{content} -> reported as success: {res}"
+
+
+def test_manage_session_errors_report_as_failures(monkeypatch):
+    monkeypatch.setattr(st, "get_session_manager", lambda: _FakeMgr({}))
+    monkeypatch.setattr(database, "Session", object, raising=False)
+
+    for content in ("", '{"action": "teleport", "session_id": "abc"}'):
+        res = asyncio.run(st.manage_session(content, owner="alice"))
+        assert "error" in res, content
+        assert _failed(res), f"{content} -> reported as success: {res}"
+
+
+# ── a loadout means two different things; it must say which ───────────────
+#
+# `session_id: "new"` writes the loadout's whole policy onto the chat it
+# creates. An existing chat is the user's, so its stored policy is left alone
+# and only the per-exchange parts apply. Same tool, same argument, two
+# policies — which is fine as long as the result says so instead of implying
+# the first when it did the second.
+
+
+_LOADOUT = {
+    "name": "Auditor", "instructions": "", "model": "", "model_fallbacks": [],
+    "disabled_tools": ["bash"], "max_rounds": 5, "private_vault_access": False,
+}
+
+
+def _run_send(monkeypatch, target, seen):
+    """Send to `target` under _LOADOUT, with the headless drain stubbed out."""
+    import src.agent_profiles as agent_profiles
+    import src.headless_agent as headless
+
+    existing = _FakeSession("alice", "Notes", [])
+    existing.model = "m"  # not the offline fixture model: take the agent path
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen.update(kwargs)
+        return "done", []
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+    monkeypatch.setattr(agent_profiles, "get_profile", lambda name: dict(_LOADOUT))
+    monkeypatch.setattr(st, "get_session_manager", lambda: _FakeMgr({"sid": existing}))
+    monkeypatch.setattr(st, "_new_child_session", lambda *a, **k: (_Child(), None))
+    return asyncio.run(st.send_to_session(
+        '{"session_id": "%s", "message": "audit", "profile": "Auditor"}' % target, owner="alice"))
+
+
+class _Child(_FakeSession):
+    def __init__(self):
+        super().__init__("alice", "child", [])
+        self.id, self.model = "childsid", "m"
+
+
+def test_a_loadout_says_whether_it_re_policed_the_chat_or_only_the_exchange(monkeypatch):
+    fresh = _run_send(monkeypatch, "new", {})
+    assert fresh["profile"] == "Auditor"
+    assert fresh["profile_scope"] == "chat"
+
+    existing = _run_send(monkeypatch, "sid", {})
+    assert existing["profile"] == "Auditor"
+    assert existing["profile_scope"] == "exchange"
+    # And the difference is spelled out rather than left to be discovered.
+    assert "did not" in existing["profile_note"] or "NOT changed" in existing["profile_note"]
+    assert existing["profile_note"] != fresh["profile_note"]
+
+
+def test_a_loadouts_private_vault_denial_binds_an_existing_chat_too(monkeypatch):
+    """The one part of the gap that was an escalation, not just a difference.
+
+    Everything else the loadout does not reach on an existing chat leaves that
+    chat at its own setting. Private-vault access is different: leaving it at
+    the chat's setting *granted* a loadout that denies it, so this one narrows.
+    """
+    seen = {}
+    _run_send(monkeypatch, "sid", seen)
+    assert seen["deny_private_vault"] is True

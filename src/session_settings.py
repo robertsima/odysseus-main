@@ -19,7 +19,7 @@ Two kinds of keys live in ``sessions.settings_json``:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Set
 
 from src import tool_approvals
 
@@ -120,6 +120,32 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out
+
+
+def stored_disabled_tools(settings: Optional[Dict[str, Any]]) -> Set[str]:
+    """The tools this chat has switched off, read off the chat's own settings.
+
+    The single reader of the stored tool-denial shape. Two places need exactly
+    the same answer: the chat route before a live turn, and
+    :func:`src.headless_agent.run_headless` when a chat continues *itself*
+    headlessly (after a worker finishes, or after a background job does). They
+    had no shared definition, and the second one simply did not do it — which
+    is how a worker finishing came to run the user's chat with none of the
+    chat's own denials in force. One definition, imported: when the stored shape
+    grows another form (an allowlist stored as an allowlist rather than as an
+    inverted denylist), extend it here and both callers follow.
+
+    Owner-level denials are deliberately NOT included —
+    :func:`src.tool_security.owner_baseline_disabled_tools` owns those, and
+    every agent turn merges the two.
+    """
+    names = (settings or {}).get("disabled_tools") or []
+    if not isinstance(names, list):
+        # Policy fails closed, but there is no safe non-empty guess to make from
+        # a malformed row: say "nothing is recorded here" and let the owner
+        # baseline (which is read from a different store) still apply.
+        return set()
+    return {str(name).strip() for name in names if str(name).strip()}
 
 
 def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
