@@ -97,6 +97,17 @@ def _install_model_route_import_stubs(monkeypatch):
     exceptions_mod.SessionNotFoundError = type("SessionNotFoundError", (Exception,), {})
     session_mgr_mod = types.ModuleType("core.session_manager")
     session_mgr_mod.SessionManager = MagicMock()
+    # `core` above is a stub module with no __path__, so every core.* submodule
+    # the routes import has to be registered here too. chat_routes and
+    # model_routes both grew `from core.log_safety import redact_url` and this
+    # fixture did not follow, which turned three tests into
+    # ModuleNotFoundError before they asserted anything. Use the real function:
+    # it is pure string work with no imports of its own, so stubbing it would
+    # only risk the fake and the real one disagreeing.
+    from core.log_safety import redact_url as _real_redact_url
+
+    log_safety_mod = types.ModuleType("core.log_safety")
+    log_safety_mod.redact_url = _real_redact_url
 
     monkeypatch.delitem(sys.modules, "routes.model_routes", raising=False)
     monkeypatch.delitem(sys.modules, "routes.chat_routes", raising=False)
@@ -108,6 +119,7 @@ def _install_model_route_import_stubs(monkeypatch):
     monkeypatch.setitem(sys.modules, "core.models", models_mod)
     monkeypatch.setitem(sys.modules, "core.exceptions", exceptions_mod)
     monkeypatch.setitem(sys.modules, "core.session_manager", session_mgr_mod)
+    monkeypatch.setitem(sys.modules, "core.log_safety", log_safety_mod)
 
 
 def _install_core_auth_stub(monkeypatch):
@@ -860,6 +872,23 @@ def _install_admin_auth_stub(monkeypatch):
             return True
 
     monkeypatch.setattr(auth_mod, "AuthManager", lambda: FakeAdminAuth())
+    # The execution-time gate does not go through AuthManager at all:
+    # tool_execution._owner_is_admin delegates to
+    # tool_security.owner_is_admin_or_single_user, which resolves the owner its
+    # own way. Stubbing only the class left the email tools blocked by
+    # is_public_blocked_tool() before they reached the argument validation these
+    # tests are actually about, so four of them asserted on a permission message
+    # instead of on JSON handling. The admin gate itself is covered by
+    # tests/test_task_cookbook_admin_gate.py; pinning it here is scaffolding,
+    # not a relaxed assertion.
+    # Patched on tool_execution, not tool_security: the name is bound at import
+    # (`from src.tool_security import owner_is_admin_or_single_user`), so
+    # patching the source module leaves the already-bound reference in place.
+    import src.tool_execution as _tool_execution
+
+    monkeypatch.setattr(
+        _tool_execution, "owner_is_admin_or_single_user", lambda owner: True, raising=False
+    )
 
 
 class _FakeMcpManager:
