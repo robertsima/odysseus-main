@@ -1366,7 +1366,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
-                    "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
+                    "max_rounds": {"type": "integer", "description": "Advisory round budget for the worker (0 = unlimited, the default; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."},
                     "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
                     "run_id": {"type": "string", "description": "stop only: the worker run to stop (from start/status). Omit when exactly one worker is running."},
                     "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},
@@ -1395,7 +1395,7 @@ FUNCTION_TOOL_SCHEMAS = [
                             "skills": {"type": "array", "items": {"type": "string"}},
                             "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
                             "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},
-                            "max_rounds": {"type": "integer", "minimum": 1, "maximum": 40}
+                            "max_rounds": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Advisory round budget for this specialist (0 = unlimited; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."}
                         }, "required": ["name", "task", "tools"]
                     }},
                     "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {

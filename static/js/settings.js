@@ -1548,7 +1548,7 @@ async function initAgentSettings() {
       await _postSettings(payload);
       if (fold != null && window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(fold);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (rounds != null ? ' · ' + rounds + ' rounds/message (advisory)' : '') +
         (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
         (cap != null ? ' · context cap ' + Math.round(cap / 1000) + 'k' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
@@ -1564,7 +1564,7 @@ async function initAgentSettings() {
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (curR != null ? ' · ' + curR + ' rounds/message (advisory)' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }
@@ -2641,8 +2641,8 @@ function initAgentProfilesEditor(initial) {
       var head = document.createElement('div');
       head.className = 'agent-profile-head';
       head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
-      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'empty = calling chat’s model' }), 'model or model@endpoint'));
-      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '1', max: '40', placeholder: '12' })));
+      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
+      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = unlimited' }), 'Advisory round budget (0 = unlimited, max 200). It does not stop a run; the tool call limit, stall detection and timeouts do.'));
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'ats-btn agent-profile-remove';
@@ -2707,7 +2707,7 @@ function initAgentProfilesEditor(initial) {
   }
   addBtn && addBtn.addEventListener('click', function () {
     profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
-      max_rounds: 12, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
+      max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
       private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
       persona_name: '', temperature: null, max_tokens: null });
