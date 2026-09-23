@@ -256,6 +256,42 @@ def _mcp_state() -> Tuple[Dict[str, Tuple[str, str]], Set[str]]:
         return {}, set()
 
 
+def stale_mcp_grants(profile: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, List[str]]]:
+    """MCP tools a loadout names that its (connected) server no longer has.
+
+    ``{server_id: {"missing": [...], "present": [...]}}`` for every server that
+    is connected right now and on which the loadout names at least one exact
+    tool that server does not offer. Wildcard grants cannot go stale and are
+    ignored, and so is a server with no tools listed at all — that is a
+    connection problem, which the launcher reports separately.
+
+    On 2026-09-23 the Penpot Product Designer loadout named the plugin Penpot
+    MCP's four tools (`execute_code`, `high_level_overview`, ...) on server
+    c5ec6d7a, which by then was a different 81-tool Penpot server. The
+    allowlist permitted names nothing had, so the worker started with no Penpot
+    tool at all and reported the job impossible. Nothing said why.
+    """
+    if not profile or profile.get("tool_access") != "selected":
+        return {}
+    from src.tool_policy import split_mcp_tool_name
+
+    rows, _deferred = _mcp_state()
+    offered: Dict[str, Set[str]] = {}
+    for qualified, (server, _status) in rows.items():
+        offered.setdefault(server, set()).add(qualified)
+    out: Dict[str, Dict[str, List[str]]] = {}
+    for entry in profile.get("enabled_tools") or []:
+        parts = split_mcp_tool_name(entry)
+        if not parts or parts[1] == "*":
+            continue
+        server = parts[0]
+        if server not in offered:
+            continue
+        bucket = out.setdefault(server, {"missing": [], "present": []})
+        bucket["present" if entry in offered[server] else "missing"].append(entry)
+    return {server: b for server, b in out.items() if b["missing"]}
+
+
 def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
                       policy: Dict[str, Any], owner: Optional[str] = None) -> Dict[str, Any]:
     """Every state a requested tool can be in, and why each missing one is missing.

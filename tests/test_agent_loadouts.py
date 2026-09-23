@@ -871,3 +871,53 @@ async def test_preflight_names_unresolved_skill_dependencies_and_a_stale_index(s
     assert readiness["access"] == {"indexed_retrieval_public": True, "indexed_retrieval_private": False,
                                    "raw_private_file_access": False, "index_current": False}
     assert "DEGRADED" in result["response"] and "repair" in result["response"]
+
+
+async def test_start_refuses_a_loadout_whose_mcp_tools_its_server_no_longer_has(monkeypatch, store):
+    """2026-09-23: Penpot Product Designer named the plugin Penpot MCP's tools on
+    server c5ec6d7a, which by then was a different Penpot server. The worker
+    started with no Penpot tool and could only report the job impossible."""
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"]}', "c", owner="u")
+    base = store["profiles"][0]
+    store["profiles"].append({**base, "name": "Designer", "enabled_tools": [
+        "read_file", "mcp__c5ec6d7a__execute_code", "mcp__c5ec6d7a__high_level_overview"]})
+    store["profiles"].append({**base, "name": "Partial", "enabled_tools": [
+        "read_file", "mcp__c5ec6d7a__execute_code", "mcp__c5ec6d7a__create_frame"]})
+    monkeypatch.setattr(agent_loadouts, "_mcp_state", lambda: ({
+        "mcp__c5ec6d7a__create_frame": ("c5ec6d7a", "connected"),
+        "mcp__c5ec6d7a__create_text": ("c5ec6d7a", "connected"),
+    }, set()))
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"session_id": "w-1", "session_name": "Partial 1", "run_id": "r-1",
+                "model": "gpt-5.6-sol", "max_rounds": 4}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Designer", "task": "make a card"}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert result["blocked_reason"] == "loadout_mcp_tools_missing"
+    assert "mcp__c5ec6d7a__execute_code" in result["error"]
+    assert not launched
+
+    # Some of the server's grant still exists: start, but say what is missing.
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Partial", "task": "make a card"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert "mcp__c5ec6d7a__execute_code" in result["response"]
+    assert launched
+
+
+def test_stale_mcp_grants_ignores_wildcards_and_disconnected_servers(monkeypatch):
+    monkeypatch.setattr(agent_loadouts, "_mcp_state", lambda: ({
+        "mcp__penpot__create_frame": ("penpot", "connected")}, set()))
+    profile = {"tool_access": "selected", "enabled_tools": [
+        "mcp__penpot__*", "mcp__offline__some_tool", "read_file"]}
+    assert agent_loadouts.stale_mcp_grants(profile) == {}
+    assert agent_loadouts.stale_mcp_grants({"tool_access": "all"}) == {}

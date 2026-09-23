@@ -637,6 +637,32 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "exit_code": 1,
         }
 
+    # A loadout that names MCP tools its server no longer offers starts a
+    # worker without them, and the worker can only report that its job is
+    # impossible. When every named tool on a connected server is gone, that
+    # server's part of the role is gone too: refuse and say which names.
+    stale = agent_loadouts.stale_mcp_grants(started_profile) if started_profile else {}
+    dead_servers = {s: b["missing"] for s, b in stale.items() if not b["present"]}
+    if dead_servers:
+        listed = "; ".join(f"server {s}: {', '.join(names)}" for s, names in sorted(dead_servers.items()))
+        return {
+            "error": (
+                f"start: loadout {name!r} names MCP tools its connected server does not offer "
+                f"({listed}). The server is connected but its tools have different names now, so "
+                "the worker would start with none of them. Update the loadout's enabled_tools "
+                "(action='capabilities' lists what exists, or grant the server whole with "
+                "mcp__<server>__*), then start again."
+            ),
+            "blocked": True,
+            "blocked_reason": "loadout_mcp_tools_missing",
+            "missing_mcp_tools": dead_servers,
+            "exit_code": 1,
+        }
+    stale_note = ""
+    if stale:
+        stale_note = " Note: these granted MCP tools do not exist on their server and will not be available: " + \
+            ", ".join(sorted(n for b in stale.values() for n in b["missing"])) + "."
+
     # A worker always reports to the chat that started it. `parent_session`
     # used to accept "" (standalone) or any chat the user owns, and a model
     # that filled the optional field -- empty, or with an id it had seen
@@ -718,7 +744,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             f"with these tools: {tool_note}. It runs until the task is done — a round count never "
             f"cuts it off{wrap_note} — and it runs detached, so its progress appears on this chat's activity feed "
             "and in action='status'. If those tools cannot do the task you just described, stop it "
-            "and fix the loadout instead of waiting for the result."
+            "and fix the loadout instead of waiting for the result." + stale_note
         ),
         "preflight": preflight,
         **{key: value for key, value in result.items() if key != "preflight"},
