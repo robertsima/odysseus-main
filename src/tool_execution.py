@@ -547,6 +547,8 @@ _ADMIN_TOOLS = {
     # is operator-facing diagnostic data.
     "manage_agent_worktree",
     "read_app_logs",
+    # Reads task prompts, run outputs and configuration provenance.
+    "inspect_runtime",
     # Runs an external coding agent against an approved repo checkout.
     "delegate_to_agent", "delegate_to_claude_code",
     "manage_endpoints",

@@ -1630,6 +1630,57 @@ FUNCTION_TOOL_SCHEMAS = [
             }
         }
     },
+    # Appended last on purpose: additive at the tail of the list keeps this
+    # entry out of the way of concurrent edits elsewhere in the file.
+    {
+        "type": "function",
+        "function": {
+            "name": "inspect_runtime",
+            "description": (
+                "Explain why a scheduled task behaved the way it did, and where a "
+                "configuration value came from. action='tasks' lists the tasks you own "
+                "with the scheduler lane each one lands in and why. action='task' with a "
+                "task_id returns the last few runs: the prompt each actually sent (which "
+                "differs from the stored prompt, because the system half is composed at "
+                "run time), whether each run succeeded, errored, was skipped or was "
+                "aborted and what aborted it, the tool calls it made including email "
+                "tools, the tool/approval policy it ran under, the circuit-breaker "
+                "verdict for its endpoint, and every occasion the scheduler decided not "
+                "to run it at all. action='config' says whether a setting's effective "
+                "value comes from an environment variable, data/settings.json, your own "
+                "preferences or the code default. Read-only. Credentials are never "
+                "returned, and the result is data about your own tasks only."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["tasks", "task", "config"],
+                        "description": "tasks | task | config (default: tasks)",
+                    },
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task id, required for action='task' (from action='tasks').",
+                    },
+                    "runs": {
+                        "type": "integer",
+                        "description": "How many recent runs to report for action='task' (default 5, max 20).",
+                    },
+                    "include_traces": {
+                        "type": "boolean",
+                        "description": "Include per-run tool-call traces (default true).",
+                    },
+                    "keys": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Setting keys for action='config'. Omit for every key whose value is not the code default.",
+                    },
+                },
+                "required": ["action"],
+            },
+        },
+    },
 ]
 
 

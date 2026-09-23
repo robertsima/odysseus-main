@@ -394,27 +394,27 @@ def _parse_args(args: dict) -> dict:
     {"repository": Path, "prompt": str, "timeout": int, "tools": list[str], "model": str|None}
     or {"error": str} — never both, and never raises."""
     if not isinstance(args, dict):
-        return {"error": "delegate_to_claude_code: JSON object required"}
+        return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
     requested = str(args.get("repository") or "").strip()
     if requested and requested.lower() != "auto":
         try:
             repository = _approved_repository(requested)
         except (ValueError, OSError) as exc:
-            return {"error": f"delegate_to_claude_code: {exc}"}
+            return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
     else:
         repository, why = default_repository()
         if repository is None:
-            return {"error": f"delegate_to_claude_code: {why}. {_describe_candidates()}"}
+            return {"error": f"delegate_to_claude_code: {why}. {_describe_candidates()}", "exit_code": 1}
     prompt = str(args.get("prompt") or "").strip()
     if not prompt or len(prompt) > 20000:
-        return {"error": "delegate_to_claude_code: prompt is required and must be <= 20000 characters"}
+        return {"error": "delegate_to_claude_code: prompt is required and must be <= 20000 characters", "exit_code": 1}
     try:
         timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
     except (TypeError, ValueError):
         timeout = 900
     tools = args.get("allowed_tools") or default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
-        return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings"}
+        return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings", "exit_code": 1}
     rejected = [item for item in tools if not SAFE_TOOL.fullmatch(item)]
     accepted_hint = (
         f"Accepted: Read, Glob, Grep, Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
@@ -423,7 +423,8 @@ def _parse_args(args: dict) -> dict:
     )
     if rejected and len(rejected) == len(tools):
         return {"error": f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. {accepted_hint} "
-                         "Omit allowed_tools to use the defaults."}
+                         "Omit allowed_tools to use the defaults.",
+                "exit_code": 1}
     dropped: list[str] = []
     if rejected:
         # A mixed list runs with its safe entries. Refusing the whole job cost
@@ -433,7 +434,7 @@ def _parse_args(args: dict) -> dict:
         tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
-        return {"error": "delegate_to_claude_code: model must be a plain model name or alias"}
+        return {"error": "delegate_to_claude_code: model must be a plain model name or alias", "exit_code": 1}
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
     if dropped:
         parsed["dropped_tools"] = dropped

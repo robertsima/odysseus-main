@@ -376,7 +376,7 @@ class CreateDocumentTool:
             title = "Untitled"
 
         if not session_id:
-            return {"error": "No session context for document creation"}
+            return {"error": "No session context for document creation", "exit_code": 1}
 
         db = SessionLocal()
         try:
@@ -387,7 +387,7 @@ class CreateDocumentTool:
             # session later being deleted (session_id → NULL).
             _sess = db.query(DbSession).filter(DbSession.id == session_id).first()
             if owner is not None and (not _sess or _sess.owner != owner):
-                return {"error": "Cannot create document in another user's session"}
+                return {"error": "Cannot create document in another user's session", "exit_code": 1}
             _owner = _sess.owner if _sess else None
 
             missing_id = _missing_document_upload(_owner, content)
@@ -436,7 +436,7 @@ class CreateDocumentTool:
             }
         except Exception as e:
             db.rollback()
-            return {"error": f"Failed to create document: {e}"}
+            return {"error": f"Failed to create document: {e}", "exit_code": 1}
         finally:
             db.close()
 
@@ -461,7 +461,7 @@ class UpdateDocumentTool:
                     set_active_document(target_id)
                     logger.info(f"update_document: fell back to most recent doc id={target_id}")
             if not doc:
-                return {"error": "No documents exist to update"}
+                return {"error": "No documents exist to update", "exit_code": 1}
 
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
             new_content = _coerce_email_document_content(doc.current_content or "", content) if is_email_doc else content.strip()
@@ -508,7 +508,7 @@ class UpdateDocumentTool:
             }
         except Exception as e:
             db.rollback()
-            return {"error": f"Failed to update document: {e}"}
+            return {"error": f"Failed to update document: {e}", "exit_code": 1}
         finally:
             db.close()
 
@@ -523,7 +523,7 @@ class EditDocumentTool:
 
         edits = parse_edit_blocks(content)
         if not edits:
-            return {"error": "No valid <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks found"}
+            return {"error": "No valid <<<FIND>>>...<<<REPLACE>>>...<<<END>>> blocks found", "exit_code": 1}
 
         db = SessionLocal()
         try:
@@ -539,7 +539,7 @@ class EditDocumentTool:
                     set_active_document(target_id)
                     logger.info(f"edit_document: fell back to most recent doc id={target_id} title={doc.title!r}")
             if not doc:
-                return {"error": "No documents exist to edit"}
+                return {"error": "No documents exist to edit", "exit_code": 1}
 
             is_email_doc = doc.language == "email" or _looks_like_email_document(doc.current_content or "", doc.title or "")
             blank_find_edits = [e for e in edits if not (e.get("find") or "").strip()]
@@ -547,7 +547,7 @@ class EditDocumentTool:
                 if is_email_doc:
                     replacement_body = (blank_find_edits[0].get("replace") or "").strip()
                     if not replacement_body:
-                        return {"error": "No edits applied — blank FIND block had no replacement text"}
+                        return {"error": "No edits applied — blank FIND block had no replacement text", "exit_code": 1}
                     updated_content = _coerce_email_document_content(doc.current_content or "", replacement_body)
                     applied = 1
                     skipped = max(0, len(edits) - 1)
@@ -581,7 +581,7 @@ class EditDocumentTool:
                         "applied": applied,
                         "skipped": skipped,
                     }
-                return {"error": "No edits applied — FIND text cannot be blank"}
+                return {"error": "No edits applied — FIND text cannot be blank", "exit_code": 1}
 
             updated_content = doc.current_content
             applied = 0
@@ -608,7 +608,7 @@ class EditDocumentTool:
                         skipped += 1
 
             if applied == 0:
-                return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})"}
+                return {"error": f"No edits applied — none of the FIND blocks matched the document content (skipped {skipped})", "exit_code": 1}
 
             missing_id = _missing_document_upload(owner, updated_content)
             if missing_id:
@@ -652,7 +652,7 @@ class EditDocumentTool:
             }
         except Exception as e:
             db.rollback()
-            return {"error": f"Failed to edit document: {e}"}
+            return {"error": f"Failed to edit document: {e}", "exit_code": 1}
         finally:
             db.close()
 
@@ -665,17 +665,17 @@ class SuggestDocumentTool:
         owner = ctx.get("owner")
 
         if not target_id:
-            return {"error": "No active document to suggest on"}
+            return {"error": "No active document to suggest on", "exit_code": 1}
 
         suggestions = parse_suggest_blocks(content)
         if not suggestions:
-            return {"error": "No valid <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks found"}
+            return {"error": "No valid <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks found", "exit_code": 1}
 
         db = SessionLocal()
         try:
             doc = _get_owned_document(db, Document, target_id, owner)
             if not doc:
-                return {"error": f"Document {target_id} not found"}
+                return {"error": f"Document {target_id} not found", "exit_code": 1}
 
             # Validate that FIND text exists in document
             valid = []
@@ -686,7 +686,7 @@ class SuggestDocumentTool:
                     logger.warning(f"suggest_document: FIND text not found, skipping: {s['find'][:80]!r}")
 
             if not valid:
-                return {"error": "No suggestions matched the document content"}
+                return {"error": "No suggestions matched the document content", "exit_code": 1}
 
             return {
                 "action": "suggest",
