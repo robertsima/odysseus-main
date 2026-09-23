@@ -325,3 +325,43 @@ def test_dynamic_mcp_fence_default_compatibility_and_identifier_bounds():
     assert parse_tool_blocks(f"```{too_long_server}\n{{}}\n```") == []
     assert parse_tool_blocks(f"```{too_long_tool}\n{{}}\n```") == []
     assert parse_tool_blocks(f"```{name}\n{{}}\n```", dynamic_tool_names=set()) == []
+
+
+def test_a_policy_dropped_tool_is_reported_as_policy_not_budget():
+    """The 2026-09-23 invention. Discovery could only say "No permitted tools
+    matched that discovery query", which is true of the permitted inventory and
+    says nothing about the tool the caller asked for by name — so the model
+    supplied its own cause ("tool discovery hit the schema budget and returned
+    no loadout-management tool") and reported the invention to the user as fact.
+    """
+    loadout = schema("manage_agent_loadout", "Define and start worker loadouts")
+    discovery = TurnToolDiscovery(
+        CATALOG + [loadout], disabled_tools={"manage_agent_loadout"},
+    )
+    result = run(discovery, "manage_agent_loadout")
+    assert "manage_agent_loadout" not in result["loaded_names"]
+    assert result["policy_denied_names"] == ["manage_agent_loadout"]
+    # Not a budget outcome, and the result must not let it read as one.
+    assert result["discovery"]["budget_limited"] is False
+    assert "manage_agent_loadout" in result["output"]
+    assert "tool policy" in result["output"]
+    assert "not by the schema budget" in result["output"]
+
+    # A real budget stop still says budget, and claims no policy drop.
+    budget = run(TurnToolDiscovery(CATALOG, max_schema_tokens=1), "web_search")
+    assert budget["discovery"]["budget_limited"] is True
+    assert budget["policy_denied_names"] == []
+    assert "not by the schema budget" not in budget["output"]
+
+
+def test_a_denied_tool_the_caller_never_named_is_not_disclosed():
+    """The other half: policy honesty must not become a way to enumerate what
+    the chat is not allowed to have. Only a name the caller wrote out — which
+    it therefore already holds — is repeated back."""
+    discovery = TurnToolDiscovery(CATALOG, disabled_tools={"manage_memory"})
+    result = run(discovery, "store something for later")
+    assert result["policy_denied_names"] == []
+    assert "manage_memory" not in repr(result)
+    # ...and an empty answer still says which kind of empty it is, so there is
+    # no room to invent a budget that was never hit.
+    assert "not a schema-budget result" in result["output"]

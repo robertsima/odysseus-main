@@ -20,6 +20,7 @@ import pytest
 from src import agent_loop, agent_profiles
 from src.agent_loop import (
     _classify_agent_request,
+    _delegation_gated_tools,
     _detect_admin_tools,
     _explain_dropped_matches,
     _explicit_delegation_requested,
@@ -751,10 +752,166 @@ def test_run_the_agent_tests_cannot_reach_a_tool_that_starts_an_agent():
     # read this as orchestration either.
     assert _detect_admin_tools(_user(text)) == set()
 
-    disabled = set(_DELEGATION_TOOLS)
+    # Through the gate the loop actually applies, not a hand-rolled deny set:
+    # naming a tool now re-opens it, and this turn names none.
+    disabled = _delegation_gated_tools("explicit", text)
+    assert disabled == set(_DELEGATION_TOOLS)
     sent = _sent_names(
         set(known_tool_names()) - disabled,
         disabled_tools=disabled, needs_admin=True, admin_tools=None,
     )
     assert not (sent & _DELEGATION_TOOLS), sorted(sent & _DELEGATION_TOOLS)
     assert "manage_agent_loadout" not in sent
+
+
+def test_a_user_who_names_a_delegation_tool_by_name_gets_it():
+    """The 2026-09-23 turn. `manage_agent_loadout` joined `_DELEGATION_TOOLS`
+    because its `start` action launches a worker — correct — but under the
+    default `explicit` policy that dropped it on every turn without
+    orchestration phrasing, including the turn that named it outright. The
+    separate `[tool-rag] User named tools` rescue could not help: it subtracts
+    `disabled_tools`, and this gate had already put the name there.
+    """
+    text = "use manage_agent_loadout  to repair Penpot Product Designer preset"
+    # No hand-off wording: the phrase recogniser is not what saves this.
+    assert _explicit_delegation_requested(text) is False
+
+    gated = _delegation_gated_tools("explicit", text)
+    assert "manage_agent_loadout" not in gated
+    # Only the tool that was named. Naming one launcher is not consent to all.
+    assert gated == set(_DELEGATION_TOOLS) - {"manage_agent_loadout"}
+
+    sent = _sent_names(set(known_tool_names()) - gated, disabled_tools=gated)
+    assert "manage_agent_loadout" in sent
+    assert not (sent & gated), sorted(sent & gated)
+
+    # `never` means never: no wording in the turn re-opens it.
+    assert _delegation_gated_tools("never", text) == set(_DELEGATION_TOOLS)
+
+
+@pytest.mark.parametrize("text", [
+    # The incident turn: no tool named at all.
+    "run the agent tests",
+    # A pasted log line that happens to contain the name.
+    "why did this happen?\n21:45:30 [tool-rag] dropped 1 selected tool(s) the "
+    "chat's policy disables: ['manage_agent_loadout']",
+    "2026-09-23 21:45 manage_agent_loadout could not be attached",
+    "WARNING manage_agent_loadout is not in the schema list",
+    # Quoted text: someone else's instruction, reported rather than given.
+    "> use manage_agent_loadout to repair the preset\n\nthat is what they asked for",
+    # A fenced paste.
+    "```\nmanage_agent_loadout\n```\nwhat does that line mean",
+])
+def test_a_passing_mention_does_not_open_the_delegation_gate(text):
+    """A user typing the tool's name is an instruction; a quotation or a pasted
+    log containing it is not. This is a policy gate, so the case it cannot read
+    as an instruction goes in the restrictive bucket."""
+    assert _delegation_gated_tools("explicit", text) == set(_DELEGATION_TOOLS)
+
+
+# ── A pinned role's MCP tools ──────────────────────────────────────────────
+#
+# The 2026-09-23 incident. `_pinned_policy_toolset` built its universe from
+# `known_tool_names()`, which is builtins by construction, so the complement it
+# returned could not hold a single `mcp__` name: a Penpot role whose loadout
+# declared 29 tools was pinned to the 14 builtins among them and — because the
+# pin also skips retrieval — had no other route to its server on that turn. It
+# spent four rounds discovering that the only job it has was impossible.
+
+PENPOT_LOADOUT = {
+    "name": "penpot-designer",
+    "tool_access": "selected",
+    "enabled_tools": [
+        # The ambient five, named like anything else.
+        "ask_user", "update_plan", "manage_memory", "recall_tool_output",
+        "search_documents",
+        # A whole connected server, by the wildcard that is the only way to
+        # write "all of it" for runtime-generated names.
+        "mcp__penpot__*",
+        # Two tools of a server too large to be always-bound. A gated server's
+        # schema reaches the payload only by winning selection — which under a
+        # pin is the pinned set, and that is what stopped holding MCP names.
+        "mcp__firecrawl__firecrawl_t0", "mcp__firecrawl__firecrawl_t1",
+    ],
+}
+
+PENPOT_TOOL_NAMES = {f"mcp__penpot__penpot_t{i}" for i in range(_SEPT_INVENTORY["penpot"])}
+NAMED_FIRECRAWL = {"mcp__firecrawl__firecrawl_t0", "mcp__firecrawl__firecrawl_t1"}
+
+
+def _with_connected_mcp(monkeypatch):
+    """Point every live-registry read at the audit inventory.
+
+    The process singleton in `src.tool_utils` is what `tool_policy
+    .connected_mcp_tool_names` reads, and therefore what both the allowlist
+    inversion and the pin's universe see.
+    """
+    mgr = _sept_manager()
+    monkeypatch.setattr("src.tool_utils._mcp_manager", mgr, raising=False)
+    return mgr
+
+
+def test_a_pinned_role_receives_the_mcp_tools_its_loadout_names(monkeypatch):
+    mgr = _with_connected_mcp(monkeypatch)
+    disabled = _role_disabled_tools(PENPOT_LOADOUT)
+    offerable = {s["function"]["name"] for s in mgr.get_all_openai_schemas()}
+
+    pinned = _pinned_policy_toolset(disabled, offerable)
+    assert pinned is not None, "the role is well under the pin threshold"
+    assert PENPOT_TOOL_NAMES <= pinned
+    assert NAMED_FIRECRAWL <= pinned
+    # Nothing the allowlist did not name: a wider pin would be its own bug.
+    assert "mcp__firecrawl__firecrawl_t2" not in pinned
+    assert not {n for n in pinned if n.startswith("mcp__ntfy__")}
+
+    # End of the pipeline: the schemas one round is actually sent, after the
+    # per-turn shaping passes a pin has to survive.
+    query = "lay out the new landing page in penpot"
+    sent = _sent_names(
+        _reassert_pinned_toolset(pinned, _shaped_for_turn(pinned, query)),
+        disabled_tools=disabled, last_user=query,
+    )
+    assert PENPOT_TOOL_NAMES <= sent
+    assert NAMED_FIRECRAWL <= sent, (
+        "a demoted server's tools reach the payload only through the turn's "
+        "selection, which under a pin is the pinned set"
+    )
+    assert "mcp__firecrawl__firecrawl_t2" not in sent
+
+
+def test_the_pinned_universe_reads_the_live_registry_by_default(monkeypatch):
+    """No explicit schema list: the helper must still see connected MCP.
+
+    The loop passes the offerable names so an operator-disabled tool neither
+    gets advertised nor spends one of the pin's slots, but a caller that cannot
+    produce them must not silently fall back to the builtins-only universe that
+    caused the incident.
+    """
+    _with_connected_mcp(monkeypatch)
+    pinned = _pinned_policy_toolset(_role_disabled_tools(PENPOT_LOADOUT))
+    assert PENPOT_TOOL_NAMES <= pinned
+    assert NAMED_FIRECRAWL <= pinned
+
+
+def test_a_pinned_role_with_mcp_is_byte_stable_between_turns(monkeypatch):
+    """Prefix stability is still the point, with MCP names in the set.
+
+    A server connecting or disconnecting moves this payload — but it moves it
+    either way (a disconnected server has no schema left to send, a newly
+    connected small one is always-bound whatever selection said), so that is
+    one invalidation at the event rather than per-turn churn. What must not
+    happen is the payload moving with the turn's *wording*, and that is what
+    this pins.
+    """
+    mgr = _with_connected_mcp(monkeypatch)
+    disabled = _role_disabled_tools(PENPOT_LOADOUT)
+    offerable = {s["function"]["name"] for s in mgr.get_all_openai_schemas()}
+    pinned = _pinned_policy_toolset(disabled, offerable)
+    payloads = {
+        json.dumps(sorted(_sent_names(
+            _reassert_pinned_toolset(pinned, _shaped_for_turn(pinned, t)),
+            disabled_tools=disabled, last_user=t,
+        )))
+        for t in PINNED_TURNS
+    }
+    assert len(payloads) == 1, "a pinned role's schema prefix moved between turns"

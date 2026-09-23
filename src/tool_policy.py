@@ -366,7 +366,18 @@ def connected_mcp_tool_names() -> Set[str]:
 
     names: Set[str] = set()
     try:
-        from src.mcp_manager import get_mcp_manager
+        # `src.tool_utils` owns the process singleton and imports nothing from
+        # the project, so it is the safe place to read it from. This used to
+        # import the name from `src.mcp_manager`, which does not define it: the
+        # ImportError landed in the best-effort `except` below and every caller
+        # silently got an empty set. That made `live_tool_names()` identical to
+        # `known_tool_names()`, so the one inversion that was supposed to cover
+        # MCP — `session_settings.stored_disabled_tools`, and through it every
+        # worker and headless continuation — denied no MCP tool at all and a
+        # role narrowed to three tools kept every tool of every connected
+        # server. That is the exact hole this module's header says it closed,
+        # failing open on a policy decision.
+        from src.tool_utils import get_mcp_manager
 
         manager = get_mcp_manager()
         if manager is None:
