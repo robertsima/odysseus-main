@@ -31,9 +31,12 @@ module.exports = async ({ github, context, core }) => {
   // 2. Linked Issue must reference a real issue. Accept a bare #NNN, a closing
   //    keyword + #NNN, or a full issue URL (e.g. .../issues/123) — the strict
   //    keyword-prefixed form previously false-flagged correctly-linked PRs.
+  //    A repository with Issues turned off has nothing to link, so there the
+  //    requirement would fail every PR; the event payload says which it is.
   const linkedSection = section('Linked Issue');
   const hasIssueRef = /#\d+\b/.test(linkedSection) || /\/issues\/\d+/.test(linkedSection);
-  if (!linkedSection || !hasIssueRef) {
+  const issuesDisabled = context.payload.repository?.has_issues === false;
+  if (!issuesDisabled && (!linkedSection || !hasIssueRef)) {
     descriptionProblems.push('**Linked Issue** — add a reference like `Fixes #NNN`, a bare `#NNN`, or a link to the issue.');
   }
 
