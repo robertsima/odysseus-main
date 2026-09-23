@@ -21,6 +21,17 @@
 #     settings the backend was running with.
 #   * The exporter published 4403 -> 19403. Nothing listens there (the
 #     exporter serves 6061 and is only reached through the frontend). Removed.
+#   * Images were `:latest`. A NAS that pulled `latest` before 2.16 keeps that
+#     old frontend, whose nginx template appends :4401/:4402 to PENPOT_MCP_URI
+#     itself, so the 2.16+ values below (full URL with port) became
+#     `penpot-mcp:4401:4402` and nginx refused to start ("invalid port in
+#     upstream"). Every Penpot image is pinned to the same release instead.
+#
+# MCP for Odysseus: the penpot-mcp service below is Penpot's own server. It
+# only works while a browser tab has the MCP plugin connected. For an MCP that
+# is always available, `enable-access-tokens` is on so Odysseus can run a
+# headless, token-based Penpot MCP server itself (see README.md, "MCP in
+# Odysseus"). No extra container is needed on the NAS for that.
 #
 # Keep PENPOT_FLAGS, PENPOT_PUBLIC_URI and PENPOT_SECRET_KEY identical across
 # the services that declare them. YAML anchors are avoided on purpose because
@@ -46,7 +57,7 @@ services:
       penpot-exporter:
         condition: service_started
     environment:
-      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp
+      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp enable-access-tokens
       PENPOT_PUBLIC_URI: http://homelab.nas:9001
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
       # Internal upstreams nginx proxies to. Service names resolve on the
@@ -78,7 +89,7 @@ services:
       penpot-redis:
         condition: service_healthy
     environment:
-      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp
+      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp enable-access-tokens
       PENPOT_PUBLIC_URI: http://homelab.nas:9001
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
       # Master key; sessions/invitations/export tokens derive from it, so the
