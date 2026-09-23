@@ -649,7 +649,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
                     "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
                     "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
-                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent."},
+                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget (the round at which it wraps up and hands back what it has). Implies mode=agent."},
                     "workspace": {"type": "string", "description": "agent mode: the checkout the sub-agent's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
                     "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "agent mode: what the task needs. The sub-agent is refused before it starts, with the fix, when a need cannot be met."}
                 },
@@ -1366,7 +1366,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
-                    "max_rounds": {"type": "integer", "description": "Advisory round budget for the worker (0 = unlimited, the default; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."},
+                    "max_rounds": {"type": "integer", "description": "Round budget for the worker (0 = no budget, the default; at most 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left; it is never cut off mid-task."},
                     "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
                     "run_id": {"type": "string", "description": "stop only: the worker run to stop (from start/status). Omit when exactly one worker is running."},
                     "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},

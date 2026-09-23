@@ -61,6 +61,17 @@ Raising the numbers only moved where that happened, so the mechanism is gone.
 display, but they are advisory — `stream_agent_loop` iterates until the work is
 done.
 
+The one exception is a positive `max_rounds` someone set on a saved agent
+profile on purpose. A worker started from that profile (`send_to_session` with
+`profile`, or a loadout `start`) is not cut off at that round either: it gets
+`wrap_up_round`, so that round runs with no tools and the model is told to
+write its final answer from what it has and list what is unfinished (the same
+tool-free round, grace synthesis and fallback the loop-breaker uses). The loop
+emits `round_budget_reached`, and the run counts as completed unless that
+forced answer comes back empty. Defaults nobody chose — a profile-less
+sub-agent's 12, a workflow specialist's inline 12, the hand-off and
+background-monitor turns — stay advisory.
+
 What bounds a run instead measures PROGRESS rather than counting iterations, and
 is strictly better at the job: the loop-breaker's stall detector (four rounds
 with no new call and no new text), the runaway detector (the same call with the

@@ -2642,7 +2642,7 @@ function initAgentProfilesEditor(initial) {
       head.className = 'agent-profile-head';
       head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
       head.appendChild(field('Model', mk('input', 'model', { placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
-      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = unlimited' }), 'Advisory round budget (0 = unlimited, max 200). It does not stop a run; the tool call limit, stall detection and timeouts do.'));
+      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = no budget' }), 'Round budget (0 = no budget, max 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left. It is never cut off mid-task.'));
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'ats-btn agent-profile-remove';

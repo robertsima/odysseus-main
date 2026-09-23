@@ -515,3 +515,125 @@ def test_workers_cannot_start_workers_through_loadouts_or_orchestration():
     assert {"orchestrate_agents", "manage_agent_loadout"} <= headless_agent.SUBAGENT_BLOCKED_TOOLS
     # Peer messaging between running agents stays available.
     assert "message_agent" not in headless_agent.SUBAGENT_BLOCKED_TOOLS
+
+
+# ── Round-budget wrap-up: an explicit profile budget is a wrap-up point ──
+
+
+async def test_headless_forwards_wrap_up_round_and_defaults_to_none(monkeypatch):
+    seen = {}
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+
+    await headless_agent.run_headless(_Sess(), [])
+    assert seen["wrap_up_round"] == 0
+
+    await headless_agent.run_headless(_Sess(), [], max_rounds=30, wrap_up_round=30)
+    assert seen["wrap_up_round"] == 30 and seen["max_rounds"] == 30
+
+
+async def test_a_run_that_wraps_up_at_its_budget_is_a_finished_one(monkeypatch):
+    async def fake_loop(url, model, messages, **kwargs):
+        yield _sse({"type": "tool_output", "tool": "read_file", "command": "a.py", "output": "x", "exit_code": 0})
+        yield _sse({"type": "round_budget_reached", "round": 30, "budget": 30})
+        yield _sse({"delta": "Findings so far. Unfinished: b.py."})
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    outcome = {}
+    text, _events = await headless_agent.run_headless(
+        _Sess(), [], run_id="wrap-run", activity_session_id="parent", outcome=outcome, wrap_up_round=30)
+
+    assert outcome == {"round_budget_reached": 30}
+    assert text == "Findings so far. Unfinished: b.py."
+    notes = [ev for ev in act.history("parent") if ev["kind"] == "note"]
+    assert any("round budget of 30" in ev["title"] for ev in notes)
+
+
+async def test_a_wrap_up_with_no_answer_hands_back_as_incomplete(monkeypatch):
+    async def fake_loop(url, model, messages, **kwargs):
+        yield _sse({"type": "round_budget_reached", "round": 30, "budget": 30})
+        yield _sse({"type": "round_budget_unanswered", "round": 30, "budget": 30})
+        yield _sse({"delta": "I gathered some search results but couldn't pull a clean answer together."})
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    outcome = {}
+    text, _events = await headless_agent.run_headless(_Sess(), [], outcome=outcome, wrap_up_round=30)
+
+    assert outcome["rounds_exhausted"] is True and outcome["rounds"] == 30
+    assert "round_budget_reached" not in outcome
+    assert "ran out of rounds" in text and "partial work" in text
+
+
+def _launch_env(monkeypatch, sid):
+    import src.agent_tools.session_tools as session_tools
+    import src.ai_interaction as ai_interaction
+    import src.headless_agent as headless
+
+    worker_chat = _Chat(sid)
+    monkeypatch.setattr(ai_interaction, "get_session_manager", lambda: _manager({sid: worker_chat}))
+    monkeypatch.setattr(session_tools, "_new_child_session", lambda *a, **k: (worker_chat, None))
+    seen = []
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen.append(kwargs)
+        if kwargs.get("wrap_up_round"):
+            kwargs["outcome"]["round_budget_reached"] = kwargs["wrap_up_round"]
+        return "Here is what I found; not yet done: the tests.", [{"tool": "read_file"}]
+
+    monkeypatch.setattr(headless, "run_headless", fake_headless)
+    return worker_chat, seen
+
+
+async def test_a_saved_loadouts_budget_asks_the_worker_to_wrap_up(monkeypatch):
+    from src import agent_control, agent_profiles
+
+    _worker, seen = _launch_env(monkeypatch, "w-budget")
+    profiles = {p["name"]: p for p in agent_profiles.validate_profiles([
+        {"name": "Brownfield Contribution Scout", "max_rounds": 30},
+        {"name": "Open-ended", "max_rounds": 0},
+    ])}
+    monkeypatch.setattr(agent_profiles, "get_profile", lambda name: profiles.get(name))
+
+    rec = await agent_control.launch_worker(
+        owner="alice", task="survey the handler", profile_name="Brownfield Contribution Scout")
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen[-1]["max_rounds"] == 30 and seen[-1]["wrap_up_round"] == 30
+    # Wrapping up with an answer is a finished run, not an incomplete one.
+    assert act.get_run(rec["run_id"])["status"] == "completed"
+
+    rec = await agent_control.launch_worker(owner="alice", task="survey the handler", profile_name="Open-ended")
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen[-1]["wrap_up_round"] == 0
+
+
+async def test_defaults_nobody_chose_stay_advisory(monkeypatch):
+    """No profile, a model-only worker, and a workflow's inline profile (whose
+    12 is a default) never get a wrap-up round."""
+    from src import agent_control
+    import core.database as database
+
+    _worker, seen = _launch_env(monkeypatch, "w-default")
+    monkeypatch.setattr(database, "update_session_settings", lambda sid, patch: dict(patch))
+
+    rec = await agent_control.launch_worker(owner="alice", task="survey the handler")
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen[-1]["wrap_up_round"] == 0
+
+    rec = await agent_control.launch_worker(owner="alice", task="survey the handler", model="other-model")
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen[-1]["wrap_up_round"] == 0
+
+    rec = await agent_control.launch_worker(
+        owner="alice", task="survey the handler", preflight=False, handoff=False,
+        inline_profile={"name": "research-1", "max_rounds": 12, "tool_access": "none"})
+    await agent_control._WORKERS[rec["run_id"]]
+    assert seen[-1]["max_rounds"] == 12 and seen[-1]["wrap_up_round"] == 0

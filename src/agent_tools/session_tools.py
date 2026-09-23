@@ -469,6 +469,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         outcome=outcome,
                         workspace=preflight.workspace if preflight else None,
                         forced_tools=preflight.forced_tools if preflight else None,
+                        # Only a profile's own explicit budget asks the worker
+                        # to wrap up; the no-profile default stays advisory.
+                        wrap_up_round=(profile["max_rounds"]
+                                       if profile and (profile.get("max_rounds") or 0) > 0 else 0),
                     )
                     if not response.strip() and tool_events:
                         response = "(the sub-agent finished with tool calls but no closing text)"
@@ -551,6 +555,10 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             out["status"] = run_status
         if preflight is not None:
             out["preflight"] = preflight.summary()
+        if outcome.get("round_budget_reached"):
+            # The reply is a wrap-up written at the profile's round budget; it
+            # should name what it did not get to.
+            out["round_budget_reached"] = outcome["round_budget_reached"]
         if outcome.get("awaiting_approval"):
             out["awaiting_approval"] = {
                 "tool": outcome["awaiting_approval"].get("tool"),
