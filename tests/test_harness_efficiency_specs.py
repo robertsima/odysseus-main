@@ -13,20 +13,29 @@ instead of dropped, the audit counter is per owner, the regex fallback only
 adds identity facts once the model has judged the window, and promotional /
 list mail never reaches calendar extraction.
 """
+import json
+
 import pytest
 
-from src import agent_loop
+from src import agent_loop, agent_profiles
 from src.agent_loop import (
+    _classify_agent_request,
     _detect_admin_tools,
     _explain_dropped_matches,
     _explicit_delegation_requested,
     _harness_directive,
+    _pinned_policy_toolset,
+    _reassert_pinned_toolset,
     _tool_schemas_for_round,
+    apply_terminus_toolset,
+    document_tools_to_drop,
     _ADMIN_TOOLS,
     _DELEGATION_TOOLS,
 )
 from src.llm_core import _build_chatgpt_responses_payload
 from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
+from src.tool_policy import known_tool_names
+from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 
 # ── Spec 1 ──
@@ -543,3 +552,182 @@ def test_both_call_sites_pass_the_keyword_breakdown():
         "a call site that omits admin_tools falls back to the whole "
         "_ADMIN_TOOLS set, silently, on every round of the turn"
     )
+
+
+# ── Pinned toolsets for role-scoped agents ─────────────────────────────────
+#
+# A worker under a named loadout with `tool_access="selected"` used to run the
+# whole per-turn pipeline — intent classification, embedding retrieval over the
+# entire tool index, keyword hints, domain seeding — and have the profile
+# filter the result afterwards. Two costs, both from the 2026-09-16 logs: the
+# bound set varied per turn inside the allowlist, so one session's schema block
+# walked 3846 → 4246 → 4500 → 4787 → 5418 tokens across consecutive turns with
+# `cached=0` on several round-1s; and retrieval has no similarity floor, so
+# "use ntfy to send a notification to odysseus" was handed 21 tools including
+# the whole email suite.
+
+MARKETING_LOADOUT = {
+    "name": "marketing",
+    "tool_access": "selected",
+    "enabled_tools": [
+        # The ambient five. A loadout has to name them like anything else.
+        "ask_user", "update_plan", "manage_memory", "recall_tool_output",
+        "search_documents",
+        # The role's own work.
+        "create_document", "update_document", "manage_documents",
+        "web_search", "web_fetch", "manage_calendar", "manage_notes",
+    ],
+}
+
+# Wordings that pull a selection in different directions: a plain request, a
+# file-work request (the Terminus swap), the ntfy incident phrase, and a
+# contentless one.
+PINNED_TURNS = [
+    "write the launch announcement for the new release",
+    "fix the failing test in src/agent_loop.py and commit it",
+    "use ntfy to send a notification to odysseus",
+    "hey",
+]
+
+
+def _role_disabled_tools(loadout):
+    """The deny set this loadout really reaches the agent loop as.
+
+    `agent_profiles.session_patch` is the production path, and it stores an
+    allowlist as its complement — every known tool minus the enabled ones — so
+    by the time `stream_agent_loop` sees the policy there is nothing left to
+    tell it apart from any other deny. That is why the pipeline kept running
+    underneath it, and why the pin reads the allowlist back out of the denies.
+    """
+    profile = agent_profiles.validate_profiles([dict(loadout)])[0]
+    return set(agent_profiles.session_patch(profile)["disabled_tools"])
+
+
+def _shaped_for_turn(selection, text):
+    """Run the real per-turn shaping passes over a selection.
+
+    Not a mirror of the loop: these are the shipping functions the loop calls
+    between choosing a selection and sending it, and they are what a pinned set
+    has to survive.
+    """
+    domains = _classify_agent_request(_user(text), text).get("domains") or set()
+    shaped = apply_terminus_toolset(set(selection), query_matched=set(), domains=domains)
+    shaped -= document_tools_to_drop(
+        shaped, active_document_relevant=False, domains=domains,
+    )
+    return shaped
+
+
+def _pinned_payload(text, pinned, disabled, reassert=True):
+    """The exact bytes of the schema list one round would be sent."""
+    selection = _shaped_for_turn(pinned, text)
+    if reassert:
+        selection = _reassert_pinned_toolset(pinned, selection)
+    return json.dumps(_tool_schemas_for_round(
+        force_answer=False, is_api_model=True, relevant_tools=selection,
+        needs_admin=False, admin_tools=set(), mcp_schemas=[],
+        disabled_tools=set(disabled), ody_qwen_finetune_model=False,
+        last_user=text,
+    ))
+
+
+def test_a_role_allowlist_is_bound_whole_instead_of_being_reselected():
+    pinned = _pinned_policy_toolset(_role_disabled_tools(MARKETING_LOADOUT))
+    assert pinned == set(MARKETING_LOADOUT["enabled_tools"])
+    # The ambient tools survive: the pin neither drops one the policy allows
+    # nor adds one back that the policy denies.
+    assert set(ALWAYS_AVAILABLE) <= pinned
+
+
+def test_a_policy_wider_than_the_threshold_keeps_per_turn_selection():
+    """The pin is for a declared role, not a way to send everything."""
+    assert _pinned_policy_toolset(set()) is None
+    keep = set(sorted(known_tool_names())[:40])
+    assert _pinned_policy_toolset(set(known_tool_names()) - keep) is None
+
+
+def test_a_pinned_role_sends_byte_identical_schemas_every_turn():
+    """Prefix stability is the point: the same bytes whatever the turn says."""
+    disabled = _role_disabled_tools(MARKETING_LOADOUT)
+    pinned = _pinned_policy_toolset(disabled)
+    payloads = {_pinned_payload(t, pinned, disabled) for t in PINNED_TURNS}
+    assert len(payloads) == 1, "a pinned role's schema prefix moved between turns"
+    # Rounds of one turn all read the same selection, so the instability that
+    # matters is between turns — and re-asserting the pin after the shaping
+    # passes is what removes it. Without that step these same turns produce
+    # more than one prefix.
+    reshaped = {_pinned_payload(t, pinned, disabled, reassert=False) for t in PINNED_TURNS}
+    assert len(reshaped) > 1
+
+
+def test_a_pinned_role_does_not_drag_in_an_unrelated_domain():
+    """The ntfy turn. Retrieval's keyword pass alone hands this query the whole
+    email suite off the bare word "send"; the embedding neighbours behind the
+    incident's `query_matched_count=21 selected_count=27 schema_tokens=4787`
+    are on top of that. A pinned role never asks."""
+    query = PINNED_TURNS[2]
+    unpinned = ToolIndex.__new__(ToolIndex).get_tools_for_query(query, use_embeddings=False)
+    assert {"send_email", "list_emails", "bulk_email"} <= unpinned
+
+    disabled = _role_disabled_tools(MARKETING_LOADOUT)
+    pinned = _pinned_policy_toolset(disabled)
+    assert not (pinned & BUILTIN_EMAIL_TOOLS)
+    sent = {
+        s["function"]["name"]
+        for s in _tool_schemas_for_round(
+            force_answer=False, is_api_model=True,
+            relevant_tools=_reassert_pinned_toolset(pinned, _shaped_for_turn(pinned, query)),
+            needs_admin=False, admin_tools=set(), mcp_schemas=[],
+            disabled_tools=disabled, ody_qwen_finetune_model=False, last_user=query,
+        )
+    }
+    assert not (sent & BUILTIN_EMAIL_TOOLS), sorted(sent & BUILTIN_EMAIL_TOOLS)
+    # Subset, not equality: a name with no native schema, or a tool whose
+    # capability is not configured on this host, is withheld by the same
+    # builder for reasons that have nothing to do with the pin.
+    assert sent <= set(MARKETING_LOADOUT["enabled_tools"])
+    assert {"create_document", "ask_user"} <= sent
+
+
+# ── The delegation gate must cover everything that starts work elsewhere ────
+
+def test_every_tool_orchestration_phrasing_routes_to_is_delegation_gated():
+    """The structural hole `manage_agent_loadout` fell through.
+
+    Admin routing sends "spin up a worker" to the tools that start one; the
+    delegation policy decides whether those tools survive to the schema list. A
+    tool the first knows about and the second does not is a tool the harness
+    offers on exactly the turn it refused to delegate — which is what happened
+    on 2026-09-16, when `manage_agent_loadout` (whose `start` action calls
+    `agent_control.launch_worker`) stayed reachable while the three named
+    delegation tools were correctly dropped.
+    """
+    for text in ORCHESTRATION_REQUESTS:
+        routed = _detect_admin_tools(_user(text))
+        assert routed, text
+        assert routed <= _DELEGATION_TOOLS, (text, sorted(routed - _DELEGATION_TOOLS))
+
+
+def test_run_the_agent_tests_cannot_reach_a_tool_that_starts_an_agent():
+    """The incident turn. "run the agent tests" asks for no hand-off, so the
+    default `explicit` policy closes the gate — and it must stay closed on the
+    worst-case round: every known tool selected, with the blanket admin set
+    unioned in on top.
+
+    What no name list can cover is a remote-execution MCP tool; the refused
+    turn called `mcp__pi_worker__run_pi_task` instead. See the note on
+    `_DELEGATION_TOOLS` for why that belongs to `mcp_access`.
+    """
+    text = "run the agent tests"
+    assert _explicit_delegation_requested(text) is False
+    # "agent" alone is this app's own vocabulary, so admin routing does not
+    # read this as orchestration either.
+    assert _detect_admin_tools(_user(text)) == set()
+
+    disabled = set(_DELEGATION_TOOLS)
+    sent = _sent_names(
+        set(known_tool_names()) - disabled,
+        disabled_tools=disabled, needs_admin=True, admin_tools=None,
+    )
+    assert not (sent & _DELEGATION_TOOLS), sorted(sent & _DELEGATION_TOOLS)
+    assert "manage_agent_loadout" not in sent

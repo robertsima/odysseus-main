@@ -1616,9 +1616,50 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
     return found
 
 
+# Tools that hand this turn's work to something running on its own: another
+# agent, another chat, a coding CLI, a detached worker. The policy gate below
+# switches the whole set off at once, in the schema list and at execution.
+#
+# `manage_agent_loadout` is in the set because its `start` action calls
+# `agent_control.launch_worker`, the same thing `delegate_to_agent` does. Its
+# own refusal only covers `delegation_policy="never"`, so under the default
+# `explicit` the 2026-09-16 "run the agent tests" turn was correctly refused
+# delegate_to_agent, delegate_to_claude_code and message_agent and could still
+# have minted a loadout and started it. The cost is that the read-only actions
+# (list/get/capabilities) go with it on a turn that asked for no hand-off, and
+# that is the right way round: those actions exist to prepare a hand-off, and
+# any orchestration phrasing re-opens the whole tool through
+# `_explicit_delegation_requested`.
+#
+# `manage_agent_worktree` is deliberately NOT in the set. It makes a checkout,
+# commits in it and asks a human to publish — all of it this turn's own work,
+# in this process, with no second agent anywhere. Gating it here would mean a
+# turn that was refused a hand-off also loses the ability to commit its own
+# edits: that is write policy wearing the delegation gate's clothes, and
+# `NON_ADMIN_BLOCKED_TOOLS` and `_PLAN_MODE_KNOWN_MUTATORS` are where the
+# decision about it already lives.
+#
+# Remote-execution MCP tools — `mcp__pi_worker__run_pi_task` is what the
+# refused 2026-09-16 turn reached for instead — cannot be covered by this set,
+# and adding names will never fix that: the qualified name carries a
+# per-server hash, the server is whatever the user connected, and the only
+# other thing to match on is the server's own description, which is untrusted
+# text and must not decide a policy question (THREAT_MODEL.md). What does
+# cover them is the loadout's `mcp_access` / `allowed_mcp_servers`: a chat that
+# must not start work elsewhere must not be connected to a server that can.
+# That is also why this stays a hand-maintained list of names rather than a
+# flag derived from the tool definitions — a flag would close the half of the
+# hole that never fired and leave the half that did, while adding a second
+# place to state a rule that `NON_ADMIN_BLOCKED_TOOLS`, `_RISKY_TOOLS` and
+# `_PLAN_MODE_KNOWN_MUTATORS` already state as name sets. The forgetting is
+# caught by test instead, from the other end: a tool that starts work elsewhere
+# is a tool admin routing sends "spin up a worker" to, so
+# `tests/test_harness_efficiency_specs.py` asserts everything
+# `_ADMIN_KEYWORD_TOOLS` routes an orchestration phrase to is in this set —
+# which is exactly what `manage_agent_loadout` failed.
 _DELEGATION_TOOLS = frozenset({
     "delegate_to_agent", "delegate_to_claude_code", "send_to_session",
-    "message_agent", "pipeline", "create_session",
+    "message_agent", "pipeline", "create_session", "manage_agent_loadout",
 })
 _EXPLICIT_DELEGATION_RE = re.compile(
     r"\b(?:delegate|hand\s+off|sub[ -]?agent|another\s+agent|other\s+agent|"
@@ -5060,6 +5101,100 @@ def _explain_dropped_matches(
     return explained
 
 
+# How many tools a session's own policy may leave allowed before the harness
+# stops re-deriving the turn's subset and just binds the lot. The default is a
+# setting (`agent_pinned_toolset_max_tools`) because it is the one number an
+# operator with an unusually wide loadout might want to move.
+#
+# 25 is not taste. Three things put it there: the always-bound MCP budget is
+# already 24 tools (`mcp_always_bound_total_max_tools`), so a payload of this
+# size is one the harness has decided elsewhere it can afford on every round;
+# at the ~120 schema tokens per tool this install measures (118 schemas =
+# 14,180 tokens in the 2026-09-10 audit) 25 tools is ~3k tokens, at or under
+# the *smallest* of the churning per-turn sets the 2026-09-16 logs recorded
+# for one role (3846 → 4246 → 4500 → 4787 → 5418), and unlike those it is paid
+# once and then served from cache; and above roughly this size the reason for
+# selecting at all comes back — an unselected schema is an active suggestion
+# about what the turn is for, and a role holding 40 of them is being told 40
+# different things about its job.
+_PINNED_TOOLSET_MAX_TOOLS = 25
+
+
+def _pinned_policy_toolset(disabled_tools: Set[str]) -> Optional[Set[str]]:
+    """Everything this session's policy still allows, when that is a short list.
+
+    A worker running under a loadout with `tool_access="selected"` has already
+    had its tool needs declared by a human. `agent_profiles.session_patch`
+    stores that allowlist as its complement — every known tool minus the
+    enabled ones — so by the time the loop sees it, it is indistinguishable
+    from any other deny, which is why the per-turn pipeline kept running
+    underneath it and only filtered at the end. Read it back the way it was
+    written: what is left over IS the role's toolset.
+
+    Deriving it from the effective deny set rather than from `tool_access`
+    means it cannot drift away from what execution enforces, and it covers any
+    other policy that leaves a session this narrow — a non-admin owner, an
+    operator-wide `disabled_tools` — for the same reason and with the same
+    argument. A caller that computes its own selection opts out by passing
+    `relevant_tools`; the scheduled-assistant path does exactly that, so a
+    crew's allowlist keeps its own RAG pass.
+
+    Returns None when the policy is not narrow enough to bind — the caller
+    then runs the normal selection pipeline. An *empty* allowlist
+    (`tool_access="none"`) also returns None: there is nothing to send either
+    way, and every downstream check in the loop reads an empty selection as
+    "retrieval has not run yet" rather than "nothing is allowed".
+    """
+    try:
+        from src.tool_index import ALWAYS_AVAILABLE
+        from src.tool_policy import known_tool_names
+    except Exception:
+        # Optimisation, so it fails open: no pin, ordinary selection.
+        return None
+    denied = set(disabled_tools or ())
+    # ALWAYS_AVAILABLE is unioned in rather than trusted to be inside
+    # `known_tool_names()`: an ambient tool that never got a native schema
+    # would otherwise be dropped from a pinned role while every other path
+    # still offers it. A tool the policy denies stays denied — re-adding it
+    # here would advertise a capability execution then refuses.
+    allowed = (set(known_tool_names()) | set(ALWAYS_AVAILABLE)) - denied
+    try:
+        limit = int(get_setting("agent_pinned_toolset_max_tools", _PINNED_TOOLSET_MAX_TOOLS))
+    except (TypeError, ValueError):
+        limit = _PINNED_TOOLSET_MAX_TOOLS
+    if limit <= 0 or not allowed or len(allowed) > limit:
+        return None
+    return allowed
+
+
+def _reassert_pinned_toolset(pinned: Set[str], selected: Optional[Set[str]]) -> Set[str]:
+    """Put a pinned role's toolset back after the per-turn shaping passes.
+
+    Binding the pin before retrieval is what skips the work; this is what makes
+    the result byte-stable, and both are needed. Everything in between either
+    ADDS tools — domain seeding, retention, skills, starved-domain repair, all
+    no-ops under a pin, since the pinned set already holds every tool the
+    policy allows and anything else is subtracted straight afterwards — or
+    reshapes the selection for THIS turn's wording: `apply_terminus_toolset`
+    replaces it outright on a file-work turn and carries across only what
+    retrieval matched, which under a pin is nothing at all; the open-document
+    and email-draft prunes take tools away on whichever turns an editor panel
+    happened to be open. Any one of those is a different schema prefix next
+    turn, which is the churn the pin exists to stop.
+
+    MCP tools ride across instead of being dropped. They are not in
+    `known_tool_names()`, so an allowlist expressed over it never denied them
+    and they were never in the pinned set to begin with; dropping them here
+    would take a connected server away from a pinned role for no reason. In
+    practice what reaches this point is the browser catalog expanded from the
+    `builtin_browser` sentinel the allowlist itself names, and that expansion
+    is unconditional once the sentinel is present — so it costs no stability.
+    """
+    return set(pinned) | {
+        name for name in (selected or ()) if name.startswith("mcp__")
+    }
+
+
 def _tool_schemas_for_round(
     *,
     force_answer: bool,
@@ -5535,7 +5670,37 @@ async def stream_agent_loop(
     _suppressed_retained_tools: set[str] = set()
     _low_signal_hints_only = False
     _t1 = time.time()
-    if _relevant_tools:
+    # A role whose toolset is already declared does not get it computed again.
+    # When the session's own policy leaves only a handful of tools allowed —
+    # a loadout with `tool_access="selected"`, a restricted owner — the
+    # per-turn pipeline can only ever return a SUBSET of that handful, and a
+    # different subset each turn: one role's schema prefix moved 3846 → 4246 →
+    # 4500 → 4787 → 5418 tokens across consecutive turns on 2026-09-16, with
+    # `cached=0` on several round-1s, and the same run's `use ntfy to send a
+    # notification` retrieved 21 tools including the whole email suite because
+    # the index has no similarity floor. Binding the allowlist outright costs
+    # at most `_PINNED_TOOLSET_MAX_TOOLS` schemas, is byte-identical every
+    # round and every turn (so the cached prefix holds — see
+    # specs/prompt-prefix-stability.md), and skips retrieval, the embedding
+    # call and the domain seeding entirely.
+    #
+    # Not in plan mode: its read-only allowlist is a per-turn MODE rather than
+    # a role, an ordinary chat is underneath it, and the next turn out of plan
+    # mode has a different set anyway — nothing to keep stable. Not for the
+    # fine-tuned models either: their clamps below ARE the behaviour under
+    # test and must have the last word on the selection.
+    _pinned_tools: Optional[Set[str]] = None
+    if not guide_only and not relevant_tools and not plan_mode and not _ody_qwen_finetune_model:
+        _pinned_tools = _pinned_policy_toolset(disabled_tools)
+        if _pinned_tools is not None:
+            _relevant_tools = set(_pinned_tools)
+            _tool_selection_source = "pinned"
+            logger.info(
+                "[tool-routing] policy allowlist is %d tool(s); pinning the toolset "
+                "and skipping retrieval for this turn: %s",
+                len(_pinned_tools), _name_list(_pinned_tools, 25),
+            )
+    if _relevant_tools and _pinned_tools is None:
         logger.info(f"[tool-rag] Using caller-provided relevant_tools ({len(_relevant_tools)} tools)")
     if not guide_only and not _relevant_tools and _low_signal_turn:
         from src.tool_index import ALWAYS_AVAILABLE
@@ -5650,7 +5815,15 @@ async def stream_agent_loop(
         from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS_AVAILABLE_BASE
     except Exception:
         _ALWAYS_AVAILABLE_BASE = frozenset()
-    _query_matched_tools = set(_relevant_tools or set()) - set(_ALWAYS_AVAILABLE_BASE)
+    # Empty under a pin, and deliberately so: nothing was matched against this
+    # query because nothing was retrieved. Reporting the whole allowlist as
+    # `query_matched_count` would tell an operator the opposite of what
+    # happened, and `dropped_query_matches` is read as "retrieval asked for
+    # these and selection refused" — a claim there is no evidence for here.
+    _query_matched_tools = (
+        set() if _pinned_tools is not None
+        else set(_relevant_tools or set()) - set(_ALWAYS_AVAILABLE_BASE)
+    )
 
     # If deterministic domain detection fired, seed the corresponding domain
     # tools into the selected tool set. This is not direct prompt-pack
@@ -6055,6 +6228,18 @@ async def stream_agent_loop(
             allow_repair=not _ody_qwen_finetune_model,
             protected={"email"} if active_email else frozenset(),
         )
+
+    # Undo whatever the per-turn shaping above did to a pinned role's toolset;
+    # `_reassert_pinned_toolset` has the reasoning. Last thing before the
+    # disabled-tools subtraction, so nothing gets to reshape it afterwards.
+    if _pinned_tools is not None and _relevant_tools is not None:
+        _reshaped = sorted(set(_pinned_tools) - set(_relevant_tools))
+        _relevant_tools = _reassert_pinned_toolset(_pinned_tools, _relevant_tools)
+        if _reshaped:
+            logger.info(
+                "[tool-routing] pinned toolset restored after per-turn reshaping "
+                "put back=%s", _name_list(_reshaped, 25),
+            )
 
     if _relevant_tools is not None and disabled_tools:
         # A disabled tool can be neither prompted nor scheduled; keep the
@@ -7177,6 +7362,16 @@ async def stream_agent_loop(
                 if not _needs_admin:
                     _rearm_pool -= _ADMIN_TOOLS
                 _rearm_pool = {t for t in _rearm_pool if t and t not in disabled_tools}
+                # A pinned role (`_pinned_policy_toolset`) reaches here with the
+                # pool and the selection already equal, because the pin IS every
+                # builtin its policy allows. Both tiers below then find nothing
+                # new and the round lands in the "nothing left to re-arm" branch,
+                # which is the right answer and not a regression: the tool the
+                # round is asking for is one the loadout denies, so widening
+                # would offer a schema execution refuses. MCP tools are the
+                # exception and still re-arm normally — they are not in
+                # `known_tool_names()`, so an allowlist never denied them and a
+                # gated catalog is genuinely missing rather than forbidden.
                 # Two tiers, both bounded. There is deliberately no third.
                 #
                 # Tier 1, targeted: the tools the claim actually points at, by
