@@ -120,12 +120,33 @@ consecutive turns, and `use ntfy to send a notification to odysseus` retrieved
 floor (§2.2). Computing a subset of a declared list, differently each turn, is
 work that can only make the answer worse.
 
-Two consequences worth knowing. A pinned role's missing-tool self-unblock (§5)
-finds nothing to attach — the pin already holds every builtin the policy allows
-— so the round ends without re-arming, which is the honest answer: what it is
-asking for is denied, not merely unselected. Gated MCP catalogs are the
-exception and still re-arm, because an allowlist expressed over
-`known_tool_names()` never denied them.
+The set is the complement of the turn's deny set over **every tool that exists
+on this turn** — `known_tool_names()`, the ambient tools, and the qualified name
+of every connected MCP tool the turn can send a schema for. Taking it over the
+builtins alone was the 2026-09-23 regression: `known_tool_names()` is builtins
+by construction, so the complement could hold no `mcp__` name at all, and a role
+whose whole job was driving a connected server was pinned to the 14 builtins
+among its 29 declared tools with no retrieval pass left to find the rest. A
+demoted or gated server reaches the payload only by winning selection (§2.4),
+and under a pin the pinned set *is* the selection. One tool of a small
+always-bound server still arrived, which is how the incident looked like a
+partial outage rather than a total one.
+
+MCP names are generated at runtime, so a server connecting or disconnecting
+moves the pinned set — but it moves the payload either way. A disconnected
+server has no schema left to send and `_sticky_tool_selection` already drops
+what no longer exists; a newly connected small server is bound unconditionally
+whatever selection said. So this is one invalidation at the event, not per-turn
+churn, and between events the prefix is byte-identical as before. What it does
+change is the count: a role whose allowlist reaches a large server now measures
+over `agent_pinned_toolset_max_tools` and takes the ordinary retrieval path
+instead — which above that size is the better answer anyway, and is the
+honest way to say "this policy is too wide to pin".
+
+One consequence worth knowing. A pinned role's missing-tool self-unblock (§5)
+finds nothing to attach — the pin already holds every tool the policy allows —
+so the round ends without re-arming, which is the honest answer: what it is
+asking for is denied, not merely unselected.
 
 ### 2.1 Intent classification
 
@@ -190,7 +211,7 @@ and selection was invisible.
 
 | gate | effect |
 | --- | --- |
-| delegation policy | `never`, or `explicit` without an explicit request, disables delegation launchers, loadout creation and qualified MCP `run_pi_task` tools — `manage_agent_loadout` included, whose `start` action launches a worker; `_DELEGATION_TOOLS` says why a name set cannot cover remote-execution MCP tools and `mcp_access` must |
+| delegation policy | `never`, or `explicit` without an explicit request, disables delegation launchers, loadout creation and qualified MCP `run_pi_task` tools — `manage_agent_loadout` included, whose `start` action launches a worker; `_DELEGATION_TOOLS` says why a name set cannot cover remote-execution MCP tools and `mcp_access` must. Under `explicit`, a launcher the user **typed the name of** is kept: naming the tool is a more specific ask than any phrase the recogniser matches, and only that tool is kept. The name has to be said, not shown — a fenced block, a quoted line or a pasted log does not count, so `run the agent tests` and a transcript of the refusal both stay gated. `never` is not re-opened by any wording |
 | tool allowlist | the chat's `tool_access`/`enabled_tools` (§6), inverted against the tools that exist on *this* turn |
 | model / memory / skill access | the chat's loadout (§6) removes what it is not allowed |
 | plan mode | allowlist of read-only tools only |
@@ -200,6 +221,17 @@ and selection was invisible.
 The owner baseline (`src/tool_security.py::owner_baseline_disabled_tools`) is
 the single merge point every agent turn passes through, whichever route started
 it — a chat turn, a `send_to_session` sub-agent, a background follow-up.
+
+A gate also has to report itself to the *model*, not only to the operator.
+`dropped_query_matches` answers "which gate dropped it" for whoever is reading
+the log; the model saw nothing, so when `discover_tools` returned no
+loadout-management tool on 2026-09-23 it supplied its own reason — "tool
+discovery hit the schema budget" — and told the user that as fact. Discovery
+now names a policy drop as a policy drop, for the tools the query wrote out by
+name: a name the caller typed is one it already holds, so repeating it back
+discloses nothing, while a denied tool it never asked about stays invisible. An
+empty result also says which kind of empty it is, so "nothing matched" can no
+longer be reported as "nothing fitted".
 
 ### 2.4 Assembling the schema list
 
@@ -395,12 +427,20 @@ genuinely needed:
   poll-shaped in it. Missing any of these three makes a job impossible to
   observe finishing.
 - **A mutating call clears cached results**, so a re-read after an edit is
-  correct. Recognised by the same three routes. Its own same-signature failure
-  counter is retained so a repeatedly failing mutation cannot evade the guard.
-- **A failed call gets one real retry.** The second identical failure is retained
-  and the third call is suppressed with the prior error quoted to the model.
-  Approval holds are never counted or memoised: the approval contract requires
-  re-issuing byte-identical arguments.
+  correct. Recognised by the same three routes. The clear happens *before* the
+  recording, so the mutating call's own signature survives it and a model
+  firing the same write twice in a row is still caught.
+- **A failed call is never memoised**, so a retry after a transient error always
+  runs; the runaway and stall detectors are what bound a call that keeps
+  failing. Approval holds are not memoised either: the approval contract
+  requires re-issuing byte-identical arguments once the user decides.
+
+The guard's helpers survived the 2026-09-18 upstream-core re-sync but its call
+sites did not, and its tests went with them, so between then and 2026-09-23 it
+could not fire at all — `_detect_runaway_call` (15 identical calls) and the
+stall detector (four text-free repeats) were the only things left, and neither
+sees a four-round burn. If this section and `grep -n _is_duplicate_call` ever
+disagree again, the section is the claim and the grep is the fact.
 
 ### Missing-tool self-unblock
 

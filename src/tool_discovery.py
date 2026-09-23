@@ -69,6 +69,20 @@ def _is_readonly(name: str, schema: Dict[str, Any]) -> bool:
     return name in PLAN_MODE_READONLY_TOOLS or name == "discover_tools" or name in READ_ACTION_TOOLS
 
 
+def _name_written_out(name: str, text: str) -> bool:
+    """Whether ``text`` contains this tool's name as a whole token.
+
+    The test for "the caller already has this name", which is what makes it
+    safe to say a tool was denied. A substring test would report `ls` against
+    the word "tools"; a looser lexical match would report a tool the caller
+    never asked about, which is the disclosure the filtering above exists to
+    prevent.
+    """
+    return re.search(
+        r"(?<![A-Za-z0-9_-])" + re.escape(name) + r"(?![A-Za-z0-9_-])", text, re.IGNORECASE,
+    ) is not None
+
+
 def _compact_schema_cost(schema: Dict[str, Any]) -> int:
     """Conservative token estimate without changing the returned schema."""
     item = copy.deepcopy(schema)
@@ -251,8 +265,31 @@ class TurnToolDiscovery:
         query = str(query or "").strip()[:500]
         limit = max(1, min(int(max_results), 8))
         permitted = self._permitted(settings)
-        if not query or not permitted:
+        if not query:
             return self._result(query, [], limit)
+
+        # Tools the caller NAMED that policy withheld. Without this, discovery
+        # could only say "No permitted tools matched that discovery query",
+        # which is true of the permitted inventory and says nothing about the
+        # tool the caller asked for by name — so on 2026-09-23 the model
+        # supplied its own cause ("tool discovery hit the schema budget and
+        # returned no loadout-management tool") and reported the invention to
+        # the user as fact. "Degrade honestly" (website/design-patterns.md)
+        # applies to the model as an audience too: it cannot report a reason it
+        # was never given, and the drop reason already existed for the operator
+        # in `[tool-routing]`'s `dropped_query_matches`.
+        #
+        # Scoped to names written out in the query, on a token boundary. That
+        # is the line that keeps this from becoming a way to enumerate what the
+        # chat may not have: a name the caller typed is one it already holds,
+        # while a denied tool it never asked about stays invisible, which is
+        # what the semantic-filter and fresh-revocation tests pin.
+        policy_denied = sorted(
+            name for name in self._catalog
+            if name not in permitted and _name_written_out(name, query)
+        )[:limit]
+        if not permitted:
+            return self._result(query, [], limit, policy_denied=policy_denied)
 
         words = set(_WORDS.findall(query.casefold()))
         meaningful_words = words - _LEXICAL_STOPWORDS
@@ -309,14 +346,17 @@ class TurnToolDiscovery:
         return self._result(
             query, chosen, limit, already_attached=already_attached[:limit],
             budget_limited=bool(ranked and not chosen),
+            policy_denied=policy_denied,
         )
 
     def _result(
         self, query: str, chosen: List[str], limit: int,
         *, already_attached: Optional[List[str]] = None,
         budget_limited: bool = False,
+        policy_denied: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         already_attached = list(already_attached or ())
+        policy_denied = list(policy_denied or ())
         rows = []
         for name in chosen:
             schema = self._loaded[name]
@@ -328,6 +368,7 @@ class TurnToolDiscovery:
             "query": query, "loaded_names": chosen,
             "already_attached_names": already_attached, "tools": rows,
             "budget_limited": budget_limited,
+            "policy_denied_names": policy_denied,
         }
         output = (
             "Loaded tools for this turn: " + ", ".join(chosen)
@@ -346,12 +387,32 @@ class TurnToolDiscovery:
             # to repeat the request before it would call the tool.
             output += (". They are attached to your next call in this same turn; "
                        "call the tool now instead of asking the user to retry.")
+        elif not already_attached and not budget_limited:
+            # Name the kind of answer this is. "Nothing matched" and "nothing
+            # fitted" are different facts and the model was inventing the
+            # second one to explain the first.
+            output += " This is not a schema-budget result: nothing was withheld for size."
+        if policy_denied:
+            output = output.rstrip()
+            if not output.endswith("."):
+                output += "."
+            plural = len(policy_denied) > 1
+            output += (
+                " Dropped by this chat's tool policy, not by the schema budget: "
+                + ", ".join(policy_denied)
+                + f". Policy denies {'them' if plural else 'it'} for this turn, so "
+                f"discovery cannot attach {'them' if plural else 'it'} and retrying "
+                "will not change that. If this blocks you, say that this chat's tool "
+                "policy denies the tool by name — do not report a schema budget, a "
+                "missing server, or any other cause."
+            )
         return {
             "output": output,
             "exit_code": 0,
             "continue_same_turn": bool(chosen or already_attached),
             "loaded_names": list(chosen),
             "already_attached_names": already_attached,
+            "policy_denied_names": policy_denied,
             "loaded_tools": [copy.deepcopy(self._loaded[name]) for name in chosen],
             "discovery": machine,
             "max_results": limit,

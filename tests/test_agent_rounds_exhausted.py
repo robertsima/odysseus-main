@@ -223,3 +223,93 @@ def test_max_rounds_alone_does_not_wrap_up(monkeypatch):
     )))
     assert len(calls) == 4
     assert not any(str(e.get("type", "")).startswith("round_budget") for e in events), events
+
+
+# ── Duplicate-call guard ─────────────────────────────────────────────────
+#
+# Written on 2026-09-16 for a turn that spent rounds 3-6 on four identical
+# `execute_code` calls; `_detect_runaway_call` needs 15 identical calls and the
+# stall detector needs four text-free repeats in a row, so a six-round burn was
+# invisible to both. The 2026-09-18 upstream-core re-sync (c72cb40c) replaced
+# the round loop and took the guard's call sites with it — the three helpers
+# stayed in the module with no caller, and these tests went with the call
+# sites, so nothing noticed. On 2026-09-23 a turn spent rounds 1-4 on
+# `discover_tools` and the guard did not fire, because there was no guard.
+
+
+def _run_repeat_loop(monkeypatch, round_text, *, tools, max_rounds=4):
+    """Drive the real round loop with a model that emits the same call forever."""
+    ran = []
+
+    async def _fake_exec(block, *a, **k):
+        ran.append((block.tool_type, (block.content or "").strip()))
+        return (block.tool_type, {"output": f"run #{len(ran)}", "exit_code": 0})
+
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(al, "execute_tool_block", _fake_exec, raising=False)
+
+    async def _fake_stream(_candidates, messages, **kwargs):
+        yield f'data: {json.dumps({"delta": round_text})}\n\n'
+        yield "data: [DONE]\n\n"
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+
+    gen = al.stream_agent_loop(
+        "http://x/v1", "m",
+        [{"role": "user", "content": "find the thing"}],
+        max_rounds=max_rounds,
+        relevant_tools=set(tools),
+    )
+    return ran, _types(_collect(gen))
+
+
+def test_an_identical_repeat_is_answered_from_the_memo(monkeypatch):
+    """Same tool, same arguments, nothing mutating in between: run once."""
+    call = '```search_documents\n{"query": "tool routing"}\n```'
+    ran, events = _run_repeat_loop(monkeypatch, call, tools={"search_documents"})
+
+    assert [name for name, _ in ran] == ["search_documents"], ran
+    outputs = [e.get("output") or "" for e in events if e.get("type") == "tool_output"]
+    assert len(outputs) > 1, "the model kept calling; only the executions are deduped"
+    assert any("you already made this exact call this turn" in text for text in outputs), outputs
+    # The first result is what the repeats are answered with.
+    assert any("run #1" in text for text in outputs[1:]), outputs
+
+
+def test_the_guard_never_withholds_a_poll_a_retry_or_a_reread():
+    """A false positive here withholds a call the model genuinely needed, so
+    the three exemptions are the load-bearing half of this guard."""
+    memo = {}
+    sig = al._dedupe_signature("read_file", '{"path": "a.md"}')
+    al._record_call_result(sig, "read_file", "contents", memo, '{"path": "a.md"}')
+    assert al._is_duplicate_call(sig, "read_file", memo, '{"path": "a.md"}') is True
+
+    # 1. Polling, by allowlist, by name shape, and by the `action` argument --
+    #    an MCP name carries a per-server hash and can never be enumerated.
+    for tool, args in (
+        ("manage_bg_jobs", "{}"),
+        ("mcp__77d1a280__firecrawl_check_crawl_status", '{"id": "1"}'),
+        ("delegate_to_claude_code", '{"action": "poll", "task_id": "1"}'),
+    ):
+        poll_sig = al._dedupe_signature(tool, args)
+        al._record_call_result(poll_sig, tool, "still running", memo, args)
+        assert al._is_duplicate_call(poll_sig, tool, memo, args) is False, tool
+
+    # 2. A mutating call drops the memo, so a re-read after an edit is correct.
+    write_args = '{"path": "a.md", "content": "x"}'
+    al._record_call_result(
+        al._dedupe_signature("write_file", write_args), "write_file", "ok", memo, write_args,
+    )
+    assert al._is_duplicate_call(sig, "read_file", memo, '{"path": "a.md"}') is False
+
+    # 3. A failed call is never memoised at all, so the retry runs.
+    fresh = {}
+    assert al._is_duplicate_call(sig, "read_file", fresh, '{"path": "a.md"}') is False
+
+    # Key on the FULL arguments: two long calls sharing a prefix are different
+    # calls, and suppressing the second is the false positive to avoid.
+    long_a = '{"cmd": "' + "x" * 200 + 'a"}'
+    long_b = '{"cmd": "' + "x" * 200 + 'b"}'
+    assert al._dedupe_signature("bash", long_a) != al._dedupe_signature("bash", long_b)
+    # ...and a reordered key is the same call.
+    assert (al._dedupe_signature("bash", '{"a": 1, "b": 2}')
+            == al._dedupe_signature("bash", '{"b": 2, "a": 1}'))

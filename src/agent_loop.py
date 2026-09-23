@@ -15,7 +15,7 @@ import os
 import re
 import time
 import logging
-from typing import Any, AsyncGenerator, List, Dict, Optional, Set, Tuple
+from typing import Any, AsyncGenerator, Iterable, List, Dict, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 from src.llm_core import (
@@ -1615,6 +1615,19 @@ def _detect_admin_tools(messages: List[Dict]) -> Set[str]:
 # any orchestration phrasing re-opens the whole tool through
 # `_explicit_delegation_requested`.
 #
+# Re-examined on 2026-09-23, because gating the read-only actions looked like
+# the cause of a user being refused a tool they named. It was not — the cause
+# was that naming a tool could not satisfy the gate at all, which
+# `_delegation_tools_named_by_user` now fixes — and the read-only actions stay
+# in. Splitting this per action would put the delegation rule in a third place
+# (a name set here, a `never` check in the tool, and a new argument-shaped
+# check somewhere between), and it would have to hold at BOTH ends: this set
+# is subtracted from the schema list and consulted again at execution, so a
+# half-open tool means offering a schema whose main action is refused, which
+# is the phantom-tool failure `website/design-patterns.md` names. The cheap
+# version of the same benefit is already here: any orchestration phrasing, or
+# the user writing the tool's name, re-opens the whole tool.
+#
 # `manage_agent_worktree` is deliberately NOT in the set. It makes a checkout,
 # commits in it and asks a human to publish — all of it this turn's own work,
 # in this process, with no second agent anywhere. Gating it here would mean a
@@ -1662,6 +1675,85 @@ def _explicit_delegation_requested(text: str) -> bool:
     no longer disagree about the same sentence.
     """
     return delegation_intent.explicit_delegation_requested(text)
+
+
+# Regions of a user turn that are being SHOWN rather than said: fenced blocks,
+# email/markdown quotation, and pasted log lines (a leading clock time, an ISO
+# stamp, a `[tag]` or a level word). A tool name inside one of those is the
+# user quoting the harness at us, not instructing it — which is the whole
+# difference between "use manage_agent_loadout to repair the preset" and a
+# pasted `[tool-rag] dropped ... ['manage_agent_loadout']`. Inline backticks
+# are deliberately NOT stripped: `use \`manage_agent_loadout\`` is someone
+# naming the tool carefully, and treating that as quotation would punish the
+# clearest way to ask.
+_QUOTED_FENCE_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_QUOTED_LINE_RE = re.compile(r"^[ \t]*>.*$", re.MULTILINE)
+_PASTED_LOG_LINE_RE = re.compile(
+    r"^[ \t]*(?:"
+    r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?"          # 21:45:30
+    r"|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?"        # 2026-09-23 21:45
+    r"|\[[A-Za-z0-9_.:+-]{1,40}\]"                   # [tool-rag]
+    r"|(?:DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|TRACE)\b"
+    r").*$",
+    re.MULTILINE,
+)
+
+
+def _spoken_user_text(text: str) -> str:
+    """The part of a user turn the user is saying, with quoted/pasted parts cut."""
+    out = _QUOTED_FENCE_RE.sub(" ", str(text or ""))
+    out = _PASTED_LOG_LINE_RE.sub(" ", out)
+    return _QUOTED_LINE_RE.sub(" ", out)
+
+
+def _delegation_tools_named_by_user(text: str) -> Set[str]:
+    """Delegation tools the user typed out by name in their own latest turn.
+
+    The gate below is a policy gate and stays closed by default, but a user who
+    writes the tool's name has made the request this policy asks for: `explicit`
+    means "only when asked", and naming the tool is a more specific ask than any
+    phrase `_explicit_delegation_requested` matches. Without this, the 2026-09-23
+    turn `use manage_agent_loadout to repair Penpot Product Designer preset` was
+    refused the very tool it named — and the separate `[tool-rag] User named
+    tools` rescue could not help, because it subtracts `disabled_tools` and the
+    gate had already put the name there.
+
+    Two things this must not become. It rescues only the tools actually named,
+    never the rest of `_DELEGATION_TOOLS`: naming one launcher is not consent to
+    all of them. And it reads only text the user is *saying* — `run the agent
+    tests` names nothing and stays gated, and so does a pasted log or a quoted
+    reply that happens to contain a launcher's name.
+    """
+    spoken = _spoken_user_text(text)
+    if not spoken.strip():
+        return set()
+    return {
+        name for name in _DELEGATION_TOOLS
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", spoken)
+    }
+
+
+def _delegation_gated_tools(policy: object, text: str) -> Set[str]:
+    """The delegation tools this turn's policy switches off.
+
+    One definition, imported (website/design-patterns.md). The same set is
+    subtracted from the schema list and consulted again at execution, and it is
+    what the tests read, so there is no second place that can disagree with the
+    loop about the same sentence.
+    """
+    mode = str(policy or "explicit").strip().lower()
+    if mode == "never":
+        # Never means never: no wording in the turn re-opens it.
+        return set(_DELEGATION_TOOLS)
+    if mode != "explicit":
+        # "auto", and anything unrecognised, gates nothing here. This is not
+        # the fail-closed default it looks like: the policy value itself is
+        # validated where it is stored (`agent_profiles._choice`), and every
+        # one of these tools has its own execution-side checks.
+        return set()
+    if _explicit_delegation_requested(text):
+        return set()
+    return set(_DELEGATION_TOOLS) - _delegation_tools_named_by_user(text)
 
 
 def _extract_last_user_message(messages: List[Dict]) -> str:
@@ -4660,7 +4752,10 @@ def _explain_dropped_matches(
 _PINNED_TOOLSET_MAX_TOOLS = 25
 
 
-def _pinned_policy_toolset(disabled_tools: Set[str]) -> Optional[Set[str]]:
+def _pinned_policy_toolset(
+    disabled_tools: Set[str],
+    mcp_tool_names: Optional[Iterable[str]] = None,
+) -> Optional[Set[str]]:
     """Everything this session's policy still allows, when that is a short list.
 
     A worker running under a loadout with `tool_access="selected"` has already
@@ -4684,20 +4779,61 @@ def _pinned_policy_toolset(disabled_tools: Set[str]) -> Optional[Set[str]]:
     (`tool_access="none"`) also returns None: there is nothing to send either
     way, and every downstream check in the loop reads an empty selection as
     "retrieval has not run yet" rather than "nothing is allowed".
+
+    ``mcp_tool_names`` is the qualified name of every MCP tool this turn could
+    actually send a schema for. It is part of the universe, not an extra:
+    `known_tool_names()` is builtins by construction, so a universe built from
+    it alone made the complement "every builtin the policy allows and *no* MCP
+    tool at all". On 2026-09-23 a Penpot role whose loadout declared 29 tools
+    was pinned to the 14 builtins among them, retrieval — the one thing that
+    would otherwise have surfaced its server — was skipped on the same turn,
+    and the role spent four rounds discovering that it could not do the only
+    job it has. The complement is only meaningful over the set the policy was
+    evaluated against, and by the time the loop gets here `disabled_tools`
+    already carries every MCP name the allowlist and the server gate rejected
+    (`stream_agent_loop` adds them per connected tool through
+    `allowlist_permits`), so subtracting from the live universe is what reads
+    the allowlist back rather than re-deriving it.
+
+    Passing the offerable schema names rather than reading the registry keeps
+    the offer and the enforcement in agreement (website/design-patterns.md): a
+    tool an operator switched off in MCP settings has no schema this turn, so
+    pinning its name would advertise nothing and spend one of the ~25 slots.
+
+    On byte-stability (specs/prompt-prefix-stability.md): MCP names are
+    generated at runtime, so a server connecting or disconnecting mid-
+    conversation moves this set — but it moves the payload either way, and
+    always did. A disconnected server has no schema to send, and
+    `_sticky_tool_selection` already drops a tool that no longer exists; a
+    newly connected small server is bound unconditionally by
+    `_tool_schemas_for_round` whatever selection said. So the pin adds no new
+    churn class: it is one invalidation at the connect/disconnect, then
+    byte-identical again for every round and turn that follows, which is the
+    property the pin exists for. What it does change is the *count*: a role
+    whose allowlist reaches a large server now measures over the limit and
+    takes the ordinary retrieval path instead, which is the honest answer —
+    above that size, selecting is worth doing again.
     """
     try:
         from src.tool_index import ALWAYS_AVAILABLE
-        from src.tool_policy import known_tool_names
+        from src.tool_policy import connected_mcp_tool_names, known_tool_names
     except Exception:
         # Optimisation, so it fails open: no pin, ordinary selection.
         return None
     denied = set(disabled_tools or ())
+    if mcp_tool_names is None:
+        try:
+            mcp_names = set(connected_mcp_tool_names())
+        except Exception:
+            mcp_names = set()
+    else:
+        mcp_names = {str(name) for name in mcp_tool_names if name}
     # ALWAYS_AVAILABLE is unioned in rather than trusted to be inside
     # `known_tool_names()`: an ambient tool that never got a native schema
     # would otherwise be dropped from a pinned role while every other path
     # still offers it. A tool the policy denies stays denied — re-adding it
     # here would advertise a capability execution then refuses.
-    allowed = (set(known_tool_names()) | set(ALWAYS_AVAILABLE)) - denied
+    allowed = (set(known_tool_names()) | set(ALWAYS_AVAILABLE) | mcp_names) - denied
     try:
         limit = int(get_setting("agent_pinned_toolset_max_tools", _PINNED_TOOLSET_MAX_TOOLS))
     except (TypeError, ValueError):
@@ -4722,13 +4858,15 @@ def _reassert_pinned_toolset(pinned: Set[str], selected: Optional[Set[str]]) -> 
     happened to be open. Any one of those is a different schema prefix next
     turn, which is the churn the pin exists to stop.
 
-    MCP tools ride across instead of being dropped. They are not in
-    `known_tool_names()`, so an allowlist expressed over it never denied them
-    and they were never in the pinned set to begin with; dropping them here
-    would take a connected server away from a pinned role for no reason. In
-    practice what reaches this point is the browser catalog expanded from the
-    `builtin_browser` sentinel the allowlist itself names, and that expansion
-    is unconditional once the sentinel is present — so it costs no stability.
+    MCP tools ride across instead of being dropped. The pin itself now holds
+    every MCP tool the policy permits (`_pinned_policy_toolset`), so this is no
+    longer the only thing keeping a connected server reachable from a pinned
+    role — but it stays, for the two cases the pin's universe cannot see: the
+    browser catalog expanded from the `builtin_browser` sentinel the allowlist
+    itself names, and a manager that could not list its tools when the pin was
+    computed. Both are unconditional once present, so neither costs stability,
+    and dropping a connected server's tool here would be the vanishing-tool bug
+    again.
     """
     return set(pinned) | {
         name for name in (selected or ()) if name.startswith("mcp__")
@@ -5100,11 +5238,20 @@ async def stream_agent_loop(
         disabled_tools.update(_allowlist_denied)
         _mark_dropped(_allowlist_denied, f"tool-access:{_tool_access}")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
-    if _delegation_policy == "never" or (
-        _delegation_policy == "explicit" and not _explicit_delegation_requested(_last_user)
-    ):
-        disabled_tools.update(_DELEGATION_TOOLS)
-        _mark_dropped(_DELEGATION_TOOLS, f"delegation-policy:{_delegation_policy}")
+    _gated_delegation = _delegation_gated_tools(_delegation_policy, _last_user)
+    if _gated_delegation:
+        disabled_tools.update(_gated_delegation)
+        _mark_dropped(_gated_delegation, f"delegation-policy:{_delegation_policy}")
+        # Only non-empty when the user wrote a launcher's name out: `explicit`
+        # means "when the human asks", and naming the tool is a more specific
+        # ask than any phrase the recogniser matches.
+        _named_delegation = set(_DELEGATION_TOOLS) - _gated_delegation
+        if _named_delegation:
+            logger.info(
+                "[tool-routing] delegation policy=%s; kept %d tool(s) the user named "
+                "outright: %s",
+                _delegation_policy, len(_named_delegation), _name_list(_named_delegation, 8),
+            )
     _model_access = str(_agent_settings.get("model_access") or "all")
     if _model_access == "current":
         _model_tools = {"chat_with_model", "ask_teacher", "list_models"}
@@ -5539,7 +5686,23 @@ async def stream_agent_loop(
     # test and must have the last word on the selection.
     _pinned_tools: Optional[Set[str]] = None
     if not guide_only and not relevant_tools and not plan_mode and not _ody_qwen_finetune_model:
-        _pinned_tools = _pinned_policy_toolset(disabled_tools)
+        # The MCP half of the pin's universe: exactly the qualified names this
+        # turn can send a schema for. Read from the schema builder rather than
+        # the registry so an operator-disabled tool neither gets advertised nor
+        # spends one of the pin's slots.
+        _pinnable_mcp_names: Optional[Set[str]] = None
+        if mcp_mgr:
+            try:
+                _pinnable_mcp_names = {
+                    str((schema.get("function") or {}).get("name") or "")
+                    for schema in mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {})
+                } - {""}
+            except Exception:
+                # Fall back to the registry read inside the helper rather than
+                # to "no MCP": a manager that cannot list schemas must not be
+                # the reason a role loses its server again.
+                _pinnable_mcp_names = None
+        _pinned_tools = _pinned_policy_toolset(disabled_tools, _pinnable_mcp_names)
         if _pinned_tools is not None:
             _relevant_tools = set(_pinned_tools)
             _tool_selection_source = "pinned"
@@ -6372,6 +6535,27 @@ async def stream_agent_loop(
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
     _call_freq: collections.Counter = collections.Counter()
+    # Duplicate-call guard (see `_dedupe_signature` and the notes above it).
+    # {exact call signature: the result that call already returned}. Turn-scoped
+    # on purpose — a repeat in a LATER turn is the user asking again, and the
+    # approval flow explicitly requires re-issuing an identical call next turn.
+    #
+    # Re-wired on 2026-09-23. The helpers landed on 2026-09-16 and their call
+    # sites were lost in the 2026-09-18 upstream-core re-sync (c72cb40c), which
+    # left `_dedupe_signature`, `_is_duplicate_call` and `_record_call_result`
+    # in the file with no caller and their tests deleted — so the guard the
+    # runtime docs describe has not fired since. `_detect_runaway_call` needs 15
+    # identical calls and `_stuck_rounds` needs four text-free repeats in a row,
+    # which is exactly the six-round burn the guard was written for.
+    _call_memo: Dict[str, str] = {}
+    _dup_calls_skipped = 0
+    # Bounded like _MAX_TOOLSET_REARMS / _MAX_INTENT_NUDGES: the suppressed
+    # result itself tells the model on every repeat, but the sharper directive
+    # ("you already made this exact call — change approach") is worth saying
+    # twice at most. Past that it is nagging, and the loop-breaker takes over.
+    _dup_directive_count = 0
+    _MAX_DUP_CALL_DIRECTIVES = 2
+    _dup_pending_directive = None  # queued until this round's tool results land
     _force_answer = False  # set by loop-breaker → next round runs with NO tools
     _round_budget_hit = False  # set once when `wrap_up_round` forces the answer round
     # Supervisor: how many times we've nudged the model after it announced
@@ -7536,15 +7720,12 @@ async def stream_agent_loop(
                 and _tool_rearms < _MAX_TOOL_REARMS
             ):
                 # A pinned role (`_pinned_policy_toolset`) reaches here with
-                # nothing left to attach: the pin IS every builtin its policy
-                # allows, so `permitted_names` below can only return what the
-                # round already has. That is the right answer and not a
-                # regression — the tool the round is asking for is one the
-                # loadout denies, and widening would offer a schema execution
-                # refuses. MCP catalogs are the exception and still re-arm:
-                # they are not in `known_tool_names()`, so an allowlist
-                # expressed over it never denied them, and a gated catalog is
-                # genuinely missing rather than forbidden.
+                # nothing left to attach: the pin IS every tool its policy
+                # allows — builtin and MCP alike, since 2026-09-23 — so
+                # `permitted_names` below can only return what the round
+                # already has. That is the right answer and not a regression:
+                # the tool the round is asking for is one the loadout denies,
+                # and widening would offer a schema execution refuses.
                 _rearm = _missing_tools_to_attach(
                     _strip_think_blocks(cleaned_round),
                     sent=set(_tool_names_sent),
@@ -7763,6 +7944,7 @@ async def stream_agent_loop(
                 _ody_notes_finetune_mode
                 and block.tool_type in {"manage_notes", "manage_calendar", "manage_tasks"}
             )
+            _dup_sig = _dedupe_signature(block.tool_type, full_command)
             policy_names = email_tool_policy_names(block.tool_type)
             blocked_by_tool_policy = bool(
                 tool_policy
@@ -7796,6 +7978,47 @@ async def stream_agent_loop(
                     "Tool blocked before approval by current policy: %s",
                     block.tool_type,
                 )
+            elif _is_duplicate_call(_dup_sig, block.tool_type, _call_memo, block.content or ""):
+                # Exact repeat of a call that already succeeded this turn, with
+                # nothing mutating in between — running it again can only
+                # reproduce the same bytes at full price. Hand back what it
+                # returned the first time instead of executing. Ahead of the
+                # approval branch so a repeat never re-prompts the user for a
+                # decision they already made.
+                _dup_calls_skipped += 1
+                _prior = _call_memo.get(_dup_sig) or "(no output)"
+                desc = f"{block.tool_type}: DUPLICATE (not run)"
+                result = {
+                    "output": (
+                        "Not run — you already made this exact call this turn (same "
+                        "tool, same arguments) and nothing has changed since. It "
+                        "returned:\n\n" + _prior +
+                        "\n\nRepeating it cannot produce a different answer. Use this "
+                        "result, or take a different step."
+                    ),
+                    "exit_code": 0,
+                    "duplicate_call": True,
+                }
+                logger.warning(
+                    "[agent] duplicate-call guard on round %d: skipped repeat #%d of %s",
+                    round_num, _dup_calls_skipped, block.tool_type,
+                )
+                if _dup_directive_count < _MAX_DUP_CALL_DIRECTIVES:
+                    _dup_directive_count += 1
+                    # Queued, not appended: _append_tool_results has not run
+                    # yet, so appending here would put the correction BEFORE
+                    # the assistant turn and tool results it is about.
+                    _dup_pending_directive = (
+                        f"You just called `{block.tool_type}` with arguments identical to "
+                        "a call you already made earlier in this turn, so it was not run "
+                        "again — the earlier result is repeated in the tool output above "
+                        "and it has not changed. Repeating a call is not progress. Either "
+                        "act on the result you already have, call a DIFFERENT tool, or, if "
+                        "you are stuck because the tool you actually need is not in your "
+                        "schema list, say so plainly and name it instead of retrying. If "
+                        "you genuinely need this call again because something changed, "
+                        "explain what changed first."
+                    )
             elif not security_decision.allowed:
                 approval_document = (
                     active_document
@@ -8140,6 +8363,22 @@ async def stream_agent_loop(
             elif "error" in result:
                 output_text = _truncate(result["error"])
 
+            # Duplicate-call guard: memoise what this call returned so an
+            # identical one later in the turn can be answered from here instead
+            # of re-run. Only successful calls — a retry after a real failure is
+            # legitimate work — and never an approval hold, whose whole contract
+            # is that the model re-issues the same call once the user decides.
+            if (
+                not result.get("error")
+                and not result.get("blocked")
+                and not result.get("approval_required")
+                and not result.get("duplicate_call")
+                and result.get("exit_code", 0) in (0, None)
+            ):
+                _record_call_result(
+                    _dup_sig, block.tool_type, output_text, _call_memo, block.content or "",
+                )
+
             # Emit tool_output (include ui_event data if present)
             tool_output_data = {"type": "tool_output", "tool": block.tool_type, "command": cmd_display, "output": output_text, "exit_code": result.get("exit_code")}
             if is_doc_tool and "action" in result:
@@ -8466,6 +8705,14 @@ async def stream_agent_loop(
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
                              tool_result_records=tool_result_records)
+
+        # Duplicate-call correction, delivered after the round's tool results so
+        # it reads as a reply to the repeat it is about. Capped by
+        # _MAX_DUP_CALL_DIRECTIVES; the suppressed result still says it on every
+        # repeat, this is only the sharper "change approach" nudge.
+        if _dup_pending_directive:
+            messages.append(_harness_directive(_dup_pending_directive))
+            _dup_pending_directive = None
 
         # Emit agent_step event
         yield (
