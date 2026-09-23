@@ -15,6 +15,7 @@ import logging
 import os
 import pathlib
 import re
+import stat
 import sys
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, Tuple
@@ -27,16 +28,37 @@ from src.tool_security import (
     is_public_blocked_tool,
     owner_is_admin_or_single_user,
 )
+from src.tool_capabilities import ToolRunSecurityContext, blocked_tool_result
+from src.tool_approvals import ExactToolApproval
 from src.tool_policy import ToolPolicy
-from src.constants import MAX_OUTPUT_CHARS, MAX_READ_CHARS, MAX_DIFF_LINES, DATA_DIR
+from src.private_access import effective_private_grant, private_tool_denial, tool_requires_private_grant
+from src.constants import (
+    MAX_OUTPUT_CHARS,
+    MAX_READ_CHARS,
+    MAX_DIFF_LINES,
+    AGENT_WORKSPACE_DIR,
+)
 from src.tool_utils import _truncate, get_mcp_manager
+from src.github_mcp_shaping import compact_github_mcp_result, github_mcp_request_defaults
+
+
+class _MissingToolSecurityContext:
+    pass
+
+
+class _NoToolSecurityContext:
+    """Explicit sentinel for non-agent callers that have no run provenance."""
+
+
+_MISSING_TOOL_SECURITY_CONTEXT = _MissingToolSecurityContext()
+NO_TOOL_SECURITY_CONTEXT = _NoToolSecurityContext()
 
 # Persistent working directory for agent subprocesses.
-# Resolves to <repo_root>/data, which is the bind-mounted volume in Docker
-# (/app/data) and the local data directory for manual installs.
-# Using this as cwd and HOME prevents the agent from silently creating files
-# in ephemeral container layers that are lost on the next rebuild.
-_AGENT_WORKDIR = DATA_DIR
+# Resolves to <repo_root>/data/agent_workspace, inside the bind-mounted volume
+# in Docker (/app/data), so files survive a rebuild as before. The subdirectory
+# rather than data/ itself keeps agent scratch files and dotfiles out of the
+# directory holding the session store and the auth database.
+_AGENT_WORKDIR = AGENT_WORKSPACE_DIR
 
 
 def _git_safe_directory_env(env: Dict[str, str]) -> Dict[str, str]:
@@ -79,10 +101,15 @@ def _git_safe_directory_env(env: Dict[str, str]) -> Dict[str, str]:
 #   1. Sensitive-subpath deny list — checked FIRST. Blocks .ssh,
 #      .gnupg, shell rc files, token/env files even if the root above
 #      them is on the allowlist.
-#   2. Allowlist — only the directories the agent legitimately needs
-#      (project data/, system tmp). $HOME is NOT on the default list.
-#   3. Opt-in extra roots — admin can add broader roots via the
-#      "tool_path_extra_roots" setting (list of path strings).
+#   2. Application-state deny (_is_app_state_path) - DATA_DIR holds the
+#      session store, auth database, app key and settings, so only
+#      _agent_readable_data_subdirs() is readable inside it.
+#   3. Allowlist - only the directories the agent legitimately needs
+#      (its data/ workspace, user content, system tmp). $HOME is NOT on
+#      the default list.
+#   4. Opt-in extra roots - admin can add broader roots via the
+#      "tool_path_extra_roots" setting. These cannot re-open DATA_DIR;
+#      rule 2 is independent of which root a path arrived through.
 # ---------------------------------------------------------------------------
 
 _SENSITIVE_BASENAMES: set[str] = {
@@ -91,6 +118,8 @@ _SENSITIVE_BASENAMES: set[str] = {
     ".zshrc", ".zprofile", ".zshenv",
     ".profile", ".tcshrc", ".cshrc",
     ".env", ".netrc",
+    # `git credential-store` keeps https://user:token@host lines here.
+    ".git-credentials",
 }
 
 _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
@@ -114,9 +143,76 @@ _SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
 # case before comparing — the sibling resolver already normcases paths for the
 # same reason. casefold (not os.path.normcase) because normcase is a no-op on
 # POSIX, which is exactly where the macOS read-exfil path lives.
+_ENV_TEMPLATE_NAMES_CF: frozenset[str] = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist", ".env.defaults",
+})
 _SENSITIVE_BASENAMES_CF: frozenset[str] = frozenset(b.casefold() for b in _SENSITIVE_BASENAMES)
 _SENSITIVE_FILE_PATTERNS_CF: frozenset[str] = frozenset(p.casefold() for p in _SENSITIVE_FILE_PATTERNS)
 _SENSITIVE_KEY_SUFFIXES_CF: tuple[str, ...] = tuple(s.casefold() for s in _SENSITIVE_KEY_SUFFIXES)
+
+
+# ── walk-scoped policy snapshot ────────────────────────────────────────────
+# A directory walk (glob, grep, ls) checks every directory and file against the
+# path policy. The policy's inputs come from config: the agent-worktree config
+# file (read and parsed twice per check), settings lookups, and realpath calls
+# on the same few roots. On a large tree that was ~2 ms per check locally and
+# far more on the server's overlay filesystem, where two globs over /app took
+# 97 s each. Inside a snapshot those inputs are computed once for the walk;
+# outside one (every single-path check) nothing is cached, so no decision is
+# ever made on stale config across calls.
+_POLICY_SNAPSHOT: contextvars.ContextVar = contextvars.ContextVar("_tool_policy_snapshot", default=None)
+
+
+def _policy_memo(key: str, compute):
+    memo = _POLICY_SNAPSHOT.get()
+    if memo is None:
+        return compute()
+    if key not in memo:
+        memo[key] = compute()
+    return memo[key]
+
+
+def run_with_policy_snapshot(fn, *args, **kwargs):
+    """Call ``fn`` with the path-policy inputs computed once for its duration.
+    For the worker function of a directory walk (runs inside to_thread)."""
+    token = _POLICY_SNAPSHOT.set({})
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        _POLICY_SNAPSHOT.reset(token)
+
+
+def _vault_realpath() -> Optional[str]:
+    def compute():
+        from src.rag_sensitivity import vault_root
+        try:
+            return os.path.realpath(vault_root())
+        except (OSError, ValueError):
+            return None
+    return _policy_memo("vault_realpath", compute)
+
+
+def _worktree_config_paths() -> tuple:
+    """(approval state dir, configured signing-key path), both canonical."""
+    def compute():
+        try:
+            from src.agent_worktree.config import load_config
+            cfg = load_config()
+        except Exception:
+            return (None, None)
+        state = None
+        key = None
+        try:
+            state = os.path.normcase(os.path.realpath(cfg.state_dir))
+        except Exception:
+            state = None
+        try:
+            if cfg.private_key_path:
+                key = os.path.normcase(os.path.realpath(cfg.private_key_path))
+        except Exception:
+            key = None
+        return (state, key)
+    return _policy_memo("worktree_config", compute)
 
 
 def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
@@ -138,6 +234,19 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
         if part in _SENSITIVE_BASENAMES_CF:
             return True
 
+    # A repository's .git/config can carry a token in a remote URL
+    # (https://x-access-token:<token>@github.com/...) or an http extraheader,
+    # and writing it can set hooks/fsmonitor commands. manage_git's `remotes`
+    # action reports remotes credential-free; the raw file stays off limits.
+    if len(parts) >= 2 and filename == "config" and parts[-2] == ".git":
+        return True
+
+    # `.env` is listed above; its per-environment variants (.env.local,
+    # .env.production, ...) hold the same secrets. Committed templates carry
+    # placeholders only and are what an agent needs to learn the variables.
+    if filename.startswith(".env.") and filename not in _ENV_TEMPLATE_NAMES_CF:
+        return True
+
     # Documents the user labelled private. These live under PERSONAL_DIR, which
     # sits inside DATA_DIR — an allowed tool root — so without this check any
     # model could read a private note by absolute path and walk straight around
@@ -153,13 +262,14 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
         )
 
         in_vault = False
+        vault = None
         try:
-            vault = os.path.realpath(vault_root())
-            in_vault = resolved == vault or os.path.commonpath([resolved, vault]) == vault
+            vault = _vault_realpath()
+            in_vault = bool(vault) and (resolved == vault or os.path.commonpath([resolved, vault]) == vault)
         except (OSError, ValueError):
             pass
         if not allow_private and (
-            path_is_under_private_directory(resolved)
+            path_is_under_private_directory(resolved, vault_real=vault)
             or (in_vault and resolve_sensitivity(resolved) == "private")
         ):
             return True
@@ -187,30 +297,21 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
 
 def _is_configured_signing_key(resolved: str) -> bool:
     """True for the GitHub App private key, whatever the operator named it."""
-    try:
-        from src.agent_worktree.config import load_config
-
-        configured = load_config().private_key_path
-    except Exception:
-        return False
+    configured = _worktree_config_paths()[1]
     if not configured:
         return False
     try:
-        return os.path.normcase(os.path.realpath(configured)) == os.path.normcase(resolved)
+        return configured == os.path.normcase(resolved)
     except (OSError, ValueError):
         return False
 
 
 def _is_under_agent_worktree_state(resolved: str) -> bool:
     """True when *resolved* sits in the agent worktree's approval state dir."""
-    try:
-        from src.agent_worktree.config import load_config
-
-        root = os.path.realpath(load_config().state_dir)
-    except Exception:
+    b = _worktree_config_paths()[0]
+    if not b:
         return False
     a = os.path.normcase(resolved)
-    b = os.path.normcase(root)
     return a == b or a.startswith(b + os.sep)
 
 
@@ -291,6 +392,245 @@ def _is_under_personal_docs(resolved: str) -> bool:
     return a == b or a.startswith(b + os.sep)
 
 
+def _path_within(resolved: str, root: str) -> bool:
+    """True when *resolved* is *root* itself or sits underneath it.
+
+    Use the platform's path-case rules.  This helper participates in allow
+    decisions, so unconditional case-folding would let a distinct ``/DATA``
+    tree masquerade as a descendant of ``/data`` on case-sensitive systems.
+    """
+    resolved, root = os.path.normcase(resolved), os.path.normcase(root)
+    if resolved == root:
+        return True
+    try:
+        if os.path.commonpath([resolved, root]) == root:
+            return True
+    except ValueError:
+        return False
+    # normcase is intentionally conservative about assumptions (notably on
+    # POSIX), so consult the filesystem when paths exist.  This recognizes a
+    # case alias on a case-insensitive volume without treating distinct
+    # case-sensitive paths as the same allow root.
+    if os.path.exists(root):
+        candidate = resolved
+        while True:
+            try:
+                if os.path.exists(candidate) and os.path.samefile(candidate, root):
+                    return True
+            except OSError:
+                pass
+            parent = os.path.dirname(candidate)
+            if parent == candidate:
+                break
+            candidate = parent
+    return False
+
+
+def _path_within_conservative(resolved: str, root: str) -> bool:
+    """Containment for deny decisions, folding case to fail closed."""
+    resolved, root = resolved.casefold(), root.casefold()
+    if resolved == root:
+        return True
+    try:
+        return os.path.commonpath([resolved, root]) == root
+    except ValueError:
+        return False
+
+
+def _agent_readable_data_subdirs() -> tuple[str, ...]:
+    return _policy_memo("readable_data_subdirs", _agent_readable_data_subdirs_uncached)
+
+
+def _agent_readable_data_subdirs_uncached() -> tuple[str, ...]:
+    """The only parts of DATA_DIR the agent's file tools may reach.
+
+    The agent's own scratch folder, plus the directories of user content whose
+    paths the application itself gives to the model, which it would then be
+    unable to open.  These normally live under DATA_DIR; the documented mail
+    attachment override may instead name a disjoint external directory:
+
+      UPLOAD_DIR            the chat upload manifest renders "path=<p>" and
+                            says to read it with read_file (agent_loop.py)
+      MAIL_ATTACHMENTS_DIR  download_attachment returns the path and its own
+                            description tells the model to read it
+      PERSONAL_DIR          GET /api/personal returns a path per file and is
+                            reachable through the app_api tool; RUNBOOK_DIR
+                            nests under it
+      PERSONAL_UPLOADS_DIR  indexed as a personal-docs directory, which
+                            manage_rag lists as an absolute path
+
+    Order matters: the first entry is roots[0], which _resolve_search_root uses
+    when grep/glob/ls are called with no path.
+    """
+    from src.constants import (
+        DATA_DIR,
+        MAIL_ATTACHMENTS_DIR,
+        PERSONAL_DIR,
+        PERSONAL_UPLOADS_DIR,
+        UPLOAD_DIR,
+    )
+    configured = (
+        (AGENT_WORKSPACE_DIR, "agent_workspace", False),
+        (UPLOAD_DIR, "uploads", False),
+        # This has a documented environment override and may legitimately
+        # live outside DATA_DIR, but it must never equal/contain DATA_DIR.
+        (MAIL_ATTACHMENTS_DIR, "mail-attachments", True),
+        (PERSONAL_DIR, "personal_docs", False),
+        (PERSONAL_UPLOADS_DIR, "personal_uploads", False),
+    )
+    configured_data_dir = os.path.abspath(os.path.expanduser(str(DATA_DIR)))
+    data_dir = os.path.realpath(configured_data_dir)
+    safe: list[str] = []
+    for raw, internal_name, external_ok in configured:
+        value = str(raw or "").strip()
+        # These paths are security-policy roots, not ordinary allowlist
+        # entries. Internal roles may inherit a relative DATA_DIR, but must
+        # still resolve to their exact canonical child below. External mail
+        # overrides require an absolute, disjoint directory.
+        if not value:
+            continue
+        expanded = os.path.abspath(os.path.expanduser(value))
+        # A policy root must not acquire an exemption by redirecting its final
+        # path component to protected state or to an unrelated external tree.
+        if os.path.islink(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if os.path.exists(resolved) and not os.path.isdir(resolved):
+            continue
+        expected_internal = os.path.join(data_dir, internal_name)
+        expected_configured = os.path.join(configured_data_dir, internal_name)
+        inside_data = (
+            os.path.normcase(expanded)
+            in {
+                os.path.normcase(expected_configured),
+                os.path.normcase(expected_internal),
+            }
+            and resolved == expected_internal
+        )
+        external_safe = (
+            external_ok
+            and os.path.isabs(os.path.expanduser(value))
+            and resolved != data_dir
+            and os.path.dirname(resolved) != resolved
+            and not _path_within(data_dir, resolved)
+            and not _path_within(resolved, data_dir)
+        )
+        if not (inside_data or external_safe) or _is_sensitive_path(resolved):
+            continue
+        safe.append(resolved)
+    safe.extend(r for r in _repository_data_subdirs(data_dir) if r not in safe)
+    return tuple(safe)
+
+
+# Settings-derived, and consulted on every path check; a few seconds is fresh
+# enough for a changed repository-roots setting.
+_REPO_SUBDIRS_TTL_S = 5.0
+_REPO_SUBDIRS_CACHE: dict[str, tuple[float, tuple[str, ...]]] = {}
+
+
+def _repository_data_subdirs(data_dir: str) -> tuple[str, ...]:
+    """Configured repository roots that live inside DATA_DIR.
+
+    The defaults (/app/data/development and /app/data/agent_worktrees) are
+    under DATA_DIR, and get_workspace lists the checkouts in them, yet every
+    file tool refused them as application state and a workspace could not be
+    bound there: the 2026-09-18 workers reported "cannot read
+    /app/data/development/odysseus-main" and stopped. They are admitted here
+    only as real, non-symlinked directories strictly inside DATA_DIR that hold
+    neither DATA_DIR itself nor the worktree approval state. Sensitive files,
+    private documents and that approval state are still refused inside them,
+    by the checks in _is_sensitive_path.
+    """
+    now = time.monotonic()
+    cached = _REPO_SUBDIRS_CACHE.get(data_dir)
+    if cached and now - cached[0] < _REPO_SUBDIRS_TTL_S:
+        return cached[1]
+    try:
+        from src.agent_worktree.config import load_config
+        from src.agent_worktree.repository_sync import git_repository_roots
+
+        roots = [str(root) for root in git_repository_roots()]
+        state_dir = os.path.realpath(load_config().state_dir)
+    except Exception:
+        return ()
+    out: list[str] = []
+    for raw in roots:
+        expanded = os.path.abspath(os.path.expanduser(raw))
+        if os.path.islink(expanded):
+            continue
+        resolved = os.path.realpath(expanded)
+        if (
+            not os.path.isdir(resolved)
+            or resolved == data_dir
+            or not _path_within(resolved, data_dir)
+            or _path_within(state_dir, resolved)
+            or _is_sensitive_path(resolved)
+        ):
+            continue
+        out.append(resolved)
+    result = tuple(out)
+    _REPO_SUBDIRS_CACHE[data_dir] = (now, result)
+    return result
+
+
+def _is_app_state_path(resolved: str) -> bool:
+    """True for anything under DATA_DIR that is not agent-readable.
+
+    DATA_DIR holds the session store, the auth database, the app encryption key
+    and the settings file. A model-supplied path must not reach those through
+    any root, so this is checked in both resolvers rather than expressed as an
+    absence from the allowlist: a workspace bound at or above the data
+    directory, or an opt-in tool_path_extra_roots entry covering it, would
+    otherwise put them back in reach.
+
+    A containment rule rather than a filename deny list, so state files added
+    later are covered without anyone remembering to list them, and so a user's
+    own settings.json or app.db inside a real workspace is not caught.
+    """
+    from src.constants import DATA_DIR
+    data_real = _policy_memo("data_dir_realpath", lambda: os.path.realpath(DATA_DIR))
+    if not _path_within_conservative(resolved, data_real):
+        return False
+    return not any(
+        _path_within(resolved, d)
+        for d in _agent_readable_data_subdirs()
+    )
+
+
+def _is_hardlinked_regular_file(resolved: str) -> bool:
+    """Reject inode aliases that can smuggle DATA_DIR state into an allow root."""
+    try:
+        target = os.stat(resolved, follow_symlinks=False)
+    except OSError:
+        return False
+    return stat.S_ISREG(target.st_mode) and getattr(target, "st_nlink", 1) > 1
+
+
+def _is_denied_tool_path(resolved: str, allow_private: bool = False) -> bool:
+    """Apply every path deny to a canonical traversal result.
+
+    ``allow_private`` is the chat's effective private-vault grant; without it
+    documents labelled private are denied like any other sensitive path.
+    """
+    return (
+        _is_sensitive_path(resolved, allow_private=allow_private)
+        or _is_app_state_path(resolved)
+        or _is_hardlinked_regular_file(resolved)
+    )
+
+
+def _can_traverse_tool_path(resolved: str, allow_private: bool = False) -> bool:
+    """Allow walking a denied state parent only to reach safe carve-outs."""
+    if _is_sensitive_path(resolved, allow_private=allow_private):
+        return False
+    if not _is_app_state_path(resolved):
+        return True
+    return any(
+        _path_within(readable, resolved)
+        for readable in _agent_readable_data_subdirs()
+    )
+
+
 def _tool_path_roots() -> list[str]:
     """Return the list of directory roots that read_file / write_file
     may touch. Default: project data/ + system temp dirs. Extra roots
@@ -299,9 +639,9 @@ def _tool_path_roots() -> list[str]:
     """
     roots: list[str] = []
 
-    # Project data directory — the agent's primary workspace.
-    from src.constants import DATA_DIR
-    roots.append(DATA_DIR)
+    # The agent's workspace plus the user-content directories inside data/.
+    # The rest of DATA_DIR is denied by _is_app_state_path.
+    roots.extend(_agent_readable_data_subdirs())
 
     # /tmp (and its macOS realpath /private/tmp).
     roots.append("/tmp")
@@ -363,7 +703,14 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
     if ws:
         try:
             return _resolve_tool_path_in_workspace(ws, raw_path, allow_private=allow_private)
-        except ValueError:
+        except ValueError as workspace_error:
+            # Only a path that is merely outside the workspace gets the second
+            # chance below. A path the workspace resolver DENIED (sensitive,
+            # application state, hard-linked) keeps that refusal: re-resolving
+            # it elsewhere would mask the reason, or quietly hand back a
+            # different file of the same name.
+            if "is outside the workspace" not in str(workspace_error):
+                raise
             # The knowledge base is not "somewhere else on the host" — it is
             # the user's own indexed notes, reachable by these same tools when
             # no workspace is bound, and the paths `search_documents` cites.
@@ -384,6 +731,12 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
 
     for root in _tool_path_roots():
         if resolved == root:
@@ -420,6 +773,12 @@ def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> s
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
     if not _is_under_personal_docs(resolved):
         raise ValueError(
             f"path '{raw_path}' is outside the workspace and outside the "
@@ -448,6 +807,12 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private
             f"path '{raw_path}' is inside a sensitive directory "
             f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
         )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
     if resolved != base:
         # normcase so containment holds on case-insensitive filesystems
         # (Windows, default macOS): it lowercases on Windows and is a no-op on
@@ -477,6 +842,19 @@ _active_workspace: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+# Set by the private-grant gate when bash/python may run without the grant
+# because src.shell_sandbox confines them to this workspace. The handlers
+# read it; None means "run as before" (grant present) or "refused".
+_shell_sandbox_workspace: contextvars.ContextVar = contextvars.ContextVar(
+    "agent_shell_sandbox_workspace", default=None
+)
+
+
+def get_shell_sandbox_workspace() -> Optional[str]:
+    """The workspace bash/python must be sandboxed to for this call, if any."""
+    return _shell_sandbox_workspace.get()
+
+
 def get_active_workspace() -> Optional[str]:
     """The folder the agent is confined to this turn, or None."""
     return _active_workspace.get()
@@ -497,6 +875,10 @@ def vet_workspace(raw: str) -> Optional[str]:
     resolved = os.path.realpath(os.path.expanduser(raw))
     if not os.path.isdir(resolved) or _is_sensitive_path(resolved):
         return None
+    # Refuse the bind rather than binding a workspace where every subsequent
+    # tool call would fail on the same deny list.
+    if _is_app_state_path(resolved):
+        return None
     # Reject filesystem roots: binding / (or a Windows drive/UNC root) as the
     # workspace would make every absolute path "inside" it, collapsing the
     # confinement into host-wide file access. A root is its own dirname, which
@@ -509,7 +891,13 @@ def vet_workspace(raw: str) -> Optional[str]:
 def agent_cwd() -> str:
     """Working directory for agent subprocesses (bash/python/background jobs):
     the active workspace when set, else the persistent data dir."""
-    return get_active_workspace() or _AGENT_WORKDIR
+    workspace = get_active_workspace()
+    if workspace:
+        return workspace
+    resolved = os.path.realpath(_AGENT_WORKDIR)
+    if resolved not in _agent_readable_data_subdirs():
+        raise RuntimeError("agent workspace is not a safe real directory")
+    return resolved
 
 
 def get_mcp_manager():
@@ -526,16 +914,24 @@ def _resolve_search_root(raw_path: str, allow_private: bool = False) -> str:
     supplied path is confined inside it (or inside the personal-documents tree
     — see _resolve_tool_path, so grepping the vault does not require unbinding
     the workspace). Otherwise an empty path defaults to the agent's primary
-    root (project data dir) and a supplied path is confined by the global
-    allowlist + sensitive-file policy.
+    root (its workspace under the project data dir) and a supplied path is
+    confined by the global allowlist + sensitive-file policy.
     """
     raw = (raw_path or "").strip()
     ws = get_active_workspace()
     if ws:
-        return os.path.realpath(ws) if not raw else _resolve_tool_path(raw, allow_private=allow_private)
+        # Resolve the empty case as the workspace path rather than returning
+        # it directly: returned unchecked it skipped both deny lists, so a
+        # bare ls listed whatever the workspace was bound to.
+        if not raw:
+            return _resolve_tool_path_in_workspace(ws, ws, allow_private=allow_private)
+        return _resolve_tool_path(raw, allow_private=allow_private)
     if not raw:
         roots = _tool_path_roots()
-        return roots[0] if roots else os.path.realpath(".")
+        default_root = os.path.realpath(AGENT_WORKSPACE_DIR)
+        if default_root in roots and not _is_denied_tool_path(default_root):
+            return default_root
+        raise ValueError("default agent workspace is not a safe readable data subdirectory")
     return _resolve_tool_path(raw, allow_private=allow_private)
 
 logger = logging.getLogger(__name__)
@@ -546,6 +942,7 @@ _ADMIN_TOOLS = {
     # Touches the operator's git checkout and the publishing flow; log content
     # is operator-facing diagnostic data.
     "manage_agent_worktree",
+    "manage_git",
     "read_app_logs",
     # Runs an external coding agent against an approved repo checkout.
     "delegate_to_agent", "delegate_to_claude_code",
@@ -646,24 +1043,6 @@ _MCP_ARG_PARSERS: Dict[str, Callable[[str], Dict[str, str]]] = {
     "generate_image": _parse_generate_image,
     "manage_memory":  _parse_manage_memory,
 }
-
-# A user-configured MCP server can expose a filesystem or shell wrapper under
-# any server id.  Qualified calls do not pass through the legacy bare-tool
-# dispatch, so keep the obvious read-capable names behind the same explicit
-# per-chat grant.  This is intentionally conservative: a false positive is a
-# retryable tool error, while a false negative can disclose private vault data.
-_PRIVATE_READ_MCP_TOOL_NAMES = frozenset({
-    "bash", "python", "read_file", "write_file", "edit_file", "apply_patch",
-    "grep", "glob", "ls", "get_workspace", "search_documents", "manage_rag",
-})
-
-
-def _qualified_mcp_needs_private_grant(tool: str) -> bool:
-    if not isinstance(tool, str) or not tool.startswith("mcp__"):
-        return False
-    parts = tool.split("__", 2)
-    return len(parts) == 3 and parts[2].casefold() in _PRIVATE_READ_MCP_TOOL_NAMES
-
 
 # Primary argument key(s) for the legacy line-parsed tools. When a fenced
 # block's content is a JSON object carrying one of these keys, it's structured
@@ -843,6 +1222,57 @@ def _failure_detail(result: Any, limit: int = 200) -> str:
     return _redact_for_log(text) if text else ""
 
 
+_DELEGATION_INSPECTION_ACTIONS = frozenset({
+    "poll", "get", "cancel", "list", "status", "list_repositories", "repositories",
+})
+
+
+def _tool_action(content: Any, default: str = "") -> str:
+    """Read an action verb from a structured tool call without failing it."""
+    try:
+        args = json.loads(content) if isinstance(content, str) else content
+    except (TypeError, ValueError):
+        return default
+    if not isinstance(args, dict):
+        return default
+    return str(args.get("action") or default).strip().lower()
+
+
+def _capacity_limited_tool_call(tool: str, content: Any) -> bool:
+    """Whether this call may start new worker work.
+
+    ``delegate_*`` multiplexes inspection and lifecycle operations. Blocking a
+    poll/list/status behind a full worker limit traps the caller: it cannot
+    observe, cancel, or wait for the work occupying the slot.
+    """
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        return _tool_action(content, "run") not in _DELEGATION_INSPECTION_ACTIONS
+    return tool in {"send_to_session", "pipeline", "create_session"}
+
+
+def _worker_capacity_result(tool: str, limit: int, active: int) -> Dict[str, Any]:
+    available = max(0, limit - active)
+    if tool in {"delegate_to_agent", "delegate_to_claude_code"}:
+        next_step = (
+            f"inspect existing work with {tool} action='list' or action='poll', or cancel it if appropriate."
+        )
+    else:
+        next_step = "Wait for existing work to finish or cancel it before starting another worker."
+    return {
+        "error": (
+            f"Worker capacity reached: {active} active of this chat's limit {limit}. "
+            "This is the parent chat's Child workers limit, not the provider-wide concurrent-jobs setting. "
+            "Do not retry a start while capacity is unchanged; " + next_step
+        ),
+        "blocked": True,
+        "blocked_reason": "worker_capacity",
+        "capacity": {"limit": limit, "active": active, "available": available},
+        "capacity_scope": "parent_chat",
+        "configuration_hint": "Agents > select the parent chat > Loadout > Child workers. Only the user may raise this ceiling.",
+        "exit_code": 1,
+    }
+
+
 async def _direct_fallback(
     tool: str,
     content: str,
@@ -867,6 +1297,9 @@ async def _direct_fallback(
             "session_id": session_id,
             "owner": owner,
             "allow_private": bool(allow_private),
+            # Provider-neutral delegation still needs the concrete tool name
+            # for actionable, stable error prefixes.
+            "tool_name": tool,
         }
 
         from src.agent_tools import TOOL_HANDLERS
@@ -885,10 +1318,21 @@ async def _document_tool_dispatch(
     session_id: Optional[str] = None,
     owner: Optional[str] = None,
     allow_private: bool = False,
+    document_id: Optional[str] = None,
+    document_version: Optional[int] = None,
+    document_digest: Optional[str] = None,
 ) -> Optional[Dict]:
     """Route a document tool through TOOL_HANDLERS with the right ctx shape."""
     from src.agent_tools import TOOL_HANDLERS
-    ctx = {"session_id": session_id, "owner": owner, "allow_private": bool(allow_private)}
+    ctx = {
+        "session_id": session_id,
+        "owner": owner,
+        "allow_private": bool(allow_private),
+        "tool_name": tool,
+        "doc_id": document_id,
+        "expected_document_version": document_version,
+        "expected_document_digest": document_digest,
+    }
     if tool in TOOL_HANDLERS:
         return await TOOL_HANDLERS[tool](content, ctx)
     return None
@@ -897,6 +1341,12 @@ async def _document_tool_dispatch(
 # ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
+
+def _READ_ACTION_TOOLS():
+    from src.tool_capabilities import READ_ACTION_TOOLS
+
+    return READ_ACTION_TOOLS
+
 
 async def execute_tool_block(
     block: Any,
@@ -907,6 +1357,14 @@ async def execute_tool_block(
     workspace: Optional[str] = None,
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
+    security_context: (
+        ToolRunSecurityContext
+        | _NoToolSecurityContext
+        | _MissingToolSecurityContext
+    ) = _MISSING_TOOL_SECURITY_CONTEXT,
+    exact_approval: Optional[ExactToolApproval] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -914,6 +1372,109 @@ async def execute_tool_block(
     cwd confine to it) for the duration of this call, then delegate. Reset on the
     way out so the binding never leaks to the next tool call.
     """
+    if security_context is _MISSING_TOOL_SECURITY_CONTEXT:
+        raise TypeError(
+            "execute_tool_block requires security_context; pass a "
+            "ToolRunSecurityContext or NO_TOOL_SECURITY_CONTEXT explicitly"
+        )
+    if (
+        not isinstance(security_context, ToolRunSecurityContext)
+        and security_context is not NO_TOOL_SECURITY_CONTEXT
+    ):
+        raise TypeError(
+            "security_context must be a ToolRunSecurityContext or "
+            "NO_TOOL_SECURITY_CONTEXT"
+        )
+
+    approval_claimed = False
+    if exact_approval is not None:
+        # An approval raised by untrusted context must resume in an armed
+        # context. One raised by the chat's approval mode had no untrusted
+        # context to carry, so only the context itself is required.
+        if (
+            not isinstance(security_context, ToolRunSecurityContext)
+            or (
+                exact_approval.pending.external_untrusted_context_seen
+                and not security_context.external_untrusted_context_seen
+            )
+        ):
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": "Exact-action approval requires an armed run security context.",
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        if (
+            exact_approval.pending.tool_name
+            in {"edit_document", "suggest_document", "update_document"}
+            and (
+                not exact_approval.pending.document_id
+                or exact_approval.pending.document_version is None
+                or not exact_approval.pending.document_digest
+            )
+        ):
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": (
+                        "The approved document action has no sealed target and "
+                        "cannot be executed."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        sealed_workspace = exact_approval.pending.workspace
+        if sealed_workspace and vet_workspace(sealed_workspace) != sealed_workspace:
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": (
+                        "The approved workspace is no longer a valid safe "
+                        "directory. Review the action again."
+                    ),
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+        approval_claimed = exact_approval.claim(
+            owner=owner,
+            session_id=session_id,
+            tool_name=getattr(block, "tool_type", None),
+            content=getattr(block, "content", None),
+            workspace=workspace,
+        )
+        if not approval_claimed:
+            return (
+                f"{getattr(block, 'tool_type', None)}: BLOCKED",
+                {
+                    "error": "The exact-action approval did not match this tool request.",
+                    "exit_code": 1,
+                    "blocked": True,
+                    "policy": "exact_tool_approval",
+                },
+            )
+
+    if isinstance(security_context, ToolRunSecurityContext) and not approval_claimed:
+        decision = security_context.decision_for(
+            getattr(block, "tool_type", None),
+            getattr(block, "content", None),
+        )
+        if not decision.allowed:
+            logger.warning(
+                "External-context policy blocked tool=%r",
+                getattr(block, "tool_type", None),
+            )
+            return blocked_tool_result(
+                getattr(block, "tool_type", None),
+                decision.reason or "Tool blocked by external-context policy.",
+            )
+
     token = _active_workspace.set(workspace or None)
     try:
         output = await _execute_tool_block_impl(
@@ -924,7 +1485,30 @@ async def execute_tool_block(
             progress_cb=progress_cb,
             tool_policy=tool_policy,
             allow_private=allow_private,
+            delegation_authorized=delegation_authorized,
+            tool_discovery=tool_discovery,
+            approved_document_id=(
+                exact_approval.pending.document_id
+                if approval_claimed
+                else None
+            ),
+            approved_document_version=(
+                exact_approval.pending.document_version
+                if approval_claimed
+                else None
+            ),
+            approved_document_digest=(
+                exact_approval.pending.document_digest
+                if approval_claimed
+                else None
+            ),
         )
+        if isinstance(security_context, ToolRunSecurityContext):
+            security_context.observe_tool_result(
+                getattr(block, "tool_type", None),
+                output[1],
+                getattr(block, "content", None),
+            )
         return output
     finally:
         _active_workspace.reset(token)
@@ -938,6 +1522,11 @@ async def _execute_tool_block_impl(
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     tool_policy: Optional[Any] = None,
     allow_private: bool = False,
+    delegation_authorized: Optional[bool] = None,
+    tool_discovery: Optional[Any] = None,
+    approved_document_id: Optional[str] = None,
+    approved_document_version: Optional[int] = None,
+    approved_document_digest: Optional[str] = None,
 ) -> Tuple[str, Dict]:
     """Execute a single tool block. Returns (description, result_dict).
 
@@ -985,6 +1574,31 @@ async def _execute_tool_block_impl(
     # happened to emit.
     policy_names = email_tool_policy_names(tool)
 
+    # Global tool toggles can change during an agent turn (including through
+    # manage_settings itself), so the turn-start disabled_tools snapshot is not
+    # an execution-time authority. Read the small denylist directly, bypassing
+    # the ordinary settings TTL cache, and fail closed on malformed/unreadable
+    # policy. A missing settings file is the valid fresh-install empty policy.
+    try:
+        from src.settings import load_disabled_tools_strict
+        fresh_global_disabled = set(load_disabled_tools_strict())
+    except Exception:
+        logger.exception("Tool blocked because global tool policy could not be loaded: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": "The global capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+            "blocked": True,
+            "blocked_reason": "global_policy_unavailable",
+            "exit_code": 1,
+        }
+    if not policy_names.isdisjoint(fresh_global_disabled):
+        logger.info("Tool blocked by fresh global revocation: tool=%s", tool)
+        return f"{tool}: BLOCKED", {
+            "error": f"Tool '{tool}' is disabled by the current global settings.",
+            "blocked": True,
+            "blocked_reason": "fresh_global_disabled",
+            "exit_code": 1,
+        }
+
     # Misformatted tool call detection: model put JSON inside ```python``` (or
     # similar) without naming the tool. Common with MiniMax-style outputs.
     # Return a helpful error so the model retries with the correct format.
@@ -1014,6 +1628,8 @@ async def _execute_tool_block_impl(
     # Reject tools that the user has disabled for this request
     if disabled_tools and not policy_names.isdisjoint(disabled_tools):
         desc = f"{tool}: BLOCKED"
+        if tool_requires_private_grant(tool) and allow_private is not True:
+            return desc, private_tool_denial(tool)
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
@@ -1025,26 +1641,81 @@ async def _execute_tool_block_impl(
     if session_id:
         try:
             from core.database import get_session_settings
-            _agent_settings = get_session_settings(session_id) or {}
+            _agent_settings = get_session_settings(session_id, strict=True) or {}
         except Exception:
-            pass
-    if _agent_settings:
-        # The chat's tool allowlist. Checked per call rather than against a
-        # denylist computed when the loadout was saved, so a tool the registry
-        # gained afterwards — a new builtin, a newly connected MCP server — is
-        # refused by default instead of being absent from a stale list and
-        # therefore allowed. `allowlist_permits` matches qualified MCP names
-        # and the mcp__<server>__* / mcp__* grants, so this one gate covers
-        # native and MCP tools alike.
-        from src.tool_policy import allowlist_permits as _allowlist_permits
-
-        _tool_access = _agent_settings.get("tool_access") or "all"
-        if not _allowlist_permits(tool, _tool_access, _agent_settings.get("enabled_tools") or []):
+            logger.warning("Tool blocked because session policy could not be loaded: session=%s tool=%s", session_id, tool)
             return f"{tool}: BLOCKED", {
-                "error": f"Tool '{tool}' is not in this agent's tool allowlist.",
+                "error": "This chat's capability policy could not be loaded. No tool was executed; retry after settings access recovers.",
+                "blocked": True, "blocked_reason": "session_policy_unavailable", "exit_code": 1,
+            }
+    allow_private = effective_private_grant(
+        allow_private, _agent_settings if session_id else None,
+    )
+    if _agent_settings:
+        # Session settings are re-read for every call. A tool disabled after
+        # turn preparation must be revoked here before any handler (including
+        # turn-local discovery) can run; the incoming disabled_tools snapshot
+        # above intentionally cannot see such a mid-turn change.
+        _fresh_disabled = {
+            str(name) for name in (_agent_settings.get("disabled_tools") or ()) if name
+        }
+        if not policy_names.isdisjoint(_fresh_disabled):
+            logger.info("Tool blocked by fresh session revocation: session=%s tool=%s", session_id, tool)
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is disabled by this agent's current settings.",
+                "blocked": True,
+                "blocked_reason": "fresh_session_disabled",
                 "exit_code": 1,
             }
+        if _agent_settings.get("workflow_readonly"):
+            if tool == "manage_skills":
+                try:
+                    _skill_action = str(json.loads(content).get("action", "")).lower()
+                except (ValueError, TypeError, AttributeError):
+                    _skill_action = ""
+                if _skill_action not in {"list", "index", "search", "view", "view_ref"}:
+                    return f"{tool}: BLOCKED", {"error": "Research workers may load skills, not modify them.", "exit_code": 1}
+            elif tool in _READ_ACTION_TOOLS():
+                from src.tool_capabilities import action_is_read
 
+                if not action_is_read(tool, content):
+                    return f"{tool}: BLOCKED", {
+                        "error": f"This worker is read-only: {tool} may only read here (for example "
+                                 "list_events). Return the proposed change for the parent to apply.",
+                        "blocked": True, "blocked_reason": "workflow_readonly", "exit_code": 1,
+                    }
+            elif tool.startswith("mcp__"):
+                from src.mcp_manager import mcp_call_is_readonly
+                _manager = get_mcp_manager()
+                _metadata = next((t for t in (_manager.get_all_tools() if _manager else [])
+                                  if t.get("qualified_name") == tool), None)
+                if not mcp_call_is_readonly(tool, content, _metadata):
+                    return f"{tool}: BLOCKED", {
+                        "error": "Research workers may call only read-only MCP tools. "
+                                 "Return the proposed change for the parent to apply.",
+                        "blocked": True, "blocked_reason": "workflow_readonly", "exit_code": 1,
+                    }
+        # The chat's tool allowlist. Checked per call rather than against a
+        # denylist computed when the loadout was saved, so a tool the registry
+        # gained afterwards -- a new builtin, a newly connected MCP server -- is
+        # refused by default instead of being absent from a stale list and
+        # therefore allowed. `allowlist_permits` is the one rule the agent loop
+        # and `session_patch` also read: it matches the equivalent tool
+        # spellings AND the `mcp__<server>__<tool>` / `mcp__<server>__*` /
+        # `mcp__*` grants an allowlist uses to name runtime-generated MCP tools,
+        # which a literal set-membership test cannot.
+        from src.tool_policy import allowlist_permits as _allowlist_permits
+
+        _tool_access = _agent_settings.get("tool_access", "all")
+        _enabled = set(_agent_settings.get("enabled_tools") or [])
+        # A selected-tools agent may still search its own bindings.
+        _discovery_selected_ok = tool == "discover_tools" and _tool_access == "selected" and bool(_enabled)
+        if not _allowlist_permits(tool, _tool_access, _enabled) and not _discovery_selected_ok:
+            return f"{tool}: BLOCKED", {
+                "error": f"Tool '{tool}' is not in this agent's tool allowlist "
+                         "(its selected tool bindings).",
+                "exit_code": 1,
+            }
         _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
         if tool.startswith("mcp__") and isinstance(_allowed_mcp, list) and "*" not in _allowed_mcp:
             _parts = tool.split("__", 2)
@@ -1104,16 +1775,21 @@ async def _execute_tool_block_impl(
                     "exit_code": 1,
                 }
 
-        if tool in {"delegate_to_agent", "delegate_to_claude_code", "send_to_session", "pipeline", "create_session"}:
-            _raw_limit = _agent_settings.get("max_parallel_workers")
-            _limit = int(1 if _raw_limit is None else _raw_limit)
-            from src import agent_control as _agent_control
-            _live_children = _agent_control.live_children(session_id)
-            if _limit <= 0 or _live_children >= _limit:
-                return f"{tool}: BLOCKED", {
-                    "error": f"This agent's worker limit is {_limit}; {_live_children} child process(es) are already running.",
-                    "exit_code": 1,
-                }
+    # Capacity is a default policy, not an opt-in profile setting: an empty
+    # settings object still means one child at a time. Keep it outside the
+    # profile-only guards above, which intentionally do nothing for a plain
+    # chat, so that a missing settings row cannot bypass the limit.
+    if _capacity_limited_tool_call(tool, content):
+        from src.session_settings import effective_worker_limit
+        _limit = effective_worker_limit(_agent_settings)
+        from src import agent_control as _agent_control
+        _live_children = _agent_control.live_children(session_id)
+        if _limit <= 0 or _live_children >= _limit:
+            logger.info(
+                "Tool blocked by worker capacity: tool=%s action=%s active=%s limit=%s",
+                tool, _tool_action(content, "run"), _live_children, _limit,
+            )
+            return f"{tool}: BLOCKED", _worker_capacity_result(tool, _limit, _live_children)
 
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
@@ -1142,24 +1818,70 @@ async def _execute_tool_block_impl(
         logger.warning("Public tool policy blocked owner=%r tool=%s", owner, tool)
         return desc, result
 
+    # Discovery is handled only by the turn-local context supplied by the
+    # agent loop.  It runs after every hard/profile/admin gate above and has no
+    # fallback handler that could accidentally broaden authority.
+    if tool == "discover_tools":
+        if tool_discovery is None:
+            return "discover_tools: BLOCKED", {
+                "error": "Tool discovery is unavailable outside an active agent turn.",
+                "blocked": True,
+                "exit_code": 1,
+            }
+        try:
+            args = json.loads(content or "{}")
+        except (TypeError, ValueError):
+            return "discover_tools: invalid arguments", {"error": "Expected JSON arguments.", "exit_code": 1}
+        if not isinstance(args, dict) or not isinstance(args.get("query"), str):
+            return "discover_tools: invalid arguments", {"error": "A string query is required.", "exit_code": 1}
+        query = args["query"].strip()
+        max_results = args.get("max_results", 5)
+        if not query or len(query) > 500 or isinstance(max_results, bool) or not isinstance(max_results, int) or not 1 <= max_results <= 8:
+            return "discover_tools: invalid arguments", {
+                "error": "query must contain 1-500 characters and max_results must be an integer from 1 to 8.",
+                "exit_code": 1,
+            }
+        fresh_settings = dict(_agent_settings)
+        runtime_disabled = set(disabled_tools or ()) | fresh_global_disabled
+        if not _owner_is_admin(owner):
+            runtime_disabled.update(_ADMIN_TOOLS)
+            runtime_disabled.update(name for name in getattr(tool_discovery, "_catalog", {}) if is_public_blocked_tool(name))
+        fresh_settings["_runtime_disabled_tools"] = sorted(runtime_disabled)
+        fresh_settings["private_vault_access"] = allow_private
+        result = await tool_discovery.discover(query, max_results, settings=fresh_settings)
+        return f"discover_tools: {query[:80]}", result
+
     # Shell/Python are unrestricted subprocesses: unlike the dedicated file
     # tools, they can read an absolute path (or walk the vault through a
     # command substitution) before any local sensitivity resolver runs.  The
     # per-chat private-vault grant is therefore a hard execution gate, not a
     # prompt hint.  Keep this before the detached-background branch and before
     # MCP dispatch so neither route can escape the same decision.
-    if tool in ("bash", "python") and allow_private is not True:
-        desc = f"{tool}: BLOCKED"
-        result = {
-            "error": (
-                f"Tool '{tool}' is disabled unless this chat explicitly enables "
-                "private vault access. Use the dedicated workspace/file tools "
-                "for public project files, or enable 'Allow private vault reads'."
-            ),
-            "exit_code": 1,
-        }
-        logger.info("Unrestricted subprocess blocked without private-vault grant: tool=%s session=%r", tool, session_id)
-        return desc, result
+    #
+    # Without the grant, bash and python may still run inside the bubblewrap
+    # sandbox (src/shell_sandbox.py), which sees only the workspace and the
+    # read-only system: no /app/data, no vault, no app environment.
+    _sandbox_ws = None
+    if tool_requires_private_grant(tool) and allow_private is not True:
+        _ws = get_active_workspace()
+        _sandbox_note = ""
+        if tool in ("bash", "python"):
+            from src import shell_sandbox
+
+            _why = await asyncio.to_thread(shell_sandbox.unavailable_reason, _ws)
+            if not _why:
+                _sandbox_ws = os.path.realpath(_ws)
+            else:
+                _sandbox_note = (" It can run without the grant only in the workspace sandbox, "
+                                 f"which is not possible here: {_why}.")
+        if _sandbox_ws is None:
+            desc = f"{tool}: BLOCKED"
+            result = private_tool_denial(tool)
+            if _sandbox_note:
+                result["error"] += _sandbox_note
+            logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
+            return desc, result
+    _shell_sandbox_workspace.set(_sandbox_ws)
 
 
     # Background execution: a `bash` block whose first line is the `#!bg`
@@ -1170,7 +1892,8 @@ async def _execute_tool_block_impl(
         _is_bg, _bg_cmd = _split_bg_marker(content)
         if _is_bg and _bg_cmd:
             from src import bg_jobs
-            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd())
+            rec = bg_jobs.launch(_bg_cmd, session_id=session_id, cwd=agent_cwd(),
+                                 sandbox_workspace=_sandbox_ws)
             short = _command_preview(_bg_cmd)
             desc = f"bash (background): {short}"
             result = {
@@ -1242,7 +1965,16 @@ async def _execute_tool_block_impl(
     elif tool in ("create_document", "update_document", "edit_document",
                   "suggest_document", "manage_documents"):
         desc = f"{tool}: {_command_preview(content)}"
-        result = await _document_tool_dispatch(tool, content, session_id, owner, allow_private) \
+        result = await _document_tool_dispatch(
+            tool,
+            content,
+            session_id,
+            owner,
+            allow_private=allow_private,
+            document_id=approved_document_id,
+            document_version=approved_document_version,
+            document_digest=approved_document_digest,
+        ) \
             or {"error": f"{tool}: execution failed", "exit_code": 1}
         if tool in ("edit_document", "suggest_document") and "title" in (result or {}):
             desc = f"{tool}: {result.get('title', '')}"
@@ -1429,22 +2161,8 @@ async def _execute_tool_block_impl(
             result = {"error": "MCP manager not available", "exit_code": 1}
     elif tool.startswith("mcp__"):
         # MCP tool dispatch
-        _mcp_private_blocked = _qualified_mcp_needs_private_grant(tool) and allow_private is not True
-        if _mcp_private_blocked:
-            desc = f"{tool}: BLOCKED"
-            result = {
-                "error": (
-                    f"MCP tool '{tool}' is disabled unless this chat explicitly "
-                    "enables private vault access."
-                ),
-                "exit_code": 1,
-            }
-            logger.info("Qualified MCP private-read tool blocked without grant: tool=%s session=%r", tool, session_id)
-        else:
-            mcp = get_mcp_manager()
-        if _mcp_private_blocked:
-            pass
-        elif mcp:
+        mcp = get_mcp_manager()
+        if mcp:
             desc = f"mcp: {tool}"
             args, parse_error = _parse_qualified_mcp_args(tool, content)
             if parse_error:
@@ -1463,12 +2181,24 @@ async def _execute_tool_block_impl(
                 elif tool.startswith("mcp__lotus__"):
                     args = dict(args)
                     args[_LOTUS_MCP_OWNER_ARG] = owner or "__single_user__"
+                # GitHub list/search tools: default a small page and trim each
+                # item, so results stay inline instead of being offloaded.
+                args, injected_per_page = github_mcp_request_defaults(tool, args, mcp)
                 result = await mcp.call_tool(tool, args)
+                result = compact_github_mcp_result(tool, result, injected_per_page)
         else:
             desc = f"mcp: {tool}"
             result = {"error": "MCP manager not available", "exit_code": 1}
 
 
+    elif tool == "orchestrate_agents":
+        from src.agent_tools.workflow_tools import OrchestrateAgentsTool
+        desc = tool
+        result = await OrchestrateAgentsTool().execute(content, {
+            "session_id": session_id, "owner": owner,
+            "allow_private": bool(allow_private),
+            "delegation_authorized": delegation_authorized,
+        })
     elif tool in dynamic_handlers:
         first_line = _command_preview(content)
         desc = f"registry: {tool} {first_line}".strip()
@@ -1505,13 +2235,21 @@ _FORMATTER_HANDLED_KEYS = {
     "stdout", "stderr", "exit_code", "content", "size",
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
-    "error", "output",
+    "error", "output", "delegation_state", "delegation_note",
 }
 
 
 def format_tool_result(description: str, result: Dict) -> str:
     """Format a tool result into text for feeding back to the LLM."""
     parts = [f"### {description}"]
+
+    # Provider output is evidence, but it may be an optimistic or stale text
+    # payload. Put the normalized local outcome ahead of raw stdout/output so
+    # the next agent round cannot mistake "started" prose for a confirmation.
+    if result.get("delegation_state"):
+        state = str(result["delegation_state"])
+        note = str(result.get("delegation_note") or "")
+        parts.append(f"**delegation:** `{state}`" + (f" — {note}" if note else ""))
 
     if "stdout" in result:
         if result["stdout"]:

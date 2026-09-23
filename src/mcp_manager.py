@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import asyncio 
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional, Set, Tuple
 from src.database import McpServer, SessionLocal
 
@@ -119,6 +120,21 @@ def _always_bound_limits() -> Tuple[int, int]:
         # here would take the whole turn down.
         return _MCP_ALWAYS_BOUND_SERVER_MAX_TOOLS, _MCP_ALWAYS_BOUND_TOTAL_MAX_TOOLS
     return per_server, total
+
+
+def _policy_visible_tools(server_id: str, tools: List[Dict]) -> List[Dict]:
+    """Drop tools operator policy never exposes (GitHub delete/remove/archive).
+
+    Applied where a server's catalogue is stored, so every listing, schema,
+    discovery and prompt path sees the same filtered set; call_tool refuses
+    the same names in case a model invents one anyway.
+    """
+    from src.tool_security import github_mcp_policy_refusal
+
+    return [
+        t for t in tools
+        if not github_mcp_policy_refusal(f"mcp__{server_id}__{t.get('name', '')}")
+    ]
 
 
 def _model_visible_schema(schema: Any) -> Dict:
@@ -276,7 +292,17 @@ def _format_mcp_params(input_schema: Any) -> str:
 _MCP_READONLY_VERBS = (
     "list", "get", "read", "search", "fetch", "query", "find", "describe",
     "show", "view", "lookup", "count", "status", "info", "inspect", "summar",
+    "detect", "analy", "estimate", "compare", "forecast",
 )
+_MCP_WRITE_VERBS = (
+    "create", "add", "insert", "update", "edit", "modify", "patch", "put", "set",
+    "delete", "remove", "clear", "reset", "purge", "drop", "archive", "move",
+    "rename", "send", "post", "publish", "upload", "write", "save", "log",
+    "record", "complete", "close", "cancel", "run", "exec", "start", "stop",
+    "kill", "restart", "deploy", "merge", "push", "approve", "reply", "follow",
+    "like", "repost", "block", "mute", "subscribe", "unsubscribe", "enable", "disable",
+)
+_VERB_ENDINGS = frozenset({"s", "d", "e", "es", "ed", "ing", "ion"})
 
 
 def mcp_tool_is_readonly(tool: Dict) -> bool:
@@ -298,13 +324,85 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
         else:
             read_hint = getattr(ann, "readOnlyHint", None)
             destructive = getattr(ann, "destructiveHint", None)
-    if read_hint is True:
-        return True
     if read_hint is False or destructive is True:
         return False
-    # No usable hint — heuristic on the tool name's leading verb.
+    if read_hint is True:
+        return True
+    # No usable hint — heuristic on the tool name's verbs. A leading read verb
+    # reads (`list_events`, `get-post-thread`). A noun-first name
+    # (`mood_summarize_period`) reads only when a read verb appears and no
+    # write verb does, so `mood_log_entry` and `delete_list_item` stay writes.
     name = (tool.get("name") or "").lower()
-    return name.startswith(_MCP_READONLY_VERBS)
+    if name.startswith(_MCP_READONLY_VERBS):
+        return True
+    words = [w for w in re.split(r"[_.-]+", name) if w]
+    if any(_is_write_word(w) for w in words):
+        return False
+    return any(w.startswith(_MCP_READONLY_VERBS) for w in words[1:])
+
+
+def _is_write_word(word: str) -> bool:
+    return any(
+        word == verb or (word.startswith(verb) and word[len(verb):] in _VERB_ENDINGS)
+        for verb in _MCP_WRITE_VERBS
+    )
+
+
+# Todoist is one MCP tool wrapping the whole `td` CLI, so whether a call reads
+# or writes is in its arguments, not its name. Reads: a view command (`today`,
+# `upcoming`, ...) or `<noun> list|view|show|get`. Everything else writes.
+_TODOIST_READ_COMMANDS = frozenset({
+    "today", "upcoming", "inbox", "completed", "search", "activity", "stats",
+    "help", "version", "whoami",
+})
+_TODOIST_READ_SUBCOMMANDS = frozenset({"list", "ls", "view", "show", "get", "browse", "search"})
+
+
+def todoist_args_readonly(args: Any) -> bool:
+    if not isinstance(args, (list, tuple)):
+        return False
+    words = [str(a).strip().lower() for a in args if str(a).strip() and not str(a).strip().startswith("-")]
+    if not words:
+        return True  # flags only: --help, --version
+    if words[0] in _TODOIST_READ_COMMANDS:
+        return True
+    return len(words) >= 2 and words[1] in _TODOIST_READ_SUBCOMMANDS
+
+
+_MIXED_MCP_TOOLS = {
+    "mcp__todoist__todoist": lambda payload: todoist_args_readonly(payload.get("args")),
+}
+
+
+def mcp_call_is_readonly(qualified_name: str, content: Any, metadata: Optional[Dict] = None) -> bool:
+    """Whether this particular MCP call only reads. Fails closed.
+
+    Per call rather than per tool: a CLI-wrapping tool such as Todoist reads
+    or writes depending on its arguments, so a read-only planner may list
+    tasks while a quick-add still counts as a write.
+    """
+    check = _MIXED_MCP_TOOLS.get(str(qualified_name or ""))
+    if check is not None:
+        try:
+            payload = json.loads(content) if isinstance(content, str) else dict(content or {})
+        except (TypeError, ValueError):
+            return False
+        return isinstance(payload, dict) and bool(check(payload))
+    if metadata is None:
+        return False
+    return mcp_tool_is_readonly(metadata)
+
+
+def mcp_tool_metadata(qualified_name: str) -> Optional[Dict]:
+    """The connected catalogue's entry for a qualified MCP tool, if any."""
+    try:
+        from src.tool_utils import get_mcp_manager
+
+        manager = get_mcp_manager()
+        return next((t for t in (manager.get_all_tools() if manager else [])
+                     if t.get("qualified_name") == qualified_name), None)
+    except Exception:
+        return None
 
 
 class _ServerLock:
@@ -344,6 +442,89 @@ class _ServerLock:
             self._depth = 0
             self._lock.release()
         return False
+
+
+class _OwnedStack:
+    """An AsyncExitStack that one dedicated task both enters and exits.
+
+    The MCP clients open anyio task groups, and an anyio cancel scope may only
+    be exited by the task that entered it. The stack used to be entered by
+    whichever task ran the connect (a request, the startup task, a restart)
+    and closed by whichever task asked for the disconnect, which raised
+    "Attempted to exit cancel scope in a different task than it was entered
+    in" for every server at shutdown. Here the owner task runs ``setup``,
+    hands its result back, then waits for ``aclose`` and unwinds the stack
+    itself.
+    """
+
+    def __init__(self, label: str):
+        self._label = label
+        self._stop: Optional[asyncio.Event] = None
+        self._task: Optional[asyncio.Task] = None
+
+    async def open(self, setup):
+        """Run ``setup(stack)`` in the owner task and return its result.
+
+        If ``setup`` fails, the owner unwinds what it entered and the error is
+        raised here. If the caller is cancelled (a connect timeout), the owner
+        is cancelled too, so nothing is left half-open.
+        """
+        from contextlib import AsyncExitStack
+
+        loop = asyncio.get_running_loop()
+        ready = loop.create_future()
+        self._stop = asyncio.Event()
+        stop = self._stop
+
+        async def owner():
+            try:
+                setup_error: Optional[BaseException] = None
+                async with AsyncExitStack() as stack:
+                    try:
+                        result = await setup(stack)
+                    except BaseException as exc:  # noqa: BLE001 - re-raised to the caller below
+                        # Unwind without handing the error to the stack: a task
+                        # group would wrap it in an ExceptionGroup, and the
+                        # caller should see the handshake's own error.
+                        setup_error = exc
+                    else:
+                        if ready.done():
+                            return  # the caller gave up; unwind now
+                        ready.set_result(result)
+                        await stop.wait()
+                if setup_error is not None and not ready.done():
+                    if isinstance(setup_error, asyncio.CancelledError):
+                        ready.cancel()
+                    else:
+                        ready.set_exception(setup_error)
+            except asyncio.CancelledError:
+                if not ready.done():
+                    ready.cancel()
+            except BaseException as exc:  # noqa: BLE001 - reported to the caller or logged
+                if not ready.done():
+                    ready.set_exception(exc)
+                else:
+                    logger.warning("MCP server %s connection ended: %s", self._label, _describe_exception(exc))
+
+        self._task = loop.create_task(owner(), name=f"mcp-owner-{self._label}")
+        try:
+            return await ready
+        except asyncio.CancelledError:
+            self._task.cancel()
+            raise
+
+    async def aclose(self, timeout: float = 10.0) -> None:
+        if self._stop is not None:
+            self._stop.set()
+        task = self._task
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout)
+        except asyncio.TimeoutError:
+            logger.warning("MCP server %s did not close within %.0fs; cancelling it", self._label, timeout)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
 
 class McpManager:
@@ -472,24 +653,14 @@ class McpManager:
     async def _connect_stdio(self, server_id: str, name: str, command: str, args: List[str], env: Dict[str, str]) -> bool:
         """Connect to an MCP server via stdio transport.
 
-        Known limitation: stdio_client() opens an anyio task group, and anyio
-        cancel scopes may only be exited by the task that entered them. The
-        AsyncExitStack built here therefore belongs to whichever task ran the
-        connect (a FastAPI request task, or restart_server's own task), while
-        disconnect_server() closes it from whatever task asks for the
-        disconnect later -- so `await stack.aclose()` can raise "Attempted to
-        exit cancel scope in a different task than it was entered in". That
-        warning is logged and swallowed; the subprocess still dies with its
-        pipes. Removing it entirely means owning each stdio server's stack in
-        one long-lived supervisor task per server and driving connect/
-        disconnect through a queue, which is a much larger change. Serializing
-        the callers (see restart_server) removes the state corruption and the
-        orphaned-subprocess storm that made the warning fire repeatedly.
+        stdio_client() opens an anyio task group, whose cancel scope may only
+        be exited by the task that entered it, so the stack lives in its own
+        owner task (_OwnedStack) and connect and disconnect can come from any
+        task.
         """
         try:
             from mcp import ClientSession, StdioServerParameters
             from mcp.client.stdio import stdio_client
-            from contextlib import AsyncExitStack
 
             server_params = StdioServerParameters(
                 command=command,
@@ -497,24 +668,27 @@ class McpManager:
                 env={**os.environ, **env} if env else None,
             )
 
-            stack = AsyncExitStack()
-            registered = False
+            # Capture the subprocess's stderr to a file instead of letting it
+            # vanish into the app's own stderr. When the process dies, the
+            # client-side exception is often anyio's ClosedResourceError with
+            # no message at all; this tail is the only thing that says *why*.
+            errlog = self._open_stderr_log(server_id)
 
-            try:
-                # Capture the subprocess's stderr to a file instead of letting it
-                # vanish into the app's own stderr. When the process dies, the
-                # client-side exception is often anyio's ClosedResourceError with
-                # no message at all; this tail is the only thing that says *why*.
-                errlog = self._open_stderr_log(server_id)
+            async def setup(stack):
                 if errlog is not None:
                     transport = await stack.enter_async_context(stdio_client(server_params, errlog=errlog))
                 else:
                     transport = await stack.enter_async_context(stdio_client(server_params))
                 read_stream, write_stream = transport
                 session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
                 await session.initialize()
-                tools_result = await session.list_tools()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
+            registered = False
+
+            try:
 
                 tools = []
                 for tool in tools_result.tools:
@@ -540,7 +714,7 @@ class McpManager:
 
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
-                self._tools[server_id] = tools
+                self._tools[server_id] = _policy_visible_tools(server_id, tools)
                 self._connections[server_id] = {
                     "status": "connected",
                     "name": name,
@@ -572,18 +746,18 @@ class McpManager:
         try:
             from mcp import ClientSession
             from mcp.client.sse import sse_client
-            from contextlib import AsyncExitStack
 
-            stack = AsyncExitStack()
+            async def setup(stack):
+                read_stream, write_stream = await stack.enter_async_context(sse_client(url))
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
             registered = False
 
             try:
-                transport = await stack.enter_async_context(sse_client(url))
-                read_stream, write_stream = transport
-                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-
-                await session.initialize()
-                tools_result = await session.list_tools()
 
                 tools = []
                 for tool in tools_result.tools:
@@ -599,7 +773,7 @@ class McpManager:
 
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
-                self._tools[server_id] = tools
+                self._tools[server_id] = _policy_visible_tools(server_id, tools)
                 self._connections[server_id] = {
                     "status": "connected",
                     "name": name,
@@ -657,7 +831,6 @@ class McpManager:
         try:
             from mcp import ClientSession
             from mcp.client.streamable_http import streamablehttp_client
-            from contextlib import AsyncExitStack
             from src.mcp_oauth import build_provider, clear_auth_url
 
             def _on_redirect(auth_url):
@@ -669,13 +842,16 @@ class McpManager:
                 }
 
             provider = build_provider(server_id, url, on_redirect=_on_redirect)
-            stack = AsyncExitStack()
-            transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
-            read_stream, write_stream, _get_session_id = transport
-            session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
-            await session.initialize()
 
-            tools_result = await session.list_tools()
+            async def setup(stack):
+                transport = await stack.enter_async_context(streamablehttp_client(url, auth=provider))
+                read_stream, write_stream, _get_session_id = transport
+                session = await stack.enter_async_context(ClientSession(read_stream, write_stream))
+                await session.initialize()
+                return session, await session.list_tools()
+
+            stack = _OwnedStack(server_id)
+            session, tools_result = await stack.open(setup)
             tools = []
             for tool in tools_result.tools:
                 tools.append({
@@ -686,7 +862,7 @@ class McpManager:
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
-            self._tools[server_id] = tools
+            self._tools[server_id] = _policy_visible_tools(server_id, tools)
             self._connections[server_id] = {
                 "status": "connected", "name": name, "transport": "http",
                 "tool_count": len(tools),
@@ -825,18 +1001,28 @@ class McpManager:
 
 
     async def connect_all_enabled(self):
+        # Read the rows and give the connection back before connecting: the
+        # connects take up to 20s each, and holding a pooled connection that
+        # long starved everything else (the 15-16s "long checkout" warnings
+        # at mcp_manager connect_all_enabled).
         db = SessionLocal()
         try:
-            servers = db.query(McpServer).filter(McpServer.is_enabled == True).all()
-
-            tasks = [
-                asyncio.create_task(self._connect_with_timeout(srv))
-                for srv in servers
+            servers = [
+                SimpleNamespace(id=srv.id, name=srv.name, transport=srv.transport, command=srv.command,
+                                args=srv.args, env=srv.env, url=srv.url)
+                for srv in db.query(McpServer).filter(McpServer.is_enabled == True).all()
             ]
-
-            await asyncio.gather(*tasks)
         finally:
             db.close()
+
+        await asyncio.gather(*(self._connect_with_timeout(srv) for srv in servers))
+        # Refresh the agent's tool index now, off the request path, so the
+        # next turn doesn't spend its tool-selection budget on it.
+        try:
+            from src.tool_index import refresh_mcp_index_if_loaded
+            await asyncio.to_thread(refresh_mcp_index_if_loaded, self)
+        except Exception as e:
+            logger.debug("MCP index refresh after connect skipped: %s", e)
 
 
     async def _connect_with_timeout(self, srv):
@@ -875,6 +1061,14 @@ class McpManager:
 
         server_id = parts[1]
         tool_name = parts[2]
+
+        # Every MCP call funnels through here (agent loop, delegation, routes),
+        # so the no-delete GitHub policy is enforced once, before the server.
+        from src.tool_security import github_mcp_policy_refusal
+
+        refusal = github_mcp_policy_refusal(qualified_name, arguments)
+        if refusal:
+            return {"error": refusal, "exit_code": 1, "code": "forbidden_by_policy"}
 
         session = self._sessions.get(server_id)
         if not session:
@@ -968,6 +1162,8 @@ class McpManager:
             "stderr": output if is_error else "",
             "exit_code": 1 if is_error else 0,
         }
+        if is_error and output:
+            result_dict["untrusted_content"] = True
         if images:
             result_dict["images"] = images
         return result_dict
@@ -1296,9 +1492,108 @@ class McpManager:
                     "qualified_name": f"mcp__{server_id}__{tool['name']}",
                     "description": tool.get("description", ""),
                     "input_schema": _model_visible_schema(tool.get("input_schema")),
+                    # Preserve authoritative hints for downstream selection and
+                    # execution guards; names alone can misclassify MCP tools.
+                    "annotations": tool.get("annotations"),
                     "is_disabled": tool["name"] in disabled,
                 })
         return result
+
+    def discover_requested_tools(
+        self,
+        query: str,
+        *,
+        disabled_map: Optional[Dict[str, set]] = None,
+        disabled_tools: Optional[Set[str]] = None,
+        allowed_servers: Optional[List[str]] = None,
+        enabled_tools: Optional[Set[str]] = None,
+        readonly: bool = False,
+        max_tools: int = 8,
+    ) -> Set[str]:
+        """Deterministically attach a small set from explicitly requested servers.
+
+        Large catalogs still use retrieval gating; mentioning a connected server
+        must not leave its useful tools dependent on embedding similarity alone.
+        This is a selection hint, NOT an authorization grant. Callers must pass
+        the same disabled/private-policy maps used by execution and schemas.
+
+        ``enabled_tools`` means deliberate per-agent selected bindings, not all
+        permitted tools. When supplied it is also an allowlist (including an
+        empty set), and those bindings have priority over query matches. A mere
+        server or tool mention only promotes read-only tools. Writes can only
+        enter here through explicit bindings, and ``readonly`` blocks those too.
+        Normal write-intent retrieval is unchanged elsewhere in the router.
+        """
+        if max_tools <= 0:
+            return set()
+
+        def normalize(value: str) -> str:
+            return " ".join(re.findall(r"[a-z0-9]+", str(value).lower()))
+
+        normalized_query = f" {normalize(query)} "
+        # A qualified tool's server id is not a request for its whole catalog.
+        server_text = re.sub(r"\bmcp__[a-zA-Z0-9_-]+__[a-zA-Z0-9_-]+\b", " ", str(query))
+        server_query = f" {normalize(server_text)} "
+        query_words = set(normalized_query.split())
+
+        def mentioned(value: str, text: str = normalized_query) -> bool:
+            phrase = normalize(value)
+            return bool(phrase and f" {phrase} " in text)
+
+        generic = {"mcp", "server", "servers", "tool", "tools", "builtin"}
+
+        def server_mentioned(server_id: str, display_name: str) -> bool:
+            for label in (server_id, display_name):
+                words = normalize(label).split()
+                if not set(words) - generic:
+                    continue
+                # "bluesky-mcp" and "Bluesky MCP server" both match Bluesky,
+                # but a request merely mentioning "MCP" matches no catalog.
+                while words and words[0] in generic:
+                    words.pop(0)
+                while words and words[-1] in generic:
+                    words.pop()
+                if mentioned(label, server_query) or mentioned(" ".join(words), server_query):
+                    return True
+            return False
+
+        blocked = set(disabled_tools or ())
+        selected = set(enabled_tools) if enabled_tools is not None else None
+        allowed = set(allowed_servers) if allowed_servers is not None else None
+        candidates = []
+        for server_id, tools in self._tools.items():
+            conn = self._connections.get(server_id, {})
+            if conn.get("status") != "connected":
+                continue
+            if allowed is not None and "*" not in allowed and server_id not in allowed:
+                continue
+            if self.is_builtin(server_id) and server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS:
+                continue
+            requested_server = server_mentioned(server_id, conn.get("name", server_id))
+            disabled = (disabled_map or {}).get(server_id, set())
+            for tool in tools:
+                name = tool["name"]
+                qualified = f"mcp__{server_id}__{name}"
+                if name in disabled or qualified in disabled or qualified in blocked or name in blocked:
+                    continue
+                if selected is not None and qualified not in selected:
+                    continue
+                bound = selected is not None and qualified in selected
+                read_only = mcp_tool_is_readonly(tool)
+                if not read_only and (readonly or not bound):
+                    continue
+                exact_qualified = re.search(
+                    r"(?<![\w-])" + re.escape(qualified) + r"(?![\w-])", str(query), re.IGNORECASE,
+                ) is not None
+                exact = exact_qualified or (requested_server and mentioned(name))
+                if not (bound or exact or requested_server):
+                    continue
+                # Selected bindings, then exact tool names, then matching nouns
+                # from names. No description matching: untrusted marketing prose
+                # must not make an unrelated schema win this deterministic path.
+                overlap = len(set(normalize(name).split()) & query_words)
+                candidates.append((not bound, not exact, -overlap, qualified))
+        return {row[3] for row in sorted(candidates)[:max_tools]}
 
     def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.
@@ -1331,6 +1626,17 @@ class McpManager:
             "github_read",
             "github_write",
         }
+
+    def get_tool_input_schema(self, qualified_name: str) -> Optional[Dict]:
+        """The input schema a connected server advertised for a tool, or None."""
+        parts = qualified_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp":
+            return None
+        for tool in self._tools.get(parts[1], []):
+            if tool.get("name") == parts[2]:
+                schema = tool.get("input_schema")
+                return schema if isinstance(schema, dict) else None
+        return None
 
     def get_server_status(self, server_id: str) -> Dict:
         """Get connection status for a server."""
@@ -1413,8 +1719,10 @@ class McpManager:
                     f"  (CONNECTED AND WORKING, but this server's {len(server_tools)} call "
                     f"schemas are not attached this turn -- {_why}. Do NOT report these tools "
                     "as unavailable to the user, and do NOT substitute an unrelated tool. To "
-                    "get one attached, state that you do not have the exact tool available, by "
-                    "its full mcp__ name, and it will be attached for the next round.)"
+                    "get one attached, call `discover_tools` with its full mcp__ name, or state "
+                    "that you do not have the exact tool available by that full name; either "
+                    "way it is attached and this same turn continues, so never ask the user "
+                    "to repeat the request.)"
                 )
             for t in server_tools:
                 # One line per tool, truncated. A multi-line description

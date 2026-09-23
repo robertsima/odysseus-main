@@ -31,6 +31,9 @@ const STATUS = {
   // not a failure — without this entry pill() fell through to the raw status
   // word with no class at all.
   incomplete: ['Out of rounds', 'warn'],
+  // Refused before it started (src/worker_preflight.py): no workspace for a
+  // repository task, or the tools it needs are switched off.
+  blocked: ['Blocked', 'warn'],
   // Steering-message states (src/agent_control.py). They share this map, and
   // therefore the same pill colours, because they answer the same question the
   // run statuses above do: is this still going, did it land, or did it not.
@@ -53,16 +56,31 @@ const STEER_STATE_NOTE = {
 const SOURCE_LABEL = { odysseus: 'Odysseus', claude_code: 'Claude Code', session: 'Sub-agent', pipeline: 'Pipeline', bg_job: 'Background job', worktree: 'Worktree', system: 'System' };
 const KIND_ICON = { run_started: '▸', run_finished: '■', message: '›', tool_start: '→', tool_result: '←', file_change: '±', commit: '●', status: '·', error: '!', note: '~' };
 const MODAL_ID = 'agents-dashboard';
+const FLEET_PAGE_SIZE = 8;
 let returnFocus = null;
 
 const state = {
   open: false, rows: [], totals: {}, profiles: [], chats: [], approvals: [], selected: null,
+  providerLimits: {},
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
   catalog: null, configOpen: false, configTab: 'general', configDrafts: new Map(),
   fleetWidth: Number(localStorage.getItem('odysseus-agents-fleet-width') || 380),
   error: '', refreshing: false, refreshQueued: false,
   // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
   bucket: 'all',
+  fleetPage: 0,
+  detailTab: 'overview',
+  archiveView: false,
+  detailDrafts: new Map(),
+  // Parent session ids whose worker chats are unfolded under them in Recent.
+  expandedParents: new Set(),
+  // Saved personas the loadout editor can copy from (loadPersonaSources).
+  personaSources: null,
+  // The user closed the room during the current turn; that turn's runs
+  // (worker legs, sub-agents, hand-offs) no longer reopen it. Cleared when the
+  // user starts a new turn or opens the room by hand.
+  dismissed: false,
+  compactFleet: localStorage.getItem('odysseus-agents-fleet-density') !== 'expanded',
 };
 
 async function api(path, opts = {}) {
@@ -110,11 +128,12 @@ async function refresh() {
   state.refreshing = true;
   try {
     const current = window.sessionModule?.getCurrentSessionId?.() || '';
-    const overviewRequest = current
-      ? apiPoll(`/api/agents/overview?current_session=${encodeURIComponent(current)}`)
-      : apiPoll('/api/agents/overview');
+    const overviewArgs = new URLSearchParams();
+    if (current) overviewArgs.set('current_session', current);
+    if (state.archiveView) overviewArgs.set('archived', 'true');
+    const overviewRequest = apiPoll(`/api/agents/overview${overviewArgs.size ? `?${overviewArgs}` : ''}`);
     const [ov, ap] = await Promise.all([overviewRequest, apiPoll('/api/agents/approvals')]);
-    state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || [];
+    state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
     state.approvals = ap.approvals || [];
     state.error = '';
     if (state.selected && !state.rows.some((r) => r.session_id === state.selected)) state.selected = null;
@@ -276,6 +295,8 @@ function render() {
   if (!root || !state.open) return;
   const surface = $('agents-dashboard-body');
   if (!surface) return;
+  const archiveToggle = `<button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">${state.archiveView ? 'Back to fleet' : 'Archived'}</button>`;
+  const headActions = state.archiveView ? archiveToggle : `${archiveToggle}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
   // button doing exactly what the title bar's maximize button does.
@@ -286,14 +307,13 @@ function render() {
         : `<div class="ag-triage">${triageHtml()}</div>`}
       <div class="ag-head-actions">
         ${liveHtml()}
-        ${state.configOpen ? '' : `<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${
-          workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`}
+        ${state.configOpen ? '' : headActions}
       </div>
     </div>
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
     ${state.configOpen ? loadoutWorkspaceHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
-      <aside class="ag-fleet wb-card">
-        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"></div>
+      <aside class="ag-fleet wb-card ${state.compactFleet ? 'ag-fleet-compact' : 'ag-fleet-expanded'}">
+        <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-density" aria-pressed="${state.compactFleet}" title="${state.compactFleet ? 'Use larger cards' : 'Use compact cards'}">${state.compactFleet ? 'Compact' : 'Large'}</button></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
       </aside>
       <div class="ag-pane-splitter" data-ag-splitter role="separator" aria-orientation="vertical" aria-label="Resize fleet and agent details" tabindex="0"><span></span></div>
@@ -301,11 +321,64 @@ function render() {
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
   if (!state.configOpen) renderDetail();
-  $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; renderFleetOnly(); });
+  else {
+    const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
+    const selectedAgent = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
+    if (pluginPicker && selectedAgent && window.OdysseusPluginCatalog?.mount) {
+      window.OdysseusPluginCatalog.mount(pluginPicker, {
+        sessionId: selectedAgent.session_id,
+        api,
+        onApplied: (result) => applyPluginSettings(selectedAgent, result),
+      });
+    }
+  }
+  $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; state.fleetPage = 0; renderFleetOnly(); });
 }
 function filteredRows() {
   const q = state.filter.trim().toLowerCase();
   return state.rows.filter((r) => !q || (r.name || '').toLowerCase().includes(q) || (r.latest || '').toLowerCase().includes(q));
+}
+/** Parent → worker rows among `rows`, and the rows with no listed parent.
+ *  A worker whose parent is filtered out or archived stands on its own. */
+function fleetTree(rows) {
+  const byId = new Map(rows.map((row) => [row.session_id, row]));
+  const kids = new Map();
+  rows.forEach((row) => {
+    const parent = row.parent_session;
+    if (!parent || parent === row.session_id || !byId.has(parent)) return;
+    if (!kids.has(parent)) kids.set(parent, []);
+    kids.get(parent).push(row);
+  });
+  const roots = rows.filter((row) => !row.parent_session || row.parent_session === row.session_id || !byId.has(row.parent_session));
+  // A parent loop would leave its members with no root; list them flat.
+  const reached = new Set();
+  roots.forEach((root) => { reached.add(root.session_id); descendants(root, kids).forEach((row) => reached.add(row.session_id)); });
+  rows.forEach((row) => { if (!reached.has(row.session_id)) { roots.push(row); reached.add(row.session_id); } });
+  return { roots, kids };
+}
+function descendants(row, kids, seen = new Set([row.session_id])) {
+  const out = [];
+  (kids.get(row.session_id) || []).forEach((child) => {
+    if (seen.has(child.session_id)) return;
+    seen.add(child.session_id);
+    out.push(child, ...descendants(child, kids, seen));
+  });
+  return out;
+}
+function isLiveAgent(row) { return row.status === 'running' || row.status === 'waiting_approval'; }
+/** A card plus the workers under it: live (or selected) ones always, the rest
+ *  only while the parent is unfolded. */
+function treeHtml(row, kids, seen = new Set()) {
+  seen.add(row.session_id);
+  const workers = (kids.get(row.session_id) || []).filter((child) => !seen.has(child.session_id));
+  if (!workers.length) return rowHtml(row);
+  const pinned = (child) => [child, ...descendants(child, kids)].some((node) => isLiveAgent(node) || node.session_id === state.selected);
+  const open = state.expandedParents.has(row.session_id);
+  const folded = workers.filter((child) => !pinned(child)).length;
+  const visible = open ? workers : workers.filter(pinned);
+  const inner = visible.map((child) => treeHtml(child, kids, seen)).join('');
+  return `${rowHtml(row, { folded, open })}${inner
+    ? `<div class="ag-card-workers" role="group" aria-label="Workers of ${esc(row.name)}">${inner}</div>` : ''}`;
 }
 function fleetHtml() {
   const rows = filteredRows();
@@ -313,15 +386,35 @@ function fleetHtml() {
   // selection, so clicking "2 need approval" appeared to do nothing when the
   // first such chat was already selected.
   const shown = state.bucket === 'all' ? BUCKETS : BUCKETS.filter(([key]) => key === state.bucket);
-  const html = shown.map(([key, label, match]) => {
-    const items = rows.filter(match);
+  // Do not turn the fleet into an unbounded scroll just because a user has a
+  // long history.  Filtering still searches every visible row, while paging
+  // limits the expensive, interactive cards that need to stay easy to scan.
+  //
+  // Every bucket lists top-level agents; workers sit under their parent's card.
+  // A live worker (running or waiting on you) is always shown there, and so is
+  // the selected one. Finished workers fold behind a "N workers" toggle. A
+  // parent is filed under the most urgent status anywhere in its tree, so a
+  // finished chat whose worker is still running is listed once, under Active.
+  const { roots, kids } = fleetTree(rows);
+  const bucketOf = new Map(roots.map((root) => {
+    const tree = [root, ...descendants(root, kids)];
+    return [root.session_id, (BUCKETS.find(([, , match]) => tree.some(match)) || BUCKETS[BUCKETS.length - 1])[0]];
+  }));
+  const shownKeys = new Set(shown.map(([key]) => key));
+  const candidates = roots.filter((root) => shownKeys.has(bucketOf.get(root.session_id)));
+  const pages = Math.max(1, Math.ceil(candidates.length / FLEET_PAGE_SIZE));
+  state.fleetPage = Math.min(Math.max(0, state.fleetPage), pages - 1);
+  const pageRows = new Set(candidates.slice(state.fleetPage * FLEET_PAGE_SIZE, (state.fleetPage + 1) * FLEET_PAGE_SIZE).map((row) => row.session_id));
+  const html = shown.map(([key, label]) => {
+    const items = candidates.filter((row) => bucketOf.get(row.session_id) === key && pageRows.has(row.session_id));
     if (!items.length) return '';
     const solo = shown.length === 1;
+    const cards = items.map((row) => treeHtml(row, kids)).join('');
     return `<div class="ag-group${key === 'attention' ? ' ag-group-attn' : ''}">${
       solo ? '' : `<div class="wb-group-h"><span class="wb-group-title">${label}</span><span class="wb-count">${items.length}</span></div>`
-    }<div class="ag-card-grid">${items.map(rowHtml).join('')}</div></div>`;
+    }<div class="ag-card-grid">${cards}</div></div>`;
   }).join('');
-  if (html) return html;
+  if (html) return `${html}${pages > 1 ? `<nav class="ag-fleet-pages" aria-label="Fleet pages"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage - 1}"${state.fleetPage === 0 ? ' disabled' : ''}>← Newer</button><span>${state.fleetPage * FLEET_PAGE_SIZE + 1}–${Math.min(candidates.length, (state.fleetPage + 1) * FLEET_PAGE_SIZE)} of ${candidates.length}</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-page" data-page="${state.fleetPage + 1}"${state.fleetPage >= pages - 1 ? ' disabled' : ''}>Older →</button></nav>` : ''}`;
   if (!state.rows.length) return '<div class="wb-empty">Nothing is running. Send a chat a task, or launch a worker.</div>';
   if (state.bucket !== 'all') {
     const label = (BUCKETS.find(([k]) => k === state.bucket) || [, ''])[1];
@@ -353,44 +446,67 @@ function updateOpenView() {
   const error = $('ag-refresh-error');
   if (error) { error.textContent = state.error; error.hidden = !state.error; }
 }
-// The chat's tool allowlist, read as an allowlist. A chat saved before
-// allowlists were stored carries only the denylist this editor used to compute
-// and PATCH, so that is still read back — but it is never written again: saving
-// replaces it with `tool_access`/`enabled_tools`, which the server inverts
-// against the tools that exist at the time rather than against a snapshot.
-function readToolAccess(config) {
-  const names = (state.catalog?.tools || []).map((tool) => tool.name);
-  const stored = String(config.tool_access || '');
-  if (stored === 'all' || stored === 'none' || stored === 'selected') {
-    return {
-      tool_access: stored,
-      enabled_tools: stored === 'all' ? names : (config.enabled_tools || []).filter((name) => names.includes(name)),
-    };
-  }
+const PLUGIN_CAPABILITY_KEYS = [
+  'tool_access', 'enabled_tools', 'disabled_tools', 'skill_access', 'skill_names',
+  'model_access', 'allowed_models', 'allowed_mcp_servers',
+];
+function applyPluginSettings(row, result) {
+  const settings = result?.settings || {};
+  row.config = Object.assign({}, row.config || {}, settings);
+  const draft = configFor(row);
+  // A plugin apply changes capabilities only. Preserve unsaved personality,
+  // approval and delegation edits in the open form instead of replacing the
+  // whole draft with the server's older copy of those fields.
+  PLUGIN_CAPABILITY_KEYS.forEach((key) => {
+    if (Object.prototype.hasOwnProperty.call(settings, key)) draft[key] = settings[key];
+  });
+  draft._explicitToolAccess = Object.prototype.hasOwnProperty.call(settings, 'tool_access')
+    || draft._explicitToolAccess;
+  draft._catalogReady = false;
+  finalizeToolConfig(draft);
+  render();
+}
+function finalizeToolConfig(config) {
+  if (!state.catalog) return config;
   const disabled = new Set(config.disabled_tools || []);
-  return {
-    tool_access: !disabled.size ? 'all' : (names.length && disabled.size >= names.length ? 'none' : 'selected'),
-    enabled_tools: names.filter((name) => !disabled.has(name)),
-  };
+  const names = state.catalog.tools.map((tool) => tool.name);
+  if (config._explicitToolAccess) {
+    if (config.tool_access === 'selected') {
+      config.enabled_tools = (config.enabled_tools || []).filter((name) => names.includes(name) && !disabled.has(name));
+    } else if (config.tool_access === 'none') {
+      config.enabled_tools = [];
+    } else {
+      config.tool_access = 'all';
+      config.enabled_tools = names.filter((name) => !disabled.has(name));
+    }
+  } else {
+    // Backward compatibility for sessions saved before positive tool policy
+    // existed: derive access solely from their denylist once.
+    config.tool_access = !disabled.size ? 'all' : disabled.size >= names.length ? 'none' : 'selected';
+    config.enabled_tools = names.filter((name) => !disabled.has(name));
+  }
+  config.mcp_access = config.allowed_mcp_servers?.includes('*') ? 'all' : config.allowed_mcp_servers?.length ? 'selected' : 'none';
+  config._catalogReady = true;
+  return config;
 }
 function configFor(row) {
   if (state.configDrafts.has(row.session_id)) {
     const existing = state.configDrafts.get(row.session_id);
     if (state.catalog && !existing._catalogReady) {
-      Object.assign(existing, readToolAccess(existing));
-      existing.mcp_access = existing.allowed_mcp_servers?.includes('*') ? 'all' : existing.allowed_mcp_servers?.length ? 'selected' : 'none';
-      existing._catalogReady = true;
+      finalizeToolConfig(existing);
     }
     return existing;
   }
+  const stored = row.config || {};
   const base = Object.assign({
-    agent_profile: '', approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
+    agent_profile: '', agent_instructions: '', agent_persona_name: '', agent_temperature: null, agent_max_tokens: null, agent_reasoning_effort: '',
+    approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
     allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
-  }, row.config || {});
-  Object.assign(base, state.catalog ? readToolAccess(base) : { tool_access: base.tool_access || 'all', enabled_tools: [] });
-  base.mcp_access = base.allowed_mcp_servers?.includes('*') ? 'all' : base.allowed_mcp_servers?.length ? 'selected' : 'none';
-  base._catalogReady = !!state.catalog;
+  }, stored);
+  base._explicitToolAccess = Object.prototype.hasOwnProperty.call(stored, 'tool_access');
+  base._catalogReady = false;
+  finalizeToolConfig(base);
   state.configDrafts.set(row.session_id, base);
   return base;
 }
@@ -414,7 +530,10 @@ function profileConfig(profile) {
     // MCP access (or a narrowed list) rendered correctly, then saved as full
     // access: the editor showed one policy and the server stored another.
     mcp_access: profile.mcp_access || 'all',
-    agent_profile: profile.name || '', approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
+    agent_profile: profile.name || '', agent_instructions: profile.instructions || '',
+    agent_persona_name: profile.persona_name || '', agent_temperature: profile.temperature ?? null, agent_max_tokens: profile.max_tokens ?? null,
+    agent_reasoning_effort: profile.reasoning_effort || '',
+    approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
     memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
     delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
@@ -446,11 +565,21 @@ function configEditorHtml(row) {
   const tab = state.configTab || 'general';
   const tabButton = (id, label, summary) => `<button type="button" class="ag-config-tab${tab === id ? ' active' : ''}" data-ag="config-tab" data-tab="${id}" aria-selected="${tab === id ? 'true' : 'false'}"><span>${label}</span><small>${summary}</small></button>`;
   const generalPanel = `<div class="ag-config-panel ag-config-general" data-config-panel="general">
-    <div class="ag-panel-heading"><div><b>Behavior</b><span>Decide how independently this agent may operate.</span></div></div>
+    <div class="ag-panel-heading"><div><b>Persona</b><span>How this agent sounds. It replaces the shared prompt from the Prompt window whenever this chat runs as an agent.</span></div></div>
+    <label class="ag-field"><span>Start from persona</span><select class="wb-select" data-config-persona><option value="">Copy a saved persona…</option>${(state.personaSources || []).map((src, i) => `<option value="${i}">${esc(src.name)}</option>`).join('')}</select><small>Copies its name, personality and temperature into this agent. Later edits to the saved persona don't change this agent.</small></label>
+    <div class="ag-voice-grid">
+      <label class="ag-field"><span>Persona name</span><input class="wb-input" type="text" maxlength="60" data-config="agent_persona_name" value="${esc(c.agent_persona_name || '')}" placeholder="None"><small>The name this agent answers as.</small></label>
+      <label class="ag-field"><span>Temperature</span><input class="wb-input" type="number" min="0" max="2" step="0.05" data-config="agent_temperature" data-config-optional value="${c.agent_temperature == null ? '' : esc(c.agent_temperature)}" placeholder="Default"></label>
+      <label class="ag-field"><span>Max tokens</span><input class="wb-input" type="number" min="0" max="65536" step="1" data-config="agent_max_tokens" data-config-optional value="${c.agent_max_tokens == null ? '' : esc(c.agent_max_tokens)}" placeholder="Default"></label>
+      <label class="ag-field"><span>Reasoning effort</span><select class="wb-select" data-config="agent_reasoning_effort">${option('', 'Default', c.agent_reasoning_effort || '')}${option('minimal', 'Minimal', c.agent_reasoning_effort || '')}${option('low', 'Low (faster)', c.agent_reasoning_effort || '')}${option('medium', 'Medium', c.agent_reasoning_effort || '')}${option('high', 'High (slower)', c.agent_reasoning_effort || '')}</select></label>
+    </div>
+    <small class="ag-voice-note">Blank temperature or max tokens use the app default.</small>
+    <label class="ag-field"><span>Personality & instructions</span><textarea class="wb-input ag-textarea" rows="5" maxlength="8000" data-config="agent_instructions" placeholder="How this agent should communicate and approach its work">${esc(c.agent_instructions || '')}</textarea><small>Scoped to this agent. Platform security and capability policy always take priority.</small></label>
+    <div class="ag-panel-heading ag-panel-heading-sub"><div><b>Behavior</b><span>How independently this agent may act.</span></div></div>
     <div class="ag-policy-grid">
       <label class="ag-field"><span>Delegation</span><select class="wb-select" data-config="delegation_policy">${option('never','Never delegate',c.delegation_policy)}${option('explicit','Only when I ask',c.delegation_policy)}${option('auto','Agent decides',c.delegation_policy)}</select><small>Controls sub-agents and coding-agent handoffs.</small></label>
       <label class="ag-field"><span>Approvals</span><select class="wb-select" data-config="approval_mode">${option('','Use global default',c.approval_mode)}${option('ask_risky','Ask for risky actions',c.approval_mode)}${option('ask_all','Ask for every change',c.approval_mode)}${option('auto','Run automatically',c.approval_mode)}</select><small>Human checkpoint before tools change things.</small></label>
-      <label class="ag-field"><span>Parallel workers</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8.</small></label>
+      <label class="ag-field"><span>Child workers for this agent</span><input class="wb-input" type="number" min="0" max="8" data-config="max_parallel_workers" value="${esc(c.max_parallel_workers)}"><small>0 disables children; maximum 8. Separate from the provider-wide Claude Code capacity (${esc(state.providerLimits.claude_code || catalog.provider_limits?.claude_code || 1)}).</small></label>
     </div>
   </div>`;
   const toolsPanel = `<div class="ag-config-panel" data-config-panel="tools">
@@ -478,9 +607,10 @@ function configEditorHtml(row) {
   const roleOptions = state.profiles.map((p) => option(p.name, p.name, row.crew?.agent_profile || '')).join('');
   const rolePicker = row.crew ? `<label class="ag-preset-role"><span>Role profile</span><select class="wb-select" data-ag-crew-profile data-sid="${esc(row.session_id)}"><option value="">No linked role</option>${roleOptions}</select><small>Applies to ${esc(row.crew.name || 'this agent')} everywhere — chat and its scheduled tasks.</small></label>` : '';
   return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label><button type="button" class="wb-btn wb-btn-sm" data-ag="apply-profile">Apply preset</button>${rolePicker}<small>Presets are reusable; this agent keeps its own copy after applying.</small></div>
+    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label>${rolePicker}<small>Choosing a preset loads its settings; this agent keeps its own copy once saved.</small></div>
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
+    <div data-ag-plugin-picker></div>
     <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
   </div>`;
 }
@@ -495,7 +625,16 @@ function loadoutWorkspaceHtml() {
     ${configEditorHtml(row)}
   </section>`;
 }
-function rowHtml(r) {
+/** The card's "what it is doing" line. A worker that has only started reports
+ *  its run title ("Worker · Scout · Write a poem"), which restates the card's
+ *  own name ("↳ Scout: Write a poem") next to the profile already in `meta`. */
+function latestText(r) {
+  const latest = String(r.latest || '');
+  const core = latest.replace(/^(Worker|Sub-agent)\s*·\s*/, '').replace(/^[^·:]+[·:]\s*/, '').trim().replace(/…$/, '');
+  const name = String(r.name || '').replace(/^↳\s*/, '');
+  return core && name.includes(core.slice(0, 40)) ? 'Started' : latest;
+}
+function rowHtml(r, nest = {}) {
   const sel = r.session_id === state.selected;
   const dur = r.status === 'running' && r.started_at ? fmtDur(r.started_at) : '';
   // Two lines, not three. The model/profile/worker chips used to occupy a whole
@@ -518,15 +657,25 @@ function rowHtml(r) {
     <div class="ag-card-copy">
       <div class="ag-row-top"><button type="button" class="ag-row-name ag-card-select" data-ag="select-agent" data-sid="${esc(r.session_id)}" aria-pressed="${sel ? 'true' : 'false'}" title="Inspect ${esc(r.name)}">${esc(r.name)}</button>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
       <div class="ag-card-status">${pill(status)}${blocked}</div>
-      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
+      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
+      ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>
-    <div class="ag-card-actions"><button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
+    <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
   </div>`;
 }
 function renderDetail() {
   const box = $('ag-detail');
   if (!box) return;
+  // Capture the outgoing agent before a selection changes.  renderDetail is
+  // also called after `state.selected` has already changed, so limiting this
+  // to the new selection would silently lose a half-written steer/reply.
+  const renderedSid = box.dataset.sessionId;
+  if (renderedSid) {
+    const outgoing = {};
+    box.querySelectorAll('textarea[id]').forEach((el) => { outgoing[el.id] = el.value; });
+    if (Object.keys(outgoing).length) state.detailDrafts.set(renderedSid, Object.assign({}, state.detailDrafts.get(renderedSid), outgoing));
+  }
   const active = box.contains(document.activeElement) ? document.activeElement : null;
   const activeId = active?.id || '';
   const selection = active && typeof active.selectionStart === 'number' ? [active.selectionStart, active.selectionEnd] : null;
@@ -536,50 +685,54 @@ function renderDetail() {
   const r = state.rows.find((x) => x.session_id === state.selected);
   if (!r) { delete box.dataset.sessionId; box.innerHTML = '<div class="wb-empty">Select a chat to see what its agent is doing.</div>'; return; }
   box.dataset.sessionId = r.session_id;
-  const scroll = box.querySelector('[data-wb-scroll="events"]');
+  const scroll = box.querySelector('[data-wb-scroll="detail-tab"]');
   const keep = scroll ? scroll.scrollTop : null;
   const approvals = state.approvals.filter((a) => a.session_id === r.session_id);
   const running = r.status === 'running' || r.status === 'waiting_approval';
   const events = (state.events.get(r.session_id) || []).slice(-200).reverse();
   const children = r.children || [];
-  // One identity block, not two. The hero and the meta strip under it each
-  // introduced the same agent: the hero repeated the latest-step line already
-  // printed on the unit's fleet card and at the top of Live events, and the
-  // strip counted workers and events that the section headers below count
-  // again. What is left is the agent, what it is running on, and its controls.
+  const tab = ['overview', 'activity', 'steering'].includes(state.detailTab) ? state.detailTab : 'overview';
+  const tabs = [['overview', 'Overview'], ['activity', 'Activity'], ['steering', 'Steering']]
+    .map(([key, label]) => `<button type="button" id="ag-tab-${key}" class="ag-detail-tab${tab === key ? ' active' : ''}" data-ag="detail-tab" data-tab="${key}" role="tab" aria-label="${label} for ${esc(r.name)}" aria-controls="ag-panel-${key}" aria-selected="${tab === key}" tabindex="${tab === key ? '0' : '-1'}">${label}</button>`).join('');
+  const overview = `
+    ${loadoutSummaryHtml(r)}
+    ${(r.hidden_run_ids || []).length ? `<div class="ag-hidden-runs"><span>${r.hidden_run_ids.length} completed run card${r.hidden_run_ids.length === 1 ? '' : 's'} hidden</span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-runs" data-sid="${esc(r.session_id)}">Restore cards</button></div>` : ''}
+    ${approvals.length || children.length ? `<div class="ag-detail-top">
+      ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
+      ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Child workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
+      ${!approvals.length && !children.length ? '<div class="wb-empty">No child workers or pending approvals.</div>' : ''}
+    </div>` : '<div class="wb-empty">No child workers or pending approvals.</div>'}`;
+  const activity = `<div class="ag-section ag-events"><div class="wb-group-h"><span class="wb-group-title">Live events</span><span class="wb-count">${events.length}</span></div><div class="wb-ev-list ag-ev-list">${events.map(eventHtml).join('') || '<div class="wb-empty">No events yet.</div>'}</div></div>`;
+  const steering = `<div class="ag-section ag-compose">
+      ${running
+        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} waiting to be picked up` : ''}</small></label><div class="ag-compose-row"><textarea id="ag-steer" class="wb-input ag-textarea" rows="2" placeholder="e.g. Skip the tests for now and focus on the migration"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="steer" data-sid="${esc(r.session_id)}">Steer</button></div>`
+        : `<label class="ag-compose-label" for="ag-reply">Send a message <small>opens the chat and sends it</small></label><div class="ag-compose-row"><textarea id="ag-reply" class="wb-input ag-textarea" rows="2" placeholder="Next task for this chat…"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="reply" data-sid="${esc(r.session_id)}">Send</button></div>`}
+      ${steerLogHtml(r)}
+    </div>`;
+  // The identity and primary actions deliberately stay outside the tab scroll.
+  // This keeps Stop/Archive available even when a child produced a long log.
   box.innerHTML = `
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
       <div class="ag-console-identity">
         <span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span>
-        <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.approval_mode ? `<span class="wb-meta-item">approvals: ${esc(r.approval_mode.replace('_', ' '))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
+        <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
       </div>
       <div class="ag-console-status">
         <span class="ag-console-state">${pill(r.status)}${r.started_at ? `<strong class="ag-row-dur" data-started="${r.started_at}">${esc(fmtDur(r.started_at))}</strong>` : ''}</span>
-        <span class="ag-console-actions"><button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>${
-          r.parent_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="This worker's parent chat">↳ parent</button>` : ''}${
-          r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}</span>
+        <span class="ag-console-actions">${isCurrentChat(r.session_id)
+          ? '<span class="ag-this-chat" title="This is the chat you have open">This chat</span>'
+          : `<button type="button" class="wb-btn wb-btn-sm" data-ag="open-chat" data-sid="${esc(r.session_id)}">Open chat</button>`}${
+          r.parent_session && !isCurrentChat(r.parent_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(r.parent_session)}" title="Parent agent: ${esc(r.parent_name || r.parent_session)}">↳ ${esc(r.parent_name || 'parent')}</button>` : ''}${
+          r.status === 'running' ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-chat" data-sid="${esc(r.session_id)}">Stop</button>` : ''}${
+          r.archived ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="restore-agent" data-sid="${esc(r.session_id)}">Restore</button>` : !running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="archive-agent" data-sid="${esc(r.session_id)}" title="Hide this idle chat; its chat and run history stay preserved">Archive</button>` : ''}</span>
       </div>
     </div>
-    ${loadoutSummaryHtml(r)}
-    ${approvals.length || children.length ? `<div class="ag-detail-top">
-      ${approvals.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Waiting for your approval</span><span class="wb-count">${approvals.length}</span></div>${approvals.map(approvalHtml).join('')}</div>` : ''}
-      ${children.length ? `<div class="ag-section"><div class="wb-group-h"><span class="wb-group-title">Workers & jobs</span><span class="wb-count">${children.length}</span></div>${children.map(childHtml).join('')}</div>` : ''}
-    </div>` : ''}
-    <div class="ag-section ag-compose">
-      ${running
-        ? `<label class="ag-compose-label" for="ag-steer">Steer <small>lands before the agent's next step${r.steer_queued ? ` · ${r.steer_queued} waiting to be picked up` : ''}</small></label>
-           <div class="ag-compose-row"><textarea id="ag-steer" class="wb-input ag-textarea" rows="2" placeholder="e.g. Skip the tests for now and focus on the migration"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="steer" data-sid="${esc(r.session_id)}">Steer</button></div>`
-        : `<label class="ag-compose-label" for="ag-reply">Send a message <small>opens the chat and sends it</small></label>
-           <div class="ag-compose-row"><textarea id="ag-reply" class="wb-input ag-textarea" rows="2" placeholder="Next task for this chat…"></textarea><button type="button" class="wb-btn wb-btn-primary" data-ag="reply" data-sid="${esc(r.session_id)}">Send</button></div>`}
-    </div>
-    ${steerLogHtml(r)}
-    <div class="ag-section ag-events">
-      <div class="wb-group-h"><span class="wb-group-title">Live events</span><span class="wb-count">${events.length}</span></div>
-      <div class="wb-ev-list ag-ev-list" data-wb-scroll="events">${events.map(eventHtml).join('') || '<div class="wb-empty">No events yet.</div>'}</div>
-    </div>`;
-  if (keep != null) { const s2 = box.querySelector('[data-wb-scroll="events"]'); if (s2) s2.scrollTop = keep; }
+    <div class="ag-detail-tabs" role="tablist" aria-label="${esc(r.name)} details">${tabs}</div>
+    <div class="ag-detail-tab-panel" id="ag-panel-${tab}" role="tabpanel" aria-labelledby="ag-tab-${tab}" data-wb-scroll="detail-tab">${tab === 'overview' ? overview : tab === 'activity' ? activity : steering}</div>`;
+  if (keep != null) { const s2 = box.querySelector('[data-wb-scroll="detail-tab"]'); if (s2) s2.scrollTop = keep; }
   Object.entries(draft).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
+  Object.entries(state.detailDrafts.get(r.session_id) || {}).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
   if (sameSelection && activeId) {
     const next = $(activeId);
     if (next) {
@@ -629,19 +782,21 @@ function steerRowHtml(m) {
     ${meta.map((item) => `<span class="wb-meta-item">${esc(item)}</span>`).join('')}
     ${age ? `<span class="ag-row-dur" data-started="${esc(m.queued_at)}" data-finished="${esc(finished)}">${esc(age)}</span>` : ''}</div>`;
 }
+// An exact approval is decided on its card in the chat, which shows the sealed
+// action in full; the overview only points there.
 function approvalHtml(a) {
   return `<div class="ag-approval"><div class="ag-approval-head"><span class="approval-badge">Approval needed</span><code class="approval-tool">${esc(a.tool)}</code><span class="wb-meta-item">${esc(a.reason)}</span></div>
     <pre class="approval-command">${esc(a.command)}</pre>
-    <div class="approval-actions"><button type="button" class="approval-btn approval-approve" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="once">Approve once</button><button type="button" class="approval-btn" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="always">Always allow ${esc(a.tool)}</button><button type="button" class="approval-btn approval-deny" data-ag="approve" data-sid="${esc(a.session_id)}" data-id="${esc(a.id)}" data-decision="deny">Deny</button></div></div>`;
+    <div class="approval-actions">${isCurrentChat(a.session_id) ? '<span class="ag-this-chat">Decide in this chat</span>' : `<button type="button" class="approval-btn approval-approve" data-ag="open-chat" data-sid="${esc(a.session_id)}">Open chat to decide</button>`}</div></div>`;
 }
 function childHtml(c) {
   const live = c.status === 'running';
   const s = c.summary || {};
   const title = String(c.title || '').replace(/^(Sub-agent|Claude Code|Background job|Worker)\s*[·:]\s*/, '');
   return `<div class="ag-child${live ? '' : ' done'}">${robotHtml(c, 'mini')}${pill(c.status === 'completed' ? 'finished' : c.status)}${chip(c.source)}<span class="ag-child-title" title="${esc(c.title)}">${esc(title)}</span><span class="ag-row-dur" data-started="${c.started_at || ''}" data-finished="${c.finished_at || ''}">${esc(fmtDur(c.started_at, c.finished_at))}</span>
-    ${s.target_session ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
+    ${s.target_session && !isCurrentChat(s.target_session) ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="open-chat" data-sid="${esc(s.target_session)}">Open</button>` : ''}
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="inspect-run" data-run="${esc(c.run_id)}" data-sid="${esc(state.selected || '')}">Inspect</button>
-    ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : ''}</div>`;
+    ${live ? `<button type="button" class="wb-btn wb-btn-sm" data-ag="stop-run" data-run="${esc(c.run_id)}">Stop</button>` : `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="hide-run" data-run="${esc(c.run_id)}" title="Hide this completed card; activity history remains">Hide</button>`}</div>`;
 }
 function eventHtml(ev) {
   const lvl = ev.level === 'error' || ev.kind === 'error' ? ' err' : ev.level === 'warning' ? ' warn' : '';
@@ -655,6 +810,7 @@ function launchHtml() {
     <label class="ag-field"><span>Task</span><textarea id="ag-task" class="wb-input ag-textarea" rows="5" placeholder="The whole task — the worker starts with no other context."></textarea></label>
     <label class="ag-field"><span>Report to chat</span><select id="ag-parent" class="wb-select"><option value="">None (standalone)</option>${chats}</select></label>
     <label class="ag-field"><span>Model override</span><input id="ag-model" class="wb-input" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
+    <label class="ag-field"><span>Workspace</span><input id="ag-workspace" class="wb-input" placeholder="optional checkout path; default: the parent chat's, or the one the task names"></label>
     <div class="ag-launch-actions"><button type="button" class="wb-btn wb-btn-primary" data-ag="launch-go">Launch</button><span class="ag-launch-msg" id="ag-launch-msg"></span></div>
     ${state.profiles.length ? '' : '<p class="wb-hint">No profiles yet — define workers under Settings › Workbench › Agent profiles.</p>'}`;
 }
@@ -698,11 +854,38 @@ function onConfigChange(e) {
   const editor = e.target.closest('.ag-loadout-editor');
   const row = state.rows.find((item) => item.session_id === state.selected);
   if (!editor || !row) return;
-  const draft = configFor(row);
+  if (e.target.matches('[data-config-persona]')) {
+    // Copy a saved persona into this agent's own loadout (unsaved until Save).
+    const src = (state.personaSources || [])[Number(e.target.value)];
+    if (!src || e.target.value === '') return;
+    const draft = configFor(row);
+    draft.agent_persona_name = src.persona_name || '';
+    draft.agent_instructions = src.instructions || '';
+    if (src.temperature != null) draft.agent_temperature = src.temperature;
+    if (src.max_tokens) draft.agent_max_tokens = src.max_tokens;
+    render();
+    const msg = $('ag-config-msg');
+    if (msg) msg.textContent = `Copied ${src.name}. Not saved yet.`;
+    return;
+  }
   const field = e.target.dataset.config;
+  const profile = field === 'agent_profile' && state.profiles.find((item) => item.name === e.target.value);
+  if (profile) {
+    // Choosing a preset loads its whole loadout. Recording only the name left
+    // every field as it was, and saving then stored the old settings under
+    // the new preset's label.
+    state.configDrafts.set(row.session_id, profileConfig(profile));
+    render();
+    const msg = $('ag-config-msg');
+    if (msg) msg.textContent = `Loaded ${profile.name} — unsaved`;
+    return;
+  }
+  const draft = configFor(row);
   if (field) {
+    // Optional numbers (temperature, max tokens) read blank as "app default".
     draft[field] = e.target.type === 'checkbox' ? !!e.target.checked
-      : e.target.type === 'number' ? Number(e.target.value || 0) : e.target.value;
+      : e.target.type === 'number' ? (e.target.value === '' && 'configOptional' in e.target.dataset ? null : Number(e.target.value || 0))
+      : e.target.value;
     if (field === 'mcp_access') {
       if (e.target.value === 'all') draft.allowed_mcp_servers = ['*'];
       else if (e.target.value === 'none') draft.allowed_mcp_servers = [];
@@ -714,6 +897,12 @@ function onConfigChange(e) {
     const values = new Set(draft[list] || []);
     e.target.checked ? values.add(e.target.value) : values.delete(e.target.value);
     draft[list] = [...values];
+    if (list === 'enabled_tools' && e.target.checked) {
+      // A direct human checkbox action is the explicit authorization needed
+      // to remove this one tool from the denylist. Passive profile/plugin
+      // merges never do this, so their additions still respect manual denies.
+      draft.disabled_tools = (draft.disabled_tools || []).filter((name) => name !== e.target.value);
+    }
   }
   syncConfigVisibility(editor, draft);
   const msg = $('ag-config-msg');
@@ -722,11 +911,16 @@ function onConfigChange(e) {
 async function saveAgentConfig(row) {
   const draft = configFor(row);
   // Send the allowlist, not its inverse. This used to PATCH `disabled_tools`
-  // computed here from `state.catalog.tools` — a third registry, holding no MCP
+  // computed here from `state.catalog.tools` -- a third registry, holding no MCP
   // names, sampled in the browser at save time. Anything the install gained
-  // afterwards was missing from that list and therefore allowed. `null` clears
-  // whichever snapshot an earlier save left behind, so a chat edited here stops
-  // carrying two disagreeing descriptions of its own policy.
+  // afterwards was missing from that list and therefore allowed, so the
+  // complement is no longer computed or sent.
+  //
+  // Explicit denials still are, and still win, including over plugin/profile
+  // additions: selecting tools narrows from that baseline and never resurrects
+  // a tool the user deliberately denied. They can only ever deny, so unlike the
+  // complement they cannot go stale in the dangerous direction.
+  const explicitDisabled = new Set(draft.disabled_tools || []);
   let allowedMcp = ['*'];
   if (draft.mcp_access === 'none') allowedMcp = [];
   else if (draft.mcp_access === 'selected') allowedMcp = [...(draft.allowed_mcp_servers || [])];
@@ -735,17 +929,24 @@ async function saveAgentConfig(row) {
   // would silently take this chat's MCP servers away while still showing them
   // as connected. `mcp__<id>__*` / `mcp__*` are how a grant over runtime-named
   // tools is spelled; see src/tool_policy.py.
-  const enabledTools = draft.tool_access === 'selected' ? [...(draft.enabled_tools || [])] : [];
+  const enabledTools = draft.tool_access === 'selected'
+    ? (draft.enabled_tools || []).filter((name) => !explicitDisabled.has(name))
+    : [];
   if (draft.tool_access === 'selected') {
     if (draft.mcp_access === 'all') enabledTools.push('mcp__*');
     else if (draft.mcp_access === 'selected') enabledTools.push(...allowedMcp.map((id) => `mcp__${id}__*`));
   }
   const payload = {
     agent_profile: draft.agent_profile || null,
+    agent_instructions: draft.agent_instructions || null,
+    agent_persona_name: draft.agent_persona_name || null,
+    agent_temperature: draft.agent_temperature ?? null,
+    agent_max_tokens: draft.agent_max_tokens ?? null,
+    agent_reasoning_effort: draft.agent_reasoning_effort || null,
     approval_mode: draft.approval_mode || null,
-    disabled_tools: null,
+    disabled_tools: [...explicitDisabled],
     tool_access: draft.tool_access || 'all',
-    enabled_tools: enabledTools,
+    enabled_tools: draft.tool_access === 'selected' ? enabledTools : [],
     memory_access: draft.memory_access,
     skill_access: draft.skill_access,
     skill_names: draft.skill_access === 'selected' ? (draft.skill_names || []) : [],
@@ -760,6 +961,8 @@ async function saveAgentConfig(row) {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   });
   row.config = Object.assign({}, result.settings || payload);
+  // The composer's Agents menu decides whether the shared persona applies.
+  document.dispatchEvent(new CustomEvent('odysseus:loadout-changed', { detail: { sessionId: row.session_id } }));
   row.approval_mode = result.approval_mode;
   state.configDrafts.set(row.session_id, Object.assign({}, draft, row.config, {
     tool_access: draft.tool_access, enabled_tools: draft.enabled_tools || [], mcp_access: draft.mcp_access,
@@ -782,6 +985,7 @@ async function onClick(e) {
   try {
     if (act === 'select-agent') {
       state.selected = b.dataset.sid;
+      state.detailTab = 'overview';
       renderFleetOnly(); renderDetail();
       $('agents-dashboard')?.querySelector(`.ag-card-select[data-sid="${CSS.escape(state.selected)}"]`)?.focus({ preventScroll: true });
     }
@@ -791,6 +995,11 @@ async function onClick(e) {
       window.workbenchModule.open();
     }
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
+    else if (act === 'archive-view') {
+      state.archiveView = !state.archiveView;
+      state.selected = null; state.filter = ''; state.bucket = 'all'; state.fleetPage = 0;
+      await refresh();
+    }
     else if (act === 'launch') { state.launchOpen = true; render(); $('ag-task')?.focus(); }
     else if (act === 'launch-close') { state.launchOpen = false; render(); }
     else if (act === 'bucket') {
@@ -799,6 +1008,7 @@ async function onClick(e) {
       const next = b.dataset.bucket;
       state.bucket = (next === 'all' || state.bucket === next) ? 'all' : next;
       state.filter = '';
+      state.fleetPage = 0;
       const input = $('ag-filter'); if (input) input.value = '';
       // Keep a selection that is still visible in the new bucket.
       const match = (BUCKETS.find(([k]) => k === state.bucket) || [])[2];
@@ -807,12 +1017,30 @@ async function onClick(e) {
       }
       updateStats(); renderFleetOnly(); renderDetail();
     }
+    else if (act === 'toggle-workers') {
+      const sid = b.dataset.sid;
+      state.expandedParents.has(sid) ? state.expandedParents.delete(sid) : state.expandedParents.add(sid);
+      renderFleetOnly();
+    }
+    else if (act === 'fleet-page') {
+      state.fleetPage = Math.max(0, Number(b.dataset.page || 0));
+      renderFleetOnly();
+    }
+    else if (act === 'fleet-density') {
+      state.compactFleet = !state.compactFleet;
+      localStorage.setItem('odysseus-agents-fleet-density', state.compactFleet ? 'compact' : 'expanded');
+      render();
+    }
+    else if (act === 'detail-tab') {
+      state.detailTab = b.dataset.tab || 'overview';
+      renderDetail();
+    }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'config-toggle') {
       state.configOpen = true;
       state.configTab = 'general';
       render();
-      try { await loadCatalog(); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+      try { await Promise.all([loadCatalog(), loadPersonaSources()]); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
       render();
       syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
     }
@@ -824,15 +1052,6 @@ async function onClick(e) {
       state.configTab = b.dataset.tab || 'general';
       render();
       syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === state.selected)));
-    }
-    else if (act === 'apply-profile') {
-      const row = state.rows.find((item) => item.session_id === state.selected);
-      const selectedName = document.querySelector('.ag-loadout-editor [data-config="agent_profile"]')?.value || '';
-      const profile = state.profiles.find((item) => item.name === selectedName);
-      if (!row || !profile) { uiModule.showToast('Choose a preset first', 'warning'); return; }
-      state.configDrafts.set(row.session_id, profileConfig(profile));
-      state.configOpen ? render() : renderDetail();
-      uiModule.showToast(`Loaded ${profile.name}; save to apply it to this agent`);
     }
     else if (act === 'save-config') {
       const row = state.rows.find((item) => item.session_id === state.selected);
@@ -852,19 +1071,37 @@ async function onClick(e) {
       b.disabled = true;
       const r = await post(`/api/chat/stop/${encodeURIComponent(b.dataset.sid)}`);
       uiModule.showToast(r.stopped ? 'Stopping' : 'Nothing to stop'); scheduleRefresh();
+    } else if (act === 'archive-agent') {
+      const selected = state.rows.find((item) => item.session_id === b.dataset.sid);
+      if (!selected || !window.confirm(`Archive “${selected.name}”? Its chat and run history stay preserved. Active work cannot be archived.`)) return;
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive`);
+      state.events.delete(b.dataset.sid);
+      state.selected = null;
+      uiModule.showToast('Archived — chat and run history were preserved', 'success');
+      await refresh();
+    } else if (act === 'restore-agent') {
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/unarchive`);
+      state.events.delete(b.dataset.sid);
+      state.selected = null;
+      uiModule.showToast('Restored — available in chat history', 'success');
+      await refresh();
+    } else if (act === 'hide-run') {
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(state.selected || '')}/cleanup-runs`, { run_ids: [b.dataset.run] });
+      uiModule.showToast('Hidden from this overview — activity history remains', 'success');
+      await refresh();
+    } else if (act === 'restore-runs') {
+      b.disabled = true;
+      const row = state.rows.find((item) => item.session_id === b.dataset.sid);
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/restore-runs`, { run_ids: row?.hidden_run_ids || [] });
+      uiModule.showToast('Completed run cards restored', 'success');
+      await refresh();
     } else if (act === 'stop-run') {
       b.disabled = true; b.textContent = 'Stopping…';
       const r = await post(`/api/agents/runs/${encodeURIComponent(b.dataset.run)}/stop`);
       uiModule.showToast(r.stopped ? 'Stopping — its partial result goes back to the chat' : `Not stopped: ${r.reason || ''}`, r.stopped ? 'success' : 'warning'); scheduleRefresh();
-    } else if (act === 'approve') {
-      b.closest('.approval-actions')?.querySelectorAll('button').forEach((x) => { x.disabled = true; });
-      await post(`/api/session/${encodeURIComponent(b.dataset.sid)}/approvals/${encodeURIComponent(b.dataset.id)}`, { decision: b.dataset.decision });
-      // The decision is a grant; the chat must be told so the agent re-issues the call.
-      const tool = b.closest('.ag-approval')?.querySelector('.approval-tool')?.textContent || 'tool';
-      const text = b.dataset.decision === 'deny' ? `Denied: don't run that \`${tool}\` call. Tell me what you'll do instead.`
-        : b.dataset.decision === 'always' ? `Approved, and always allow \`${tool}\` in this chat. Run that call now.` : `Approved: run that \`${tool}\` call now.`;
-      await sendToChat(b.dataset.sid, text);
-      uiModule.showToast(b.dataset.decision === 'deny' ? 'Denied' : 'Approved — the agent is resuming'); scheduleRefresh();
     } else if (act === 'steer') {
       const ta = $('ag-steer'); const text = (ta?.value || '').trim(); if (!text) return;
       b.disabled = true;
@@ -884,7 +1121,7 @@ async function onClick(e) {
       if (!task) { if (msg) msg.textContent = 'Describe the task first.'; return; }
       b.disabled = true; if (msg) msg.textContent = 'Launching…';
       try {
-        const r = await post('/api/agents/launch', { task, profile: $('ag-profile')?.value || '', parent_session: $('ag-parent')?.value || '', model: $('ag-model')?.value || '' });
+        const r = await post('/api/agents/launch', { task, profile: $('ag-profile')?.value || '', parent_session: $('ag-parent')?.value || '', model: $('ag-model')?.value || '', workspace: $('ag-workspace')?.value || '' });
         state.launchOpen = false; state.selected = r.session_id; state.events.delete(r.session_id);
         uiModule.showToast(`Worker started: ${r.session_name}`, 'success');
         await refresh();
@@ -913,8 +1150,29 @@ async function selectChat(sid) {
   const current = window.sessionModule.getCurrentSessionId?.();
   if (current && current !== sid) throw new Error('Could not open the selected chat');
 }
+/** The chat the user has open. Offering to "open" it just reloaded the same
+ *  chat, so its Open controls are left out. */
+function isCurrentChat(sid) {
+  return !!sid && sid === window.sessionModule?.getCurrentSessionId?.();
+}
 async function openChat(sid) {
   await selectChat(sid);
+  if (state.open) { renderFleetOnly(); renderDetail(); }
+  // The room fills the chat area, so opening a chat from it used to switch the
+  // chat hidden underneath: nothing seemed to happen, and only the chat's title
+  // and status line showed around the room's edges. Make the opened chat
+  // visible: dock the room beside it, or on narrow screens, where the room is
+  // a full-screen sheet, tuck it into the dock.
+  showChatBesideRoom();
+}
+function isDocked(root) {
+  return root.classList.contains('modal-left-docked') || root.classList.contains('modal-right-docked');
+}
+function showChatBesideRoom() {
+  const root = $(MODAL_ID);
+  if (!root || !state.open || isDocked(root)) return;
+  if (window.innerWidth <= 900) { Modals.minimize(MODAL_ID); return; }
+  applyEdgeDock(root, 'right');
 }
 
 // ── open / close ──────────────────────────────────────────────────────────
@@ -930,6 +1188,8 @@ function registerWithManager() {
 }
 function hideWindow() {
   const root = $(MODAL_ID); if (!root) return;
+  // Closed by the user (close button, Escape, rail toggle): stop auto-opening.
+  if (state.open) state.dismissed = true;
   const restoreFocus = root.contains(document.activeElement);
   state.open = false;
   root.hidden = true;
@@ -947,8 +1207,9 @@ function bringToFront() {
   const root = $(MODAL_ID); if (!root) return;
   root.style.zIndex = String(nextToolWindowZ({ exclude: root, current: root.style.zIndex }));
 }
-export function open() {
+export function open({ focus = true, auto = false } = {}) {
   const root = $('agents-dashboard'); if (!root) return;
+  if (!auto) state.dismissed = false;
   registerWithManager();
   if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }
   if (!state.open) returnFocus = document.activeElement;
@@ -960,7 +1221,7 @@ export function open() {
   const cur = window.sessionModule?.getCurrentSessionId?.();
   if (cur && state.rows.some((r) => r.session_id === cur)) state.selected = cur;
   render(); refresh(); connect();
-  root.focus({ preventScroll: true });
+  if (focus) root.focus({ preventScroll: true });
   if (!state.tick) state.tick = setInterval(() => {
     if (!state.open) return;
     root.querySelectorAll('.ag-row-dur[data-started]').forEach((el) => {
@@ -970,6 +1231,19 @@ export function open() {
     });
   }, 1000);
 }
+/** Show the panel for work the current chat just started. Leaves it alone
+ * when it is already open or the user minimized it, and keeps focus in the
+ * composer so the user can keep typing. */
+export function openForRun() {
+  // Once the user has closed the room, the rest of that turn's runs are not a
+  // reason to put it back: every worker leg, sub-agent and hand-off starts a
+  // run, so it kept reappearing. A new message the user sends clears this, so
+  // the next request that delegates shows it again.
+  if (state.open || state.dismissed || Modals.isMinimized(MODAL_ID)) return;
+  open({ focus: false, auto: true });
+  // Opened for them, not by them: sit beside the chat rather than on top of it.
+  showChatBesideRoom();
+}
 export function close() {
   if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
   else hideWindow();
@@ -977,6 +1251,44 @@ export function close() {
 export function toggle() {
   if (Modals.toggle(MODAL_ID)) return;
   state.open ? close() : open();
+}
+
+/** Saved personas an agent can copy from: built-ins and user templates. */
+async function loadPersonaSources() {
+  if (state.personaSources) return;
+  const [builtins, saved] = await Promise.all([
+    import('./presets.js').then((m) => m.PROMPT_TEMPLATES || []).catch(() => []),
+    api('/api/presets/templates').catch(() => []),
+  ]);
+  const out = builtins.map((t) => ({ name: t.name, persona_name: t.noName ? '' : t.name, instructions: t.prompt || '', temperature: t.temperature }));
+  (Array.isArray(saved) ? saved : []).forEach((t) => {
+    if (t?.name && !out.some((src) => src.name === t.name)) {
+      out.push({ name: t.name, persona_name: t.name, instructions: t.system_prompt || '', temperature: t.temperature, max_tokens: t.max_tokens || null });
+    }
+  });
+  state.personaSources = out;
+}
+
+/** Open this chat's own loadout editor (persona first). Used by the composer's
+ *  Agents menu and the Prompt window's "Edit this agent's persona". */
+export async function editLoadout(sessionId) {
+  open();
+  // open() starts a refresh; wait for the chat's row rather than racing it.
+  for (let i = 0; i < 30 && !state.rows.some((r) => r.session_id === sessionId); i++) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (i % 5 === 4) refresh();
+  }
+  if (!state.rows.some((r) => r.session_id === sessionId)) {
+    uiModule.showToast('This chat is not in the Agents panel yet', 'warning');
+    return;
+  }
+  state.selected = sessionId;
+  state.configOpen = true;
+  state.configTab = 'general';
+  render();
+  try { await Promise.all([loadCatalog(), loadPersonaSources()]); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
+  render();
+  syncConfigVisibility(document.querySelector('.ag-loadout-editor'), configFor(state.rows.find((item) => item.session_id === sessionId)));
 }
 
 function setFleetWidth(body, width) {
@@ -1026,12 +1338,30 @@ function init() {
   registerWithManager();
   Modals.injectMinimizeButton(root, MODAL_ID);
   $('close-agents-dashboard')?.addEventListener('click', close);
+  // A new turn in the chat: auto-open may show the room again for its runs.
+  // Only the idle -> busy edge counts; the signal repeats while a turn streams.
+  let chatBusy = !!window.__odysseusChatBusy;
+  window.addEventListener('odysseus:chat-busy-change', (e) => {
+    const active = !!e.detail?.active;
+    if (active && !chatBusy) state.dismissed = false;
+    chatBusy = active;
+  });
   $('ag-dock-left')?.addEventListener('click', () => applyEdgeDock(root, 'left'));
   $('ag-dock-right')?.addEventListener('click', () => applyEdgeDock(root, 'right'));
   $('ag-maximize')?.addEventListener('click', () => snapModalToZone(root, { name: 'maximize', rect: workspaceRect() }));
   root.addEventListener('pointerdown', bringToFront, true);
   root.addEventListener('pointerdown', beginFleetResize);
   root.addEventListener('click', onClick);
+  root.addEventListener('keydown', (e) => {
+    const tab = e.target?.closest?.('[data-ag="detail-tab"]');
+    if (!tab || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+    const tabs = [...root.querySelectorAll('[data-ag="detail-tab"]')];
+    const current = tabs.indexOf(tab);
+    const next = e.key === 'Home' ? 0 : e.key === 'End' ? tabs.length - 1
+      : (current + (e.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length;
+    e.preventDefault(); state.detailTab = tabs[next].dataset.tab || 'overview'; renderDetail();
+    root.querySelector(`[data-ag="detail-tab"][data-tab="${CSS.escape(state.detailTab)}"]`)?.focus({ preventScroll: true });
+  });
   root.addEventListener('change', onConfigChange);
   document.addEventListener('keydown', (e) => {
     if (state.open && e.target?.matches?.('[data-ag-splitter]') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
@@ -1043,12 +1373,27 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'a') { e.preventDefault(); toggle(); }
   });
   // Badges stay current while the page is closed: a light poll plus the feed.
-  connect();
+  // The feed is held only by a visible tab. Every open tab used to keep this
+  // stream (and the Workbench's) for its whole life, and six such connections
+  // is all a browser allows per host over HTTP/1.1 -- after that every fetch
+  // from any Odysseus tab queued indefinitely, which is how the agent strip
+  // in the chat that launched a worker never got to ask about it (2026-09-17).
+  if (!document.hidden) connect();
   refresh();
   state.pollTimer = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, state.open ? 5000 : 20000);
+  let hiddenTimer = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      if (!hiddenTimer) hiddenTimer = setTimeout(() => { hiddenTimer = null; if (document.hidden) disconnect(); }, 30000);
+      return;
+    }
+    if (hiddenTimer) { clearTimeout(hiddenTimer); hiddenTimer = null; }
+    connect();
+    refresh();
+  });
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
-const agentsDashboard = { open, close, toggle, refresh };
+const agentsDashboard = { open, openForRun, close, toggle, refresh, editLoadout };
 window.agentsDashboard = agentsDashboard;
 export default agentsDashboard;

@@ -115,6 +115,41 @@ def test_applying_a_preset_keeps_its_mcp_policy_through_save():
     assert "draft.mcp_access === 'none'" in save
 
 
+def test_explicit_tool_policy_survives_dashboard_load_and_save():
+    """Positive allowlists are authoritative; deny-only derivation is legacy fallback."""
+    config = AGENTS.split("function finalizeToolConfig(config)", 1)[1].split("function configFor(row)", 1)[0]
+    assert "config._explicitToolAccess" in config
+    assert "config.tool_access === 'selected'" in config
+    assert "!disabled.has(name)" in config
+    assert "Backward compatibility" in config
+
+    save = AGENTS.split("async function saveAgentConfig(row)", 1)[1].split("// ── actions", 1)[0]
+    assert "tool_access: draft.tool_access" in save
+    assert "enabled_tools: draft.tool_access === 'selected' ? enabledTools : []" in save
+    # Explicit denials are still sent, and still win over plugin/profile
+    # additions; they can only ever deny.
+    assert "explicitDisabled" in save
+    assert "disabled_tools: [...explicitDisabled]" in save
+    # But the COMPLEMENT is not computed here any more. It used to be
+    # `allTools.filter((name) => !enabled.has(name))` over `state.catalog.tools`
+    # -- a third registry, holding no MCP name, sampled in the browser at save
+    # time, so anything the install gained afterwards was missing from the
+    # stored denylist and therefore allowed. The allowlist is stored as an
+    # allowlist and inverted server-side against the tools that exist then.
+    assert "allTools" not in save
+    assert "!enabled.has(name)" not in save
+
+
+def test_plugin_apply_merges_capabilities_without_clobbering_unsaved_personality():
+    apply = AGENTS.split("function applyPluginSettings(row, result)", 1)[1].split("function finalizeToolConfig", 1)[0]
+    assert "PLUGIN_CAPABILITY_KEYS.forEach" in apply
+    assert "Object.assign({}, draft" not in apply
+    assert "agent_instructions" not in apply
+    assert "render();" in apply
+    mount = AGENTS.split("OdysseusPluginCatalog.mount", 1)[1].split("});", 1)[0]
+    assert "onApplied: (result) => applyPluginSettings(selectedAgent, result)" in mount
+
+
 def test_fleet_selection_and_window_focus_are_keyboard_accessible():
     assert 'aria-labelledby="ag-window-title"' in INDEX
     assert 'class="ag-row-name ag-card-select"' in AGENTS
@@ -170,10 +205,17 @@ def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():
 
 def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-card-avatar { min-height: 60px" in STYLE
-    assert "padding-top: 5px" in STYLE.split(".ag-bot {", 1)[1].split("}", 1)[0]
+    # Match the base selector, not a density-specific descendant override.
+    assert "padding-top: 5px" in STYLE.split("\n.ag-bot {", 1)[1].split("}", 1)[0]
     assert 'class="ag-console-robot-bay"' in AGENTS
     assert ".ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto" in STYLE
     assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE
+
+
+def test_archive_view_clears_active_only_filter():
+    action = AGENTS.split("act === 'archive-view'", 1)[1].split("else if", 1)[0]
+    assert "state.bucket = 'all'" in action
+    assert "state.filter = ''" in action
 
 
 def test_each_agent_has_a_dedicated_server_backed_capability_loadout():
@@ -207,6 +249,19 @@ def test_control_room_reply_keeps_the_window_open_while_switching_chat():
     assert "await selectChat(sid)" in send
 
 
+def test_agent_management_stays_bounded_and_cleanup_is_recoverable():
+    assert "const FLEET_PAGE_SIZE = 8" in AGENTS
+    assert 'data-ag="fleet-page"' in AGENTS
+    assert 'data-ag="detail-tab"' in AGENTS
+    assert "data-wb-scroll=\"detail-tab\"" in AGENTS
+    assert 'data-ag="archive-agent"' in AGENTS
+    assert "chat and run history stay preserved" in AGENTS
+    assert "/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/archive" in AGENTS
+    assert ".ag-detail-tabs" in STYLE and ".ag-fleet-pages" in STYLE
+    assert "ag-fleet-compact" in AGENTS and ".ag-fleet-compact .ag-bot-card" in STYLE
+    assert "aria-controls=\"ag-panel-${key}\"" in AGENTS
+
+
 def test_a_cut_off_worker_reads_as_partial_work_not_a_failure():
     """launch_worker records `incomplete` for a run that spent its round budget
     mid-task. Neither status renderer knew the word: the dashboard fell through
@@ -218,3 +273,57 @@ def test_a_cut_off_worker_reads_as_partial_work_not_a_failure():
     assert "s === 'incomplete'" in WORKBENCH
     workbench_class = WORKBENCH.split("function statusClass(status)", 1)[1].split("\n}", 1)[0]
     assert "'incomplete'" in workbench_class.split("return 'warn'", 1)[0]
+
+
+def test_fleet_lists_top_level_agents_and_keeps_live_workers_visible():
+    """Every bucket lists parents; live workers show under them, finished ones fold."""
+    fleet = AGENTS.split("function fleetHtml()", 1)[1].split("function renderFleetOnly()", 1)[0]
+    assert "fleetTree(rows)" in fleet
+    assert "recentMatch" not in fleet
+    tree = AGENTS.split("function treeHtml(", 1)[1].split("function fleetHtml()", 1)[0]
+    assert "isLiveAgent(node) || node.session_id === state.selected" in tree
+    assert "open ? workers : workers.filter(pinned)" in tree
+    assert "finished worker" in AGENTS
+
+
+def test_agent_mode_swaps_prompt_for_an_agents_menu():
+    menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
+    app = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    sessions = (ROOT / "static/js/sessions.js").read_text(encoding="utf-8")
+    assert 'id="overflow-agents-btn"' in INDEX
+    assert "body.composer-agent-mode #overflow-preset-btn" in STYLE
+    assert "body:not(.composer-agent-mode) #overflow-agents-btn" in STYLE
+    assert "import './js/agentMenu.js';" in app
+    assert "/api/agents/profiles" in menu and "/loadout`" in menu
+    assert "openCustomPresetModal" in menu and "agentsDashboard?.open" in menu
+    # A loadout picked before the chat exists is applied before its first turn.
+    assert "await window.agentMenuModule.applyPendingLoadout(payload.id)" in sessions
+
+
+def test_opening_a_chat_from_the_room_shows_it_beside_the_room():
+    """The room fills the chat area, so ↗ used to switch the chat hidden under
+    it. It now docks beside the opened chat (or tucks away on narrow screens)."""
+    open_chat = AGENTS.split("async function openChat(sid)", 1)[1].split("function isDocked", 1)[0]
+    assert "showChatBesideRoom()" in open_chat
+    beside = AGENTS.split("function showChatBesideRoom()", 1)[1].split("\n}\n", 1)[0]
+    assert "applyEdgeDock(root, 'right')" in beside and "Modals.minimize(MODAL_ID)" in beside
+
+
+def test_a_closed_room_is_not_reopened_by_every_run():
+    for_run = AGENTS.split("export function openForRun()", 1)[1].split("export function close()", 1)[0]
+    assert "state.dismissed" in for_run and "showChatBesideRoom()" in for_run
+    hide = AGENTS.split("function hideWindow()", 1)[1].split("function workspaceRect()", 1)[0]
+    assert "state.dismissed = true" in hide
+    assert "if (!auto) state.dismissed = false;" in AGENTS
+    # Only for the rest of that turn: the next message the user sends (the
+    # idle -> busy edge) lets the next delegation show the room again.
+    assert "odysseus:chat-busy-change" in AGENTS and "if (active && !chatBusy) state.dismissed = false;" in AGENTS
+
+
+def test_no_open_control_for_the_chat_already_open():
+    """Opening the chat you are in only reloaded it."""
+    assert "function isCurrentChat(sid)" in AGENTS
+    assert AGENTS.count("isCurrentChat(") >= 6
+    assert 'class="ag-this-chat"' in AGENTS
+    strip = WORKBENCH.split("function stripRowHtml(run)", 1)[1].split("\n}\n", 1)[0]
+    assert "d.target_session !== state.sessionId" in strip and "'Events'" in strip

@@ -41,6 +41,12 @@ SUBAGENT_MAX_ROUNDS = 12
 # budget, tool denials, and a private-vault denial, which narrows and so is
 # safe), and the rest is reported rather than pretended.
 #
+# `send_to_session` now REFUSES a profile aimed at an existing chat outright,
+# which is the stronger form of the same argument and makes `_PROFILE_SCOPE_NEW`
+# the only reachable answer. `_PROFILE_SCOPE_EXISTING` is kept as the wording for
+# a half-applied loadout: every other caller that applies one to a chat it did
+# not create (the scheduler, the crew-role link) owes the user this sentence.
+#
 # The offer and the enforcement must agree: the tool says which half it did.
 _PROFILE_SCOPE_NEW = (
     "This chat was created for the loadout, so its full policy applies — tools, memory, "
@@ -57,7 +63,8 @@ _PROFILE_SCOPE_EXISTING = (
 
 
 def _parse_send_extras(content: str) -> Dict:
-    """``profile`` from the JSON form (the legacy two-line form has none)."""
+    """``profile``, ``workspace`` and ``requires`` from the JSON form (the
+    legacy two-line form has none)."""
     raw = (content or "").strip()
     if not raw.startswith("{"):
         return {}
@@ -67,11 +74,39 @@ def _parse_send_extras(content: str) -> Dict:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {"profile": str(data.get("profile") or "").strip()}
+    requires = data.get("requires") or []
+    if isinstance(requires, str):
+        requires = [requires]
+    return {
+        "profile": str(data.get("profile") or "").strip(),
+        "workspace": str(data.get("workspace") or "").strip(),
+        "requires": [str(r) for r in requires if isinstance(r, str)] if isinstance(requires, list) else [],
+    }
+
+
+def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
+    """The workspace of the chat delegating the task: the one bound to the
+    turn that is calling this tool, else the one saved on that chat."""
+    try:
+        from src.tool_execution import get_active_workspace
+
+        active = get_active_workspace()
+        if active:
+            return active
+    except Exception:
+        pass
+    if not session_id:
+        return None
+    try:
+        from core.database import get_session_settings
+
+        return (get_session_settings(session_id) or {}).get("workspace") or None
+    except Exception:
+        return None
 
 
 def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], message: str,
-                       profile: Optional[Dict]) -> tuple:
+                       profile: Optional[Dict], workspace: Optional[str] = None) -> tuple:
     """Create a fresh chat for a delegated task. Returns ``(session, error)``.
 
     The child runs on the profile's model when it names one, else on the
@@ -104,12 +139,21 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
         from core.database import update_session_settings
 
         patch = {"parent_session": parent_id} if parent_id else {}
+        if workspace:
+            # Saved on the chat, so the worker's runs and a user who opens its
+            # chat later both work in the folder preflight chose.
+            patch["workspace"] = workspace
         if profile:
             from src.agent_profiles import session_patch
             patch.update(session_patch(profile))
         if patch:
-            update_session_settings(sid, patch)
+            saved = update_session_settings(sid, patch)
+            if profile and saved is None:
+                return None, "Could not persist the worker's scoped policy; worker not started"
     except Exception:
+        if profile:
+            logger.warning("child session policy persistence failed; worker not started", exc_info=True)
+            return None, "Could not persist the worker's scoped policy; worker not started"
         logger.debug("child session settings failed", exc_info=True)
     return sess, None
 
@@ -312,12 +356,49 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         if profile is None:
             names = ", ".join(p["name"] for p in agent_profiles.load_profiles()) or "none are defined (Settings › Workbench)"
             return {"error": f"No agent profile named {extras['profile']!r}. Available: {names}", "exit_code": 1}
+        if target_sid.lower() != "new":
+            return {"error": (
+                "A scoped agent profile requires a fresh child chat so its permissions cannot affect "
+                "another ongoing run. Use session_id: 'new' with this profile, or omit profile to "
+                "message an existing chat under that chat's own settings."
+            ), "exit_code": 1}
         mode = "agent"  # a profile is a worker definition: it always runs with tools
+
+    # Before anything starts: does the task need a repository, is there a
+    # workspace for it, and can the worker use the tools it needs? A worker
+    # that cannot do the task is refused here with the fix, instead of running
+    # into the wall and reporting it later.
+    preflight = None
+    if target_sid.lower() == "new" or mode == "agent":
+        from src import worker_preflight
+
+        target_settings: Dict = {}
+        if target_sid.lower() != "new":
+            existing = _session_manager.get_session(target_sid)
+            if existing is not None and (not owner or getattr(existing, "owner", None) == owner):
+                try:
+                    from core.database import get_session_settings
+
+                    target_settings = get_session_settings(target_sid) or {}
+                except Exception:
+                    target_settings = {}
+        preflight = worker_preflight.run_preflight(
+            message,
+            explicit_workspace=extras.get("workspace") or None,
+            inherited_workspace=target_settings.get("workspace") or _caller_workspace(session_id),
+            unavailable_tools=worker_preflight.worker_unavailable_tools(
+                owner, profile, target_settings.get("disabled_tools") or ()),
+            requires=extras.get("requires") or (),
+        )
+        if not preflight.ok:
+            worker_preflight.record_blocked(session_id, owner, message, preflight)
+            return preflight.blocked_payload()
 
     if target_sid.lower() == "new":
         if not message:
             return {"error": "No message provided", "exit_code": 1}
-        sess, err = _new_child_session(_session_manager, session_id, owner, message, profile)
+        child_kwargs = {"workspace": preflight.workspace} if preflight and preflight.workspace else {}
+        sess, err = _new_child_session(_session_manager, session_id, owner, message, profile, **child_kwargs)
         if err:
             return {"error": err, "exit_code": 1}
         target_sid = sess.id
@@ -363,9 +444,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         context.append({"role": "user", "content": message})
         runner = sess
+        # Profile instructions are persisted in the fresh child's settings and
+        # applied by agent_loop on every turn. Do not inject them here too:
+        # that would duplicate the persona on the first turn and differ from a
+        # reopened worker session.
         if profile:
-            if profile.get("instructions"):
-                context.insert(0, {"role": "system", "content": profile["instructions"]})
             if profile.get("model") and not extras.get("_child_created"):
                 # An existing chat delegated to under a profile runs this one
                 # exchange on the profile's model without changing the chat.
@@ -427,10 +510,26 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
                         source="session",
                         owner=owner,
                         outcome=outcome,
+                        workspace=preflight.workspace if preflight else None,
+                        forced_tools=preflight.forced_tools if preflight else None,
+                        # Only a profile's own explicit budget asks the worker
+                        # to wrap up; the no-profile default stays advisory.
+                        wrap_up_round=(profile["max_rounds"]
+                                       if profile and (profile.get("max_rounds") or 0) > 0 else 0),
                     )
                     if not response.strip() and tool_events:
                         response = "(the sub-agent finished with tool calls but no closing text)"
                 else:
+                    # Same request-local refresh the chat route and headless
+                    # workers do. The chat's saved headers can hold a bearer
+                    # that has since rotated (ChatGPT subscription, Copilot),
+                    # which 401'd here while the calling chat kept working.
+                    try:
+                        from routes.chat_helpers import resolve_session_auth
+                        await asyncio.to_thread(resolve_session_auth, sess, target_sid,
+                                                owner if owner is not None else getattr(sess, "owner", None))
+                    except Exception:
+                        logger.warning("send_to_session: credential refresh failed for %s", target_sid, exc_info=True)
                     response = await llm_call_async(
                         sess.endpoint_url, sess.model, context,
                         headers=sess.headers,
@@ -464,10 +563,20 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         activity.publish(session_id, "message", f"← {sess.name or target_sid}: {response[:160]}",
                          source="session", run_id=run_id, owner=owner, detail=response[:2000])
         stopped = bool(outcome.get("stopped"))
+        # The reply alone doesn't say the work is done: a worker can end its
+        # turn on an approval card or run out of rounds.
+        if stopped:
+            run_status, verb = "cancelled", "stopped"
+        elif outcome.get("awaiting_approval"):
+            run_status, verb = "waiting_approval", "is waiting for approval"
+        elif outcome.get("rounds_exhausted"):
+            run_status, verb = "incomplete", "ran out of rounds"
+        else:
+            run_status, verb = "completed", "replied"
         activity.run_finished(
             session_id, "session", run_id,
-            f"Sub-agent · {sess.name or target_sid} {'stopped' if stopped else 'replied'}",
-            status="cancelled" if stopped else "completed",
+            f"Sub-agent · {sess.name or target_sid} {verb}",
+            status=run_status,
             owner=owner,
             data={"target_session": target_sid, "target_session_name": sess.name, "mode": mode,
                   "steps": len(tool_events), "result_excerpt": response[:400]},
@@ -490,12 +599,30 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             out["profile_note"] = _PROFILE_SCOPE_NEW if created else _PROFILE_SCOPE_EXISTING
         if stopped:
             out["stopped_by_user"] = True
+        if run_status != "completed":
+            out["status"] = run_status
+        if preflight is not None:
+            out["preflight"] = preflight.summary()
+        if outcome.get("round_budget_reached"):
+            # The reply is a wrap-up written at the profile's round budget; it
+            # should name what it did not get to.
+            out["round_budget_reached"] = outcome["round_budget_reached"]
+        if outcome.get("awaiting_approval"):
+            out["awaiting_approval"] = {
+                "tool": outcome["awaiting_approval"].get("tool"),
+                "note": ("The sub-agent stopped for the user's approval in its own chat. "
+                         "Tell the user; do not treat the task as done or retry it."),
+            }
         if tool_events:
             out["tool_calls"] = len(tool_events)
         return out
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")
-        return {"error": f"Failed to send to session: {e}", "exit_code": 1}
+        return {
+            "error": f"Failed to send to session: {e}",
+            "untrusted_content": True,
+            "exit_code": 1,
+        }
 
 async def manage_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Manage sessions: rename, archive, delete, important, truncate, fork.

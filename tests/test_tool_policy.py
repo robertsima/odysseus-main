@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import src.agent_loop as al
 from src.agent_tools import ToolBlock
-from src.tool_execution import execute_tool_block
+from src.tool_execution import NO_TOOL_SECURITY_CONTEXT, execute_tool_block
 from src.tool_policy import (
     WEB_TOOL_NAMES,
     build_effective_tool_policy,
@@ -194,7 +194,11 @@ def test_agent_loop_policy_blocks_disabled_web_tool_call_before_execution(monkey
 def test_executor_policy_backstop_blocks_tools():
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
     desc, result = asyncio.run(
-        execute_tool_block(ToolBlock("bash", "echo should-not-run"), tool_policy=policy)
+        execute_tool_block(
+            ToolBlock("bash", "echo should-not-run"),
+            tool_policy=policy,
+            security_context=NO_TOOL_SECURITY_CONTEXT,
+        )
     )
     assert desc == "bash: BLOCKED"
     assert result["exit_code"] == 1
@@ -276,10 +280,11 @@ def test_guide_only_skips_tool_retrieval(monkeypatch):
         raise AssertionError("guide-only mode must not retrieve tool candidates")
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    from src.tool_index import email_intent
     monkeypatch.setitem(
         sys.modules,
         "src.tool_index",
-        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set()),
+        SimpleNamespace(get_tool_index=_fail_tool_index, ALWAYS_AVAILABLE=set(), email_intent=email_intent),
     )
     policy = build_effective_tool_policy(last_user_message="Do not use tools.")
 
@@ -348,7 +353,11 @@ def test_guide_only_blocks_later_round_document_streaming(monkeypatch):
         )
     )
     events = _events(chunks)
-    assert calls == 2
+    # A later round has to have been reached — the block under test is the one
+    # that fires after round 1. The exact count is not the property: a round
+    # ceiling no longer ends a run, so the loop runs on until the loop-breaker
+    # trips, and pinning it to 2 was pinning the old cap.
+    assert calls >= 2
     assert not any(event.get("type") == "doc_stream_open" for event in events)
     assert not any(event.get("type") == "doc_stream_delta" for event in events)
 
@@ -704,17 +713,28 @@ def test_executor_blocks_a_tool_the_chats_allowlist_does_not_name(monkeypatch):
     the schema layer already hid the tool."""
     import core.database as core_db
 
-    monkeypatch.setattr(core_db, "get_session_settings", lambda sid: {
+    # The executor reads the chat's policy with strict=True and fails closed if
+    # it cannot, so the stub has to accept that keyword.
+    monkeypatch.setattr(core_db, "get_session_settings", lambda sid, **kw: {
         "tool_access": "selected", "enabled_tools": ["web_search"], "allowed_mcp_servers": ["*"],
     }, raising=False)
 
-    desc, result = asyncio.run(execute_tool_block(
-        ToolBlock("bash", "echo should-not-run"), session_id="chat-1"))
+    # Both names are read off the module object at call time. Another test in
+    # the suite reloads `src.tool_execution`, and the executor checks the
+    # security context by identity/isinstance -- a sentinel captured at import
+    # time would then belong to a different module instance and be rejected
+    # before this test's own assertion could run.
+    import src.tool_execution as te
+
+    desc, result = asyncio.run(te.execute_tool_block(
+        ToolBlock("bash", "echo should-not-run"), session_id="chat-1",
+        security_context=te.NO_TOOL_SECURITY_CONTEXT))
     assert desc == "bash: BLOCKED" and result["exit_code"] == 1
     assert "allowlist" in result["error"]
 
-    desc, result = asyncio.run(execute_tool_block(
-        ToolBlock("mcp__email__send_email", '{"to":"x"}'), session_id="chat-1"))
+    desc, result = asyncio.run(te.execute_tool_block(
+        ToolBlock("mcp__email__send_email", '{"to":"x"}'), session_id="chat-1",
+        security_context=te.NO_TOOL_SECURITY_CONTEXT))
     assert desc == "mcp__email__send_email: BLOCKED" and result["exit_code"] == 1
 
 

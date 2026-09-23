@@ -29,7 +29,7 @@ Precedence — what wins when a crew member has BOTH its own fields and a profil
    scoped crew member can only ever remove capability.
 
    This is a policy decision, and policy fails closed
-   (``docs/design-patterns.md``).  The obvious alternative — "the profile wins
+   (``website/design-patterns.md``).  The obvious alternative — "the profile wins
    outright" — would silently hand a crew member scoped to three tools every
    tool the profile allows, and the widening would be invisible at the point
    where someone assigned the role.

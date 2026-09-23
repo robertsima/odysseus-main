@@ -13,13 +13,31 @@ import re
 from typing import Any, Dict, List, Optional
 
 MAX_PROFILES = 40
-MAX_ROUNDS_CAP = 40
-DEFAULT_ROUNDS = 12
+# A round budget is a safety stop, not a work allowance, and counting rounds was
+# never what kept a worker safe. The 2026-09-17 logs cut workers off after 12 and
+# 29 tool calls with the task unstarted, which is the only thing the counter
+# reliably achieved. So: UNLIMITED BY DEFAULT (`max_rounds = 0`). What actually
+# bounds a run is unchanged and is not a counter -- the per-run tool-call ceiling
+# (`agent_max_tool_calls`, default 500), the request timeout, the worker's own
+# tool policy, and the user's stop control. An explicit positive budget is still
+# honoured for anyone who wants one, up to MAX_ROUNDS_CAP, as a wrap-up point
+# rather than a cutoff: at that round the worker's tools are switched off and it
+# is asked to write its final answer from what it has and name what is left
+# (stream_agent_loop's `wrap_up_round`).
+MAX_ROUNDS_CAP = 200
+UNLIMITED_ROUNDS = 0
+DEFAULT_ROUNDS = UNLIMITED_ROUNDS
+MAX_INSTRUCTIONS = 8000
+MAX_PERSONA_NAME = 60
+MAX_TOKENS_CAP = 65536
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.\-]{0,39}$")
 _MEMORY_ACCESS = {"none", "read", "write"}
 _SELECTION_ACCESS = {"all", "selected", "none"}
 _MODEL_ACCESS = {"current", "selected", "all"}
 _DELEGATION = {"never", "explicit", "auto"}
+# How much a ChatGPT-subscription model thinks before each step ("" = provider
+# default). Lower is markedly faster per round for skim-and-collect workers.
+REASONING_EFFORTS = ("minimal", "low", "medium", "high")
 
 
 def _names(raw: Any, field: str, profile: str, limit: int = 300) -> List[str]:
@@ -36,6 +54,24 @@ def _choice(raw: Any, field: str, profile: str, allowed: set, default: str) -> s
     value = str(raw or default).strip().lower()
     if value not in allowed:
         raise ValueError(f"profile {profile!r}: {field} must be one of {', '.join(sorted(allowed))}")
+    return value
+
+
+def _optional_number(raw: Any, field: str, profile: str, lo: float, hi: float, cast):
+    """A bounded number, or None (blank) meaning "use the app default"."""
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = cast(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"profile {profile!r}: {field} must be a number")
+    return max(lo, min(hi, value))
+
+
+def _reasoning_effort(raw: Any, profile: str) -> str:
+    value = str(raw or "").strip().lower()
+    if value and value not in REASONING_EFFORTS:
+        raise ValueError(f"profile {profile!r}: reasoning_effort must be one of {', '.join(REASONING_EFFORTS)} (or empty)")
     return value
 
 
@@ -59,6 +95,9 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
         seen.add(key)
         tools = _names(raw.get("disabled_tools"), "disabled_tools", name, 200)
         try:
+            # 0 (and a missing value) mean "no round budget"; anything positive
+            # is an explicit budget the author chose: the round at which the
+            # worker is asked to wrap up and hand back what it has.
             rounds = int(raw.get("max_rounds") or DEFAULT_ROUNDS)
         except (TypeError, ValueError):
             raise ValueError(f"profile {name!r}: max_rounds must be a number")
@@ -70,7 +109,16 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
         out.append({
             "name": name,
             "description": str(raw.get("description") or "").strip()[:300],
-            "instructions": str(raw.get("instructions") or "").strip()[:8000],
+            # ``personality`` is an API-friendly alias; the existing editor and
+            # runtime use ``instructions`` as the canonical persisted field.
+            "instructions": str(raw.get("instructions") or raw.get("personality") or "").strip()[:MAX_INSTRUCTIONS],
+            # The loadout's own voice. A chat running under a loadout uses these
+            # instead of the shared persona from the Prompt window, so two
+            # agents can sound and sample differently. Blank = app default.
+            "persona_name": str(raw.get("persona_name") or "").strip()[:MAX_PERSONA_NAME],
+            "temperature": _optional_number(raw.get("temperature"), "temperature", name, 0.0, 2.0, float),
+            "max_tokens": _optional_number(raw.get("max_tokens"), "max_tokens", name, 0, MAX_TOKENS_CAP, int),
+            "reasoning_effort": _reasoning_effort(raw.get("reasoning_effort"), name),
             "model": str(raw.get("model") or "").strip()[:300],
             "model_fallbacks": _names(raw.get("model_fallbacks"), "model_fallbacks", name, 12),
             "model_access": _choice(raw.get("model_access"), "model_access", name, _MODEL_ACCESS, "current"),
@@ -87,11 +135,18 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
             "approval_mode": str(raw.get("approval_mode") or "inherit").strip().lower(),
             "delegation_policy": _choice(raw.get("delegation_policy"), "delegation_policy", name, _DELEGATION, "explicit"),
             "max_parallel_workers": max(0, min(8, workers)),
-            "max_rounds": max(1, min(MAX_ROUNDS_CAP, rounds)),
+            "max_rounds": 0 if rounds <= 0 else min(MAX_ROUNDS_CAP, rounds),
         })
         if out[-1]["approval_mode"] not in {"inherit", "auto", "ask_risky", "ask_all"}:
             raise ValueError(f"profile {name!r}: invalid approval_mode")
     return out
+
+
+def expand_tool_aliases(names) -> set:
+    """Equivalent tool spellings share one permission, including email MCP."""
+    from src.tool_security import email_tool_policy_names
+
+    return {alias for name in names for alias in email_tool_policy_names(name)}
 
 
 def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
@@ -129,6 +184,14 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
     )
     patch = {
         "agent_profile": profile.get("name"),
+        # Snapshot the loadout's persona onto the child.  Profiles are reusable
+        # defaults and may be edited later; an existing agent must not silently
+        # acquire another agent's (or a newly edited) personality.
+        "agent_instructions": profile.get("instructions") or None,
+        "agent_persona_name": profile.get("persona_name") or None,
+        "agent_temperature": profile.get("temperature"),
+        "agent_max_tokens": profile.get("max_tokens"),
+        "agent_reasoning_effort": profile.get("reasoning_effort") or None,
         "disabled_tools": profile.get("disabled_tools") or None,
         "tool_access": tool_access,
         "enabled_tools": enabled_tools,

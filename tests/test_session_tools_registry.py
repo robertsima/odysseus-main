@@ -234,13 +234,16 @@ def test_manage_session_errors_report_as_failures(monkeypatch):
         assert _failed(res), f"{content} -> reported as success: {res}"
 
 
-# ── a loadout means two different things; it must say which ───────────────
+# ── a loadout means one thing, because the other one is refused ───────────
 #
 # `session_id: "new"` writes the loadout's whole policy onto the chat it
-# creates. An existing chat is the user's, so its stored policy is left alone
-# and only the per-exchange parts apply. Same tool, same argument, two
-# policies — which is fine as long as the result says so instead of implying
-# the first when it did the second.
+# creates. An existing chat is the user's: patching a loadout's policy onto it
+# would silently re-police somebody else's chat off the back of one delegated
+# message, and applying only the parts that fit would mean the same argument
+# meant two different policies. `send_to_session` refuses that combination
+# outright instead, which is the stronger form of the same argument — and the
+# result still says which policy it applied, because the scheduler and the
+# crew-role link do apply a loadout to a chat they did not create.
 
 
 _LOADOUT = {
@@ -275,26 +278,35 @@ class _Child(_FakeSession):
         self.id, self.model = "childsid", "m"
 
 
-def test_a_loadout_says_whether_it_re_policed_the_chat_or_only_the_exchange(monkeypatch):
+def test_a_loadout_says_it_re_policed_the_chat_it_created(monkeypatch):
     fresh = _run_send(monkeypatch, "new", {})
     assert fresh["profile"] == "Auditor"
     assert fresh["profile_scope"] == "chat"
+    # The scope is spelled out rather than left to be discovered.
+    assert "full policy applies" in fresh["profile_note"]
 
+
+def test_a_loadout_aimed_at_an_existing_chat_is_refused_not_half_applied(monkeypatch):
+    """The half-applied case is gone: it is refused before anything runs.
+
+    A partially applied loadout was reported honestly, but it still meant one
+    argument could mean two policies. Refusing it is the narrower answer and
+    the error names the fix.
+    """
     existing = _run_send(monkeypatch, "sid", {})
-    assert existing["profile"] == "Auditor"
-    assert existing["profile_scope"] == "exchange"
-    # And the difference is spelled out rather than left to be discovered.
-    assert "did not" in existing["profile_note"] or "NOT changed" in existing["profile_note"]
-    assert existing["profile_note"] != fresh["profile_note"]
+    assert _failed(existing)
+    assert "new" in existing["error"]
+    assert "profile" not in existing
 
 
 def test_a_loadouts_private_vault_denial_binds_an_existing_chat_too(monkeypatch):
-    """The one part of the gap that was an escalation, not just a difference.
+    """Defence in depth on the run itself, not only on the stored settings.
 
-    Everything else the loadout does not reach on an existing chat leaves that
-    chat at its own setting. Private-vault access is different: leaving it at
-    the chat's setting *granted* a loadout that denies it, so this one narrows.
+    `session_patch` writes `private_vault_access: False` onto the child chat,
+    but `run_headless` reads the grant from that chat mid-run, so a loadout
+    that denies the vault also says so on the call. Narrowing is always safe:
+    the flag can take access away and can never hand it to a chat with none.
     """
     seen = {}
-    _run_send(monkeypatch, "sid", seen)
+    _run_send(monkeypatch, "new", seen)
     assert seen["deny_private_vault"] is True

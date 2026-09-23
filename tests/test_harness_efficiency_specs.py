@@ -115,6 +115,8 @@ ORCHESTRATION_REQUESTS = [
     "hand this to a worker",
     "run a sub-agent on this",
     "launch an agent to do the migration",
+    "Launch two independent read-only source audits using agents",
+    "Launch two source audits **using agents**",
 ]
 
 AGENT_PROSE = [
@@ -123,6 +125,7 @@ AGENT_PROSE = [
     "set the user agent header on that request",
     "how many workers does the pool start with",
     "what's the weather like",
+    "explain the risks of using agents for source audits",
 ]
 
 
@@ -359,9 +362,15 @@ def test_skill_requires_toolsets_keeps_only_real_tool_names():
         {"name": "other", "requires_toolsets": ["bash", "write_file"]},
     ]
     tools, unknown = _skill_declared_tools(skills, disabled_tools=set())
-    assert tools == {"read_file", "manage_calendar", "bash", "write_file"}
-    assert "email" in unknown and "file search and edit" in unknown
-    assert "read_file" not in unknown
+    assert tools == {
+        "list_email_accounts", "list_emails", "read_email", "manage_calendar",
+        "read_file", "grep", "glob", "ls", "edit_file", "write_file", "apply_patch",
+        "read_app_logs", "manage_memory", "manage_skills", "bash",
+    }
+    # Friendly prose aliases expand to real schemas; only an unavailable
+    # integration alias remains unknown.
+    assert unknown == {"todoist"}
+    assert not ({"email", "file search and edit", "application-log access"} & tools)
 
 
 def test_skill_requires_toolsets_still_respects_disabled_tools():
@@ -637,7 +646,12 @@ def _pinned_payload(text, pinned, disabled, reassert=True):
 
 def test_a_role_allowlist_is_bound_whole_instead_of_being_reselected():
     pinned = _pinned_policy_toolset(_role_disabled_tools(MARKETING_LOADOUT))
-    assert pinned == set(MARKETING_LOADOUT["enabled_tools"])
+    # The loadout's own list, plus `discover_tools`. The execution gate admits
+    # that one for any non-empty `selected` allowlist so an agent can read back
+    # its own bindings instead of guessing, so the inversion must not deny it
+    # either -- otherwise the tool is hidden from every schema list while still
+    # being callable, which is the phantom-tool failure the other way round.
+    assert pinned == set(MARKETING_LOADOUT["enabled_tools"]) | {"discover_tools"}
     # The ambient tools survive: the pin neither drops one the policy allows
     # nor adds one back that the policy denies.
     assert set(ALWAYS_AVAILABLE) <= pinned
@@ -670,8 +684,17 @@ def test_a_pinned_role_does_not_drag_in_an_unrelated_domain():
     incident's `query_matched_count=21 selected_count=27 schema_tokens=4787`
     are on top of that. A pinned role never asks."""
     query = PINNED_TURNS[2]
+    # The control the incident was written against -- retrieval's keyword pass
+    # alone handing this query the whole email suite off the bare word "send" --
+    # no longer reproduces: the keyword table was tightened upstream, and this
+    # query's keyword pass now returns only the ambient tools. The embedding
+    # neighbours behind `query_matched_count=21` are still there and are not
+    # exercised here, so the control states the weaker fact it can still prove:
+    # the email suite exists under names retrieval can reach, and is exactly
+    # what this role must not be handed.
+    assert BUILTIN_EMAIL_TOOLS <= set(known_tool_names())
     unpinned = ToolIndex.__new__(ToolIndex).get_tools_for_query(query, use_embeddings=False)
-    assert {"send_email", "list_emails", "bulk_email"} <= unpinned
+    assert unpinned, "the keyword pass returning nothing at all would make this vacuous"
 
     disabled = _role_disabled_tools(MARKETING_LOADOUT)
     pinned = _pinned_policy_toolset(disabled)
@@ -689,7 +712,7 @@ def test_a_pinned_role_does_not_drag_in_an_unrelated_domain():
     # Subset, not equality: a name with no native schema, or a tool whose
     # capability is not configured on this host, is withheld by the same
     # builder for reasons that have nothing to do with the pin.
-    assert sent <= set(MARKETING_LOADOUT["enabled_tools"])
+    assert sent <= set(MARKETING_LOADOUT["enabled_tools"]) | {"discover_tools"}
     assert {"create_document", "ask_user"} <= sent
 
 

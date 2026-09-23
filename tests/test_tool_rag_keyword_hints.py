@@ -12,7 +12,13 @@ These hints are deterministic string matching — no embeddings — so we can te
 `get_tools_for_query` directly with retrieval stubbed out (no ChromaDB needed).
 """
 
-from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
+from src.tool_index import (
+    ALWAYS_AVAILABLE,
+    ToolIndex,
+    _EMAIL_MUTATION_TOOLS,
+    email_intent,
+    filter_email_tools,
+)
 
 _EMAIL_TOOLS = {
     "list_emails", "read_email", "send_email", "reply_to_email",
@@ -56,6 +62,18 @@ def test_genuine_email_query_still_gets_email_tools():
     assert {"reply_to_email", "send_email", "read_email"} <= tools
 
 
+def test_review_mail_about_software_does_not_mean_review_its_implementation():
+    ti = _index_without_embeddings()
+    for query in ("review my emails about the backend", "audit my inbox for repository access requests"):
+        assert {"read_email", "audit_emails"} <= ti.get_tools_for_query(query)
+
+
+def test_singular_mailbox_and_inbox_are_email_context():
+    ti = _index_without_embeddings()
+    assert "audit_emails" in ti.get_tools_for_query("audit my mailbox")
+    assert "reply_to_email" in ti.get_tools_for_query("reply to the last message in my inbox")
+
+
 def test_plain_tell_request_stays_minimal():
     """A bare 'tell me a joke' must not pull in email tools either."""
     ti = _index_without_embeddings()
@@ -63,3 +81,126 @@ def test_plain_tell_request_stays_minimal():
     assert not (_EMAIL_TOOLS & tools)
     # Always-available baseline is still there.
     assert set(ALWAYS_AVAILABLE) <= tools
+
+
+def test_notification_retrieval_does_not_leak_email_neighbours():
+    """Generic send/message language must not turn an ntfy request into mail."""
+    ti = _index_without_embeddings()
+    ti.retrieve = lambda query, k=8: [
+        "mcp__ntfy__send",
+        "send_email",
+        "list_emails",
+        "reply_to_email",
+    ]
+
+    tools = ti.get_tools_for_query(
+        "use ntfy to send a notification for odysseus after reading the documentation"
+    )
+
+    assert "mcp__ntfy__send" in tools
+    assert not (_EMAIL_TOOLS & tools)
+
+
+def test_code_audit_email_word_does_not_select_mail_mutations():
+    """"Email subsystem" means source code here, not the user's mailbox."""
+    ti = _index_without_embeddings()
+    ti.retrieve = lambda query, k=8: [
+        "audit_emails",
+        "list_emails",
+        "send_email",
+        "reply_to_email",
+        "delete_email",
+    ]
+
+    tools = ti.get_tools_for_query("run a few agents to audit the email subsystem")
+
+    assert not (_EMAIL_MUTATION_TOOLS & tools)
+    assert "send_email" not in tools
+    assert "reply_to_email" not in tools
+
+
+def test_explicit_email_action_still_gets_mutation_tools():
+    """Context gating must preserve ordinary user-directed email actions."""
+    ti = _index_without_embeddings()
+    for query in (
+        "send an email to bob@example.com",
+        "reply to the unread email in my inbox",
+        "archive the email from Alice",
+    ):
+        tools = ti.get_tools_for_query(query)
+        assert _EMAIL_MUTATION_TOOLS <= tools, query
+
+
+def test_email_subject_about_code_is_still_a_mail_request():
+    """Code words in the subject must not turn a mailbox read into a code audit."""
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query("read my email about security tests")
+    assert "read_email" in tools
+    assert "send_email" not in tools
+
+
+def test_ui_control_is_not_part_of_the_email_filter():
+    selected = filter_email_tools("open settings", {"ui_control", "send_email"})
+    assert selected == {"ui_control"}
+
+
+def test_code_audit_and_email_results_keeps_the_mail_action():
+    query = "run agents to audit the email subsystem and email me the results"
+    intent = email_intent(query)
+    assert intent["result_action"] and not intent["code_context"]
+
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query(query)
+    assert "send_email" in tools
+
+
+def test_explicit_address_action_seeds_email_tools_without_retrieval():
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query("send a message to bob@example.com")
+    assert "send_email" in tools
+
+
+def test_drafting_email_does_not_surface_send_mutation():
+    ti = _index_without_embeddings()
+    tools = ti.get_tools_for_query("draft an email to bob@example.com")
+    assert "create_document" in tools
+    assert "send_email" not in tools
+
+
+def test_shared_contact_tool_survives_non_email_filtering():
+    selected = filter_email_tools(
+        "find Alice's phone number",
+        {"resolve_contact", "ui_control", "send_email"},
+    )
+    assert selected == {"resolve_contact", "ui_control"}
+
+
+def test_plural_mailbox_targets_are_mutation_intent():
+    ti = _index_without_embeddings()
+    for query in ("archive all emails", "delete unread messages"):
+        tools = ti.get_tools_for_query(query)
+        assert _EMAIL_MUTATION_TOOLS <= tools, query
+
+
+def test_ntfy_result_notification_is_not_email_delivery():
+    query = "audit the email subsystem then send an ntfy notification of results"
+    intent = email_intent(query)
+    assert intent["code_context"] and not intent["result_action"]
+
+    selected = filter_email_tools(query, {"mcp__ntfy__send", "send_email"})
+    assert selected == {"mcp__ntfy__send"}
+
+
+def test_explicit_builtin_tool_name_survives_context_filter():
+    selected = filter_email_tools("use send_email for this step", set())
+    assert selected == {"send_email"}
+
+
+def test_delegated_source_audits_do_not_select_mailbox_tools():
+    query = (
+        "Launch two independent read-only source audits using agents: one covering email poller "
+        "lifecycle and one covering calendar synchronization error handling."
+    )
+    assert email_intent(query)["code_context"]
+    selected = filter_email_tools(query, {"read_file", "delegate_to_agent", "list_emails", "read_email"})
+    assert selected == {"read_file", "delegate_to_agent"}

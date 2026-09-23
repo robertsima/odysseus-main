@@ -9,6 +9,7 @@ relevant ones per user message.
 import logging
 import hashlib
 import re
+import threading
 import time
 from typing import Dict, List, Optional, Set
 
@@ -55,6 +56,10 @@ ALWAYS_AVAILABLE = frozenset({
     # first is only emitted when the tool is selected, so the model was never
     # even told the vault existed. One schema, ambient like memory.
     "search_documents",
+    # Loads a permitted-but-unselected schema (a deferred MCP catalogue, a
+    # domain retrieval missed) into this same turn. The MCP prompt note tells
+    # the model to call it, so it must always be in the schema list.
+    "discover_tools",
 })
 
 # Tools that the Personal Assistant always has access to during scheduled
@@ -81,6 +86,154 @@ ASSISTANT_ALWAYS_AVAILABLE = frozenset({
 
 COLLECTION_NAME = "odysseus_tool_index"
 
+# Chroma reports cosine distance here and retrieval historically accepted every
+# top-K neighbour, even one with effectively no semantic overlap.  That let an
+# ntfy notification request bind the email suite merely because email text was
+# its least-bad neighbour.  0.18 retains intentionally broad tool requests
+# while rejecting the weak tail observed from unrelated connected services.
+_MIN_RETRIEVAL_SIMILARITY = 0.18
+
+# Email tools are intentionally split by intent.  A bare word such as
+# ``send``/``message``/``reply`` is not enough to identify email work: those
+# words are also common in notification, agent-delegation, and chat requests.
+# Keep this vocabulary here (rather than adding one-off exclusions for each
+# integration) so retrieval can apply the same context gate to built-ins while
+# leaving explicitly matched MCP tools untouched.
+_EMAIL_READ_TOOLS = frozenset({
+    "list_email_accounts", "list_emails", "read_email", "audit_emails",
+    "scan_email_unsubscribes", "resolve_contact", "ui_control",
+})
+_EMAIL_MUTATION_TOOLS = frozenset({
+    "send_email", "reply_to_email", "bulk_email", "delete_email",
+    "archive_email", "mark_email_read", "unsubscribe_email",
+})
+# ``ui_control`` and ``resolve_contact`` are shared tools. They are useful for
+# unrelated UI/contact requests and must survive filtering of those requests.
+_EMAIL_TOOLS = (_EMAIL_READ_TOOLS - {"ui_control", "resolve_contact"}) | _EMAIL_MUTATION_TOOLS
+_EXPLICIT_EMAIL_TOOL_RE = re.compile(
+    r"\b(?:list_email_accounts|list_emails|read_email|audit_emails|"
+    r"scan_email_unsubscribes|unsubscribe_email|send_email|reply_to_email|"
+    r"bulk_email|delete_email|archive_email|mark_email_read)\b",
+    re.I,
+)
+
+# A mailbox noun is a useful positive signal, but only when it is not being
+# used as part of a software/code audit.  The latter is a frequent request for
+# this project and must not make mail mutation schemas compete with delegation
+# and source-inspection tools.  Code context is structural: a code noun must
+# occur alongside an audit/inspection-style operation.  Words like
+# ``security`` or ``tests`` alone are intentionally not enough, since users
+# often ask to read mail about those subjects.
+_EMAIL_CONTEXT_RE = re.compile(
+    r"\b(?:e-?mails?|mails?|mailbox(?:es)?|gmail|googlemail|inbox(?:es)?|unread)\b",
+    re.I,
+)
+_EMAIL_CODE_OPERATION_RE = re.compile(
+    r"\b(?:audits?|reviews?|inspect|debug|fix|implement|analy[sz]e|run)\b",
+    re.I,
+)
+_EMAIL_CODE_NOUN_RE = re.compile(
+    r"\b(?:e-?mail|mail)(?:[\s-]+(?:sync|delivery|processing|polling|account|server)){0,2}"
+    r"[\s-]+(?:subsystem|code|implementation|backend|pollers?|module|function|class|lifecycle|integration)\b"
+    r"|\b(?:implementation|source\s+code|code|module|backend)\s+(?:of|for)\s+(?:the\s+)?(?:e-?mail|mail)\b",
+    re.I,
+)
+_EMAIL_MUTATION_RE = re.compile(
+    r"(?:"
+    r"\bsend\b.{0,48}\b(?:e-?mails?|mails?)\b|"
+    r"\b(?:e-?mails?|mails?)\b.{0,48}\bsend\b|"
+    r"\breply\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?)\b|"
+    r"\b(?:delete|archive|mark|unsubscribe)\b.{0,48}\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b|"
+    r"\b(?:e-?mails?|mails?|inbox(?:es)?|messages?)\b.{0,48}\b(?:delete|archive|mark|unsubscribe)\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_ADDRESS_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:send|message|reply)\b.{0,64}"
+    r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|"
+    r"\b(?:e-?mail|mail)\s+[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b"
+    r")",
+    re.I | re.S,
+)
+_EMAIL_RESULT_ACTION_RE = re.compile(
+    r"(?:"
+    r"\b(?:e-?mail|mail)\b\s+(?:(?:me|us|him|her|them)\s+)?"
+    r"(?:(?:the|a|an)\s+)?(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:e-?mail|mail)\b.{0,48}"
+    r"\b(?:result|results|report|summary|findings|output)\b|"
+    r"\b(?:send|deliver|forward)\b.{0,48}\b(?:result|results|report|summary|findings|output)\b"
+    r".{0,24}\b(?:by|via|through)\s+(?:an?\s+)?(?:e-?mail|mail)\b"
+    r")",
+    re.I | re.S,
+)
+
+
+def email_intent(query: str) -> Dict[str, bool]:
+    """Classify the small amount of context needed for email tool routing.
+
+    This deliberately does not classify MCP tools.  It only identifies when
+    exact built-in email names are supported by the user's wording, allowing
+    callers such as the agent-loop fallback/domain seeding path to share the
+    same decision as embedding retrieval.
+    """
+    text = str(query or "")
+    email_context = bool(_EMAIL_CONTEXT_RE.search(text))
+    result_action = bool(_EMAIL_RESULT_ACTION_RE.search(text))
+    code_context = (
+        email_context
+        and bool(_EMAIL_CODE_OPERATION_RE.search(text))
+        and bool(_EMAIL_CODE_NOUN_RE.search(text))
+        and not result_action
+    )
+    mutation = bool(_EMAIL_MUTATION_RE.search(text)) or result_action
+    address_action = bool(_EMAIL_ADDRESS_ACTION_RE.search(text))
+    return {
+        "email_context": email_context,
+        "code_context": code_context,
+        "mutation": mutation,
+        "address_action": address_action,
+        "result_action": result_action,
+    }
+
+
+def filter_email_tools(query: str, selected: Set[str]) -> Set[str]:
+    """Filter/seed built-in email tools using contextual intent.
+
+    Exact built-in names are the only values removed or added. Namespaced MCP
+    tools (including explicit ``mcp__...__ntfy...`` matches) pass through.
+    """
+    tools = set(selected or ())
+    intent = email_intent(query)
+    # An exact built-in tool name is an explicit request and outranks the
+    # heuristic context filter (while still leaving namespaced MCP tools alone).
+    mentioned = {
+        match.casefold()
+        for match in _EXPLICIT_EMAIL_TOOL_RE.findall(str(query or ""))
+    }
+    explicit = {name for name in _EMAIL_TOOLS if name.casefold() in mentioned}
+    if intent["code_context"]:
+        tools.difference_update(_EMAIL_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["email_context"]:
+        tools.update(_EMAIL_READ_TOOLS)
+        if intent["mutation"] or intent["address_action"]:
+            tools.update(_EMAIL_MUTATION_TOOLS)
+        else:
+            # Retrieval can return destructive tools for a read-only mailbox
+            # query. Keep that request read-only unless the wording is explicit.
+            tools.difference_update(_EMAIL_MUTATION_TOOLS)
+        tools.update(explicit)
+        return tools
+    if intent["address_action"]:
+        tools.update(_EMAIL_TOOLS)
+    else:
+        # Generic send/message/reply or notification wording is not email
+        # intent. Keep unrelated UI/MCP tools untouched.
+        tools.difference_update(_EMAIL_TOOLS)
+    tools.update(explicit)
+    return tools
 # ── Tool description registry ──
 # Each tool gets a searchable description that helps retrieval.
 # These are richer than the system prompt one-liners — they're for embedding.
@@ -94,13 +247,16 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
+    "discover_tools": "Search the already-permitted, already-connected tool catalog for a capability and load a bounded set of matching definitions for the next agent round. Discovery never grants permission, connects services, changes settings, or performs the requested action.",
     "write_file": "Write/create or fully rewrite a file ON DISK (source code, configs, project files). Use for new files or full rewrites — NOT create_document (editor panel) and NOT a bash heredoc.",
     "edit_file": "Edit an existing file ON DISK by exact string replacement (fix a bug, change a function). Shows a diff. The tool for changing files on disk — NOT edit_document (editor panel) and NOT bash sed/heredoc.",
     "apply_patch": "Apply a multi-file patch to source files ON DISK. Use for implementation, refactors, and bug fixes where several edits belong together. Workspace-confined and returns a diff. Prefer over bash redirects/heredocs/sed.",
     "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
-    "manage_agent_worktree": "Work on this codebase in an isolated, persistent git worktree on an agent/odysseus/* branch, then publish it as a DRAFT pull request once a human approves. Use for any 'change the code / fix this bug / open a PR / push a branch' request about Odysseus itself. Actions: start, status, diff, commit, request_publish, publish, list_requests, show_request, remove. This is the ONLY way to push: git commands run through bash have no credentials and will fail to authenticate.",
+    "manage_git": "Typed Git workflows: discover/clone/init repositories; status/diff/log; stage/commit; branch/tag/switch; fetch/pull; managed stash; fast-forward push; fast-forward merge; reset/rebase with recovery refs. Works in approved roots without shell or private-vault access. Publishing and history rewrites require exact-call human confirmation; deletes (branches, remote branches, stashes), force pushes and discards are refused by policy. GitHub API metadata cannot update local checkouts; arbitrary commands remain unavailable.",
+    "manage_agent_worktree": "Odysseus's persistent agent/odysseus/* worktree and human-gated publishing: start/status/diff/commit/request_publish/publish/list_requests/show_request/remove. Publishing credentials belong to this reviewed path, not arbitrary bash commands. Use manage_git for ordinary repository workflows. Legacy repo_list/repo_status/repo_pull actions also support scoped checkout synchronization.",
     "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working. Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
     "manage_agent_loadout": "Define reusable worker loadouts (named policies: instructions, model, tools, skills, memory, MCP, delegation, approvals, worker limit) and start workers with them. Use for \u2018set up a researcher/reviewer/builder agent\u2019, \u2018make a worker that can only read files\u2019, \u2018spin up an agent to do X\u2019. A loadout you create is intersected with this chat\u2019s own policy, so it can never grant more than you already have; action=capabilities reports that ceiling.",
+    "orchestrate_agents": "Run multiple scoped specialist research agents, collect evidence-backed handoffs and synthesize results. Use appropriately scoped agents and MCP tools for market research, competitor positioning, content research, and draft synthesis. Real start/status/wait/cancel lifecycle with per-agent tool bindings, not simply loading skills or generic deep research.",
     "delegate_to_agent": "Delegate a bounded coding task through the administrator-selected provider: a local subscription-backed CLI or a connected remote coding-agent MCP tool. Provider-neutral; use instead of assuming Claude is installed.",
     "read_app_logs": "Read Odysseus's own application logs to debug or troubleshoot the running app. Use when something in the app failed, errored, or behaved unexpectedly and you need to see what it recorded. action=list to enumerate log files, action=tail for the last N lines with optional substring or minimum-level filters. Read-only; credentials are redacted.",
     "create_document": "Create a new document in the editor panel. For code, articles, text content longer than 15 lines, unless an already-open document/email draft is the obvious target. If an email compose draft is open, edit that draft instead of creating another document.",
@@ -183,6 +339,15 @@ class ToolIndex:
         migrate_legacy_collection(COLLECTION_NAME, self._lanes)
         self._fingerprint = ""
         self._mcp_generation = -1
+        # MCP entries this process indexed ({id: indexed text}); None until the
+        # first refresh, which replaces whatever an earlier process left behind.
+        self._mcp_docs: Optional[Dict[str, str]] = None
+        self._mcp_indexed_at = 0.0
+        # One refresh at a time. A turn's wait for the refresh times out after
+        # a second or two but the thread keeps going, so without this the next
+        # turn started a second refresh whose delete could land after the
+        # first one's upsert and leave the index with no MCP tools at all.
+        self._mcp_index_lock = threading.Lock()
         self._healthy = True
         logger.info("ToolIndex initialized (lanes=%s)", [lane.name for lane in self._lanes])
 
@@ -246,8 +411,23 @@ class ToolIndex:
         ).hexdigest()
         logger.info(f"Indexed {len(docs)} built-in tools")
 
+    def mcp_index_state(self, mcp_mgr) -> Dict[str, object]:
+        """Whether the MCP part of the index matches the connected servers."""
+        gen = getattr(mcp_mgr, '_generation', 0) if mcp_mgr else 0
+        return {
+            "current": gen == self._mcp_generation,
+            "refreshing": self._mcp_index_lock.locked(),
+            "age_seconds": round(time.time() - self._mcp_indexed_at, 1) if self._mcp_indexed_at else None,
+            "tools": len(self._mcp_docs or {}),
+        }
+
     def index_mcp_tools(self, mcp_mgr, disabled_map: Optional[Dict] = None):
-        """Index MCP tool descriptions. Call after MCP servers connect/disconnect."""
+        """Index MCP tool descriptions. Call after MCP servers connect/disconnect.
+
+        Only tools whose indexed text changed are re-embedded, and tools that
+        are gone are deleted, so reconnecting one server doesn't re-embed every
+        server's tools. A refresh already in progress is left to finish.
+        """
         if not mcp_mgr:
             return
 
@@ -255,15 +435,26 @@ class ToolIndex:
         gen = getattr(mcp_mgr, '_generation', 0)
         if gen == self._mcp_generation:
             return
+        if not self._mcp_index_lock.acquire(blocking=False):
+            logger.info("[tool-rag] MCP index refresh already running; this turn uses the current index")
+            return
+        try:
+            self._index_mcp_tools_locked(mcp_mgr, disabled_map, gen)
+        finally:
+            self._mcp_index_lock.release()
 
-        # Remove old MCP entries
-        for lane in self._lanes:
-            try:
-                existing = lane.collection.get(where={"tool_type": "mcp"})
-                if existing and existing["ids"]:
-                    lane.collection.delete(ids=existing["ids"])
-            except Exception:
-                pass
+    def _index_mcp_tools_locked(self, mcp_mgr, disabled_map: Optional[Dict], gen: int) -> None:
+        started = time.time()
+        if self._mcp_docs is None:
+            # First refresh in this process: drop what a previous process left.
+            for lane in self._lanes:
+                try:
+                    existing = lane.collection.get(where={"tool_type": "mcp"})
+                    if existing and existing["ids"]:
+                        lane.collection.delete(ids=existing["ids"])
+                except Exception:
+                    pass
+            self._mcp_docs = {}
 
         # Get current MCP tools
         try:
@@ -272,7 +463,10 @@ class ToolIndex:
             all_tools = ""
 
         if not all_tools:
+            self._remove_mcp_ids(set(self._mcp_docs))
+            self._mcp_docs = {}
             self._mcp_generation = gen
+            self._mcp_indexed_at = time.time()
             return
 
         # Parse MCP tool descriptions from the prompt text
@@ -301,27 +495,49 @@ class ToolIndex:
                     ids.append(f"mcp_{name}")
                     metadatas.append({"tool_name": name, "tool_type": "mcp"})
 
-        if not docs:
-            self._mcp_generation = gen
-            return
+        wanted = dict(zip(ids, docs))
+        removed = set(self._mcp_docs) - set(wanted)
+        changed = [i for i, doc_id in enumerate(ids) if self._mcp_docs.get(doc_id) != docs[i]]
+        self._remove_mcp_ids(removed)
+        for doc_id in removed:
+            self._mcp_docs.pop(doc_id, None)
 
-        indexed = False
+        if changed:
+            up_ids = [ids[i] for i in changed]
+            up_docs = [docs[i] for i in changed]
+            up_meta = [metadatas[i] for i in changed]
+            indexed = False
+            for lane in self._lanes:
+                try:
+                    lane.collection.upsert(
+                        ids=up_ids,
+                        documents=up_docs,
+                        embeddings=lane.encode(up_docs),
+                        metadatas=up_meta,
+                    )
+                    indexed = True
+                except Exception as e:
+                    logger.warning("MCP tool indexing failed in %s lane: %s", lane.name, e)
+            if not indexed:
+                logger.warning("MCP tool indexing failed in all embedding lanes")
+                return
+            for i in changed:
+                self._mcp_docs[ids[i]] = docs[i]
+        self._mcp_generation = gen
+        self._mcp_indexed_at = time.time()
+        logger.info(
+            "Indexed MCP tools: %d total, %d embedded, %d removed in %.1fs",
+            len(wanted), len(changed), len(removed), time.time() - started,
+        )
+
+    def _remove_mcp_ids(self, doc_ids) -> None:
+        if not doc_ids:
+            return
         for lane in self._lanes:
             try:
-                lane.collection.upsert(
-                    ids=ids,
-                    documents=docs,
-                    embeddings=lane.encode(docs),
-                    metadatas=metadatas,
-                )
-                indexed = True
+                lane.collection.delete(ids=sorted(doc_ids))
             except Exception as e:
-                logger.warning("MCP tool indexing failed in %s lane: %s", lane.name, e)
-        if not indexed:
-            logger.warning("MCP tool indexing failed in all embedding lanes")
-            return
-        self._mcp_generation = gen
-        logger.info(f"Indexed {len(docs)} MCP tools")
+                logger.warning("Removing stale MCP tools failed in %s lane: %s", lane.name, e)
 
     def retrieve(self, query: str, k: int = 8) -> List[str]:
         """Retrieve the top-K most relevant tool names for a query."""
@@ -354,7 +570,13 @@ class ToolIndex:
             except Exception as e:
                 logger.warning("Tool retrieval failed in %s lane: %s", lane.name, e)
         rows.sort(key=lambda row: (-row["score"], lane_priority.get(row["embedding_lane"], 99)))
-        return [row["tool_name"] for row in dedupe_results(rows, id_key="tool_name", limit=k)]
+        above_floor = [row for row in rows if row["score"] >= _MIN_RETRIEVAL_SIMILARITY]
+        if rows and not above_floor:
+            logger.debug(
+                "Tool retrieval rejected %d weak neighbour(s); best similarity=%.4f floor=%.2f",
+                len(rows), rows[0]["score"], _MIN_RETRIEVAL_SIMILARITY,
+            )
+        return [row["tool_name"] for row in dedupe_results(above_floor, id_key="tool_name", limit=k)]
 
     # Structural recurring-schedule intent. Typo-resilient (matches "every dya"
     # via "every <word>"), and catches bare clock times ("at 7:30 am", "7am").
@@ -373,12 +595,14 @@ class ToolIndex:
 
     # Keyword hints: if the query mentions these words, force-include the tools.
     _KEYWORD_HINTS = {
-        # NOTE: "tell" was removed from this set. It fired on any "tell me ..."
-        # request (e.g. "visit <url> and tell me the title"), force-including the
-        # whole email toolset and crowding out the relevant tools — the model then
-        # believed it had only email tools and refused web/other tasks (#1707).
-        frozenset({"email", "emails", "mail", "mails", "mailbox", "gmail", "googlemail", "message", "messages", "send", "reply", "replies", "inbox", "unread"}):
-            {"list_email_accounts", "list_emails", "read_email", "audit_emails", "scan_email_unsubscribes", "unsubscribe_email", "send_email", "reply_to_email", "bulk_email", "delete_email", "archive_email", "mark_email_read", "resolve_contact", "ui_control"},
+        # Email retrieval is gated by contextual intent below.  In particular,
+        # generic verbs such as "send", "message", and "reply" must not
+        # force-load the entire mailbox suite for notification or agent-chat
+        # requests.  This hint only contributes the read-only/inspection set;
+        # mutation tools are added when an email action is explicit.
+        frozenset({"email", "emails", "mail", "mails", "mailbox", "mailboxes",
+                   "gmail", "googlemail", "inbox", "inboxes", "unread"}):
+            _EMAIL_READ_TOOLS,
         frozenset({"calendar", "event", "meeting", "schedule", "appointment"}):
             {"manage_calendar"},
         # Source-control work on Odysseus itself. Without this the retrieval step
@@ -389,7 +613,7 @@ class ToolIndex:
                    "push", "publish", "merge", "rebase", "worktree", "checkout",
                    "open a pr", "raise a pr", "draft pr", "codebase", "repo",
                    "repository", "patch", "changeset", "diff"}):
-            {"manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
+            {"manage_git", "manage_agent_worktree", "read_file", "apply_patch", "edit_file", "grep"},
         # Self-debugging: the app's own logs.
         #
         # Matching is `\b<hint>\b`, so the plural "logs" is already safe from
@@ -631,6 +855,13 @@ class ToolIndex:
         for keywords, tools in self._KEYWORD_HINTS.items():
             if any(re.search(rf"\b{re.escape(kw)}\b", ql) for kw in keywords):
                 base.update(tools)
+
+        # Apply the shared email context gate after both keyword hints and
+        # embedding retrieval. Embeddings are intentionally broad and can
+        # return mail tools as the least-bad neighbours for an ntfy
+        # notification or a code audit; semantic similarity alone is not an
+        # authorization to expose those schemas.
+        base = filter_email_tools(query, base)
         # Structural scheduling-intent detection — typo-resilient (the literal
         # keyword "every day" misses "every dya"). Catches "every <word>",
         # daily/nightly/etc., or a clock time like "at 7:30 am" / "7am", which
@@ -727,3 +958,21 @@ def reset_tool_index() -> None:
     global _tool_index, _last_attempt
     _tool_index = None
     _last_attempt = 0.0
+
+
+def refresh_mcp_index_if_loaded(mcp_mgr) -> None:
+    """Bring the MCP part of an already-built index up to date.
+
+    Called off the request path after MCP servers connect, so the next agent
+    turn finds the index current instead of paying for the refresh inside its
+    tool-selection budget. Does nothing when the index was never built: the
+    first turn builds it anyway, and startup should not pay for the embedder.
+    """
+    index = _tool_index
+    if index is None or not index.healthy or not mcp_mgr:
+        return
+    try:
+        from src.agent_loop import _load_mcp_disabled_map
+        index.index_mcp_tools(mcp_mgr, _load_mcp_disabled_map())
+    except Exception as e:
+        logger.warning("Background MCP index refresh failed: %s", e)

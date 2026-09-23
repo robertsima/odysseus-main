@@ -516,10 +516,38 @@ register_all([
 
     SettingSpec(
         key="agent_approval_mode", type="choice", label="Approval prompts",
-        help=("Choose when an agent must ask before acting. ‘Risky actions’ covers "
-              "destructive shell commands, publishing, sending email, and similar outside effects."),
+        help=("Choose when an agent must ask before acting. This is the default for "
+              "every chat and sub-agent; a chat or agent profile can pick its own. "
+              "‘Risky actions’ covers destructive shell commands, publishing, sending "
+              "email, deletes and admin changes. ‘Every change’ also asks for any write "
+              "or shell command, and for anything high-impact once web, email or file "
+              "content has entered the run."),
         group="Agents", choices=("auto", "ask_risky", "ask_all"),
         choice_labels=("Run automatically", "Ask for risky actions", "Ask for every change"),
+    ),
+    SettingSpec(
+        key="shell_sandbox", type="choice", label="Workspace shell sandbox",
+        help=("Lets bash and python run in chats without private vault access, confined to "
+              "the chat's workspace: the sandbox cannot see the app's data, the vault, other "
+              "folders or the app's environment. Needs bubblewrap and a container allowed to "
+              "create user namespaces. Off = the shell needs 'Allow private vault reads'."),
+        group="Agents", choices=("auto", "off"),
+        choice_labels=("On when available", "Off"),
+    ),
+    SettingSpec(
+        key="shell_sandbox_network", type="bool", label="Sandbox network access",
+        help=("Whether the sandboxed shell may use the network (pip, npm, git fetch). Off also "
+              "stops it reaching services next to Odysseus, such as ChromaDB, whose index "
+              "holds vault excerpts."),
+        group="Agents", advanced=True,
+    ),
+    SettingSpec(
+        key="agent_tool_budget", type="int", label="Tools per turn",
+        help=("The most tools one agent turn is offered. Broad messages match many "
+              "keyword domains; past this limit the domains retrieval agrees with "
+              "least are dropped first. Tools you forced on, and the ones retrieval "
+              "picked, always stay. 0 = no limit."),
+        group="Agents", min_value=0, max_value=200, unit="tools", advanced=True,
     ),
     SettingSpec(
         key="agent_approval_ttl_seconds", type="int", label="Approval link lifetime",
@@ -540,14 +568,16 @@ register_all([
         advanced=True,
     ),
     SettingSpec(
-        key="agent_input_token_hard_max", type="int", label="Automatic budget ceiling",
-        help="Maximum context budget chosen by automatic scaling; explicit custom budgets can exceed it.",
-        group="Agents", min_value=1000, max_value=2_000_000, step=1000, unit="tokens",
+        key="agent_input_token_hard_max", type="int", label="Agent context cap",
+        help=("Most context the agent sends the model per step when the context budget is automatic: "
+              "85% of the model's window, up to this cap. Explicit custom budgets can exceed it."),
+        group="Agents", min_value=16_000, max_value=2_000_000, step=1000, unit="tokens",
         advanced=True,
     ),
     SettingSpec(
-        key="agent_max_rounds", type="int", label="Maximum agent rounds",
-        help="Safety limit on reasoning/tool rounds in one turn before the agent must finish.",
+        key="agent_max_rounds", type="int", label="Round budget (advisory)",
+        help=("Advisory round budget per message. It does not stop a run; \"Maximum tool calls\", "
+              "stall detection, timeouts and Stop are the real limits."),
         group="Agents", min_value=1, max_value=500, unit="rounds", advanced=True,
     ),
     SettingSpec(

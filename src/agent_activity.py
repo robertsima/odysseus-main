@@ -57,6 +57,13 @@ KINDS = (
 
 MAX_EVENTS_PER_SESSION = 500
 MAX_RUNS = 300
+# A run in one of these states is still working. Everything else is terminal
+# and must carry a ``finished_at``: the agent strip above the composer keeps a
+# finished row visible for a few seconds by comparing that timestamp against
+# now, and the Agents dashboard windows its recent rows the same way. A
+# terminal run with no finish time is therefore invisible in both — the row
+# vanishes the moment the work ends instead of showing how it ended.
+LIVE_RUN_STATUSES = frozenset({"running", "queued", "pending", "in_progress"})
 MAX_TITLE_CHARS = 300
 MAX_DETAIL_CHARS = 4000
 MAX_DATA_CHARS = 12000
@@ -194,9 +201,9 @@ def _load_runs() -> None:
                     _runs[str(run_id)] = rec
     except (OSError, ValueError):
         pass
-    # A run that was "running" when the process died never finished.
+    # A run that was still live when the process died never finished.
     for rec in _runs.values():
-        if rec.get("status") == "running":
+        if rec.get("status") in LIVE_RUN_STATUSES:
             rec["status"] = "interrupted"
             rec["finished_at"] = rec.get("finished_at") or time.time()
 
@@ -207,8 +214,18 @@ def _save_runs() -> None:
     except Exception:  # pragma: no cover - core is always importable in the app
         atomic_write_json = None
     if len(_runs) > MAX_RUNS:
-        ordered = sorted(_runs.items(), key=lambda kv: kv[1].get("started_at") or 0)
-        for run_id, _ in ordered[: len(_runs) - MAX_RUNS]:
+        # Evict FINISHED runs, oldest first. A still-working run must never be
+        # dropped to make room: this registry is the only server-side truth the
+        # agent strip has, so evicting a live run makes a working agent vanish
+        # from the chat that started it, frees its slot in `live_children`, and
+        # makes `has_active_run` say an in-flight chat is idle. Chat turns are
+        # recorded here too, so on a busy day a long worker is exactly the
+        # oldest entry a purely age-ordered eviction would take first.
+        evictable = sorted(
+            (kv for kv in _runs.items() if kv[1].get("status") not in LIVE_RUN_STATUSES),
+            key=lambda kv: kv[1].get("started_at") or 0,
+        )
+        for run_id, _ in evictable[: len(_runs) - MAX_RUNS]:
             _runs.pop(run_id, None)
     try:
         os.makedirs(activity_dir(), exist_ok=True)
@@ -306,6 +323,7 @@ def _update_run(ev: dict) -> None:
     if ev["kind"] == "run_started":
         rec["summary"] = {k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS}
     elif ev["kind"] == "run_finished":
+        _progress_saved_at.pop(run_id, None)
         status = str(data.get("status") or ("failed" if ev.get("level") == "error" else "completed"))
         rec["status"] = status
         rec["finished_at"] = ev["ts"]
@@ -313,13 +331,68 @@ def _update_run(ev: dict) -> None:
         rec["summary"].update({k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS})
     elif ev["kind"] == "status" and data.get("status"):
         rec["status"] = str(data["status"])
+        # A status event closes a run just as a run_finished does — the chat
+        # that started a worker closes it this way, and a headless stream
+        # failure reports `failed` here before the caller's run_finished lands.
+        # Stamping the finish time is what keeps that row on the strip long
+        # enough to be read as failed/cancelled instead of disappearing.
+        if rec["status"] in LIVE_RUN_STATUSES:
+            rec["finished_at"] = None       # back to work (a worker earning another leg)
+        elif not rec.get("finished_at"):
+            rec["finished_at"] = ev["ts"]
+        # Keep the continuity that identifies the run. A record rebuilt from a
+        # status event (its run_started was evicted, or arrived in an earlier
+        # process) starts with an empty summary, and without `parent_session`
+        # the chat that started the worker can no longer list it at all.
+        rec["summary"].update({k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS})
     _save_runs()
+
+
+PROGRESS_SAVE_S = 5.0
+_progress_saved_at: Dict[str, float] = {}
+
+
+def note_progress(run_id: Optional[str], **fields: Any) -> None:
+    """Merge live counters (round, tokens, current tool) into a run's record.
+
+    A detached worker can run for a hundred rounds while its row shows only
+    the last event title; the round, token totals and cache hit rate lived in
+    the log alone. These change every round, so they go on the run record
+    (``progress``), not the event ring: publishing them would push the events
+    that matter out of the 500-event window. Persisted at most every
+    ``PROGRESS_SAVE_S`` so a busy run does not rewrite the runs file per tool
+    call; ``list_runs`` reads the in-memory record, so the UI is never behind.
+    Never raises.
+    """
+    if not run_id:
+        return
+    try:
+        with _lock:
+            _load_runs()
+            rec = _runs.get(str(run_id))
+            if rec is None:
+                return
+            progress = rec.get("progress")
+            if not isinstance(progress, dict):
+                progress = rec["progress"] = {}
+            progress.update(fields)
+            now = time.time()
+            if now - _progress_saved_at.get(str(run_id), 0.0) >= PROGRESS_SAVE_S:
+                _progress_saved_at[str(run_id)] = now
+                _save_runs()
+    except Exception as exc:  # observability must never break the work it observes
+        logger.debug("activity: note_progress failed: %s", exc, exc_info=True)
 
 
 _RUN_SUMMARY_KEYS = frozenset({
     "repository", "branch", "commit", "model", "task_id", "target_session", "target_session_name",
     "changed_files", "changes", "commits", "num_turns", "total_cost_usd", "exit_code", "error",
     "job_id", "command", "steps", "pull_request", "request_id", "result_excerpt", "mode",
+    "max_rounds", "rounds_exhausted", "profile",
+    "workflow_id", "parent_session", "parent_run_id", "stage", "workflow_controller",
+    "requested_agents", "launched_agents", "research_requested", "research_completed", "research_failed",
+    "usable_handoffs", "synthesis_status", "handoff_count", "artifact_count",
+    "unresolved_count", "verification_failed",
 })
 
 
@@ -359,6 +432,22 @@ def active_turn(session_id: Optional[str]) -> Optional[str]:
         return _active_turns.get(str(session_id or ""))
 
 
+def has_active_run(session_id: Optional[str]) -> bool:
+    """Whether activity still records live work for this chat.
+
+    This is deliberately a small read-side helper for lifecycle operations
+    such as archiving.  A session may have work which was started outside the
+    chat-run registry (Claude Code, a background job, or a delegated session),
+    so checking only ``agent_runs.is_busy`` would let its history disappear
+    from the active workspace while it is still doing work.
+    """
+    sid = str(session_id or "")
+    with _lock:
+        _load_runs()
+        return any(rec.get("session_id") == sid and rec.get("status") in LIVE_RUN_STATUSES
+                   for rec in _runs.values())
+
+
 def close_turn(session_id: Optional[str], *, status: str = "completed", title: Optional[str] = None) -> bool:
     """Finish the session's live chat turn if it never reported its own end.
 
@@ -380,10 +469,25 @@ def close_turn(session_id: Optional[str], *, status: str = "completed", title: O
 
 def history(session_id: str, *, since_seq: int = 0, limit: int = 200) -> List[dict]:
     sid = str(session_id or "global")
+    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
+    if sid == GLOBAL_FEED:
+        # The global feed is a fan-out key, not a stored session: `publish`
+        # appends to the originating session only. So this used to return an
+        # empty list, and the Workbench's "All sessions" scope showed nothing
+        # until something new happened — which read as the filter doing
+        # nothing at all. Merge the real sessions instead. `subscribe` still
+        # replays nothing for GLOBAL_FEED, so there is no double-delivery:
+        # history comes from here, live frames from there.
+        merged: List[dict] = []
+        for name in sessions_with_activity():
+            with _lock:
+                _load_session(name)
+                merged.extend(_events.get(name, ()))
+        merged.sort(key=lambda ev: ev.get("ts") or 0)
+        return merged[-limit:]
     with _lock:
         _load_session(sid)
         rows = [ev for ev in _events.get(sid, ()) if ev.get("seq", 0) > since_seq]
-    limit = max(1, min(int(limit or 200), MAX_EVENTS_PER_SESSION))
     return rows[-limit:]
 
 
@@ -394,26 +498,72 @@ def last_seq(session_id: str) -> int:
         return _seq.get(sid, 0)
 
 
+def _descendant_sessions(rows: List[dict], session_id: str, max_depth: int = 4) -> set:
+    """Chats of workers started by ``session_id``, and by those workers in
+    turn. A worker that starts its own worker reports to the worker, so the
+    chat at the top of the tree could neither see nor list the nested one."""
+    children: Dict[str, set] = {}
+    for r in rows:
+        summary = r.get("summary") or {}
+        parent = summary.get("parent_session")
+        child = summary.get("target_session") or r.get("session_id")
+        if parent and child and child != parent:
+            children.setdefault(parent, set()).add(child)
+    found, frontier = set(), {session_id}
+    for _ in range(max_depth):
+        frontier = {c for s in frontier for c in children.get(s, ())} - found - {session_id}
+        if not frontier:
+            break
+        found |= frontier
+    return found
+
+
 def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
-              limit: int = 50, active_only: bool = False) -> List[dict]:
+              limit: int = 50, active_only: bool = False,
+              include_descendants: bool = False) -> List[dict]:
     with _lock:
         _load_runs()
         rows = list(_runs.values())
     if owner is not None:
         rows = [r for r in rows if r.get("owner") in (owner, None)]
-    if session_id:
-        rows = [r for r in rows if r.get("session_id") == session_id]
+    if session_id and include_descendants:
+        tree = {session_id} | _descendant_sessions(rows, session_id)
+        rows = [r for r in rows
+                if r.get("session_id") in tree
+                or (r.get("summary") or {}).get("parent_session") in tree]
+    elif session_id:
+        # A worker's run is filed under the WORKER's chat, but the chat that
+        # started it has to be able to find it: the agent strip above the
+        # composer reconciles the rows it drew from the parent's own feed
+        # against this list, and a run it cannot find here is marked
+        # interrupted. That is why sub-agents appeared for a moment and then
+        # silently vanished from the chat that launched them.
+        rows = [r for r in rows
+                if r.get("session_id") == session_id
+                or (r.get("summary") or {}).get("parent_session") == session_id]
     if active_only:
-        rows = [r for r in rows if r.get("status") == "running"]
+        # The strip reconciles its rows against this list and marks anything it
+        # cannot find here as interrupted, so "active" has to mean every live
+        # state, not just `running`.
+        rows = [r for r in rows if r.get("status") in LIVE_RUN_STATUSES]
     rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
-    return [dict(r) for r in rows[: max(1, min(int(limit or 50), MAX_RUNS))]]
+    return [_copy_run(r) for r in rows[: max(1, min(int(limit or 50), MAX_RUNS))]]
 
 
 def get_run(run_id: str) -> Optional[dict]:
     with _lock:
         _load_runs()
         rec = _runs.get(run_id)
-        return dict(rec) if rec else None
+        return _copy_run(rec) if rec else None
+
+
+def _copy_run(rec: dict) -> dict:
+    # `progress` is mutated in place by note_progress; hand out a copy so a
+    # caller serialising the record never iterates a dict that is changing.
+    out = dict(rec)
+    if isinstance(out.get("progress"), dict):
+        out["progress"] = dict(out["progress"])
+    return out
 
 
 def run_events(run_id: str, *, limit: int = 300) -> List[dict]:
@@ -485,6 +635,7 @@ def _reset_for_tests() -> None:
         _seq.clear()
         _loaded.clear()
         _runs.clear()
+        _progress_saved_at.clear()
         _runs_loaded = False
         _subscribers.clear()
         _active_turns.clear()

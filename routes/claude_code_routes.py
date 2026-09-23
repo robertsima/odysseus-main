@@ -58,6 +58,32 @@ def setup_claude_code_routes() -> APIRouter:
         _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
         return await status_report()
 
+    # ── cloud runner (Claude Code in GitHub Actions; src/claude_cloud.py) ──
+    @router.get("/cloud/status")
+    async def cloud_status(request: Request):
+        """Whether the cloud runner can dispatch: GitHub credential, the
+        allowlisted repositories and whether each has the workflow."""
+        require_admin(request)
+        from src import claude_cloud
+        return await claude_cloud.status()
+
+    @router.get("/cloud/workflow.yml")
+    async def cloud_workflow(request: Request):
+        """The workflow file to copy into .github/workflows/ of each repository."""
+        require_admin(request)
+        from fastapi.responses import PlainTextResponse
+        from src import claude_cloud
+        return PlainTextResponse(
+            claude_cloud.workflow_template(), media_type="text/yaml",
+            headers={"Content-Disposition": f'attachment; filename="{claude_cloud.workflow_file()}"'},
+        )
+
+    @router.get("/cloud/tasks")
+    async def cloud_tasks(request: Request):
+        require_admin(request)
+        from src import claude_cloud
+        return {"tasks": claude_cloud.summaries()}
+
     @router.get("/tasks")
     async def list_tasks(request: Request, limit: int = 50):
         """Bounded task rows (no output blobs). API tokens see their own

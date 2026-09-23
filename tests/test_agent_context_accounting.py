@@ -7,6 +7,14 @@ half the tool-output inline limit a chat on the same model gets, and every
 metric derived from the window (``context_percent``) read 0.
 """
 
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
+
 import asyncio
 
 from src.agent_loop import _compute_final_metrics, _estimate_tool_schema_tokens

@@ -83,6 +83,7 @@ _COMMON_TOOL_NAMES = {
     "list_sessions",
     "ls",
     "manage_agent_loadout",
+    "orchestrate_agents",
     "manage_calendar",
     "manage_contact",
     "manage_documents",
@@ -211,7 +212,7 @@ def known_tool_names() -> Set[str]:
 # ---------------------------------------------------------------------------
 # Tool allowlists
 #
-# One definition, imported (docs/design-patterns.md). Three places used to
+# One definition, imported (website/design-patterns.md). Three places used to
 # invert a role's allowlist into a denylist by hand — `agent_profiles.
 # session_patch`, `task_scheduler` (against a *different* registry) and
 # `agent_loadouts._clamp_tools`. Every copy inherited the same two holes: the
@@ -228,7 +229,7 @@ MCP_TOOL_PREFIX = "mcp__"
 #: Grants every tool on every connected MCP server. The only way to say "all
 #: MCP" inside an allowlist, and it has to be written out: MCP tool names are
 #: generated at runtime and carry a per-server id, so they can never be
-#: enumerated in advance (docs/design-patterns.md, "recognise by shape").
+#: enumerated in advance (website/design-patterns.md, "recognise by shape").
 ALL_MCP_WILDCARD = "mcp__*"
 #: Suffix of a per-server grant: ``mcp__<server>__*``.
 _MCP_SERVER_WILDCARD_SUFFIX = "__*"
@@ -265,7 +266,7 @@ def allowlist_permits(
 ) -> bool:
     """Whether a role whose policy is ``tool_access``/``enabled_tools`` may call ``tool_name``.
 
-    This is a **policy** decision, so it fails closed (docs/design-patterns.md):
+    This is a **policy** decision, so it fails closed (website/design-patterns.md):
     an access mode this build does not recognise grants nothing, and a tool
     nobody listed is denied whether or not it existed when the role was saved.
 
@@ -338,11 +339,25 @@ def denied_by_allowlist(
     :func:`live_tool_names` is the usual source and includes connected MCP.
     """
 
-    denied = {str(t).strip() for t in (disabled_tools or []) if str(t).strip()}
+    explicit = {str(t).strip() for t in (disabled_tools or []) if str(t).strip()}
+    denied = set(explicit)
     for name in candidates or ():
         text = str(name).strip()
         if text and not allowlist_permits(text, tool_access, enabled_tools):
             denied.add(text)
+    # `discover_tools` is the one exception, and it is not a hole: the
+    # execution gate in :mod:`src.tool_execution` admits it for an agent with a
+    # non-empty `selected` allowlist, so that the agent can read back its own
+    # bindings instead of guessing. The offer and the enforcement have to agree
+    # (website/design-patterns.md), so the inversion must not deny what execution
+    # will run -- otherwise the tool is hidden from every schema list while
+    # still being callable. An explicit `disabled_tools` entry still wins.
+    if (
+        str(tool_access or "").strip().lower() == "selected"
+        and _allowlist_entries(enabled_tools)
+        and "discover_tools" not in explicit
+    ):
+        denied.discard("discover_tools")
     return denied
 
 
@@ -376,7 +391,20 @@ def live_tool_names() -> Set[str]:
 
 
 def mcp_servers_named_in_allowlist(enabled_tools: Optional[Iterable[str]]) -> Optional[Set[str]]:
-    """Servers an allowlist reaches: ``None`` for "all of them" (``mcp__*``)."""
+    """Servers an allowlist reaches: ``None`` for "all of them" (``mcp__*``).
+
+    An entry reaches a server through any of its policy-equivalent spellings,
+    not only the qualified one. A bare ``read_email`` and ``mcp__email__read_email``
+    are one permission -- :func:`allowlist_permits` says so -- so a role granted
+    the bare name must keep the email server reachable, or the coarse server
+    gate would refuse the very call the allowlist just permitted.
+    """
+
+    try:
+        from src.tool_security import email_tool_policy_names
+    except Exception:  # pragma: no cover - the alias table is best effort here
+        def email_tool_policy_names(name):
+            return {name}
 
     servers: Set[str] = set()
     for entry in _allowlist_entries(enabled_tools):
@@ -387,9 +415,10 @@ def mcp_servers_named_in_allowlist(enabled_tools: Optional[Iterable[str]]) -> Op
             if head.startswith(MCP_TOOL_PREFIX) and head != MCP_TOOL_PREFIX:
                 servers.add(head[len(MCP_TOOL_PREFIX):])
                 continue
-        parts = split_mcp_tool_name(entry)
-        if parts:
-            servers.add(parts[0])
+        for spelling in email_tool_policy_names(entry) or (entry,):
+            parts = split_mcp_tool_name(spelling)
+            if parts:
+                servers.add(parts[0])
     return servers
 
 
@@ -428,7 +457,7 @@ def reconcile_tool_and_mcp_access(
       it was written against the new rule and means what it says, including
       "one tool of a server, not the server".
     * **The server list is then narrowed to what the allowlist can reach**, so
-      the offer matches the enforcement (docs/design-patterns.md). A server
+      the offer matches the enforcement (website/design-patterns.md). A server
       advertised in the prompt whose every tool the gate rejects is the
       phantom-tool failure that rule exists to stop.
     """

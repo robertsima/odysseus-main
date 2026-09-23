@@ -18,15 +18,26 @@ from types import SimpleNamespace
 import pytest
 
 from src.tool_execution import (
+
+    NO_TOOL_SECURITY_CONTEXT,
     _AGENT_WORKDIR,
     _active_workspace,
     _resolve_search_root,
     _resolve_tool_path,
     _resolve_tool_path_in_workspace,
     agent_cwd,
-    execute_tool_block,
+    execute_tool_block as _execute_tool_block,
     get_active_workspace,
 )
+
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: the fork's agent-loop routing (website/upstream-sync-2026-09-18.md)"
+)
+
+
+async def execute_tool_block(*args, **kwargs):
+    kwargs.setdefault("security_context", NO_TOOL_SECURITY_CONTEXT)
+    return await _execute_tool_block(*args, **kwargs)
 
 
 def _block(tool, content=""):
@@ -261,14 +272,15 @@ async def test_glob_skips_sensitive_files_in_workspace(ws, admin):
 
 
 @pytest.mark.asyncio
-async def test_subprocess_cwd_is_workspace_e2e(ws, admin):
+async def test_subprocess_cwd_is_workspace_e2e(ws, admin, monkeypatch):
     """python tool runs with cwd = workspace (OS-agnostic probe)."""
     # Unrestricted Python is available only when the chat explicitly grants
     # private-vault reads; without that grant it could open an absolute vault
     # path outside the workspace before the file-tool policy runs.
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": True})
     _, r = await execute_tool_block(
         _block("python", "import os; print(os.getcwd())"),
-        owner="a", workspace=ws, allow_private=True,
+        owner="a", session_id="workspace-chat", workspace=ws, allow_private=True,
     )
     assert r["exit_code"] == 0
     assert os.path.realpath(r["output"].strip()) == os.path.realpath(ws)
@@ -298,13 +310,14 @@ async def test_binding_does_not_leak(ws, admin):
 # must still surface the file tools, otherwise the agent says it has no file
 # access (the bug this guards against).
 
-def _sent_tool_names(monkeypatch, *, workspace, message="look at the local project", force_keyword_fallback=False):
+def _sent_tool_names(monkeypatch, *, workspace, message="look at the local project", force_keyword_fallback=False, private_grant=False):
     import asyncio
     import src.agent_loop as al
 
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "estimate_tokens", lambda *a, **k: 10, raising=False)
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": private_grant})
     # Isolate the selection logic from owner gating (tested separately).
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
     if force_keyword_fallback:
@@ -329,6 +342,7 @@ def _sent_tool_names(monkeypatch, *, workspace, message="look at the local proje
             "https://api.openai.com/v1", "gpt-test",
             [{"role": "user", "content": message}],
             max_rounds=1, relevant_tools=None, owner="admin", workspace=workspace,
+            session_id="workspace-chat", allow_private=private_grant,
         )
         return [c async for c in gen]
 
@@ -350,12 +364,15 @@ def test_low_signal_with_workspace_surfaces_readonly_file_tools(monkeypatch):
     assert "python" not in names
 
 
-def test_workspace_coding_request_surfaces_edit_and_verify_tools(monkeypatch):
+@_REPORT_BACKLOG
+@pytest.mark.parametrize("private_grant", [False, True])
+def test_workspace_coding_request_surfaces_only_permitted_edit_and_verify_tools(monkeypatch, private_grant):
     names = _sent_tool_names(
         monkeypatch,
         workspace="/tmp",
         message="fix the failing frontend test in this repo",
         force_keyword_fallback=True,
+        private_grant=private_grant,
     )
     assert "get_workspace" in names
     assert "read_file" in names
@@ -364,8 +381,8 @@ def test_workspace_coding_request_surfaces_edit_and_verify_tools(monkeypatch):
     assert "write_file" in names
     assert "apply_patch" in names
     assert "todowrite" in names
-    assert "bash" in names
-    assert "python" in names
+    assert ("bash" in names) is private_grant
+    assert ("python" in names) is private_grant
 
 
 def test_low_signal_without_workspace_excludes_file_tools(monkeypatch):

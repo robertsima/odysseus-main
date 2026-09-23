@@ -67,7 +67,13 @@ from core.constants import (
     REQUEST_TIMEOUT, OPENAI_API_KEY, AUTH_FILE,
 )
 from core.database import SessionLocal, ApiToken
-from core.middleware import SecurityHeadersMiddleware, is_cors_preflight
+from core.middleware import (
+    SecurityHeadersMiddleware,
+    get_application_route_path,
+    is_cors_preflight,
+    path_is_route_or_child,
+    with_asgi_root_path,
+)
 from core.auth import AuthManager, normalize_known_username
 from core.exceptions import (
     SessionNotFoundError, InvalidFileUploadError,
@@ -78,6 +84,7 @@ import bcrypt as _bcrypt
 
 from src.app_helpers import abs_join, serve_html_with_nonce
 from src.generated_images import GENERATED_IMAGE_HEADERS, resolve_generated_image_path
+from src.owner_identity import auth_disabled
 from starlette.responses import RedirectResponse
 
 # ========= LOGGING =========
@@ -96,7 +103,15 @@ _console_h = logging.StreamHandler()
 _console_h.setFormatter(_formatter)
 _root_logger.addHandler(_console_h)
 
+# A test run must not write into the deployment's log. Tests that import this
+# module used to install the file handler on the root logger for the whole
+# session, so every later test's fixture failures ("boom", "kaboom",
+# "simulated db unavailable") landed in data/logs/app.log, and a log audit read
+# them as live incidents.
+_file_logging = os.environ.get("ODYSSEUS_FILE_LOG", "1") != "0" and "pytest" not in sys.modules
 try:
+    if not _file_logging:
+        raise RuntimeError("file logging disabled for this process (tests or ODYSSEUS_FILE_LOG=0)")
     _log_dir = os.path.join(DATA_DIR, "logs")
     os.makedirs(_log_dir, exist_ok=True)
     _log_file = os.path.join(_log_dir, "app.log")
@@ -110,9 +125,18 @@ try:
     _file_h.setFormatter(_formatter)
     _root_logger.addHandler(_file_h)
 except Exception as e:
-    _root_logger.warning(f"Failed to initialize file logging handler (falling back to console-only): {e}")
+    if _file_logging:
+        _root_logger.warning(f"Failed to initialize file logging handler (falling back to console-only): {e}")
 
 logger = logging.getLogger(__name__)
+# One line that says which process wrote what follows: which deployment,
+# which data directory. An audit of a log file otherwise cannot tell this
+# runtime from another instance or checkout sharing the path.
+logger.info(
+    "[runtime] start pid=%s mode=runtime deployment=%s data_dir=%s",
+    os.getpid(), os.environ.get("ODYSSEUS_DEPLOYMENT_ID") or os.environ.get("HOSTNAME") or "local",
+    os.path.realpath(DATA_DIR),
+)
 
 # ========= APP =========
 # Lifespan is defined below (after all helpers it references are in scope)
@@ -254,7 +278,7 @@ from routes.auth_routes import setup_auth_routes, SESSION_COOKIE
 
 auth_manager = AuthManager()
 app.state.auth_manager = auth_manager
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "true").lower() != "false"
+AUTH_ENABLED = not auth_disabled()
 LOCALHOST_BYPASS = os.getenv("LOCALHOST_BYPASS", "false").lower() == "true"
 if LOCALHOST_BYPASS:
     logger.warning("LOCALHOST_BYPASS is enabled, loopback requests bypass authentication. Do not expose this instance to a network.")
@@ -290,7 +314,7 @@ if AUTH_ENABLED:
     def _is_auth_exempt(path: str) -> bool:
         if path in AUTH_EXEMPT_EXACT:
             return True
-        if any(path.startswith(p) for p in AUTH_EXEMPT_PREFIXES):
+        if any(path_is_route_or_child(path, p) for p in AUTH_EXEMPT_PREFIXES):
             return True
         return any(p.match(path) for p in AUTH_EXEMPT_PATTERNS)
 
@@ -312,6 +336,7 @@ if AUTH_ENABLED:
 
     def _refresh_token_cache():
         """Rebuild the prefix→[(id,hash)] map from the DB."""
+        global _token_cache
         from collections import defaultdict
         new_map = defaultdict(list)
         db = SessionLocal()
@@ -330,8 +355,8 @@ if AUTH_ENABLED:
                 new_map[r.token_prefix].append((r.id, r.token_hash, owner_key, scopes))
         finally:
             db.close()
-        _token_cache.clear()
-        _token_cache.update(new_map)
+        _token_cache = dict(new_map)
+        app.state._token_cache = _token_cache
         app.state._token_cache_dirty = False
 
     # Headers that prove a request was forwarded by a proxy/tunnel (cloudflared,
@@ -361,7 +386,7 @@ if AUTH_ENABLED:
 
     class AuthMiddleware(BaseHTTPMiddleware):
         async def dispatch(self, request: Request, call_next):
-            path = request.url.path
+            path = get_application_route_path(request.scope)
             # A genuine CORS preflight (OPTIONS + Access-Control-Request-Method)
             # carries no credentials by design and must reach CORSMiddleware to be
             # answered. AuthMiddleware is the outermost middleware, so gating the
@@ -405,7 +430,10 @@ if AUTH_ENABLED:
             if not auth_manager.is_configured:
                 # No users yet — redirect to login for first-time setup
                 if not path.startswith("/api/"):
-                    return RedirectResponse(url="/login", status_code=302)
+                    return RedirectResponse(
+                        url=with_asgi_root_path(request.scope, "/login"),
+                        status_code=302,
+                    )
                 return JSONResponse(status_code=401, content={"error": "Setup required"})
 
             # --- Bearer token auth (API tokens for external integrations) ---
@@ -467,7 +495,10 @@ if AUTH_ENABLED:
             if not auth_manager.validate_token(token):
                 if path.startswith("/api/"):
                     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
-                return RedirectResponse(url="/login", status_code=302)
+                return RedirectResponse(
+                    url=with_asgi_root_path(request.scope, "/login"),
+                    status_code=302,
+                )
 
             # Attach current username to request state for downstream routes
             request.state.current_user = auth_manager.get_username_for_token(token)
@@ -606,6 +637,11 @@ tts_service = get_tts_service()
 logger.info("TTS service initialized (provider managed via admin settings)")
 
 # ========= EXCEPTION HANDLERS =========
+from core.database import pool_diagnostics
+from core.database_health import install_database_error_handler
+
+install_database_error_handler(app, pool_diagnostics)
+
 @app.exception_handler(SessionNotFoundError)
 async def session_not_found_handler(request: Request, exc: SessionNotFoundError):
     return JSONResponse(status_code=404, content={"error": "SESSION_NOT_FOUND", "message": str(exc)})
@@ -635,15 +671,42 @@ app.include_router(auth_router)
 
 
 @app.post("/api/activity/heartbeat")
-async def activity_heartbeat():
-    from src.interactive_gate import mark_browser_activity
-    await mark_browser_activity()
+async def activity_heartbeat(request: Request):
+    from src.interactive_gate import (
+        mark_browser_activity,
+        maybe_stop_background_tasks_for_heartbeat,
+    )
+
+    # The client distinguishes a beat that followed a real pointer/key/scroll/
+    # focus event from the 15s keepalive it sends for as long as the tab is not
+    # hidden. Only the former is a person using Odysseus; treating the
+    # keepalive as activity is what stopped every scheduled task from running
+    # while a tab sat open. An unparseable or bodyless beat is read as
+    # interactive so an older cached client keeps its previous behaviour.
+    interactive = True
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and "idle" in body:
+            interactive = not bool(body.get("idle"))
+    except Exception:
+        pass
+
+    await mark_browser_activity(interactive)
+
     async def _stop_background():
         try:
-            await task_scheduler.stop_background_tasks_for_foreground(reason="browser heartbeat")
+            await maybe_stop_background_tasks_for_heartbeat(
+                task_scheduler.stop_background_tasks_for_foreground,
+                interactive=interactive,
+            )
         except Exception:
-            logging.getLogger("app.foreground_gate").debug("heartbeat task stop failed", exc_info=True)
-    asyncio.create_task(_stop_background())
+            logging.getLogger("app.foreground_gate").debug(
+                "heartbeat task stop failed",
+                exc_info=True,
+            )
+
+    if interactive:
+        asyncio.create_task(_stop_background())
     return {"ok": True}
 
 
@@ -685,6 +748,9 @@ memory_router = setup_memory_routes(memory_manager, session_manager, memory_vect
 app.include_router(memory_router)
 from routes.skills_routes import setup_skills_routes
 app.include_router(setup_skills_routes(skills_manager))
+
+from routes.plugin_routes import setup_plugin_routes
+app.include_router(setup_plugin_routes(session_manager=session_manager))
 
 # Chat
 from routes.chat_routes import setup_chat_routes
@@ -773,7 +839,7 @@ from src.task_scheduler import TaskScheduler
 task_scheduler = TaskScheduler(session_manager)
 from src.event_bus import set_task_scheduler
 set_task_scheduler(task_scheduler)
-from routes.task_routes import setup_task_routes
+from routes.task.task_routes import setup_task_routes
 app.include_router(setup_task_routes(task_scheduler))
 
 from routes.assistant_routes import setup_assistant_routes
@@ -822,7 +888,7 @@ app.include_router(setup_font_routes())
 # MCP (Model Context Protocol)
 from src.mcp_manager import McpManager
 from src.agent_tools import set_mcp_manager
-from routes.mcp_routes import setup_mcp_routes
+from routes.mcp.mcp_routes import setup_mcp_routes
 
 mcp_manager = McpManager()
 set_mcp_manager(mcp_manager)
@@ -897,7 +963,13 @@ app.include_router(setup_companion_routes())
 async def serve_index(request: Request):
     static_path = abs_join(BASE_DIR, "static/index.html")
     if os.path.exists(static_path):
-        return serve_html_with_nonce(request, static_path)
+        resp = serve_html_with_nonce(request, static_path)
+        # The shell carries the `?v=` cache-busters for every module, so a
+        # stale shell means stale modules: with no header here browsers kept a
+        # heuristically-fresh copy across deploys and the fixes in it never
+        # arrived. Same rule as _RevalidatingStatic: keep the bytes, but ask.
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
     # No static bundle — fall back to a root-level index.html if one is shipped.
     # If neither exists, serve_html_with_nonce logs it and returns a generic 500:
     # a missing index.html is a broken deployment (server fault), not a client

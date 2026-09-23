@@ -156,6 +156,11 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                 "current_folder": row.folder,
             })
 
+        # The remaining work is a remote model call, not a database transaction.
+        # Keep only scalar snapshots and return the connection before resolving
+        # credentials or awaiting the model (which may take two minutes).
+        db.close()
+
         if len(session_list) < 2:
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. Too few remaining to sort."
 
@@ -220,6 +225,8 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
 
         # Apply assignments
         id_prefix_map = {s["id"][:8]: s["id"] for s in session_list}
+        original_folders = {s["id"]: s["current_folder"] for s in session_list}
+        db = SessionLocal()
         updated = 0
         for folder_name, ids in folders.items():
             for sid_or_prefix in ids:
@@ -236,7 +243,14 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
                                 full_id = fid
                                 break
                 if full_id:
-                    db_sess = db.query(DbSession).filter(DbSession.id == full_id).first()
+                    # A user may move/archive a chat while the model is working.
+                    # Do not overwrite that newer choice or cross an owner change.
+                    db_sess = db.query(DbSession).filter(
+                        DbSession.id == full_id,
+                        DbSession.archived == False,
+                        DbSession.folder == original_folders[full_id],
+                        *([DbSession.owner == owner] if owner else []),
+                    ).first()
                     if db_sess:
                         db_sess.folder = folder_name
                         db_sess.updated_at = _utcnow_naive()

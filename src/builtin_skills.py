@@ -79,3 +79,47 @@ def seed_bundled_skills(skills_manager) -> list[str]:
         installed.append(name)
         logger.info("Installed/reconciled bundled skill: %s", name)
     return installed
+
+
+# Fields that reach the model when a skill is indexed or injected. Metadata the
+# seeder reconciles or usage bookkeeping updates (source, status, uses, ...) is
+# deliberately not compared.
+_PROMPT_VISIBLE_FIELDS = (
+    "name", "title", "description", "when_to_use", "procedure", "pitfalls",
+    "verification", "problem", "solution", "steps", "body_extra",
+)
+
+
+def is_shipped_skill(entry) -> bool:
+    """True when a loaded skill is bundled AND still exactly what this release ships.
+
+    `source: bundled` alone proves nothing: the seeder re-stamps it on every
+    start but keeps the installed body, which `manage_skills` (and so an agent)
+    can edit. Only content that matches the repository copy is as trustworthy
+    as the code, so only that may skip the prompt-injection tool gate. Both
+    copies are parsed the same way, because the seeder rewrites the installed
+    file through `Skill.to_markdown()`, and the shipped copy is normalized the
+    same way before comparing.
+    """
+    if not isinstance(entry, dict) or entry.get("source") != "bundled":
+        return False
+    name = entry.get("name")
+    spec = next((item for item in _BUNDLED_SKILLS if item[1] == name), None)
+    installed = entry.get("path")
+    if spec is None or not installed:
+        return False
+    shipped = os.path.join(_bundled_source(get_app_root(), spec[0], name), "SKILL.md")
+    try:
+        with open(shipped, encoding="utf-8") as handle:
+            shipped_skill = Skill.from_markdown(handle.read(), path=shipped)
+        # The seeder writes the installed copy through to_markdown(), which is
+        # not a lossless round trip; compare against the same normalization.
+        shipped_skill = Skill.from_markdown(shipped_skill.to_markdown(), path=shipped)
+        with open(installed, encoding="utf-8") as handle:
+            installed_skill = Skill.from_markdown(handle.read(), path=installed)
+    except Exception:
+        return False
+    return all(
+        getattr(shipped_skill, field, None) == getattr(installed_skill, field, None)
+        for field in _PROMPT_VISIBLE_FIELDS
+    )

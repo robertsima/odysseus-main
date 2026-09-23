@@ -20,7 +20,7 @@ and workspace routes: it exposes host checkouts and can write to GitHub.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -31,6 +31,20 @@ from src import repo_inspect
 from src.auth_helpers import require_user
 
 logger = logging.getLogger(__name__)
+
+
+_RUNS_ANSWERED: Dict[str, tuple] = {}
+
+
+def _note_runs_answer(session_id: str, rows: List[dict]) -> None:
+    running = sum(1 for r in rows if r.get("status") == "running")
+    signature = (len(rows), running, tuple(sorted(str(r.get("run_id")) for r in rows[:8])))
+    if _RUNS_ANSWERED.get(session_id) == signature:
+        return
+    if len(_RUNS_ANSWERED) > 500:
+        _RUNS_ANSWERED.clear()
+    _RUNS_ANSWERED[session_id] = signature
+    logger.info("[workbench] runs for chat %s: %d row(s), %d running", session_id, len(rows), running)
 
 
 def _admin(request: Request) -> str:
@@ -90,7 +104,16 @@ def setup_workbench_routes() -> APIRouter:
     async def runs(request: Request, session_id: Optional[str] = None, limit: int = 50,
                    active: bool = False):
         _admin(request)
-        return {"runs": activity.list_runs(session_id=session_id, limit=limit, active_only=active)}
+        # The chat's strip also shows workers its workers started.
+        rows = activity.list_runs(session_id=session_id, limit=limit, active_only=active,
+                                  include_descendants=bool(session_id))
+        if session_id:
+            # The agent strip polls this every few seconds, so log a line only
+            # when the answer changes. One line per change is enough to tell,
+            # from the server log alone, whether the browser is asking and what
+            # it was told -- which "the strip shows nothing" reports could not.
+            _note_runs_answer(str(session_id), rows)
+        return {"runs": rows}
 
     @router.get("/runs/{run_id}")
     async def run_detail(request: Request, run_id: str):
@@ -116,6 +139,22 @@ def setup_workbench_routes() -> APIRouter:
             raise HTTPException(404, str(exc))
         except ValueError as exc:
             raise HTTPException(409, str(exc))
+
+    @router.post("/runs/{run_id}/wrap-up")
+    async def wrap_up_run(request: Request, run_id: str):
+        """Ask a live agent run to finish from what it already has: a steer
+        the loop reads between rounds, so the run writes its own hand-back
+        instead of being cut off mid-tool the way Stop does."""
+        owner = _admin(request)
+        from src import agent_control
+
+        try:
+            rec = agent_control.wrap_up(run_id, owner=owner)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc))
+        except ValueError as exc:
+            raise HTTPException(409, str(exc))
+        return {"queued": True, "id": rec["id"], "state": rec["state"]}
 
     # ── repository inspection ───────────────────────────────────────────────
 

@@ -268,53 +268,83 @@ def resolve_runtime_credentials_via_db(
     token a second time.
     """
     ProviderAuthSession, SessionLocal, utcnow_naive = database_handles()
-    db = SessionLocal()
-    try:
-        q = db.query(ProviderAuthSession).filter(
-            ProviderAuthSession.id == auth_id,
-            ProviderAuthSession.provider == provider_id,
-        )
-        if owner:
-            q = q.filter(ProviderAuthSession.owner == owner)
-        row = q.first()
-        if row is None:
-            raise SubscriptionAuthNotFound(
-                "Subscription credentials were not found for this user.",
-                provider=provider_id,
-            )
 
-        access_token = row.access_token or ""
-        if force_refresh or is_expiring(access_token):
-            with refresh_lock_for(auth_id):
-                db.refresh(row)
-                access_token = row.access_token or ""
-                refresh_token = row.refresh_token or ""
-                if force_refresh or is_expiring(access_token):
-                    refreshed = refresh(access_token, refresh_token)
-                    row.access_token = refreshed["access_token"]
-                    # Providers that rotate refresh tokens send a new one with
-                    # every refresh; providers that do not omit the field
-                    # entirely. Only overwrite on a value, or the next refresh
-                    # has nothing to present.
+    def _read_stored():
+        """Return plain values without keeping an ORM session checked out."""
+        db = SessionLocal()
+        try:
+            q = db.query(ProviderAuthSession).filter(
+                ProviderAuthSession.id == auth_id,
+                ProviderAuthSession.provider == provider_id,
+            )
+            if owner:
+                q = q.filter(ProviderAuthSession.owner == owner)
+            row = q.first()
+            if row is None:
+                raise SubscriptionAuthNotFound(
+                    "Subscription credentials were not found for this user.",
+                    provider=provider_id,
+                )
+            return {
+                "access_token": row.access_token or "",
+                "refresh_token": row.refresh_token or "",
+                "base_url": row.base_url or default_base_url,
+                "auth_mode": row.auth_mode or auth_mode,
+            }
+        finally:
+            db.close()
+
+    stored = _read_stored()
+    access_token = stored["access_token"]
+    if force_refresh or is_expiring(access_token):
+        # Never wait for this lock, or perform provider network I/O, while a
+        # pooled database connection is checked out. Endpoint resolution can
+        # invoke this while many agents start concurrently; holding one outer
+        # and one inner connection per waiter used to exhaust the whole pool.
+        with refresh_lock_for(auth_id):
+            stored = _read_stored()
+            access_token = stored["access_token"]
+            if force_refresh or is_expiring(access_token):
+                refreshed = refresh(access_token, stored["refresh_token"])
+                new_access_token = refreshed["access_token"]
+                db = SessionLocal()
+                try:
+                    q = db.query(ProviderAuthSession).filter(
+                        ProviderAuthSession.id == auth_id,
+                        ProviderAuthSession.provider == provider_id,
+                    )
+                    if owner:
+                        q = q.filter(ProviderAuthSession.owner == owner)
+                    row = q.first()
+                    if row is None:
+                        raise SubscriptionAuthNotFound(
+                            "Subscription credentials were not found for this user.",
+                            provider=provider_id,
+                        )
+                    row.access_token = new_access_token
                     if refreshed.get("refresh_token"):
                         row.refresh_token = refreshed["refresh_token"]
                     row.last_refresh = utcnow_naive()
                     db.commit()
-                    db.refresh(row)
-            access_token = row.access_token or ""
+                    stored = {
+                        "access_token": row.access_token or "",
+                        "refresh_token": row.refresh_token or "",
+                        "base_url": row.base_url or default_base_url,
+                        "auth_mode": row.auth_mode or auth_mode,
+                    }
+                finally:
+                    db.close()
+            access_token = stored["access_token"]
 
-        return {
-            "provider": provider_id,
-            "base_url": (row.base_url or default_base_url).rstrip("/"),
-            # Named "api_key" because that is the key src.endpoint_resolver
-            # reads, not because it is one: this is a short-lived OAuth access
-            # token minted against the user's subscription.
-            "api_key": access_token,
-            "auth_mode": row.auth_mode or auth_mode,
-        }
-    finally:
-        db.close()
-
+    return {
+        "provider": provider_id,
+        "base_url": stored["base_url"].rstrip("/"),
+        # Named "api_key" because that is the key src.endpoint_resolver
+        # reads, not because it is one: this is a short-lived OAuth access
+        # token minted against the user's subscription.
+        "api_key": access_token,
+        "auth_mode": stored["auth_mode"],
+    }
 
 # --- the contract ---------------------------------------------------------
 

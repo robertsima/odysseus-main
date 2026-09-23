@@ -39,6 +39,7 @@ def _install_llm_stub(monkeypatch, facts_json):
         return facts_json
 
     mod.llm_call_async = llm_call_async
+    mod.llm_call_async_with_fallback = llm_call_async
     # Use monkeypatch.setitem so sys.modules is restored at teardown. A raw
     # assignment here permanently replaced the real src.llm_core with this
     # stripped stub, leaking "My home is in Lisbon" (and hiding _detect_provider)

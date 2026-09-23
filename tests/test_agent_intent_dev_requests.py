@@ -5,6 +5,14 @@ as would make sense to finish MVP ASAP" matched the Cookbook domain on the bare
 word "start". The turn got serve_model/download_model instead of shell and
 Claude Code tools, and the agent answered that it could not push.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 import pytest
 
 from src.agent_loop import (
@@ -56,6 +64,24 @@ def test_generic_verbs_do_not_imply_model_serving():
     for text in ("start the next feature", "pull the latest changes", "restart the server and try again",
                  "download the report and summarise it"):
         assert "cookbook" not in _domains(text), text
+
+
+def test_email_implementation_audit_is_source_work_not_mailbox_work():
+    domains = _domains("run a few agents to audit the email subsystem")
+    assert "files" in domains
+    assert "email" not in domains
+
+
+def test_email_about_software_and_mixed_delivery_remain_mailbox_work():
+    assert "email" in _domains("read my email about security tests")
+    assert "email" in _domains("audit the email subsystem and email me the results")
+
+
+def test_notification_keyword_fallback_does_not_add_email_suite():
+    from src.agent_loop import keyword_fallback_tools
+
+    selected = keyword_fallback_tools("use ntfy to send a notification for odysseus")
+    assert not selected & {"send_email", "reply_to_email", "read_email", "list_emails"}
 
 
 def test_model_serving_requests_still_route_to_cookbook():

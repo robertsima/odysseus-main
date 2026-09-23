@@ -26,12 +26,21 @@ from src import agent_control, agent_mailbox
 
 
 @pytest.fixture(autouse=True)
-def _clean_state():
+def _clean_state(tmp_path, monkeypatch):
+    from src import agent_activity, constants
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     agent_control._STEER.clear()
     agent_mailbox._SEND_COUNTS.clear()
+    agent_activity._reset_for_tests()
+    # Each symbolic recipient used below represents a live, uniquely-owned
+    # worker. This exercises the real run-resolution path rather than stubbing
+    # is_steerable globally.
+    for sid in ("target", "peer-target", "s", "t", "their-session", "full"):
+        agent_activity.run_started(sid, "session", "Test worker", run_id=f"run-{sid}")
     yield
     agent_control._STEER.clear()
     agent_mailbox._SEND_COUNTS.clear()
+    agent_activity._reset_for_tests()
 
 
 def _settings(peer_messaging=True, budget=8):
@@ -42,6 +51,14 @@ def _settings(peer_messaging=True, budget=8):
         return values.get(key, default)
 
     return _get
+
+
+def test_idle_receiver_is_refused_without_queueing_or_spending_budget(monkeypatch):
+    monkeypatch.setattr(agent_mailbox, "get_setting", _settings())
+    out = agent_mailbox.send("idle", "hello", from_session="sender")
+    assert out["ok"] is False
+    assert agent_control.pending_steer("idle") == []
+    assert agent_mailbox._SEND_COUNTS == {}
 
 
 class TestPeerMessageDrainsThroughSteer:
@@ -55,11 +72,11 @@ class TestPeerMessageDrainsThroughSteer:
         # It is sitting in the SAME queue agent_control.pending_steer/drain_steer
         # already serve to the agent loop and the dashboard.
         assert len(agent_control.pending_steer("target")) == 1
-        drained = agent_control.drain_steer("target")
+        drained = agent_control.drain_steer("target", run_id="run-target")
         assert len(drained) == 1
         assert "stop editing config.py, I already did" in drained[0]
         # Draining empties it exactly like a human steer would.
-        assert agent_control.drain_steer("target") == []
+        assert agent_control.drain_steer("target", run_id="run-target") == []
 
     def test_inbox_and_pending_are_read_only_views(self, monkeypatch):
         monkeypatch.setattr(agent_mailbox, "get_setting", _settings())
@@ -96,7 +113,7 @@ class TestPrefixIsDistinguishableFromAHumanSteer:
                            from_session_name="Refactor bot")
 
         human_text = agent_control.drain_steer("human-target")[0]
-        peer_text = agent_control.drain_steer("peer-target")[0]
+        peer_text = agent_control.drain_steer("peer-target", run_id="run-peer-target")[0]
 
         # Identical payload text, but the peer version is wrapped with an
         # explicit, unmistakable tag naming the sending session -- the human
@@ -232,10 +249,10 @@ class TestExistingSteerBehaviourUnchanged:
     tests/test_agent_turn_lifecycle.py) already relies on."""
 
     def test_plain_steer_round_trip(self):
-        agent_control.steer("s", "first")
-        agent_control.steer("s", "second")
-        assert agent_control.drain_steer("s") == ["first", "second"]
-        assert agent_control.drain_steer("s") == []
+        agent_control.steer("legacy", "first")
+        agent_control.steer("legacy", "second")
+        assert agent_control.drain_steer("legacy") == ["first", "second"]
+        assert agent_control.drain_steer("legacy") == []
 
     def test_plain_steer_default_kind_is_user(self):
         rec = agent_control.steer("s", "hello")
@@ -243,10 +260,10 @@ class TestExistingSteerBehaviourUnchanged:
         assert "from_session" not in rec
 
     def test_clear_steer_returns_and_empties(self):
-        agent_control.steer("s", "late arrival")
-        assert agent_control.clear_steer("s") == ["late arrival"]
-        assert agent_control.pending_steer("s") == []
-        assert agent_control.clear_steer("s") == []
+        agent_control.steer("legacy", "late arrival")
+        assert agent_control.clear_steer("legacy") == ["late arrival"]
+        assert agent_control.pending_steer("legacy") == []
+        assert agent_control.clear_steer("legacy") == []
 
     def test_empty_text_still_rejected(self):
         with pytest.raises(ValueError):
@@ -265,10 +282,10 @@ class TestExistingSteerBehaviourUnchanged:
         agent_control.steer("s", "human note")
         agent_mailbox.send("s", "peer note", from_session="sender")
 
-        records = agent_control.drain_steer_records("s")
+        records = agent_control.drain_steer_records("s", run_id="run-s")
 
         assert [r["kind"] for r in records] == ["user", "peer"]
-        assert agent_control.drain_steer_records("s") == []
+        assert agent_control.drain_steer_records("s", run_id="run-s") == []
 
 
 def test_message_agent_native_call_reaches_execution_pipeline():

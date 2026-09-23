@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from src import agent_activity as activity
@@ -25,6 +26,51 @@ logger = logging.getLogger(__name__)
 # run returns what it produced so far, which re-enters the parent as the tool
 # result (the partial work is not thrown away).
 _STOP_EVENTS: Dict[str, asyncio.Event] = {}
+# A wrapper run is the stable public steering target for a headless loop.  The
+# loop also creates its own activity telemetry run, which must not replace the
+# wrapper's source/summary merely to make steering work.
+_STEER_RUNS: Dict[str, Set[str]] = {}
+
+
+class HeadlessStreamError(RuntimeError):
+    """Terminal upstream stream failure that a detached caller must not lose."""
+
+    def __init__(self, message: str, *, status: Optional[int] = None, retryable: bool = False):
+        self.status = status
+        self.retryable = bool(retryable)
+        prefix = f"Upstream model request failed with HTTP {status}" if status else "Upstream model request failed"
+        super().__init__(f"{prefix}: {str(message or 'unknown error')[:1000]}")
+
+
+def _stream_error(payload: Dict[str, Any]) -> HeadlessStreamError:
+    raw_status = payload.get("status")
+    try:
+        status = int(raw_status) if raw_status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    message = payload.get("text") or payload.get("error") or payload.get("message") or "unknown error"
+    if isinstance(message, (dict, list)):
+        message = json.dumps(message, ensure_ascii=False)
+    return HeadlessStreamError(str(message), status=status, retryable=bool(payload.get("retryable")))
+
+
+def _sse_error_payload(chunk: str) -> Optional[Dict[str, Any]]:
+    """Extract a terminal ``event: error`` frame from an SSE chunk."""
+    event = ""
+    data_lines = []
+    for line in str(chunk or "").splitlines():
+        if line.startswith("event:"):
+            event = line[6:].strip().lower()
+        elif line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+    if event != "error":
+        return None
+    raw = "\n".join(data_lines).strip()
+    try:
+        payload = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        payload = {"error": raw or "unknown stream error"}
+    return payload if isinstance(payload, dict) else {"error": str(payload)}
 
 
 def request_stop(run_id: str) -> bool:
@@ -38,6 +84,22 @@ def request_stop(run_id: str) -> bool:
 
 def running_ids() -> Set[str]:
     return set(_STOP_EVENTS)
+
+
+def steering_run_id(session_id: Optional[str]) -> Optional[str]:
+    """Return the sole headless wrapper serving a session, if unambiguous."""
+    runs = _STEER_RUNS.get(str(session_id or ""), set())
+    return next(iter(runs)) if len(runs) == 1 else None
+
+
+def serves_run(session_id: Optional[str], run_id: Optional[str]) -> bool:
+    """Whether ``run_id`` is a headless wrapper draining ``session_id``'s steers."""
+    return bool(run_id) and str(run_id) in _STEER_RUNS.get(str(session_id or ""), set())
+
+
+def has_steering_runs(session_id: Optional[str]) -> bool:
+    """Whether a headless owner exists, including an ambiguous set of owners."""
+    return bool(_STEER_RUNS.get(str(session_id or "")))
 
 
 async def _resolve_context_length(sess) -> int:
@@ -109,12 +171,45 @@ def _rounds_exhausted_note(state: Dict[str, Any]) -> str:
 # hands a fresh child chat the "explicit" delegation default (only "never"
 # refuses), and `live_children` is 0 because the child has started nothing yet,
 # so both gates pass on the first call. The set is enforced by tool name, so
-# the loadout CRUD actions go with it; a child that may not start a worker has
+# the loadout CRUD actions go with it: a child that may not start a worker has
 # no use for authoring one.
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
     "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
-    "manage_session", "manage_agent_worktree", "manage_agent_loadout",
+    "manage_session", "manage_agent_worktree",
+    # Both can start workers too: orchestrate_agents fans out specialists and
+    # manage_agent_loadout's `start` launches one detached.
+    "orchestrate_agents", "manage_agent_loadout",
 })
+
+
+def worker_tool_budget() -> int:
+    """The per-run tool-call ceiling for a headless run; 0 = unlimited.
+
+    The same `agent_max_tool_calls` setting and margin the chat route applies
+    to a foreground turn. Headless runs used to pass nothing, so the ceiling
+    every "rounds are advisory" comment names as a worker's real bound never
+    applied to workers at all: a worker was observed running 108 rounds over
+    23 minutes with nothing but the stall detector able to end it.
+    """
+    try:
+        from src.settings import get_setting
+        budget = int(get_setting("agent_max_tool_calls", 0) or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    except Exception:
+        logger.debug("worker tool budget unavailable; running without one", exc_info=True)
+        budget = 0
+    return budget + max(10, budget // 10) if budget > 0 else 0
+
+
+def _budget_exhausted_note(state: Dict[str, Any]) -> str:
+    """The hand-back line for a run the tool-call ceiling cut off."""
+    events = state.get("tool_events") or []
+    limit = int(state.get("budget_limit") or 0)
+    last = next((ev.get("tool") for ev in reversed(events) if ev.get("tool")), "")
+    return (f"(ran out of tool calls: the per-run budget of {limit} was spent with the task unfinished"
+            f"{f', the last call was {last}' if last else ''}. Everything above is partial work, not a "
+            "final answer; continue from there rather than starting over.)")
 
 
 async def run_headless(
@@ -122,6 +217,7 @@ async def run_headless(
     messages: List[Dict[str, Any]],
     *,
     max_rounds: int = 12,
+    max_tool_calls: Optional[int] = None,
     disabled_tools: Optional[Set[str]] = frozenset(),
     subagent: bool = True,
     deny_private_vault: bool = False,
@@ -131,6 +227,9 @@ async def run_headless(
     owner: Optional[str] = None,
     on_event: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
     outcome: Optional[Dict[str, Any]] = None,
+    workspace: Optional[str] = None,
+    forced_tools: Optional[Set[str]] = None,
+    wrap_up_round: int = 0,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """Drain ``stream_agent_loop`` for ``sess`` over ``messages``.
 
@@ -147,7 +246,8 @@ async def run_headless(
     child of another agent, which additionally gets
     :data:`SUBAGENT_BLOCKED_TOOLS` so it cannot fan out grandchildren; ``False``
     for a chat continuing *itself*, which instead runs under that chat's own
-    stored policy — the tools it has switched off and its approval mode.
+    stored tool policy. (The chat's ``approval_mode`` applies either way: it is
+    resolved from the chat the run happens in, whichever kind of run it is.)
 
     ``deny_private_vault`` narrows only: it forces private-vault access off for
     this run whatever the chat's own grant says. It can never turn access on.
@@ -162,10 +262,26 @@ async def run_headless(
     ``{"rounds_exhausted": True, "rounds": n}`` there, and says so in the prose
     it returns, so the caller can report a cut-off run as such rather than as a
     finished one.
+
+    ``wrap_up_round`` (an agent profile's explicit ``max_rounds``; 0 = none) is
+    passed to the loop, which makes that round a tool-free final answer. A run
+    that wraps up that way and answers is a completed run, recorded in
+    ``outcome`` as ``{"round_budget_reached": n}``; if the forced answer comes
+    back empty it is reported as ``rounds_exhausted``, like a cut-off run.
     """
     effective_owner = owner if owner is not None else getattr(sess, "owner", None)
-    from src.session_settings import effective_approval_mode, stored_disabled_tools
+    # Foreground requests refresh session-backed provider credentials in the
+    # chat route. Detached workers bypass that route, so perform the same
+    # request-local refresh before fan-out rather than copying a stale bearer
+    # into every child.
+    try:
+        from routes.chat_helpers import resolve_session_auth
+        await asyncio.to_thread(resolve_session_auth, sess, str(getattr(sess, "id", "")), effective_owner)
+    except Exception:
+        logger.warning("headless provider credential preflight failed for %s",
+                       getattr(sess, "id", "?"), exc_info=True)
     from src.tool_security import owner_baseline_disabled_tools
+    from src.session_settings import effective_approval_mode, stored_disabled_tools
     try:
         from core.database import get_session_settings
         chat_settings = get_session_settings(getattr(sess, "id", None)) or {}
@@ -176,14 +292,26 @@ async def run_headless(
         # A narrowing, never a grant: a caller may take private-vault access
         # away from this run, but may not hand it to a chat that has none.
         allow_private = False
+    # The chat this run happens in decides what asks, for BOTH kinds of run. A
+    # detached child's chat carries the mode its profile set when the child was
+    # created; a chat continuing itself carries the user's own. The earlier
+    # reading -- that a detached child should never be gated, because nobody is
+    # there to answer -- is not taken here: a held call is recorded by
+    # `tool_approvals.request` and listed by the Agent Control Room
+    # (`routes/agents_routes.py`), so the question is answerable in both cases,
+    # and a call that is never answered is one that never ran, which is the
+    # direction policy is supposed to fail.
+    approval_mode = effective_approval_mode(chat_settings)
+    # The folder its file tools work in: the caller's (preflight's) choice,
+    # else the one saved on the chat. Without it a worker had no workspace at
+    # all and every repository task ended in "cannot read the repository".
+    from src.tool_execution import vet_workspace
+    workspace = vet_workspace(workspace or chat_settings.get("workspace") or "") or None
 
     baseline = owner_baseline_disabled_tools(effective_owner)
     extra = set(disabled_tools or ())
     if subagent:
         blocked = set(SUBAGENT_BLOCKED_TOOLS) | extra | baseline
-        # A detached child runs in a chat the user did not open; an approval
-        # card raised there really would have nobody to answer it.
-        approval_mode: Optional[str] = None
     else:
         # A chat continuing ITSELF — after a worker it launched finished, or
         # after a background job it started did. It is the user's own chat, so
@@ -191,33 +319,31 @@ async def run_headless(
         # chat with `bash` switched off came to run `bash` the moment a worker
         # reported back.
         #
-        # Resolving the tension with `src/agent_loop.py`'s note that headless
-        # callers "are never gated — nobody would be there to answer": that is
-        # right for the branch above and wrong for this one. This run continues
-        # the user's foreground chat, in that chat, and writes its answer into
-        # that chat's transcript; the user is exactly as present as they were
-        # for the turn that launched the worker. So a chat set to `ask_all`
-        # keeps asking. A gated call is recorded by `tool_approvals.request`
-        # and listed by the Agent Control Room (`routes/agents_routes.py`), so
-        # the question is answerable rather than dropped — and a call that is
-        # never answered is one that never ran, which is the direction policy
-        # is supposed to fail.
+        # This run continues the user's foreground chat, in that chat, and
+        # writes its answer into that chat's transcript, so the chat's own
+        # `approval_mode` (resolved above for every headless run) is exactly
+        # right here: a chat set to `ask_all` keeps asking.
         #
         # SUBAGENT_BLOCKED_TOOLS is deliberately NOT added here. It exists to
         # stop a *child* minting grandchildren; the parent delegating is the
         # normal case, not the thing being prevented.
         blocked = extra | stored_disabled_tools(chat_settings) | baseline
-        approval_mode = effective_approval_mode(chat_settings)
     blocked = blocked or None
 
     state: Dict[str, Any] = {"full": "", "tool_events": [], "round": 1}
     stop_event = asyncio.Event() if run_id else None
     if run_id and stop_event is not None:
         _STOP_EVENTS[run_id] = stop_event
-    drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
+        _STEER_RUNS.setdefault(str(getattr(sess, "id", "")), set()).add(run_id)
+    if max_tool_calls is None:
+        max_tool_calls = worker_tool_budget()
+    drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds,
+                                         max_tool_calls=max_tool_calls, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
-                                         allow_private=allow_private, approval_mode=approval_mode))
+                                         allow_private=allow_private, approval_mode=approval_mode,
+                                         workspace=workspace, forced_tools=forced_tools,
+                                         wrap_up_round=wrap_up_round))
     try:
         if stop_event is None:
             await drain
@@ -245,8 +371,20 @@ async def run_headless(
         drain.cancel()
         raise
     finally:
+        if run_id:
+            try:
+                from src import agent_control
+                agent_control.clear_steer(getattr(sess, "id", None), run_id=run_id)
+            except Exception:
+                logger.debug("headless steer cleanup failed", exc_info=True)
         if run_id and _STOP_EVENTS.get(run_id) is stop_event:
             _STOP_EVENTS.pop(run_id, None)
+        if run_id:
+            session_runs = _STEER_RUNS.get(str(getattr(sess, "id", "")))
+            if session_runs is not None:
+                session_runs.discard(run_id)
+                if not session_runs:
+                    _STEER_RUNS.pop(str(getattr(sess, "id", "")), None)
     full = state["full"]
     if outcome is not None and outcome.get("stopped"):
         full = (full.rstrip() + "\n\n" if full.strip() else "") + "(stopped by the user before finishing)"
@@ -257,13 +395,73 @@ async def run_headless(
             outcome["rounds_exhausted"] = True
             outcome["rounds"] = int(state.get("exhausted_rounds") or 0)
         full = (full.rstrip() + "\n\n" if full.strip() else "") + _rounds_exhausted_note(state)
+    elif state.get("budget_exhausted"):
+        # Reported through the same `rounds_exhausted` flag so every caller
+        # already records the run as incomplete rather than finished.
+        if outcome is not None:
+            outcome["rounds_exhausted"] = True
+            outcome["budget_exhausted"] = True
+            outcome["rounds"] = int(state.get("round") or 0)
+        full = (full.rstrip() + "\n\n" if full.strip() else "") + _budget_exhausted_note(state)
+    elif state.get("awaiting_approval"):
+        # The run ended on an approval card, not because the work is done. Say
+        # so to whoever reads the result, and let the caller record the run as
+        # waiting rather than completed.
+        pending = state["awaiting_approval"]
+        if outcome is not None:
+            outcome["awaiting_approval"] = dict(pending)
+        full = ((full.rstrip() + "\n\n" if full.strip() else "")
+                + f"(paused: {pending.get('tool') or 'a tool call'} is waiting for the user's approval "
+                "in this worker's chat; the task is not finished)")
+    elif state.get("round_budget") and outcome is not None:
+        # Wrapped up at the profile's round budget and wrote its answer: a
+        # finished run whose text says what is left, not a cut-off one.
+        outcome["round_budget_reached"] = int(state["round_budget"])
     return full, state["tool_events"]
 
 
+# Loop frames that move a run's live counters (see ``_track_progress``).
+_PROGRESS_EVENTS = frozenset({"agent_step", "tool_start", "tool_output", "round_usage"})
+
+
+def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> None:
+    """Fold one loop frame into the run's live ``progress`` record.
+
+    A detached run was otherwise visible only as its last event title: the
+    round it was on, how many tokens it had burned and how much of that the
+    provider cached lived in the log alone, which is how a 108-round worker
+    looked no different from a 3-round one. Totals are kept on ``state`` so
+    they cover the whole run, and are written through ``note_progress`` (no
+    event, bounded saves).
+    """
+    kind = d.get("type")
+    if kind not in _PROGRESS_EVENTS:
+        return
+    p = state.setdefault("progress", {"round": 1, "tool_calls": 0, "current_tool": None,
+                                      "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0})
+    if kind == "agent_step":
+        p["round"] = d.get("round", p["round"])
+    elif kind == "tool_start":
+        p["current_tool"] = d.get("tool")
+    elif kind == "tool_output":
+        p["current_tool"] = None
+        p["tool_calls"] += 1
+    else:
+        for key, total in (("input", "input_tokens"), ("cached", "cached_tokens"), ("output", "output_tokens")):
+            try:
+                p[total] += int(d.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    p["last_event_at"] = time.time()
+    activity.note_progress(run_id, **p)
+
+
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
+                 max_tool_calls: int = 0,
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
                  source: str, on_event, allow_private: bool = False,
-                 approval_mode: Optional[str] = None) -> None:
+                 approval_mode: Optional[str] = None, workspace: Optional[str] = None,
+                 forced_tools: Optional[Set[str]] = None, wrap_up_round: int = 0) -> None:
     from src.agent_loop import stream_agent_loop
 
     tool_events: List[Dict[str, Any]] = state["tool_events"]
@@ -273,12 +471,33 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         headers=getattr(sess, "headers", None),
         context_length=await _resolve_context_length(sess),
         session_id=sess.id,
+        # Keep a headless worker's steering queue attached to its externally
+        # visible run.  Without this a foreground turn in the same session can
+        # drain or cancel the worker's correction (and vice versa).
+        steer_run_id=run_id,
         max_rounds=max_rounds,
+        max_tool_calls=max_tool_calls,
         owner=owner,
         disabled_tools=blocked,
         allow_private=allow_private,
         approval_mode=approval_mode,
+        workspace=workspace,
+        forced_tools=set(forced_tools) if forced_tools else None,
+        wrap_up_round=wrap_up_round,
     ):
+        event_error = _sse_error_payload(chunk)
+        if event_error is not None:
+            error = _stream_error(event_error)
+            state["stream_error"] = {
+                "message": str(error), "status": error.status, "retryable": error.retryable,
+            }
+            if activity_session_id:
+                activity.publish(activity_session_id, "status", "Upstream model request failed",
+                                 source=source, run_id=run_id, owner=owner,
+                                 detail=str(error)[:2000],
+                                 data={"status": "failed", "http_status": error.status,
+                                       "retryable": error.retryable}, level="error")
+            raise error
         if not chunk.startswith("data: "):
             continue
         body = chunk[6:].strip()
@@ -290,15 +509,32 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             continue
         if not isinstance(d, dict):
             continue
+        if d.get("type") == "stream_error":
+            error = _stream_error(d)
+            state["stream_error"] = {
+                "message": str(error), "status": error.status, "retryable": error.retryable,
+            }
+            raise error
         if on_event is not None:
             try:
                 await on_event(d)
             except Exception:  # a listener must never stop the drain
                 logger.debug("headless agent listener failed", exc_info=True)
+        if run_id:
+            _track_progress(run_id, d, state)
         if "delta" in d:
             delta = d.get("delta")
             if isinstance(delta, str) and not d.get("thinking"):
                 state["full"] += delta
+        elif d.get("type") == "steer_applied":
+            # Detached/headless loops do not pass through chat_routes' SSE
+            # persistence branch. Preserve the same human/peer attribution in
+            # both paths, so a resumed worker never renders peer mail as "You".
+            try:
+                from src.agent_control import persist_applied_steer
+                persist_applied_steer(sess, d)
+            except Exception:
+                logger.debug("headless steer persistence failed", exc_info=True)
         elif d.get("type") == "agent_step":
             round_num = d.get("round", round_num)
             state["round"] = round_num
@@ -318,6 +554,31 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                                  data={"rounds": state["exhausted_rounds"],
                                        "tool_calls": d.get("tool_calls")},
                                  level="warning")
+        elif d.get("type") == "round_budget_reached":
+            # The profile's round budget: the loop runs this round without
+            # tools so the worker writes up what it has and what is left.
+            state["round_budget"] = int(d.get("budget") or 0)
+            if activity_session_id:
+                activity.publish(activity_session_id, "note",
+                                 f"Reached its round budget of {state['round_budget']} — wrapping up with what it has",
+                                 source=source, run_id=run_id, owner=owner,
+                                 data={"rounds": state["round_budget"], "round": d.get("round")})
+        elif d.get("type") == "round_budget_unanswered":
+            # The wrap-up round wrote nothing of its own (the loop filled in a
+            # canned line), so hand back as incomplete, like a cut-off run.
+            state["exhausted"] = True
+            state["exhausted_rounds"] = int(d.get("budget") or 0)
+        elif d.get("type") == "budget_exceeded":
+            # The loop stops right after this frame with no closing answer, so
+            # the run must hand back as incomplete, like a rounds_exhausted one.
+            state["budget_exhausted"] = True
+            state["budget_limit"] = int(d.get("limit") or 0)
+            if activity_session_id:
+                activity.publish(activity_session_id, "note",
+                                 f"Ran out of tool calls after {state['budget_limit']} — handing back partial work",
+                                 source=source, run_id=run_id, owner=owner,
+                                 data={"limit": state["budget_limit"], "used": d.get("used")},
+                                 level="warning")
         elif d.get("type") == "tool_start" and activity_session_id:
             activity.publish(activity_session_id, "tool_start",
                              f"{d.get('tool')} {str(d.get('command') or '')[:120]}".strip(),
@@ -333,6 +594,22 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
             }
             if d.get("diff"):
                 ev["diff"] = d.get("diff")
+            approval = d.get("ask_user")
+            if isinstance(approval, dict):
+                # Saved with the reply, so the worker's chat shows the
+                # approval card and the user can decide it there.
+                ev["ask_user"] = approval
+                if approval.get("approval_id"):
+                    state["awaiting_approval"] = {"approval_id": approval.get("approval_id"),
+                                                  "tool": d.get("tool")}
+                if activity_session_id and approval.get("approval_id"):
+                    activity.publish(activity_session_id, "status",
+                                     f"Waiting for approval: {d.get('tool')}",
+                                     source=source, run_id=run_id, owner=owner,
+                                     detail=str(approval.get("description") or "")[:2000] or None,
+                                     data={"approval_id": approval.get("approval_id"), "tool": d.get("tool"),
+                                           "target_session": str(getattr(sess, "id", ""))},
+                                     level="warning")
             tool_events.append(ev)
             if activity_session_id:
                 failed = d.get("exit_code") not in (0, None)

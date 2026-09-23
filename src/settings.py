@@ -15,6 +15,13 @@ from src.constants import SETTINGS_FILE, FEATURES_FILE
 
 logger = logging.getLogger(__name__)
 
+# Keys retained in the raw settings store for compatibility and rollback, but
+# deliberately unavailable through generic settings APIs or agent tools.  They
+# must stay in ``DEFAULT_SETTINGS`` so old files continue to load without data
+# loss; callers that present or mutate settings should use this set as a
+# tombstone boundary.
+RETIRED_SETTING_KEYS = frozenset({"default_model_fallbacks"})
+
 # Tiny TTL cache for settings/features. get_setting() is called on hot paths
 # (every chat, every preprocess); without this it re-parses the JSON each call.
 # Picks up edits within _CACHE_TTL seconds, which is fine for human-edited config.
@@ -177,7 +184,7 @@ DEFAULT_SETTINGS = {
     # long build→test→fix or multi-repository delegation turn is not cut off;
     # the repeat/stall detectors still catch a genuinely stuck loop.
     "agent_max_tool_calls": 500,
-    "agent_max_rounds": 100,  # per-message agent step cap (clamped 1..500)
+    "agent_max_rounds": 100,  # advisory per-message round budget (clamped 1..500); never ends a run
     # When a session's own policy (a loadout's `tool_access="selected"`, a
     # restricted owner) leaves this many tools allowed or fewer, the harness
     # binds that whole set for the turn instead of re-deriving a subset of it
@@ -203,6 +210,16 @@ DEFAULT_SETTINGS = {
     "claude_code_max_concurrent_tasks": 0,
     "claude_code_model": "",
     "claude_code_restricted": True,
+    # Cloud runner (src/claude_cloud.py): Claude Code in GitHub Actions on
+    # these owner/repo slugs, with the operator's credential kept in each
+    # repository's secrets. "local" (default) or "cloud" decides where a
+    # delegation without an explicit `via` or cloud repository goes.
+    "claude_code_backend": "local",
+    # ChatGPT-subscription reasoning effort for chats whose loadout sets none
+    # ("" = provider default; minimal/low/medium/high).
+    "chatgpt_reasoning_effort": "",
+    "claude_cloud_repositories": [],
+    "claude_cloud_workflow": "odysseus-claude.yml",
     "claude_code_odysseus_url": "",
     "claude_code_odysseus_token_file": "",
     # Ask a stream-json-capable Claude Code for its transcript as it runs, so
@@ -210,13 +227,22 @@ DEFAULT_SETTINGS = {
     # for the single final envelope (the pre-2026-09 behaviour).
     "claude_code_stream_transcript": True,
     # Workbench (Settings > Tools): the docked agent activity / changes /
-    # commits / pull-request panel. `workbench_auto_open` pops it open when a
-    # delegated run starts in the current chat.
+    # commits / pull-request panel. `workbench_auto_open` opens the Agents
+    # panel (not the Workbench) when a delegated run starts in the current chat.
     "workbench_enabled": True,
     "workbench_auto_open": True,
     # Default approval mode for chats that have not chosen one
     # (auto | ask_risky | ask_all; see src/tool_approvals.py).
     "agent_approval_mode": "auto",
+    # Most tools one agent turn is offered from retrieval and keyword domains
+    # (src.agent_loop._apply_tool_budget). 0 = no limit.
+    "agent_tool_budget": 40,
+    # bash/python without the private-vault grant run in a bubblewrap sandbox
+    # that sees only the chat's workspace (src/shell_sandbox.py). "off" keeps
+    # the old rule: no grant, no shell. The network toggle cuts the sandbox off
+    # from the network entirely (pip, npm and git fetch then fail too).
+    "shell_sandbox": "auto",
+    "shell_sandbox_network": True,
     # Named sub-agent worker profiles (src/agent_profiles.py).
     "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the
@@ -266,14 +292,13 @@ DEFAULT_SETTINGS = {
     # Email replies use email_writing_style instead because greetings,
     # signatures, and mailbox identity rules are medium-specific.
     "document_writing_style": "",
-    # Ordered fallback chain for the default chat model. Each entry is
-    # {"endpoint_id": "...", "model": "..."}. If the primary model fails
-    # before producing output (endpoint offline / errors), the chat
-    # dispatch retries the next entry in order.
+    # Legacy ordered fallback chain for the default chat model. Values remain
+    # stored for compatibility and rollback reference, but model routing no
+    # longer reads this key.
     "default_model_fallbacks": [],
-    # When True, non-admin users inherit global default model/endpoint/fallbacks
-    # when they have no personal defaults. When False, users only use their
-    # personal defaults (no global fallback). Default is False.
+    # When True, non-admin users inherit the global default model/endpoint when
+    # they have no personal defaults. When False, users only use their personal
+    # defaults. Default is False.
     "share_defaults_with_users": False,
     "utility_endpoint_id": "",
     "utility_model": "",
@@ -326,6 +351,17 @@ DEFAULT_SETTINGS = {
     },
 }
 
+
+def without_retired_settings(settings: dict) -> dict:
+    """Return a shallow copy suitable for generic settings interfaces."""
+    if not isinstance(settings, dict):
+        return {}
+    return {
+        key: value
+        for key, value in settings.items()
+        if key not in RETIRED_SETTING_KEYS
+    }
+
 DEFAULT_FEATURES = {
     "web_search": True,
     "web_fetch": True,
@@ -356,6 +392,29 @@ def load_settings() -> dict:
         merged = dict(DEFAULT_SETTINGS)
     _settings_cache = (now, merged)
     return merged
+
+
+def load_disabled_tools_strict() -> frozenset[str]:
+    """Read the current global tool denylist without the fail-soft TTL cache.
+
+    Execution authorization must observe a disable made during the same agent
+    turn. A fresh installation legitimately has no settings file yet; every
+    other read/shape failure is surfaced so the dispatcher can fail closed.
+    Ordinary settings consumers continue to use :func:`load_settings`.
+    """
+    try:
+        with open(SETTINGS_FILE, "r", encoding="utf-8") as handle:
+            saved = json.load(handle)
+    except FileNotFoundError:
+        return frozenset()
+    if not isinstance(saved, dict):
+        raise ValueError("settings must be an object")
+    disabled = saved.get("disabled_tools", [])
+    if not isinstance(disabled, list):
+        raise ValueError("disabled_tools must be a list")
+    if any(not isinstance(name, str) for name in disabled):
+        raise ValueError("disabled_tools entries must be strings")
+    return frozenset(name for name in disabled if name)
 
 
 def save_settings(settings: dict):
@@ -413,7 +472,7 @@ _PER_USER_KEYS = {
     # Default chat endpoint / model — without per-user resolution every new
     # account inherited whatever the most-recent admin picked, which then
     # got injected into the chat composer on first open.
-    "default_endpoint_id", "default_model", "default_model_fallbacks",
+    "default_endpoint_id", "default_model",
     "utility_endpoint_id", "utility_model", "utility_model_fallbacks",
     "research_endpoint_id", "research_model",
     "stt_enabled", "stt_provider", "stt_model", "stt_language",

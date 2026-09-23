@@ -63,13 +63,14 @@ def test_a_loadout_with_nothing_left_is_stored_as_no_tools():
     assert profile["enabled_tools"] == []
 
 
-def test_the_denylist_is_never_silently_truncated():
-    """validate_profiles caps name lists; a cut-off denylist would read back as
-    'allowed', so an over-long clamp is refused instead."""
+def test_large_inventory_uses_authoritative_positive_policy_not_truncated_denylist():
+    """None/selected stays binding without copying hundreds of denied names."""
     many = {f"tool_{i}" for i in range(agent_loadouts.MAX_DISABLED_TOOLS_IN_PROFILE + 5)}
     caller = policy(allowed_tools=set(), known_tools=many)
-    with pytest.raises(ValueError, match="narrow enabled_tools"):
-        agent_loadouts.clamp(request(tool_access="none"), caller)
+    profile, _ = agent_loadouts.clamp(request(tool_access="none"), caller)
+    assert profile["tool_access"] == "none"
+    assert profile["enabled_tools"] == []
+    assert profile["disabled_tools"] == []
 
 
 # ── graded policies ──────────────────────────────────────────────────────────
@@ -181,6 +182,8 @@ async def test_create_then_list_then_delete(store):
 
     listed = await manage_agent_loadout('{"action": "list"}', "chat-1", owner="u")
     assert [row["name"] for row in listed["loadouts"]] == ["Reviewer"]
+    assert listed["loadouts"][0]["tool_count"] == 2
+    assert "tools" not in listed["loadouts"][0]
 
     removed = await manage_agent_loadout('{"action": "delete", "name": "Reviewer"}', "chat-1", owner="u")
     assert removed["exit_code"] == 0
@@ -200,7 +203,11 @@ async def test_create_refuses_to_overwrite_and_update_replaces(store):
 async def test_capabilities_reports_the_ceiling_before_the_agent_trips_over_it(store):
     result = await manage_agent_loadout('{"action": "capabilities"}', "c", owner="u")
     assert result["exit_code"] == 0
-    assert "bash" in result["ceiling"]["tools"]
+    assert "bash" in result["ceiling"]["tool_examples"]
+    assert result["ceiling"]["tool_count"] >= len(result["ceiling"]["tool_examples"])
+
+    detailed = await manage_agent_loadout('{"action": "capabilities", "detail": true}', "c", owner="u")
+    assert "bash" in detailed["ceiling"]["tools"]
     assert result["ceiling"]["max_parallel_workers"] == 8
 
 
@@ -234,7 +241,8 @@ async def test_start_respects_the_same_worker_limit_as_the_spawning_tools(monkey
                         lambda sid, owner: policy(max_parallel_workers=1))
     monkeypatch.setattr("src.agent_control.live_children", lambda sid: 1)
     result = await manage_agent_loadout('{"action": "start", "task": "go"}', "c", owner="u")
-    assert result["exit_code"] == 1 and "worker limit" in result["error"]
+    assert result["exit_code"] == 1 and result["blocked_reason"] == "worker_capacity"
+    assert result["capacity"] == {"limit": 1, "active": 1, "available": 0}
 
 
 async def test_start_launches_a_worker_reporting_to_the_calling_chat(monkeypatch, store):
@@ -271,7 +279,7 @@ async def test_an_unknown_action_is_refused(store):
 def test_caller_policy_reads_the_chats_own_stored_settings(monkeypatch):
     """The clamp is only meaningful if its ceiling is the policy the Control
     Room writes and agent_loop enforces, not a default."""
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {
         "disabled_tools": ["bash", "write_file"],
         "memory_access": "read",
         "model_access": "current",
@@ -296,14 +304,14 @@ def test_caller_policy_reads_the_chats_own_stored_settings(monkeypatch):
 def test_caller_policy_also_applies_the_owner_baseline(monkeypatch):
     """A tool the operator switched off globally is not available to a loadout
     just because this chat never denied it individually."""
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {})
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: {"web_search"})
     result = agent_loadouts.caller_policy("chat-1", "owner")
     assert "web_search" not in result["allowed_tools"]
 
 
 def test_an_unconfigured_chat_is_not_treated_as_a_locked_down_one(monkeypatch):
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {})
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kwargs: {})
     monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: set())
     result = agent_loadouts.caller_policy("chat-1", "owner")
     assert result["memory_access"] == "write"
@@ -339,29 +347,59 @@ def launcher(monkeypatch, store):
     return seen
 
 
-async def test_start_refuses_another_owners_chat_as_the_parent(monkeypatch, launcher):
+async def test_start_never_reports_to_another_owners_chat(monkeypatch, launcher):
     monkeypatch.setattr("src.ai_interaction.get_session_manager",
                         lambda: _manager({"theirs": _Chat("someone-else")}))
     result = await manage_agent_loadout(
         '{"action": "start", "task": "go", "parent_session": "theirs"}', "mine", owner="me")
-    assert result["exit_code"] == 1 and "not found" in result["error"]
-    assert launcher == {}
+    assert result["exit_code"] == 0
+    assert launcher["parent_session"] == "mine"
 
 
-async def test_start_accepts_another_chat_the_caller_does_own(monkeypatch, launcher):
+async def test_start_reports_to_the_calling_chat_not_an_unrelated_one(monkeypatch, launcher):
+    """2026-09-23: a worker whose parent_session named some other chat (or
+    was sent empty) finished with no card, no status row and no hand-off in
+    the chat that started it."""
     monkeypatch.setattr("src.ai_interaction.get_session_manager",
                         lambda: _manager({"other": _Chat("me")}))
-    result = await manage_agent_loadout(
-        '{"action": "start", "task": "go", "parent_session": "other"}', "mine", owner="me")
-    assert result["exit_code"] == 0
-    assert launcher["parent_session"] == "other"
+    for value in ('"other"', '""', "null"):
+        launcher.clear()
+        result = await manage_agent_loadout(
+            '{"action": "start", "task": "go", "parent_session": %s}' % value, "mine", owner="me")
+        assert result["exit_code"] == 0
+        assert launcher["parent_session"] == "mine", value
 
 
-async def test_start_can_be_asked_for_a_standalone_worker(launcher):
+async def test_start_may_report_to_one_of_this_chats_workers(monkeypatch, launcher):
+    from src import agent_activity
+
+    runs = [{"run_id": "r-0", "session_id": "w-9", "owner": "me", "status": "running",
+             "summary": {"parent_session": "mine", "target_session": "w-9"}}]
+    monkeypatch.setattr(agent_activity, "list_runs", lambda **kw: runs)
+    monkeypatch.setattr("src.ai_interaction.get_session_manager",
+                        lambda: _manager({"w-9": _Chat("me")}))
     result = await manage_agent_loadout(
-        '{"action": "start", "task": "go", "parent_session": ""}', "mine", owner="me")
+        '{"action": "start", "task": "go", "parent_session": "w-9"}', "mine", owner="me")
     assert result["exit_code"] == 0
-    assert launcher["parent_session"] is None
+    assert launcher["parent_session"] == "w-9"
+
+
+def test_list_runs_can_include_workers_started_by_workers(monkeypatch):
+    from src import agent_activity
+
+    rows = {
+        "a": {"run_id": "a", "session_id": "w1", "owner": "me", "status": "completed", "started_at": 1,
+              "summary": {"parent_session": "top", "target_session": "w1"}},
+        "b": {"run_id": "b", "session_id": "w2", "owner": "me", "status": "running", "started_at": 2,
+              "summary": {"parent_session": "w1", "target_session": "w2"}},
+        "c": {"run_id": "c", "session_id": "x", "owner": "me", "status": "running", "started_at": 3,
+              "summary": {"parent_session": "elsewhere", "target_session": "x"}},
+    }
+    monkeypatch.setattr(agent_activity, "_runs", rows)
+    monkeypatch.setattr(agent_activity, "_load_runs", lambda: None)
+    direct = {r["run_id"] for r in agent_activity.list_runs(session_id="top")}
+    tree = {r["run_id"] for r in agent_activity.list_runs(session_id="top", include_descendants=True)}
+    assert direct == {"a"} and tree == {"a", "b"}
 
 
 # ── update must not wipe fields the caller never set ─────────────────────────
@@ -449,7 +487,7 @@ def test_caller_policy_reads_the_chats_allowlist_not_just_its_denylist(monkeypat
     """A chat narrowed by an allowlist has an EMPTY `disabled_tools`. Reading
     only the denylist would see an unrestricted caller and let it mint a worker
     with every tool — the escalation this module exists to stop."""
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid: {
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {
         "tool_access": "selected",
         "enabled_tools": ["read_file", "grep"],
     })
@@ -489,3 +527,347 @@ def test_a_whole_server_grant_needs_the_caller_to_hold_the_whole_server():
         request(tool_access="selected", enabled_tools=["mcp__email__*"]), wide)
     assert profile["enabled_tools"] == ["mcp__email__*"]
     assert profile["allowed_mcp_servers"] == ["email"]
+
+# ── a loadout that cannot work must never be stored or started ───────────────
+
+def test_total_tool_refusal_is_flagged_apart_from_ordinary_narrowing():
+    """Losing every tool is the loadout failing, not the loadout being narrowed.
+
+    2026-09-17: a research loadout asked for web tools from a chat that had
+    none. Clamping stored it as `tool_access: "none"`, and every worker it
+    started opened with "I'm blocked from producing the report".
+    """
+    caller = policy(allowed_tools={"read_file", "grep"})
+    starved, notes = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["web_search", "bash"]), caller)
+
+    assert starved["tool_access"] == "none"
+    assert agent_loadouts.tool_starved(notes)
+    assert agent_loadouts.unusable_reason(starved)
+
+    partial, partial_notes = agent_loadouts.clamp(
+        request(tool_access="selected", enabled_tools=["read_file", "bash"]), caller)
+    assert not agent_loadouts.tool_starved(partial_notes)
+    assert agent_loadouts.unusable_reason(partial) is None
+
+
+async def test_creating_a_loadout_with_no_usable_tools_is_refused_not_stored(monkeypatch, store):
+    monkeypatch.setattr(agent_loadouts, "caller_policy",
+                        lambda sid, owner: policy(allowed_tools={"read_file", "grep"}))
+
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Researcher", "tool_access": "selected",'
+        ' "enabled_tools": ["web_search", "web_fetch"]}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert "no tools at all" in result["error"]
+    assert "read_file" in result["error"] and "grep" in result["error"]
+    assert store["profiles"] == []
+
+
+async def test_starting_a_stored_toolless_loadout_is_refused_with_a_usable_alternative(monkeypatch, store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"]}', "c", owner="u")
+    # A loadout stored before this guard existed, or authored in a wider chat.
+    store["profiles"].append({**store["profiles"][0], "name": "Toolless",
+                              "tool_access": "none", "enabled_tools": []})
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Toolless", "task": "audit the repository"}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert result["blocked_reason"] == "loadout_has_no_tools"
+    assert "Reader" in result["error"]
+
+
+async def test_start_reports_the_model_and_tools_it_actually_launched(monkeypatch, store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Runner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "grep"], "max_rounds": 4}', "c", owner="u")
+
+    async def fake_launch(**kwargs):
+        return {"session_id": "w-1", "session_name": "Runner 1", "run_id": "r-1",
+                "model": "gpt-5.6-sol", "max_rounds": 4}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Runner", "task": "read the changelog"}', "chat-7", owner="u")
+
+    assert result["exit_code"] == 0
+    assert result["preflight"] == {
+        "loadout": "Runner", "model": "gpt-5.6-sol", "max_rounds": 4,
+        "tools": ["grep", "read_file"], "tool_count": 2, "skills": [], "allowed_mcp_servers": [],
+    }
+    assert "grep, read_file" in result["response"]
+    # A round count never ends a run, so the response must not imply one will.
+    assert "round budget" not in result["response"]
+    assert "runs until the task is done" in result["response"]
+    # The loadout's explicit budget is a wrap-up point, and the caller is told.
+    assert "at round 4 it is asked to wrap up" in result["response"]
+
+
+async def test_an_unknown_loadout_name_is_not_an_invitation_to_pick_a_near_miss(store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"]}', "c", owner="u")
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "reader-but-for-umni", "task": "go"}', "c", owner="u")
+
+    assert result["exit_code"] == 1
+    assert "Reader (1 tools)" in result["error"]
+    assert "near-miss name is not a near-miss loadout" in result["error"]
+
+
+async def test_status_reports_what_the_workers_did_without_reading_log_files(monkeypatch, store, tmp_path):
+    from src import agent_activity, constants
+
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
+    agent_activity._reset_for_tests()
+    agent_activity.run_started("w-1", "session", "Worker · Notes UI", run_id="session-a", owner="u",
+                               data={"parent_session": "chat-7", "target_session": "w-1",
+                                     "profile": "Runner", "model": "gpt-5.6-sol", "max_rounds": 6})
+    agent_activity.run_finished("w-1", "session", "session-a", "Worker · Notes UI incomplete",
+                                status="incomplete", owner="u",
+                                data={"target_session": "w-1", "steps": 24, "max_rounds": 6,
+                                      "rounds_exhausted": True, "result_excerpt": "Inspected notes.js."})
+
+    result = await manage_agent_loadout('{"action": "status"}', "chat-7", owner="u")
+
+    assert result["exit_code"] == 0
+    assert result["running"] == 0
+    row = result["runs"][0]
+    assert row["status"] == "incomplete" and row["ran_out_of_rounds"] is True
+    assert row["loadout"] == "Runner" and row["max_rounds"] == 6 and row["tool_calls"] == 24
+    assert "did NOT finish their task" in result["response"]
+    agent_activity._reset_for_tests()
+
+
+# ── an agent-authored loadout is scoped, never "everything I have" ───────────
+#
+# 2026-09-17: two read-only audit loadouts were stored with ~200 tools each
+# (bash, python, send_email, vault_unlock, Bluesky posting, the browser MCP
+# surface) because the model wrote tool_access "all" and the clamp faithfully
+# granted everything the chat had.
+
+async def test_tool_access_all_is_refused_with_the_read_only_set_to_copy(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "tool_access": "all"}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert "@read_only" in result["error"]
+    assert result["read_only_tools"] == ["grep", "read_file", "web_search"]
+    assert result["mutating_tool_count"] == 3          # bash, send_to_session, write_file
+    assert "bash" in result["error"]
+    assert store["profiles"] == []
+
+
+async def test_a_loadout_with_no_tool_policy_gets_the_read_only_set_not_everything(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Reviewer", "description": "reads diffs"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    saved = store["profiles"][0]
+    assert saved["tool_access"] == "selected"
+    assert saved["enabled_tools"] == ["grep", "read_file", "web_search"]
+    assert any("read-only" in note for note in result["narrowed"])
+
+
+async def test_read_only_token_expands_and_can_be_widened_by_name(store):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Fixer", "tool_access": "selected",'
+        ' "enabled_tools": ["@read_only", "bash"]}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["enabled_tools"] == ["bash", "grep", "read_file", "web_search"]
+
+
+async def test_an_update_that_leaves_tool_access_alone_does_not_trip_the_all_refusal(store):
+    """A loadout the user made wide in Settings stays wide when an agent only
+    edits its description; the refusal is for what the agent *asks* for."""
+    from src import agent_profiles
+    store["profiles"] = agent_profiles.validate_profiles([{"name": "Wide", "tool_access": "all"}])
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Wide", "description": "documented"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["description"] == "documented"
+    assert store["profiles"][0]["tool_access"] == "selected"   # the clamp's own normal form
+    # Plus `mcp__*`: "everything the calling chat has" includes its MCP tools,
+    # whose names are generated at runtime and can only be carried as a
+    # wildcard (see test_tool_access_all_means_all_the_caller_has_... above).
+    assert store["profiles"][0]["enabled_tools"] == sorted(
+        set(policy()["allowed_tools"]) | {"mcp__*"})
+
+
+async def test_a_wide_grant_is_reported_as_a_count_not_an_inventory(monkeypatch, store):
+    import json
+    many = {f"tool_{i:02d}" for i in range(30)}
+    monkeypatch.setattr(agent_loadouts, "caller_policy",
+                        lambda sid, owner: policy(allowed_tools=set(many), known_tools=set(many)))
+    created = await manage_agent_loadout(
+        json.dumps({"action": "create", "name": "Wide", "tool_access": "selected",
+                    "enabled_tools": sorted(many)}), "c", owner="u")
+    assert created["exit_code"] == 0
+
+    async def fake_launch(**kwargs):
+        return {"session_id": "w-1", "session_name": "Wide 1", "run_id": "r-1", "model": "m", "max_rounds": 0}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Wide", "task": "go"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert "(+18 more, 30 total)" in result["response"]
+    assert len(result["preflight"]["tools"]) == 12
+    assert result["preflight"]["tool_count"] == 30
+    assert "tool_29" not in result["response"]
+
+
+# ── a model id is checked when it is written, not when a worker fails ────────
+
+async def test_a_model_that_does_not_exist_is_refused_at_create_with_the_real_ids(monkeypatch, store):
+    """`model: "gpt-luna-5.6"` (a misspelling of gpt-5.6-luna) used to be accepted
+    and only fail at start, two rounds later, with "has no available model"."""
+    import src.agent_tools.loadout_tools as lt
+    monkeypatch.setattr(lt, "_model_problem",
+                        lambda spec, owner: None if spec == "gpt-5.6-luna" else f"Model '{spec}' not found")
+    monkeypatch.setattr(lt, "_available_model_ids", lambda owner: ["gpt-5.6-luna", "gpt-5.6-sol"])
+
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-luna-5.6",'
+        ' "enabled_tools": ["@read_only"]}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert "gpt-luna-5.6" in result["error"] and "gpt-5.6-luna" in result["error"]
+    assert result["available_models"] == ["gpt-5.6-luna", "gpt-5.6-sol"]
+    assert store["profiles"] == []
+
+    ok = await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-5.6-luna",'
+        ' "enabled_tools": ["@read_only"]}', "c", owner="u")
+    assert ok["exit_code"] == 0 and store["profiles"][0]["model"] == "gpt-5.6-luna"
+
+
+async def test_an_update_only_checks_the_models_it_names(monkeypatch, store):
+    import src.agent_tools.loadout_tools as lt
+    monkeypatch.setattr(lt, "_model_problem", lambda spec, owner: None)
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Auditor", "model": "gpt-5.6-luna"}', "c", owner="u")
+    # The endpoint is now unreachable; renaming must not be blocked by it.
+    monkeypatch.setattr(lt, "_model_problem", lambda spec, owner: "No enabled endpoints found")
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Auditor", "description": "audits"}', "c", owner="u")
+    assert result["exit_code"] == 0
+    assert store["profiles"][0]["model"] == "gpt-5.6-luna"
+
+
+# ── start without a task says exactly what to send ───────────────────────────
+
+async def test_start_without_a_task_spells_out_the_call_shape(store):
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Auditor", "detail": true}', "c", owner="u")
+    assert result["exit_code"] == 1
+    assert '"task": "<the whole assignment>"' in result["error"]
+    assert "'detail'" in result["error"]
+
+
+# ── the capability matrix (2026-09-22) ───────────────────────────────────────
+
+class _Mcp:
+    def __init__(self, tools, statuses, gated=()):
+        self._tools, self._statuses, self._gated = tools, statuses, set(gated)
+
+    def get_all_tools(self, *_a, **_k):
+        return list(self._tools)
+
+    def get_server_status(self, server_id):
+        return {"status": self._statuses.get(server_id, "disconnected")}
+
+    def gated_tool_names(self, *_a, **_k):
+        return set(self._gated)
+
+
+@pytest.fixture
+def planning_mcp(monkeypatch):
+    mcp = _Mcp(
+        [{"qualified_name": "mcp__todoist__todoist", "server_id": "todoist"},
+         {"qualified_name": "mcp__lotus__mood_summarize_period", "server_id": "lotus"}],
+        {"todoist": "connected", "lotus": "disconnected"},
+        gated={"mcp__todoist__todoist"},
+    )
+    monkeypatch.setattr("src.tool_utils.get_mcp_manager", lambda: mcp)
+    monkeypatch.setattr("src.tool_security.owner_baseline_disabled_tools", lambda owner: set())
+    caller = policy(allowed_tools={"read_file", "web_search", "mcp__todoist__todoist",
+                                   "mcp__lotus__mood_summarize_period"})
+    monkeypatch.setattr(agent_loadouts, "caller_policy", lambda sid, owner: caller)
+    return mcp
+
+
+async def test_required_tool_on_a_disconnected_server_blocks_the_save(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Planner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "mcp__todoist__todoist"],'
+        ' "required_tools": ["mcp__todoist__todoist", "mcp__lotus__mood_summarize_period"]}',
+        "chat-1", owner="u")
+    assert result["exit_code"] == 1
+    assert "was not saved" in result["error"] and "lotus is disconnected" in result["error"]
+    assert result["capabilities"]["status"] == "BLOCKED"
+    assert result["capabilities"]["mission_critical_missing"] == ["mcp__lotus__mood_summarize_period"]
+    assert store["profiles"] == []
+
+
+async def test_optional_losses_save_as_degraded_with_a_reason_each(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Planner", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "bash", "no_such_tool", "mcp__lotus__mood_summarize_period"],'
+        ' "required_tools": ["mcp__todoist__todoist"]}',
+        "chat-1", owner="u")
+    assert result["exit_code"] == 0, result
+    matrix = result["capabilities"]
+    assert matrix["status"] == "DEGRADED"
+    reasons = {row["tool"]: row["reason"] for row in matrix["denied"]}
+    assert reasons == {"bash": "parent_policy", "no_such_tool": "unknown",
+                       "mcp__lotus__mood_summarize_period": "mcp_server"}
+    assert "mcp__todoist__todoist" in matrix["selected_for_profile"]
+    assert matrix["deferred_schema"] == ["mcp__todoist__todoist"]
+    assert result["readback_consistent"] is True
+    assert "DEGRADED" in result["response"]
+
+
+async def test_everything_granted_reads_ready(store, planning_mcp):
+    result = await manage_agent_loadout(
+        '{"action": "create", "name": "Reader", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file", "web_search"]}', "chat-1", owner="u")
+    assert result["capabilities"]["status"] == "READY"
+    assert result["capabilities"]["denied"] == []
+
+
+# ── preflight readiness ──────────────────────────────────────────────────────
+
+async def test_preflight_names_unresolved_skill_dependencies_and_a_stale_index(store, planning_mcp, monkeypatch):
+    class _Sm:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def load(self, owner=None):
+            return [{"name": "todoist-planning", "requires_toolsets": ["todoist", "no such toolset"]}]
+
+    monkeypatch.setattr("services.memory.skills.SkillsManager", _Sm)
+    monkeypatch.setattr("src.retrieval_health.cached_problems",
+                        lambda: ["AI Mind is not mounted (declared but not a directory)"])
+    monkeypatch.setattr("src.agent_profiles.get_profile", lambda name: {
+        "name": "Planner", "tool_access": "selected", "enabled_tools": ["read_file", "search_documents"],
+        "skill_access": "selected", "skill_names": ["todoist-planning", "missing-skill"],
+        "mcp_access": "all", "private_vault_access": False,
+    })
+    result = await manage_agent_loadout('{"action": "preflight", "name": "Planner"}', "chat-1", owner="u")
+    readiness = result["readiness"]
+    assert readiness["status"] == "DEGRADED"
+    failed = {row["check"]: row for row in readiness["checks"] if not row["ok"]}
+    assert "needs tools this profile does not bind: mcp__todoist__todoist" in failed["skill todoist-planning"]["detail"]
+    assert "no such toolset" in failed["skill todoist-planning"]["detail"]
+    assert "no skill with this name" in failed["skill missing-skill"]["detail"]
+    assert "not mounted" in failed["document index"]["detail"]
+    assert readiness["access"] == {"indexed_retrieval_public": True, "indexed_retrieval_private": False,
+                                   "raw_private_file_access": False, "index_current": False}
+    assert "DEGRADED" in result["response"] and "repair" in result["response"]

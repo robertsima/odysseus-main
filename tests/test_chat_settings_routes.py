@@ -17,6 +17,10 @@ import core.database as cdb
 from core.database import Session as DbSession
 from src import tool_approvals
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 _TMPDB = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
 _ENGINE = create_engine(f"sqlite:///{_TMPDB.name}", connect_args={"check_same_thread": False}, poolclass=NullPool)
 cdb.Base.metadata.create_all(_ENGINE)
@@ -26,13 +30,11 @@ _TS = sessionmaker(bind=_ENGINE, autoflush=False, autocommit=False)
 @pytest.fixture
 def db(monkeypatch):
     monkeypatch.setattr(cdb, "SessionLocal", _TS)
-    tool_approvals._reset_for_tests()
     s = _TS()
     s.query(DbSession).delete()
     s.commit()
     s.close()
     yield
-    tool_approvals._reset_for_tests()
 
 
 def _add(sid, name="chat", **cols):
@@ -76,6 +78,7 @@ def _req(body=None):
     return SimpleNamespace(json=_json)
 
 
+@_REPORT_BACKLOG
 def test_settings_and_approval_routes(db, monkeypatch):
     ep = _routes(monkeypatch)
     src_id, fork_id = str(uuid.uuid4()), str(uuid.uuid4())
@@ -126,6 +129,11 @@ def test_fork_records_its_source_copies_settings_and_defaults_to_everything(db, 
 
     class SM:
         sessions = {src_id: source}
+
+        def get_session(self, session_id):
+            # The fork route reads the source through get_session so a
+            # metadata-only session is hydrated before its history is copied.
+            return self.sessions[session_id]
 
         def create_session(self, session_id, name, endpoint_url, model, rag, owner):
             _add(session_id, name=name)

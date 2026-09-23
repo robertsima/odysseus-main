@@ -1,0 +1,145 @@
+# Odysseus → Claude Code cloud runner.
+#
+# Odysseus starts this workflow (workflow_dispatch) to hand a coding task to
+# Anthropic's official Claude Code GitHub Action. Claude runs in GitHub's cloud
+# with YOUR credential from this repository's secrets; Odysseus never sees it.
+#
+# Setup (once per repository):
+#   1. Copy this file to .github/workflows/odysseus-claude.yml on the default
+#      branch.
+#   2. Add ONE repository secret:
+#        CLAUDE_CODE_OAUTH_TOKEN  from `claude setup-token` (your Pro/Max plan)
+#        or ANTHROPIC_API_KEY     (billed per token)
+#      Running `/install-github-app` inside Claude Code sets this up for you.
+#   3. Settings › Actions › General › Workflow permissions: allow "Read and
+#      write" and tick "Allow GitHub Actions to create and approve pull
+#      requests" (otherwise the run pushes a branch but cannot open the PR).
+#   4. The GitHub credential Odysseus uses needs Actions: write, Contents:
+#      read and Pull requests: read on this repository.
+#
+# Security: dispatch inputs are untrusted text. They reach shell steps only
+# through environment variables, never through ${{ }} interpolation inside a
+# `run:` script. Claude gets file tools and read-only git; the commit, push and
+# draft PR are done by the steps below, never by Claude.
+
+name: Odysseus → Claude Code
+run-name: "Odysseus task ${{ inputs.task_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      task_id:
+        description: "Odysseus task id (letters, digits, dashes)"
+        required: true
+        type: string
+      prompt:
+        description: "The task for Claude"
+        required: true
+        type: string
+      base_branch:
+        description: "Branch to start from (empty = default branch)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+concurrency:
+  group: odysseus-claude-${{ inputs.task_id }}
+  cancel-in-progress: false
+
+jobs:
+  claude:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check task id
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+        run: |
+          case "$TASK_ID" in
+            ''|*[!A-Za-z0-9-]*) echo "::error::invalid task id"; exit 1 ;;
+          esac
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch || github.event.repository.default_branch }}
+          fetch-depth: 0
+
+      - name: Create work branch
+        env:
+          TASK_ID: ${{ inputs.task_id }}
+        run: git switch -c "claude/odysseus-$TASK_ID"
+
+      - name: Run Claude Code
+        id: claude
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          prompt: ${{ inputs.prompt }}
+          # A GitHub App dispatch runs as "<app>[bot]", which the action refuses
+          # unless listed. Only workflow_dispatch starts this workflow, and
+          # GitHub already requires write access to dispatch it.
+          allowed_bots: ${{ github.actor }}
+          claude_args: >-
+            --allowedTools "Read,Write,Edit,Glob,Grep,Bash(git status:*),Bash(git diff:*),Bash(git log:*)"
+            --append-system-prompt "You are working for Odysseus in a GitHub Actions checkout on a prepared branch. Make the requested change with the file tools. Do not commit, push or open pull requests; the workflow does that after you finish. End with a short summary of what you changed and anything left undone."
+
+      - name: Collect result
+        if: always()
+        env:
+          EXECUTION_FILE: ${{ steps.claude.outputs.execution_file }}
+          CONCLUSION: ${{ steps.claude.outputs.conclusion }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          path = os.environ.get("EXECUTION_FILE") or ""
+          text = ""
+          try:
+              with open(path, encoding="utf-8") as fh:
+                  data = json.load(fh)
+              items = data if isinstance(data, list) else [data]
+              for item in reversed(items):
+                  if isinstance(item, dict) and item.get("type") == "result":
+                      text = str(item.get("result") or "")
+                      break
+          except Exception as exc:
+              text = f"(could not read Claude's result: {exc})"
+          if not text.strip():
+              text = "(Claude finished without a closing summary.)"
+          with open("claude-result.md", "w", encoding="utf-8") as fh:
+              fh.write(text.strip() + "\n\n")
+              fh.write(f"_Conclusion: {os.environ.get('CONCLUSION') or 'unknown'}. Opened by Odysseus._\n")
+          PY
+
+      - name: Commit, push and open draft PR
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TASK_ID: ${{ inputs.task_id }}
+          BASE_BRANCH: ${{ inputs.base_branch || github.event.repository.default_branch }}
+        run: |
+          git add -A -- . ':!claude-result.md'
+          if git diff --cached --quiet; then
+            echo "No file changes to publish."
+            exit 0
+          fi
+          git -c user.name="claude[bot]" -c user.email="41898282+claude[bot]@users.noreply.github.com" \
+            commit -m "Odysseus task $TASK_ID (Claude Code)"
+          git push origin "claude/odysseus-$TASK_ID"
+          gh pr create --draft --base "$BASE_BRANCH" --head "claude/odysseus-$TASK_ID" \
+            --title "Odysseus task $TASK_ID (Claude Code)" --body-file claude-result.md \
+            || echo "::warning::Branch pushed, but the draft PR could not be opened (check 'Allow GitHub Actions to create and approve pull requests')."
+
+      - name: Upload result for Odysseus
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: odysseus-result
+          path: claude-result.md
+          if-no-files-found: ignore
+          retention-days: 7

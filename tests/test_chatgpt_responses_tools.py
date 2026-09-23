@@ -56,6 +56,24 @@ def test_already_flat_tools_pass_through():
     assert out[0]["name"] == "ls"
 
 
+@pytest.mark.parametrize("strict", [True, False])
+@pytest.mark.parametrize("nested", [True, False])
+def test_explicit_strict_setting_survives_responses_conversion(strict, nested):
+    definition = {**CHAT_TOOL["function"], "strict": strict}
+    tool = {"type": "function", "function": definition} if nested else {
+        "type": "function", **definition,
+    }
+    out = build_responses_tools([tool])
+    assert out[0]["strict"] is strict
+    assert definition["strict"] is strict
+
+
+@pytest.mark.parametrize("invalid", [None, "false", 0, 1])
+def test_invalid_strict_setting_does_not_change_provider_default(invalid):
+    tool = {"type": "function", "function": {**CHAT_TOOL["function"], "strict": invalid}}
+    assert "strict" not in build_responses_tools([tool])[0]
+
+
 def test_tools_without_a_name_are_dropped():
     assert build_responses_tools([{"type": "function", "function": {}}]) == []
     assert build_responses_tools([None, "nonsense"]) == []

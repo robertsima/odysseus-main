@@ -10,6 +10,10 @@ SQLAlchemy
 pypdf
 beautifulsoup4
 charset-normalizer
+# DuckDuckGo is the default no-key fallback when SearXNG returns no results,
+# so the maintained client must exist in a normal install rather than only in
+# the optional extras image.
+ddgs
 numpy
 # Vector store + local embeddings for RAG, semantic memory, and tool
 # selection. Used on core agent paths, so installed by default — the app
@@ -56,3 +60,9 @@ pytest-asyncio
 # TestClient import when only classic httpx is present. Runtime code keeps
 # using `httpx` above; this is test-client only.
 httpx2
+dulwich==1.2.5
+# DATABASE_URL defaults to sqlite (core/database.py), but when pointed at an
+# external Postgres, SQLAlchemy's postgresql dialect imports psycopg2 inside
+# create_engine() and raises ModuleNotFoundError if missing. -binary avoids
+# needing libpq-dev/pg_config on the host/image to compile it.
+psycopg2-binary

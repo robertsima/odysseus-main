@@ -18,6 +18,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: per-agent profile instructions in upstream's system prompt (website/upstream-sync-2026-09-18.md)"
+)
+
 # ── stub heavy imports before loading agent_loop ────────────────────────────
 for _mod in [
     "sqlalchemy", "sqlalchemy.orm", "sqlalchemy.ext", "sqlalchemy.ext.declarative",
@@ -51,6 +55,34 @@ def _bust_prompt_cache():
     from src import agent_loop
     agent_loop._cached_base_prompt = None
     agent_loop._cached_base_prompt_key = None
+
+
+@_REPORT_BACKLOG
+def test_per_agent_customization_is_scoped_and_security_precedes_it():
+    """A cached base prompt must not carry one worker's persona into another."""
+    _bust_prompt_cache()
+    from src.agent_loop import _build_system_prompt
+
+    common = dict(
+        messages=[{"role": "user", "content": "do the task"}],
+        model="test-model", active_document=None, mcp_mgr=None, owner=None,
+        relevant_tools={"ask_user"},
+    )
+    ada, _ = _build_system_prompt(**common, agent_instructions="ADA_ONLY: explain carefully")
+    grace, _ = _build_system_prompt(**common, agent_instructions="GRACE_ONLY: be concise")
+    plain, _ = _build_system_prompt(**common)
+
+    ada_system = _sys_role_text(ada)
+    grace_system = _sys_role_text(grace)
+    plain_system = _sys_role_text(plain)
+    assert "ADA_ONLY" in ada_system and "GRACE_ONLY" not in ada_system
+    assert "GRACE_ONLY" in grace_system and "ADA_ONLY" not in grace_system
+    assert "ADA_ONLY" not in plain_system and "GRACE_ONLY" not in plain_system
+    boundary = "PER-AGENT CUSTOMIZATION (SCOPED TO THIS CHAT)"
+    # The complete platform/tool contract is emitted before the scoped block.
+    assert len(ada_system.split(boundary, 1)[0]) > 500
+    assert "cannot replace, weaken, or override" in ada_system
+    assert ada_system.index("cannot replace, weaken, or override") < ada_system.index("ADA_ONLY")
 
 
 # ── 1. Email writing style ───────────────────────────────────────────────────

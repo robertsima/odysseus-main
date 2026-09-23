@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from core.log_safety import redact_url
@@ -147,14 +147,19 @@ _URL_WITH_QUERY = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s\"'<>]*\?[^\s\"'<>]*")
 
 def redact_line(line: str) -> str:
     """Remove credential material from one log line."""
-    out = line or ""
+    return redact_text(line)[:MAX_LINE_CHARS]
+
+
+def redact_text(text: str) -> str:
+    """:func:`redact_line` without the log-line length cap, for any text."""
+    out = text or ""
     # URLs first: userinfo and query strings carry keys, and redact_url strips
     # both while keeping scheme/host/path readable.
     for pattern in (_URL_WITH_USERINFO, _URL_WITH_QUERY):
         out = pattern.sub(lambda m: redact_url(m.group(0)), out)
     for pattern, replacement in _REDACTIONS:
         out = pattern.sub(replacement, out)
-    return out[:MAX_LINE_CHARS]
+    return out
 
 
 def _tail_lines(path: str, limit: int) -> List[str]:
@@ -178,8 +183,14 @@ def read_log(
     lines: int = DEFAULT_LINES,
     contains: Optional[str] = None,
     level: Optional[str] = None,
+    since_minutes: Optional[float] = None,
 ) -> Dict[str, object]:
-    """Return the tail of one log, filtered and redacted."""
+    """Return the tail of one log, filtered and redacted.
+
+    ``since_minutes`` keeps only entries written in that many recent minutes
+    (a traceback's continuation lines go with their entry). "Logs from the
+    last 10 minutes" used to mean guessing a line count.
+    """
     target = resolve(name)
     if target is None:
         available = [f.name for f in list_logs()]
@@ -194,7 +205,15 @@ def read_log(
 
     # Filtering happens before the tail is trimmed, so "last 100 ERROR lines"
     # means what it says instead of "errors within the last 100 lines".
-    raw = _tail_lines(target.path, 0 if (contains or level) else count)
+    since = None
+    if since_minutes not in (None, ""):
+        try:
+            since = datetime.now() - timedelta(minutes=max(0.0, float(since_minutes)))
+        except (TypeError, ValueError):
+            raise RuntimeError("since_minutes must be a number")
+    raw = _tail_lines(target.path, 0 if (contains or level or since) else count)
+    if since is not None:
+        raw = _entries_since(raw, since)
 
     needle = (contains or "").lower() or None
     wanted_level = (level or "").strip().upper() or None
@@ -206,7 +225,7 @@ def read_log(
         raw = [ln for ln in raw if any(f" - {lv} - " in ln or ln.startswith(lv) for lv in allowed)]
     if needle:
         raw = [ln for ln in raw if needle in ln.lower()]
-    if contains or wanted_level:
+    if contains or wanted_level or since is not None:
         raw = raw[-count:]
 
     return {
@@ -219,6 +238,27 @@ def read_log(
     }
 
 
+_ENTRY_TIME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+
+
+def _entries_since(lines: List[str], since: datetime) -> List[str]:
+    """Lines of entries stamped at or after ``since`` (the app's formatter
+    writes local time, as datetime.now() reads it). Unstamped lines belong to
+    the entry above them."""
+    kept: List[str] = []
+    include = False
+    for line in lines:
+        match = _ENTRY_TIME_RE.match(line)
+        if match:
+            try:
+                include = datetime.fromisoformat(match.group(1).replace("T", " ")) >= since
+            except ValueError:
+                pass
+        if include:
+            kept.append(line)
+    return kept
+
+
 def logs_index() -> List[Dict[str, object]]:
     return [
         {
@@ -229,3 +269,59 @@ def logs_index() -> List[Dict[str, object]]:
         }
         for f in list_logs()
     ]
+
+
+_TRACE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{5,80}$")
+
+
+def trace(correlation_id: str, *, lines: int = 200, owner: Optional[str] = None) -> Dict[str, object]:
+    """Everything recorded under one workflow, run, or session ID.
+
+    The app log, its rotated siblings (oldest first), and the activity
+    store's run records, in one place: auditing a worker used to mean
+    grepping each file by hand and still missing the run registry.
+    Redacted like ``read_log``; the activity rows are the owner's only.
+    """
+    needle = str(correlation_id or "").strip()
+    if not _TRACE_ID_RE.match(needle):
+        raise RuntimeError("id must be a workflow-, run or session ID (6-80 letters, digits, - _ . :)")
+    try:
+        count = max(1, min(MAX_LINES, int(lines)))
+    except (TypeError, ValueError):
+        count = DEFAULT_LINES
+    files = sorted((f for f in list_logs() if f.name.startswith("app.log")),
+                   key=lambda f: f.modified)
+    matched: List[str] = []
+    for log in files:
+        try:
+            with open(log.path, "rb") as fh:
+                for raw in fh:
+                    text = raw.decode("utf-8", errors="replace").rstrip("\n")
+                    if needle in text:
+                        matched.append(f"{log.name}: {redact_line(text)}")
+        except OSError:
+            continue
+    runs: List[Dict[str, object]] = []
+    try:
+        from src import agent_activity
+
+        rec = agent_activity.get_run(needle)
+        rows = [rec] if rec else []
+        rows += agent_activity.list_runs(session_id=needle, limit=50)
+        seen = set()
+        for row in rows:
+            if not row or row.get("run_id") in seen:
+                continue
+            if owner is not None and row.get("owner") not in (owner, None):
+                continue
+            seen.add(row.get("run_id"))
+            summary = row.get("summary") or {}
+            runs.append({key: row.get(key) for key in ("run_id", "session_id", "kind", "status", "title",
+                                                         "started_at", "finished_at")}
+                        | {"parent_session": summary.get("parent_session"),
+                           "workflow_id": summary.get("workflow_id"),
+                           "profile": summary.get("profile"), "error": summary.get("error")})
+    except Exception as exc:  # the activity store is optional evidence here
+        runs.append({"error": f"activity store unavailable: {type(exc).__name__}"})
+    return {"id": needle, "log_files": [f.name for f in files], "line_count": len(matched),
+            "lines": matched[-count:], "truncated": len(matched) > count, "runs": runs}
