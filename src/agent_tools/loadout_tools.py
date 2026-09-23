@@ -9,6 +9,7 @@ report back exactly which parts of a request were narrowed.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -18,7 +19,8 @@ from src.tool_utils import _parse_tool_args
 
 logger = logging.getLogger(__name__)
 
-_ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop")
+_ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop",
+            "export", "import")
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
@@ -239,6 +241,27 @@ def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> D
     return merged
 
 
+def _import_prepare(policy: Dict[str, Any]):
+    """The ``create`` rule for each imported profile, as a transfer ``prepare``.
+
+    An imported file is agent-supplied input like any other: the same
+    tool-policy refusal, clamp to this chat's policy and starved-loadout check
+    apply, so a file cannot carry in a wider loadout than ``create`` would store.
+    """
+    def prepare(profile: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
+        requested = dict(profile)
+        error, scope_notes = _scope_tools(requested, policy, action="import",
+                                          supplied_access=str(profile.get("tool_access") or ""))
+        if error:
+            raise ValueError(error["error"])
+        clamped, narrowed = agent_loadouts.clamp(requested, policy)
+        narrowed = [*scope_notes, *narrowed]
+        if agent_loadouts.tool_starved(narrowed):
+            raise ValueError("none of its tools are available to this chat: " + "; ".join(narrowed))
+        return clamped, narrowed
+    return prepare
+
+
 async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                                owner: Optional[str] = None) -> Dict[str, Any]:
     try:
@@ -370,6 +393,37 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             "ceiling": ceiling,
             "exit_code": 0,
         }
+
+    if action == "export":
+        from src import agent_profile_transfer
+
+        try:
+            document = agent_profile_transfer.export_profiles(args.get("names"))
+        except ValueError as exc:
+            return {"error": f"export: {exc}", "exit_code": 1}
+        return {"response": f"Exported {len(document['profiles'])} loadout(s)", "document": document,
+                "exit_code": 0}
+
+    if action == "import":
+        from src import agent_profile_transfer
+
+        document = args.get("document")
+        if isinstance(document, str):
+            try:
+                document = json.loads(document)
+            except ValueError:
+                return {"error": "import: document is not valid JSON", "exit_code": 1}
+        try:
+            report = agent_profile_transfer.import_profiles(
+                document, mode=str(args.get("mode") or "merge"),
+                rename_conflicts=bool(args.get("rename_conflicts")),
+                prepare=_import_prepare(policy),
+                check_model=lambda spec: _model_problem(spec, owner),
+            )
+        except ValueError as exc:
+            return {"error": str(exc), "exit_code": 1}
+        return {"response": agent_profile_transfer.summary_line(report), "report": report,
+                "exit_code": 0 if report["written"] or not report["errors"] else 1}
 
     name = str(args.get("name") or (args.get("loadout") or {}).get("name") or "").strip()
 
