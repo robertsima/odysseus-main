@@ -329,7 +329,7 @@ import inspect
 import src.agent_loop as agent_loop
 from src.agent_tools.git_tools import GitTool
 
-STASH_DROP_WITHOUT_PROOF = json.dumps({"action": "stash_drop", "repository": "/r", "index": 0})
+STASH_POP_WITHOUT_PROOF = json.dumps({"action": "stash_pop", "repository": "/r", "index": 0})
 PUSH_WITH_FOREIGN_ARG = json.dumps({"action": "push", "repository": "/r", "remote_branch": "dev",
                                     "expected_head": "a" * 40, "expected_target": "b" * 40})
 VALID_MERGE = json.dumps({"action": "merge", "repository": "/r", "ref": "upstream/dev",
@@ -337,7 +337,7 @@ VALID_MERGE = json.dumps({"action": "merge", "repository": "/r", "ref": "upstrea
 
 
 def test_precheck_names_the_missing_revision_proof():
-    error = GitTool.precheck(STASH_DROP_WITHOUT_PROOF)
+    error = GitTool.precheck(STASH_POP_WITHOUT_PROOF)
     assert error["code"] == "missing_revision"
     assert "expected_target" in error["error"]
 
@@ -372,13 +372,13 @@ def test_the_loop_prechecks_before_it_holds():
 
 @_FORK_APPROVALS
 def test_a_retired_approval_is_not_handed_back():
-    pending = tool_approvals.request("chat", "manage_git", STASH_DROP_WITHOUT_PROOF, "drops")
+    pending = tool_approvals.request("chat", "manage_git", STASH_POP_WITHOUT_PROOF, "drops")
     tool_approvals.decide("chat", pending["id"], "once")
     assert tool_approvals.approved_unused_calls("chat")          # would be re-offered
 
-    assert tool_approvals.retire_approved_call("chat", "manage_git", STASH_DROP_WITHOUT_PROOF)
+    assert tool_approvals.retire_approved_call("chat", "manage_git", STASH_POP_WITHOUT_PROOF)
     assert tool_approvals.approved_unused_calls("chat") == []
-    assert not tool_approvals.retire_approved_call("chat", "manage_git", STASH_DROP_WITHOUT_PROOF)
+    assert not tool_approvals.retire_approved_call("chat", "manage_git", STASH_POP_WITHOUT_PROOF)
 
 
 @_FORK_APPROVALS

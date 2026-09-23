@@ -247,6 +247,52 @@ def email_tool_policy_names(tool_name: str) -> frozenset:
     return frozenset((tool_name,))
 
 
+# Operator policy for GitHub: agents may read and collaborate (PRs, issues,
+# comments, reviews) but never delete anything. The built-in servers' --tools
+# lists (src/builtin_mcp.py) already leave every delete out; this is the
+# name-pattern backstop for a user-added GitHub server or a widened list, and
+# for mixed tools that delete through a method argument
+# (pull_request_review_write method=delete_pending, sub_issue_write
+# method=remove).
+_GITHUB_MCP_DESTRUCTIVE_WORDS = ("delete", "remove", "archive")
+
+
+def is_github_mcp_tool(tool_name: object) -> bool:
+    """True for mcp__github*__<tool> -- any server whose id starts with github."""
+    if not isinstance(tool_name, str):
+        return False
+    parts = tool_name.split("__", 2)
+    return len(parts) == 3 and parts[0] == "mcp" and parts[1].lower().startswith("github")
+
+
+def github_mcp_policy_refusal(tool_name: object, arguments: object = None) -> Optional[str]:
+    """The policy error for a destructive GitHub MCP call, or None to allow it."""
+    if not is_github_mcp_tool(tool_name):
+        return None
+    bare = str(tool_name).split("__", 2)[2].lower()
+    if isinstance(arguments, str):
+        import json
+
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = None
+    reason = None
+    if any(word in bare for word in _GITHUB_MCP_DESTRUCTIVE_WORDS):
+        reason = f"tool {bare!r} deletes, removes or archives GitHub data"
+    elif isinstance(arguments, dict):
+        method = str(arguments.get("method") or "").lower()
+        if any(word in method for word in _GITHUB_MCP_DESTRUCTIVE_WORDS):
+            reason = f"method {method!r} of {bare!r} deletes or removes GitHub data"
+    if reason is None:
+        return None
+    return (
+        f"Not permitted by policy: {reason}. Agents may read GitHub and open "
+        "pull requests, issues, comments and reviews, but must not delete, "
+        "remove or archive anything. Ask the user to do it themselves."
+    )
+
+
 def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
     """Return True when a non-admin/public user must not execute this tool.
 

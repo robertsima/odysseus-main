@@ -122,6 +122,21 @@ def _always_bound_limits() -> Tuple[int, int]:
     return per_server, total
 
 
+def _policy_visible_tools(server_id: str, tools: List[Dict]) -> List[Dict]:
+    """Drop tools operator policy never exposes (GitHub delete/remove/archive).
+
+    Applied where a server's catalogue is stored, so every listing, schema,
+    discovery and prompt path sees the same filtered set; call_tool refuses
+    the same names in case a model invents one anyway.
+    """
+    from src.tool_security import github_mcp_policy_refusal
+
+    return [
+        t for t in tools
+        if not github_mcp_policy_refusal(f"mcp__{server_id}__{t.get('name', '')}")
+    ]
+
+
 def _model_visible_schema(schema: Any) -> Dict:
     """Remove dispatcher-injected arguments from a model-facing MCP schema."""
     if not isinstance(schema, dict):
@@ -699,7 +714,7 @@ class McpManager:
 
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
-                self._tools[server_id] = tools
+                self._tools[server_id] = _policy_visible_tools(server_id, tools)
                 self._connections[server_id] = {
                     "status": "connected",
                     "name": name,
@@ -758,7 +773,7 @@ class McpManager:
 
                 self._sessions[server_id] = session
                 self._stacks[server_id] = stack
-                self._tools[server_id] = tools
+                self._tools[server_id] = _policy_visible_tools(server_id, tools)
                 self._connections[server_id] = {
                     "status": "connected",
                     "name": name,
@@ -847,7 +862,7 @@ class McpManager:
 
             self._sessions[server_id] = session
             self._stacks[server_id] = stack
-            self._tools[server_id] = tools
+            self._tools[server_id] = _policy_visible_tools(server_id, tools)
             self._connections[server_id] = {
                 "status": "connected", "name": name, "transport": "http",
                 "tool_count": len(tools),
@@ -1046,6 +1061,14 @@ class McpManager:
 
         server_id = parts[1]
         tool_name = parts[2]
+
+        # Every MCP call funnels through here (agent loop, delegation, routes),
+        # so the no-delete GitHub policy is enforced once, before the server.
+        from src.tool_security import github_mcp_policy_refusal
+
+        refusal = github_mcp_policy_refusal(qualified_name, arguments)
+        if refusal:
+            return {"error": refusal, "exit_code": 1, "code": "forbidden_by_policy"}
 
         session = self._sessions.get(server_id)
         if not session:

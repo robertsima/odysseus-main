@@ -300,28 +300,28 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
                 "Git workflows in approved local checkouts: repositories, status, diff, log, "
                 "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
-                "stash_list/create/apply/pop/drop, push, force_push_with_lease, merge, reset, rebase, delete_branch, delete_remote_branch, set_upstream. "
+                "stash_list/create/apply/pop, push, merge, reset, rebase, set_upstream. "
                 "No shell/private-vault grant needed. "
                 "Use absolute repository paths from repositories. Stage explicit relative files; "
                 "commit uses local identity or supplied author. Pull/merge fast-forward only. "
                 "After first push, set_upstream can bind the current branch to its fetched/pushed "
                 "remote_branch on an existing configured remote; never replaces an upstream. "
-                "Push/merge/deletion/history rewrites and stash deletion require fresh confirmation bound to exact revisions. "
-                "Force push is force-with-lease only. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
+                "Push/merge/history rewrites require fresh confirmation bound to exact revisions. "
+                "Policy refuses every delete (branches, remote branches, stashes), force push and discard of work; no approval re-enables them. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
                 "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
                 "Odysseus self-publishing still uses manage_agent_worktree."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "stash_drop", "push", "force_push_with_lease", "merge", "reset", "rebase", "delete_branch", "delete_remote_branch", "set_upstream"]},
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "push", "merge", "reset", "rebase", "set_upstream"]},
                     "repository": {"type": "string", "description": "All actions except repositories: absolute checkout path; clone/init use the new target path"},
                     "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL"},
                     "branch": {"type": "string", "description": "clone only: optional remote branch"},
                     "depth": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "clone only: optional shallow history depth"},
                     "initial_branch": {"type": "string", "description": "init only: initial branch, default main"},
                     "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
-                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},
+                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch)"},
                     "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
                     "message": {"type": "string", "description": "Commit or stash_create message"},
                     "index": {"type": "integer", "minimum": 0, "maximum": 99, "description": "stash action only: stash index, default 0"},
@@ -329,7 +329,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "author_email": {"type": "string", "description": "commit only: omit to use local Git identity"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "log only: maximum commits (default 20)"},
                     "staged": {"type": "boolean", "description": "diff only: compare index versus HEAD (default false)"},
-                    "remote_branch": {"type": "string", "description": "fetch_branch/push/force_push_with_lease/delete_remote_branch/set_upstream: configured remote's branch name"},
+                    "remote_branch": {"type": "string", "description": "fetch_branch/push/set_upstream: configured remote's branch name"},
                     "remote": {"type": "string", "description": "fetch_branch/set_upstream only: existing configured remote name; omit when origin or one remote is unambiguous"},
                     "expected_head": {"type": "string", "description": "Exact current HEAD being confirmed for publish/integration/history rewrite"},
                     "expected_target": {"type": "string", "description": "Exact target/stash/remote-lease commit being confirmed; 40 zeros means absent remote for force-with-lease"}

@@ -117,6 +117,8 @@ _SENSITIVE_BASENAMES: set[str] = {
     ".zshrc", ".zprofile", ".zshenv",
     ".profile", ".tcshrc", ".cshrc",
     ".env", ".netrc",
+    # `git credential-store` keeps https://user:token@host lines here.
+    ".git-credentials",
 }
 
 _SENSITIVE_FILE_PATTERNS: tuple[str, ...] = (
@@ -227,6 +229,13 @@ def _is_sensitive_path(resolved: str, allow_private: bool = False) -> bool:
     for part in parts:
         if part in _SENSITIVE_BASENAMES_CF:
             return True
+
+    # A repository's .git/config can carry a token in a remote URL
+    # (https://x-access-token:<token>@github.com/...) or an http extraheader,
+    # and writing it can set hooks/fsmonitor commands. manage_git's `remotes`
+    # action reports remotes credential-free; the raw file stays off limits.
+    if len(parts) >= 2 and filename == "config" and parts[-2] == ".git":
+        return True
 
     # Documents the user labelled private. These live under PERSONAL_DIR, which
     # sits inside DATA_DIR — an allowed tool root — so without this check any
