@@ -757,6 +757,8 @@ LEDGER_MAX_ENTRY_CHARS = 900
 _LEDGER_MAX_LINE_CHARS = 240
 
 _LEDGER_NEVER_COMPACT = frozenset({"recall_tool_output", "ask_user"})
+# Route labels `execute_tool_block` puts before the real tool name in `desc`.
+_LEDGER_DISPATCH_PREFIXES = frozenset({"registry", "mcp"})
 
 _LEDGER_REF_RE = re.compile(r"\btoolout-[0-9a-f]{10}\b")
 _LEDGER_FENCE_RE = re.compile(r"^\s*```")
@@ -834,7 +836,19 @@ def _ledger_tool_name(text: str, fallback: str = "") -> str:
     if not match:
         return fallback
     desc = match.group("desc").strip()
-    return (desc.split(":", 1)[0] if ":" in desc else desc).strip() or fallback
+    head, sep, rest = desc.partition(":")
+    head = head.strip()
+    # Registry and MCP dispatch put their route first: `registry: <tool> <args>`
+    # and `mcp: <tool>`. Reading the route as the tool name made every recall
+    # look like "registry", so `_LEDGER_NEVER_COMPACT` never matched it: recalled
+    # slices were collapsed again a batch later and the model had to recall the
+    # same text a second time. It also let any registry/MCP success "resolve" an
+    # unrelated registry/MCP failure.
+    if sep and head in _LEDGER_DISPATCH_PREFIXES:
+        tool = rest.strip().split(None, 1)
+        if tool:
+            return tool[0]
+    return head or fallback
 
 
 def _ledger_failed(text: str) -> bool:
