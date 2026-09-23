@@ -21,15 +21,31 @@ def _test_utcnow():
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
-def _stub_heavy():
+def _stub_heavy(monkeypatch):
+    """Stub the heavy modules the scheduler imports lazily.
+
+    Installed through monkeypatch so pytest removes them again at teardown.
+    A bare ``sys.modules.setdefault`` left empty stub modules (notably
+    ``src.endpoint_resolver`` and ``src.session_manager``) behind for the rest
+    of the session.
+    """
     for name in [
         "src.builtin_actions", "src.ai_interaction", "src.endpoint_resolver",
         "src.agent_loop", "src.session_manager",
     ]:
-        sys.modules.setdefault(name, types.ModuleType(name))
+        if name not in sys.modules:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
 
 
-def _setup_isolated_db():
+def _setup_isolated_db(monkeypatch):
+    """Point core.database at a throwaway in-memory schema for one test.
+
+    Every attribute is swapped through monkeypatch, so the real engine,
+    SessionLocal and ORM classes come back at teardown. Assigning them
+    directly (``cd.ScheduledTask = ScheduledTask``) left this file's cut-down
+    ScheduledTask -- no ``action``, no ``session_id`` column -- installed on
+    core.database for every later test in the session.
+    """
     import core.database as cd
     B = declarative_base()
 
@@ -56,10 +72,12 @@ def _setup_isolated_db():
 
     eng = create_engine("sqlite:///:memory:")
     B.metadata.create_all(eng)
-    cd.engine = eng
-    cd.SessionLocal = sessionmaker(bind=eng, autocommit=False, autoflush=False)
-    cd.ScheduledTask = ScheduledTask
-    cd.TaskRun = TaskRun
+    monkeypatch.setattr(cd, "engine", eng, raising=False)
+    monkeypatch.setattr(
+        cd, "SessionLocal", sessionmaker(bind=eng, autocommit=False, autoflush=False)
+    )
+    monkeypatch.setattr(cd, "ScheduledTask", ScheduledTask)
+    monkeypatch.setattr(cd, "TaskRun", TaskRun)
     return cd, ScheduledTask, TaskRun
 
 
@@ -74,8 +92,8 @@ def test_scheduler_utcnow_preserves_naive_utc_contract():
 
 def _drive_scheduler(monkeypatch, pre_start_setup=None):
     """Build a TaskScheduler bypassing __init__ and run start() + two polls."""
-    _stub_heavy()
-    cd, ScheduledTask, TaskRun = _setup_isolated_db()
+    _stub_heavy(monkeypatch)
+    cd, ScheduledTask, TaskRun = _setup_isolated_db(monkeypatch)
 
     from src.task_scheduler import TaskScheduler
     sch = TaskScheduler.__new__(TaskScheduler)
