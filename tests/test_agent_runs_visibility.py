@@ -463,3 +463,55 @@ async def test_a_worker_making_no_progress_is_not_handed_another_budget(monkeypa
 
     assert len(calls) == 1
     assert act.get_run(rec["run_id"])["status"] == "incomplete"
+
+
+async def test_headless_workers_get_the_tool_call_budget(monkeypatch):
+    """Rounds are advisory, so `agent_max_tool_calls` is a worker's real bound.
+    Headless runs never passed it: a worker ran 108 rounds with no ceiling."""
+    seen = {}
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    import src.settings as settings
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    monkeypatch.setattr(settings, "get_setting",
+                        lambda key, default=None: 500 if key == "agent_max_tool_calls" else default)
+
+    await headless_agent.run_headless(_Sess(), [])
+    # Same margin chat_routes puts above the configured budget.
+    assert seen["max_tool_calls"] == 550
+
+    await headless_agent.run_headless(_Sess(), [], max_tool_calls=7)
+    assert seen["max_tool_calls"] == 7
+
+    monkeypatch.setattr(settings, "get_setting",
+                        lambda key, default=None: "unlimited" if key == "agent_max_tool_calls" else default)
+    await headless_agent.run_headless(_Sess(), [])
+    assert seen["max_tool_calls"] == 0
+
+
+async def test_a_worker_cut_off_by_the_tool_budget_hands_back_as_incomplete(monkeypatch):
+    async def fake_loop(url, model, messages, **kwargs):
+        yield _sse({"type": "agent_step", "round": 42})
+        yield _sse({"type": "tool_output", "tool": "read_file", "command": "a.py",
+                    "output": "x", "exit_code": 0})
+        yield _sse({"type": "budget_exceeded", "limit": 550, "used": 550})
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+    outcome = {}
+    text, _events = await headless_agent.run_headless(
+        _Sess(), [], run_id="budget-run", activity_session_id="parent", outcome=outcome)
+    assert outcome["rounds_exhausted"] is True and outcome["budget_exhausted"] is True
+    assert outcome["rounds"] == 42
+    assert "ran out of tool calls" in text and "550" in text and "partial work" in text
+
+
+def test_workers_cannot_start_workers_through_loadouts_or_orchestration():
+    assert {"orchestrate_agents", "manage_agent_loadout"} <= headless_agent.SUBAGENT_BLOCKED_TOOLS
+    # Peer messaging between running agents stays available.
+    assert "message_agent" not in headless_agent.SUBAGENT_BLOCKED_TOOLS
