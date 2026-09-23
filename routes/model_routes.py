@@ -11,6 +11,7 @@ import time as _time
 import logging
 import httpx
 from datetime import datetime
+from types import SimpleNamespace
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse, urlunparse
 from fastapi import APIRouter, HTTPException, Form, Query, Body, Request, Response
@@ -46,10 +47,12 @@ _ENDPOINT_SETTING_FIELDS = {
 }
 
 _ENDPOINT_FALLBACK_FIELDS = {
-    "default_model_fallbacks": "Default Model Fallbacks",
+    "foreground_model_fallbacks": "Foreground Model Fallbacks",
     "utility_model_fallbacks": "Utility Model Fallbacks",
     "vision_model_fallbacks":  "Vision Model Fallbacks",
 }
+# `default_model_fallbacks` is intentionally absent. The legacy data remains
+# stored as-is even when an endpoint is removed, but no longer affects routing.
 
 
 def _speech_settings_using_endpoint(settings: dict, ep_id: str) -> list:
@@ -179,7 +182,12 @@ def _clear_user_pref_endpoint_refs(all_prefs: dict, ep_id: str) -> int:
     if not isinstance(all_prefs, dict):
         return 0
     users = all_prefs.get("_users")
-    pref_sets = users.values() if isinstance(users, dict) else [all_prefs]
+    # A mixed store can contain auth-disabled foreground policy at the root
+    # alongside named-owner preferences. Both are active namespaces; legacy
+    # `default_model_fallbacks` remains untouched by the field allowlist.
+    pref_sets = [all_prefs]
+    if isinstance(users, dict):
+        pref_sets.extend(users.values())
     cleared_users = 0
     for prefs in pref_sets:
         if isinstance(prefs, dict) and _clear_endpoint_settings_for_endpoint(prefs, ep_id):
@@ -1361,14 +1369,14 @@ def _legacy_visible_api_models(ep) -> List[str]:
 def _picker_models_for_endpoint(ep, base_url: str, kind: str):
     """Return model IDs that should appear in the picker for an endpoint.
 
-    API providers expose remote inventory from /v1/models. Treat that cache as
-    inventory, not approval: only manually pinned API models should appear in
-    the picker. Local/self-hosted endpoints keep the older hide-list behavior.
+    API providers expose remote inventory from /v1/models. Default to that
+    visible inventory until an explicit pinned-model allow-list is saved.
+    Local/self-hosted endpoints keep the older hide-list behavior.
     """
     pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
     if _picker_requires_pinning(base_url, kind):
         if not _has_explicit_pinned_models(ep):
-            pinned = _legacy_visible_api_models(ep) if _hidden_model_ids(ep) else []
+            pinned = _legacy_visible_api_models(ep)
         return pinned, pinned
     return _visible_models(
         _cached_model_ids(ep),
@@ -1433,13 +1441,21 @@ def setup_model_routes(model_discovery):
         category = _classify_endpoint(base, kind)
         mode = _endpoint_refresh_mode(ep, kind)
         cached = _cached_model_ids(ep)
-        key = _refresh_key(base, getattr(ep, "api_key", None))
+        raw_api_key = getattr(ep, "api_key", None)
+        provider_auth_id = getattr(ep, "provider_auth_id", None)
+        key = _refresh_key(base, raw_api_key or (f"auth:{provider_auth_id}" if provider_auth_id else None))
         state = _refresh_state.get(key, {})
 
         info = {
             "id": getattr(ep, "id", ""),
             "base": base,
-            "api_key": _endpoint_runtime_key(ep),
+            "runtime_endpoint": {
+                "id": getattr(ep, "id", ""),
+                "base_url": getattr(ep, "base_url", ""),
+                "api_key": raw_api_key,
+                "provider_auth_id": provider_auth_id,
+                "owner": getattr(ep, "owner", None),
+            },
             "kind": kind,
             "category": category,
             "mode": mode,
@@ -1497,45 +1513,93 @@ def setup_model_routes(model_discovery):
                             continue
                         groups.setdefault(info["key"], {
                             "base": info["base"],
-                            "api_key": info["api_key"],
+                            "runtime_endpoint": info["runtime_endpoint"],
                             "timeout": info["timeout"],
                             "endpoint_ids": [],
+                            "endpoint_configs": {},
                         })["endpoint_ids"].append(info["id"])
+                        groups[info["key"]]["endpoint_configs"][info["id"]] = dict(
+                            info["runtime_endpoint"]
+                        )
 
-                    for key in groups:
-                        st = _refresh_state.setdefault(key, {})
-                        st["inflight"] = True
-                        st["last_attempt"] = now
-
-                    def _probe_one(key: str, data: Dict[str, Any]):
-                        try:
-                            ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
-                            return key, data["endpoint_ids"], ids, None
-                        except Exception as e:
-                            return key, data["endpoint_ids"], None, e
-
-                    if groups:
-                        with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
-                            futures = [pool.submit(_probe_one, key, data) for key, data in groups.items()]
-                            for fut in as_completed(futures):
-                                key, endpoint_ids, ids, err = fut.result()
-                                st = _refresh_state.setdefault(key, {})
-                                if ids:
-                                    for ep_id in endpoint_ids:
-                                        ep_obj = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
-                                        if ep_obj:
-                                            ep_obj.cached_models = json.dumps(ids)
-                                            changed = True
-                                    st["last_success"] = _time.time()
-                                    st["fail_count"] = 0
-                                    st.pop("last_failure", None)
-                                else:
-                                    st["last_failure"] = _time.time()
-                                    st["fail_count"] = int(st.get("fail_count") or 0) + 1
-                                st["inflight"] = False
-                        db.commit()
+                    # Do not retain a checked-out connection while provider
+                    # probes run.  They may block for many seconds and this
+                    # background refresh must not starve request handlers.
+                    groups = {
+                        key: {
+                            "base": data["base"],
+                            "runtime_endpoint": dict(data["runtime_endpoint"]),
+                            "timeout": data.get("timeout"),
+                            "endpoint_ids": list(data["endpoint_ids"]),
+                            "endpoint_configs": {
+                                ep_id: dict(config)
+                                for ep_id, config in data["endpoint_configs"].items()
+                            },
+                        }
+                        for key, data in groups.items()
+                    }
                 finally:
                     db.close()
+
+                # OAuth credential resolution may refresh tokens and use both
+                # the network and database.  It must happen after the endpoint
+                # inventory session has been returned to the pool.
+                for data in groups.values():
+                    data["api_key"] = _endpoint_runtime_key(
+                        SimpleNamespace(**data.pop("runtime_endpoint"))
+                    )
+
+                for key in groups:
+                    st = _refresh_state.setdefault(key, {})
+                    st["inflight"] = True
+                    st["last_attempt"] = now
+
+                def _probe_one(key: str, data: Dict[str, Any]):
+                    try:
+                        ids = _probe_endpoint(data["base"], data.get("api_key"), timeout=data.get("timeout") or 2)
+                        return key, data["endpoint_ids"], ids, None
+                    except Exception as e:
+                        return key, data["endpoint_ids"], None, e
+
+                cache_updates: Dict[str, List[str]] = {}
+                if groups:
+                    with ThreadPoolExecutor(max_workers=min(4, len(groups))) as pool:
+                        futures = [pool.submit(_probe_one, key, data) for key, data in groups.items()]
+                        for fut in as_completed(futures):
+                            key, endpoint_ids, ids, err = fut.result()
+                            st = _refresh_state.setdefault(key, {})
+                            if ids:
+                                for ep_id in endpoint_ids:
+                                    cache_updates[ep_id] = ids
+                                st["last_success"] = _time.time()
+                                st["fail_count"] = 0
+                                st.pop("last_failure", None)
+                            else:
+                                st["last_failure"] = _time.time()
+                                st["fail_count"] = int(st.get("fail_count") or 0) + 1
+                            st["inflight"] = False
+
+                if groups:
+                    write_db = SessionLocal()
+                    try:
+                        for ep_id, ids in cache_updates.items():
+                            ep_obj = write_db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                            expected = next(
+                                (data["endpoint_configs"].get(ep_id) for data in groups.values()
+                                 if ep_id in data["endpoint_configs"]),
+                                None,
+                            )
+                            config_unchanged = bool(ep_obj) and bool(ep_obj.is_enabled) and bool(expected)
+                            for field in ("base_url", "api_key", "provider_auth_id", "owner"):
+                                if getattr(ep_obj, field, None) != (expected or {}).get(field):
+                                    config_unchanged = False
+                                    break
+                            if config_unchanged:
+                                ep_obj.cached_models = json.dumps(ids)
+                                changed = True
+                        write_db.commit()
+                    finally:
+                        write_db.close()
                 if changed:
                     _invalidate_models_cache()
             except Exception as e:
@@ -1813,40 +1877,42 @@ def setup_model_routes(model_discovery):
 
         db = SessionLocal()
         try:
+            endpoint_ids = {
+                item.get("endpoint_id", "") for item in models_to_probe
+                if item.get("endpoint_id", "")
+            }
             endpoints_cache = {}
-            results = []
-            for item in models_to_probe:
-                ep_id = item.get("endpoint_id", "")
-                model_id = item.get("model", "")
-                if not model_id:
-                    results.append({"model": model_id, "status": "fail", "error": "No model specified"})
-                    continue
-
-                # Cache endpoint lookups
-                if ep_id and ep_id not in endpoints_cache:
-                    ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
-                    if ep:
-                        endpoints_cache[ep_id] = {"base_url": ep.base_url, "api_key": ep.api_key}
-                ep_data = endpoints_cache.get(ep_id)
-                if not ep_data:
-                    # Try to find by base_url from the model's endpoint field
-                    endpoint_url = item.get("endpoint", "")
-                    if endpoint_url:
-                        ep_data = {"base_url": endpoint_url, "api_key": item.get("api_key", "")}
-                    else:
-                        results.append({"model": model_id, "status": "fail", "error": "Endpoint not found"})
-                        continue
-
-                base = _normalize_base(ep_data["base_url"])
-                _with_tools = item.get("with_tools", False)
-                result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools)
-                result["model"] = model_id
-                result["endpoint_id"] = ep_id
-                results.append(result)
-
-            return {"results": results}
+            for ep_id in endpoint_ids:
+                ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                if ep:
+                    endpoints_cache[ep_id] = {"base_url": ep.base_url, "api_key": ep.api_key}
         finally:
             db.close()
+
+        results = []
+        for item in models_to_probe:
+            ep_id = item.get("endpoint_id", "")
+            model_id = item.get("model", "")
+            if not model_id:
+                results.append({"model": model_id, "status": "fail", "error": "No model specified"})
+                continue
+
+            ep_data = endpoints_cache.get(ep_id)
+            if not ep_data:
+                endpoint_url = item.get("endpoint", "")
+                if endpoint_url:
+                    ep_data = {"base_url": endpoint_url, "api_key": item.get("api_key", "")}
+                else:
+                    results.append({"model": model_id, "status": "fail", "error": "Endpoint not found"})
+                    continue
+
+            base = _normalize_base(ep_data["base_url"])
+            _with_tools = item.get("with_tools", False)
+            result = _probe_single_model(base, ep_data.get("api_key"), model_id, timeout=8, with_tools=_with_tools)
+            result["model"] = model_id
+            result["endpoint_id"] = ep_id
+            results.append(result)
+        return {"results": results}
 
     @router.get("/probe")
     def probe_models(request: Request, endpoint_id: Optional[str] = Query(None)):
@@ -1865,10 +1931,21 @@ def setup_model_routes(model_discovery):
                     "id": ep.id,
                     "name": ep.name,
                     "base_url": ep.base_url,
-                    "api_key": _endpoint_runtime_key(ep),
+                    "runtime_endpoint": {
+                        "id": ep.id,
+                        "base_url": ep.base_url,
+                        "api_key": getattr(ep, "api_key", None),
+                        "provider_auth_id": getattr(ep, "provider_auth_id", None),
+                        "owner": getattr(ep, "owner", None),
+                    },
                 })
         finally:
             db.close()
+
+        for ep in ep_data:
+            ep["api_key"] = _endpoint_runtime_key(
+                SimpleNamespace(**ep.pop("runtime_endpoint"))
+            )
 
         if not ep_data:
             def _empty():
@@ -2273,10 +2350,24 @@ def setup_model_routes(model_discovery):
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
-            ep_data = {"id": ep.id, "name": ep.name, "base_url": ep.base_url,
-                       "api_key": _endpoint_runtime_key(ep)}
+            ep_data = {
+                "id": ep.id,
+                "name": ep.name,
+                "base_url": ep.base_url,
+                "runtime_endpoint": {
+                    "id": ep.id,
+                    "base_url": ep.base_url,
+                    "api_key": getattr(ep, "api_key", None),
+                    "provider_auth_id": getattr(ep, "provider_auth_id", None),
+                    "owner": getattr(ep, "owner", None),
+                },
+            }
         finally:
             db.close()
+
+        ep_data["api_key"] = _endpoint_runtime_key(
+            SimpleNamespace(**ep_data.pop("runtime_endpoint"))
+        )
 
         base = _normalize_base(ep_data["base_url"])
         all_models = _probe_endpoint(base, ep_data["api_key"])
@@ -2335,40 +2426,79 @@ def setup_model_routes(model_discovery):
             base = _normalize_base(ep.base_url)
             kind = _effective_endpoint_kind(ep, base)
             picker_requires_pinning = _picker_requires_pinning(base, kind)
+            pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
+            if picker_requires_pinning and not _has_explicit_pinned_models(ep):
+                pinned = _legacy_visible_api_models(ep)
+            refresh_snapshot = None
             if refresh:
+                refresh_snapshot = {
+                    "id": ep.id,
+                    "base_url": ep.base_url,
+                    "api_key": getattr(ep, "api_key", None),
+                    "provider_auth_id": getattr(ep, "provider_auth_id", None),
+                    "owner": getattr(ep, "owner", None),
+                    "endpoint_kind": getattr(ep, "endpoint_kind", None),
+                    "model_refresh_mode": getattr(ep, "model_refresh_mode", None),
+                    "model_refresh_interval": getattr(ep, "model_refresh_interval", None),
+                    "model_refresh_timeout": getattr(ep, "model_refresh_timeout", None),
+                    "is_enabled": bool(ep.is_enabled),
+                }
                 category = _classify_endpoint(base, kind)
                 timeout = _manual_refresh_timeout(ep, category, refresh_timeout)
+        finally:
+            db.close()
+
+        if refresh:
+            # Credential resolution can refresh OAuth state and perform its own
+            # DB/network work.  Resolve only for an explicit refresh and only
+            # after the endpoint read connection has been returned to the pool.
+            runtime_ep = SimpleNamespace(**refresh_snapshot)
+            runtime_key = _endpoint_runtime_key(runtime_ep)
+            try:
+                probed = _probe_endpoint(base, runtime_key, timeout=timeout)
+            except Exception as exc:
+                logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
+                probed = []
+            if probed:
+                persisted = False
+                write_db = SessionLocal()
                 try:
-                    probed = _probe_endpoint(base, _endpoint_runtime_key(ep), timeout=timeout)
-                except Exception as exc:
-                    logger.warning("Manual model refresh failed for endpoint %s at %s: %s", ep_id, base, exc)
-                    probed = []
-                if probed:
+                    write_ep = write_db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
+                    # A slow probe must not overwrite models after an admin has
+                    # edited, re-authenticated, disabled, or replaced the row.
+                    config_unchanged = bool(write_ep) and bool(write_ep.is_enabled)
+                    for field in ("base_url", "api_key", "provider_auth_id", "owner"):
+                        if getattr(write_ep, field, None) != refresh_snapshot[field]:
+                            config_unchanged = False
+                            break
+                    if config_unchanged:
+                        write_ep.cached_models = json.dumps(probed)
+                        write_db.commit()
+                        persisted = True
+                finally:
+                    write_db.close()
+                if persisted:
                     all_models = probed
-                    ep.cached_models = json.dumps(all_models)
-                    db.commit()
                     _invalidate_models_cache()
                     response.headers["X-Model-Refresh-Status"] = "refreshed"
                     response.headers["X-Model-Refresh-Count"] = str(len(probed))
                 else:
-                    response.headers["X-Model-Refresh-Status"] = "failed"
-                    response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
-            pinned = _normalize_model_ids(getattr(ep, "pinned_models", None))
-            if picker_requires_pinning and not _has_explicit_pinned_models(ep):
-                pinned = _legacy_visible_api_models(ep)
-            pinned_set = set(pinned)
-            return [
-                {
-                    "id": m,
-                    "display": m.split("/")[-1],
-                    "is_hidden": m in hidden,
-                    "is_pinned": m in pinned_set,
-                    "picker_requires_pinning": picker_requires_pinning,
-                }
-                for m in _merge_model_ids(all_models, pinned)
-            ]
-        finally:
-            db.close()
+                    response.headers["X-Model-Refresh-Status"] = "discarded"
+                    response.headers["X-Model-Refresh-Warning"] = "Endpoint changed during refresh; discarded stale probe results."
+            else:
+                response.headers["X-Model-Refresh-Status"] = "failed"
+                response.headers["X-Model-Refresh-Warning"] = "Model refresh failed or returned no models; kept cached models."
+        pinned_set = set(pinned)
+        return [
+            {
+                "id": m,
+                "display": m.split("/")[-1],
+                "is_hidden": m in hidden,
+                "is_pinned": m in pinned_set,
+                "picker_requires_pinning": picker_requires_pinning,
+            }
+            for m in _merge_model_ids(all_models, pinned)
+        ]
 
     @router.patch("/model-endpoints/{ep_id}/models")
     async def update_hidden_models(ep_id: str, request: Request):
@@ -2380,14 +2510,14 @@ def setup_model_routes(model_discovery):
         without clobbering the other.
         """
         require_admin(request)
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Body must be a JSON object")
         db = SessionLocal()
         try:
             ep = db.query(ModelEndpoint).filter(ModelEndpoint.id == ep_id).first()
             if not ep:
                 raise HTTPException(404, "Endpoint not found")
-            body = await request.json()
-            if not isinstance(body, dict):
-                raise HTTPException(400, "Body must be a JSON object")
             if "hidden" in body:
                 hidden = body.get("hidden")
                 if not isinstance(hidden, list):
@@ -2455,7 +2585,6 @@ def setup_model_routes(model_discovery):
             _user_prefs = _load_for_user(_user) or {}
             ep_id = (_user_prefs.get("default_endpoint_id") or "").strip()
             model = (_user_prefs.get("default_model") or "").strip()
-            _fallbacks = _user_prefs.get("default_model_fallbacks") or []
             # If user has no personal default, fall back to global default
             # But only based on the "share_defaults_with_users" flag
             # (only if share_defaults_with_users is enabled)
@@ -2464,12 +2593,9 @@ def setup_model_routes(model_discovery):
                     ep_id = settings.get("default_endpoint_id", "")
                 if not model:
                     model = settings.get("default_model", "")
-                if not _fallbacks:
-                    _fallbacks = settings.get("default_model_fallbacks") or []
         else:
             ep_id = settings.get("default_endpoint_id", "")
             model = settings.get("default_model", "")
-            _fallbacks = settings.get("default_model_fallbacks") or []
         db = SessionLocal()
         try:
             ep = None
@@ -2484,33 +2610,6 @@ def setup_model_routes(model_discovery):
                 if _user and not _is_admin:
                     ep_q = owner_filter(ep_q, ModelEndpoint, _user)
                 ep = ep_q.first()
-            # Configured fallback chain — when the chosen default endpoint is
-            # gone/disabled, honor the user's configured `default_model_fallbacks`
-            # in order BEFORE arbitrarily grabbing the first enabled endpoint.
-            # (Previously this jumped straight to "first enabled", which is why
-            # deleting/changing the main endpoint silently reassigned the default
-            # chat to some unrelated endpoint instead of the fallback.)
-            if not ep:
-                for entry in _fallbacks:
-                    if not isinstance(entry, dict):
-                        continue
-                    fid = (entry.get("endpoint_id") or "").strip()
-                    if not fid:
-                        continue
-                    cand_q = db.query(ModelEndpoint).filter(
-                        ModelEndpoint.id == fid, ModelEndpoint.is_enabled == True
-                    )
-                    if _user and not _is_admin:
-                        cand_q = owner_filter(cand_q, ModelEndpoint, _user)
-                    cand = cand_q.first()
-                    if cand:
-                        ep = cand
-                        # Use the fallback entry's model. Reset even when empty
-                        # so we don't carry the prior endpoint's stale model onto
-                        # this fallback — the cached-models lookup below then
-                        # fills it from the fallback endpoint.
-                        model = (entry.get("model") or "").strip()
-                        break
             # Last resort: first enabled endpoint owned by THIS user. Do not
             # include null-owner/shared endpoints here: a brand-new user with
             # no explicit default should not auto-open a pending chat using an

@@ -193,8 +193,15 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
     try:
         if action == "list_calendars":
             _ensure_default_calendar(db, owner)
+            # This read path intentionally persists the lazily-created default;
+            # event creation commits it in the event's transaction instead.
+            db.commit()
             cals = _calendar_query().all()
-            result = [{"name": c.name, "href": c.id} for c in cals]
+            # `href` is a local calendar id, not a remote CalDAV URL — the name
+            # is historical and kept so existing callers keep working. `id` is
+            # the same value under an honest name; pass either back as
+            # calendar_href to scope list_events to one calendar.
+            result = [{"name": c.name, "id": c.id, "href": c.id} for c in cals]
             if result:
                 lines = [f"Found {len(result)} calendar(s):"]
                 for c in result:
@@ -240,12 +247,36 @@ async def do_manage_calendar(content: str, owner: Optional[str] = None) -> Dict:
                 CalendarEvent.dtend > start_dt,
                 CalendarEvent.status != "cancelled",
             )
-            calendar_filter = args.get("calendar")
+            # The schema advertises both `calendar_href` (what list_events
+            # itself returns on every event) and `calendar`. Reading only
+            # `calendar` meant a model that echoed back the href it had just
+            # been given was silently answered from EVERY calendar the owner
+            # has — including the one Todoist tasks are imported into, which
+            # is why picking a specific calendar kept returning Todoist items.
+            calendar_filter = args.get("calendar_href") or args.get("calendar")
             if calendar_filter:
-                q = q.filter(
-                    (CalendarEvent.calendar_id == calendar_filter) |
-                    (CalendarCal.name == calendar_filter)
-                )
+                # Same resolution order create_event uses: exact id, then name
+                # (case-insensitive), then the short-id prefix list_calendars
+                # prints. Resolving to an id first keeps the filter on one
+                # calendar instead of matching a name across several.
+                match = (_calendar_query()
+                         .filter(CalendarCal.id == calendar_filter)
+                         .first())
+                if not match:
+                    match = (_calendar_query()
+                             .filter(CalendarCal.name.ilike(calendar_filter))
+                             .first())
+                if not match:
+                    match = (_calendar_query()
+                             .filter(CalendarCal.id.like(f"{calendar_filter}%"))
+                             .first())
+                if not match:
+                    return {
+                        "error": f"No calendar matching {calendar_filter!r}. "
+                                 "Call list_calendars to see the available ids and names.",
+                        "exit_code": 1,
+                    }
+                q = q.filter(CalendarEvent.calendar_id == match.id)
             rows = q.order_by(CalendarEvent.dtstart).all()
             events = []
             for ev in rows:

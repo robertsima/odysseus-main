@@ -18,6 +18,7 @@ import re
 from typing import Optional
 
 from src.memory import MemoryStoreUnreadable
+from services.memory.extraction_context import conversation_for_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -300,10 +301,9 @@ async def extract_and_store(
         from src.llm_core import llm_call_async, llm_call_async_with_fallback
 
         # Get last N messages from session
-        messages = session.get_context_messages()
-        recent = messages[-CONTEXT_WINDOW:] if len(messages) > CONTEXT_WINDOW else messages
+        recent = conversation_for_extraction(session.get_context_messages(), limit=CONTEXT_WINDOW)
 
-        if len(recent) < 2:
+        if len(recent) < 2 or not any(m["role"] == "user" for m in recent):
             return  # Need at least a user message and assistant response
 
         # Strip media (images/audio) from messages — background memory extraction

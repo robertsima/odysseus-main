@@ -168,6 +168,9 @@ def send(to_session: str, text: str, *, from_session: str, owner: Optional[str] 
 
     payload = f"{_peer_prefix(from_session, from_session_name)} {text}"
 
+    if not agent_control.is_steerable(to_session):
+        return {"ok": False, "reason": f"session {to_session!r} has no uniquely steerable live run"}
+
     try:
         rec = agent_control.steer(to_session, payload, owner=owner, kind="peer",
                                   from_session=from_session, from_session_name=from_session_name)

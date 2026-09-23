@@ -323,6 +323,74 @@ async def test_provider_neutral_tool_uses_registry_selection(monkeypatch):
     assert chosen.calls[0][0]["prompt"] == "fix it"
     assert result["provider"] == "remote"
     assert result["selection"] == "selected remote"
+    assert result["delegation_state"] == "completed"
+
+
+async def test_provider_neutral_start_does_not_claim_an_untrackable_job_started(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+
+    async def ambiguous_start(request, ctx=None):
+        return {"response": "Started three audits", "exit_code": 0}
+
+    monkeypatch.setattr(chosen, "delegate", ambiguous_start)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+    result = await DelegationTool().execute('{"action":"start","prompt":"audit"}', {})
+
+    assert result["exit_code"] == 0
+    assert result["delegation_state"] == "unconfirmed"
+    assert "Do not claim it started" in result["delegation_note"]
+    assert "Started three audits" not in result["delegation_note"]
+
+
+async def test_provider_neutral_start_reports_a_trackable_active_job(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+
+    async def started(request, ctx=None):
+        return {"task_id": "job-1", "status": "queued", "exit_code": 0}
+
+    monkeypatch.setattr(chosen, "delegate", started)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+    result = await DelegationTool().execute('{"action":"start","prompt":"audit"}', {})
+
+    assert result["delegation_state"] == "started"
+    assert "job-1" in result["delegation_note"]
+
+
+async def test_provider_nonzero_or_failed_status_never_claims_success(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+
+    async def failed(request, ctx=None):
+        return {"status": "failed", "output": "started audit", "exit_code": 0}
+
+    monkeypatch.setattr(chosen, "delegate", failed)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+    result = await DelegationTool().execute('{"action":"start","prompt":"audit"}', {})
+
+    assert result["exit_code"] == 1
+    assert result["delegation_state"] == "failed"
+    assert "no worker is confirmed" in result["delegation_note"]
+
+
+async def test_provider_nonzero_run_preserves_the_real_exit_code(monkeypatch):
+    from src.agent_tools.delegation_tools import DelegationTool
+
+    chosen = _FakeProvider("remote", ok=True)
+
+    async def failed(request, ctx=None):
+        return {"output": "timed out", "exit_code": 124}
+
+    monkeypatch.setattr(chosen, "delegate", failed)
+    monkeypatch.setattr(delegation, "selection", lambda: (chosen, "selected remote"))
+    result = await DelegationTool().execute('{"action":"run","prompt":"audit"}', {})
+
+    assert result["exit_code"] == 124
+    assert result["delegation_state"] == "failed"
 
 
 async def test_provider_neutral_tool_returns_provider_failures(monkeypatch):

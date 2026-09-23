@@ -11,6 +11,7 @@ status) is local and side-effect-free outside the worktree directory.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Any, Dict
 
@@ -19,11 +20,68 @@ from src.tool_utils import _parse_tool_args
 logger = logging.getLogger(__name__)
 
 _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request", "remove")
+            "publish", "list_requests", "show_request",
+            "repo_list", "repo_status", "repo_pull")
+
+# Refused by policy rather than merely unknown: `remove` runs
+# `git worktree remove --force` and then prunes, which discards uncommitted
+# work. Agents may create and publish worktrees but never delete them.
+_FORBIDDEN_ACTIONS = ("remove",)
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
     return {"error": message, "exit_code": 1, **extra}
+
+
+# Actions that work on one named worktree, in the order an agent needs them.
+_BRANCH_ACTIONS = ("commit", "diff", "request_publish")
+
+
+def _next_step(code: str, action: str, branch: str) -> Dict[str, Any]:
+    """The call that fixes a failure the agent caused, so it doesn't spend
+    rounds guessing the publish sequence (start → edit → commit →
+    request_publish)."""
+    if code == "MISSING_BRANCH":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "status"},
+                "hint": (f"'{action}' needs the worktree's name. Call status to list the "
+                         "agent worktrees, or start one with {\"action\": \"start\", \"name\": \"...\"}.")}
+    if code == "WORKTREE_NOT_STARTED":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "start", "name": branch},
+                "hint": ("Start the worktree first, make and commit the changes in it, "
+                         f"then call {action} again with the same name.")}
+    if code == "INVALID_BRANCH":
+        return {"code": code, "required_fields": ["name"],
+                "next_action": {"action": "status"},
+                "hint": ("Use a short task name such as 'cache-fix' (or the full "
+                         "agent/odysseus/<name> branch). Call status to list existing ones.")}
+    return {"code": code}
+
+
+def _repository_read_token(ctx: dict) -> str | None:
+    """Borrow GitHub's read credential only within the live integration ceiling.
+
+    The token never comes from model arguments, a repository config, or the
+    separate human-gated publishing credential. Sessionless calls are anonymous.
+    """
+    session_id = ctx.get("session_id")
+    if not session_id:
+        return None
+    from core.database import get_session_settings
+
+    settings = get_session_settings(session_id, strict=True) or {}
+    allowed = settings.get("allowed_mcp_servers")
+    if allowed is not None and (
+        not isinstance(allowed, list) or not {"*", "github_read"}.intersection(allowed)
+    ):
+        return None
+    # The token GitHub MCP uses, for the host it uses (github.com or
+    # GITHUB_HOST). Which remote actually receives it is decided per URL by
+    # repository_sync._transport: only that same host, never another.
+    from src.github_credentials import github_token_from_env
+
+    return github_token_from_env()
 
 
 class AgentWorktreeTool:
@@ -36,11 +94,21 @@ class AgentWorktreeTool:
             return _err(f"manage_agent_worktree: invalid JSON arguments ({exc})")
 
         action = str(args.get("action") or "status").strip().lower()
+        if action in _FORBIDDEN_ACTIONS:
+            return _err(
+                f"manage_agent_worktree: action {action!r} is not permitted by policy: "
+                "removing a worktree discards its uncommitted work. Commit and "
+                "request_publish instead, or ask the user to remove it.",
+                code="forbidden_by_policy",
+            )
         if action not in _ACTIONS:
             return _err(
                 f"manage_agent_worktree: unknown action {action!r}. "
                 f"Valid actions: {', '.join(_ACTIONS)}"
             )
+
+        if action.startswith("repo_"):
+            return await self._repo_execute(dict(args, action=action), ctx)
 
         from src.agent_worktree import approval as approval_mod
         from src.agent_worktree import service
@@ -48,6 +116,10 @@ class AgentWorktreeTool:
 
         cfg = load_config()
         branch = str(args.get("branch") or args.get("name") or "").strip()
+
+        if action in _BRANCH_ACTIONS and not branch:
+            return _err(f"manage_agent_worktree {action}: 'name' is required",
+                        **_next_step("MISSING_BRANCH", action, branch))
 
         try:
             if action == "status":
@@ -107,14 +179,58 @@ class AgentWorktreeTool:
                     return _err("manage_agent_worktree: 'request_id' is required")
                 return {"exit_code": 0, "request": approval_mod.get_request(request_id, cfg=cfg)}
 
-            if action == "remove":
-                return {"exit_code": 0, "result": await service.remove_worktree(branch, cfg=cfg)}
         except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
             # Messages from this package are already credential-scrubbed.
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)
-            return _err(f"manage_agent_worktree {action}: {exc}")
+            code = getattr(exc, "code", None)
+            return _err(f"manage_agent_worktree {action}: {exc}",
+                        **(_next_step(code, action, branch) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")
+
+    async def _repo_execute(self, args: dict, ctx: dict) -> dict:
+        """Separate scoped checkout sync from the app's publishing worktree."""
+        from src.git_tool_contract import normalize_worktree_repo_arguments
+        from src.tool_security import owner_is_admin_or_single_user
+
+        if not owner_is_admin_or_single_user(ctx.get("owner")):
+            return _err("Repository operations require an admin user.", code="admin_required")
+        args = normalize_worktree_repo_arguments(args)
+        action = args["action"]
+        accepted = {"action"} if action == "repo_list" else {"action", "repository"}
+        if set(args) - accepted:
+            return _err(
+                "Repository sync accepts only action and repository; the configured upstream "
+                "cannot be overridden with a branch, remote, URL, or command.", code="invalid_arguments",
+            )
+        if action != "repo_list" and (
+            not isinstance(args.get("repository"), str) or not args["repository"].strip()
+        ):
+            return _err("Use repo_list, then pass its absolute repository path.", code="invalid_path")
+        try:
+            from src.agent_worktree import repository_sync
+        except ImportError:
+            return _err("Repository sync dependency is missing; rebuild the app image.", code="dependency_missing")
+        try:
+            if action == "repo_list":
+                return {"exit_code": 0, "repositories": await repository_sync.list_repositories()}
+            if action == "repo_status":
+                result = await repository_sync.repository_status(args["repository"])
+            else:
+                result = await repository_sync.pull_repository(
+                    args["repository"], token=_repository_read_token(ctx),
+                )
+            return {"exit_code": 0, "result": result}
+        except repository_sync.RepositorySyncError as exc:
+            return _err(str(exc), code=exc.code)
+        except Exception:
+            # Transport/config exceptions can contain auth headers or embedded
+            # credentials. Never emit their text or traceback to the model/log.
+            logger.warning("Scoped repository operation failed: action=%s", action)
+            return _err(
+                "Repository operation failed; check checkout access and the GitHub read "
+                "integration. No shell fallback was attempted.", code="repository_sync_failed",
+            )
 
 
 class ReadAppLogsTool:
@@ -132,13 +248,25 @@ class ReadAppLogsTool:
         try:
             if action == "list":
                 return {"exit_code": 0, "logs": agent_logs.logs_index()}
+            if action == "trace":
+                found = agent_logs.trace(args.get("id") or args.get("contains") or "",
+                                         lines=args.get("lines", agent_logs.DEFAULT_LINES),
+                                         owner=ctx.get("owner"))
+                body = "\n".join(found["lines"]) or "(no log lines mention this id)"
+                runs = "\n".join(json.dumps(r, default=str) for r in found["runs"]) or "(no activity runs)"
+                return {"exit_code": 0, "trace": found,
+                        "output": (f"Trace {found['id']}: {found['line_count']} log line(s) across "
+                                   f"{', '.join(found['log_files']) or 'no log files'}"
+                                   + (" (showing the newest)" if found["truncated"] else "")
+                                   + f"\n{body}\n\nActivity runs:\n{runs}")}
             if action != "tail":
-                return _err(f"read_app_logs: unknown action {action!r} (use 'list' or 'tail')")
+                return _err(f"read_app_logs: unknown action {action!r} (use 'list', 'tail' or 'trace')")
             result = agent_logs.read_log(
                 args.get("name"),
                 lines=args.get("lines", agent_logs.DEFAULT_LINES),
                 contains=args.get("contains"),
                 level=args.get("level"),
+                since_minutes=args.get("since_minutes"),
             )
         except RuntimeError as exc:
             return _err(f"read_app_logs: {exc}")

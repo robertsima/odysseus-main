@@ -106,7 +106,7 @@ before proposing any change to how Claude is reached.
 |---|---|---|
 | "not an existing Git repository or worktree" | wrong path (e.g. `/app`) | use a path from `status`/`list_repositories` |
 | "outside Claude Code approved roots" | path not under the configured roots | pick an approved one or ask the operator to add the root in Settings |
-| `ready: false`, `auth.logged_in: false` | binary not signed in | tell the operator to sign in once as the container user |
+| `ready: false`, `auth.logged_in: false` | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise tell the operator to sign in once as the container user or set up the cloud runner |
 | "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Tools > Claude Code |
 | `permission_denials` mentions push/remote | Claude tried to publish | expected; publishing goes through `manage_agent_worktree` |
 | exit 124 | timed out | narrow the task or split it |

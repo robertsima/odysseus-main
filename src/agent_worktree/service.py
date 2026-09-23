@@ -48,7 +48,15 @@ MAX_CHANGED_FILES = 500
 
 
 class WorktreeError(RuntimeError):
-    """An operation could not be completed safely."""
+    """An operation could not be completed safely.
+
+    ``code`` names the failures an agent can fix by itself (see
+    agent_tools.worktree_tools, which turns it into a next step).
+    """
+
+    def __init__(self, message: str, *, code: Optional[str] = None):
+        super().__init__(message)
+        self.code = code
 
 
 def _lock_path(cfg: WorktreeConfig) -> str:
@@ -257,13 +265,13 @@ async def commit(
     cfg = cfg or load_config()
     resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
     if not resolved:
-        raise WorktreeError("invalid agent branch")
+        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
     text = (message or "").strip()
     if not text:
         raise WorktreeError("a commit message is required")
     path = _worktree_dir(cfg, resolved)
     if not os.path.exists(os.path.join(path, ".git")):
-        raise WorktreeError("worktree does not exist yet; start it first")
+        raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
 
     try:
         with file_lock(_lock_path(cfg)):
@@ -293,10 +301,10 @@ async def diff_summary(
     cfg = cfg or load_config()
     resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
     if not resolved:
-        raise WorktreeError("invalid agent branch")
+        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
     path = _worktree_dir(cfg, resolved)
     if not os.path.exists(os.path.join(path, ".git")):
-        raise WorktreeError("worktree does not exist yet; start it first")
+        raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
     try:
         # The summary reports HEAD, and publish pushes the branch. If those two
         # have been separated — a detached HEAD parked on the reviewed commit
@@ -550,7 +558,7 @@ async def remove_worktree(
     cfg = cfg or load_config()
     resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
     if not resolved:
-        raise WorktreeError("invalid agent branch")
+        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
     path = _worktree_dir(cfg, resolved)
     if not is_inside(path, cfg.worktree_root):
         raise WorktreeError("refusing to remove a path outside the worktree root")

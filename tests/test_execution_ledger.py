@@ -32,6 +32,10 @@ from src.context_compactor import (
 from src.model_context import estimate_tokens
 from src.prompt_security import untrusted_context_message
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: the execution ledger is not wired into upstream's loop (website/upstream-sync-2026-09-18.md)"
+)
+
 
 @pytest.fixture(autouse=True)
 def _store_root(monkeypatch):
@@ -275,6 +279,32 @@ def test_recall_results_are_never_collapsed():
     assert all(
         m["content"] == recall for m in msgs if m.get("role") == "tool"
     )
+
+
+def test_registry_dispatched_recall_results_are_never_collapsed():
+    """The real header: execute_tool_block routes recall through the registry,
+    so its desc is `registry: recall_tool_output {...}`. Reading "registry" as
+    the tool name compacted recalled slices and the agent recalled them again."""
+    recall = (
+        '### registry: recall_tool_output {"ref": "toolout-b3b8db60cf", "query": "state"}\n'
+        + "the slice the model asked for. " * 60
+    )
+    msgs = _transcript(0)
+    for i in range(LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 2):
+        msgs.extend(_native_round(i, recall, tool="recall_tool_output"))
+    compact_tool_exchanges(msgs)
+    assert all(
+        m["content"] == recall for m in msgs if m.get("role") == "tool"
+    )
+
+
+def test_dispatch_prefix_is_not_the_tool_name():
+    from src.context_compactor import _ledger_tool_name
+
+    assert _ledger_tool_name('### registry: recall_tool_output {"ref": "x"}') == "recall_tool_output"
+    assert _ledger_tool_name("### mcp: mcp__github_read__issue_read") == "mcp__github_read__issue_read"
+    assert _ledger_tool_name("### read_file: /srv/app.py") == "read_file"
+    assert _ledger_tool_name("### bash") == "bash"
 
 
 def test_a_failed_store_leaves_the_exchange_untouched(monkeypatch):

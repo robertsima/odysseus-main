@@ -82,6 +82,7 @@ class WebSearchTool:
             return {
                 "error": f"web_search failed: {type(e).__name__}: {str(e) or 'no details'}",
                 "exit_code": 1,
+                "untrusted_content": True,
             }
         if progress_cb:
             await progress_cb({
@@ -152,7 +153,11 @@ class WebFetchTool:
 
         if not text:
             if err:
-                return {"error": f"web_fetch: {url}: {err}{_fetch_error_hint(str(err))}", "exit_code": 1}
+                return {
+                    "error": f"web_fetch: {url}: {err}{_fetch_error_hint(str(err))}",
+                    "exit_code": 1,
+                    "untrusted_content": True,
+                }
             # A JavaScript-rendered app (phosphoricons.com in the logs) ships
             # an empty body but a real <title> and meta description. Hand
             # those over, clearly marked partial, instead of a bare failure
@@ -169,7 +174,7 @@ class WebFetchTool:
                     + f"Source: {url}\n"
                     + (f"\nDescription: {meta}\n" if meta else "")
                 )
-                return {"output": output, "exit_code": 0}
+                return {"output": output, "exit_code": 0, "untrusted_content": True}
             return {
                 "error": (
                     f"web_fetch: {url}: no readable text content (not HTML, or the page needs "

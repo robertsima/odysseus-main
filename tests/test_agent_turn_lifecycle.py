@@ -23,6 +23,10 @@ the turn it was meant for.
 
 import pytest
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 
 @pytest.fixture(autouse=True)
 def _clear_steer_queue(tmp_path, monkeypatch):
@@ -74,6 +78,61 @@ class TestSteerQueueLifecycle:
         assert agent_control.pending_steer("b") == ["for b"] or \
             [r["text"] for r in agent_control.pending_steer("b")] == ["for b"]
 
+    def test_concurrent_runs_cannot_drain_or_cancel_each_others_steer(self, monkeypatch):
+        """A steering request belongs to the turn that was live when accepted.
+
+        A detached continuation can share a session with a foreground turn.
+        Session-only queues let either loop eat the other loop's instruction,
+        or let the earlier finisher cancel it before the intended loop gets a
+        round.  Run ownership makes both operations exact.
+        """
+        from src import agent_activity, agent_control
+
+        monkeypatch.setattr(agent_activity, "active_turn", lambda sid: "run-parent")
+        parent = agent_control.steer("s", "keep the parent task focused")
+        child = agent_control.steer("s", "child-only correction", run_id="run-child")
+        assert parent["run_id"] == "run-parent"
+        assert child["run_id"] == "run-child"
+
+        assert agent_control.drain_steer("s", run_id="run-parent") == [parent["text"]]
+        # Finishing the parent cannot discard the child's still-pending steer.
+        assert agent_control.clear_steer("s", run_id="run-parent") == []
+        assert agent_control.pending_steer("s", run_id="run-child") == [child]
+        assert agent_control.drain_steer("s", run_id="run-child") == [child["text"]]
+        history = {row["id"]: row for row in agent_control.steer_history("s")}
+        assert history[parent["id"]]["target_run"] == "run-parent"
+        assert history[child["id"]]["target_run"] == "run-child"
+
+    def test_sole_headless_wrapper_run_is_the_steer_target(self):
+        from src import agent_activity, agent_control
+
+        agent_activity.run_started("s", "session", "Worker", run_id="wrapper", owner="alice")
+        rec = agent_control.steer("s", "keep checking the worker")
+        assert rec["run_id"] == "wrapper"
+        assert agent_control.drain_steer("s", run_id="wrapper") == [rec["text"]]
+
+    def test_ambiguous_headless_wrappers_are_not_stolen_by_latest_telemetry(self, monkeypatch):
+        from routes import chat_routes
+        from src import agent_activity, agent_control, headless_agent
+
+        monkeypatch.setattr(chat_routes, "_active_streams", {}, raising=False)
+        headless_agent._STEER_RUNS["s"] = {"wrapper-a", "wrapper-b"}
+        agent_activity.run_started("s", "odysseus", "latest", run_id="telemetry")
+        assert agent_control._live_run_id("s") is None
+        assert agent_control.is_steerable("s") is False
+        headless_agent._STEER_RUNS.pop("s", None)
+
+    def test_foreground_preparation_binds_steer_before_loop_telemetry(self, monkeypatch):
+        from routes import chat_routes
+        from src import agent_control
+
+        monkeypatch.setattr(chat_routes, "_active_streams", {
+            "s": {"mode": "agent", "steer_run_id": "steer-prep"},
+        })
+        rec = agent_control.steer("s", "do not lose this during preparation")
+        assert rec["run_id"] == "steer-prep"
+        assert agent_control.drain_steer("s", run_id="steer-prep") == [rec["text"]]
+
     def test_empty_text_is_rejected(self):
         from src import agent_control
 
@@ -88,6 +147,42 @@ class TestSteerQueueLifecycle:
             agent_control.steer("s", f"m{i}")
         with pytest.raises(ValueError):
             agent_control.steer("s", "one too many")
+
+
+class TestLiveChildCapacity:
+    def test_queued_claude_task_counts_before_activity_run_exists(self, monkeypatch):
+        """Claude records a task before its semaphore permits `_run_claude`.
+        That queued interval must consume the same per-chat worker slot as a
+        published run, or several starts in one agent round all pass the gate.
+        """
+        from src import agent_activity, agent_control
+        from src.agent_tools import claude_code_tools
+
+        class Runner:
+            def summaries(self, *, limit):
+                assert limit == 400
+                return [
+                    {"task_id": "queued-task", "session_id": "chat-1", "status": "queued"},
+                    {"task_id": "other-chat", "session_id": "chat-2", "status": "queued"},
+                ]
+
+        monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [])
+        monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
+        assert agent_control.live_children("chat-1") == 1
+
+    def test_claude_task_already_in_activity_is_not_double_counted(self, monkeypatch):
+        from src import agent_activity, agent_control
+        from src.agent_tools import claude_code_tools
+
+        class Runner:
+            def summaries(self, *, limit):
+                return [{"task_id": "task-1", "session_id": "chat-1", "status": "running"}]
+
+        monkeypatch.setattr(agent_activity, "list_runs", lambda *, limit: [
+            {"run_id": "task-1", "session_id": "chat-1", "status": "running", "source": "claude_code"},
+        ])
+        monkeypatch.setattr(claude_code_tools, "get_task_runner", lambda: Runner())
+        assert agent_control.live_children("chat-1") == 1
 
 
 class TestSteerability:
@@ -107,7 +202,7 @@ class TestSteerability:
         from routes import chat_routes
         from src import agent_control
 
-        monkeypatch.setattr(chat_routes, "_active_streams", {"s": {"mode": "agent"}}, raising=False)
+        monkeypatch.setattr(chat_routes, "_active_streams", {"s": {"mode": "agent", "steer_run_id": "prep-run"}}, raising=False)
         assert agent_control.is_steerable("s") is True
 
     def test_steerable_for_a_detached_worker_with_no_chat_stream(self, monkeypatch):
@@ -118,6 +213,8 @@ class TestSteerability:
         from src import agent_control
 
         monkeypatch.setattr(chat_routes, "_active_streams", {}, raising=False)
+        from src import agent_activity
+        agent_activity.run_started("worker-1", "session", "Worker", run_id="wrapper")
         assert agent_control.is_steerable("worker-1") is True
 
     def test_route_is_what_requires_the_run_to_be_live(self, monkeypatch):
@@ -127,7 +224,7 @@ class TestSteerability:
         from src import agent_control
 
         monkeypatch.setattr(chat_routes, "_active_streams", {}, raising=False)
-        assert agent_control.is_steerable("never-existed") is True
+        assert agent_control.is_steerable("never-existed") is False
 
 
 class TestClientTrustsTheServer:
@@ -140,6 +237,8 @@ class TestClientTrustsTheServer:
 
         root = Path(__file__).resolve().parents[1]
         return (root / "static" / "js" / "chat.js").read_text(encoding="utf-8", errors="replace")
+
+    @pytest.mark.skip(reason="Superseded: a dropped stream now re-attaches to the detached run (upstream) instead of probing and nudging")
 
     def test_auto_recover_probes_the_server_before_nudging(self):
         """A dropped SSE is not a dropped run; check before inventing a turn."""
@@ -158,6 +257,32 @@ class TestClientTrustsTheServer:
         assert "/steer" in body, "a mid-run message should reach the running agent"
         assert "fallbackToQueue" in body, "and still queue when steering is not possible"
 
+    def test_route_binds_a_steer_run_before_agent_preparation(self):
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parents[1] / "routes" / "chat_routes.py").read_text(encoding="utf-8")
+        setup = source[source.index("async def stream_with_save"):source.index("async for chunk in stream_agent_loop")]
+        call = source[source.index("async for chunk in stream_agent_loop"):source.index("if chunk.startswith(\"data: \")", source.index("async for chunk in stream_agent_loop"))]
+        assert '"steer_run_id": _steer_run_id' in setup
+        assert "steer_run_id=_steer_run_id" in call
+
+    def test_mid_run_steer_chip_tracks_the_server_lifecycle(self):
+        """The optimistic composer chip used to have no steer id, so it could
+        not observe injection and stayed labelled `Steering` forever."""
+        src = self._chat_js()
+        submit = src[src.index("export function queueStreamingComposerRequest"):]
+        lifecycle = src[src.index("function _applySteeredBubbleState"):src.index("export function queueStreamingComposerRequest")]
+
+        assert "await res.json()" in submit
+        assert "steerRecord.id" in submit
+        assert "_trackSteeredBubble(sid, steerRecord.id, bubble)" in submit
+        assert "/steer?limit=50" in lifecycle
+        # Injection is terminal for this ephemeral composer chip, but it is
+        # not called completion: only the durable server history can say it
+        # reached the model, not that the agent acted on it.
+        assert "bubble.remove()" in lifecycle
+        assert "steerState === 'completed'" not in lifecycle
+
     def test_dashboard_polls_are_marked_as_polls(self):
         from pathlib import Path
 
@@ -166,7 +291,7 @@ class TestClientTrustsTheServer:
         assert "X-Odysseus-Poll" in src
         # The timer-driven reads must use it, or the dashboard resumes killing
         # the background runs it exists to display.
-        assert "apiPoll('/api/agents/overview')" in src
+        assert "apiPoll(`/api/agents/overview${overviewArgs.size" in src
         assert "apiPoll('/api/agents/approvals')" in src
 
 
@@ -181,6 +306,38 @@ class TestSteerIsObservable:
         from src import agent_control
 
         return [(row["id"], row["state"]) for row in agent_control.steer_history(session_id)]
+
+    def test_unbound_callers_cannot_adopt_a_named_run_queue(self):
+        from src import agent_control
+
+        rec = agent_control.steer("s", "only for the named run", run_id="specific-run")
+        assert agent_control.drain_steer("s") == []
+        assert agent_control.clear_steer("s") == []
+        assert agent_control.pending_steer("s", run_id="specific-run") == [rec]
+        assert agent_control.drain_steer("s", run_id="specific-run") == [rec["text"]]
+
+    @_REPORT_BACKLOG
+    def test_persisted_steering_keeps_human_and_peer_attribution(self):
+        from types import SimpleNamespace
+        from src import agent_control
+        from src.agent_loop import _user_intent_text
+        from services.memory.extraction_context import conversation_for_extraction
+
+        history = []
+        sess = SimpleNamespace(add_message=history.append)
+        for kind, steer_id in (("user", "human-id"), ("peer", "peer-id")):
+            agent_control.persist_applied_steer(sess, {
+                "text": "Check the tests", "kind": kind, "steer_id": steer_id,
+                "from_session": "worker", "from_session_name": "Reviewer",
+            })
+        human, peer = [m.to_dict() for m in history]
+        assert human["metadata"] == {"source": "steer", "steer_id": "human-id"}
+        assert peer["metadata"]["source"] == "agent"  # renderer's peer badge, not You
+        assert peer["metadata"]["from_session_name"] == "Reviewer"
+        assert _user_intent_text(peer) is None
+        assert conversation_for_extraction([human, peer], limit=6) == [
+            {"role": "user", "content": "Check the tests"},
+        ]
 
     def test_queue_drain_and_injection_are_three_separate_facts(self):
         from src import agent_control

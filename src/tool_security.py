@@ -47,6 +47,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     # Runs git against the operator's checkout and can reach the publishing
     # flow; log reading can expose internal hostnames and stack traces.
     "manage_agent_worktree",
+    "manage_git",
     "read_app_logs",
     # Reads scheduled-task prompts, run outputs and the settings store's
     # provenance. Settings are admin-only per THREAT_MODEL.md, so the whole
@@ -76,6 +77,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     # loadout wider than its own chat; this keeps the shared loadout
     # namespace itself an administrator surface, like manage_settings.
     "manage_agent_loadout",
+    "orchestrate_agents",
     "api_call",
     "app_api",
     "resolve_contact",
@@ -107,6 +109,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
 # Code/file discovery is covered by the dedicated read-only tools below
 # (read_file, grep, glob, ls) instead of freestyle shell.
 PLAN_MODE_READONLY_TOOLS = {
+    "discover_tools",
     "read_file",
     "grep",
     "glob",
@@ -167,6 +170,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "write_file", "edit_file", "apply_patch", "todowrite",
     # Creates worktrees, commits, and (with human approval) pushes.
     "manage_agent_worktree",
+    "manage_git",
     # Runs an external coding agent that can edit/commit inside an approved repo.
     "delegate_to_agent", "delegate_to_claude_code",
     "create_document", "edit_document", "update_document",
@@ -174,7 +178,7 @@ _PLAN_MODE_KNOWN_MUTATORS = {
     "send_to_session", "message_agent", "pipeline", "manage_memory", "manage_skills",
     "manage_tasks", "manage_notes", "manage_endpoints", "manage_mcp",
     "manage_webhooks", "manage_tokens", "manage_settings", "manage_contact",
-    "manage_agent_loadout",
+    "manage_agent_loadout", "orchestrate_agents",
     "manage_calendar", "api_call", "app_api", "ui_control",
     # manage_wellbeing is read-mostly, but log_checkin writes a check-in.
     "manage_wellbeing",
@@ -248,6 +252,52 @@ def email_tool_policy_names(tool_name: str) -> frozenset:
         if bare in BUILTIN_EMAIL_TOOLS:
             return frozenset((tool_name, bare))
     return frozenset((tool_name,))
+
+
+# Operator policy for GitHub: agents may read and collaborate (PRs, issues,
+# comments, reviews) but never delete anything. The built-in servers' --tools
+# lists (src/builtin_mcp.py) already leave every delete out; this is the
+# name-pattern backstop for a user-added GitHub server or a widened list, and
+# for mixed tools that delete through a method argument
+# (pull_request_review_write method=delete_pending, sub_issue_write
+# method=remove).
+_GITHUB_MCP_DESTRUCTIVE_WORDS = ("delete", "remove", "archive")
+
+
+def is_github_mcp_tool(tool_name: object) -> bool:
+    """True for mcp__github*__<tool> -- any server whose id starts with github."""
+    if not isinstance(tool_name, str):
+        return False
+    parts = tool_name.split("__", 2)
+    return len(parts) == 3 and parts[0] == "mcp" and parts[1].lower().startswith("github")
+
+
+def github_mcp_policy_refusal(tool_name: object, arguments: object = None) -> Optional[str]:
+    """The policy error for a destructive GitHub MCP call, or None to allow it."""
+    if not is_github_mcp_tool(tool_name):
+        return None
+    bare = str(tool_name).split("__", 2)[2].lower()
+    if isinstance(arguments, str):
+        import json
+
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = None
+    reason = None
+    if any(word in bare for word in _GITHUB_MCP_DESTRUCTIVE_WORDS):
+        reason = f"tool {bare!r} deletes, removes or archives GitHub data"
+    elif isinstance(arguments, dict):
+        method = str(arguments.get("method") or "").lower()
+        if any(word in method for word in _GITHUB_MCP_DESTRUCTIVE_WORDS):
+            reason = f"method {method!r} of {bare!r} deletes or removes GitHub data"
+    if reason is None:
+        return None
+    return (
+        f"Not permitted by policy: {reason}. Agents may read GitHub and open "
+        "pull requests, issues, comments and reviews, but must not delete, "
+        "remove or archive anything. Ask the user to do it themselves."
+    )
 
 
 def is_public_blocked_tool(tool_name: Optional[str]) -> bool:
@@ -364,3 +414,66 @@ def owner_baseline_disabled_tools(owner: Optional[str]) -> Set[str]:
         if not privileges.get("can_manage_memory", True):
             out.update({"manage_memory", "manage_skills"})
     return out
+
+
+def session_policy_disabled_tools(settings: Optional[dict], mcp_tools=()) -> Set[str]:
+    """Tools a chat's own saved policy denies, as the executor enforces them.
+
+    ``execute_tool_call`` re-reads the chat's settings for every call and
+    refuses ``disabled_tools``, anything outside a ``tool_access`` allowlist,
+    and MCP servers outside ``allowed_mcp_servers``. Only the chat route merged
+    ``disabled_tools`` into the schema list, so worker, workflow, scheduler and
+    skill turns were offered web_search/web_fetch/create_document their own
+    profile denied, and spent rounds calling them into "fresh session
+    revocation" blocks. The loop applies this set so offer and enforcement
+    agree whichever caller started the turn.
+    """
+    settings = settings or {}
+    out: Set[str] = {str(n) for n in (settings.get("disabled_tools") or ()) if n}
+    mcp_names = {
+        str(t.get("qualified_name"))
+        for t in (mcp_tools or ()) if isinstance(t, dict) and t.get("qualified_name")
+    }
+    access = settings.get("tool_access", "all")
+    if access in {"selected", "none"}:
+        # Inverted through the one shared rule (`src.tool_policy`) rather than
+        # by subtracting a literal set. `allowlist_permits` already matches the
+        # equivalent tool spellings `expand_tool_aliases` used to add by hand,
+        # AND the `mcp__<server>__*` / `mcp__*` grants an allowlist now uses to
+        # name runtime-generated MCP tools — a plain subtraction would deny
+        # every tool of a server the loadout deliberately granted whole.
+        from src.tool_policy import denied_by_allowlist, known_tool_names
+
+        enabled = {str(n) for n in (settings.get("enabled_tools") or ()) if n}
+        if access == "none":
+            enabled = set()
+        denied = denied_by_allowlist(
+            set(known_tool_names()) | mcp_names,
+            tool_access=access,
+            enabled_tools=enabled,
+        )
+        # The executor lets a selected-tools agent search its own bindings.
+        if access == "selected" and enabled:
+            denied.discard("discover_tools")
+        out |= denied
+    allowed_servers = settings.get("allowed_mcp_servers")
+    if isinstance(allowed_servers, list) and "*" not in allowed_servers:
+        allowed = {str(s) for s in allowed_servers}
+        for name in mcp_names:
+            parts = name.split("__", 2)
+            if len(parts) == 3 and parts[1] not in allowed:
+                out.add(name)
+    return out
+
+
+def delegated_credential_blocked_tools() -> Set[str]:
+    """Tools an agent run driven by a bearer API token must not reach.
+
+    Deliberately not owner-dependent. ``blocked_tools_for_owner`` asks whether
+    the OWNER is an admin, and for a token that question is always answered
+    yes: minting a token is an admin-only action, so the empty set comes back
+    for every token in existence. A token is a long-lived credential the owner
+    hands to a third party, so it is capped at the non-admin policy no matter
+    who minted it.
+    """
+    return set(NON_ADMIN_BLOCKED_TOOLS)

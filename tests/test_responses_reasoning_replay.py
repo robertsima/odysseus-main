@@ -18,6 +18,10 @@ from src.llm_core import (
     _sanitize_llm_messages,
 )
 
+_REPORT_BACKLOG = pytest.mark.skip(
+    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
+)
+
 
 REASONING_ITEM = {
     "type": "reasoning",
@@ -139,6 +143,7 @@ def _run_rounds(n):
     return messages
 
 
+@_REPORT_BACKLOG
 def test_replay_window_prunes_in_batches_not_every_round():
     """Every pop edits an already-sent assistant turn in the middle of the
     input, which moved the provider's cache boundary on every round

@@ -5,7 +5,10 @@ Odysseus never talks to Anthropic itself on this path. It runs the unmodified
 with the operator's own Claude login or API key doing the authentication. The
 harness never reads, stores, or forwards those credentials: the only thing it
 hands the child is (optionally) a scoped *Odysseus* token so Claude can call
-back into this instance during the job.
+back into this instance during the job. The child's environment is an
+allowlist (``_base_child_environment``), not the server's: no GitHub or other
+server credentials reach it, deletes/force/remote commands are denied with
+``--disallowedTools``, and its output is redacted before the model sees it.
 
 Two ways in:
 
@@ -27,6 +30,7 @@ import contextvars
 import json
 import os
 import re
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -102,13 +106,40 @@ SAFE_TOOL = re.compile(
     rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\)"
     rf"|Bash\({_CALLBACK_HELPER}(?::\*)?\))$"
 )
+# Deny rules passed as ``--disallowedTools`` on every run, whatever the
+# allowlist says. Claude Code evaluates deny before allow, so these close the
+# gaps a prefix-matched allow rule leaves open — ``Bash(git branch:*)`` would
+# otherwise also permit ``git branch -D main`` — and keep deleting or
+# rewriting history, touching a remote, and GitHub CLI access out of reach
+# even if a future allowlist entry is too broad. Delegated Claude may edit
+# and commit; it may not delete, force, or publish.
+DISALLOWED_TOOLS = (
+    # Filesystem deletion.
+    "Bash(rm:*)", "Bash(rmdir:*)", "Bash(unlink:*)", "Bash(shred:*)",
+    "Bash(find:*)", "Bash(xargs:*)", "Bash(sudo:*)",
+    # Branch/tag/ref deletion and force-moves.
+    "Bash(git branch -d:*)", "Bash(git branch -D:*)", "Bash(git branch --delete:*)",
+    "Bash(git branch -f:*)", "Bash(git branch --force:*)", "Bash(git branch -M:*)",
+    "Bash(git tag -d:*)", "Bash(git tag --delete:*)", "Bash(git update-ref:*)",
+    # History and working-tree destruction.
+    "Bash(git reset:*)", "Bash(git clean:*)", "Bash(git rm:*)", "Bash(git checkout:*)",
+    "Bash(git restore:*)", "Bash(git stash:*)", "Bash(git rebase:*)",
+    "Bash(git filter-branch:*)", "Bash(git reflog:*)", "Bash(git gc:*)", "Bash(git prune:*)",
+    "Bash(git worktree:*)", "Bash(git commit --amend:*)",
+    # Remotes and credentials: Claude never publishes (see _base_child_environment).
+    "Bash(git push:*)", "Bash(git pull:*)", "Bash(git fetch:*)", "Bash(git clone:*)",
+    "Bash(git remote:*)", "Bash(git config:*)", "Bash(git credential:*)",
+    "Bash(gh:*)", "Bash(curl:*)", "Bash(wget:*)",
+    # Reading the environment back.
+    "Bash(env:*)", "Bash(printenv:*)", "Bash(set:*)", "Bash(export:*)",
+)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]{1,80}$")
 # Flags the runner adapts to. Claude Code < 2.1.259 has no
 # --permission-prompts (prompts are denied anyway in a hostless -p run) and
 # older builds have no --restricted; both are detected from --help rather
 # than guessed from the version string.
 _OPTIONAL_FLAGS = ("--permission-prompts", "--restricted", "--bare", "--model",
-                   "--tools", "--allowedTools", "--no-session-persistence",
+                   "--tools", "--allowedTools", "--disallowedTools", "--no-session-persistence",
                    "--output-format", "--verbose", "--include-partial-messages")
 # Lines of the live transcript kept on the task record (the activity feed
 # keeps its own bounded copy per session).
@@ -128,6 +159,22 @@ _PROCESS_LIMIT_SIZE = MAX_CONCURRENT_TASKS
 # --version / --help of a binary, keyed by path and mtime so an upgraded
 # install is re-probed without a restart.
 _BINARY_INFO: dict[str, dict] = {}
+
+# ``delegate_to_agent`` can use this implementation through the local CLI
+# provider.  Keep diagnostics tied to the spelling the model actually called;
+# otherwise a provider-neutral call receives a misleading Claude-specific
+# correction message.
+_TOOL_NAMES = {"delegate_to_agent", "delegate_to_claude_code"}
+_DEFAULT_TOOL_NAME = "delegate_to_claude_code"
+
+
+def _tool_name(value: Optional[str] = None) -> str:
+    value = str(value or "").strip()
+    return value if value in _TOOL_NAMES else _DEFAULT_TOOL_NAME
+
+
+def _tool_error(message: str, value: Optional[str] = None) -> str:
+    return f"{_tool_name(value)}: {message}"
 
 
 # ── Configuration (settings first, then environment) ──
@@ -176,6 +223,17 @@ def repository_roots() -> tuple[Path, ...]:
     return tuple(Path(root.strip()).expanduser().resolve() for root in roots)
 
 
+def configured_concurrency() -> int:
+    """Read the provider-wide ceiling without creating or resizing a gate."""
+    try:
+        # 0 (the settings default) means "use the environment/built-in value".
+        size = int(_setting("claude_code_max_concurrent_tasks", 0) or 0) or MAX_CONCURRENT_TASKS
+        size = max(1, min(16, size))
+    except (TypeError, ValueError):
+        size = MAX_CONCURRENT_TASKS
+    return size
+
+
 def _process_limit() -> asyncio.Semaphore:
     """The shared concurrency gate, resized when the setting changes.
 
@@ -183,12 +241,7 @@ def _process_limit() -> asyncio.Semaphore:
     new size, which is the safe direction for a live change.
     """
     global _PROCESS_LIMIT, _PROCESS_LIMIT_SIZE
-    try:
-        # 0 (the settings default) means "use the environment/built-in value".
-        size = int(_setting("claude_code_max_concurrent_tasks", 0) or 0) or MAX_CONCURRENT_TASKS
-        size = max(1, min(16, size))
-    except (TypeError, ValueError):
-        size = MAX_CONCURRENT_TASKS
+    size = configured_concurrency()
     if size != _PROCESS_LIMIT_SIZE:
         _PROCESS_LIMIT = asyncio.Semaphore(size)
         _PROCESS_LIMIT_SIZE = size
@@ -355,19 +408,99 @@ def default_tools() -> list[str]:
     return tools
 
 
+# ── Child environment ──
+#
+# The child gets an allowlisted environment, never ``os.environ``. The server
+# process holds GitHub tokens (GITHUB_PERSONAL_ACCESS_TOKEN,
+# ODYSSEUS_AGENT_GITHUB_TOKEN, GitHub App keys), provider API keys, OAuth
+# client secrets, database URLs and SMTP passwords; anything placed in the
+# child's environment can be read back with `env` or `echo $X` by the
+# delegated session, whatever the calling session was allowed to see. Only
+# what the CLI needs to start, reach the network and authenticate is passed.
+_CHILD_ENV_EXACT = frozenset({
+    # Process basics: find binaries (git, node, the test runners), know who
+    # we are, pick a shell for Bash tool calls, and a temp dir. HOME is set
+    # separately to the Claude home.
+    "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "TZ",
+    # Terminal / locale, so output encoding and colour handling are sane.
+    "TERM", "COLORTERM", "NO_COLOR", "LANG", "LANGUAGE",
+    # Outbound network: containers commonly reach Anthropic through a proxy
+    # that re-signs TLS, so the proxy and CA bundle variables must survive or
+    # the CLI cannot connect at all.
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO",
+    # Where Claude Code keeps its own login and settings (_claude_config_dir).
+    "CLAUDE_CONFIG_DIR",
+    # Claude Code's own authentication and endpoint. ANTHROPIC_API_KEY /
+    # ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN are the *only* secrets
+    # the child receives, and it can read whichever one is set: the CLI
+    # cannot authenticate otherwise. A subscription login stored under
+    # CLAUDE_CONFIG_DIR needs none of them.
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # Claude Code behaviour switches (no secrets).
+    "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+    "DISABLE_COST_WARNINGS", "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
+})
+# Locale categories (LC_ALL, LC_CTYPE, ...) and Claude Code's own
+# CLAUDE_CODE_* switches (CLAUDE_CODE_MAX_OUTPUT_TOKENS, ...).
+_CHILD_ENV_PREFIXES = ("LC_", "CLAUDE_CODE_")
+# CLAUDE_CODE_* names that are *Odysseus* configuration, not Claude Code's:
+# the child has no use for them, and the token-file path points at the
+# callback credential.
+_ODYSSEUS_CLAUDE_CODE_VARS = frozenset({
+    "CLAUDE_CODE_BINARY", "CLAUDE_CODE_REPOSITORY_ROOTS", "CLAUDE_CODE_DEFAULT_REPOSITORY",
+    "CLAUDE_CODE_MAX_CONCURRENT_TASKS", "CLAUDE_CODE_HOME", "CLAUDE_CODE_ODYSSEUS_URL",
+    "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE",
+})
+# A prefix-allowed name that still looks like a credential is dropped unless
+# it is listed explicitly above (CLAUDE_CODE_OAUTH_TOKEN is). Also used to
+# pick the server-side values masked out of child output.
+_SECRET_NAME = re.compile(r"(?i)(TOKEN(?!S)|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|AUTH(?!OR)|COOKIE|SESSION|PRIVATE|DSN|DATABASE_URL)")
+
+
+def _child_env_allowed(name: str) -> bool:
+    if name in _CHILD_ENV_EXACT:
+        return True
+    if name in _ODYSSEUS_CLAUDE_CODE_VARS:
+        return False
+    return name.startswith(_CHILD_ENV_PREFIXES) and not _SECRET_NAME.search(name)
+
+
+def _base_child_environment() -> dict[str, str]:
+    """The allowlisted environment every ``claude`` process gets (probes too).
+
+    Deliberately absent: every GitHub credential (GITHUB_*, GH_TOKEN,
+    ODYSSEUS_AGENT_GITHUB_TOKEN, GIT_ASKPASS, SSH_AUTH_SOCK, GIT_CONFIG_*
+    credential helpers). Claude commits in the local checkout only;
+    publishing goes through Odysseus' own human-gated path
+    (manage_agent_worktree request_publish/publish), so the child never
+    authenticates to GitHub. :data:`DISALLOWED_TOOLS` denies the matching
+    commands.
+    """
+    env = {name: value for name, value in os.environ.items() if _child_env_allowed(name)}
+    env["HOME"] = _claude_home()
+    # No TTY in a headless run: fail fast instead of hanging on a git
+    # credential prompt until the timeout.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 def _claude_environment() -> dict[str, str]:
     """Build the child environment without persisting or exposing secrets.
 
-    A deployment may give delegated Claude sessions scoped access back to
-    Odysseus with a private token file. Keeping the token out of argv avoids
-    process-list exposure; the child receives it only in its environment.
-    The child's own Anthropic credentials (its OAuth login or API key) are
-    never read here — the unmodified binary resolves them itself.
+    Starts from :func:`_base_child_environment` — an allowlist, never
+    ``os.environ``. A deployment may give delegated Claude sessions scoped
+    access back to Odysseus with a private token file. Keeping the token out
+    of argv avoids process-list exposure; the child receives it only in its
+    environment (it is scoped to the /api/codex/* callback, which is the
+    point of handing it over).
     """
-    env = {
-        **os.environ,
-        "HOME": _claude_home(),
-    }
+    env = _base_child_environment()
     callback = _callback_config()
     if callback["url"]:
         env["ODYSSEUS_URL"] = callback["url"]
@@ -389,44 +522,200 @@ def _claude_environment() -> dict[str, str]:
     return env
 
 
-def _parse_args(args: dict) -> dict:
+# ── Output redaction ──
+
+def _secret_values() -> list[str]:
+    """Server-side secret values, longest first, for exact-match masking of
+    anything the child prints back (a checkout's .env, a test that echoes a
+    key, Claude's own API key in an error)."""
+    values = {value for name, value in os.environ.items()
+              if value and len(value) >= 8 and _SECRET_NAME.search(name)}
+    token_file = _callback_config()["token_file"]
+    if token_file:
+        try:
+            token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            token = ""
+        if len(token) >= 8:
+            values.add(token)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact(value: Any, secrets: list[str]) -> Any:
+    """Scrub child-produced text (recursing into lists/dicts) before it reaches
+    the model or the activity feed: exact server secret values first, then
+    the credential shapes :func:`src.agent_logs.redact_text` knows."""
+    if isinstance(value, str):
+        if not value:
+            return value
+        for secret in secrets:
+            value = value.replace(secret, "***")
+        from src.agent_logs import redact_text
+        return redact_text(value)
+    if isinstance(value, list):
+        return [_redact(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact(item, secrets) for key, item in value.items()}
+    return value
+
+
+# Fields of a run result that carry child-produced text.
+_CHILD_TEXT_FIELDS = ("output", "stderr", "error", "result", "transcript", "permission_denials", "claude",
+                      "commits")
+
+
+def _redact_result(result: dict, secrets: Optional[list[str]] = None) -> dict:
+    secrets = _secret_values() if secrets is None else secrets
+    for key in _CHILD_TEXT_FIELDS:
+        if key in result:
+            result[key] = _redact(result[key], secrets)
+    return result
+
+
+def _canonical_allowed_tool(value: str) -> str:
+    """Canonicalize tool-name casing without broadening the safe grammar.
+
+    Only the fixed built-in names (and the ``Bash`` wrapper spelling) are
+    case-normalized.  The command inside ``Bash(...)`` remains byte-for-byte
+    unchanged and is still checked by ``SAFE_TOOL``; e.g. ``git PUSH`` remains
+    rejected.
+    """
+    builtins = {name.lower(): name for name in ("Read", "Glob", "Grep", "Edit", "Write")}
+    if value.lower() in builtins:
+        return builtins[value.lower()]
+    if len(value) >= 5 and value[:4].lower() == "bash" and value[4] == "(":
+        return "Bash" + value[4:]
+    return value
+
+
+def _cloud_repositories() -> list[str]:
+    try:
+        from src import claude_cloud
+        return claude_cloud.repositories()
+    except Exception:
+        return []
+
+
+def _wants_cloud(args: dict) -> bool:
+    """Whether this delegation goes to the GitHub Actions cloud runner.
+
+    ``via: "cloud"`` (or ``"github"``) asks for it; ``via: "local"`` never.
+    Otherwise an allowlisted ``owner/repo`` repository means cloud, and the
+    ``claude_code_backend`` setting ("local" default, or "cloud") decides the
+    rest.
+    """
+    via = str(args.get("via") or "").strip().lower()
+    if via in ("cloud", "github", "actions"):
+        return True
+    if via == "local":
+        return False
+    repos = _cloud_repositories()
+    requested = str(args.get("repository") or "").strip()
+    if requested and any(requested.lower() == r.lower() for r in repos):
+        return True
+    return bool(repos) and str(_setting("claude_code_backend", "local") or "local").lower() == "cloud"
+
+
+async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name: str) -> Optional[dict]:
+    """Handle the action on the cloud runner, or return None for the local one."""
+    task_id = str(args.get("task_id") or "").strip()
+    if action in ("poll", "get", "cancel"):
+        from src import claude_cloud
+        if not claude_cloud.is_cloud_task(task_id):
+            return None
+        try:
+            if action == "cancel":
+                record = await claude_cloud.cancel(task_id, owner=owner)
+            else:
+                try:
+                    wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
+                except (TypeError, ValueError):
+                    wait = 0
+                if claude_cloud.get(task_id, owner) is None:
+                    record = None
+                else:
+                    record = await claude_cloud.wait(task_id, wait) if wait else await claude_cloud.refresh(task_id)
+        except Exception as exc:
+            return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
+        if record is None:
+            return {"error": _tool_error(f"task {task_id} not found", tool_name), "exit_code": 1}
+        return claude_cloud.report(record)
+    if action not in ("run", "start") or not _wants_cloud(args):
+        return None
+    from src import claude_cloud
+    repos = claude_cloud.repositories()
+    repository = str(args.get("repository") or "").strip()
+    if not repository or repository.lower() == "auto":
+        if len(repos) != 1:
+            return {"error": _tool_error("repository is required for the cloud runner; one of: "
+                                         + (", ".join(repos) or "none configured"), tool_name), "exit_code": 1}
+        repository = repos[0]
+    label = str(args.get("label") or "").strip()[:120] or None
+    try:
+        record = await claude_cloud.dispatch(repository, str(args.get("prompt") or ""),
+                                             base_branch=str(args.get("base_branch") or ""),
+                                             owner=owner, session_id=session_id, label=label)
+        if action == "run":
+            try:
+                timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
+            except (TypeError, ValueError):
+                timeout = 900
+            record = await claude_cloud.wait(record["task_id"], timeout)
+    except Exception as exc:
+        return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
+    return claude_cloud.report(record)
+
+
+def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
     """Validate a delegation request. Returns either
     {"repository": Path, "prompt": str, "timeout": int, "tools": list[str], "model": str|None}
     or {"error": str} — never both, and never raises."""
+    prefix = _tool_name(tool_name)
     if not isinstance(args, dict):
-        return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+        return {"error": _tool_error("JSON object required", prefix), "exit_code": 1}
     requested = str(args.get("repository") or "").strip()
     if requested and requested.lower() != "auto":
         try:
             repository = _approved_repository(requested)
         except (ValueError, OSError) as exc:
-            return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
+            return {"error": _tool_error(str(exc), prefix), "exit_code": 1}
     else:
         repository, why = default_repository()
         if repository is None:
-            return {"error": f"delegate_to_claude_code: {why}. {_describe_candidates()}", "exit_code": 1}
+            return {"error": _tool_error(f"{why}. {_describe_candidates()}", prefix), "exit_code": 1}
     prompt = str(args.get("prompt") or "").strip()
     if not prompt or len(prompt) > 20000:
-        return {"error": "delegate_to_claude_code: prompt is required and must be <= 20000 characters", "exit_code": 1}
+        return {"error": _tool_error("prompt is required and must be <= 20000 characters", prefix),
+                "exit_code": 1}
     try:
         timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
     except (TypeError, ValueError):
         timeout = 900
-    tools = args.get("allowed_tools") or default_tools()
+    requested_tools = args.get("allowed_tools")
+    tools = requested_tools if requested_tools else default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
-        return {"error": "delegate_to_claude_code: allowed_tools must be a list of strings", "exit_code": 1}
+        return {"error": _tool_error("allowed_tools must be a list of strings", prefix), "exit_code": 1}
+    # Normalize only the names whose casing is cosmetic.  Safety matching is
+    # intentionally still exact, so malformed or unsafe Bash expressions do
+    # not become valid through a broad IGNORECASE regex.
+    tools = [_canonical_allowed_tool(item) for item in tools]
     rejected = [item for item in tools if not SAFE_TOOL.fullmatch(item)]
     accepted_hint = (
         f"Accepted: Read, Glob, Grep, Edit, Write, Bash(git <{_SAFE_GIT_SUBCOMMANDS.replace('|', '/')}>:*), "
         "Bash(<pytest/npm test/npm run typecheck|lint|build/./gradlew test|build/./mvnw test|verify>:*). "
         "Claude never pushes: publish its commits yourself afterwards."
     )
-    if rejected and len(rejected) == len(tools):
-        return {"error": f"delegate_to_claude_code: unsafe allowed tool(s) {rejected[:5]}. {accepted_hint} "
-                         "Omit allowed_tools to use the defaults.",
-                "exit_code": 1}
     dropped: list[str] = []
-    if rejected:
+    dropped_note = ""
+    if rejected and len(rejected) == len(tools):
+        # Falling back to the known-safe defaults is strictly safer than
+        # refusing the whole delegation: no caller-supplied permission survives
+        # and the model gets a corrective note instead of retrying forever.
+        dropped = rejected[:10]
+        tools = default_tools()
+        dropped_note = (f"Ignored unsafe allowed_tools {dropped}; none were safe, so ran with the defaults. "
+                        f"{accepted_hint}")
+    elif rejected:
         # A mixed list runs with its safe entries. Refusing the whole job cost
         # the 2026-09-13 run three rounds re-sending one list with `git push`
         # and a malformed entry in it; dropping can only narrow Claude's rights.
@@ -434,16 +723,20 @@ def _parse_args(args: dict) -> dict:
         tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
-        return {"error": "delegate_to_claude_code: model must be a plain model name or alias", "exit_code": 1}
+        return {"error": _tool_error("model must be a plain model name or alias", prefix), "exit_code": 1}
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
     if dropped:
         parsed["dropped_tools"] = dropped
-        parsed["dropped_note"] = f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
+        parsed["dropped_note"] = dropped_note or f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
     return parsed
 
 
 def _with_dropped(result: dict, parsed: dict) -> dict:
     if parsed.get("dropped_tools"):
+        # Keep the parser's concise names in the tool result as well as the
+        # older descriptive aliases used by existing callers.
+        result["dropped_tools"] = parsed["dropped_tools"]
+        result["dropped_note"] = parsed["dropped_note"]
         result["dropped_allowed_tools"] = parsed["dropped_tools"]
         result["allowed_tools_note"] = parsed["dropped_note"]
     return result
@@ -452,9 +745,11 @@ def _with_dropped(result: dict, parsed: dict) -> dict:
 # ── Binary probing ──
 
 async def _capture(binary: Path, *args: str, timeout: float = 30, env: Optional[dict] = None) -> tuple[int, str]:
+    # Probes (--version, --help) get the same allowlisted environment as a
+    # run, never the server's full one.
     proc = await asyncio.create_subprocess_exec(
         str(binary), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=env, cwd=str(binary.parent),
+        env=env if env is not None else _base_child_environment(), cwd=str(binary.parent),
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -516,7 +811,8 @@ async def auth_status(binary: Optional[Path] = None) -> dict:
     except json.JSONDecodeError:
         parsed = {}
     if not isinstance(parsed, dict) or not parsed:
-        return {"checked": True, "logged_in": None, "error": out.strip()[-400:] or f"exit {code}"}
+        return {"checked": True, "logged_in": None,
+                "error": _redact(out.strip()[-400:], _secret_values()) or f"exit {code}"}
     return {
         "checked": True,
         "logged_in": bool(parsed.get("loggedIn")),
@@ -577,7 +873,10 @@ async def status_report() -> dict:
         hints.append(info["error"])
     if info["available"] and auth.get("logged_in") is False:
         hints.append("The binary is not signed in. Run `claude` once as the container user "
-                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY." % _claude_home())
+                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY. "
+                     "To avoid signing in inside the container, use the cloud runner instead: Settings > Tools > "
+                     "Claude Code > Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
+                     "the repository's secrets." % _claude_home())
     if info["available"] and "--permission-prompts" not in info["flags"]:
         hints.append("Claude Code is older than 2.1.259; upgrade for --permission-prompts none "
                      "(prompts are still denied in headless mode, but Claude may retry them).")
@@ -594,7 +893,13 @@ async def status_report() -> dict:
             "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
+    available_slots = max(0, _PROCESS_LIMIT_SIZE - len(active))
     return {
+        "response": (
+            f"Claude Code is {'ready' if ready else 'not ready'}; "
+            f"{len(active)} active of {_PROCESS_LIMIT_SIZE} configured task slot(s) "
+            f"({available_slots} available)."
+        ),
         "ready": ready,
         "binary": {k: info[k] for k in ("path", "available", "version", "flags", "error")},
         "auth": auth,
@@ -609,6 +914,7 @@ async def status_report() -> dict:
         "callback": callback_status,
         "max_concurrent_tasks": _PROCESS_LIMIT_SIZE,
         "active_tasks": len(active),
+        "available_task_slots": available_slots,
         "hints": hints,
         "exit_code": 0 if ready else 1,
     }
@@ -642,6 +948,12 @@ def _build_argv(binary: Path, prompt: str, tools: list[str], flags: list[str], *
         argv.append("--restricted")
     if model and "--model" in flags:
         argv += ["--model", model]
+    if "--disallowedTools" in flags:
+        # Deny rules win over allow rules: no delete, force, or remote access
+        # even where an allowed prefix would otherwise cover it. Placed before
+        # the variadic --tools/--allowedTools pair so each list ends at the
+        # next option.
+        argv += ["--disallowedTools", *DISALLOWED_TOOLS]
     argv += ["--tools", *tool_names, "--allowedTools", *tools]
     return argv
 
@@ -722,18 +1034,23 @@ class _Transcript:
         self.truncated = False
         self.envelope: Optional[dict] = None
         self.tool_names: dict[str, str] = {}
+        # Tool results carry whatever Claude read or ran; both the task
+        # record and the activity feed see them only redacted.
+        self.secrets = _secret_values()
 
     def _add(self, entry: dict) -> None:
         if len(self.entries) >= MAX_TRANSCRIPT_ENTRIES:
             self.truncated = True
             return
+        entry = _redact(entry, self.secrets)
         entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.entries.append(entry)
 
     def _publish(self, kind: str, title: str, *, detail: Optional[str] = None,
                  data: Optional[dict] = None, level: str = "info") -> None:
-        activity.publish(self.session_id, kind, title, source="claude_code", run_id=self.run_id,
-                         owner=self.owner, detail=detail, data=data, level=level)
+        activity.publish(self.session_id, kind, _redact(title, self.secrets), source="claude_code",
+                         run_id=self.run_id, owner=self.owner, detail=_redact(detail, self.secrets),
+                         data=_redact(data, self.secrets), level=level)
 
     def feed(self, raw: bytes) -> None:
         line = raw.decode("utf-8", errors="replace").strip()
@@ -917,16 +1234,16 @@ async def _run_claude(
     """
     binary = binary_path()
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        return {"error": f"delegate_to_claude_code: binary unavailable at {binary}", "exit_code": 1}
+        return {"error": _tool_error(f"binary unavailable at {binary}", _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     info = await binary_info(binary)
     if info.get("error"):
-        return {"error": f"delegate_to_claude_code: {info['error']}", "exit_code": 1}
+        return {"error": _tool_error(str(info["error"]), _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     stream = bool(info.get("stream_json")) and _flag_setting("claude_code_stream_transcript", True)
     argv = _build_argv(binary, prompt, tools, info.get("flags", []), model=model, stream=stream)
     try:
         child_env = _claude_environment()
     except ValueError as exc:
-        return {"error": f"delegate_to_claude_code: {exc}", "exit_code": 1}
+        return {"error": _tool_error(str(exc), _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
     ctx = dict(_RUN_CONTEXT.get() or {})
     run_id = ctx.get("task_id") or activity.new_run_id("claude_code")
     title = _run_title(prompt, ctx.get("label"))
@@ -959,6 +1276,7 @@ async def _run_claude(
             result = {"error": f"Claude Code timed out after {timeout}s", "exit_code": 124,
                       "repository": str(repository), "transcript": transcript.entries}
             result.update(await _git_changes(repository, start_sha))
+            _redact_result(result, transcript.secrets)
             _finish_run(ctx, run_id, title, result)
             return result
         except asyncio.CancelledError:
@@ -1009,6 +1327,10 @@ async def _run_claude(
                 result["output_truncated"] = len(full_out) > RAW_TAIL_ON_ENVELOPE
         result.update(await _git_report(repository))
         result.update(await _git_changes(repository, start_sha))
+        # Everything above that came from the child (stdout, stderr, the
+        # envelope, error text, commit subjects) is redacted before it is
+        # returned to the model or published.
+        _redact_result(result, transcript.secrets)
         _finish_run(ctx, run_id, title, result)
         return result
 
@@ -1018,6 +1340,31 @@ _ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_rep
 # alternating `bash sleep 20..120` with poll for ten minutes until the
 # loop-breaker ended the turn; one poll that waits on the job replaces both.
 MAX_POLL_WAIT_S = 600
+# A model that polls without wait_seconds gets an answer at once and polls
+# again, one model round per check: the 2026-09-18 logs show nine rounds of
+# identical polls before the loop-breaker ended the turn. So a repeat poll of a
+# still-running task waits on the job itself, doubling each time (30s, 60s,
+# 120s…, capped so a steer or stop is still picked up within minutes). The
+# wait ends as soon as the task finishes.
+_POLL_BACKOFF_START_S = 30
+_POLL_BACKOFF_MAX_S = 240
+_POLL_REPEAT_WINDOW_S = 900
+_last_polls: dict[str, tuple[float, int]] = {}
+
+
+def _poll_wait(task_id: str, requested: int) -> int:
+    """Seconds this poll should wait: the caller's request, or the backoff
+    floor when it is polling the same task again soon after the last poll."""
+    now = time.monotonic()
+    last = _last_polls.get(task_id)
+    repeats = last[1] + 1 if last and now - last[0] < _POLL_REPEAT_WINDOW_S else 0
+    _last_polls[task_id] = (now, repeats)
+    for stale in [tid for tid, (ts, _) in _last_polls.items() if now - ts > _POLL_REPEAT_WINDOW_S]:
+        _last_polls.pop(stale, None)
+    if repeats == 0:
+        return requested
+    floor = min(_POLL_BACKOFF_MAX_S, _POLL_BACKOFF_START_S * 2 ** min(repeats - 1, 8))
+    return max(requested, floor)
 
 
 def _running_report(record: dict) -> dict:
@@ -1039,6 +1386,10 @@ def _running_report(record: dict) -> dict:
         out["recent_activity"] = progress[-6:]
     out["note"] = (f"Still {record.get('status')}. To wait, call poll again with wait_seconds (up to {MAX_POLL_WAIT_S}) — "
                    "do not sleep in bash. Or end your turn and tell the user; the result is kept for 24h.")
+    # The agent loop's stall detector reads this instead of the whole report,
+    # so a poll that only shows a larger elapsed time is not mistaken for
+    # progress. It is removed before the model sees the result.
+    out["progress_key"] = json.dumps([record.get("status"), progress[-6:]], default=str)
     out["exit_code"] = 0
     return out
 
@@ -1057,20 +1408,31 @@ class ClaudeCodeTool:
     """
 
     async def execute(self, content: str, ctx: dict) -> dict:
+        invoked_tool = _tool_name((ctx or {}).get("tool_name") if isinstance(ctx, dict) else None)
         try:
             args = json.loads(content) if (content or "").strip() else {}
         except (TypeError, json.JSONDecodeError):
-            return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+            return {"error": _tool_error("JSON object required", invoked_tool), "exit_code": 1}
         if not isinstance(args, dict):
-            return {"error": "delegate_to_claude_code: JSON object required", "exit_code": 1}
+            return {"error": _tool_error("JSON object required", invoked_tool), "exit_code": 1}
         action = str(args.get("action") or "run").strip().lower()
         if action not in _ACTIONS:
-            return {"error": f"delegate_to_claude_code: unknown action {action!r}; one of {', '.join(_ACTIONS)}",
+            return {"error": _tool_error(f"unknown action {action!r}; one of {', '.join(_ACTIONS)}", invoked_tool),
                     "exit_code": 1}
         owner = (ctx or {}).get("owner") if isinstance(ctx, dict) else None
         session_id = (ctx or {}).get("session_id") if isinstance(ctx, dict) else None
         if action == "status":
-            return await status_report()
+            report = await status_report()
+            if _cloud_repositories():
+                try:
+                    from src import claude_cloud
+                    report["cloud"] = await claude_cloud.status()
+                except Exception as exc:
+                    report["cloud"] = {"ready": False, "hints": [str(exc)]}
+            return report
+        cloud = await _cloud_action(action, args, owner=owner, session_id=session_id, tool_name=invoked_tool)
+        if cloud is not None:
+            return cloud
         if action in ("list_repositories", "repositories"):
             repos = discover_repositories()
             default_repo, how = default_repository()
@@ -1083,7 +1445,7 @@ class ClaudeCodeTool:
             }
         runner = get_task_runner()
         if action == "start":
-            started = await runner.start(args, owner=owner, session_id=session_id)
+            started = await runner.start(args, owner=owner, session_id=session_id, tool_name=invoked_tool)
             if "error" in started:
                 return {**started, "exit_code": 1}
             return {**started, "exit_code": 0,
@@ -1091,7 +1453,7 @@ class ClaudeCodeTool:
         if action in ("poll", "get", "cancel"):
             task_id = str(args.get("task_id") or "").strip()
             if not task_id:
-                return {"error": "delegate_to_claude_code: task_id is required", "exit_code": 1}
+                return {"error": _tool_error("task_id is required", invoked_tool), "exit_code": 1}
             if action == "cancel":
                 record = await runner.cancel(task_id, owner=owner)
             else:
@@ -1099,19 +1461,29 @@ class ClaudeCodeTool:
                     wait = max(0, min(MAX_POLL_WAIT_S, int(args.get("wait_seconds") or 0)))
                 except (TypeError, ValueError):
                     wait = 0
+                if action == "poll":
+                    wait = _poll_wait(task_id, wait)
                 record = await runner.wait(task_id, wait, owner=owner) if wait else runner.get(task_id, owner=owner)
             if record is None:
-                return {"error": f"delegate_to_claude_code: task {task_id} not found", "exit_code": 1}
+                return {"error": _tool_error(f"task {task_id} not found", invoked_tool), "exit_code": 1}
             if record.get("status") in _ACTIVE_STATUSES:
-                return _running_report(record)
+                report = _running_report(record)
+                if action == "poll" and wait:
+                    report["waited_seconds"] = wait
+                return report
+            _last_polls.pop(task_id, None)
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
-            return {"tasks": runner.summaries(owner=owner), "exit_code": 0}
-        parsed = _parse_args(args)
+            tasks = runner.summaries(owner=owner)
+            if _cloud_repositories():
+                from src import claude_cloud
+                tasks = tasks + claude_cloud.summaries(owner=owner)
+            return {"tasks": tasks, "exit_code": 0}
+        parsed = _parse_args(args, invoked_tool)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
         label = str(args.get("label") or "").strip()[:120] or None
-        with run_context(session_id=session_id, owner=owner, label=label):
+        with run_context(session_id=session_id, owner=owner, label=label, tool_name=invoked_tool):
             result = await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
                                        model=parsed["model"])
         return _with_dropped(result, parsed)
@@ -1234,8 +1606,9 @@ class ClaudeCodeTaskRunner:
             self._save()
 
     async def start(self, args: dict, *, owner: Optional[str] = None,
-                    session_id: Optional[str] = None) -> dict:
-        parsed = _parse_args(args if isinstance(args, dict) else {})
+                    session_id: Optional[str] = None,
+                    tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
+        parsed = _parse_args(args if isinstance(args, dict) else {}, tool_name)
         if "error" in parsed:
             return {**parsed, "exit_code": 1}
         task_id = uuid.uuid4().hex
@@ -1249,6 +1622,7 @@ class ClaudeCodeTaskRunner:
             # The chat session that delegated, so the run reports to its
             # activity feed and the UI can find the task from the chat.
             "session_id": session_id,
+            "tool_name": _tool_name(tool_name),
             "created_at": now,
             "model": parsed["model"],
             # A short, operator-chosen name; the prompt itself is never stored.
@@ -1269,7 +1643,8 @@ class ClaudeCodeTaskRunner:
 
         try:
             with run_context(session_id=record.get("session_id"), owner=record.get("owner"),
-                             task_id=task_id, label=record.get("label")):
+                             task_id=task_id, label=record.get("label"),
+                             tool_name=record.get("tool_name")):
                 result = await _run_claude(
                     parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
                     on_process=_register, model=parsed.get("model"),

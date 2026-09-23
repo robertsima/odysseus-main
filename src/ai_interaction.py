@@ -341,7 +341,10 @@ async def do_pipeline(content: str, session_id: Optional[str] = None, owner: Opt
         logger.error(f"pipeline failed at step {len(step_outputs) + 1}: {e}")
         activity.run_finished(session_id, "pipeline", run_id, f"Pipeline failed at step {len(step_outputs) + 1}",
                               status="failed", owner=owner, data={"steps": len(resolved), "error": str(e)[:400]})
-        return {"error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}"}
+        return {
+            "error": f"Pipeline failed at step {len(step_outputs) + 1}: {e}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1147,7 +1150,10 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
                     error_text = err_json.get("error", {}).get("message", error_text) if isinstance(err_json.get("error"), dict) else str(err_json.get("error", error_text))
                 except Exception:
                     pass
-                return {"error": f"Image generation failed ({resp.status_code}): {error_text}"}
+                return {
+                    "error": f"Image generation failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
 
             data = resp.json()
             images = data.get("data", [])
@@ -1231,7 +1237,10 @@ async def do_generate_image(content: str, session_id: Optional[str] = None, owne
     except httpx.TimeoutException:
         return {"error": "Image generation timed out (300s). The model may be overloaded — try again or use quality=low."}
     except Exception as e:
-        return {"error": f"Image generation error: {str(e)}"}
+        return {
+            "error": f"Image generation error: {str(e)}",
+            "untrusted_content": True,
+        }
 
 
 async def do_edit_image(
@@ -1368,7 +1377,10 @@ async def do_edit_image(
                     error_text = err_json.get("detail") or err_json.get("error") or error_text
                 except Exception:
                     pass
-                return {"error": f"Image edit fallback failed ({fallback_resp.status_code}): {error_text}"}
+                return {
+                    "error": f"Image edit fallback failed ({fallback_resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
             fallback_data = fallback_resp.json()
             image_b64 = fallback_data.get("image")
             if not image_b64:
@@ -1452,7 +1464,10 @@ async def do_edit_image(
                                 "model for attached-image prompts."
                             )
                         }
-                return {"error": f"Image edit failed ({resp.status_code}): {error_text}"}
+                return {
+                    "error": f"Image edit failed ({resp.status_code}): {error_text}",
+                    "untrusted_content": True,
+                }
 
             data = resp.json()
             images = data.get("data", [])
@@ -1492,7 +1507,10 @@ async def do_edit_image(
     except httpx.TimeoutException:
         return {"error": "Image edit timed out. The model may still be loading or overloaded."}
     except Exception as e:
-        return {"error": f"Image edit error: {str(e)}"}
+        return {
+            "error": f"Image edit error: {str(e)}",
+            "untrusted_content": True,
+        }
 
 
 # ---------------------------------------------------------------------------

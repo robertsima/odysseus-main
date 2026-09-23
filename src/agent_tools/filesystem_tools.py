@@ -3,8 +3,8 @@ import json
 import os
 import re
 import difflib
-import fnmatch
 import shutil
+import time
 from typing import Optional, Dict, Any, Tuple, List
 
 from src.constants import MAX_READ_CHARS, MAX_DIFF_LINES, MAX_OUTPUT_CHARS
@@ -15,7 +15,16 @@ _CODENAV_SKIP_DIRS = frozenset({
     ".next", ".cache", "site-packages", ".idea", ".tox",
 })
 _CODENAV_MAX_HITS = 200
+
+
+def run_with_policy_snapshot(fn):
+    """Run a walk's worker with the path policy's inputs computed once
+    (src.tool_execution; imported lazily like the other helpers here)."""
+    from src.tool_execution import run_with_policy_snapshot as _run
+    return _run(fn)
 _CODENAV_MAX_LINE = 400
+_GREP_TIMEOUT_SECONDS = 20
+_GREP_STDERR_PREFIX = 20_000
 
 
 def _glob_to_regex(pat: str) -> "re.Pattern":
@@ -41,6 +50,113 @@ def _glob_to_regex(pat: str) -> "re.Pattern":
             out.append(re.escape(pat[i]))
             i += 1
     return re.compile("".join(out))
+
+
+def _python_grep_worker(payload: dict, output_queue) -> None:
+    """Spawn-safe fallback grep worker used when ripgrep is unavailable.
+
+    Keep this at module scope: a frozen Windows executable cannot safely be
+    relaunched as ``sys.executable -c ...``, while multiprocessing can invoke a
+    top-level target through its frozen-process bootstrap.
+    """
+    try:
+        flags = re.IGNORECASE if payload["ignore_case"] else 0
+        try:
+            regex = re.compile(payload["pattern"], flags)
+            glob_regex = (
+                _glob_to_regex(payload["glob"].replace("\\", "/"))
+                if payload["glob"]
+                else None
+            )
+        except re.error as exc:
+            output_queue.put(("error", f"grep: bad pattern: {exc}"))
+            return
+
+        requested_root = payload["root"]
+        skip_dirs = set(payload["skip_dirs"])
+        sensitive = {name.casefold() for name in payload["sensitive_names"]}
+        max_hits = payload["max_hits"]
+        hits = 0
+
+        def within(path: str, root: str) -> bool:
+            try:
+                return os.path.commonpath(
+                    [os.path.normcase(path), os.path.normcase(root)]
+                ) == os.path.normcase(root)
+            except ValueError:
+                return False
+
+        def safe_file(path: str, target: str) -> Optional[str]:
+            if os.path.islink(path):
+                return None
+            canonical = os.path.realpath(path)
+            if not within(canonical, requested_root) or not within(canonical, target):
+                return None
+            parts = [part.casefold() for part in canonical.split(os.sep)]
+            if any(part in sensitive for part in parts):
+                return None
+            try:
+                if not os.path.isfile(canonical) or os.stat(canonical).st_nlink > 1:
+                    return None
+            except OSError:
+                return None
+            return canonical
+
+        for target in payload["targets"]:
+            if hits >= max_hits:
+                break
+            if os.path.isfile(target):
+                file_iter = iter((target,))
+            else:
+                def walk_files():
+                    for directory, dirnames, filenames in os.walk(
+                        target, followlinks=False
+                    ):
+                        dirnames[:] = [
+                            name
+                            for name in dirnames
+                            if name not in skip_dirs
+                            and name.casefold() not in sensitive
+                            and not os.path.islink(os.path.join(directory, name))
+                        ]
+                        for name in filenames:
+                            yield os.path.join(directory, name)
+
+                file_iter = walk_files()
+
+            for candidate in file_iter:
+                path = safe_file(candidate, target)
+                if path is None:
+                    continue
+                relative = os.path.relpath(path, requested_root).replace(os.sep, "/")
+                if glob_regex and not (
+                    glob_regex.fullmatch(relative)
+                    or glob_regex.fullmatch(os.path.basename(path))
+                ):
+                    continue
+                try:
+                    with open(path, "r", encoding="utf-8", errors="strict") as handle:
+                        for number, line in enumerate(handle, 1):
+                            if regex.search(line):
+                                output_queue.put((
+                                    "match",
+                                    path,
+                                    number,
+                                    line.rstrip()[:_CODENAV_MAX_LINE],
+                                ))
+                                hits += 1
+                                if hits >= max_hits:
+                                    break
+                except (UnicodeDecodeError, OSError):
+                    continue
+                if hits >= max_hits:
+                    break
+        output_queue.put(("done",))
+    except BaseException as exc:
+        try:
+            output_queue.put(("error", f"grep: fallback worker failed: {exc}"))
+        except BaseException:
+            pass
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
@@ -452,24 +568,110 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
             raise ValueError(f"{label}: hunk {idx} context not found")
     return updated
 
+_OUTLINE_MAX_DEPTH = 4
+_OUTLINE_MAX_LINES = 300
+
+
+def _outline(root: str, depth: int, allow_private: bool, can_traverse) -> tuple:
+    """A bounded folder tree: directories to `depth`, each with the number of
+    files directly inside it rather than every file. It is the cheap first
+    look at an unfamiliar tree (one call instead of a glob over everything)
+    and skips the same build/vendor/cache folders and denied paths as grep and
+    glob (so under the data directory only the agent-readable folders show)."""
+    if not os.path.isdir(root):
+        return None, f"ls: {root}: not a directory"
+    lines = [f"{root}: (outline to depth {depth}; counts are direct children)"]
+    truncated = False
+
+    def scan(path):
+        dirs, files = [], 0
+        try:
+            with os.scandir(path) as it:
+                for entry in it:
+                    if entry.name.startswith("."):
+                        continue
+                    try:
+                        if entry.is_symlink():
+                            continue
+                        if entry.is_dir(follow_symlinks=False):
+                            if entry.name in _CODENAV_SKIP_DIRS:
+                                continue
+                            if not can_traverse(os.path.realpath(entry.path), allow_private=allow_private):
+                                continue
+                            dirs.append(entry)
+                        else:
+                            files += 1
+                    except OSError:
+                        continue
+        except OSError:
+            return [], 0, False
+        return sorted(dirs, key=lambda e: e.name.lower()), files, True
+
+    def walk(path, level):
+        nonlocal truncated
+        dirs, _files, _ok = scan(path)
+        for entry in dirs:
+            if len(lines) >= _OUTLINE_MAX_LINES:
+                truncated = True
+                return
+            indent = "  " * level
+            sub_dirs, sub_files, ok = scan(entry.path)
+            if not ok:
+                lines.append(f"{indent}{entry.name}/  (unreadable)")
+                continue
+            note = f"{sub_files} files" + (f", {len(sub_dirs)} dirs" if sub_dirs else "")
+            lines.append(f"{indent}{entry.name}/  ({note})")
+            if level < depth and sub_dirs:
+                walk(entry.path, level + 1)
+
+    _dirs, top_files, _ok = scan(root)
+    walk(root, 1)
+    if top_files:
+        lines.insert(1, f"  ({top_files} files at the top level)")
+    if truncated:
+        lines.append(
+            f"  ... [outline stopped at {_OUTLINE_MAX_LINES} lines; "
+            "ls a subfolder with depth for more]"
+        )
+    return "\n".join(lines), None
+
+
 class LsTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import _is_sensitive_path, _resolve_tool_path, _resolve_search_root, _truncate
         from src.private_access import context_allows_private
+        from src.tool_execution import (
+            _can_traverse_tool_path,
+            _is_denied_tool_path,
+            _resolve_search_root,
+            _truncate,
+        )
         allow_private = context_allows_private(ctx)
         raw_path = ""
+        depth = 1
         _s = (content or "").strip()
         if _s.startswith("{"):
             try:
-                raw_path = str(json.loads(_s).get("path", "")).strip()
-            except json.JSONDecodeError:
-                raw_path = ""
+                _args = json.loads(_s)
+                raw_path = str(_args.get("path", "")).strip()
+                depth = int(_args.get("depth") or 1)
+            except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+                pass
         else:
             raw_path = _s.split("\n", 1)[0].strip()
+        depth = max(1, min(depth, _OUTLINE_MAX_DEPTH))
         try:
             root = _resolve_search_root(raw_path, allow_private=allow_private)
         except ValueError as e:
             return {"error": f"ls: {e}", "exit_code": 1}
+
+        if depth > 1:
+            out, err = await asyncio.to_thread(
+                run_with_policy_snapshot,
+                lambda: _outline(root, depth, allow_private, _can_traverse_tool_path),
+            )
+            if err:
+                return {"error": err, "exit_code": 1}
+            return {"output": _truncate(out), "exit_code": 0}
 
         def _ls():
             if not os.path.isdir(root):
@@ -481,7 +683,7 @@ class LsTool:
                         if entry.name.startswith("."):
                             continue
                         try:
-                            if _is_sensitive_path(
+                            if _is_denied_tool_path(
                                 os.path.realpath(entry.path),
                                 allow_private=allow_private,
                             ):
@@ -506,7 +708,7 @@ class LsTool:
                 lines.append("  (empty)")
             return "\n".join(lines), None
 
-        out, err = await asyncio.to_thread(_ls)
+        out, err = await asyncio.to_thread(run_with_policy_snapshot, _ls)
         if err:
             return {"error": err, "exit_code": 1}
         return {"output": _truncate(out), "exit_code": 0}
@@ -515,7 +717,10 @@ class GlobTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import (
             _SENSITIVE_BASENAMES,
-            _is_sensitive_path,
+            _agent_readable_data_subdirs,
+            _can_traverse_tool_path,
+            _is_denied_tool_path,
+            _path_within,
             _resolve_tool_path,
             _resolve_search_root,
             _truncate,
@@ -566,7 +771,7 @@ class GlobTool:
                 # .ssh/id_rsa, …) falls through to the walk, which skips it —
                 # otherwise glob would surface secret paths that read_file /
                 # grep already refuse to touch.
-                if inside and os.path.exists(cand) and not _is_sensitive_path(cand, allow_private=allow_private):
+                if inside and os.path.exists(cand) and not _is_denied_tool_path(cand, allow_private=allow_private):
                     return [cand], None
                 # Literal not at exact path — fall through to walk so
                 # e.g. "foo.py" still matches at any depth (like rglob).
@@ -574,15 +779,37 @@ class GlobTool:
             regex = _glob_to_regex(norm_pat)
             matched = []
             cap = _CODENAV_MAX_HITS * 5
+            # Inside the data directory only the agent-readable folders (the
+            # workspace, uploads, personal docs, mail attachments) can match, so
+            # prune straight to them instead of walking and policy-checking
+            # every other folder there (a glob over /app used to visit all of
+            # the user's data first). The per-directory check below still runs.
+            from src.constants import DATA_DIR as _DATA_DIR
+            data_real = os.path.realpath(_DATA_DIR)
+            readable = _agent_readable_data_subdirs()
+
+            def _leads_to_readable(path):
+                return any(_path_within(r, path) or _path_within(path, r) for r in readable)
+
             try:
                 for dp, dns, fns in os.walk(base):
+                    dp_real = os.path.realpath(dp)
+                    if _path_within(dp_real, data_real) and not any(_path_within(dp_real, r) for r in readable):
+                        dns[:] = [d for d in dns if _leads_to_readable(os.path.realpath(os.path.join(dp, d)))]
+                    if not _can_traverse_tool_path(os.path.realpath(dp), allow_private=allow_private):
+                        dns[:] = []
+                        continue
                     # Prune skipped dirs before descending (unlike rglob which
                     # descends first then filters — fatal on large node_modules).
                     # Sensitive dirs (.ssh, .gnupg, …) are pruned too so glob
                     # never enumerates the keys/tokens inside them.
                     dns[:] = [
                         d for d in dns
-                        if d not in _CODENAV_SKIP_DIRS and d not in _SENSITIVE_BASENAMES
+                        if d not in _CODENAV_SKIP_DIRS
+                        and d not in _SENSITIVE_BASENAMES
+                        and _can_traverse_tool_path(
+                            os.path.realpath(os.path.join(dp, d)), allow_private=allow_private
+                        )
                     ]
                     for name in fns + dns:
                         full = os.path.join(dp, name)
@@ -590,7 +817,7 @@ class GlobTool:
                         if regex.fullmatch(rel) or regex.fullmatch(name):
                             # Skip deny-listed sensitive files (.env, id_rsa,
                             # known_hosts, …) the same way grep does.
-                            if _is_sensitive_path(os.path.realpath(full), allow_private=allow_private):
+                            if _is_denied_tool_path(os.path.realpath(full), allow_private=allow_private):
                                 continue
                             try:
                                 mtime = os.stat(full).st_mtime
@@ -604,7 +831,7 @@ class GlobTool:
             matched.sort(key=lambda t: t[0], reverse=True)
             return [pth for _, pth in matched[:_CODENAV_MAX_HITS]], None
 
-        paths, err = await asyncio.to_thread(_glob)
+        paths, err = await asyncio.to_thread(run_with_policy_snapshot, _glob)
         if err:
             return {"error": err, "exit_code": 1}
         if not paths:
@@ -617,9 +844,11 @@ class GlobTool:
 class GrepTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import (
+            _SENSITIVE_BASENAMES,
             _SENSITIVE_FILE_PATTERNS,
-            _is_sensitive_path,
-            _resolve_tool_path,
+            _agent_readable_data_subdirs,
+            _is_denied_tool_path,
+            _path_within,
             _resolve_search_root,
             _truncate,
         )
@@ -650,66 +879,309 @@ class GrepTool:
             return {"error": f"grep: {e}", "exit_code": 1}
 
         def _grep():
-            import re as _re
-            import shutil
-            rg = shutil.which("rg")
-            if rg and allow_private:
-                cmd = [rg, "--line-number", "--no-heading", "--color=never",
-                       "--max-count", str(max_hits)]
-                if ignore_case:
-                    cmd.append("--ignore-case")
-                if glob_pat:
-                    cmd += ["--glob", glob_pat]
-                # --iglob (not --glob) so the exclusion is case-insensitive:
-                # on a case-insensitive filesystem "ID_RSA"/"Known_Hosts"
-                # resolve to the same secret as their lowercase forms, and the
-                # Python fallback below already folds case via _is_sensitive_path.
-                for _pat in _SENSITIVE_FILE_PATTERNS:
-                    cmd += ["--iglob", f"!*{_pat}*"]
-                for _d in _CODENAV_SKIP_DIRS:
-                    cmd += ["--glob", f"!**/{_d}/**"]
-                cmd += ["--regexp", pattern, root]
-                try:
-                    import subprocess
-                    p = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
-                    lines = [ln for ln in (p.stdout or "").splitlines() if ln][:max_hits]
-                    return lines, None
-                except subprocess.TimeoutExpired:
-                    return None, "grep: timed out"
-                except Exception as _e:
-                    return None, f"grep: {_e}"
-            try:
-                rx = _re.compile(pattern, _re.IGNORECASE if ignore_case else 0)
-            except _re.error as _e:
-                return None, f"grep: bad pattern: {_e}"
-            hits = []
-            if os.path.isfile(root):
-                file_iter = [root]
-            else:
-                file_iter = []
-                for dp, dns, fns in os.walk(root):
-                    dns[:] = [d for d in dns if d not in _CODENAV_SKIP_DIRS]
-                    for fn in fns:
-                        if glob_pat and not fnmatch.fnmatch(fn, glob_pat):
-                            continue
-                        file_iter.append(os.path.join(dp, fn))
-            for fp in file_iter:
-                if len(hits) >= max_hits:
-                    break
-                if _is_sensitive_path(os.path.realpath(fp), allow_private=allow_private):
-                    continue
-                try:
-                    with open(fp, "r", encoding="utf-8", errors="strict") as f:
-                        for i, line in enumerate(f, 1):
-                            if rx.search(line):
-                                hits.append(f"{fp}:{i}:{line.rstrip()[:_CODENAV_MAX_LINE]}")
-                                if len(hits) >= max_hits:
-                                    break
-                except (UnicodeDecodeError, OSError):
-                    continue
-            return hits, None
+            import multiprocessing
+            import queue
+            import subprocess
+            import threading
 
-        lines, err = await asyncio.to_thread(_grep)
+            from src.constants import DATA_DIR
+
+            rg = shutil.which("rg")
+            real_root = os.path.realpath(root)
+            data_dir = os.path.realpath(DATA_DIR)
+            spans_state = _path_within(data_dir, real_root)
+
+            def is_top_level_safe(path: str, *, partition_generated: bool) -> bool:
+                lexical = os.path.abspath(path)
+                if os.path.islink(lexical):
+                    return False
+                canonical = os.path.realpath(lexical)
+                if not _path_within(canonical, real_root):
+                    return False
+                if partition_generated and os.path.basename(lexical) in _CODENAV_SKIP_DIRS:
+                    return False
+                if _is_denied_tool_path(canonical, allow_private=allow_private):
+                    return False
+                return True
+
+            def safe_targets() -> tuple[list[str], Optional[str]]:
+                candidates: list[tuple[str, bool]] = []
+                if not spans_state:
+                    # Preserve direct-root compatibility: skip-directory policy
+                    # prunes descendants, but an explicitly requested allowed
+                    # root named node_modules remains searchable.
+                    candidates.append((real_root, False))
+                else:
+                    current = real_root
+                    if current != data_dir:
+                        for part in os.path.relpath(data_dir, current).split(os.sep):
+                            try:
+                                with os.scandir(current) as entries:
+                                    for entry in entries:
+                                        if entry.name != part:
+                                            # Reject a sibling link lexically before
+                                            # canonicalizing or treating it as a target.
+                                            if entry.is_symlink():
+                                                continue
+                                            candidates.append((entry.path, True))
+                            except OSError as exc:
+                                return [], f"grep: {exc}"
+                            current = os.path.join(current, part)
+                    for readable in _agent_readable_data_subdirs():
+                        if (
+                            _path_within(readable, data_dir)
+                            and _path_within(readable, real_root)
+                            and os.path.exists(readable)
+                        ):
+                            candidates.append((readable, True))
+
+                targets: list[str] = []
+                seen: set[str] = set()
+                for candidate, partition_generated in candidates:
+                    if not is_top_level_safe(
+                        candidate, partition_generated=partition_generated
+                    ):
+                        continue
+                    canonical = os.path.realpath(candidate)
+                    if canonical not in seen:
+                        seen.add(canonical)
+                        targets.append(canonical)
+                return targets, None
+
+            targets, target_error = safe_targets()
+            if target_error:
+                return None, target_error
+
+            base = real_root if os.path.isdir(real_root) else os.path.dirname(real_root)
+            deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
+            lines: list[str] = []
+
+            def parse_rg_result(raw: str) -> Optional[str]:
+                try:
+                    record = json.loads(raw)
+                except (TypeError, json.JSONDecodeError):
+                    return None
+                if record.get("type") != "match":
+                    return None
+                data = record.get("data") or {}
+                path = (data.get("path") or {}).get("text")
+                text_value = (data.get("lines") or {}).get("text")
+                number = data.get("line_number")
+                if not isinstance(path, str) or not isinstance(text_value, str):
+                    return None
+                absolute = path if os.path.isabs(path) else os.path.join(base, path)
+                canonical = os.path.realpath(absolute)
+                if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical, allow_private=allow_private):
+                    return None
+                return f"{os.path.abspath(absolute)}:{number}:{text_value.rstrip()[:_CODENAV_MAX_LINE]}"
+
+            def run_rg(cmd: list[str]) -> Optional[str]:
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        cwd=base,
+                        stdin=subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        bufsize=1,
+                    )
+                except Exception as exc:
+                    return f"grep: {exc}"
+                output: queue.Queue[Optional[str]] = queue.Queue(maxsize=max_hits + 2)
+                stderr_prefix: list[str] = []
+                stderr_size = 0
+                stop_reader = threading.Event()
+
+                def enqueue_stdout(value: Optional[str]) -> bool:
+                    # The consumer stops at the result cap or deadline. Never
+                    # leave a producer blocked on its bounded queue afterward.
+                    while not stop_reader.is_set():
+                        try:
+                            output.put(value, timeout=0.05)
+                            return True
+                        except queue.Full:
+                            continue
+                    return False
+
+                def read_stdout() -> None:
+                    assert process.stdout is not None
+                    try:
+                        for line in process.stdout:
+                            if not enqueue_stdout(line.rstrip("\n")):
+                                break
+                    finally:
+                        enqueue_stdout(None)
+
+                def read_stderr() -> None:
+                    nonlocal stderr_size
+                    assert process.stderr is not None
+                    while True:
+                        chunk = process.stderr.read(4096)
+                        if not chunk:
+                            break
+                        if stderr_size < _GREP_STDERR_PREFIX:
+                            kept = chunk[:_GREP_STDERR_PREFIX - stderr_size]
+                            stderr_prefix.append(kept)
+                            stderr_size += len(kept)
+
+                stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+                stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+                stdout_thread.start()
+                stderr_thread.start()
+                timed_out = False
+                capped = False
+                try:
+                    while len(lines) < max_hits:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            timed_out = True
+                            break
+                        try:
+                            raw = output.get(timeout=remaining)
+                        except queue.Empty:
+                            timed_out = True
+                            break
+                        if raw is None:
+                            break
+                        parsed = parse_rg_result(raw)
+                        if parsed and parsed not in lines:
+                            lines.append(parsed)
+                    capped = len(lines) >= max_hits
+                finally:
+                    stop_reader.set()
+                    if (timed_out or capped) and process.poll() is None:
+                        process.terminate()
+                    try:
+                        remaining = max(0.01, deadline - time.monotonic())
+                        return_code = process.wait(timeout=min(1, remaining))
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        return_code = process.wait()
+                    stdout_thread.join()
+                    stderr_thread.join()
+                if timed_out:
+                    return "grep: timed out"
+                if not capped and return_code not in (0, 1):
+                    detail = "".join(stderr_prefix).strip()
+                    return f"grep: {detail or f'process exited {return_code}'}"
+                return None
+
+            if rg:
+                # Validate even when policy filtering leaves no search targets.
+                if not targets:
+                    error = run_rg([rg, "--json", "--no-config", "--regexp", pattern])
+                    return (None, error) if error else ([], None)
+                relative_targets = [os.path.relpath(target, base) for target in targets]
+                for offset in range(0, len(relative_targets), 128):
+                    if len(lines) >= max_hits:
+                        break
+                    cmd = [
+                        rg, "--json", "--no-config", "--no-follow",
+                        "--max-count", str(max_hits - len(lines)),
+                        "--max-columns", str(_CODENAV_MAX_LINE),
+                        "--max-columns-preview",
+                    ]
+                    if ignore_case:
+                        cmd.append("--ignore-case")
+                    if glob_pat:
+                        cmd += ["--glob", glob_pat]
+                    for sensitive_pattern in _SENSITIVE_FILE_PATTERNS:
+                        cmd += ["--iglob", f"!{sensitive_pattern}"]
+                    for skipped_dir in _CODENAV_SKIP_DIRS:
+                        cmd += ["--glob", f"!**/{skipped_dir}/**"]
+                    cmd += ["--regexp", pattern, "--", *relative_targets[offset:offset + 128]]
+                    error = run_rg(cmd)
+                    if error:
+                        return None, error
+                return lines, None
+
+            # This runs inside asyncio.to_thread(), so forking would clone a
+            # multithreaded process and can deadlock. Spawn is platform-safe and
+            # PyInstaller-compatible via launcher's early freeze_support().
+            payload = {
+                "root": real_root,
+                "targets": targets,
+                "pattern": pattern,
+                "ignore_case": ignore_case,
+                "glob": glob_pat,
+                "max_hits": max_hits,
+                "skip_dirs": tuple(_CODENAV_SKIP_DIRS),
+                "sensitive_names": tuple(
+                    set(_SENSITIVE_BASENAMES) | set(_SENSITIVE_FILE_PATTERNS)
+                ),
+            }
+            try:
+                context = multiprocessing.get_context("spawn")
+                output_queue = context.Queue(maxsize=max_hits + 2)
+                worker = context.Process(
+                    target=_python_grep_worker, args=(payload, output_queue)
+                )
+                worker.start()
+            except Exception as exc:
+                try:
+                    output_queue.close()
+                except (NameError, OSError, ValueError):
+                    pass
+                return None, f"grep: could not start fallback worker: {exc}"
+            error = None
+            completed = False
+            try:
+                while len(lines) < max_hits:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        error = "grep: timed out"
+                        break
+                    try:
+                        # Keep queue waits short enough to observe a spawn
+                        # worker that dies during bootstrap/import before it
+                        # can enqueue either an error or the done sentinel.
+                        record = output_queue.get(timeout=min(0.05, remaining))
+                    except queue.Empty:
+                        if worker.is_alive():
+                            continue
+                        worker.join(timeout=0)
+                        try:
+                            # A multiprocessing queue's feeder can make the
+                            # final record visible at process-exit time. Give
+                            # that record precedence over the exit status.
+                            remaining = deadline - time.monotonic()
+                            record = output_queue.get(
+                                timeout=min(0.05, max(0, remaining))
+                            )
+                        except queue.Empty:
+                            error = f"grep: fallback worker exited {worker.exitcode}"
+                            break
+                    if record[0] == "done":
+                        completed = True
+                        break
+                    if record[0] == "error":
+                        error = record[1]
+                        break
+                    _, path, number, text_value = record
+                    canonical = os.path.realpath(path)
+                    if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical, allow_private=allow_private):
+                        continue
+                    rendered = f"{path}:{number}:{text_value}"
+                    if rendered not in lines:
+                        lines.append(rendered)
+            finally:
+                if completed:
+                    worker.join(timeout=min(1, max(0.01, deadline - time.monotonic())))
+                if worker.is_alive():
+                    worker.terminate()
+                    worker.join(timeout=1)
+                if worker.is_alive():
+                    worker.kill()
+                    worker.join()
+                output_queue.close()
+            if error:
+                return None, error
+            if worker.exitcode not in (0, None) and len(lines) < max_hits:
+                return None, f"grep: fallback worker exited {worker.exitcode}"
+            return lines, None
+
+        lines, err = await asyncio.to_thread(run_with_policy_snapshot, _grep)
         if err:
             return {"error": err, "exit_code": 1}
         if not lines:

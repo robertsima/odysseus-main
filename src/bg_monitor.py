@@ -14,6 +14,7 @@ import asyncio
 import logging
 
 from src import bg_jobs
+from src.prompt_security import untrusted_context_message
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +25,31 @@ POLL_INTERVAL_S = 5
 _FOLLOWUP_MAX_ROUNDS = 12
 
 
+def _background_result_message(rec):
+    inject = (
+        f"[Background job {rec['id']} finished]\n\n"
+        f"{bg_jobs.result_text(rec)}\n\n"
+        "Continue the task using this output. Don't repeat work that's already done. "
+        "If the task is now complete, give the user the final result."
+    )
+    return untrusted_context_message("background job output", inject)
+
+
 async def _drain_agent(sess, messages, *, run_id=None):
     """Run the agent loop headless against a session. Returns
     (final_prose, tool_events) — tool_events in the same shape the live chat
-    saves, so the frontend rebuilds them as standard agent-thread tool cards.
+    saves, so the frontend rebuilds them as standard agent-thread tool cards,
+    including the `ask_user` card of a held exact-approval so the user can
+    authorize it on the next foreground turn instead of losing it headlessly.
+
     The drain itself lives in :mod:`src.headless_agent` (shared with
-    ``send_to_session`` in agent mode); the follow-up runs under the chat's
-    own policy, since it is the same chat continuing."""
+    ``send_to_session`` in agent mode). It was open-coded here while
+    ``run_headless`` still passed the upstream loop parameters it did not
+    accept; it no longer does, and going back through it is what gets this run
+    the owner's baseline denials, the chat's own stored tool policy, the
+    resolved context window and its own row on the activity feed — none of
+    which the open-coded loop call had.
+    """
     from src.headless_agent import run_headless
 
     return await run_headless(
@@ -79,14 +98,8 @@ async def _run_followup(rec: dict) -> bool:
     except Exception:
         pass
 
-    inject = (
-        f"[Background job {rec['id']} finished]\n\n"
-        f"{bg_jobs.result_text(rec)}\n\n"
-        "Continue the task using this output. Don't repeat work that's already done. "
-        "If the task is now complete, give the user the final result."
-    )
     context = sess.get_context_messages()
-    context.append({"role": "user", "content": inject})
+    context.append(_background_result_message(rec))
 
     from src import agent_activity as activity
 

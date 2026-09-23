@@ -98,14 +98,22 @@ _PASSIVE_EXACT_PATHS = {
     "/api/activity/heartbeat",
     "/api/client-perf",
     "/api/tasks/notifications",
+    "/api/tasks/runs/recent",
     "/api/research/active",
     "/api/email/urgency-state",
+    # UI idle poll sibling of urgency-state; must not pre-empt background tasks.
     "/api/email/unread-state",
     # Read-only views *of* background work (agents dashboard + sidebar polls).
     "/api/agents/overview",
     "/api/agents/approvals",
     "/api/agents/stream",
     "/api/chat/runs",
+    # The workbench agent strip polls this every 4s for as long as a chat is
+    # open (static/js/workbench.js). It is the same livelock as the agents
+    # dashboard above — it just reached the scheduler through a different
+    # endpoint, so listing those four was not enough. GET is the only method
+    # served here; the stop action lives at /runs/{id}/stop.
+    "/api/workbench/runs",
 }
 
 _PASSIVE_PREFIXES = (
@@ -120,6 +128,24 @@ _PASSIVE_PREFIXES = (
 # HEAD honour it: nothing that writes is ever passive, whatever it claims.
 POLL_HEADER = "x-odysseus-poll"
 _TRUTHY = {"1", "true", "yes", "on"}
+
+
+async def maybe_stop_background_tasks_for_heartbeat(
+    stop_background, *, interactive: bool = True
+) -> bool:
+    """Stop background work for browser activity only when the gate is enabled.
+
+    ``stop_background`` is injected by the application boundary so this policy
+    remains independently testable without importing the full FastAPI app.
+
+    ``interactive`` is False for the idle keepalive beat — see
+    mark_browser_activity for why an open tab is not the same as a busy user.
+    """
+    if not _enabled() or not interactive:
+        return False
+
+    await stop_background(reason="browser heartbeat")
+    return True
 
 
 def should_track_interactive_request(path: str, method: str = "GET", headers=None) -> bool:
@@ -141,10 +167,24 @@ def should_track_interactive_request(path: str, method: str = "GET", headers=Non
     return True
 
 
-async def mark_browser_activity() -> None:
-    """Record that an authenticated browser tab is visibly using Odysseus."""
+async def mark_browser_activity(interactive: bool = True) -> None:
+    """Record that a person is currently using Odysseus in a browser tab.
+
+    An *open* tab is not a busy user. The client beats on a 15s timer whenever
+    the page is not hidden, while a beat blocks background work for
+    _browser_active_seconds() (45s by default) — so a tab left open on a second
+    monitor held has_foreground_activity() true forever, and the scheduler
+    re-deferred every due task by 15 minutes on every tick. Nothing scheduled
+    ever ran.
+
+    So the client now says which kind of beat this is: `interactive` beats
+    follow a real pointer/key/scroll/focus event, idle keepalives set
+    interactive=False and are recorded as liveness only. The default stays True
+    so a client that predates the flag behaves exactly as it did before rather
+    than silently losing the gate.
+    """
     global _LAST_BROWSER_ACTIVITY
-    if not _enabled():
+    if not _enabled() or not interactive:
         return
     cond = _condition()
     async with cond:

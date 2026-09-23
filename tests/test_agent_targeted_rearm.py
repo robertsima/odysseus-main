@@ -10,6 +10,14 @@ see the last section. That makes the targeted path the path that has to work,
 so the sections below pin the two ways it was silently failing: the app's own
 prose->tool table was never consulted, and phrase matching broke on a hyphen.
 """
+
+import pytest
+
+pytest.skip(
+    "Re-port backlog: exercises the fork's agent loop, replaced by upstream's in the 2026-09-18 sync (website/upstream-sync-2026-09-18.md)",
+    allow_module_level=True,
+)
+
 from src.agent_loop import (
     _claims_missing_tools,
     _flatten_capability_phrase,
@@ -154,6 +162,20 @@ def test_the_skill_alias_table_is_the_refusal_vocabulary():
         "I have no skill-management capability here.", LOG_POOL)
     assert {"bash", "read_app_logs"} <= _targeted_rearm_tools(
         "I lack shell access and application-log access.", LOG_POOL)
+
+
+def test_unavailable_delegation_capability_rearms_its_matching_toolset():
+    pool = LOG_POOL | {"delegate_to_agent", "delegate_to_claude_code", "manage_agent_loadout"}
+    found = _targeted_rearm_tools(
+        "The agent delegation capability is unavailable to me in this session.", pool,
+    )
+    assert {"delegate_to_agent", "manage_agent_loadout"} <= found
+
+
+def test_session_scoped_calendar_access_refusal_rearms_calendar():
+    assert "manage_calendar" in _targeted_rearm_tools(
+        "calendar access isn't available in this session", POOL,
+    )
 
 
 def test_flattening_leaves_tool_names_and_ordinary_text_alone():

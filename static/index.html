@@ -231,26 +231,24 @@
       }
     }
   </style>
-  <!-- KaTeX CSS is loaded with media="print" so it doesn't block render,
-       then flipped to "all" via JS after load. Mermaid init runs once the
-       library finishes loading. Both hooks are wired via addEventListener
-       below (inline onload= attrs are blocked by CSP script-src-attr). -->
-  <link id="katex-css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.css" media="print">
-  <script async src="https://cdn.jsdelivr.net/npm/katex@0.16.22/dist/katex.min.js"></script>
-  <script id="mermaid-script" async src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
-  <script nonce="{{CSP_NONCE}}">
-    (function(){
-      var k = document.getElementById('katex-css');
-      if (k) k.addEventListener('load', function(){ k.media = 'all'; }, { once: true });
-      var m = document.getElementById('mermaid-script');
-      if (m) m.addEventListener('load', function(){
-        if (window.odysseusInitMermaid) window.odysseusInitMermaid();
-      }, { once: true });
-    })();
-  </script>
-  <link rel="stylesheet" href="/static/style.css?v=20260916workspace2">
-  <link rel="modulepreload" href="/static/app.js?v=20260916workspace2">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260825ctxmeter1">
+  <!-- KaTeX and Mermaid are vendored in /static/lib and pulled in by
+       static/js/markdown.js the first time a page actually renders math or a
+       ```mermaid fence. They used to load here from cdn.jsdelivr.net on every
+       page load, which cost ~985 KB on the wire, broke offline installs, and
+       announced every session to a third party. -->
+  <!-- Preload the two faces first paint actually uses: Fira Code 400 and 600,
+       the app font and the weight the sidebar and header text render at. They
+       are declared in style.css, so without a hint they are only discovered
+       after the stylesheet parses and then queue behind the module graph.
+       crossorigin is required even though these are same-origin: fonts are
+       always fetched in CORS mode, and a preload whose mode does not match the
+       real request is discarded and the font fetched a second time. -->
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
+  <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
+  <link rel="stylesheet" href="/static/style.css?v=20260808startupshell1">
+  <link rel="stylesheet" href="/static/skill-import-review.css">
+  <link rel="modulepreload" href="/static/app.js?v=20260815toolapproval4">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260819approvalcontrol1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -286,7 +284,13 @@
       if(!document.getElementById('app-loader')){clearInterval(iv);return}
       render();
     },150);
-    setTimeout(function(){var l=document.getElementById('app-loader');if(l){l.style.opacity='0';setTimeout(function(){l.remove()},300)}},5000);
+    // startupShell.js hides the loader as soon as the shell is wired; it calls
+    // back here to stop the wave because this interval is owned by this script.
+    window.__odysseusLoaderWaveStop=function(){clearInterval(iv)};
+    // Last-resort fallback for a boot that never reaches app.js at all. Must
+    // still REMOVE the node: sessions.js reads its presence as "startup in
+    // progress" and stops clearing the composer while it is around.
+    setTimeout(function(){var l=document.getElementById('app-loader');if(l){clearInterval(iv);l.style.opacity='0';setTimeout(function(){l.remove()},300)}},5000);
   })();
   </script>
   <!-- Memory Management Modal -->
@@ -431,7 +435,7 @@
             <div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">
               <h2 style="margin:0;padding:0;line-height:1;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;color:var(--accent, var(--red));"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>Add Skill</h2>
             </div>
-            <p class="memory-desc doclib-desc" style="margin-top:6px;">Import a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a> (folder with <code>SKILL.md</code> and optional templates).</p>
+            <p class="memory-desc doclib-desc" style="margin-top:6px;">Preview a skill from GitHub or <a href="https://skills.sh" target="_blank" rel="noopener noreferrer">skills.sh</a>, then import it as a draft. Instructions and supporting files are reviewed before use.</p>
             <div class="memory-add-row" style="margin-top:6px;margin-bottom:10px;">
               <div class="skill-ph-wrap" style="flex:1;min-width:0;">
                 <input type="url" id="skill-import-url" placeholder=" " class="memory-add-input skill-hint-input" aria-label="Skill import URL" />
@@ -874,7 +878,13 @@
             <button class="session-bulk-btn" id="session-bulk-cancel" title="Cancel"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
           </div>
         </div>
-        <div id="session-list" role="listbox"></div>
+        <div id="session-list" role="listbox">
+          <!-- Sidebar-local bootstrap state. renderSessionList() replaces the
+               whole list on first hydration, so this row is transient. -->
+          <div id="session-list-loading" class="list-item session-list-bootstrap" role="option" aria-disabled="true" aria-live="polite" aria-atomic="true">
+            <span class="grow muted" data-session-list-status>Loading chats…</span>
+          </div>
+        </div>
       </div>
       <!-- Hidden dropdown for session actions -->
       <div id="session-actions-dropdown" class="dropdown hidden">
@@ -1215,11 +1225,19 @@
                 <span>TTS Mode</span>
                 <span class="overflow-active-dot"></span>
               </button>
-              <button type="button" class="overflow-menu-item" id="overflow-preset-btn">
+              <button type="button" class="overflow-menu-item" id="overflow-preset-btn" title="Shared prompt: persona, message prefix/suffix and temperature for chats (and agents without a loadout)">
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/>
                 </svg>
                 <span>Prompt</span>
+              </button>
+              <!-- Agent mode shows this in place of Prompt (js/agentMenu.js):
+                   loadouts, the Agents panel, and prompts & personas. -->
+              <button type="button" class="overflow-menu-item" id="overflow-agents-btn" title="Choose this chat's agent loadout, edit its persona, or open the Agents panel">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="14" r="1"/><circle cx="15" cy="14" r="1"/></svg>
+                <span>Agents</span>
+                <span id="overflow-agents-current" class="overflow-agents-current"></span>
+                <svg class="overflow-agents-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 6 15 12 9 18"/></svg>
               </button>
             </div>
           </div>
@@ -1301,6 +1319,17 @@
           <button class="close-btn" id="close-custom-preset" aria-label="Close prompt">✖</button>
         </div>
         <div class="modal-body preset-modal-body">
+          <!-- Scope: this window edits the SHARED prompt only. An agent with a
+               loadout keeps its own persona, edited in the Agents panel
+               (js/agentMenu.js syncPromptScope fills the banner). -->
+          <p class="preset-scope" id="preset-scope">
+            <b>Shared prompt.</b> Used in Chat mode, and in Agent mode when the chat has no loadout.
+            Agents with a loadout have their own persona, set in the Agents panel.
+          </p>
+          <div class="preset-scope-agent" id="preset-scope-agent" role="status" hidden>
+            <span>This chat runs as <b id="preset-scope-agent-name">an agent</b>, which has its own persona. Changes here won't affect it.</span>
+            <button type="button" class="char-action-btn" id="preset-scope-edit-agent">Edit this agent's persona</button>
+          </div>
           <div id="char-fields-wrap">
             <div class="preset-tabs">
               <button class="preset-tab active" data-chartab="inject"><svg class="preset-tab-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m18 2 4 4"/><path d="m17 7 3-3"/><path d="M19 9 8.7 19.3c-1 1-2.5 1-3.4 0l-.6-.6c-1-1-1-2.5 0-3.4L15 5"/><path d="m9 11 4 4"/><path d="m5 19-3 3"/><path d="m14 4 6 6"/></svg><span>Inject</span></button>
@@ -1309,6 +1338,7 @@
             </div>
             <!-- Inject tab (also holds model tuning: temperature + max tokens) -->
             <div class="preset-chartab" data-chartab-panel="inject">
+              <p class="preset-tab-sub">Text wrapped around every message you send, plus how creative and how long replies are.</p>
               <label for="inject-prefix">Prefix</label>
               <textarea id="inject-prefix" rows="2" placeholder="Added before your message" style="margin-bottom:8px"></textarea>
               <label for="inject-suffix">Suffix</label>
@@ -1331,6 +1361,7 @@
             </div>
             <!-- Prompt (character/persona) tab -->
             <div class="preset-chartab" data-chartab-panel="character" style="display:none">
+              <p class="preset-tab-sub">Who the assistant is: a name and a personality it keeps for the whole chat. Saved personas can also be copied into an agent's loadout.</p>
               <label>Persona</label>
               <div class="char-name-combo">
                 <select id="char-template-select" class="char-template-select">
@@ -1357,6 +1388,7 @@
             </div>
             <!-- Group tab -->
             <div class="preset-chartab" data-chartab-panel="group" style="display:none">
+              <p class="preset-tab-sub">Several personas in one chat, answering in turn or all at once.</p>
               <div style="display:flex;gap:4px;margin-bottom:8px;">
                 <button type="button" class="compare-parallel-toggle" id="group-mode-btn" style="flex:1;height:auto;width:auto;">
                   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="20" y2="6"/><line x1="8" y1="12" x2="20" y2="12"/><line x1="8" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1.5" fill="currentColor"/><circle cx="4" cy="12" r="1.5" fill="currentColor"/><circle cx="4" cy="18" r="1.5" fill="currentColor"/></svg>
@@ -1490,6 +1522,55 @@
       </div>
       <div class="settings-layout">
         <div class="settings-sidebar">
+          <button
+            type="button"
+            class="settings-sidebar-toggle"
+            id="settings-sidebar-toggle"
+            aria-label="Collapse settings navigation"
+            title="Collapse settings navigation"
+          >
+            <svg class="settings-sidebar-toggle-collapse" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="15 18 9 12 15 6"></polyline>
+            </svg>
+            <svg class="settings-sidebar-toggle-expand" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </button>
+
+          <div
+            class="settings-sidebar-resize-handle"
+            id="settings-sidebar-resize-handle"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Resize settings navigation"
+            aria-valuemin="150"
+            aria-valuemax="340"
+            aria-valuenow="220"
+            tabindex="0"
+          ></div>
+
+          <div class="settings-sidebar-content">
+          <div class="settings-nav-search-wrap">
+            <svg class="settings-nav-search-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+              <circle cx="11" cy="11" r="7"></circle>
+              <path d="M20 20l-4-4"></path>
+            </svg>
+            <input
+              type="search"
+              id="settings-nav-search"
+              class="settings-nav-search"
+              placeholder="Find settings…"
+              autocomplete="off"
+              aria-label="Find settings"
+              aria-controls="settings-nav-search-results"
+            />
+            <div
+              id="settings-nav-search-results"
+              class="settings-nav-search-results hidden"
+              role="listbox"
+              aria-label="Settings search results"
+            ></div>
+          </div>
           <!-- Section 1: AI plumbing (Add Models → AI Defaults → Search) -->
           <button class="settings-nav-item active" data-settings-tab="services">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
@@ -1562,9 +1643,10 @@
             <span>Configuration</span>
           </button>
           <button class="settings-nav-item admin-only" data-settings-tab="system">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v-.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09A1.65 1.65 0 0 0 19.4 15z"/></svg>
             <span>System</span>
           </button>
+          </div>
         </div>
         <div class="settings-panels">
 
@@ -1635,13 +1717,6 @@
                 <label class="settings-label">Model</label>
                 <span class="adm-model-logo" id="set-defaultModelSelect-logo" style="display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;opacity:0.9;color:var(--fg);"></span>
                 <select id="set-defaultModelSelect" class="settings-select"></select>
-              </div>
-              <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" style="margin-top:6px;">Fallbacks</label>
-                <div style="flex:1;display:flex;flex-direction:column;gap:6px;">
-                  <div id="set-defaultFallbacks" class="settings-fallbacks"></div>
-                  <button type="button" class="settings-fallback-add" id="set-defaultAddFallback" title="Add a model to try if the one above fails">+ Add fallback</button>
-                </div>
               </div>
               <div id="set-defaultChatMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></div>
             </div>
@@ -2556,8 +2631,16 @@
                 <input id="set-agentMaxTools" type="text" inputmode="numeric" placeholder="500 (0 = unlimited)" class="settings-select" style="width:120px;">
               </div>
               <div class="settings-row">
-                <label class="settings-label">Max steps per message</label>
+                <label class="settings-label" title="Advisory round budget per message. It does not stop a run: the tool call limit, stall detection, timeouts and Stop are the real limits.">Round budget (advisory)</label>
                 <input id="set-agentMaxRounds" type="text" inputmode="numeric" placeholder="100" class="settings-select" style="width:120px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="How much ChatGPT-subscription models think before each step, for chats whose loadout sets none. Default sends nothing (the provider's own level). Low is much faster per round.">Reasoning effort (ChatGPT)</label>
+                <select id="set-agentReasoning" class="settings-select" style="width:160px;"><option value="">Provider default</option><option value="minimal">Minimal</option><option value="low">Low (faster)</option><option value="medium">Medium</option><option value="high">High (slower)</option></select>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="Most context the agent sends the model per step when the context budget is automatic: 85% of the model's window, up to this cap (minimum 16000). Explicit custom budgets can exceed it. Higher keeps more history in view on long-context models; lower is faster and cheaper per step. Old tool results are condensed and oversized ones stored for recall either way.">Agent context cap (tokens)</label>
+                <input id="set-agentContextCap" type="text" inputmode="numeric" placeholder="200000" class="settings-select" style="width:120px;">
               </div>
               <div class="settings-row">
                 <label class="settings-label" title="In chat, fold the middle of a tool timeline once a turn has made this many calls. 0 = never fold.">Fold tool timeline after</label>
@@ -2571,20 +2654,25 @@
             <div class="admin-toggle-sub" style="margin-bottom:8px">The Workbench window shows every agent process for a chat as it happens — Odysseus turns, Claude Code runs, sub-agents, model pipelines and background-job follow-ups — plus the files they changed, the commits they made and the repository's pull requests. Runs also appear as live cards inside the conversation.</div>
             <div class="settings-col">
               <div class="settings-row"><label class="settings-label">Workbench window</label><label class="admin-toggle" style="margin:0"><input id="set-wbEnabled" type="checkbox"> <span>on</span></label></div>
-              <div class="settings-row"><label class="settings-label" title="Open the Workbench automatically the first time a Claude Code run, sub-agent or pipeline starts in the current chat.">Auto-open on delegation</label><label class="admin-toggle" style="margin:0"><input id="set-wbAutoOpen" type="checkbox"> <span>on</span></label></div>
+              <div class="settings-row"><label class="settings-label" title="Open the Agents panel automatically when a Claude Code run, sub-agent or pipeline starts in the current chat.">Open Agents panel on delegation</label><label class="admin-toggle" style="margin:0"><input id="set-wbAutoOpen" type="checkbox"> <span>on</span></label></div>
               <div class="settings-row"><label class="settings-label" title="Run Claude Code with --output-format stream-json so its tool calls, file edits and messages stream into the Workbench live. Falls back to plain output when the installed CLI does not support it.">Live Claude Code transcript</label><label class="admin-toggle" style="margin:0"><input id="set-wbStream" type="checkbox"> <span>on</span></label></div>
-              <div class="settings-row"><label class="settings-label" title="How a chat treats risky tool calls unless the chat picks its own mode in its status line: Auto runs them, Ask for risky stops destructive or outward-facing actions for approval, Ask for everything stops every tool that can change something.">Default approvals</label>
+              <div class="settings-row"><label class="settings-label" title="What every chat and sub-agent asks before acting, unless the chat (its status line) or its agent profile picks its own mode. Auto never asks. Ask for risky stops destructive or outward-facing actions. Ask for everything stops every tool that can change something, and anything high-impact once web, email or file content has entered the run.">Default approvals</label>
                 <select id="set-wbApproval" class="settings-select" style="max-width:220px"><option value="auto">Auto — never ask</option><option value="ask_risky">Ask for risky actions</option><option value="ask_all">Ask for everything</option></select></div>
               <div class="settings-row"><span id="set-wbMsg" class="admin-toggle-sub"></span></div>
             </div>
             <h3 class="agent-profiles-title">Agent profiles</h3>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. A preset can choose instructions, primary and fallback models, tool and skill allowlists, MCP/integration access, memory permissions, private-vault access, approval behavior, delegation policy, and worker limits. Apply one from the Agent Control Room; the selected agent receives its own editable copy.</div>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts. Each one sets what an agent may do (tools, skills, MCP connections, memory, private-vault access, approvals, delegation, worker limits, models) and how it sounds (its own persona name, personality, temperature and reply length). Pick one for a chat from the composer&rsquo;s Agents menu in Agent mode, or from the Agent Control Room. The chat gets its own copy, so editing a loadout here does not change agents already running with it. The shared prompt in the Prompt window is used only by chats and agents without a loadout.</div>
             <div id="set-agentProfiles" class="agent-profiles"></div>
             <div class="agent-profiles-actions">
               <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
               <button type="button" class="ats-btn" id="set-agentProfileSave">Save profiles</button>
+              <button type="button" class="ats-btn" id="set-agentProfileExport" title="Download the saved profiles as a JSON file. Credentials pasted into a profile's text are redacted.">Export</button>
+              <button type="button" class="ats-btn" id="set-agentProfileImport" title="Load profiles from an exported JSON file. Each one is validated like a normal save.">Import</button>
+              <select id="set-agentProfileImportMode" class="settings-select" style="max-width:220px" title="What Import does with profiles that already exist"><option value="merge">Merge, overwrite same names</option><option value="rename">Merge, keep both</option><option value="replace">Replace all profiles</option></select>
+              <input type="file" id="set-agentProfileImportFile" accept=".json,application/json" hidden>
               <span id="set-agentProfileMsg" class="admin-toggle-sub"></span>
             </div>
+            <div id="set-agentProfileImportReport" class="admin-toggle-sub" style="margin-top:6px" hidden></div>
           </div>
           <div class="admin-card" style="margin-bottom:12px;" id="set-claudeCodeCard">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Claude Code delegation</h2>
@@ -2608,8 +2696,8 @@
                 <input id="set-ccDefaultRepo" type="text" placeholder="auto" class="settings-select" style="width:320px;">
               </div>
               <div class="settings-row">
-                <label class="settings-label">Max concurrent jobs</label>
-                <input id="set-ccConcurrency" type="text" inputmode="numeric" placeholder="2" class="settings-select" style="width:120px;">
+                <label class="settings-label" title="Shared across all chats. Each parent chat also has its own Child workers limit in Agents > Loadout; raising this provider ceiling does not change that limit.">Provider-wide concurrent jobs</label>
+                <input id="set-ccConcurrency" type="number" min="0" max="16" step="1" placeholder="Default" class="settings-select" style="width:120px;" aria-label="Provider-wide concurrent jobs; zero uses deployment default">
               </div>
               <div class="settings-row">
                 <label class="settings-label" title="Claude model alias passed with --model, e.g. sonnet or opus. Empty = Claude Code's own default.">Model</label>
@@ -2632,6 +2720,28 @@
                 <button type="button" id="set-ccRefreshTasks" class="btn btn-secondary">Refresh jobs</button>
                 <span id="set-ccMsg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 45%, transparent);"></span>
               </div>
+            </div>
+            <h3 class="agent-profiles-title" style="margin-top:14px">Cloud runner (GitHub Actions)</h3>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Runs Claude Code in GitHub's cloud with Anthropic's official GitHub Action, so nothing has to be signed in inside this container. Your Claude credential lives only in each repository's secrets (<code>CLAUDE_CODE_OAUTH_TOKEN</code> from <code>claude setup-token</code>, or <code>ANTHROPIC_API_KEY</code>); Odysseus never sees it. Claude works on a <code>claude/odysseus-*</code> branch and the result comes back as a draft pull request. Uses the GitHub credential configured for the agent worktree.</div>
+            <div class="settings-col">
+              <div class="settings-row">
+                <label class="settings-label" title="Where a delegation goes when it names neither via nor a cloud repository.">Default runner</label>
+                <select id="set-ccBackend" class="settings-select" style="width:220px;"><option value="local">This container (local)</option><option value="cloud">GitHub Actions (cloud)</option></select>
+              </div>
+              <div class="settings-row" style="align-items:flex-start;">
+                <label class="settings-label" title="owner/repo slugs Claude may be dispatched to. Each needs the workflow file and a Claude secret.">Cloud repositories<br><span style="font-weight:normal;opacity:.7">owner/repo, one per line</span></label>
+                <textarea id="set-ccCloudRepos" rows="3" placeholder="robertsima/odysseus-main" class="settings-select" style="width:320px;font-family:var(--mono, ui-monospace, monospace);font-size:12px;"></textarea>
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="File name under .github/workflows/ in each repository.">Workflow file</label>
+                <input id="set-ccCloudWorkflow" type="text" placeholder="odysseus-claude.yml" class="settings-select" style="width:220px;">
+              </div>
+              <div class="settings-row" style="gap:8px;">
+                <a class="btn btn-secondary" href="/api/claude-code/cloud/workflow.yml" download>Download workflow</a>
+                <button type="button" id="set-ccCloudCheck" class="btn btn-secondary">Check cloud setup</button>
+              </div>
+              <div class="admin-toggle-sub">Per repository: commit the workflow to <code>.github/workflows/</code>, add the Claude secret (or run <code>/install-github-app</code> in Claude Code), and under Actions › General allow read/write and "Allow GitHub Actions to create and approve pull requests".</div>
+              <div id="set-ccCloudStatus" class="cc-status"></div>
             </div>
             <div class="admin-toggle-sub" style="margin:12px 0 6px">Recent delegations (chat and API). Prompts are never stored; each row is what git reported afterwards.</div>
             <div id="set-ccTasks" class="admin-user-list cc-tasks"></div>
@@ -2856,6 +2966,7 @@
 
 
 <!-- Load modules in this order -->
+<script src="/static/js/pluginCatalog.js"></script>
 <script type="module" src="/static/js/storage.js"></script>
 <script type="module" src="/static/js/ui.js"></script>
 <script type="module" src="/static/js/markdown.js"></script>
@@ -2873,21 +2984,21 @@
 <script type="module" src="/static/js/search.js"></script>
 <script type="module" src="/static/js/spinner.js"></script>
 <script type="module" src="/static/js/tts-ai.js"></script>
-<script type="module" src="/static/js/document.js?v=20260722emailfastindex1"></script>
+<script type="module" src="/static/js/document.js?v=20260815approvalsave1"></script>
 <script type="module" src="/static/js/gallery.js?v=20260708match1"></script>
-<script type="module" src="/static/js/chatRenderer.js?v=20260825ctxmeter1"></script>
+<script type="module" src="/static/js/chatRenderer.js?v=20260819approvalcontrol1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
-<script type="module" src="/static/js/chatStream.js?v=20260722emailfastindex1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260825ctxmeter1"></script>
+<script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260819approvalcontrol1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260916workspace2"></script>
+<script type="module" src="/static/js/settings.js?v=20260923roundbudget1"></script>
 <script type="module" src="/static/js/capabilitiesPanel.js?v=20260916workspace2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260916workspace2"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260815toolapproval4"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

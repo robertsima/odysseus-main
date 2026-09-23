@@ -7,6 +7,49 @@ the codebase, you are probably right to stay away.
 
 ## High Priority
 
+- [x] Add scoped Git inspection, staging/commits, branches/tags, switching,
+  fetch/pull/upstream configuration and confirmation-bound push/merge/deletion
+  without a private-vault grant; preserve unresolved URL follow-ups.
+  See [local repository sync](website/agent-worktree.md#updating-an-existing-checkout-scoped-git).
+- [x] Fix native Git calls rejected for unused empty parameters; preserve optional
+  fields through Responses conversion, action guidance through schema compaction,
+  exact single-use confirmations, and routing for pasted Git credential errors.
+- [ ] After rebuild, verify local Git sync against the deployed Umni checkout:
+  exact configured upstream, clean fast-forward, dirty/missing-branch refusal,
+  and revoked GitHub-read/tool permissions. Do not assume the checkout directory
+  name is the GitHub repository name.
+- [x] Add bounded `pull_with_restore` for dirty checkouts, preserving staged,
+  unstaged and untracked paths without exposing arbitrary stash-pop behavior.
+- [x] Extend typed Git coverage to clone/init, bounded stash management,
+  recovery-ref reset/rebase, force-with-lease and lease-bound remote branch
+  deletion. Risky actions use exact single-use confirmations; arbitrary force,
+  interactive rebase and conflict-resolving merge remain intentionally unavailable.
+- [x] Repair corrective follow-up routing, distinguish MCP usage from MCP
+  administration, defer irrelevant connected tools, and align advertised tools
+  with private-vault execution permission. See
+  [September 17 log follow-up](website/harness-log-review-2026-09-17.md).
+- [ ] Design genuinely isolated general repository execution so builds/tests can run
+  without granting access to the mounted private vault. A working directory
+  or prompt restriction is not an isolation boundary.
+- [ ] Measure cross-turn cache reuse and large-tool-output growth in production;
+  evaluate pre-turn compaction and bounded output offloading with task-success
+  checks before changing the execution ledger.
+
+- [x] Per-agent persisted personality/instructions, declarative capability plugins,
+  pinned PromptScript/skills CLIs, and reviewed draft-only portable skill imports.
+  See [agent extensions guide](website/agent-extensions.md).
+- [ ] Verify agent extension controls after deployment: two contrasting personas,
+  plugin enable/remove with manual permission edits, local skill import/publish,
+  and native/Docker CLI readiness.
+
+- [x] Separate shared human-intent assessment, advisory candidate selection,
+  and execution authorization; add bounded per-turn capability discovery for
+  native and fenced/MCP models. See
+  [harness routing design](specs/harness-capability-routing.md).
+- [ ] Run the native/local-provider [routing acceptance matrix](website/harness-routing-acceptance.md)
+  after deployment; compare task success, total tokens, cached input and
+  latency, including eight concurrent agents and revoked permissions.
+
 - SQUASH BUGS
 - Fresh install smoke tests on Linux, macOS, and Windows. Docker, native Python,
   and WSL all need coverage.
@@ -159,6 +202,13 @@ loadouts. The living behavior specification is
 
 - More tests around endpoint probing and provider setup.
 - Better task scheduler defaults and visibility.
+- Close the database-exhaustion deployment follow-up: without enlarging the
+  pool, validate simultaneous background jobs plus model refresh while ordinary
+  database endpoints remain responsive; verify cancellation leaves no stuck
+  task-run rows, subscription auth refresh stays owner-scoped, and deliberate
+  exhaustion produces safe `503` responses with useful occupancy diagnostics.
+  The 2026-09-17 incident and acceptance checklist are tracked in
+  `specs/harness-reliability-efficiency.md`; the fix is not yet deployed.
 - Backup/restore guide and helper flow for `data/`.
 - Security hardening around admin-only tools and clear docs for their risk.
 

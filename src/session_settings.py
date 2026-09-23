@@ -2,14 +2,15 @@
 
 Two kinds of keys live in ``sessions.settings_json``:
 
-* **Policy** the server enforces on every turn: ``approval_mode`` (see
-  :mod:`src.tool_approvals`), ``tool_access``/``enabled_tools`` (this chat's
-  tool allowlist, stored as an allowlist and inverted where it is evaluated —
-  :func:`src.tool_policy.allowlist_permits`) and ``disabled_tools`` (tools
-  switched off for this chat only, on top of the global and per-user
-  denylists). ``tool_access`` is absent on chats written before allowlists were
-  stored, and resolves to ``"all"`` — those chats keep being governed by the
-  ``disabled_tools`` their loadout wrote at the time.
+* **Policy** the server enforces on every turn: ``tool_access``/``enabled_tools``
+  (this chat's tool allowlist, stored as an allowlist and inverted where it is
+  evaluated — :func:`src.tool_policy.allowlist_permits`), ``disabled_tools``
+  (tools switched off for this chat only, on top of the global and per-user
+  denylists) and ``approval_mode`` (see :mod:`src.approval_modes`), which
+  decides which tool calls stop for an approval card. ``tool_access`` is absent
+  on chats written before allowlists were stored, and resolves to ``"all"`` —
+  those chats keep being governed by the ``disabled_tools`` their loadout wrote
+  at the time.
 * **Last used** state the frontend restores when the chat is reopened:
   ``toggles`` (agent/chat mode, web, shell, plan, knowledge base),
   ``workspace`` and ``preset_id``. The chat route records these from each turn,
@@ -21,7 +22,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Set
 
-from src import tool_approvals
+from src import approval_modes
 
 _TOGGLE_KEYS = ("web", "bash", "plan", "rag")
 MAX_DISABLED_TOOLS = 300
@@ -31,6 +32,12 @@ _SELECTION_MODES = frozenset({"all", "selected", "none"})
 _MODEL_ACCESS_MODES = frozenset({"current", "selected", "all"})
 _DELEGATION_POLICIES = frozenset({"never", "explicit", "auto"})
 _LIST_KEYS = frozenset({"skill_names", "allowed_models", "allowed_mcp_servers", "enabled_tools"})
+MAX_AGENT_INSTRUCTIONS = 8000
+MAX_AGENT_PERSONA_NAME = 60
+# Keys that make a chat run under its own loadout voice rather than the shared
+# persona (see loadout_voice).
+_LOADOUT_VOICE_KEYS = ("agent_profile", "agent_instructions", "agent_persona_name",
+                       "agent_temperature", "agent_max_tokens")
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
@@ -42,8 +49,8 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
         if key == "approval_mode":
             if value is None:
                 out[key] = None
-            elif value not in tool_approvals.MODES:
-                raise ValueError(f"approval_mode must be one of {', '.join(tool_approvals.MODES)}")
+            elif value not in approval_modes.MODES:
+                raise ValueError(f"approval_mode must be one of {', '.join(approval_modes.MODES)}")
             else:
                 out[key] = value
         elif key == "disabled_tools":
@@ -76,7 +83,7 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
-        elif key == PRIVATE_VAULT_ACCESS_KEY:
+        elif key in (PRIVATE_VAULT_ACCESS_KEY, "workflow_readonly"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")
             out[key] = value
@@ -84,13 +91,9 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value not in _ACCESS_MODES:
                 raise ValueError(f"memory_access must be one of {', '.join(sorted(_ACCESS_MODES))}")
             out[key] = value
-        elif key == "tool_access":
+        elif key in ("skill_access", "tool_access"):
             if value not in _SELECTION_MODES:
-                raise ValueError(f"tool_access must be one of {', '.join(sorted(_SELECTION_MODES))}")
-            out[key] = value
-        elif key == "skill_access":
-            if value not in _SELECTION_MODES:
-                raise ValueError(f"skill_access must be one of {', '.join(sorted(_SELECTION_MODES))}")
+                raise ValueError(f"{key} must be one of {', '.join(sorted(_SELECTION_MODES))}")
             out[key] = value
         elif key == "model_access":
             if value not in _MODEL_ACCESS_MODES:
@@ -117,6 +120,30 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError("agent_profile must be a string")
             out[key] = (value or "").strip()[:40] or None
+        elif key == "agent_instructions":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_instructions must be a string")
+            out[key] = (value or "").strip()[:MAX_AGENT_INSTRUCTIONS] or None
+        elif key == "agent_reasoning_effort":
+            value = str(value or "").strip().lower()
+            if value and value not in ("minimal", "low", "medium", "high"):
+                raise ValueError("agent_reasoning_effort must be minimal, low, medium or high (or empty)")
+            out[key] = value or None
+        elif key == "agent_persona_name":
+            if value is not None and not isinstance(value, str):
+                raise ValueError("agent_persona_name must be a string")
+            out[key] = (value or "").strip()[:MAX_AGENT_PERSONA_NAME] or None
+        elif key in ("agent_temperature", "agent_max_tokens"):
+            if value is None or (isinstance(value, str) and not value.strip()):
+                out[key] = None
+                continue
+            if isinstance(value, bool):
+                raise ValueError(f"{key} must be a number")
+            try:
+                number = float(value) if key == "agent_temperature" else int(value)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number")
+            out[key] = max(0.0, min(2.0, number)) if key == "agent_temperature" else max(0, min(65536, number))
         else:
             raise ValueError(f"unknown setting {key!r}")
     return out
@@ -173,17 +200,47 @@ def stored_disabled_tools(settings: Optional[Dict[str, Any]]) -> Set[str]:
     return denied
 
 
+def loadout_voice(settings: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """The persona, instructions and sampling a chat's loadout gives it, or
+    None when the chat has no loadout and uses the shared Prompt-window persona.
+
+    Personas are shared across users, but each agent keeps its own: a chat under
+    a loadout never picks up the shared persona, its prompt or its temperature.
+    ``temperature``/``max_tokens`` are None when the loadout leaves them to the
+    app default.
+    """
+    settings = settings or {}
+    if not any(settings.get(key) not in (None, "") for key in _LOADOUT_VOICE_KEYS):
+        return None
+    return {
+        "profile": settings.get("agent_profile") or None,
+        "persona_name": settings.get("agent_persona_name") or "",
+        "instructions": settings.get("agent_instructions") or "",
+        "temperature": settings.get("agent_temperature"),
+        "max_tokens": settings.get("agent_max_tokens"),
+    }
+
+
 def effective_approval_mode(settings: Optional[Dict[str, Any]]) -> str:
     """The chat's approval mode, else the global default, else ``auto``."""
     mode = (settings or {}).get("approval_mode")
-    if mode in tool_approvals.MODES:
+    if mode in approval_modes.MODES:
         return mode
     try:
         from src.settings import get_setting
 
-        return tool_approvals.normalize_mode(get_setting("agent_approval_mode", tool_approvals.DEFAULT_MODE))
+        return approval_modes.normalize_mode(get_setting("agent_approval_mode", approval_modes.DEFAULT_MODE))
     except Exception:
-        return tool_approvals.DEFAULT_MODE
+        return approval_modes.DEFAULT_MODE
+
+
+def effective_worker_limit(settings: Optional[Dict[str, Any]]) -> int:
+    """The parent chat's child limit, independent of provider-wide capacity."""
+    raw = (settings or {}).get("max_parallel_workers")
+    try:
+        return max(0, min(8, int(1 if raw is None else raw)))
+    except (TypeError, ValueError):
+        return 1
 
 
 def last_used_from_request(*, chat_mode: str, allow_web: Any, allow_bash: Any, plan_mode: bool,

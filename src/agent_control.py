@@ -31,6 +31,15 @@ from src import agent_activity as activity
 logger = logging.getLogger(__name__)
 
 
+# Workers get one run, never extra "continuation legs". Those were added when a
+# round ceiling cut workers off mid-task; the loop has since dropped round
+# ceilings altogether (stream_agent_loop treats max_rounds as advisory), so the
+# legs could only turn an explicit budget into up to five of them. A run is
+# bounded by progress instead: the stall and runaway detectors, the per-run
+# tool-call ceiling, the request timeout and the stop control. If a caller ever
+# reports rounds_exhausted, the run ends as incomplete and is not extended.
+
+
 def live_children(session_id: Optional[str]) -> int:
     """Child runs currently in flight for ``session_id``.
 
@@ -38,19 +47,52 @@ def live_children(session_id: Optional[str]) -> int:
     spawning-tool gate in :mod:`src.tool_execution` and the loadout tool's
     ``start`` action — so the counting rule lives here rather than being
     written twice and drifting. ``odysseus`` runs are the chat's own turns, not
-    children, so they do not count against the limit.
+    children, so they do not count against the limit. Claude Code tasks are
+    registered with their runner before they enter ``_run_claude`` and publish
+    an activity run. Include those queued records as well: otherwise several
+    same-round starts can all pass this gate while they wait on Claude's
+    process semaphore. Once activity has the run, the task id/run id overlap
+    is de-duplicated.
     """
     if not session_id:
         return 0
+    sid = str(session_id)
     try:
-        return sum(
-            1 for rec in activity.list_runs(limit=400)
-            if rec.get("session_id") == session_id
+        active = [
+            rec for rec in activity.list_runs(limit=400)
+            if (rec.get("session_id") == sid or (rec.get("summary") or {}).get("parent_session") == sid)
             and rec.get("status") == "running"
             and rec.get("source") != "odysseus"
-        )
+            and not (rec.get("summary") or {}).get("workflow_controller")
+        ]
     except Exception:
-        return 0
+        active = []
+
+    # ``task_id`` is the runner's id and is used as the activity run id by
+    # _run_claude. Keep both forms for old activity rows that only recorded one
+    # of them in their summary.
+    represented = set()
+    for rec in active:
+        if rec.get("run_id"):
+            represented.add(str(rec["run_id"]))
+        summary = rec.get("summary") or {}
+        if isinstance(summary, dict) and summary.get("task_id"):
+            represented.add(str(summary["task_id"]))
+
+    total = len(active)
+    try:
+        # Lazy to avoid importing the Claude integration (which imports the
+        # activity subsystem) on ordinary chat/delegation paths.
+        from src.agent_tools.claude_code_tools import get_task_runner
+
+        for task in get_task_runner().summaries(limit=400):
+            if (task.get("session_id") == sid
+                    and task.get("status") in {"queued", "running"}
+                    and str(task.get("task_id") or "") not in represented):
+                total += 1
+    except Exception:
+        logger.debug("Could not include queued Claude Code tasks in child count", exc_info=True)
+    return total
 
 
 # ── steering ──────────────────────────────────────────────────────────────
@@ -105,7 +147,15 @@ STEER_STATES = ("queued", "acknowledged", "injected", "cancelled", "failed")
 # Nothing moves out of these; a message that reaches one is history, not queue.
 STEER_TERMINAL = ("injected", "cancelled", "failed")
 
-_STEER: Dict[str, List[dict]] = {}
+# Queues are deliberately per (session, run), not merely per session.  A chat
+# can have a foreground turn while a detached continuation, worker hand-off,
+# or background follow-up is also winding down.  With a session-only key, the
+# first loop to reach a round would consume (or the first to finish would
+# cancel) a correction intended for the other one.
+#
+# ``None`` is the legacy/unbound bucket.  It remains for callers that cannot
+# identify a run yet, and is never drained by a run-specific loop.
+_STEER: Dict[tuple[str, Optional[str]], List[dict]] = {}
 _STEER_MAX = 10
 
 # Warning for the two states a human should notice unprompted (a correction is
@@ -167,6 +217,7 @@ def _steer_transition(rec: dict, state: str, *, reason: Optional[str] = None,
         # explicitly means a row lifted out of the feed (or read from the
         # global stream) still says which agent was being steered.
         "target_session": session_id or None,
+        "target_run": rec.get("run_id") or None,
         "queued_at": queued_at,
         "state_at": now,
         "age_s": round(now - queued_at, 3),
@@ -191,8 +242,68 @@ def _steer_transition(rec: dict, state: str, *, reason: Optional[str] = None,
     return rec
 
 
+def _steer_key(session_id: str, run_id: Optional[str]) -> tuple[str, Optional[str]]:
+    return str(session_id), str(run_id) if run_id else None
+
+
+def persist_applied_steer(session, event: dict) -> None:
+    """Keep delivered instructions in history with their real author identity."""
+    from core.models import ChatMessage
+
+    text = str(event.get("text") or "")
+    if not text:
+        return
+    peer = event.get("kind") == "peer"
+    metadata = {"source": "agent" if peer else "steer", "steer_id": event.get("steer_id")}
+    if peer:
+        metadata.update(kind="peer", trusted=False,
+                        from_session=event.get("from_session"),
+                        from_session_name=event.get("from_session_name"))
+    session.add_message(ChatMessage("user", text, metadata))
+
+
+def _live_run_id(session_id: str) -> Optional[str]:
+    """Best-effort live-turn binding without making steering depend on telemetry.
+
+    Normal foreground loops publish an ``odysseus`` active turn.  A headless
+    worker has an externally-owned activity record instead, so select that
+    record only when it is the *sole* running record for the session.  More
+    than one is deliberately ambiguous: an unbound correction is safer than
+    silently steering the wrong worker.
+    """
+    try:
+        # The route allocates this before loop preparation, so it covers the
+        # only interval where a foreground steer used to become unbound.
+        from routes import chat_routes
+        stream = (getattr(chat_routes, "_active_streams", {}) or {}).get(str(session_id))
+        if isinstance(stream, dict) and str(stream.get("mode") or "").lower() == "agent":
+            stream_run = stream.get("steer_run_id")
+            if stream_run:
+                return str(stream_run)
+        # Headless wrapper ids are the queue identity for detached workers;
+        # their loop telemetry has a separate odysseus run id.
+        from src.headless_agent import steering_run_id, has_steering_runs
+        wrapper_run = steering_run_id(session_id)
+        if wrapper_run:
+            return wrapper_run
+        # Do not fall through to whichever telemetry run happened to publish
+        # last when two detached wrappers share this session.
+        if has_steering_runs(session_id):
+            return None
+        active = activity.active_turn(session_id)
+        if active:
+            return active
+        running = activity.list_runs(session_id=str(session_id), active_only=True, limit=2)
+        if len(running) == 1:
+            return str(running[0].get("run_id") or "") or None
+    except Exception:
+        pass
+    return None
+
+
 def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str = "user",
-          from_session: Optional[str] = None, from_session_name: Optional[str] = None) -> dict:
+          from_session: Optional[str] = None, from_session_name: Optional[str] = None,
+          run_id: Optional[str] = None) -> dict:
     """Queue a message for the next round of ``session_id``'s turn.
 
     ``kind``/``from_session``/``from_session_name`` are optional and default to
@@ -212,14 +323,18 @@ def steer(session_id: str, text: str, *, owner: Optional[str] = None, kind: str 
         # Never a queued message, so there is nothing to give a lifecycle to;
         # the caller is told synchronously and shows its own error.
         raise ValueError("steer text is empty")
+    # Resolve once at acceptance.  Looking up the active turn later makes a
+    # queued correction drift into whichever run happens to be active then.
+    target_run = str(run_id) if run_id else _live_run_id(str(session_id))
     now = time.time()
     rec = {"id": _new_steer_id(), "session_id": str(session_id), "text": text, "ts": now,
-           "queued_at": now, "owner": owner, "kind": kind, "state": "queued", "timestamps": {}}
+           "queued_at": now, "owner": owner, "kind": kind, "state": "queued", "timestamps": {},
+           "run_id": target_run}
     if from_session:
         rec["from_session"] = from_session
     if from_session_name:
         rec["from_session_name"] = from_session_name
-    queue = _STEER.setdefault(str(session_id), [])
+    queue = _STEER.setdefault(_steer_key(str(session_id), target_run), [])
     if len(queue) >= _STEER_MAX:
         # A refusal is exactly the case the operator needs afterwards: the
         # sender believes it steered, and without this nothing would ever
@@ -251,17 +366,18 @@ def note_refused(session_id: str, text: str, reason: str, *, owner: Optional[str
     return _steer_transition(rec, "failed", reason=reason)
 
 
-def drain_steer(session_id: Optional[str]) -> List[str]:
+def drain_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
     """Messages queued since the last round, oldest first (and cleared).
 
     Delegates to ``drain_steer_records`` so a caller that only wants the text
     still moves the messages to ``acknowledged``: a drain that left no trace is
     the hole this whole lifecycle exists to close.
     """
-    return [rec["text"] for rec in drain_steer_records(session_id)]
+    return [rec["text"] for rec in drain_steer_records(session_id, run_id=run_id)]
 
 
-def drain_steer_records(session_id: Optional[str], *, round_num: Optional[int] = None) -> List[dict]:
+def drain_steer_records(session_id: Optional[str], *, run_id: Optional[str] = None,
+                        round_num: Optional[int] = None) -> List[dict]:
     """Like ``drain_steer``, but keeps each record's metadata instead of just its text.
 
     ``drain_steer`` returns bare strings because a caller that only appends
@@ -280,7 +396,7 @@ def drain_steer_records(session_id: Optional[str], *, round_num: Optional[int] =
     """
     if not session_id:
         return []
-    queue = _STEER.pop(str(session_id), None)
+    queue = _STEER.pop(_steer_key(str(session_id), run_id), None)
     if not queue:
         return []
     for rec in queue:
@@ -306,7 +422,7 @@ def mark_failed(rec: dict, reason: str, *, round_num: Optional[int] = None,
     return _steer_transition(rec, "failed", reason=reason, round_num=round_num, run_id=run_id)
 
 
-def pending_steer(session_id: str) -> List[dict]:
+def pending_steer(session_id: str, *, run_id: Optional[str] = None) -> List[dict]:
     """Records still waiting to be drained — the live queue, nothing else.
 
     This still backs the ``steer_queued`` count on the Agents overview, and the
@@ -317,28 +433,42 @@ def pending_steer(session_id: str) -> List[dict]:
     feed, so the count dropping to zero can be read against what became of each
     message instead of being the end of the story.
     """
-    return list(_STEER.get(str(session_id), ()))
+    if run_id is not None:
+        return list(_STEER.get(_steer_key(session_id, run_id), ()))
+    # Public overview callers historically ask by session.  Keep that useful
+    # aggregate while run loops must opt into their exact bucket above.
+    sid = str(session_id)
+    return [rec for (queued_session, _), queue in _STEER.items() if queued_session == sid for rec in queue]
 
 
-def clear_steer(session_id: Optional[str]) -> List[str]:
+def clear_steer_records(session_id: Optional[str], *,
+                        run_id: Optional[str] = None) -> List[dict]:
     """Drop anything still queued for a turn that has ended, returning it.
 
-    The queue is keyed only by session, so a steer nobody drained would sit
-    there until some *future* turn picked it up and answered a correction from
-    an hour ago with no idea what it referred to. The agent loop extends a turn
-    to absorb a late steer (see the round loop), so reaching here means the turn
-    really is over — each dropped message is marked ``cancelled`` with that
-    reason, so "it never landed" is on the record instead of only in a server
-    log line the operator never sees.
+    The queue is keyed by session and run, so a steer nobody drained would sit
+    in that run's bucket until an unsafe later adoption. The agent loop extends
+    a turn to absorb a late steer (see the round loop), so reaching here means
+    that run really is over — each dropped message is marked ``cancelled`` with
+    that reason, so "it never landed" is on the record instead of only in a
+    server log line the operator never sees.
+
+    Records rather than bare strings, mirroring ``drain_steer_records``: the
+    client has to settle the pending chip for THIS message and hand its text
+    back to the user, and it can only do either if the id comes with it.
     """
     if not session_id:
         return []
-    queue = _STEER.pop(str(session_id), None)
+    queue = _STEER.pop(_steer_key(str(session_id), run_id), None)
     if not queue:
         return []
     for rec in queue:
         _steer_transition(rec, "cancelled", reason="the turn ended before it was drained")
-    return [rec["text"] for rec in queue]
+    return list(queue)
+
+
+def clear_steer(session_id: Optional[str], *, run_id: Optional[str] = None) -> List[str]:
+    """``clear_steer_records`` for callers that only need the text."""
+    return [rec["text"] for rec in clear_steer_records(session_id, run_id=run_id)]
 
 
 def steer_history(session_id: str, *, limit: int = 20) -> List[dict]:
@@ -372,7 +502,7 @@ def steer_history(session_id: str, *, limit: int = 20) -> List[dict]:
             row["state"] = state
             row["timestamps"][state] = data.get("state_at") or ev.get("ts")
         for key in ("steer_kind", "queued_at", "text", "reason", "round", "from_session",
-                    "from_session_name", "target_session"):
+                    "from_session_name", "target_session", "target_run"):
             if data.get(key) not in (None, ""):
                 row["kind" if key == "steer_kind" else key] = data[key]
         row["updated_at"] = ev.get("ts")
@@ -420,11 +550,14 @@ def is_steerable(session_id: str) -> bool:
 
         streams = getattr(chat_routes, "_active_streams", {}) or {}
     except Exception:
-        return True
+        return False
     rec = streams.get(str(session_id))
-    if not isinstance(rec, dict) or "mode" not in rec:
-        return True
-    return str(rec.get("mode") or "").strip().lower() == "agent"
+    if isinstance(rec, dict) and "mode" in rec:
+        return (str(rec.get("mode") or "").strip().lower() == "agent"
+                and _live_run_id(str(session_id)) is not None)
+    # Detached work is steerable only when its wrapper identity is known. Do
+    # not accept an unbound correction that no named loop can drain.
+    return _live_run_id(str(session_id)) is not None
 
 
 # ── stop ──────────────────────────────────────────────────────────────────
@@ -439,6 +572,11 @@ async def stop_run(run_id: str) -> dict:
         return {"stopped": False, "status": rec.get("status"), "reason": "not running"}
     summary = rec.get("summary") or {}
     source = rec.get("source")
+    if summary.get("workflow_controller"):
+        from src import agent_workflows
+        result = await agent_workflows.inspect(workflow_id=run_id, session_id=rec["session_id"],
+                                                owner=rec.get("owner"), action="cancel")
+        return {"stopped": result["status"] == "cancelled", "how": "workflow", "status": result["status"]}
     from src.headless_agent import request_stop
 
     if request_stop(run_id):
@@ -464,18 +602,64 @@ async def stop_run(run_id: str) -> dict:
     raise ValueError(f"{source or 'This'} runs can't be stopped individually")
 
 
+# ── wrap up (soft stop) ───────────────────────────────────────────────────
+
+WRAP_UP_TEXT = ("Wrap up now: stop starting new work, and within the next one or two rounds "
+                "return your result from what you already have, noting anything left unfinished.")
+
+
+def wrap_up(run_id: str, *, owner: Optional[str] = None) -> dict:
+    """Ask a live agent run to finish with what it has, instead of killing it.
+
+    Stop cancels the drain and hands back whatever text happened to exist; a
+    long worker is usually mid-tool at that point, so the parent gets partial
+    work with no summary. This queues an ordinary steer, bound to the run the
+    way the loop drains it, so the model itself writes the hand-back. Raises
+    ``LookupError`` when unknown and ``ValueError`` when the run has no agent
+    loop that would read the message.
+    """
+    rec = activity.get_run(run_id)
+    if rec is None:
+        raise LookupError("Run not found")
+    if rec.get("status") not in activity.LIVE_RUN_STATUSES:
+        raise ValueError("This run is not running")
+    session_id = str(rec.get("session_id") or "")
+    from src.headless_agent import serves_run
+
+    if serves_run(session_id, run_id):
+        # A detached worker drains exactly its wrapper run's queue.
+        target = run_id
+    elif (rec.get("source") == "odysseus" and activity.active_turn(session_id) == run_id
+          and is_steerable(session_id)):
+        # A chat turn drains the queue its stream allocated, which is not the
+        # activity run id; let `steer` resolve it from the live stream.
+        target = None
+    else:
+        raise ValueError("This run has no agent rounds to deliver a wrap-up to; stop it instead")
+    return steer(session_id, WRAP_UP_TEXT, owner=owner or rec.get("owner"), run_id=target)
+
+
 # ── launch a worker ───────────────────────────────────────────────────────
 
 _WORKERS: Dict[str, asyncio.Task] = {}
 
 
 async def launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
-                        parent_session: Optional[str] = None, model: Optional[str] = None) -> dict:
+                        parent_session: Optional[str] = None, model: Optional[str] = None,
+                        inline_profile: Optional[dict] = None, handoff: bool = True,
+                        run_metadata: Optional[dict] = None, runtime_settings: Optional[dict] = None,
+                        workspace: Optional[str] = None, requires: Optional[List[str]] = None,
+                        preflight: bool = True) -> dict:
     """Start a worker in a fresh chat and return at once with its ids.
 
     The worker runs detached (like a chat turn survives a closed tab); its
     progress is on its own chat's activity feed and on the parent's when one
     is given, so the dashboard and the parent chat both see it.
+
+    Unless ``preflight`` is off, src.worker_preflight checks the task first:
+    it binds a workspace (``workspace``, else the parent chat's, else a
+    checkout the task names) and attaches the file tools the task needs, or
+    raises WorkerBlocked (a ValueError) with the fix, before any chat exists.
     """
     from src import agent_profiles, agent_runs
     from src.agent_tools.session_tools import _new_child_session
@@ -488,7 +672,9 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     manager = get_session_manager()
     if manager is None:
         raise RuntimeError("session manager unavailable")
-    profile = None
+    if inline_profile is not None and (profile_name or model):
+        raise ValueError("inline_profile cannot be combined with profile_name or model")
+    profile = agent_profiles.validate_profiles([inline_profile])[0] if inline_profile is not None else None
     if profile_name:
         profile = agent_profiles.get_profile(profile_name)
         if profile is None:
@@ -497,53 +683,103 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         profile = dict(profile or {"name": "worker", "instructions": "", "disabled_tools": [],
                                    "max_rounds": agent_profiles.DEFAULT_ROUNDS})
         profile["model"] = model
-    sess, err = _new_child_session(manager, parent_session, owner, task, profile)
+    checked = None
+    if preflight:
+        from src import worker_preflight
+        from src.agent_tools.session_tools import _caller_workspace
+
+        checked = worker_preflight.run_preflight(
+            task,
+            explicit_workspace=workspace,
+            inherited_workspace=_caller_workspace(parent_session),
+            unavailable_tools=worker_preflight.worker_unavailable_tools(owner, profile),
+            requires=requires or (),
+        )
+        if not checked.ok:
+            worker_preflight.record_blocked(parent_session, owner, task, checked)
+            raise worker_preflight.WorkerBlocked(checked)
+    child_kwargs = {"workspace": checked.workspace} if checked and checked.workspace else {}
+    sess, err = _new_child_session(manager, parent_session, owner, task, profile, **child_kwargs)
     if err:
         raise ValueError(err)
+    if inline_profile is not None:
+        # Workflow profiles are intentionally transient. Persist their complete
+        # narrowed policy on the child before starting; the legacy child helper
+        # is best-effort, which must not turn a failed save into elevated access.
+        from core.database import update_session_settings
+        patch = {**agent_profiles.session_patch(profile), **(runtime_settings or {})}
+        if parent_session:
+            patch["parent_session"] = parent_session
+        if update_session_settings(sess.id, patch) is None:
+            raise RuntimeError("Could not persist the worker's scoped policy; worker not started")
     try:
         manager.save_sessions()
     except Exception:
         pass
-    context: List[Dict[str, Any]] = []
-    if profile and profile.get("instructions"):
-        context.append({"role": "system", "content": profile["instructions"]})
-    context.append({"role": "user", "content": task})
+    # The persona is a persisted per-session snapshot consumed by agent_loop
+    # on this first turn and every reopened turn. Keep it out of history so it
+    # cannot be duplicated or drift from the saved agent configuration.
+    context: List[Dict[str, Any]] = [{"role": "user", "content": task}]
+    # Show the task in the worker's chat from the start. It was saved only when
+    # the run ended, so opening a running worker's chat showed an empty "New
+    # chat ready" screen. The run reads `context`, not the chat history.
+    try:
+        from core.models import ChatMessage as _ChatMessage
+        sess.add_message(_ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
+        manager.save_sessions()
+    except Exception:
+        logger.debug("worker task persist failed", exc_info=True)
     label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
-    # The loadout's own round budget (validate_profiles clamps it to 1..40, and
-    # defaults it to DEFAULT_ROUNDS). Recorded on the run and returned to the
-    # caller because it is the number a "ran out of rounds" result has to be read
-    # against — otherwise the cap that ended a worker is invisible until someone
-    # reopens the loadout in Settings.
+    # The loadout's own round budget, or 0 for no ceiling (the default). It is
+    # recorded on the run and returned to the caller because it is the number a
+    # "ran out of rounds" result has to be read against — otherwise a cap that
+    # ended a worker is invisible until someone reopens the loadout in Settings.
     rounds = int(profile["max_rounds"] if profile else agent_profiles.DEFAULT_ROUNDS)
+    # A saved loadout's positive budget is one its author chose, so at that
+    # round the worker is asked to wrap up and hand back what it has. A
+    # workflow's inline profile carries a default (12) nobody picked, and a
+    # model-only worker has none; both stay advisory.
+    wrap_up_round = rounds if profile_name and rounds > 0 else 0
     run_id = activity.run_started(
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
               "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
-              **({"profile": profile["name"]} if profile and profile.get("name") else {})},
+              **({"profile": profile["name"]} if profile and profile.get("name") else {}),
+              **({"parent_session": parent_session} if parent_session else {}),
+              **(run_metadata or {})},
         detail=task[:1500],
     )
     if parent_session:
-        activity.publish(parent_session, "message", f"→ worker {sess.name}: {task[:160]}", source="session",
+        # The worker chat's name already carries the loadout and the task
+        # ("↳ Scout: Write a short poem…"); the full task is in `detail`.
+        activity.publish(parent_session, "message", f"→ worker {sess.name}", source="session",
                          run_id=run_id, owner=owner, detail=task[:2000])
 
     async def _run():
         from core.models import ChatMessage
 
         outcome: Dict[str, Any] = {}
-        status, text, events = "completed", "", []
+        status, text, events, error_detail = "completed", "", [], ""
         try:
             with agent_runs.track_external(sess.id, source="worker", owner=owner):
                 text, events = await run_headless(
-                    sess, context,
+                    sess, list(context),
                     max_rounds=rounds,
                     disabled_tools=set(profile.get("disabled_tools") or []) if profile else frozenset(),
-                    activity_session_id=sess.id, run_id=run_id, source="session", owner=owner, outcome=outcome,
+                    activity_session_id=sess.id, run_id=run_id, source="session", owner=owner,
+                    outcome=outcome,
+                    workspace=checked.workspace if checked else None,
+                    forced_tools=checked.forced_tools if checked else None,
+                    wrap_up_round=wrap_up_round,
                 )
             if outcome.get("stopped"):
                 status = "cancelled"
+            elif outcome.get("awaiting_approval"):
+                # Ended on an approval card in the worker's chat: paused, not done.
+                status = "waiting_approval"
             elif outcome.get("rounds_exhausted"):
-                # It did real work and then ran out of rounds. Reporting that as
-                # "completed" is what let a cut-off worker hand the parent an
+                # Every leg was spent and it is still not done. Reporting that
+                # as "completed" is what let a cut-off worker hand the parent an
                 # empty result that read like a finished one; `run_headless` has
                 # already appended the "here is where I got to" line to `text`.
                 status = "incomplete"
@@ -551,35 +787,149 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             status = "cancelled"
         except Exception as exc:
             status, text = "failed", f"Worker failed: {exc}"
+            error_detail = str(exc)[:2000]
             logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
         try:
-            sess.add_message(ChatMessage("user", task, {"source": "dashboard", "direction": "inbound"}))
-            meta: Dict[str, Any] = {"source": "worker", "model": sess.model}
+            meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
+                                    "status": status, **(run_metadata or {})}
+            if error_detail:
+                meta["error"] = error_detail
             if events:
                 meta["tool_events"] = events
             sess.add_message(ChatMessage("assistant", text or "(no reply)", meta))
             manager.save_sessions()
         except Exception:
             logger.debug("worker persist failed", exc_info=True)
+        exhausted = bool(outcome.get("rounds_exhausted"))
+        total_rounds = rounds or 0  # 0 = unlimited
         activity.run_finished(sess.id, "session", run_id,
                               f"Worker · {label}{sess.name} {status}", status=status, owner=owner,
-                              data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400]})
+                              data={"target_session": sess.id, "steps": len(events), "result_excerpt": text[:400],
+                                    "max_rounds": total_rounds, "rounds_exhausted": exhausted,
+                                    **({"error": error_detail} if error_detail else {})})
         if parent_session:
+            # Two events, because they answer different questions. The message
+            # carries the result text; the status event is what closes the run
+            # in the chat that STARTED this worker. Without it the parent's
+            # agent strip kept a row at "running" forever and then, on the next
+            # reconcile, decided the run it could not find had been interrupted
+            # -- which is why sub-agents stopped appearing above the composer.
+            cut = ((f" (stopped after {total_rounds} rounds with work outstanding)" if total_rounds
+                    else " (stopped with work outstanding)") if exhausted else "")
             activity.publish(parent_session, "message", f"← worker {sess.name}: {text[:160]}", source="session",
                              run_id=run_id, owner=owner, detail=text[:2000],
                              level="error" if status == "failed" else "info")
-            try:
-                await _hand_off(manager, parent_session, sess, task, text, status, owner)
-            except Exception:
-                logger.warning("worker hand-off to %s failed", parent_session, exc_info=True)
+            activity.publish(parent_session, "status", f"Worker {sess.name} {status}{cut}", source="session",
+                             run_id=run_id, owner=owner,
+                             level="error" if status == "failed" else "info",
+                             data={"status": status, "target_session": sess.id, "parent_session": parent_session,
+                                   "max_rounds": total_rounds, "rounds_exhausted": exhausted,
+                                   **({"error": error_detail} if error_detail else {})})
+            if handoff:
+                try:
+                    await _hand_off(manager, parent_session, sess, task, text, status, owner)
+                except Exception:
+                    logger.warning("worker hand-off to %s failed", parent_session, exc_info=True)
         _WORKERS.pop(run_id, None)
 
-    _WORKERS[run_id] = asyncio.create_task(_run())
+    worker_task = asyncio.create_task(_run())
+    _WORKERS[run_id] = worker_task
+
+    def _cleanup_worker(done):
+        # Cancelling a Task before its coroutine's first instruction bypasses
+        # every try/finally inside that coroutine. Always release its registry
+        # slot, and close a run that otherwise remains 'running' indefinitely.
+        if _WORKERS.get(run_id) is done:
+            _WORKERS.pop(run_id, None)
+        failure = None if done.cancelled() else done.exception()
+        if not done.cancelled() and failure is None:
+            return
+        try:
+            record = activity.get_run(run_id)
+            if record and record.get("status") != "running":
+                return
+            terminal = "cancelled" if done.cancelled() else "failed"
+            from core.models import ChatMessage
+            sess.add_message(ChatMessage("assistant", "", {
+                "source": "worker", "model": sess.model, "run_id": run_id,
+                "status": terminal, **(run_metadata or {}),
+            }))
+            manager.save_sessions()
+        except Exception:
+            logger.debug("worker task cleanup could not persist result", exc_info=True)
+        finally:
+            try:
+                # Do not downgrade a worker that completed before cancellation
+                # interrupted its optional parent continuation.
+                record = activity.get_run(run_id)
+                if record is None or record.get("status") == "running":
+                    terminal = "cancelled" if done.cancelled() else "failed"
+                    activity.run_finished(sess.id, "session", run_id, "Worker task ended before completion",
+                                          status=terminal, owner=owner,
+                                          data={"target_session": sess.id})
+                    if parent_session:
+                        # Same reason as the normal completion path: close the
+                        # row in the chat that started this worker.
+                        activity.publish(parent_session, "status",
+                                         f"Worker {sess.name} {terminal} before completion", source="session",
+                                         run_id=run_id, owner=owner, level="error",
+                                         data={"status": terminal, "target_session": sess.id,
+                                               "parent_session": parent_session})
+            except Exception:
+                logger.debug("worker task cleanup could not close activity run", exc_info=True)
+
+    worker_task.add_done_callback(_cleanup_worker)
     return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
-            "max_rounds": rounds}
+            "max_rounds": rounds, **({"preflight": checked.summary()} if checked else {})}
+
+
+def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Optional[str] = None) -> dict:
+    """Read actual persisted worker output, never infer completion from prose."""
+    from src.ai_interaction import get_session_manager
+
+    rec = activity.get_run(run_id)
+    if rec and (rec.get("owner") != owner or (session_id and rec.get("session_id") != session_id)):
+        raise LookupError("Worker run not found")
+    if rec is None and not session_id:
+        raise LookupError("Worker run not found")
+    manager = get_session_manager()
+    sess = manager.get_session(rec["session_id"] if rec else session_id) if manager else None
+    if sess is None or getattr(sess, "owner", None) != owner:
+        raise LookupError("Worker chat not found")
+    result = {"run_id": run_id, "session_id": sess.id, "status": rec.get("status") if rec else "unknown",
+              "result": "", "tool_calls": []}
+    for message in reversed(getattr(sess, "history", [])):
+        meta = message.get("metadata") or {}
+        if message.get("role") == "assistant" and meta.get("run_id") == run_id:
+            if rec is None:
+                # The small dashboard run registry may rotate long before the
+                # durable child chat. Only an exact message run-id match can
+                # recover its artifact and terminal status after eviction.
+                result["status"] = meta.get("status") or "unknown"
+            if meta.get("error"):
+                result["error"] = str(meta["error"])[:2000]
+            text = str(message.get("content") or "")
+            result["result"] = "" if text == "(no reply)" else text[:20000]
+            result["result_truncated"] = len(text) > 20000
+            result["tool_calls"] = [
+                {"tool": ev.get("tool"), "exit_code": ev.get("exit_code"), "round": ev.get("round"),
+                 **({"error": ev["error"]} if ev.get("error") else {})}
+                for ev in (meta.get("tool_events") or [])[:120] if isinstance(ev, dict)
+            ]
+            break
+    else:
+        if rec is None:
+            raise LookupError("Worker result not found in the specified chat")
+    return result
 
 
 _HANDOFF_MAX_ROUNDS = 12
+# A worker that finishes while its parent chat is mid-turn waits for that turn
+# to end, then the parent continues with the result. Bounded, so a chat that
+# never goes idle does not hold a task open forever.
+_HANDOFF_IDLE_POLL_S = 2.0
+_HANDOFF_IDLE_WAIT_S = 30 * 60
+_PENDING_HANDOFFS: set = set()
 
 
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
@@ -598,20 +948,78 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     parent = manager.get_session(parent_id)
     if parent is None:
         return
-    headline = {"completed": "finished", "incomplete": "ran out of rounds"}.get(status, status)
+    headline = {"completed": "finished", "incomplete": "ran out of rounds",
+                "waiting_approval": "is waiting for the user's approval"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
               + ("The worker was cut off by its round budget, so the result above is partial — "
                  "pick the task up from where it stopped. " if status == "incomplete" else "")
+              + ("The worker paused on an approval card in its own chat, so the task is not done. "
+                 "Tell the user it needs their approval there; do not redo the work. "
+                 if status == "waiting_approval" else "")
               + "Continue the task using this result. Don't repeat work the worker already did. "
               "If the task is now complete, give the user the final result.")
-    parent.add_message(ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
-                                                    "from_session_name": worker.name, "direction": "inbound"}))
+    inject_msg = ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
+                                              "from_session_name": worker.name, "direction": "inbound"})
+    parent.add_message(inject_msg)
     manager.save_sessions()
     if agent_runs.is_busy(parent_id):
-        # Mid-turn: the message waits in history for the next turn.
-        activity.publish(parent_id, "note", f"Worker result saved for the next turn: {worker.name}",
+        # Mid-turn. That turn built its context before this message existed,
+        # so it will not read the result. Previously the result just sat in
+        # history until the user happened to send something, and the worker
+        # looked like it had produced nothing. Continue once the turn ends.
+        activity.publish(parent_id, "note",
+                         f"Worker {worker.name} finished; this chat continues with its result when the current turn ends",
                          source="session", owner=owner)
+        task = asyncio.create_task(_continue_when_idle(manager, parent_id, parent, worker, inject_msg, owner))
+        _PENDING_HANDOFFS.add(task)
+        task.add_done_callback(_PENDING_HANDOFFS.discard)
         return
+    await _continue_parent(manager, parent_id, parent, worker, owner)
+
+
+def _result_already_read(parent, inject_msg) -> bool:
+    """Whether a turn after the hand-off already had the result in context:
+    a message the user (not a worker) sent after it started that turn."""
+    history = list(getattr(parent, "history", None) or [])
+    try:
+        start = next(i for i, m in enumerate(history) if m is inject_msg)
+    except StopIteration:
+        return False
+    for m in history[start + 1:]:
+        meta = getattr(m, "metadata", None) or {}
+        if getattr(m, "role", None) == "user" and meta.get("source") != "worker":
+            return True
+    return False
+
+
+async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_msg, owner: Optional[str]) -> None:
+    from src import agent_runs
+
+    deadline = time.monotonic() + _HANDOFF_IDLE_WAIT_S
+    try:
+        while agent_runs.is_busy(parent_id):
+            if time.monotonic() > deadline:
+                activity.publish(parent_id, "note",
+                                 f"Worker {worker.name}'s result is waiting in this chat; it was busy too long to continue automatically",
+                                 source="session", owner=owner)
+                return
+            await asyncio.sleep(_HANDOFF_IDLE_POLL_S)
+        if _result_already_read(parent, inject_msg):
+            return
+        await _continue_parent(manager, parent_id, parent, worker, owner)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("deferred worker hand-off to %s failed", parent_id, exc_info=True)
+
+
+async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optional[str]) -> None:
+    """Run the parent chat's agent on the worker's result (it is already in
+    the parent's history) and save its reply there."""
+    from core.models import ChatMessage
+    from src import agent_runs
+    from src.headless_agent import run_headless
+
     run_id = activity.run_started(parent_id, "session", f"Continuing after worker {worker.name}", owner=owner,
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})

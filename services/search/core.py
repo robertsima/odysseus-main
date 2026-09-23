@@ -3,6 +3,7 @@
 import json
 import logging
 import re
+import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set, Tuple
@@ -43,6 +44,87 @@ from .content import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Search engines occasionally return a perfectly valid-looking result set for
+# the wrong intent (for example, travel pages for a repository/poller query).
+# Keep this list deliberately small: a query made entirely from these terms is
+# too underspecified to reject, while a query with a distinctive term gets a
+# cheap, deterministic relevance check before we fetch any pages.
+_RELEVANCE_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for",
+    "from", "how", "i", "in", "is", "it", "latest", "me", "of", "on", "or",
+    "please", "search", "show", "tell", "the", "to", "today", "what", "when",
+    "where", "which", "who", "why", "with", "would", "www", "http", "https",
+    "com", "org", "net", "site", "after", "before", "lang", "intitle", "inurl",
+    "filetype", "related", "cache", "define", "allintext", "allintitle", "allinurl",
+    "intext", "not", "main",
+    # These are useful prompt scaffolding, but do not identify a subject. They
+    # also keep generic/navigational calls from being rejected on sparse
+    # provider metadata.
+    "test", "query", "web", "page", "pages", "result", "results",
+}
+
+
+def _significant_query_tokens(query: str) -> Set[str]:
+    """Return normalized subject tokens suitable for a relevance gate.
+
+    Search operators (especially ``site:``) and ordinary stopwords are not
+    evidence that a result is about the requested subject. Keep numeric IDs
+    when they have at least two digits, since standards/issues/versions often
+    use them as the only useful signal.
+    """
+    rest, _ = _site_scope(query or "")
+    normalized = unicodedata.normalize("NFKC", rest).casefold()
+    tokens = re.findall(r"\w+", normalized, flags=re.UNICODE)
+    return {
+        token for token in tokens
+        if token not in _RELEVANCE_STOPWORDS
+        and ((len(token) >= 3 and not token.isdigit())
+             or (token.isdigit() and len(token) >= 2))
+    }
+
+
+def _result_text_for_relevance(result: dict) -> str:
+    """Build the searchable text for one provider row.
+
+    Include title, snippet, and URL host/path. The URL is useful for repository
+    names and stable identifiers, but query strings/fragments are intentionally
+    excluded because they are often tracking or unrelated navigation text.
+    """
+    title = result.get("title", "")
+    snippet = result.get("snippet", "")
+    url = result.get("url", "")
+    try:
+        parsed = urlparse(url)
+        url_text = " ".join((parsed.hostname or "", parsed.path or ""))
+    except (TypeError, ValueError):
+        url_text = ""
+    return " ".join(str(part) for part in (title, snippet, url_text) if part)
+
+
+def _keep_relevant_results(query: str, results: List[dict]) -> List[dict]:
+    """Drop result rows with no meaningful token overlap with *query*.
+
+    If the query has no meaningful tokens (for example a short navigational
+    request made solely from stopwords), leave the provider's rows untouched.
+    Otherwise a row survives when at least one significant query token occurs
+    as a whole token in its title, snippet, or URL host/path.
+    """
+    query_tokens = _significant_query_tokens(query)
+    if not query_tokens:
+        return results
+    token_re = re.compile(r"\b(?:" + "|".join(
+        re.escape(token) for token in sorted(query_tokens, key=len, reverse=True)
+    ) + r")\b", flags=re.IGNORECASE | re.UNICODE)
+    kept = [
+        result for result in results
+        if isinstance(result, dict) and token_re.search(_result_text_for_relevance(result))
+    ]
+    if len(kept) < len(results):
+        logger.info(
+            "Relevance gate for %r kept %d/%d result(s)", query, len(kept), len(results)
+        )
+    return kept
 
 # ========= CONFIG =========
 SEARCH_CONFIG: Dict[str, Any] = {
@@ -239,17 +321,23 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
 
     results: List[dict] = []
     for provider_name in provider_chain:
-        for attempt in range(2):
-            try:
-                logger.info(f"Attempting {provider_name} search (attempt {attempt + 1})")
-                results = _call_provider(provider_name, query, count, time_filter)
-                if results:
-                    logger.info(f"{provider_name} search succeeded with {len(results)} results")
-                    break
-            except (NetworkError, ParseError, RateLimitError) as e:
-                error_logger.error(f"{provider_name} search error (attempt {attempt + 1}): {e}")
-            except Exception as e:
-                error_logger.error(f"Unexpected error during {provider_name} search (attempt {attempt + 1}): {e}")
+        try:
+            # Provider implementations own their fallback/error handling. A
+            # second outer call repeats every upstream request (and, for a
+            # site: query, repeats both the operator query and its keyword
+            # drift retry) without improving the result.
+            logger.info(f"Attempting {provider_name} search")
+            results = _call_provider(provider_name, query, count, time_filter)
+        except (NetworkError, ParseError, RateLimitError) as e:
+            error_logger.error(f"{provider_name} search error: {e}")
+            results = []
+        except Exception as e:
+            error_logger.error(f"Unexpected error during {provider_name} search: {e}")
+            results = []
+        if results:
+            results = _keep_relevant_results(query, results)
+            if results:
+                logger.info(f"{provider_name} search succeeded with {len(results)} relevant results")
         if results:
             break
 
@@ -347,17 +435,23 @@ def comprehensive_web_search(
     for provider_name in provider_chain:
         last_err = None
         empty = False
-        for attempt in range(2):
-            try:
-                search_results = _call_provider(provider_name, query, fetch_count, time_filter)
-                if search_results:
-                    provider_attempts[provider_name] = f"ok ({len(search_results)})"
-                    logger.info(f"Comprehensive search: {provider_name} returned {len(search_results)} results")
-                    break
+        try:
+            # Do not retry an already-fallback-aware provider here. In
+            # particular, an empty SearXNG result followed by a DuckDuckGo
+            # fallback must cost one request per provider, not two.
+            search_results = _call_provider(provider_name, query, fetch_count, time_filter)
+            if search_results:
+                search_results = _keep_relevant_results(query, search_results)
+            if search_results:
+                provider_attempts[provider_name] = f"ok ({len(search_results)})"
+                logger.info(
+                    f"Comprehensive search: {provider_name} returned {len(search_results)} relevant results"
+                )
+            else:
                 empty = True
-            except Exception as e:
-                last_err = e
-                logger.warning(f"Comprehensive search: {provider_name} attempt {attempt + 1} failed: {e}")
+        except Exception as e:
+            last_err = e
+            logger.warning(f"Comprehensive search: {provider_name} failed: {e}")
         if search_results:
             break
         if last_err is not None:

@@ -2,7 +2,8 @@
  *
  * Each chat keeps its own setup (routes/session_routes.py /session/{id}/settings):
  *   · approval mode — whether risky tool calls stop for approval first
- *     (auto / ask_risky / ask_all; enforced server-side, src/tool_approvals.py)
+ *     (auto / ask_risky / ask_all; src/approval_modes.py). A chat with no
+ *     mode follows the app default (Settings › Workbench › Default approvals).
  *   · tools switched off for this chat only (enforced server-side)
  *   · the toggles and workspace it last ran with (recorded by the chat route on
  *     every turn and restored here when the chat is reopened, so a chat no
@@ -20,7 +21,7 @@ const API = '';
 const MODE_INFO = {
   auto: { label: 'Auto', desc: 'Tools run without asking.' },
   ask_risky: { label: 'Ask for risky', desc: 'Destructive or outward-facing actions ask first: deleting files, git push, publishing, sending or deleting email, sudo.' },
-  ask_all: { label: 'Ask for everything', desc: 'Every tool that can change something asks first, including any shell command.' },
+  ask_all: { label: 'Ask for everything', desc: 'Every tool that can change something asks first, including any shell command, and so does anything high-impact once web, email or file content has entered the run.' },
 };
 // Group tool names for the per-chat tools picker.
 const TOOL_GROUPS = [
@@ -130,6 +131,7 @@ function render() {
   const d = state.data || {};
   const s = d.settings || {};
   const mode = d.approval_mode || 'auto';
+  const modesEnforced = Array.isArray(d.approval_modes) && d.approval_modes.length > 0;
   const items = [];
   const model = currentModelLabel();
   if (model) items.push(`<span class="csl-item csl-model" title="Model for this chat">${esc(model)}</span>`);
@@ -139,14 +141,12 @@ function render() {
     const tone = pct >= 85 ? ' danger' : pct >= 70 ? ' warn' : '';
     items.push(`<button type="button" class="csl-item csl-ctx${tone}" data-csl="context" title="${esc(`${ctx.used_tokens || 0} / ${ctx.context_length} tokens in context`)}"><span class="csl-meter"><i style="width:${Math.min(100, pct)}%"></i></span>${pct}%</button>`);
   }
-  items.push(`<button type="button" class="csl-item csl-approval csl-mode-${esc(mode)}" data-csl="mode-menu" title="${esc((MODE_INFO[mode]?.desc || '') + ' Click to change.')}">Approvals: ${esc(MODE_INFO[mode]?.label || mode)}</button>`);
+  if (modesEnforced) items.push(`<button type="button" class="csl-item csl-approval csl-mode-${esc(mode)}" data-csl="mode-menu" title="${esc((MODE_INFO[mode]?.desc || '') + ' Click to change.')}">Approvals: ${esc(MODE_INFO[mode]?.label || mode)}</button>`);
   if (s.workspace) items.push(`<span class="csl-item csl-workspace" title="${esc(`Workspace: ${s.workspace}`)}">${esc(basename(s.workspace))}</span>`);
   const off = (s.disabled_tools || []).length;
   items.push(`<button type="button" class="csl-item${off ? ' csl-attn' : ''}" data-csl="panel-tools" title="Choose which tools this chat may use">${off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools'}</button>`);
   const privateVault = s.private_vault_access === true;
   items.push(`<button type="button" class="csl-item${privateVault ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${privateVault ? 'Private vault excerpts may be sent to this chat\'s model endpoint. Click to review.' : 'Private vault access is off for this chat. Click to review.'}">${privateVault ? 'Private vault on' : 'Private vault off'}</button>`);
-  const always = d.always_allowed_tools || [];
-  if (always.length) items.push(`<button type="button" class="csl-item csl-attn" data-csl="revoke" title="${esc(`Always allowed here: ${always.join(', ')}. Click to ask again.`)}">${always.length} always allowed ×</button>`);
   if (d.parent_session && d.parent_session.id) {
     const who = s.agent_profile ? `${s.agent_profile} · ` : '';
     items.push(`<button type="button" class="csl-item csl-fork" data-csl="fork" data-id="${esc(d.parent_session.id)}" title="Sub-agent chat: open the chat that delegated this task">↳ ${esc(who)}from ${esc(d.parent_session.name || 'parent chat')}</button>`);
@@ -169,14 +169,6 @@ async function onLineClick(e) {
   else if (act === 'mode-menu') toggleModeMenu(b);
   else if (act === 'context') document.getElementById('chat-context-pill')?.click();
   else if (act === 'fork') window.sessionModule?.selectSession?.(b.dataset.id);
-  else if (act === 'revoke') {
-    try {
-      await api(`/api/session/${encodeURIComponent(state.sessionId)}/approvals`, { method: 'DELETE' });
-      if (state.data) state.data.always_allowed_tools = [];
-      uiModule.showToast('Tools will ask for approval again in this chat');
-      render();
-    } catch (err) { uiModule.showToast(`Could not reset approvals: ${err.message}`, 'error'); }
-  }
 }
 
 // ── approval mode quick menu ──────────────────────────────────────────────
@@ -250,6 +242,7 @@ function renderPanel() {
   const s = d.settings || {};
   const mode = (s.approval_mode) || '';
   const effective = d.approval_mode || 'auto';
+  const modesEnforced = Array.isArray(d.approval_modes) && d.approval_modes.length > 0;
   const privateVault = s.private_vault_access === true;
   const off = new Set(s.disabled_tools || []);
   const globallyOff = new Set((state.tools || []).filter((t) => t.enabled === false).map((t) => t.id));
@@ -274,7 +267,7 @@ function renderPanel() {
     </fieldset>`).join('');
   panel.innerHTML = `
     <div class="csp-head"><span class="csp-title">Chat settings</span><span class="csp-sub">Only this chat</span><button type="button" class="csp-close" data-csp="close" aria-label="Close">×</button></div>
-    <section class="csp-section"><h4>Approvals</h4>${modeRows}</section>
+    ${modesEnforced ? `<section class="csp-section"><h4>Approvals</h4>${modeRows}</section>` : ''}
     <section class="csp-section csp-privacy">
       <h4>Vault privacy</h4>
       <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint.">
@@ -326,7 +319,7 @@ function init() {
     if (e.detail && e.detail.sessionId === state.sessionId) { state.context = e.detail; render(); }
   });
   document.addEventListener('odysseus:model-picked', () => setTimeout(render, 50));
-  // A new approval decision may have added an always-allow grant.
+  // An approval decided in the chat can change what the settings report.
   document.addEventListener('odysseus:approval-decided', () => {
     if (state.sessionId) api(`/api/session/${encodeURIComponent(state.sessionId)}/settings`).then((d) => { state.data = d; render(); }).catch(() => {});
   });

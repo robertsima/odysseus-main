@@ -3,144 +3,84 @@
 
 import uiModule from './ui.js';
 import searchModule from './search.js';
-import { makeWindowDraggable } from './windowDrag.js';
-import { clearDockSide } from './modalSnap.js';
+import { byId } from './settings/dom.js';
+import {
+  getSettingsRegistryIssues,
+  isAdminManagedSettingsTab,
+} from './settings/registry.js';
+import { bindSettingsSearch } from './settings/search.js';
+import { bindSettingsSidebar } from './settings/sidebar.js';
+import {
+  activateSettingsPanel,
+  getActiveSettingsTab,
+  bindSettingsNavigation,
+} from './settings/navigation.js';
+import {
+  bindSettingsDrag,
+  bindSettingsClose,
+  bindOpenPromptModalLink,
+  showSettingsModal,
+  hideSettingsModal,
+} from './settings/lifecycle.js';
 import { sortModelIds } from './modelSort.js';
 import { providerLogo } from './providers.js';
 import { isAltGrEvent } from './platform.js';
 import { bindMenuDismiss } from './escMenuStack.js';
+import { invalidateSettings } from './appConfig.js';
 
 let initialized = false;
 let modalEl = null;
 let _authPolicy = { password_min_length: 8 };
 
-function el(id) { return document.getElementById(id); }
+/**
+ * POST a settings patch, then drop the shared snapshot in appConfig.js.
+ *
+ * Every write in this file goes through here so no save path can forget the
+ * invalidation — a stale settings object served for the rest of the session is
+ * a worse bug than the duplicate fetches the cache removes. The invalidation is
+ * in a `finally` because a request that throws on the way back may still have
+ * been applied server-side.
+ *
+ * Reads in this file deliberately stay direct fetches: this panel is the writer
+ * and edits what it reads, so it must see the authoritative state, not a cache.
+ */
+async function _postSettings(body) {
+  try {
+    return await fetch('/api/auth/settings', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } finally {
+    invalidateSettings();
+  }
+}
+
+const el = byId;
 function esc(s) { return uiModule.esc(s); }
 function safeRasterDataUrl(raw) {
   const value = String(raw || '').trim();
   return /^data:image\/(?:png|jpe?g|gif|webp);base64,[a-z0-9+/=\s]+$/i.test(value) ? value : '';
 }
 
-/* ── Tab switching ── */
-const ADMIN_TABS = new Set(['services', 'added-models', 'integrations', 'tools', 'users', 'system', 'capabilities']);
+/* ── Settings shell coordination ── */
+function onSettingsPanelActivated(tab) {
+  // Appearance keeps its existing transparent preview behavior.
+  document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
+  syncAppearanceOpacity(tab === 'appearance');
 
-function initTabs() {
-  modalEl.querySelectorAll('[data-settings-tab]').forEach(btn => {
-    btn.addEventListener('click', () => {
-      const tab = btn.dataset.settingsTab;
-      // Lazy-init admin when first clicking an admin tab
-      if (ADMIN_TABS.has(tab) && window.adminModule && typeof window.adminModule.open === 'function') {
-        window.adminModule.open(tab);
-        return;
-      }
-      modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-      modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
-      // Mark when the Appearance tab is open so the modal can go
-      // semi-transparent — lets the user see the rest of the UI react as
-      // they flip toggles instead of having to close + reopen the modal.
-      document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
-      syncAppearanceOpacity(tab === 'appearance');
-      if (tab === 'ai' || tab === 'context') refreshAiModelEndpoints();
-    });
-  });
+  // AI endpoints are intentionally refreshed only when entering a panel that
+  // shows them: AI Defaults and the admin Context panel.
+  if (tab === 'ai' || tab === 'context') refreshAiModelEndpoints();
 }
 
-/* ── Dragging ── */
-function initDrag() {
-  const header = modalEl.querySelector('.modal-header');
-  const content = modalEl.querySelector('.settings-modal-content');
-  if (!header || !content) return;
-  // Skip interactive controls in the header (e.g. the opacity slider) so
-  // grabbing them doesn't start a window-drag.
-  makeWindowDraggable(modalEl, {
-    content,
-    header,
-    skipSelector: 'button, input, select, .theme-opacity-wrap',
-    enableDock: true,
-  });
-}
-
-function resetWindowPlacement() {
-  const content = modalEl && modalEl.querySelector('.settings-modal-content');
-  if (!content) return;
-  const hadLeft = modalEl.classList.contains('modal-left-docked');
-  const hadRight = modalEl.classList.contains('modal-right-docked');
-  modalEl.classList.remove('modal-left-docked', 'modal-right-docked');
-  if (hadLeft) clearDockSide('left', modalEl);
-  if (hadRight) clearDockSide('right', modalEl);
-  if (content._leftDockNavObs) {
-    try { content._leftDockNavObs.navObs && content._leftDockNavObs.navObs.disconnect(); } catch (_) {}
-    try { window.removeEventListener('resize', content._leftDockNavObs.reanchor); } catch (_) {}
-    delete content._leftDockNavObs;
+function openAdminSettingsTab(tab) {
+  if (window.adminModule && typeof window.adminModule.open === 'function') {
+    window.adminModule.open(tab);
+    return true;
   }
-  delete content._preDockSnapshot;
-  delete content._dockSide;
-  delete content._dockSuspended;
-  delete content.dataset._tilePreSnap;
-  delete content.dataset._tileZone;
-  [
-    'position', 'left', 'top', 'right', 'bottom', 'margin', 'transform',
-    'width', 'height', 'max-width', 'max-height', 'border-radius', 'transition',
-  ].forEach(prop => content.style.removeProperty(prop));
-}
-
-/* ── Delegated link: close Settings + open the Prompt (characters) modal ── */
-function initOpenPromptModalLink() {
-  document.addEventListener('click', async (e) => {
-    const link = e.target.closest('[data-open-prompt-modal]');
-    if (!link) return;
-    e.preventDefault();
-    // Close settings first so the prompt modal isn't stacked on top.
-    if (modalEl && !modalEl.classList.contains('hidden')) close();
-    try {
-      const m = await import('./presets.js');
-      const fn = m.openCustomPresetModal || (m.default && m.default.openCustomPresetModal);
-      if (typeof fn === 'function') fn();
-    } catch (_) {
-      const modal = document.getElementById('custom-preset-modal');
-      if (modal) modal.classList.remove('hidden');
-    }
-    // Force the Persona tab (data-chartab="character") since the link's
-    // whole purpose is editing personas — not landing on Inject by default.
-    const personaTab = document.querySelector('#custom-preset-modal .preset-tab[data-chartab="character"]');
-    if (personaTab) personaTab.click();
-  });
-}
-
-/* ── Close on backdrop / X ── */
-function initClose() {
-  modalEl.querySelector('.close-btn').addEventListener('click', close);
-  modalEl.addEventListener('mousedown', e => {
-    if (uiModule.isTouchInsideModal()) return;
-    if (e.target === modalEl) close();
-  });
-  document.addEventListener('keydown', e => {
-    if (e.key !== 'Escape' || !modalEl || modalEl.classList.contains('hidden')) return;
-    // Bail when a transient popover inside the modal is open — Esc should
-    // dismiss just that, not the whole modal. Same-document listeners fire
-    // in registration order regardless of capture/bubble, so the popover's
-    // own handler can't pre-empt ours; we have to opt out here.
-    const popoverOpen = modalEl.querySelector(
-      '#adm-epLocalMoreMenu, #adm-epApiMoreMenu, #adm-provider-menu, #search-provider-menu, [data-popover-open="1"]'
-    );
-    if (popoverOpen && popoverOpen.style.display !== 'none' && !popoverOpen.classList.contains('hidden')) {
-      return;
-    }
-    // If an integration edit/add form is open inside the modal, close
-    // just that — don't dismiss the whole settings modal. (Pressing
-    // ESC mid-edit and losing the modal was a fast-typing footgun.)
-    const innerForm = modalEl.querySelector('#unified-intg-form, #set-email-accounts-form');
-    if (innerForm && innerForm.style.display !== 'none' && innerForm.children.length > 0) {
-      e.preventDefault();
-      e.stopPropagation();
-      innerForm.style.display = 'none';
-      innerForm.innerHTML = '';
-      return;
-    }
-    e.preventDefault();
-    e.stopPropagation();
-    close();
-  });
+  return false;
 }
 
 /* ── Appearance-tab opacity slider ──
@@ -363,10 +303,7 @@ function _bindFallbackWidget(opts) {
     var body = {};
     body[settingKey] = clean;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body)
-      });
+      await _postSettings(body);
     } catch (e) { console.warn('[fallback] save failed for ' + settingKey, e); }
   }
 
@@ -445,14 +382,7 @@ async function initDefaultChat() {
   var epSel = el('set-defaultEpSelect');
   var modelSel = el('set-defaultModelSelect');
   var msg = el('set-defaultChatMsg');
-  var fbContainer = el('set-defaultFallbacks');
-  var addFbBtn = el('set-defaultAddFallback');
   var _endpoints = [];
-  var _fallbacks = []; // [{endpoint_id, model}] — tried in order if primary fails
-
-  function enabledEndpoints() {
-    return _endpoints.filter(function(e) { return e.is_enabled; });
-  }
 
   // Fill any <select> with the models for a given endpoint id.
   function fillModels(selectEl, epId, selected) {
@@ -469,64 +399,6 @@ async function initDefaultChat() {
   function refreshEndpointOptions(selectedEndpoint, selectedModel) {
     _fillEndpointSelect(epSel, _endpoints, selectedEndpoint !== undefined ? selectedEndpoint : epSel.value, false);
     refreshModels(selectedModel !== undefined ? selectedModel : modelSel.value);
-    renderFallbacks();
-  }
-
-  // Render the fallback chain. Each row is endpoint + model + remove.
-  function renderFallbacks() {
-    fbContainer.innerHTML = '';
-    _fallbacks.forEach(function(fb, idx) {
-      var row = document.createElement('div');
-      row.className = 'settings-fallback-row';
-
-      var num = document.createElement('span');
-      num.className = 'settings-fallback-num';
-      num.textContent = (idx + 1) + '.';
-
-      var epS = document.createElement('select');
-      epS.className = 'settings-select';
-      enabledEndpoints().forEach(function(ep) {
-        var o = document.createElement('option');
-        o.value = ep.id;
-        o.textContent = ep.name + (ep.online ? '' : ' (offline)');
-        epS.appendChild(o);
-      });
-      var first = enabledEndpoints()[0];
-      epS.value = fb.endpoint_id || (first ? first.id : '');
-
-      var mS = document.createElement('select');
-      mS.className = 'settings-select';
-      fillModels(mS, epS.value, fb.model);
-
-      // Keep the model in sync with the values actually shown.
-      fb.endpoint_id = epS.value;
-      fb.model = mS.value;
-
-      epS.addEventListener('change', function() {
-        fb.endpoint_id = epS.value;
-        fillModels(mS, epS.value, '');
-        fb.model = mS.value;
-        saveDefault();
-      });
-      mS.addEventListener('change', function() { fb.model = mS.value; saveDefault(); });
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'settings-fallback-remove';
-      rm.title = 'Remove fallback';
-      rm.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
-      rm.addEventListener('click', function() {
-        _fallbacks.splice(idx, 1);
-        renderFallbacks();
-        saveDefault();
-      });
-
-      row.appendChild(num);
-      row.appendChild(epS);
-      row.appendChild(mS);
-      row.appendChild(rm);
-      fbContainer.appendChild(row);
-    });
   }
 
   try {
@@ -534,12 +406,6 @@ async function initDefaultChat() {
     var settings = await res.json();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
-    _fallbacks = Array.isArray(settings.default_model_fallbacks)
-      ? settings.default_model_fallbacks.map(function(f) {
-          return { endpoint_id: (f && f.endpoint_id) || '', model: (f && f.model) || '' };
-        })
-      : [];
-    renderFallbacks();
   } catch (e) { console.warn('Failed to load default chat settings', e); }
 
   epSel.addEventListener('change', function() { refreshModels(''); saveDefault(); });
@@ -547,26 +413,14 @@ async function initDefaultChat() {
 
   async function saveDefault() {
     try {
-      var clean = _fallbacks.filter(function(f) { return f.endpoint_id && f.model; });
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          default_endpoint_id: epSel.value,
-          default_model: modelSel.value,
-          default_model_fallbacks: clean
-        })
+      await _postSettings({
+        default_endpoint_id: epSel.value,
+        default_model: modelSel.value
       });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
-
-  if (addFbBtn) addFbBtn.addEventListener('click', function() {
-    var first = enabledEndpoints()[0];
-    _fallbacks.push({ endpoint_id: first ? first.id : '', model: '' });
-    renderFallbacks();
-    saveDefault();
-  });
 
   _registerAiEndpointRefresh(function(endpoints) {
     _endpoints = endpoints;
@@ -616,12 +470,9 @@ async function initUtilityModel() {
   // no toggle, "—" means "unset, use chat").
   async function saveUtility() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          utility_endpoint_id: epSel.value || '',
-          utility_model: modelSel.value || ''
-        })
+      await _postSettings({
+        utility_endpoint_id: epSel.value || '',
+        utility_model: modelSel.value || ''
       });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 1500);
@@ -714,10 +565,7 @@ async function initTeacherModel() {
         spec = ep ? (modelSel.value + '@' + ep.name) : modelSel.value;
       }
       var enabled = enabledToggle ? !!enabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ teacher_enabled: enabled, teacher_model: spec })
-      });
+      await _postSettings({ teacher_enabled: enabled, teacher_model: spec });
       msg.textContent = enabled ? (spec ? 'Saved' : 'Pick an endpoint + model') : 'Disabled';
       msg.style.color = enabled && !spec ? 'var(--red)' : 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
@@ -792,8 +640,7 @@ async function initImageSettings() {
 
   async function saveSettings() {
     try {
-      const res = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value }) });
+      const res = await _postSettings({ image_gen_enabled: enabledToggle ? enabledToggle.checked : false, image_model: modelSel.value, image_quality: qualSel.value });
       if (!res.ok) throw new Error(await res.text().catch(() => `HTTP ${res.status}`));
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -867,8 +714,7 @@ async function initVisionSettings() {
 
   async function saveSettings() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value }) });
+      await _postSettings({ vision_enabled: enabledToggle ? enabledToggle.checked : true, vision_model: vlSel.value });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; setTimeout(() => { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
@@ -949,8 +795,7 @@ async function initTtsSettings() {
 
   async function saveTTS() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' }) });
+      await _postSettings({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' });
       ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
       if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
     } catch (e) { ttsMsg.textContent = 'Failed to save'; ttsMsg.style.color = 'var(--red)'; }
@@ -1111,9 +956,7 @@ async function initSttSettings() {
   async function saveSTT() {
     try {
       var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() }) });
+      await _postSettings({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() });
       sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
       // Notify voiceRecorder of effective provider and update send button icon
       if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = effectiveProvider();
@@ -1269,10 +1112,7 @@ async function initSearchSettings() {
         payload[kf] = keyInput.value.trim();
         _settings[kf] = keyInput.value.trim();
       }
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      await _postSettings(payload);
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
       if (searchModule && searchModule.refresh) searchModule.refresh();
@@ -1424,11 +1264,7 @@ async function initSearchSettings() {
   async function _saveFallbackChain(chain) {
     _settings.search_fallback_chain = chain;
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ search_fallback_chain: chain }),
-      });
+      await _postSettings({ search_fallback_chain: chain });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1592,10 +1428,7 @@ async function initResearchSettings() {
       }
     }
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      await _postSettings(payload);
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(showStatus, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1659,10 +1492,7 @@ async function initResearchSearchSettings() {
 
   async function saveResearchSearch() {
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ research_search_provider: searchSel.value })
-      });
+      await _postSettings({ research_search_provider: searchSel.value });
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(function() { msg.textContent = ''; }, 2000);
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1676,6 +1506,8 @@ async function initAgentSettings() {
   var toolsInput = el('set-agentMaxTools');
   var roundsInput = el('set-agentMaxRounds');
   var foldInput = el('set-agentFoldAfter');
+  var capInput = el('set-agentContextCap');
+  var reasonInput = el('set-agentReasoning');
   var supInput = el('set-agentSupervisorLadder');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
@@ -1686,6 +1518,8 @@ async function initAgentSettings() {
     if (settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
     if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
     if (foldInput && settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
+    if (capInput && settings.agent_input_token_hard_max) capInput.value = settings.agent_input_token_hard_max;
+    if (reasonInput) reasonInput.value = settings.chatgpt_reasoning_effort || '';
     if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
   } catch (e) {}
 
@@ -1706,16 +1540,17 @@ async function initAgentSettings() {
     if (rounds != null) payload.agent_max_rounds = rounds;
     var fold = foldInput ? clampInt(foldInput.value, 0, 500, 12) : null;
     if (foldInput) { foldInput.value = fold; payload.chat_tool_fold_after = fold; }
+    var cap = capInput ? clampInt(capInput.value, 16000, 1000000, 200000) : null;
+    if (capInput) { capInput.value = cap; payload.agent_input_token_hard_max = cap; }
+    if (reasonInput) payload.chatgpt_reasoning_effort = reasonInput.value || '';
     if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
     try {
-      await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+      await _postSettings(payload);
       if (fold != null && window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(fold);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (rounds != null ? ' · ' + rounds + ' rounds/message (advisory)' : '') +
         (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
+        (cap != null ? ' · context cap ' + Math.round(cap / 1000) + 'k' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
       msg.style.color = 'var(--fg)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
@@ -1723,11 +1558,13 @@ async function initAgentSettings() {
 
   toolsInput.addEventListener('change', save);
   if (roundsInput) roundsInput.addEventListener('change', save);
+  if (capInput) capInput.addEventListener('change', save);
+  if (reasonInput) reasonInput.addEventListener('change', save);
   if (supInput) supInput.addEventListener('change', save);
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (curR != null ? ' · ' + curR + ' rounds/message (advisory)' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }
@@ -2108,11 +1945,7 @@ async function initShortcuts() {
 
   async function saveKeybinds() {
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keybinds }),
-      });
+      await _postSettings({ keybinds });
       // Update global keybinds so they take effect immediately
       window._odysseusKeybinds = keybinds;
       if (uiModule && uiModule.showToast) uiModule.showToast('Shortcut saved');
@@ -2733,6 +2566,27 @@ function initAgentProfilesEditor(initial) {
   if (!list || list.dataset.wired) return;
   list.dataset.wired = '1';
   var profiles = (initial || []).map(function (p) { return Object.assign({}, p); });
+  // Saved personas a loadout can start from. Choosing one copies it into the
+  // loadout, which then keeps its own persona: editing the shared persona
+  // later does not change agents built from it.
+  // Built-ins load lazily: this editor is the only part of Settings that needs
+  // presets.js, and the same module instance is already loaded by app.js.
+  var personaSources = [];
+  Promise.all([
+    import('./presets.js').then(function (m) { return m.PROMPT_TEMPLATES || []; }).catch(function () { return []; }),
+    fetch('/api/presets/templates', { credentials: 'same-origin' }).then(function (r) { return r.ok ? r.json() : []; }).catch(function () { return []; }),
+  ]).then(function (sources) {
+    sources[0].forEach(function (t) {
+      personaSources.push({ name: t.name, persona_name: t.noName ? '' : t.name, instructions: t.prompt || '', temperature: t.temperature });
+    });
+    var rows = sources[1];
+    (Array.isArray(rows) ? rows : []).forEach(function (t) {
+      if (!t || !t.name || personaSources.some(function (s) { return s.name === t.name; })) return;
+      personaSources.push({ name: t.name, persona_name: t.name, instructions: t.system_prompt || '',
+        temperature: t.temperature, max_tokens: t.max_tokens || null });
+    });
+    if (!list.contains(document.activeElement)) render();
+  }).catch(function () {});
 
   function field(label, input, hint) {
     var wrap = document.createElement('label');
@@ -2764,7 +2618,7 @@ function initAgentProfilesEditor(initial) {
         inp.value = Array.isArray(v) ? v.join(', ') : (v == null ? '' : String(v));
         inp.addEventListener('input', function () {
           var listKeys = ['disabled_tools', 'enabled_tools', 'skill_names', 'allowed_mcp_servers', 'allowed_models', 'model_fallbacks'];
-          p[key] = (key === 'max_rounds' || key === 'max_parallel_workers') ? inp.value : (listKeys.indexOf(key) >= 0
+          p[key] = (key === 'max_rounds' || key === 'max_parallel_workers' || key === 'temperature' || key === 'max_tokens') ? inp.value : (listKeys.indexOf(key) >= 0
             ? inp.value.split(/[\n,]+/).map(function (v) { return v.trim(); }).filter(Boolean) : inp.value);
           note.textContent = 'Unsaved changes';
           note.style.color = 'var(--fg)';
@@ -2787,8 +2641,8 @@ function initAgentProfilesEditor(initial) {
       var head = document.createElement('div');
       head.className = 'agent-profile-head';
       head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
-      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'empty = calling chat’s model' }), 'model or model@endpoint'));
-      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '1', max: '40', placeholder: '12' })));
+      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
+      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = no budget' }), 'Round budget (0 = no budget, max 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left. It is never cut off mid-task.'));
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'ats-btn agent-profile-remove';
@@ -2797,7 +2651,33 @@ function initAgentProfilesEditor(initial) {
       head.appendChild(remove);
       card.appendChild(head);
       card.appendChild(field('Description', mk('input', 'description', { placeholder: 'What this worker is for (shown to the agent)', maxlength: '300' })));
-      card.appendChild(field('Instructions', mk('textarea', 'instructions', { rows: '3', placeholder: 'System instructions for this worker' })));
+      // Each loadout's own voice. A chat running under it uses these instead
+      // of the shared persona from the Prompt window.
+      var voice = document.createElement('div'); voice.className = 'agent-profile-voice';
+      var from = document.createElement('select'); from.className = 'settings-select';
+      from.innerHTML = '<option value="">Copy a persona…</option>';
+      personaSources.forEach(function (src, idx) {
+        var opt = document.createElement('option'); opt.value = String(idx); opt.textContent = src.name; from.appendChild(opt);
+      });
+      from.addEventListener('change', function () {
+        var src = personaSources[Number(from.value)];
+        if (!src) return;
+        p.persona_name = src.persona_name || '';
+        p.instructions = src.instructions || '';
+        if (src.temperature != null) p.temperature = src.temperature;
+        if (src.max_tokens) p.max_tokens = src.max_tokens;
+        render();
+        note.textContent = 'Copied ' + src.name + ' — unsaved';
+        note.style.color = 'var(--fg)';
+      });
+      voice.appendChild(field('Start from persona', from, 'Copies a saved persona into this loadout'));
+      voice.appendChild(field('Persona name', mk('input', 'persona_name', { placeholder: 'none', maxlength: '60' }), 'The name this agent answers as'));
+      voice.appendChild(field('Temperature', mk('input', 'temperature', { type: 'number', min: '0', max: '2', step: '0.05', placeholder: 'default' })));
+      voice.appendChild(field('Max tokens', mk('input', 'max_tokens', { type: 'number', min: '0', max: '65536', step: '1', placeholder: 'default' }), '0 or blank lets the server decide'));
+      voice.appendChild(field('Reasoning effort', choice('reasoning_effort', [['', 'Default'], ['minimal', 'Minimal'], ['low', 'Low (faster)'], ['medium', 'Medium'], ['high', 'High (slower)']]),
+        'How much a ChatGPT-subscription model thinks before each step. Low makes skim-and-collect workers much faster per round.'));
+      card.appendChild(voice);
+      card.appendChild(field('Instructions / personality', mk('textarea', 'instructions', { rows: '3', placeholder: 'How this agent thinks, speaks and works' })));
       var policies = document.createElement('div'); policies.className = 'agent-profile-policy-grid';
       policies.appendChild(field('Delegation', choice('delegation_policy', [['explicit','Only when asked'],['never','Never'],['auto','Agent decides']]), 'When this worker may create or hand off to other agents.'));
       policies.appendChild(field('Approvals', choice('approval_mode', [['inherit','Global default'],['ask_risky','Ask for risky'],['ask_all','Ask for every change'],['auto','Automatic']])));
@@ -2827,9 +2707,10 @@ function initAgentProfilesEditor(initial) {
   }
   addBtn && addBtn.addEventListener('click', function () {
     profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
-      max_rounds: 12, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
+      max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
-      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '' });
+      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
+      persona_name: '', temperature: null, max_tokens: null });
     render();
     var inputs = list.querySelectorAll('.agent-profile:last-child input');
     if (inputs[0]) inputs[0].focus();
@@ -2852,7 +2733,118 @@ function initAgentProfilesEditor(initial) {
       note.textContent = 'Saved';
     } catch (e) { note.textContent = 'Failed to save'; note.style.color = 'var(--red)'; }
   });
+  initAgentProfilesTransfer(note, function (next) {
+    profiles = (next || []).map(function (p) { return Object.assign({}, p); });
+    render();
+  });
   render();
+}
+
+// Export / Import for the profile editor. Export downloads
+// /api/agents/profiles/export; Import posts an exported file to
+// /api/agents/profiles/import, which validates every profile like a normal
+// save and returns a report plus the stored list to re-render.
+function initAgentProfilesTransfer(note, replaceProfiles) {
+  var exportBtn = el('set-agentProfileExport');
+  var importBtn = el('set-agentProfileImport');
+  var modeSel = el('set-agentProfileImportMode');
+  var fileInput = el('set-agentProfileImportFile');
+  var reportBox = el('set-agentProfileImportReport');
+  if (!exportBtn || !importBtn || !fileInput) return;
+
+  function say(text, bad) {
+    note.textContent = text;
+    note.style.color = bad ? 'var(--red)' : 'var(--fg)';
+  }
+
+  async function ask(text, confirmText) {
+    try {
+      return await (uiModule && uiModule.styledConfirm
+        ? uiModule.styledConfirm(text, { confirmText: confirmText, cancelText: 'Cancel' })
+        : Promise.resolve(window.confirm(text)));
+    } catch (_) { return false; }
+  }
+
+  function showReport(report) {
+    if (!reportBox) return;
+    reportBox.textContent = '';
+    var lines = [];
+    [['added', 'Added'], ['updated', 'Updated'], ['removed', 'Removed']].forEach(function (pair) {
+      var names = report[pair[0]] || [];
+      if (names.length) lines.push(pair[1] + ': ' + names.join(', '));
+    });
+    Object.keys(report.narrowed || {}).forEach(function (name) {
+      lines.push('Narrowed ' + name + ': ' + report.narrowed[name].join('; '));
+    });
+    (report.skipped || []).forEach(function (s) { lines.push('Skipped ' + s.name + ': ' + s.reason); });
+    (report.errors || []).forEach(function (e) {
+      lines.push('Error in ' + (e.name || ('profile ' + (e.index + 1))) + ': ' + e.error);
+    });
+    (report.warnings || []).forEach(function (w) { lines.push('Warning: ' + w); });
+    lines.forEach(function (line) {
+      var row = document.createElement('div');
+      row.textContent = line;
+      reportBox.appendChild(row);
+    });
+    reportBox.hidden = !lines.length;
+  }
+
+  exportBtn.addEventListener('click', async function () {
+    if (note.textContent === 'Unsaved changes') say('Exporting the saved profiles (unsaved changes are not included)');
+    try {
+      var r = await fetch('/api/agents/profiles/export', { credentials: 'same-origin' });
+      if (!r.ok) {
+        var err = null;
+        try { err = await r.json(); } catch (e) {}
+        say((err && err.detail) || ('Export failed (' + r.status + ')'), true);
+        return;
+      }
+      var blob = await r.blob();
+      var match = (r.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)"?/);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = match ? match[1] : 'odysseus-agent-profiles.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      say('Export downloaded');
+    } catch (e) { say('Export failed', true); }
+  });
+
+  importBtn.addEventListener('click', async function () {
+    if (note.textContent === 'Unsaved changes' &&
+        !(await ask('Importing reloads the profile list from the server. Discard unsaved changes?', 'Discard'))) return;
+    fileInput.value = '';
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async function () {
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    var mode = modeSel ? modeSel.value : 'merge';
+    if (mode === 'replace' &&
+        !(await ask('Replace all profiles with the ones in ' + file.name + '? Profiles not in the file are deleted.', 'Replace'))) return;
+    var doc;
+    try {
+      doc = JSON.parse((await file.text()).replace(/^﻿/, ''));
+    } catch (e) { say('Not a JSON file: ' + e.message, true); return; }
+    say('Importing…');
+    try {
+      var r = await fetch('/api/agents/profiles/import', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document: doc, mode: mode === 'rename' ? 'merge' : mode,
+          rename_conflicts: mode === 'rename' }) });
+      var body = null;
+      try { body = await r.json(); } catch (e) {}
+      if (!r.ok || !body) {
+        showReport({});
+        say((body && body.detail) || ('Import failed (' + r.status + ')'), true);
+        return;
+      }
+      if (Array.isArray(body.profiles)) replaceProfiles(body.profiles);
+      showReport(body.report || {});
+      say(body.message || 'Imported', !body.ok);
+    } catch (e) { say('Import failed', true); }
+  });
 }
 
 async function initClaudeCodeSettings() {
@@ -2862,6 +2854,7 @@ async function initClaudeCodeSettings() {
     binary: el('set-ccBinary'), home: el('set-ccHome'), roots: el('set-ccRoots'),
     defaultRepo: el('set-ccDefaultRepo'), concurrency: el('set-ccConcurrency'),
     model: el('set-ccModel'), restricted: el('set-ccRestricted'),
+    backend: el('set-ccBackend'), cloudRepos: el('set-ccCloudRepos'), cloudWorkflow: el('set-ccCloudWorkflow'),
     callbackUrl: el('set-ccCallbackUrl'), tokenFile: el('set-ccTokenFile'),
   };
   var msg = el('set-ccMsg');
@@ -2878,6 +2871,9 @@ async function initClaudeCodeSettings() {
     if (f.concurrency) f.concurrency.value = settings.claude_code_max_concurrent_tasks ? settings.claude_code_max_concurrent_tasks : '';
     if (f.model) f.model.value = settings.claude_code_model || '';
     if (f.restricted) f.restricted.checked = settings.claude_code_restricted !== false;
+    if (f.backend) f.backend.value = settings.claude_code_backend === 'cloud' ? 'cloud' : 'local';
+    if (f.cloudRepos) f.cloudRepos.value = Array.isArray(settings.claude_cloud_repositories) ? settings.claude_cloud_repositories.join('\n') : '';
+    if (f.cloudWorkflow) f.cloudWorkflow.value = settings.claude_cloud_workflow || '';
     if (f.callbackUrl) f.callbackUrl.value = settings.claude_code_odysseus_url || '';
     if (f.tokenFile) f.tokenFile.value = settings.claude_code_odysseus_token_file || '';
   }
@@ -2898,6 +2894,9 @@ async function initClaudeCodeSettings() {
       claude_code_max_concurrent_tasks: Math.min(conc, 16),
       claude_code_model: (f.model && f.model.value.trim()) || '',
       claude_code_restricted: f.restricted ? !!f.restricted.checked : true,
+      claude_code_backend: (f.backend && f.backend.value) || 'local',
+      claude_cloud_repositories: f.cloudRepos ? f.cloudRepos.value.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
+      claude_cloud_workflow: (f.cloudWorkflow && f.cloudWorkflow.value.trim()) || 'odysseus-claude.yml',
       claude_code_odysseus_url: (f.callbackUrl && f.callbackUrl.value.trim()) || '',
       claude_code_odysseus_token_file: (f.tokenFile && f.tokenFile.value.trim()) || '',
     };
@@ -2985,6 +2984,30 @@ async function initClaudeCodeSettings() {
   }
 
   Object.keys(f).forEach(function (k) { if (f[k]) f[k].addEventListener('change', save); });
+  // Cloud runner: credential, allowlisted repositories, and whether each has
+  // the workflow file (GET /api/claude-code/cloud/status).
+  var cloudBox = el('set-ccCloudStatus');
+  async function checkCloud() {
+    if (!cloudBox) return;
+    cloudBox.textContent = 'Checking…';
+    try {
+      var r = await fetch('/api/claude-code/cloud/status', { credentials: 'same-origin' });
+      var s = await r.json();
+      if (!r.ok) throw new Error(s.detail || r.status);
+      var rows = ['<div class="cc-status-line"><span class="cc-pill ' + (s.ready ? 'ok' : 'bad') + '">' + (s.ready ? 'ready' : 'not ready') + '</span> '
+        + 'GitHub credential: ' + _e(s.credential === 'github_app' ? 'GitHub App' : s.credential === 'token' ? 'token' : 'none') + '</div>'];
+      (s.repositories || []).forEach(function (row) {
+        rows.push('<div class="cc-status-line">' + (row.workflow ? '<span class="cc-pill ok">workflow found</span> ' : '<span class="cc-pill bad">not set up</span> ')
+          + '<code>' + _e(row.repository) + '</code>' + (row.error ? ' <span class="cc-hint">' + _e(row.error) + '</span>' : '') + '</div>');
+      });
+      (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });
+      cloudBox.innerHTML = rows.join('');
+    } catch (e) {
+      cloudBox.innerHTML = '<span style="color:var(--red)">' + _e('Cloud status unavailable: ' + (e.message || e)) + '</span>';
+    }
+  }
+  var cloudCheckBtn = el('set-ccCloudCheck');
+  if (cloudCheckBtn) cloudCheckBtn.addEventListener('click', checkCloud);
   var checkBtn = el('set-ccCheck');
   if (checkBtn) checkBtn.addEventListener('click', function () { checkStatus(); loadTasks(); });
   var refreshBtn = el('set-ccRefreshTasks');
@@ -3008,10 +3031,39 @@ async function initClaudeCodeSettings() {
 
 function initAll() {
   modalEl = el('settings-modal');
-  initTabs();
-  initDrag();
-  initClose();
-  initOpenPromptModalLink();
+
+  bindSettingsNavigation(modalEl, {
+    openAdminTab: openAdminSettingsTab,
+    onPanelActivated: onSettingsPanelActivated,
+  });
+
+  bindSettingsSearch(modalEl, {
+    isAdmin: () => !!window._isAdmin,
+    openPanel(tab) {
+      const button = modalEl.querySelector(`[data-settings-tab="${tab}"]`);
+      if (button) button.click();
+    },
+  });
+
+  bindSettingsSidebar(modalEl);
+
+  const registryIssues = getSettingsRegistryIssues(modalEl);
+  if (registryIssues.length) {
+    console.warn('Settings registry/DOM mismatch:', registryIssues);
+  }
+
+  bindSettingsDrag(modalEl);
+
+  bindSettingsClose(modalEl, {
+    closeSettings: close,
+    isTouchInsideModal: () => uiModule.isTouchInsideModal(),
+  });
+
+  bindOpenPromptModalLink({
+    getModal: () => modalEl,
+    closeSettings: close,
+  });
+
   initOpacityToggle();
   initialized = true;
   initDefaultChat();
@@ -3125,11 +3177,7 @@ async function initReminderSettings() {
       pubDebounce = setTimeout(async () => {
         try {
           const val = pubUrlIn.value.trim().replace(/\/+$/, '');
-          await fetch('/api/auth/settings', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ app_public_url: val }),
-          });
+          await _postSettings({ app_public_url: val });
           if (pubUrlMsg) {
             pubUrlMsg.textContent = val ? 'Saved' : 'Cleared (deep-links disabled)';
             pubUrlMsg.style.color = 'var(--green,#50fa7b)';
@@ -3427,12 +3475,7 @@ async function initReminderSettings() {
 
   async function save(patch) {
     try {
-      await fetch('/api/auth/settings', {
-        method: 'POST',
-        credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
-      });
+      await _postSettings(patch);
     } catch (e) { console.warn('Failed to save reminder settings', e); }
   }
 
@@ -3580,7 +3623,7 @@ async function initEmailAccountsSettings() {
 
   el('set-email-open-library-settings')?.addEventListener('click', async () => {
     try {
-      const mod = await import('./emailLibrary.js?v=20260722emailfastindex1');
+      const mod = await import('./emailLibrary.js?v=20260815approvalsave1');
       if (typeof mod.openEmailLibrarySettings === 'function') {
         await mod.openEmailLibrarySettings();
       }
@@ -4527,16 +4570,40 @@ async function initUnifiedIntegrations() {
     });
   }
 
-  function showForm(type, editId) {
-    formEl.style.display = '';
-    if (type === 'api') showApiForm(editId);
-    else if (type === 'caldav') showCalDavForm(editId);
-    else if (type === 'contacts' || type === 'carddav') showCardDavForm();
-    else if (type === 'email') showEmailForm(editId);
-    else if (type === 'mcp') showMcpForm(editId);
-    else if (type === 'codex') showAgentForm('codex', editId);
-    else if (type === 'claude') showAgentForm('claude', editId);
-    else if (type === 'vault') showVaultForm();
+  // The editor renders BELOW the whole integration list. With more than a
+  // couple of integrations configured, clicking a card opened it off-screen —
+  // which is why editing looked like it did not exist. Scroll to it once the
+  // (async) form body has actually been written.
+  function revealForm() {
+    try {
+      formEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } catch (_) {
+      try { formEl.scrollIntoView(); } catch (__) {}
+    }
+  }
+
+  async function showForm(type, editId) {
+    // 'block', not '': the add-button observer above tests
+    // `formEl.style.display && ...`, and '' is falsy, so it never fired.
+    formEl.style.display = 'block';
+    try {
+      if (type === 'api') await showApiForm(editId);
+      else if (type === 'caldav') await showCalDavForm(editId);
+      else if (type === 'contacts' || type === 'carddav') await showCardDavForm();
+      else if (type === 'email') await showEmailForm(editId);
+      else if (type === 'mcp') await showMcpForm(editId);
+      else if (type === 'codex') await showAgentForm('codex', editId);
+      else if (type === 'claude') await showAgentForm('claude', editId);
+      else if (type === 'vault') await showVaultForm();
+    } catch (err) {
+      // A form that throws half-way used to leave an empty visible box with no
+      // hint of why. Say so instead.
+      try { console.error('[integrations] editor failed to open', err); } catch (_) {}
+      formEl.innerHTML = '<div class="admin-card" style="margin-top:8px;font-size:12px">'
+        + 'Could not open this editor: ' + esc((err && err.message) || String(err))
+        + '</div>';
+    }
+    revealForm();
   }
 
   // ── API form ──
@@ -4606,6 +4673,8 @@ async function initUnifiedIntegrations() {
           <div class="settings-row"><label class="settings-label">Auth${_apiHint('How this service expects the credential to be sent. <b>Bearer</b> = sends "Authorization: Bearer YOUR_KEY" (most modern APIs, ntfy, OpenAI-style). <b>Header</b> = sends YOUR_KEY verbatim under a header name you choose (Miniflux uses X-Auth-Token). <b>Basic</b> = HTTP basic auth (user:pass). <b>None</b> = the API is open / no auth.')}</label><select id="uf-api-auth" class="settings-input"><option value="bearer">Bearer (most common)</option><option value="header">Header</option><option value="basic">Basic</option><option value="none">None</option></select></div>
           <div class="settings-row" id="uf-api-header-row"><label class="settings-label">Header${_apiHint('The HTTP header name the key goes under (Miniflux: X-Auth-Token; most others: Authorization). Only used when Auth = Header.')}</label><input id="uf-api-header" class="settings-input" placeholder="X-Auth-Token"></div>
           <div class="settings-row"><label class="settings-label">API Key${_apiHint('The secret token the service issued you (generated in its admin panel / settings). Used to prove your identity on each request. Required for any Auth mode except None.')}</label><input id="uf-api-key" class="settings-input" type="password" placeholder="Token/key"></div>
+          <div class="settings-row" style="align-items:flex-start"><label class="settings-label" style="padding-top:6px">Endpoints${_apiHint('What the assistant reads to know how to call this service. Picking a preset fills in its endpoint list; edit it freely to add your own paths, note which ones you actually use, or tell the assistant what not to touch. A custom integration with an empty description is one the assistant can reach but has no idea how to use.')}</label><textarea id="uf-api-desc" class="settings-input" rows="6" spellcheck="false" placeholder="GET /v1/things — list things&#10;POST /v1/things — create {&quot;name&quot;: &quot;...&quot;}" style="flex:1;min-width:0;font-family:var(--mono, ui-monospace, monospace);font-size:11px;line-height:1.45;resize:vertical;"></textarea></div>
+          <div class="settings-row"><label class="settings-label">Enabled${_apiHint('Off hides this integration from the assistant and from scheduled tasks without deleting it or losing the key.')}</label><label style="display:inline-flex;align-items:center;gap:7px;font-size:12px;cursor:pointer;"><input type="checkbox" id="uf-api-enabled" checked style="cursor:pointer"><span style="opacity:0.7">Available to the assistant</span></label></div>
           <div class="settings-row" style="margin-top:10px;align-items:center;justify-content:flex-end;gap:6px;">
             <span id="uf-api-msg" style="font-size:11px;flex:1;margin-right:8px"></span>
             <button class="admin-btn-add" id="uf-api-test" style="display:inline-flex;align-items:center;gap:5px;background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Test</button>
@@ -4615,6 +4684,9 @@ async function initUnifiedIntegrations() {
         </div>
       </div>`;
     // Custom preset dropdown wire-up (hidden select stays as data source).
+    // _setPresetTrigger is hoisted out so the edit prefill below can point the
+    // visible label at the stored preset; the <select> alone is invisible.
+    let _setPresetTrigger = () => {};
     (() => {
       const trig = el('uf-api-preset-trigger');
       const menu = el('uf-api-preset-menu');
@@ -4655,23 +4727,49 @@ async function initUnifiedIntegrations() {
           sel.dispatchEvent(new Event('change', { bubbles: true }));
         });
       });
+      _setPresetTrigger = _setFromKey;
       _setFromKey(sel.value || '');
     })();
 
     const preset = el('uf-api-preset'), name = el('uf-api-name'), url = el('uf-api-url'), auth = el('uf-api-auth'), header = el('uf-api-header'), key = el('uf-api-key'), ntfyHint = el('uf-api-ntfy-hint');
+    const desc = el('uf-api-desc'), enabled = el('uf-api-enabled');
     let _editId = editId && editId !== 'new' ? editId : null;
-    // Load existing
+    // Load existing. Every stored field is prefilled, including the preset —
+    // an edit used to open reading "Custom (no preset)" whatever it was saved
+    // as, and the description (the part the assistant actually reads) was
+    // neither shown nor editable at all.
     if (_editId) {
       try {
         const r = await fetch('/api/auth/integrations', { credentials: 'same-origin' });
         const d = await r.json();
         const item = (d.integrations || []).find(i => i.id === _editId);
-        if (item) { name.value = item.name || ''; url.value = item.base_url || ''; auth.value = item.auth_type || 'none'; header.value = item.auth_header || ''; }
+        if (item) {
+          name.value = item.name || '';
+          url.value = item.base_url || '';
+          auth.value = item.auth_type || 'none';
+          header.value = item.auth_header || '';
+          if (desc) desc.value = item.description || '';
+          if (enabled) enabled.checked = item.enabled !== false;
+          if (item.preset && preset.querySelector(`option[value="${CSS.escape(item.preset)}"]`)) {
+            preset.value = item.preset;
+            try { _setPresetTrigger(item.preset); } catch (_) {}
+          }
+          // The list endpoint masks the key, so the field stays blank and
+          // blank means "keep what is stored". Without this the form looked
+          // like no key had ever been saved.
+          if (item.api_key) key.placeholder = 'Saved — leave blank to keep';
+        }
       } catch (_) {}
     }
     // Native <select>: the option `value` is the preset key directly, so
     // no typed-name → key lookup is needed (datalist-era leftover).
-    const _applyPreset = () => {
+    //
+    // Split in two. The visual half (hints, which rows are relevant) reflects
+    // the current preset and always runs. The defaults half OVERWRITES what is
+    // in the fields, so it runs only when the user actively picks a preset —
+    // running it on open would wipe the customisations of a saved integration
+    // the moment its editor appeared.
+    const _applyPresetVisuals = () => {
       const p = presets[preset.value];
       const isNtfy = preset.value === 'ntfy' || (p && (p.name || '').toLowerCase() === 'ntfy');
       const isUrlAuth = preset.value === 'discord_webhook'; // secret embedded in URL — no key/auth fields needed
@@ -4692,21 +4790,39 @@ async function initUnifiedIntegrations() {
       if (keyRow) keyRow.style.display = isUrlAuth ? 'none' : '';
       if (authRow) authRow.style.display = isUrlAuth ? 'none' : '';
       if (headerRow) headerRow.style.display = isUrlAuth ? 'none' : '';
+    };
+    const _applyPresetDefaults = () => {
+      const p = presets[preset.value];
       if (!p) return;
       name.value = p.name || '';
       auth.value = p.auth_type || 'none';
       header.value = p.auth_header || '';
+      // Seed the endpoint notes from the preset. It is a starting point, not a
+      // fixed value — everything here is editable and saved per integration.
+      if (desc) desc.value = p.description || '';
     };
-    preset.addEventListener('change', _applyPreset);
-    _applyPreset();
+    preset.addEventListener('change', () => { _applyPresetDefaults(); _applyPresetVisuals(); });
+    _applyPresetVisuals();
     el('uf-api-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
     el('uf-api-save').addEventListener('click', async () => {
-      const presetKey = preset.value || undefined;
+      // Sent even when empty: '' is how you detach an integration from a
+      // preset, and undefined would be dropped by JSON.stringify.
+      const presetKey = preset.value || '';
       const nameValue = name.value.trim();
       const urlValue = url.value.trim();
       if (!nameValue) { el('uf-api-msg').textContent = 'Name required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
       if (!urlValue) { el('uf-api-msg').textContent = 'Base URL required'; el('uf-api-msg').style.color = 'var(--red)'; return; }
-      const body = { name: nameValue, base_url: urlValue, auth_type: auth.value, auth_header: header.value, preset: presetKey };
+      const body = {
+        name: nameValue,
+        base_url: urlValue,
+        auth_type: auth.value,
+        auth_header: header.value,
+        preset: presetKey,
+        description: desc ? desc.value : '',
+        enabled: enabled ? !!enabled.checked : true,
+      };
+      // Blank key = keep the stored one. The list endpoint masks it, so the
+      // field is always blank on open and sending '' would wipe a working key.
       if (key.value) body.api_key = key.value;
       try {
         const u = _editId ? `/api/auth/integrations/${_editId}` : '/api/auth/integrations';
@@ -5452,6 +5568,7 @@ async function initUnifiedIntegrations() {
           sel.dispatchEvent(new Event('change', { bubbles: true }));
         });
       });
+      _setPresetTrigger = _setFromKey;
       _setFromKey(sel.value || '');
     })();
 
@@ -5898,6 +6015,7 @@ async function initUnifiedIntegrations() {
         const srv = servers.find(s => (s.id || s.name) === editId);
         if (!srv) { formEl.innerHTML = '<div class="admin-card" style="margin-top:8px">Server not found</div>'; return; }
         const esc = s => String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;');
+        const escAttr = s => esc(s).replace(/"/g, '&quot;');
         const statusColor = srv.needs_oauth ? '#e5a33a' : srv.status === 'connected' ? 'var(--green,#50fa7b)' : srv.status === 'error' ? 'var(--red)' : 'var(--fg)';
         const toolInfo = srv.status === 'connected' ? `${srv.enabled_tool_count}/${srv.tool_count} tools` : '';
         const statusText = srv.needs_oauth ? 'Needs authorization' : srv.status === 'connected' ? `Connected (${toolInfo})` : srv.status === 'error' ? `Error: ${esc(srv.error || 'unknown')}` : 'Disconnected';
@@ -5915,8 +6033,79 @@ async function initUnifiedIntegrations() {
               <button class="admin-btn-add" id="uf-mcp-toggle" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">${srv.is_enabled ? 'Disable' : 'Enable'}</button>
               <button class="admin-btn-add" id="uf-mcp-cancel" style="background:transparent;color:var(--accent, var(--red));border-color:color-mix(in srgb, var(--accent, var(--red)) 45%, var(--border));">Close</button>
             </div>
+            <details class="uf-mcp-conn"${srv.status === 'connected' ? '' : ' open'}>
+              <summary>Connection settings</summary>
+              <div class="uf-mcp-conn-sub">How Odysseus starts or reaches this server. Saving reconnects it with the new settings; your tool choices below are kept.</div>
+              <div class="settings-row"><label class="settings-label">Name</label><input id="uf-mcp-edit-name" class="settings-input" value="${escAttr(srv.name)}"></div>
+              <div class="settings-row"><label class="settings-label">Transport</label><select id="uf-mcp-edit-transport" class="settings-input">
+                <option value="stdio"${srv.transport === 'stdio' ? ' selected' : ''}>stdio (runs a local command)</option>
+                <option value="sse"${srv.transport === 'sse' ? ' selected' : ''}>SSE (remote URL)</option>
+                <option value="http"${srv.transport === 'http' ? ' selected' : ''}>Streamable HTTP (remote URL)</option>
+              </select></div>
+              <div data-mcp-edit-for="stdio">
+                <div class="settings-row"><label class="settings-label">Command</label><input id="uf-mcp-edit-cmd" class="settings-input" value="${escAttr(srv.command || '')}" placeholder="npx"></div>
+                <div class="settings-row"><label class="settings-label">Args</label><textarea id="uf-mcp-edit-args" class="settings-input" rows="2" placeholder='["-y", "@modelcontextprotocol/server-filesystem"]'>${esc(JSON.stringify(srv.args || []))}</textarea></div>
+                <div class="uf-mcp-conn-hint">A JSON list, one entry per argument.</div>
+              </div>
+              <div data-mcp-edit-for="remote">
+                <div class="settings-row"><label class="settings-label">URL</label><input id="uf-mcp-edit-url" class="settings-input" value="${escAttr(srv.url || '')}" placeholder="http://localhost:3001/sse"></div>
+              </div>
+              <div class="settings-row"><label class="settings-label">Env</label><textarea id="uf-mcp-edit-env" class="settings-input" rows="3" placeholder='{"API_KEY": "..."}'>${esc(JSON.stringify(srv.env || {}, null, 2))}</textarea></div>
+              <div class="uf-mcp-conn-hint">Environment variables as a JSON object: API keys, tokens, paths. Stored on the server.</div>
+              <div class="uf-mcp-conn-actions"><span id="uf-mcp-conn-msg"></span><button type="button" class="admin-btn-add" id="uf-mcp-save-conn">Save &amp; reconnect</button></div>
+            </details>
             <div id="uf-mcp-tools-panel"></div>
           </div>`;
+        // Connection settings: show the fields for the chosen transport, then
+        // save through PUT /api/mcp/servers/{id}, which reconnects.
+        const _syncMcpEditTransport = () => {
+          const remote = el('uf-mcp-edit-transport').value !== 'stdio';
+          formEl.querySelector('[data-mcp-edit-for="stdio"]').style.display = remote ? 'none' : '';
+          formEl.querySelector('[data-mcp-edit-for="remote"]').style.display = remote ? '' : 'none';
+        };
+        el('uf-mcp-edit-transport').addEventListener('change', _syncMcpEditTransport);
+        _syncMcpEditTransport();
+        el('uf-mcp-save-conn').addEventListener('click', async (ev) => {
+          const btn = ev.currentTarget;
+          if (btn.disabled) return;
+          const msg = el('uf-mcp-conn-msg');
+          const transport = el('uf-mcp-edit-transport').value;
+          let args = '[]';
+          let env = '{}';
+          try {
+            const parsedArgs = JSON.parse(el('uf-mcp-edit-args').value.trim() || '[]');
+            if (!Array.isArray(parsedArgs)) throw new Error();
+            args = JSON.stringify(parsedArgs);
+          } catch (_) { msg.textContent = 'Args must be a JSON list, e.g. ["-y", "pkg"]'; return; }
+          try {
+            const parsedEnv = JSON.parse(el('uf-mcp-edit-env').value.trim() || '{}');
+            if (!parsedEnv || typeof parsedEnv !== 'object' || Array.isArray(parsedEnv)) throw new Error();
+            env = JSON.stringify(parsedEnv);
+          } catch (_) { msg.textContent = 'Env must be a JSON object, e.g. {"API_KEY": "..."}'; return; }
+          const fd = new FormData();
+          fd.append('name', el('uf-mcp-edit-name').value.trim());
+          fd.append('transport', transport);
+          fd.append('command', el('uf-mcp-edit-cmd').value.trim());
+          fd.append('args', args);
+          fd.append('env', env);
+          fd.append('url', el('uf-mcp-edit-url').value.trim());
+          _setBtnLoading(btn, true, 'Saving…');
+          msg.textContent = '';
+          try {
+            const r = await fetch(`/api/mcp/servers/${srv.id}`, { method: 'PUT', body: fd, credentials: 'same-origin' });
+            const d = await r.json().catch(() => ({}));
+            if (!r.ok) { msg.textContent = d.detail || `Not saved (${r.status})`; return; }
+            msg.textContent = !srv.is_enabled ? 'Saved (server is disabled)'
+              : d.connected ? `Saved. Connected (${d.tool_count} tools)` : `Saved, but not connected: ${d.error || d.status || 'unknown'}`;
+            await renderList();
+            notifyIntegrationsChanged();
+            if (d.needs_auth && d.auth_url) _handleMcpAuth(srv.id, d.auth_url);
+          } catch (e) {
+            msg.textContent = 'Failed to save';
+          } finally {
+            _setBtnLoading(btn, false, 'Save & reconnect');
+          }
+        });
         // Reconnect
         // Reconnecting a stdio server takes a couple of seconds. Without an
         // in-flight guard an impatient second/third click fired another
@@ -6007,7 +6196,11 @@ async function initUnifiedIntegrations() {
         fd.append('transport', transport);
         if (transport === 'stdio') {
           fd.append('command', el('uf-mcp-cmd').value);
-          let args = '[]'; try { args = JSON.stringify(JSON.parse(el('uf-mcp-args').value || '[]')); } catch (_) {}
+          // Unlike env below, an unparseable args value is not silently
+          // defaulted: it would spawn the subprocess with an empty argv.
+          let args;
+          try { args = JSON.stringify(JSON.parse(el('uf-mcp-args').value || '[]')); }
+          catch (_) { el('uf-mcp-msg').textContent = 'Args must be valid JSON, e.g. ["-y", "pkg"]'; return; }
           let env  = '{}'; try { env  = JSON.stringify(JSON.parse(el('uf-mcp-env').value  || '{}')); } catch (_) {}
           fd.append('args', args);
           fd.append('env', env);
@@ -6550,7 +6743,6 @@ async function initUnifiedIntegrations() {
             window.location.href = '/api/calendar/oauth/google/authorize';
             return;
           }
-          formEl.style.display = '';
           showForm(k, 'new');
         });
       });
@@ -6575,44 +6767,35 @@ function syncAdminVisibility() {
    ═══════════════════════════════════════════ */
 export function open(tab) {
   if (!initialized) initAll();
+
   syncAppearanceCheckboxes();
-  if (modalEl.classList.contains('hidden')) {
-    resetWindowPlacement();
-  }
-  modalEl.classList.remove('hidden');
+  showSettingsModal(modalEl);
   syncAdminVisibility();
-  const content = modalEl.querySelector('.settings-modal-content');
+
   if (tab) {
-    modalEl.querySelectorAll('[data-settings-tab]').forEach(b => b.classList.toggle('active', b.dataset.settingsTab === tab));
-    modalEl.querySelectorAll('[data-settings-panel]').forEach(p => p.classList.toggle('hidden', p.dataset.settingsPanel !== tab));
+    activateSettingsPanel(modalEl, tab);
   }
-  // Auto-init admin data if showing an admin tab
-  const activeTab = tab || (modalEl.querySelector('[data-settings-tab].active') || {}).dataset?.settingsTab || 'services';
-  document.body.classList.toggle('settings-appearance-open', activeTab === 'appearance');
-  syncAppearanceOpacity(activeTab === 'appearance');
-  if (activeTab === 'ai') refreshAiModelEndpoints();
-  if (ADMIN_TABS.has(activeTab) && window.adminModule && !window.adminModule._initialized) {
+
+  // Preserve existing panel-specific side effects when Settings is opened
+  // directly to a tab as well as when the user navigates there.
+  const activeTab = tab || getActiveSettingsTab(modalEl);
+  onSettingsPanelActivated(activeTab);
+
+  // Auto-init admin data if showing an admin tab.
+  if (isAdminManagedSettingsTab(activeTab) && window.adminModule && !window.adminModule._initialized) {
     window.adminModule._initData();
   }
 }
 
 export function close() {
   if (!modalEl) return;
-  // Always clear the appearance-tab body class so the rest of the app
-  // doesn't keep its dimmed state if the modal got closed mid-tab.
+
+  // Always clear the Appearance state so the rest of the app does not remain
+  // dimmed if Settings is closed while that panel is active.
   document.body.classList.remove('settings-appearance-open');
-  syncAppearanceOpacity(false); // clear any opacity-slider fade
-  const content = modalEl.querySelector('.modal-content, .settings-modal-content');
-  if (content && !content.classList.contains('modal-closing')) {
-    content.classList.add('modal-closing');
-    content.addEventListener('animationend', () => {
-      modalEl.classList.add('hidden');
-      content.classList.remove('modal-closing');
-    }, { once: true });
-    setTimeout(() => { if (!modalEl.classList.contains('hidden')) { modalEl.classList.add('hidden'); content.classList.remove('modal-closing'); } }, 250);
-  } else {
-    modalEl.classList.add('hidden');
-  }
+  syncAppearanceOpacity(false);
+
+  hideSettingsModal(modalEl);
 }
 
 // Handle redirect back from Google OAuth2 — open settings to integrations and show status.

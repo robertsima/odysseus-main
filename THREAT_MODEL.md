@@ -37,7 +37,7 @@ Non-admin defaults are in `core/auth.py:DEFAULT_PRIVILEGES`. Tool enforcement is
 
 - **Sessions:** bcrypt passwords, 7-day session tokens stored atomically in `data/sessions.json` via `core/atomic_io.py`.
 - **2FA:** TOTP with 8 single-use backup codes. Verified after password check, before session issuance.
-- **Reserved usernames:** `internal-tool`, `api`, `demo`, `system` cannot be registered or renamed into. Defined in `core/auth.py:RESERVED_USERNAMES`.
+- **Reserved usernames:** request sentinels and the Default/Local storage owner cannot be registered or renamed into. Defined in `core/auth.py:RESERVED_USERNAMES`.
   - `internal-tool` is security-critical: `core/middleware.py:require_admin` treats any request where `request.state.current_user == "internal-tool"` as the in-process tool loopback and grants admin unconditionally. A real account with that name would silently pass every `require_admin` check.
 - **Orphan sessions:** `validate_token` re-checks that the user record still exists on every call. A deleted user's cookie is dropped on next request rather than continuing to authenticate.
 
@@ -72,7 +72,7 @@ External content that reaches the LLM is treated as untrusted via `src/prompt_se
 
 These are open, acknowledged, and contributor help is welcome:
 
-1. **No shell/filesystem sandbox.** The agent `bash` and `read_file`/`write_file` tools run as the app process user with no network egress filtering or filesystem confinement. A successful prompt-injection reaching a shell-enabled admin session can make outbound requests to internal services. See #1058 for the sandbox proposal.
+1. **Shell sandbox is partial.** In a chat without the private-vault grant, `bash` and `python` run in a bubblewrap sandbox (`src/shell_sandbox.py`) that sees only the chat's workspace, the read-only system and its own `/tmp`: no app data, vault, Docker socket or app environment. Its network is shared unless `shell_sandbox_network` is off, so it can still reach internal services, ChromaDB included (Chroma 1.x has no built-in auth, and its index holds vault excerpts). With the grant, or where the sandbox is unavailable and the grant is given, the shell runs unconfined as the app process user. `read_file`/`write_file` are confined by path checks, not by the sandbox. See #1058 for the sandbox proposal.
 
 2. **SSRF via `/api/v1/chat` `base_url` parameter.** A chat-scoped API token can supply an arbitrary `base_url`; the server forwards the LLM request to that host without validating the scheme or address. PR #1039 fixes this.
 

@@ -17,6 +17,19 @@ authority and change over time.
   `claude_code_odysseus_token_file`) so Claude can call `/api/codex/*` back
   in this instance.
 
+## The cloud runner (GitHub Actions)
+
+`src/claude_cloud.py` can instead dispatch
+`integrations/claude/github/odysseus-claude.yml` in an allowlisted repository,
+where Anthropic's official `anthropics/claude-code-action` runs the unmodified
+Claude Code with the operator's own credential from that repository's secrets
+(`CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or `ANTHROPIC_API_KEY`;
+`/install-github-app` sets either up). Odysseus sends only the task text and
+reads back the run status, a result artifact, the branch and the pull request.
+It never receives, stores or forwards the Claude credential, and it does not
+host a Claude login. This is the route to use when nobody should sign in
+inside the container.
+
 ## Why that stays inside the published terms
 
 - Running Claude Code "in your products or services (e.g. in hosted sandboxes

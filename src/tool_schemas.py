@@ -44,8 +44,8 @@ def _strip_schema_descriptions(value):
 def compact_function_tool_schemas(schemas):
     """Return compact provider-payload copies without changing callable shape.
 
-    Canonical schemas remain the execution contract. The API only needs names
-    and JSON constraints; property prose is repeated prompt overhead.
+    Canonical schemas remain the execution contract. Most property prose can
+    be omitted, but multi-action Git tools need their action/field mapping.
     """
     compact = []
     for schema in schemas or []:
@@ -60,7 +60,8 @@ def compact_function_tool_schemas(schemas):
         # Nested object/array schemas are common in MCP tools.  Strip only
         # explanatory prose recursively: ``type``, ``required``, ``enum``,
         # ``items``, and every other JSON-schema constraint stay intact.
-        _strip_schema_descriptions(fn.get("parameters"))
+        if fn.get("name") not in {"manage_git", "manage_agent_worktree"}:
+            _strip_schema_descriptions(fn.get("parameters"))
         compact.append(item)
     return compact
 
@@ -68,6 +69,22 @@ def compact_function_tool_schemas(schemas):
 # OpenAI-compatible function tool schemas
 # ---------------------------------------------------------------------------
 FUNCTION_TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "discover_tools",
+            "description": "Find and load a small number of permitted tools for this turn when the currently attached tools do not cover the task. Discovery is read-only and does not execute a discovered tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -146,7 +163,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output.",
+            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output. In an unfamiliar tree, run `ls` with depth first and pass the narrowest `path`; a search rooted above the data directory does not search user data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -164,7 +181,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots.",
+            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots. To learn a tree's layout use `ls` with depth instead of a broad '**/*' glob, then glob inside the folder that matters.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -179,11 +196,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ls",
-            "description": "List the entries of a directory (folders first, then files with sizes). PREFER this over `bash ls` — confined to the allowed roots.",
+            "description": "List the entries of a directory (folders first, then files with sizes). With depth 2-4 it returns a folder outline instead: the directory tree with file counts, skipping build/vendor/cache folders. Use the outline as the first look at an unfamiliar codebase, then grep/glob the folder that matters. PREFER this over `bash ls`/`find` — confined to the allowed roots.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"}
+                    "path": {"type": "string", "description": "Directory to list (optional; defaults to the project root)"},
+                    "depth": {"type": "integer", "description": "1 (default) lists entries; 2-4 returns a folder outline to that depth"}
                 },
                 "required": []
             }
@@ -275,9 +293,64 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
-            "name": "manage_agent_worktree",
+            "name": "manage_git",
+            # Action-dependent optional fields must not become all-required.
+            "strict": False,
             "description": (
-                "Work in an isolated, persistent git worktree on an agent/odysseus/* branch, "
+                "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
+                "Git workflows in approved local checkouts (configured roots and the active workspace's checkout): repositories, status, diff, log, "
+                "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
+                "stash_list/create/apply/pop, push, merge, reset, rebase, set_upstream. "
+                "No shell/private-vault grant needed. "
+                "Use absolute repository paths from repositories. Stage explicit relative files; "
+                "commit uses local identity or supplied author. Pull/merge fast-forward only. "
+                "After first push, set_upstream can bind the current branch to its fetched/pushed "
+                "remote_branch on an existing configured remote; never replaces an upstream. "
+                "Push/merge/history rewrites require fresh confirmation bound to exact revisions. "
+                "Policy refuses every delete (branches, remote branches, stashes), force push and discard of work; no approval re-enables them. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
+                "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
+                "Odysseus self-publishing still uses manage_agent_worktree."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "push", "merge", "reset", "rebase", "set_upstream"]},
+                    "repository": {"type": "string", "description": "All actions except repositories: absolute checkout path; clone/init use the new target path"},
+                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL (or the configured GitHub Enterprise host)"},
+                    "branch": {"type": "string", "description": "clone only: optional remote branch"},
+                    "depth": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "clone only: optional shallow history depth"},
+                    "initial_branch": {"type": "string", "description": "init only: initial branch, default main"},
+                    "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
+                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch)"},
+                    "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
+                    "message": {"type": "string", "description": "Commit or stash_create message"},
+                    "index": {"type": "integer", "minimum": 0, "maximum": 99, "description": "stash action only: stash index, default 0"},
+                    "author_name": {"type": "string", "description": "commit only: omit to use local Git identity"},
+                    "author_email": {"type": "string", "description": "commit only: omit to use local Git identity"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "log only: maximum commits (default 20)"},
+                    "staged": {"type": "boolean", "description": "diff only: compare index versus HEAD (default false)"},
+                    "remote_branch": {"type": "string", "description": "fetch_branch/push/set_upstream: configured remote's branch name"},
+                    "remote": {"type": "string", "description": "fetch_branch/set_upstream only: existing configured remote name; omit when origin or one remote is unambiguous"},
+                    "expected_head": {"type": "string", "description": "Exact current HEAD being confirmed for publish/integration/history rewrite"},
+                    "expected_target": {"type": "string", "description": "Exact target/stash/remote-lease commit being confirmed; 40 zeros means absent remote for force-with-lease"}
+                },
+                "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "manage_agent_worktree",
+            "strict": False,
+            "description": (
+                "Choose an action and omit unused fields; repo_list needs only action, repo_status/repo_pull also need repository. "
+                "List/status/fast-forward pull approved local Git repositories (repo_list, "
+                "repo_status, repo_pull), or manage a human-gated publishing worktree. "
+                "repo_status/repo_pull require an absolute repository path from repo_list; "
+                "repo_pull uses ONLY its configured GitHub upstream and refuses dirty or "
+                "diverged checkouts. No shell or private-vault grant is needed. "
+                "For publishing, work in an isolated persistent worktree on an agent/odysseus/* branch, "
                 "and publish it only with explicit human approval. Actions: 'start' (create or "
                 "reuse the worktree for a task name), 'status', 'diff' (changed files plus which "
                 "of them are sensitive), 'commit', 'request_publish' (freeze the change and ask a "
@@ -292,9 +365,11 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "remove"],
+                                 "publish", "list_requests", "show_request",
+                                 "repo_list", "repo_status", "repo_pull"],
                         "description": "Operation to perform (default: status)"
                     },
+                    "repository": {"type": "string", "description": "Absolute local checkout path from repo_list (repo_status/repo_pull only); not a URL"},
                     "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>"},
                     "branch": {"type": "string", "description": "Full agent branch, when it already exists"},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
@@ -317,16 +392,20 @@ FUNCTION_TOOL_SCHEMAS = [
             "description": (
                 "Read Odysseus's own application logs to debug or troubleshoot the running app. "
                 "action='list' enumerates available log files; action='tail' returns the last N "
-                "lines of one, optionally filtered by substring or minimum level. Read-only, and "
+                "lines of one, optionally filtered by substring or minimum level; action='trace' with "
+                "id (a workflow-, run or session ID) gathers every app-log line mentioning it across "
+                "rotated logs plus that ID's activity run records. Read-only, and "
                 "credential material is redacted before you see it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "tail"], "description": "Default: tail"},
+                    "action": {"type": "string", "enum": ["list", "tail", "trace"], "description": "Default: tail"},
+                    "id": {"type": "string", "description": "trace only: the workflow-, run or session ID to audit."},
                     "name": {"type": "string", "description": "Log file name, e.g. app.log. Defaults to the app log."},
                     "lines": {"type": "integer", "description": "How many lines to return (1-500, default 100)"},
                     "contains": {"type": "string", "description": "Only lines containing this substring"},
+                    "since_minutes": {"type": "number", "description": "Only entries from the last N minutes, e.g. 10 for 'the last 10 minutes'"},
                     "level": {
                         "type": "string",
                         "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -570,7 +649,9 @@ FUNCTION_TOOL_SCHEMAS = [
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
                     "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
                     "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
-                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget. Implies mode=agent. How much of the profile applies depends on the target: with session_id 'new' the whole policy applies (memory, skills, MCP, vault, delegation); with an existing chat only instructions, model, round budget, tool denials and a vault denial apply for that one exchange — the chat keeps its own settings, and the result says which happened in profile_scope."}
+                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget (the round at which it wraps up and hands back what it has). Implies mode=agent, and requires session_id 'new' — a loadout's whole policy (memory, skills, MCP, vault, delegation) is written onto the chat it creates, so it is never applied to a chat the user already owns. The result says which happened in profile_scope."},
+                    "workspace": {"type": "string", "description": "agent mode: the checkout the sub-agent's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
+                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "agent mode: what the task needs. The sub-agent is refused before it starts, with the fix, when a need cannot be met."}
                 },
                 "required": ["session_id", "message"]
             }
@@ -793,8 +874,8 @@ FUNCTION_TOOL_SCHEMAS = [
                     "description": {"type": "string", "description": "Event description / notes"},
                     "location": {"type": "string", "description": "Event location"},
                     "uid": {"type": "string", "description": "Event UID (for update/delete)"},
-                    "calendar_href": {"type": "string", "description": "Specific calendar URL (optional; defaults to first calendar)"},
-                    "calendar": {"type": "string", "description": "Filter list_events by calendar name or href"},
+                    "calendar_href": {"type": "string", "description": "Which calendar to use: the id returned by list_calendars (NOT a remote CalDAV URL). A calendar name or a short id prefix also resolves. On create_event it selects the target calendar and defaults to the first one; on list_events it restricts results to that single calendar."},
+                    "calendar": {"type": "string", "description": "Alias for calendar_href; same id, name or short-id prefix."},
                     "start": {"type": "string", "description": "list_events range start (ISO datetime). Use this for month/week requests after resolving the date range; do not pass a loose query string. Prefer start; backend also accepts start_time, start_date, range_start, from, dtstart, since."},
                     "end": {"type": "string", "description": "list_events range end (ISO datetime). Use this for month/week requests after resolving the date range; defaults to +14 days only when no range is requested. Prefer end; backend also accepts end_time, end_date, range_end, to, dtend, until."},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
@@ -1234,7 +1315,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns the OpenAPI surface (use `filter` to narrow). action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
+            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns a compact paginated OpenAPI discovery page: use `filter` first, then `limit` (1-50, default 25) and `offset` to page. action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1243,7 +1324,9 @@ FUNCTION_TOOL_SCHEMAS = [
                     "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method (default GET)"},
                     "body": {"type": "object", "description": "JSON request body for POST/PUT/PATCH"},
                     "query": {"type": "object", "description": "Querystring params as a key-value object"},
-                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery')"}
+                    "filter": {"type": "string", "description": "For action=endpoints: substring to filter paths/summaries (e.g. 'cookbook', 'gallery'); filter before paging"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 50, "default": 25, "description": "For action=endpoints: results per compact page (default 25, max 50)"},
+                    "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "For action=endpoints: zero-based offset after filtering"}
                 },
                 "required": ["action"]
             }
@@ -1253,22 +1336,27 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_agent_loadout",
-            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one.",
+            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one, and returns the model, tool bindings and round budget it actually got — check those against the task before waiting on a result. action=status reports what those workers did. A loadout whose tools all fall outside this chat's policy is refused rather than stored, because its workers could only report that they were blocked.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "create", "update", "delete", "start"], "description": "Default list. capabilities = the ceiling a loadout authored here may reach. start = launch a worker (optionally with 'name')."},
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop", "export", "import"], "description": "Default list. export = the saved loadouts (all, or 'names') as a portable JSON document. import = store a document from export ('document', 'mode'); each loadout is clamped to this chat's policy exactly as create is. stop = actually stop a worker this chat started (run_id from start/status; or worker_session); use it when the user says to stop/cancel a worker, not message_agent. capabilities = the ceiling a loadout authored here may reach. preflight = READY/DEGRADED/BLOCKED for a saved loadout right now: each tool's state, selected skills' dependencies, document-index currency, indexed vs raw private access, web lookup, with the repair for each failure. start = launch a worker: REQUIRES 'task' (optionally 'name'), e.g. {\"action\":\"start\",\"name\":\"Auditor\",\"task\":\"Review X and report Y\"}. status = what the workers this chat started actually did, including which ran out of rounds. Use status instead of searching logs or guessing."},
+                    "detail": {"type": "boolean", "description": "capabilities ONLY: include the complete allowed tool-name list. Omit for the compact count/examples summary. Not a start parameter."},
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
-                    "task": {"type": "string", "description": "start only: the whole task. The worker begins with no other context."},
+                    "task": {"type": "string", "description": "REQUIRED for start: the whole assignment, in full. The worker begins with no other context — it has not seen this conversation. A start without task does nothing."},
                     "description": {"type": "string", "description": "One line explaining when to use this loadout."},
-                    "instructions": {"type": "string", "description": "System instructions the worker starts with."},
+                    "instructions": {"type": "string", "description": "System instructions the worker starts with: its personality and way of working."},
+                    "persona_name": {"type": "string", "description": "Name the worker answers as. Each loadout keeps its own persona; the user's shared persona never applies to it."},
+                    "temperature": {"type": "number", "description": "0-2 sampling temperature for this loadout. Omit for the app default."},
+                    "max_tokens": {"type": "integer", "description": "Reply length cap for this loadout (0 = server decides). Omit for the app default."},
                     "model": {"type": "string", "description": "Model for the worker. Omit to inherit."},
                     "model_fallbacks": {"type": "array", "items": {"type": "string"}},
                     "model_access": {"type": "string", "enum": ["current", "selected", "all"], "description": "Whether the worker may switch model."},
                     "allowed_models": {"type": "array", "items": {"type": "string"}},
-                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"]},
-                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Every tool name the worker may call when tool_access=selected, MCP included. Use mcp__<server>__<tool> for one MCP tool, mcp__<server>__* for a whole server, mcp__* for all of them. Anything not listed is denied, including tools added later."},
+                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"], "description": "Use 'selected' and name enabled_tools. 'all' is refused for agent-authored loadouts: it would grant every tool this chat has, including shell, email and posting. Omitted = the read-only set."},
+                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Every tool name the worker may call when tool_access=selected, MCP included. \"@read_only\" expands to every read-only tool this chat can grant; use mcp__<server>__<tool> for one MCP tool, mcp__<server>__* for a whole server, mcp__* for all of them. Anything not listed is denied, including tools added later."},
                     "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
+                    "required_tools": {"type": "array", "items": {"type": "string"}, "description": "create/update: exact tool names the mission cannot do without (added to enabled_tools). If any is denied, unknown, or on a disconnected or disallowed MCP server, nothing is saved and the reason is returned. The result's capabilities matrix (READY/DEGRADED/BLOCKED) lists every tool's state."},
                     "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
                     "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
                     "skill_names": {"type": "array", "items": {"type": "string"}},
@@ -1278,9 +1366,17 @@ FUNCTION_TOOL_SCHEMAS = [
                     "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
-                    "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
-                    "parent_session": {"type": "string", "description": "start only: chat the worker reports to. Defaults to this chat."},
-                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."}
+                    "max_rounds": {"type": "integer", "description": "Round budget for the worker (0 = no budget, the default; at most 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left; it is never cut off mid-task."},
+                    "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
+                    "run_id": {"type": "string", "description": "stop only: the worker run to stop (from start/status). Omit when exactly one worker is running."},
+                    "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},
+                    "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
+                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "start only: what the task needs. A worker that cannot meet a need is refused before it starts, with the fix."},
+                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "export only: loadouts to export. Omit for all."},
+                    "document": {"type": "object", "description": "import only: the JSON document an export returned ({\"format\": \"odysseus-agent-profiles\", \"version\": 1, \"profiles\": [...]})."},
+                    "mode": {"type": "string", "enum": ["merge", "replace"], "description": "import only: merge (default) adds new loadouts and overwrites same-named ones; replace makes the document the whole list."},
+                    "rename_conflicts": {"type": "boolean", "description": "import merge only: store a same-named loadout under a new name instead of overwriting."}
                 },
                 "required": ["action"]
             }
@@ -1289,8 +1385,44 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "orchestrate_agents",
+            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. A small task is one specialist and no synthesis; add specialists only for branches that are independent of each other, and a synthesis agent only when their results must be reconciled. start creates visible child chats and a trace, and returns a preflight row per agent (model, bindings, MCP server health, credential state); wait/status collects their actual handoffs and a structured `record` (objective, selected agents, result summary with its source, raw outputs, artifacts, verification performed, unresolved issues). An agent with preflight blockers cannot do its branch's work — never report that branch as researched. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Omit a specialist model to inherit the current model; otherwise use an exact configured model ID. Only report completion after status=completed; queued/running means unfinished.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel", "resume"], "description": "resume: start a new workflow from a finished one that did not complete, reusing its completed research handoffs and launching only synthesis (or the stages/retry_children named)."},
+                    "task": {"type": "string", "description": "Overall objective, deliverables and constraints; start only."},
+                    "specialists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
+                        "type": "object", "properties": {
+                            "name": {"type": "string"}, "task": {"type": "string"},
+                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only bindings: any read-only native tool this chat itself may use (web_search, web_fetch, read_file, grep, glob, ls, get_workspace, search_documents, search_chats, vault_get/vault_search, read_app_logs, list_/read_ email tools, manage_skills, ...). Tools that write, send, publish or delegate (bash, write_file, apply_patch, send_email, orchestrate_agents, ...) are rejected and the whole start fails — use the worker launcher for work that must change something. The rejection lists the full supported set. MCP bindings must be exact mcp__serverId__tool names taken from discovery, on a connected server, and read-only."},
+                            "skills": {"type": "array", "items": {"type": "string"}},
+                            "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
+                            "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},
+                            "max_rounds": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Advisory round budget for this specialist (0 = unlimited; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."}
+                        }, "required": ["name", "task", "tools"]
+                    }},
+                    "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {
+                        "name": {"type": "string"}, "task": {"type": "string"},
+                        "model": {"type": "string", "description": "Optional exact configured model ID; omit to inherit."}, "skills": {"type": "array", "items": {"type": "string"}}
+                    }},
+                    "workflow_id": {"type": "string", "description": "Returned by start; required for status/wait/cancel."},
+                    "timeout_seconds": {"type": "integer", "minimum": 30, "maximum": 1800},
+                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
+                    "allow_partial_synthesis": {"type": "boolean", "description": "start only. Defaults false. When true, synthesis may run with missing required branches but must label its result provisional and identify the gaps."},
+                    "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."},
+                    "persist_document": {"description": "start/resume. true or {title}: after a normal finish, save the final result (the synthesis, or a lone specialist's) as one editor document owned by this chat, and read it back. Workers stay read-only; this uses this chat's own create_document permission. The record's editor_documents_created lists what was actually saved; handoff artifacts are worker chats, not documents.", "anyOf": [{"type": "boolean"}, {"type": "object", "properties": {"title": {"type": "string"}}}]},
+                    "stages": {"type": "array", "items": {"type": "string", "enum": ["synthesis", "research"]}, "description": "resume only. Which stages launch again; default [synthesis]. research relaunches only branches that did not complete."},
+                    "retry_children": {"type": "array", "items": {"type": "string"}, "description": "resume only. Exact agent names to launch again even if they completed."}
+                }, "required": ["action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "delegate_to_agent",
-            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider.",
+            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider. For repository-wide audits or multi-file work, prefer action=start and then poll with wait_seconds; reserve action=run for short bounded tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1312,12 +1444,14 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_claude_code",
-            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel); to wait for it, poll with wait_seconds instead of sleeping in bash.",
+            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel). For repository-wide audits or multi-file work, prefer action=start followed by poll with wait_seconds; reserve action=run for short bounded tasks. To wait, poll with wait_seconds instead of sleeping in bash. Cloud runner: when the operator has allowlisted GitHub repositories (status shows them under `cloud`), pass repository as \"owner/repo\" (or via=\"cloud\") and Claude Code runs in GitHub Actions with the operator's own credential, pushing a claude/odysseus-* branch and a draft PR; prefer start + poll, it takes minutes.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories"], "description": "Default run. status = preflight (binary, sign-in, approved repositories, callback). list_repositories = approved checkouts. start/poll/cancel/list = background task lifecycle."},
-                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree (from action=list_repositories). Omit or pass 'auto' to use the configured default / the only approved checkout."},
+                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree (from action=list_repositories), or an allowlisted GitHub \"owner/repo\" for the cloud runner. Omit or pass 'auto' to use the configured default / the only approved checkout."},
+                    "via": {"type": "string", "enum": ["local", "cloud"], "description": "local = the Claude Code binary in this container; cloud = Claude Code in GitHub Actions on an allowlisted repository. Omit to decide from the repository and settings."},
+                    "base_branch": {"type": "string", "description": "cloud only: branch to start from (default: the repository's default branch)."},
                     "prompt": {"type": "string", "description": "Task instructions for Claude Code (run/start). State the objective, likely files, constraints, and how to verify."},
                     "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrower Claude permission list. Omit for the defaults. Accepted: Read, Glob, Grep, Edit, Write, Bash(git status|diff|log|show|branch|rev-parse|add|commit:*), Bash(pytest|npm test|pnpm test|yarn test|./gradlew test|mvn test:*)."},
                     "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds (default 900)."},

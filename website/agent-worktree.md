@@ -1,0 +1,338 @@
+# Agent worktree and gated publishing
+
+## Updating an existing checkout (scoped Git)
+
+`manage_git` supports ordinary Git workflows, separate from Odysseus's own
+publishing worktree. Use `repositories` first; then supply the returned absolute
+`repository` path. Roots come from **Settings → Claude Code repository roots**
+(`claude_code_repository_roots` / `CLAUDE_CODE_REPOSITORY_ROOTS`), defaulting to
+`/app/data/development` and `/app/data/agent_worktrees` in the container.
+
+| Workflow | Actions | Safeguard |
+| --- | --- | --- |
+| Inspect | `repositories`, `status`, `diff`, `log`, `branches`, `remotes` | Read-only, bounded output |
+| Create | `clone`, `init` | New targets only under approved roots; clone accepts credential-free GitHub HTTPS URLs, validates the tree before checkout, and never runs hooks/submodules/filters |
+| Prepare changes | `stage`, `unstage`, `commit` | Explicit relative file paths; local/supplied author identity; no amend |
+| Local branches | `branch`, `tag`, `switch` | No ref overwrite; switching requires a clean checkout |
+| Synchronize | `fetch`, `fetch_branch`, `pull`, `pull_with_restore`, `set_upstream` | Configured GitHub remotes only; fetch_branch obtains a live SHA for lease-bound operations; pulls are fast-forward only; bounded dirty changes can be saved and restored; upstream binding cannot replace an existing one |
+| Save/restore | `stash_list`, `stash_create`, `stash_apply`, `stash_pop`, `stash_drop` | Tracked changes only; untracked files stay in place; apply requires a clean checkout at the stash's exact base; pop/drop require exact-call confirmation |
+| Publish/integrate | `push`, `force_push_with_lease`, `merge`, `delete_branch`, `delete_remote_branch` | Fresh exact-call human confirmation; force is lease-bound to the observed remote SHA; merge is fast-forward only; deletion is revision-bound |
+| Rewrite local history | `reset`, `rebase` | Fresh exact-call confirmation; clean checkouts only; durable `refs/odysseus/recovery/...` ref; non-interactive rebase automatically aborts on conflicts |
+
+For a new local branch, make an explicit first push to `remote_branch`, then
+use `set_upstream` to bind that already-fetched/pushed branch. An existing
+upstream is never silently changed. A URL in chat identifies a repository;
+it does not override its configured remote. Dirty/diverged checkouts require
+an operator decision, not an automatic reset. When the user explicitly asks to
+update a dirty checkout, `pull_with_restore` provides the bounded save →
+fast-forward pull → restore workflow without a shell.
+
+`pull_with_restore` preserves staged and unstaged regular-file changes plus
+untracked files. It refuses if upstream changes overlap any preserved path, if
+the save exceeds 1,000 paths or 64 MiB, or if the checkout uses unsafe linked
+files. The temporary stash is durable crash recovery, but restoration applies
+only the originally changed paths so it cannot overwrite unrelated upstream
+changes. On a restoration failure, the tool leaves the saved entry at
+`refs/stash` and reports recovery is required instead of claiming success.
+
+This admin-only tool uses pinned Dulwich directly, not a shell or external Git
+process. It does **not** require private-vault reads. Existing tool bindings,
+disables and plan mode remain binding. Routine changes run directly in `auto`;
+`ask_all` can require confirmation for them too. Publishing, history rewrites,
+stash deletion, merge and branch deletion
+**always** require a single-use confirmation, even in `auto`. An “always” UI
+choice is intentionally reduced to one use for this mixed-capability tool.
+Confirmations include `expected_head` and/or `expected_target` as appropriate;
+stale commit IDs refuse the operation. The tool is withheld entirely in plan
+mode because it also exposes write actions.
+
+The initial supported scope is ordinary physical checkouts with a `.git`
+directory; network operations require a configured `https://github.com/owner/repo`
+remote. Standard
+`git@github.com:owner/repo.git` URLs are normalized in memory; saved config is
+unchanged. Linked worktrees, vault directories, symlinks, submodules,
+filter-dependent checkouts and other remote hosts are refused. This is **not**
+a general Git/test sandbox. It does not execute hooks or credential helpers.
+Arbitrary commands, unconditional force-push, interactive rebase, remote URL
+changes, and conflict-resolving merges remain unavailable; they cannot be
+smuggled through arbitrary arguments.
+
+Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
+current chat permits the `github_read` integration; sessionless calls are
+anonymous. Push also requires `ODYSSEUS_GITHUB_MCP_WRITE=true`, permission for
+`github_write` in that agent's loadout, and a token with repository write access.
+Odysseus self-publishing still requires the host-reviewed publishing flow below;
+the generic Git tool cannot bypass it. Its publishing token is not borrowed. Tokens stay
+in memory and HTTPS redirects are refused. If an upstream branch was removed,
+the tool reports that instead of silently pulling `main` or `dev`.
+
+For GitHub.com, the token must look like an actual GitHub credential (normally
+`github_pat_...` for a fine-grained PAT or `ghp_...` for a classic PAT). An
+Odysseus `ody_...` API token in that variable is rejected, and the GitHub MCP
+servers are not registered. The deployed container needs:
+
+```dotenv
+GITHUB_PERSONAL_ACCESS_TOKEN=github_pat_your_real_github_token
+ODYSSEUS_GITHUB_MCP_WRITE=1
+ODYSSEUS_DISABLE_MCP=0
+```
+
+Leave `GITHUB_HOST` unset for GitHub.com; set it only for GitHub Enterprise.
+`ODYSSEUS_GITHUB_MCP_BINARY` is optional because the container image includes
+`/usr/local/bin/github-mcp-server`. Agent/session loadouts must separately allow
+`github_read` and `github_write`. With CasaOS/ZimaOS these values belong in the
+deployed app's container environment; recreate the container after changing
+them so the child MCP processes inherit the new values.
+
+Rebuild/redeploy the image to install the new dependency. Smoke test with:
+“List my approved local repositories and show the branch, upstream and changes
+for Umni. Do not modify anything.” Then, if the reported checkout/upstream is
+correct and clean: “Pull that checkout from its configured upstream.” Check
+the result's before/after commit IDs; GitHub CI/API results alone do not prove
+local files were updated.
+
+The legacy `manage_agent_worktree` actions `repo_list`, `repo_status`, and
+`repo_pull` remain aliases for the original narrow sync service.
+
+### Tool argument and authentication troubleshooting
+
+Send only the fields for the chosen action, for example
+`{"action":"repositories"}` or
+`{"action":"status","repository":"/app/data/development/your-checkout"}`.
+The September 17 native-call fix tolerates known, irrelevant empty placeholders
+without accepting unknown arguments or non-empty overrides. Empty optional values
+use documented defaults (for example local commit identity and a bounded log limit).
+Required fields still undergo validation. Approval fingerprints use the same normalization;
+changing a repository, branch, action or expected revision still needs fresh approval.
+
+The Git schemas explicitly preserve optional fields in Responses requests and retain
+their field descriptions after token compaction. Without an explicit opt-out,
+[Responses may normalize schemas into strict mode](https://developers.openai.com/api/docs/guides/function-calling#strict-mode),
+where every property is required. Local authorization and argument checks remain in force.
+
+`fatal: could not read Username for 'https://github.com'` from the shell is a
+separate credential error, not a vault access restriction. The scoped Git tool
+uses the permission-checked integration token described above; it does not install
+shell credentials or credential helpers. Pasted Git HTTPS credential diagnostics
+make that tool available for inspection, not authorize a pull or push automatically.
+
+## Human-gated publishing
+
+The agent gets one persistent Git worktree it can edit and test in. Nothing
+leaves the machine until a human, at the host, approves that exact commit.
+
+Publishing is **off by default**. With the feature disabled the agent can still
+create a worktree, edit, run tests and commit — it simply cannot push.
+
+## How the flow runs
+
+1. **Agent** starts or reuses a worktree on a branch under `agent/odysseus/`.
+2. **Agent** edits and tests there, then commits.
+3. **Agent** calls `request_publish`. This freezes the change and records the
+   repository, branch, head commit, changed-file list and which of those files
+   are sensitive. It pushes nothing.
+4. **You** run the CLI on the host, read the file list, and approve. The CLI
+   prints a one-time code.
+5. **You** paste the code to the agent, which calls `publish`. Odysseus
+   re-derives the change from git, spends the code, pushes the branch, and opens
+   a **draft** pull request.
+
+The agent has no action that grants an approval. The code exists only in your
+terminal and in the agent's message from you.
+
+## If it says "unauthorized" or "cannot authenticate"
+
+Run the doctor. It asks GitHub directly and names the specific mistake:
+
+```bash
+scripts/odysseus-agent-worktree doctor
+```
+
+In a container, run it inside the container so it sees the same environment:
+
+```bash
+docker exec -it odysseus python scripts/odysseus-agent-worktree doctor
+```
+
+The four failures that actually happen:
+
+- **The agent used `bash` to push.** The credential only exists inside the
+  `manage_agent_worktree` publish path. A `git push` typed into the shell tool
+  has no token and no credential helper, so it fails with an authentication
+  error that looks like a bad App. The shell tool now intercepts `git push` and
+  `gh pr create` and returns the correct procedure instead of letting them fail.
+  Set `ODYSSEUS_AGENT_ALLOW_BASH_PUSH=1` if you have your own credential setup
+  and want the raw command back.
+- **The source repository is not set.** The container image has no `.git`
+  directory, so the default (the application root) is not a checkout. Point
+  `ODYSSEUS_AGENT_SOURCE_REPO` at the checkout inside the data mount, for
+  example `/app/data/development/odysseus-main`. `doctor` lists the candidates
+  it finds and prints the exact line to set.
+- **The Client ID was pasted into `ODYSSEUS_GITHUB_APP_ID`.** The App ID is a
+  short number on the app's settings page. The Client ID starts with `Iv1.` or
+  `Iv23`.
+- **The App ID was pasted into `ODYSSEUS_GITHUB_APP_INSTALLATION_ID`.** These
+  are different numbers. The Installation ID is the last segment of the app's
+  Configure URL. `doctor` lists every installation the app has, with its id.
+- **The private key is not inside the container.** A host path such as
+  `/etc/odysseus/agent-app.pem` does not exist in the container filesystem.
+
+## Setup
+
+Add to `.env` (see `.env.example` for the full block):
+
+```bash
+ODYSSEUS_AGENT_PUBLISH_ENABLED=1
+ODYSSEUS_AGENT_REPO=your-org/your-repo
+ODYSSEUS_AGENT_BASE_BRANCH=dev
+```
+
+The push URL is derived from `ODYSSEUS_AGENT_REPO`. There is no setting that
+points the agent at a different host.
+
+### Credentials
+
+Preferred: a GitHub App installed on that one repository, with **Contents:
+write** and **Pull requests: write**. Odysseus mints a one-hour installation
+token per operation and holds it in memory only.
+
+```bash
+ODYSSEUS_GITHUB_APP_ID=123456
+ODYSSEUS_GITHUB_APP_INSTALLATION_ID=87654321
+ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH=/etc/odysseus/agent-app.pem
+```
+
+### Where the key goes in a container
+
+The container can only read paths that are bind-mounted into it. On ZimaOS and
+the Docker Compose setups, that is the data volume, mounted at `/app/data`. Put
+the key there and point the variable at the in-container path:
+
+```bash
+ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH=/app/data/github-app.pem
+```
+
+Copy the `.pem` into the host directory that backs `/app/data` (on ZimaOS, the
+`AppData/odysseus/data` folder), then tighten it:
+
+```bash
+chmod 600 /path/to/AppData/odysseus/data/github-app.pem
+```
+
+The agent's own file tools refuse to open private key material, so parking the
+key under the data mount does not expose it to the agent.
+
+Fallback, for a setup where a GitHub App is not practical: a fine-grained
+personal access token scoped to the one repository, in
+`ODYSSEUS_AGENT_GITHUB_TOKEN`. It is long-lived, so rotate it. Odysseus logs a
+warning every time it uses one.
+
+Tokens are never written to `.git/config`, a credential helper, a log line, or a
+command line. They reach git through `GIT_CONFIG_*` environment variables scoped
+to the one remote.
+
+## Operator commands
+
+```bash
+scripts/odysseus-agent-worktree status
+scripts/odysseus-agent-worktree requests
+scripts/odysseus-agent-worktree show REQUEST_ID
+scripts/odysseus-agent-worktree approve REQUEST_ID
+scripts/odysseus-agent-worktree approve REQUEST_ID --allow-sensitive
+scripts/odysseus-agent-worktree revoke REQUEST_ID
+scripts/odysseus-agent-worktree gc --keep-days 30
+```
+
+`show` prints every changed file, marking sensitive ones with `!`. Read it
+before approving.
+
+## What an approval is bound to
+
+An approval is a random secret, stored only as a salted SHA-256 hash, and tied
+to five facts:
+
+| Bound fact | Effect if it changes |
+|---|---|
+| repository slug | approval refused |
+| branch | approval refused |
+| head commit SHA | approval refused |
+| changed-file digest | approval refused |
+| sensitive-path digest | approval refused |
+
+It also expires (default 15 minutes, `ODYSSEUS_AGENT_APPROVAL_TTL_SECONDS`,
+clamped to 60–3600 seconds) and is consumed on first use. If the agent commits
+again after you approve, the SHA moves and the approval is dead — ask for a new
+request rather than re-approving blind.
+
+The record is marked used *before* the push runs, so a crash mid-push costs a
+second approval instead of leaving a live grant behind.
+
+What is pushed is the approved **commit object**, not the branch ref
+(`<sha>:refs/heads/<branch>`). A ref can move between the check and the push; a
+SHA cannot.
+
+### Why the approval records cannot be forged
+
+Approval state lives under the data directory, which the agent's file tools can
+otherwise reach. Two things close that:
+
+- The state directory is on the file tools' sensitive-path deny list, so
+  `read_file`, `write_file`, `edit_file` and `apply_patch` all refuse it.
+- Each grant carries an HMAC over its expiry, its sensitive acknowledgement, its
+  code hash and all five bound facts, keyed by `.approval_key` inside that same
+  directory. A hand-written or edited grant fails verification and is reported
+  as `pending` — not as an approval.
+
+Delete `.approval_key` to invalidate every outstanding grant at once.
+
+## Sensitive changes
+
+Some files decide what runs, as whom, and with which capabilities. Changing them
+needs a second acknowledgement: `approve` refuses without `--allow-sensitive`.
+
+| Category | Covers |
+|---|---|
+| `workflows` | `.github/`, `.gitlab-ci.yml`, `Jenkinsfile` |
+| `docker` | `Dockerfile*`, `docker-compose*`, `docker/`, `.dockerignore` |
+| `deployment` | `*.service`, `deploy/`, `k8s/`, `helm/`, `requirements*`, `setup.py`, `pyproject.toml`, `package*.json`, start/launch/build scripts |
+| `auth` | `auth.py`, `middleware.py`, `auth_routes.py`, `api_key_manager.py`, `session_manager.py`, anything under an `auth/` path or naming OAuth |
+| `secrets` | `.env*`, `*.pem`, `*.key`, `*.p12`, `secrets/`, `secret_storage.py`, `.netrc`, `.npmrc` |
+| `mcp_permissions` | `mcp_servers/`, `.claude/`, `.mcp.json`, `mcp_manager.py`, `tool_security.py`, `tool_policy.py`, anything naming permissions |
+
+## Reading the app's own logs
+
+The agent can tail Odysseus's logs to debug itself, through `read_app_logs`.
+It is read-only, addresses logs by name within known log directories only, and
+redacts credential-shaped content (Authorization headers, bearer tokens, API
+keys, JWTs, URLs carrying userinfo or query keys) before returning lines.
+
+Log directories searched, in order: `<data>/logs/`, `<repo>/logs/`,
+`/tmp/odysseus-tmux/`.
+
+## Access control
+
+Both tools are admin-only. They are in `NON_ADMIN_BLOCKED_TOOLS` and in the
+route-level admin gate, so a non-admin chat user cannot reach them. In plan mode
+the worktree tool is blocked and log reading stays available, since diagnosing is
+exactly what plan mode is for.
+
+## Limits worth knowing
+
+- One approval covers one push. Amending or adding commits invalidates it.
+- A change touching more than 500 files is refused; split it.
+- If the remote branch moved between the request and the publish, the publish is
+  refused and you need a fresh request.
+- Odysseus never merges. The pull request is always created as a draft.
+- Publishing only works through `manage_agent_worktree`. Git commands the agent
+  runs in `bash` have no credential by design and will fail to authenticate.
+- The agent may still ask you to approve something it should not. The file list
+  in `show` is the thing to read, not the agent's summary of it.
+- **This gate does not contain an agent that has `bash`.** Unconstrained shell
+  can read any credential on the host and push on its own, so on a deployment
+  where that matters, disable `bash` and `python` for the agent. With shell
+  enabled, treat this flow as a workflow and an audit trail rather than a
+  security boundary.
+- The push runs from the operator's checkout, not from the worktree, and pins
+  TLS verification and an empty proxy through environment config. That stops a
+  `.git/config` written inside the worktree from redirecting the credentialed
+  request.

@@ -79,6 +79,8 @@ async def test_agent_mode_runs_the_loop_with_tools_and_reports_steps(env, monkey
     blocked = seen["kwargs"]["disabled_tools"]
     assert {"send_to_session", "delegate_to_claude_code", "pipeline"} <= set(blocked), "no recursive fan-out"
     assert seen["kwargs"]["session_id"] == "child-1" and seen["kwargs"]["owner"] == "alice"
+    # No profile: the legacy default budget stays advisory, never a wrap-up.
+    assert seen["kwargs"]["max_rounds"] == st.SUBAGENT_MAX_ROUNDS and seen["kwargs"]["wrap_up_round"] == 0
 
     # The child chat keeps the exchange, with the tool cards the UI knows how to draw.
     roles = [m.role for m in sess.history]
@@ -164,6 +166,7 @@ async def test_profile_starts_a_new_child_chat_with_its_model_tools_and_instruct
 
     async def fake_loop(url, model, messages, **kwargs):
         seen.update(url=url, model=model, messages=messages, **kwargs)
+        yield _sse({"type": "round_budget_reached", "round": 5, "budget": 5})
         yield _sse({"delta": "Summary of findings"})
         yield "data: [DONE]\n\n"
 
@@ -175,11 +178,51 @@ async def test_profile_starts_a_new_child_chat_with_its_model_tools_and_instruct
     child = created["child"]
     assert out["response"] == "Summary of findings" and out["session_id"] == child.id and out["mode"] == "agent"
     assert child.name.startswith("↳ researcher: compare pricing") and seen["model"] == "cheap-model"
-    assert seen["messages"][0] == {"role": "system", "content": "Only research; never edit files."}
+    assert seen["messages"] == [{"role": "user", "content": "compare pricing"}]
     assert {"bash", "write_file", "send_to_session"} <= set(seen["disabled_tools"]) and seen["max_rounds"] == 5
+    # The profile's explicit budget is where the worker is asked to wrap up;
+    # doing so with an answer is a completed reply that says it wrapped up.
+    assert seen["wrap_up_round"] == 5
+    assert out["round_budget_reached"] == 5 and "status" not in out
     assert saved[child.id]["parent_session"] == "child-1" and saved[child.id]["agent_profile"] == "researcher"
+    assert saved[child.id]["agent_instructions"] == "Only research; never edit files."
     run = act.list_runs(session_id="child-1")[0]
     assert run["summary"]["target_session"] == child.id
+
+
+async def test_a_profile_without_a_budget_is_never_asked_to_wrap_up(env, monkeypatch):
+    parent, mgr = env
+    created = {}
+
+    def create_session(session_id, name, endpoint_url, model, rag, owner):
+        child = _Session(session_id, owner=owner)
+        child.name, child.endpoint_url, child.model = name, endpoint_url, model
+        child.get_context_messages = lambda: []
+        created["child"] = child
+        return child
+
+    mgr.create_session = create_session
+    real_get = mgr.get_session
+    mgr.get_session = lambda sid: created["child"] if created.get("child") and sid == created["child"].id else real_get(sid)
+
+    import src.agent_profiles as ap
+    import core.database as database
+    monkeypatch.setattr(ap, "load_profiles", lambda: ap.validate_profiles([{"name": "open", "max_rounds": 0}]))
+    monkeypatch.setattr(database, "update_session_settings", lambda sid, patch: dict(patch))
+    seen = {}
+
+    async def fake_loop(url, model, messages, **kwargs):
+        seen.update(kwargs)
+        yield _sse({"delta": "done"})
+        yield "data: [DONE]\n\n"
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
+
+    out = await st.send_to_session(json.dumps({"session_id": "new", "message": "look around", "profile": "open"}),
+                                   session_id="child-1", owner="alice")
+    assert out["response"] == "done" and "round_budget_reached" not in out
+    assert seen["max_rounds"] == 0 and seen["wrap_up_round"] == 0
 
 
 async def test_unknown_profile_lists_the_available_ones(env, monkeypatch):
@@ -187,3 +230,45 @@ async def test_unknown_profile_lists_the_available_ones(env, monkeypatch):
     monkeypatch.setattr(ap, "load_profiles", lambda: ap.validate_profiles([{"name": "coder"}]))
     out = await st.send_to_session(json.dumps({"session_id": "new", "message": "x", "profile": "ghost"}), owner="alice")
     assert "No agent profile named 'ghost'" in out["error"] and "coder" in out["error"]
+
+
+async def test_profile_cannot_transiently_override_an_existing_agents_persona(env, monkeypatch):
+    """Profiles are copied onto fresh agents, never overlaid on another chat."""
+    import src.agent_profiles as ap
+    monkeypatch.setattr(ap, "load_profiles", lambda: ap.validate_profiles([
+        {"name": "reviewer", "instructions": "Act as a reviewer."},
+    ]))
+    out = await st.send_to_session(json.dumps({
+        "session_id": "child-1", "message": "review this", "profile": "reviewer",
+    }), owner="alice")
+    assert "requires a fresh child chat" in out["error"]
+    assert "session_id: 'new'" in out["error"]
+
+
+async def test_chat_mode_refreshes_rotating_credentials_before_calling(env, monkeypatch):
+    """A chat's saved bearer can rotate (ChatGPT subscription). The chat route
+    refreshes it per request; send_to_session's chat mode must too, or it 401s
+    while the calling chat keeps working."""
+    sess, mgr = env
+    sess.headers = {"Authorization": "Bearer stale"}
+    order = []
+
+    def fake_refresh(target, sid, owner=None):
+        order.append(("refresh", sid, owner))
+        target.headers = {"Authorization": "Bearer fresh"}
+
+    async def fake_call(url, model, messages, headers=None, **kwargs):
+        order.append(("call", headers))
+        return "done"
+
+    import routes.chat_helpers as chat_helpers
+    monkeypatch.setattr(chat_helpers, "resolve_session_auth", fake_refresh)
+    import src.llm_core as llm_core
+    monkeypatch.setattr(llm_core, "llm_call_async", fake_call)
+
+    out = await st.send_to_session(json.dumps({"session_id": "child-1", "message": "hi", "mode": "chat"}),
+                                   session_id="parent-1", owner="alice")
+
+    assert out.get("response") == "done", out
+    assert order[0] == ("refresh", "child-1", "alice")
+    assert order[1] == ("call", {"Authorization": "Bearer fresh"})

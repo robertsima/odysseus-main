@@ -300,7 +300,21 @@ def add_integration(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def update_integration(integration_id: str, data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Update fields on an existing integration. Returns updated integration or None."""
+    """Update fields on an existing integration. Returns updated integration or None.
+
+    Only the keys present in ``data`` change, so callers can send a partial
+    edit. Two cases get special handling:
+
+    * **Switching preset** re-applies that preset's defaults (auth type, header,
+      endpoint description) underneath the submitted fields, the same order
+      add_integration uses. Without this, changing a preset left the previous
+      preset's endpoint description in place and the assistant kept being told
+      about endpoints the service does not have.
+    * **The API key is never cleared by accident.** Responses mask the key, so a
+      client that round-trips what it was shown, or that sends an empty field
+      meaning "unchanged", must not overwrite a working credential. Clearing a
+      key is done by deleting the integration or sending an explicit new one.
+    """
     data = dict(data)
     if "name" in data and (not isinstance(data["name"], str) or not data["name"].strip()):
         raise HTTPException(400, "Integration name is required")
@@ -312,11 +326,27 @@ def update_integration(integration_id: str, data: Dict[str, Any]) -> Optional[Di
 
     integrations = load_integrations()
     for item in integrations:
-        if item.get("id") == integration_id:
-            data.pop("id", None)  # prevent id change
-            item.update(data)
-            save_integrations(integrations)
-            return item
+        if item.get("id") != integration_id:
+            continue
+        data.pop("id", None)  # prevent id change
+
+        current_key = item.get("api_key", "")
+        if "api_key" in data:
+            submitted = data.get("api_key")
+            if not submitted or (current_key and submitted == mask_integration_secret(item).get("api_key")):
+                data.pop("api_key")
+
+        preset_key = data.get("preset")
+        if (
+            preset_key
+            and preset_key != item.get("preset")
+            and preset_key in INTEGRATION_PRESETS
+        ):
+            item.update(INTEGRATION_PRESETS[preset_key])
+
+        item.update(data)
+        save_integrations(integrations)
+        return item
     return None
 
 
@@ -719,7 +749,14 @@ async def execute_api_call(
         output = f"HTTP {status}\n{formatted}"
 
         if status >= 400:
-            return {"error": output, "exit_code": 1}
+            return {
+                "error": output,
+                "exit_code": 1,
+                # The error string includes the remote response body.  Preserve
+                # it for diagnostics, but make its provenance explicit so the
+                # agent gate does not treat HTTP failure as content-free.
+                "untrusted_content": True,
+            }
 
         return {"output": output, "exit_code": 0}
 

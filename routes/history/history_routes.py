@@ -6,13 +6,14 @@ import logging
 import re
 from typing import Dict, Any, Optional
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 
 from core.models import ChatMessage
 from core.database import SessionLocal, ChatMessage as DbChatMessage, Session as DbSession
-from src.auth_helpers import effective_user
+from src.auth_helpers import effective_user, require_chat_api_token_scope
 from src.topic_analyzer import analyze_topics
 from src.upload_handler import reserve_message_upload_references
+from src.tool_approval_scopes import sanitize_client_message_metadata
 from routes.session_routes import (
     _message_role,
     _message_text,
@@ -195,7 +196,10 @@ def _merge_continue_rows_to_delete(db_messages, db1, db2):
 
 
 def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
-    router = APIRouter(tags=["history"])
+    router = APIRouter(
+        tags=["history"],
+        dependencies=[Depends(require_chat_api_token_scope)],
+    )
 
     def _reserve_message_uploads(
         request: Request,
@@ -231,44 +235,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             entry["metadata"] = meta
         return entry
 
-    def _db_message_metadata(m: DbChatMessage) -> Dict[str, Any]:
-        meta = {}
-        if m.meta_data:
-            try:
-                meta = json.loads(m.meta_data) or {}
-            except (json.JSONDecodeError, ValueError):
-                meta = {}
-        if m.timestamp and "timestamp" not in meta:
-            meta["timestamp"] = m.timestamp.isoformat() + "Z"
-        return meta
-
-    def _hydrate_session_history_from_db(session_id: str, rows: list[DbChatMessage]) -> None:
-        """Rebuild in-memory context from raw DB rows after a history load.
-
-        The browser history endpoint can return paged/display-trimmed messages,
-        but the next model call reads ``session.history``. After a restart or a
-        stale in-memory session, selecting an old chat through the paged endpoint
-        used to show the transcript while the model only saw fresh context.
-        """
-        if not rows:
-            return
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            return
-        session.history = [
-            ChatMessage(role=m.role, content=m.content, metadata=_db_message_metadata(m) or None)
-            for m in rows
-        ]
-        session.message_count = len(session.history)
-
-    def _session_needs_db_history_hydration(session_id: str, total: int) -> bool:
-        try:
-            session = session_manager.get_session(session_id)
-        except KeyError:
-            return False
-        return len(session.history or []) < int(total or 0)
-
     @router.get("/api/history/{session_id}")
     async def get_session_history(
         request: Request,
@@ -292,6 +258,8 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 )
                 page_offset = int(offset) if offset is not None else max(total - page_limit, 0)
                 page_offset = max(0, min(page_offset, total))
+                # Keep display pagination page-scoped. ``get_session`` is the
+                # full model-context hydration seam and must not be entered here.
                 rows = (
                     db.query(DbChatMessage)
                     .filter(DbChatMessage.session_id == session_id)
@@ -300,14 +268,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .limit(page_limit)
                     .all()
                 )
-                if _session_needs_db_history_hydration(session_id, total):
-                    full_rows = (
-                        db.query(DbChatMessage)
-                        .filter(DbChatMessage.session_id == session_id)
-                        .order_by(DbChatMessage.timestamp)
-                        .all()
-                    )
-                    _hydrate_session_history_from_db(session_id, full_rows)
                 history_dict = [
                     entry for entry in (_db_history_entry(m) for m in rows)
                     if not (entry.get("metadata") or {}).get("hidden")
@@ -352,7 +312,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     entry["metadata"] = msg["metadata"]
                 history_dict.append(entry)
 
-        # Fallback: load from DB if in-memory is empty
+        # Fallback: load from DB if in-memory renders empty. Display only —
+        # get_session above is the hydration seam, so nothing here writes back
+        # into session.history — rebuilding it from raw rows would overwrite
+        # parsed multimodal content and the _db_id edit/delete keys it just set.
         if not history_dict:
             db = SessionLocal()
             try:
@@ -362,17 +325,10 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                     .order_by(DbChatMessage.timestamp)
                     .all()
                 )
-                db_history = []
-                for m in db_messages:
-                    db_history.append(_db_history_entry(m))
-                if db_history:
-                    # Rebuild in-memory history from the full set so hidden
-                    # messages (e.g. compaction summaries) are kept for AI context.
-                    _hydrate_session_history_from_db(session_id, db_messages)
                 # Response excludes hidden messages, matching the in-memory path.
                 history_dict = [
-                    m for m in db_history
-                    if not (m.get("metadata") or {}).get("hidden")
+                    entry for entry in (_db_history_entry(m) for m in db_messages)
+                    if not (entry.get("metadata") or {}).get("hidden")
                 ]
             except Exception as e:
                 logger.error(f"DB fallback failed for {session_id}: {e}")
@@ -410,7 +366,7 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             content = body.get("content", "")
             if not content:
                 raise HTTPException(400, "content is required")
-            metadata = body.get("metadata")
+            metadata = sanitize_client_message_metadata(body.get("metadata"))
             _reserve_message_uploads(request, content, metadata)
             msg = ChatMessage(role=role, content=content, metadata=metadata)
             session_manager.add_message(session_id, msg)
@@ -743,8 +699,14 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             # No keep_count forks the whole conversation.
             keep_count = (body or {}).get("keep_count")
 
-            # Get the source session
-            source = session_manager.sessions.get(session_id)
+            # Get the source session. keep_count indexes into source.history,
+            # so this must go through get_session — reading the cache directly
+            # forks an empty transcript out of a metadata-only session after a
+            # restart (display pagination no longer hydrates it).
+            try:
+                source = session_manager.get_session(session_id)
+            except KeyError:
+                raise HTTPException(404, "Session not found")
             if not source:
                 raise HTTPException(404, "Session not found")
 

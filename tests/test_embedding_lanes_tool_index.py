@@ -20,7 +20,6 @@ def test_tool_index_indexes_and_retrieves_from_available_lanes(monkeypatch):
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.tool_index import ToolIndex
@@ -28,7 +27,6 @@ def test_tool_index_indexes_and_retrieves_from_available_lanes(monkeypatch):
     index = ToolIndex()
     index.index_builtin_tools()
 
-    assert fake.collections["odysseus_tool_index_custom"].count() > 0
     assert fake.collections["odysseus_tool_index_fastembed"].count() > 0
     assert "bash" in index.retrieve("run a shell command", k=10)
 
@@ -176,3 +174,44 @@ def test_tool_index_merges_fallback_tool_results_before_limit():
     index._lanes = [custom_lane, fast_lane]
 
     assert index.retrieve("current mcp", k=2) == ["current_mcp", "one"]
+
+
+def test_tool_index_rejects_weak_email_neighbour_for_ntfy_request():
+    """Top-K alone is not intent: a notification tool must not pull email
+    schemas in when email is only a low-similarity neighbour."""
+    collection = FakeCollection("odysseus_tool_index_custom", metadata={"embedding_lane": "custom"})
+    collection.add(
+        ids=["mcp_ntfy", "builtin_email"],
+        embeddings=[[0.0] * 768, [0.0] * 768],
+        documents=["Tool: ntfy", "Tool: list_emails"],
+        metadatas=[
+            {"tool_name": "mcp__ntfy__send", "tool_type": "mcp"},
+            {"tool_name": "list_emails", "tool_type": "builtin"},
+        ],
+    )
+    collection.query = lambda **_kwargs: {
+        "ids": [["mcp_ntfy", "builtin_email"]],
+        "metadatas": [[
+            {"tool_name": "mcp__ntfy__send", "tool_type": "mcp"},
+            {"tool_name": "list_emails", "tool_type": "builtin"},
+        ]],
+        # Scores are 0.80 and 0.17; the latter is below the calibrated floor.
+        "distances": [[0.20, 0.83]],
+    }
+    lane = EmbeddingLane(
+        name=LANE_CUSTOM,
+        client=FakeEmbedder(768, "nomic", "http://embeddings/v1"),
+        collection=collection,
+        collection_name="odysseus_tool_index_custom",
+        model="nomic", url="http://embeddings/v1", dimension=768, fingerprint="custom",
+    )
+    from src.tool_index import ToolIndex
+
+    index = ToolIndex.__new__(ToolIndex)
+    index._lanes = [lane]
+    assert index.retrieve("publish an ntfy notification", k=2) == ["mcp__ntfy__send"]
+    selected = index.get_tools_for_query("publish an ntfy notification", k=2)
+    from src.tool_index import ALWAYS_AVAILABLE
+    assert set(ALWAYS_AVAILABLE) <= selected
+    assert "mcp__ntfy__send" in selected
+    assert "list_emails" not in selected

@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # This only unblocks collection/import-time init; it does not provide a shared
 # file-backed DB across processes - tests needing that must set DATABASE_URL.
 os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
+# Never append test output to the deployment's data/logs/app.log.
+os.environ["ODYSSEUS_FILE_LOG"] = "0"
 
 # Pre-import real heavy modules BEFORE any test file's module-level stubs can
 # replace them with MagicMock. Some test files (e.g. test_llm_core_sanitize_*)

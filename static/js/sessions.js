@@ -3,7 +3,7 @@
 
 import Storage from './storage.js';
 import uiModule, { autoResize, styledPrompt } from './ui.js';
-import chatRenderer from './chatRenderer.js?v=20260722ctxheader1';
+import chatRenderer from './chatRenderer.js?v=20260819approvalcontrol1';
 import { providerLogo } from './providers.js';
 import { initModelPicker, updateModelPicker } from './modelPicker.js?v=20260722ctxheader1';
 import themeModule from './theme.js';
@@ -277,6 +277,7 @@ const _researchingSessions = new Set();
 const _streamingSessions = new Set();   // Background chat streams (not polled against research API)
 const _completedSessions = new Set();   // Sessions with completed background streams
 const _serverRunning = new Set();       // Chats the server reports as working (see _pollServerRuns)
+const _serverBackgroundRunning = new Set(); // ...of those, working on a run this tab did not stream (worker, sub-agent)
 const _serverAgents = new Map();        // session id -> sub-agents / jobs running
 let _researchPollTimer = null;
 
@@ -1687,7 +1688,20 @@ export async function loadSessions() {
         url += `?active_incognito_id=${encodeURIComponent(currentSessionId)}`;
       }
       const res = await fetch(url);
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const payload = await res.json();
+          detail = payload?.detail || payload?.error || '';
+        } catch (_) {}
+        const error = new Error(detail || `Session request failed (HTTP ${res.status})`);
+        error.status = res.status;
+        throw error;
+      }
       fetched = await res.json();
+    }
+    if (!Array.isArray(fetched)) {
+      throw new Error('Session request returned an invalid response');
     }
     sessions = _normalizeSessionsList(fetched);
     renderSessionList();
@@ -1811,9 +1825,15 @@ export async function loadSessions() {
         _autoCreateInProgress = false;
       }
     }
+    return true;
   } catch (error) {
     console.error('Error in loadSessions:', error);
-    uiModule.showError('Failed to load sessions: ' + error.message);
+    // app.js's global fetch wrapper owns expired-auth navigation. Avoid
+    // flashing a redundant session error while that 401 redirect is pending.
+    if (error?.status !== 401) {
+      uiModule.showError('Failed to load sessions: ' + error.message);
+    }
+    return false;
   }
 }
 
@@ -2058,6 +2078,9 @@ export async function selectSession(id, { keepSidebar = false, showLoading = tru
       chatHistory.style.opacity = '1';
       chatHistory.classList.remove('no-animate');
     }
+    // Live cards (sub-agents, workers, Claude Code) are not part of the saved
+    // history, so re-rendering wiped them; the Workbench puts them back.
+    try { document.dispatchEvent(new CustomEvent('odysseus:history-rendered', { detail: { sessionId: id } })); } catch (_) {}
     if (window.hljs) {
       document.querySelectorAll('pre code:not(.hljs)').forEach(block => {
         window.hljs.highlightElement(block);
@@ -2322,6 +2345,11 @@ export async function materializePendingSession() {
     }
     _pendingChat = null;
     currentSessionId = payload.id;
+    // A loadout picked from the Agents menu before this chat existed must be
+    // in place before its first turn runs (js/agentMenu.js).
+    if (window.agentMenuModule?.applyPendingLoadout) {
+      try { await window.agentMenuModule.applyPendingLoadout(payload.id); } catch (_) {}
+    }
     if (!isIncognito) {
       Storage.set('lastSessionId', payload.id);
       history.replaceState(null, '', '#' + payload.id);
@@ -2719,10 +2747,31 @@ async function _pollServerRuns() {
       const sid = run.session_id;
       if (!sid) continue;
       if (run.agents_running) _serverAgents.set(sid, run.agents_running);
-      if (run.status === 'running') { running.add(sid); continue; }
+      if (run.status === 'running') {
+        running.add(sid);
+        // Remember which of this chat's runs are not the tab's own streamed turn.
+        if (run.source && run.source !== 'chat') _serverBackgroundRunning.add(sid);
+        continue;
+      }
       if (!run.finished_at || run.status === 'stopped' || run.status === 'idle' || sid === currentSessionId) continue;
       const since = seen[sid] || (_pageOpenedAt - 1800);
       if (run.finished_at > since) _completedSessions.add(sid);
+    }
+    // The open chat can gain messages this tab did not stream: a worker's
+    // result handed back to it, and the turn that continues from it. They were
+    // only visible after leaving the chat and coming back, so a finished
+    // worker looked like it had produced nothing. Reload once when such a
+    // server-side run in this chat ends.
+    // Only background runs count; the tab's own streamed turns already render.
+    const cur = currentSessionId;
+    if (cur && _serverBackgroundRunning.has(cur) && !running.has(cur)) {
+      _serverBackgroundRunning.delete(cur);
+      if (!window.chatModule?.hasActiveStream?.(cur)) {
+        selectSession(cur, { keepSidebar: true, showLoading: false }).catch(() => {});
+      }
+    }
+    for (const sid of [..._serverBackgroundRunning]) {
+      if (!running.has(sid)) _serverBackgroundRunning.delete(sid);
     }
     _serverRunning.clear();
     running.forEach((sid) => _serverRunning.add(sid));

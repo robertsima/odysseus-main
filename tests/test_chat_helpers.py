@@ -14,6 +14,7 @@ from routes.chat_helpers import (
     _session_is_research_spinoff,
     auto_name_session,
     build_chat_context,
+    should_skip_ambient_document_context,
     build_uploaded_file_manifest,
     clean_thinking_for_save,
     needs_auto_name,
@@ -30,6 +31,38 @@ class _AuthManager:
     def get_privileges(self, username):
         assert username == "alice"
         return self._privileges
+
+
+def test_corrective_and_method_feedback_skip_ambient_documents():
+    history = [
+        {"role": "user", "content": "Pull the dog-trainer repository."},
+        {"role": "assistant", "content": "I could not run it."},
+        {"role": "user", "content": "you had the paths before!"},
+    ]
+    assert should_skip_ambient_document_context("you had the paths before!", history)
+    history[-1] = {"role": "user", "content": "use your MCP tools brah"}
+    assert should_skip_ambient_document_context("use your MCP tools brah", history)
+    history[-1] = {"role": "user", "content": "what the fuuuuck"}
+    assert should_skip_ambient_document_context("what the fuuuuck", history)
+
+
+def test_explicit_document_grounding_and_real_followups_are_preserved():
+    history = [
+        {"role": "user", "content": "Review the attached report."},
+        {"role": "assistant", "content": "I found three issues."},
+        {"role": "user", "content": "Summarize this document."},
+    ]
+    assert not should_skip_ambient_document_context("Summarize this document.", history)
+    history[-1] = {"role": "user", "content": "Use the pinned report you had before."}
+    assert not should_skip_ambient_document_context("Use the pinned report you had before.", history)
+    history[-1] = {"role": "user", "content": "Fix the failing test."}
+    assert not should_skip_ambient_document_context("Fix the failing test.", history)
+    history[-1] = {"role": "user", "content": "Why didn't the experiment work?"}
+    assert not should_skip_ambient_document_context("Why didn't the experiment work?", history)
+    history[-1] = {"role": "user", "content": "You have to explain this."}
+    assert not should_skip_ambient_document_context("You have to explain this.", history)
+    history[-1] = {"role": "user", "content": "wtf search the attachment for the invoice"}
+    assert not should_skip_ambient_document_context("wtf search the attachment for the invoice", history)
 
 
 class _Request:
@@ -541,11 +574,14 @@ def test_empty_or_missing_history():
     assert _session_is_research_spinoff(SimpleNamespace()) is False
 
 
-async def _build_context_owner_probe(monkeypatch, request_state):
+async def _build_context_owner_probe(monkeypatch, request_state, *, message="hello",
+                                     initial_messages=None, use_rag=None, incognito=True,
+                                     attachment_meta=None):
     captured = {
         "prefs_owner": None,
         "preface_owner": None,
         "compact_owner": None,
+        "preface_use_rag": None,
     }
 
     async def fake_preprocess(chat_handler, message, att_ids, sess, **kwargs):
@@ -554,7 +590,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
             user_content=message,
             text_for_context=message,
             youtube_transcripts=[],
-            attachment_meta=[],
+            attachment_meta=list(attachment_meta or []),
         )
 
     def fake_extract_preset(chat_handler, preset_id):
@@ -574,6 +610,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
 
     def fake_build_context_preface(**kwargs):
         captured["preface_owner"] = kwargs["owner"]
+        captured["preface_use_rag"] = kwargs.get("use_rag")
         return [], [], []
 
     async def fake_maybe_compact(sess, endpoint_url, model, messages, headers, owner=None):
@@ -588,6 +625,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
     monkeypatch.setattr(chat_helpers, "normalize_model_id", lambda endpoint_url, model, **kwargs: None)
     monkeypatch.setattr(chat_helpers, "maybe_compact", fake_maybe_compact)
     monkeypatch.setattr(chat_helpers, "trim_for_context", lambda messages, context_length: messages)
+    monkeypatch.setattr(chat_helpers, "fire_message_event", lambda *args, **kwargs: None)
 
     import src.user_time as user_time
 
@@ -603,7 +641,7 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         model="test-model",
         headers={},
         history=[],
-        messages=[],
+        messages=list(initial_messages or []),
     )
     sess.get_context_messages = lambda: list(sess.messages)
 
@@ -613,9 +651,10 @@ async def _build_context_owner_probe(monkeypatch, request_state):
         request=request,
         chat_handler=SimpleNamespace(),
         chat_processor=SimpleNamespace(build_context_preface=fake_build_context_preface),
-        message="hello",
+        message=message,
         session_id="session-1",
-        incognito=True,
+        incognito=incognito,
+        use_rag=use_rag,
     )
 
     return ctx, captured
@@ -637,6 +676,7 @@ async def test_build_chat_context_uses_api_token_owner_for_compaction_scope(monk
         "prefs_owner": "alice",
         "preface_owner": "alice",
         "compact_owner": "alice",
+        "preface_use_rag": False,
     }
 
 
@@ -655,4 +695,39 @@ async def test_build_chat_context_keeps_cookie_user_owner_scope(monkeypatch):
         "prefs_owner": "bob",
         "preface_owner": "bob",
         "compact_owner": "bob",
+        "preface_use_rag": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_build_context_disables_rag_for_method_feedback_but_explicit_opt_in_wins(monkeypatch):
+    prior = [
+        {"role": "user", "content": "Pull the repository."},
+        {"role": "assistant", "content": "I could not run it."},
+    ]
+    ctx, captured = await _build_context_owner_probe(
+        monkeypatch, {"api_token": False, "current_user": "alice"},
+        message="use your MCP tools", initial_messages=prior, incognito=False,
+    )
+    assert captured["preface_use_rag"] is False
+    assert ctx.suppress_active_document is True
+
+    ctx, captured = await _build_context_owner_probe(
+        monkeypatch, {"api_token": False, "current_user": "alice"},
+        message="use your MCP tools", initial_messages=prior, incognito=False, use_rag="true",
+    )
+    assert captured["preface_use_rag"] is True
+    assert ctx.suppress_active_document is True
+    assert ctx.preprocessed.attachment_meta == []
+
+
+@pytest.mark.asyncio
+async def test_feedback_rag_gate_does_not_drop_attachments(monkeypatch):
+    meta = [{"id": "upload-1", "filename": "trace.log"}]
+    ctx, captured = await _build_context_owner_probe(
+        monkeypatch, {"api_token": False, "current_user": "alice"},
+        message="seriously", initial_messages=[{"role": "user", "content": "Inspect this."}],
+        incognito=False, attachment_meta=meta,
+    )
+    assert captured["preface_use_rag"] is False
+    assert ctx.preprocessed.attachment_meta == meta
