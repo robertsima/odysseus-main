@@ -8,6 +8,14 @@ all. This document inventories every `ODYSSEUS_*` variable actually read by
 the code and says where each one belongs, so the migration is traceable and a
 future contributor knows where to put the next option.
 
+This document says where a value *belongs*. For where a value on a running
+install actually *came from* — an environment pin, `data/settings.json`, that
+user's own prefs, a legacy environment fallback still in effect, or the code
+default — ask the install: `src/config_provenance.py`, over
+`GET /api/workbench/config` or the agent's `inspect_runtime` tool. It answers
+by calling the same readers the app calls, so it cannot disagree with the
+running code, and it never returns a credential's value.
+
 ## The rule
 
 **`settings.json` holds CHOICES.** Anything a person might reasonably want

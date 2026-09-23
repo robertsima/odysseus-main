@@ -37,7 +37,7 @@ async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
     # chat, deleting unlinks arbitrary *.json on disk. Allow only a bare
     # token (research session ids are hex/uuid/slug — no separators).
     if rid and not re.fullmatch(r"[A-Za-z0-9_-]+", rid):
-        return {"error": "Invalid research id."}
+        return {"error": "Invalid research id.", "exit_code": 1}
 
     def _load(p):
         try:
@@ -47,10 +47,10 @@ async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
 
     if action in ("read", "open", "view", "get"):
         if not rid:
-            return {"error": "Provide the research id (from action='list')."}
+            return {"error": "Provide the research id (from action='list').", "exit_code": 1}
         p = data_dir / f"{rid}.json"
         if not p.exists():
-            return {"error": f"Research '{rid}' not found."}
+            return {"error": f"Research '{rid}' not found.", "exit_code": 1}
         d = _load(p) or {}
         summary = d.get("result") or d.get("raw_report") or d.get("summary") or d.get("report") or "(no report body)"
         srcs = d.get("sources", []) or []
@@ -63,15 +63,15 @@ async def do_manage_research(content: str, owner: Optional[str] = None) -> Dict:
 
     if action == "delete":
         if not rid:
-            return {"error": "Provide the research id to delete (from action='list')."}
+            return {"error": "Provide the research id to delete (from action='list').", "exit_code": 1}
         p = data_dir / f"{rid}.json"
         if p.exists():
             try:
                 p.unlink()
             except Exception as e:
-                return {"error": f"Failed to delete: {e}"}
+                return {"error": f"Failed to delete: {e}", "exit_code": 1}
             return {"output": f"Deleted research '{rid}'.", "exit_code": 0}
-        return {"error": f"Research '{rid}' not found."}
+        return {"error": f"Research '{rid}' not found.", "exit_code": 1}
 
     # default: list — clickable [query](#research-<id>) rows, most-recent first
     search = (args.get("search") or "").lower()

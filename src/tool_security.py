@@ -49,6 +49,11 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "manage_agent_worktree",
     "manage_git",
     "read_app_logs",
+    # Reads scheduled-task prompts, run outputs and the settings store's
+    # provenance. Settings are admin-only per THREAT_MODEL.md, so the whole
+    # tool is: policy fails closed rather than splitting one tool's actions
+    # across two privilege levels.
+    "inspect_runtime",
     "read_file",
     "write_file",
     "edit_file",
@@ -113,6 +118,8 @@ PLAN_MODE_READONLY_TOOLS = {
     # Reading the app's own logs is inspection: it cannot mutate anything, and
     # plan mode is exactly when the agent is diagnosing a problem.
     "read_app_logs",
+    # Same reasoning, and it cannot write: inspect_runtime only reads.
+    "inspect_runtime",
     "web_search",
     "web_fetch",
     "search_chats",

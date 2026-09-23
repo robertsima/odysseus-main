@@ -156,6 +156,57 @@ def setup_workbench_routes() -> APIRouter:
             raise HTTPException(409, str(exc))
         return {"queued": True, "id": rec["id"], "state": rec["state"]}
 
+    # ── runtime introspection ───────────────────────────────────────────────
+    # The Workbench is where "what did that run do" is already answered for
+    # chat turns and delegated jobs; these add the same answer for scheduled
+    # tasks and for the configuration a run resolved against, rather than
+    # opening a new surface for it (docs/workbench.md).
+
+    @router.get("/tasks")
+    async def introspect_tasks(request: Request, limit: int = 50):
+        """The caller's scheduled tasks with the lane each one lands in."""
+        owner = _admin(request)
+        from src import runtime_introspection
+
+        return {"tasks": runtime_introspection.list_tasks(owner, limit=limit)}
+
+    @router.get("/tasks/{task_id}")
+    async def introspect_task(request: Request, task_id: str, runs: int = 5,
+                              include_traces: bool = True):
+        """One task: prompts as sent, run outcomes, tool traces, and why it
+        did not run when it did not.
+
+        Owner-scoped: a task belonging to another user is reported as missing,
+        with the same message as a task that does not exist, so this cannot be
+        used to probe for task ids.
+        """
+        owner = _admin(request)
+        from src import runtime_introspection
+
+        try:
+            return runtime_introspection.task_report(
+                task_id, owner, runs=runs, include_traces=include_traces,
+                # No offload for the HTTP surface: a browser is not spending
+                # context, and the store exists to keep tool results out of a
+                # model's turn.
+                offload=False,
+            )
+        except runtime_introspection.NotFound as exc:
+            raise HTTPException(404, str(exc))
+
+    @router.get("/config")
+    async def introspect_config(request: Request, keys: Optional[str] = None,
+                                only_non_default: bool = True):
+        """Where each effective configuration value came from. Secret-bearing
+        keys report whether they are set; their values are never returned."""
+        owner = _admin(request)
+        from src import runtime_introspection
+
+        wanted = [k.strip() for k in (keys or "").split(",") if k.strip()] or None
+        return runtime_introspection.config_report(
+            wanted, owner, only_non_default=bool(only_non_default) and not wanted,
+        )
+
     # ── repository inspection ───────────────────────────────────────────────
 
     @router.get("/repo/roots")

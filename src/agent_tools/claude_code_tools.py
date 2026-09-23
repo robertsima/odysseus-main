@@ -672,20 +672,21 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
     or {"error": str} — never both, and never raises."""
     prefix = _tool_name(tool_name)
     if not isinstance(args, dict):
-        return {"error": _tool_error("JSON object required", prefix)}
+        return {"error": _tool_error("JSON object required", prefix), "exit_code": 1}
     requested = str(args.get("repository") or "").strip()
     if requested and requested.lower() != "auto":
         try:
             repository = _approved_repository(requested)
         except (ValueError, OSError) as exc:
-            return {"error": _tool_error(str(exc), prefix)}
+            return {"error": _tool_error(str(exc), prefix), "exit_code": 1}
     else:
         repository, why = default_repository()
         if repository is None:
-            return {"error": _tool_error(f"{why}. {_describe_candidates()}", prefix)}
+            return {"error": _tool_error(f"{why}. {_describe_candidates()}", prefix), "exit_code": 1}
     prompt = str(args.get("prompt") or "").strip()
     if not prompt or len(prompt) > 20000:
-        return {"error": _tool_error("prompt is required and must be <= 20000 characters", prefix)}
+        return {"error": _tool_error("prompt is required and must be <= 20000 characters", prefix),
+                "exit_code": 1}
     try:
         timeout = max(30, min(1800, int(args.get("timeout_seconds", 900))))
     except (TypeError, ValueError):
@@ -693,7 +694,7 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
     requested_tools = args.get("allowed_tools")
     tools = requested_tools if requested_tools else default_tools()
     if not isinstance(tools, list) or not all(isinstance(item, str) and item for item in tools):
-        return {"error": _tool_error("allowed_tools must be a list of strings", prefix)}
+        return {"error": _tool_error("allowed_tools must be a list of strings", prefix), "exit_code": 1}
     # Normalize only the names whose casing is cosmetic.  Safety matching is
     # intentionally still exact, so malformed or unsafe Bash expressions do
     # not become valid through a broad IGNORECASE regex.
@@ -722,7 +723,7 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
         tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
     model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
     if model and not _MODEL_RE.fullmatch(model):
-        return {"error": _tool_error("model must be a plain model name or alias", prefix)}
+        return {"error": _tool_error("model must be a plain model name or alias", prefix), "exit_code": 1}
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
     if dropped:
         parsed["dropped_tools"] = dropped

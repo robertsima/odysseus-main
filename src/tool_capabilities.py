@@ -279,6 +279,17 @@ _register(
     # Returns the server's own tool catalogue.
 )
 _register(
+    {"inspect_runtime"},
+    # Reads only, and only this owner's own rows: scheduled-task prompts as
+    # sent, run outcomes, tool traces, and where each effective configuration
+    # value came from. It mutates nothing, and secret-bearing keys report
+    # whether they are set rather than their values.
+    ToolEffect.READ_PRIVATE,
+    # The traces carry earlier tool output and the prompts a task was built
+    # from — content the server did not author, as with `recall_tool_output`.
+    result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
+)
+_register(
     {"manage_wellbeing"},
     ToolEffect.READ_PRIVATE,
     ToolEffect.WRITE_PRIVATE,
