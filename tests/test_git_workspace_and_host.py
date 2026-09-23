@@ -25,6 +25,11 @@ def roots(tmp_path, monkeypatch):
     development.mkdir()
     monkeypatch.setattr(rs, "git_repository_roots", lambda: (development,))
     monkeypatch.setattr(rs, "DATA_DIR", str(tmp_path / "data"))
+    # vet_workspace refuses anything under the global DATA_DIR as app state.
+    # Pin it here too: the full suite can leave it pointing at a parent of the
+    # pytest temp dir, which made every workspace below look like app state.
+    import src.constants as constants
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(rs, "PERSONAL_DIR", str(tmp_path / "data" / "personal"))
     monkeypatch.setattr(rs, "vault_root", lambda: str(tmp_path / "vault"))
     return tmp_path
