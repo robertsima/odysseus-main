@@ -298,7 +298,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "strict": False,
             "description": (
                 "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
-                "Git workflows in approved local checkouts: repositories, status, diff, log, "
+                "Git workflows in approved local checkouts (configured roots and the active workspace's checkout): repositories, status, diff, log, "
                 "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
                 "stash_list/create/apply/pop/drop, push, force_push_with_lease, merge, reset, rebase, delete_branch, delete_remote_branch, set_upstream. "
                 "No shell/private-vault grant needed. "
@@ -316,7 +316,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "properties": {
                     "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "stash_drop", "push", "force_push_with_lease", "merge", "reset", "rebase", "delete_branch", "delete_remote_branch", "set_upstream"]},
                     "repository": {"type": "string", "description": "All actions except repositories: absolute checkout path; clone/init use the new target path"},
-                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL"},
+                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL (or the configured GitHub Enterprise host)"},
                     "branch": {"type": "string", "description": "clone only: optional remote branch"},
                     "depth": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "clone only: optional shallow history depth"},
                     "initial_branch": {"type": "string", "description": "init only: initial branch, default main"},

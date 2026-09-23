@@ -113,7 +113,8 @@ async def test_repository_actions_are_admin_only_before_service_dispatch(monkeyp
         ({"allowed_mcp_servers": ["github_read"]}, "github.com", "ghp_test_secret"),
         ({"allowed_mcp_servers": []}, "github.com", None),
         ({"allowed_mcp_servers": ["calendar"]}, "github.com", None),
-        ({"allowed_mcp_servers": ["github_read"]}, "github.enterprise", None),
+        # Enterprise: the same token as MCP; the transport binds it to that host.
+        ({"allowed_mcp_servers": ["github_read"]}, "github.enterprise", "ghp_test_secret"),
     ],
 )
 def test_repository_token_requires_fresh_session_permission_and_github_host(

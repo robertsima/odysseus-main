@@ -41,10 +41,11 @@ def _write_token(ctx: dict) -> str | None:
         not isinstance(allowed, list) or not {"*", "github_write"}.intersection(allowed)
     ):
         return None
-    # The shared credential is usable only at the fixed public GitHub host.
+    # The shared credential is usable only at its own host (github.com or
+    # GITHUB_HOST); repository_sync._transport drops it for any other remote.
     from src.github_credentials import github_token_from_env
 
-    return github_token_from_env(public_only=True)
+    return github_token_from_env()
 
 
 class GitTool:
