@@ -162,3 +162,44 @@ def test_agent_strip_reads_run_liveness_from_one_definition():
     assert "if (current.some((r) => isLive(r.status))) refreshAgentRuns();" in src
     strip = src[src.index("function stripRuns()"):src.index("function latestActivity")]
     assert "=== 'running'" not in strip
+
+
+def test_live_runs_offer_wrap_up_beside_stop():
+    """Wrap up is a soft stop: a steer asking the run to hand back what it has."""
+    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
+    assert 'data-strip-act="wrap-up"' in src and "if (act === 'wrap-up') {" in src
+    assert "/api/workbench/runs/${encodeURIComponent(run.run_id)}/wrap-up" in src
+    assert 'data-wb-act="run-wrap-up"' in src and "case 'run-wrap-up': wrapUpWorkbenchRun" in src
+    assert "/api/workbench/runs/${encodeURIComponent(runId)}/wrap-up" in src
+    card = src[src.index("function runCardHtml("):src.index("function disclosureHtml(")]
+    # Stop and Wrap up follow the one liveness definition, not `=== 'running'`.
+    assert "=== 'running'" not in card and "if (isLive(run.status)) {" in card
+    assert "progressHtml(run, 'wb-run-meta wb-run-progress')" in card
+    row = src[src.index("function stripRowHtml("):src.index("function renderAgentStrip(")]
+    assert "progressHtml(run, 'agent-strip-progress')" in row
+    assert "progress: row.progress || null," in src
+
+
+def _fmt_progress(calls: str) -> list:
+    # workbench.js imports half the UI, so evaluate just the pure helpers.
+    src = (_REPO / "static" / "js" / "workbench.js").read_text(encoding="utf-8")
+    body = src[src.index("function fmtDur("):src.index("function progressHtml(")].replace("export function", "function")
+    res = subprocess.run(["node", "-e", body + f"\nconsole.log(JSON.stringify([{calls}]));"],
+                         capture_output=True, timeout=30, text=True)
+    assert res.returncode == 0, res.stderr
+    return json.loads(res.stdout)
+
+
+def test_fmt_progress_renders_the_live_counters():
+    long_run, capped, early, empty = _fmt_progress("""
+        fmtProgress({round: 108, input_tokens: 4100000, cached_tokens: 3772000, output_tokens: 38000,
+                     current_tool: 'read_file'}, {startedAt: 1000, now: 1000 + 23 * 60 + 5}),
+        fmtProgress({round: 60, input_tokens: 5400, output_tokens: 900}, {startedAt: 1000, now: 1030, maxRounds: 80}),
+        fmtProgress({round: 3}, {startedAt: 1000, now: 1100}),
+        fmtProgress(null, {}),
+    """)
+    assert long_run == {"text": "round 108 · 23m · 4.1M in (92% cached) · 38k out · read_file", "warn": True}
+    # A capped run is bounded by its loadout, so it is not flagged.
+    assert capped == {"text": "round 60/80 · 5.4k in · 900 out", "warn": False}
+    assert early == {"text": "round 3 · 1m", "warn": False}
+    assert empty == {"text": "", "warn": False}

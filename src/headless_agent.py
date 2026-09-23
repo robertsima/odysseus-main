@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from src import agent_activity as activity
@@ -89,6 +90,11 @@ def steering_run_id(session_id: Optional[str]) -> Optional[str]:
     """Return the sole headless wrapper serving a session, if unambiguous."""
     runs = _STEER_RUNS.get(str(session_id or ""), set())
     return next(iter(runs)) if len(runs) == 1 else None
+
+
+def serves_run(session_id: Optional[str], run_id: Optional[str]) -> bool:
+    """Whether ``run_id`` is a headless wrapper draining ``session_id``'s steers."""
+    return bool(run_id) and str(run_id) in _STEER_RUNS.get(str(session_id or ""), set())
 
 
 def has_steering_runs(session_id: Optional[str]) -> bool:
@@ -306,6 +312,42 @@ async def run_headless(
     return full, state["tool_events"]
 
 
+# Loop frames that move a run's live counters (see ``_track_progress``).
+_PROGRESS_EVENTS = frozenset({"agent_step", "tool_start", "tool_output", "round_usage"})
+
+
+def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> None:
+    """Fold one loop frame into the run's live ``progress`` record.
+
+    A detached run was otherwise visible only as its last event title: the
+    round it was on, how many tokens it had burned and how much of that the
+    provider cached lived in the log alone, which is how a 108-round worker
+    looked no different from a 3-round one. Totals are kept on ``state`` so
+    they cover the whole run, and are written through ``note_progress`` (no
+    event, bounded saves).
+    """
+    kind = d.get("type")
+    if kind not in _PROGRESS_EVENTS:
+        return
+    p = state.setdefault("progress", {"round": 1, "tool_calls": 0, "current_tool": None,
+                                      "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0})
+    if kind == "agent_step":
+        p["round"] = d.get("round", p["round"])
+    elif kind == "tool_start":
+        p["current_tool"] = d.get("tool")
+    elif kind == "tool_output":
+        p["current_tool"] = None
+        p["tool_calls"] += 1
+    else:
+        for key, total in (("input", "input_tokens"), ("cached", "cached_tokens"), ("output", "output_tokens")):
+            try:
+                p[total] += int(d.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    p["last_event_at"] = time.time()
+    activity.note_progress(run_id, **p)
+
+
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
                  source: str, on_event, allow_private: bool = False,
@@ -367,6 +409,8 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                 await on_event(d)
             except Exception:  # a listener must never stop the drain
                 logger.debug("headless agent listener failed", exc_info=True)
+        if run_id:
+            _track_progress(run_id, d, state)
         if "delta" in d:
             delta = d.get("delta")
             if isinstance(delta, str) and not d.get("thinking"):

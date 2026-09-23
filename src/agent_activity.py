@@ -323,6 +323,7 @@ def _update_run(ev: dict) -> None:
     if ev["kind"] == "run_started":
         rec["summary"] = {k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS}
     elif ev["kind"] == "run_finished":
+        _progress_saved_at.pop(run_id, None)
         status = str(data.get("status") or ("failed" if ev.get("level") == "error" else "completed"))
         rec["status"] = status
         rec["finished_at"] = ev["ts"]
@@ -345,6 +346,42 @@ def _update_run(ev: dict) -> None:
         # the chat that started the worker can no longer list it at all.
         rec["summary"].update({k: v for k, v in data.items() if k in _RUN_SUMMARY_KEYS})
     _save_runs()
+
+
+PROGRESS_SAVE_S = 5.0
+_progress_saved_at: Dict[str, float] = {}
+
+
+def note_progress(run_id: Optional[str], **fields: Any) -> None:
+    """Merge live counters (round, tokens, current tool) into a run's record.
+
+    A detached worker can run for a hundred rounds while its row shows only
+    the last event title; the round, token totals and cache hit rate lived in
+    the log alone. These change every round, so they go on the run record
+    (``progress``), not the event ring: publishing them would push the events
+    that matter out of the 500-event window. Persisted at most every
+    ``PROGRESS_SAVE_S`` so a busy run does not rewrite the runs file per tool
+    call; ``list_runs`` reads the in-memory record, so the UI is never behind.
+    Never raises.
+    """
+    if not run_id:
+        return
+    try:
+        with _lock:
+            _load_runs()
+            rec = _runs.get(str(run_id))
+            if rec is None:
+                return
+            progress = rec.get("progress")
+            if not isinstance(progress, dict):
+                progress = rec["progress"] = {}
+            progress.update(fields)
+            now = time.time()
+            if now - _progress_saved_at.get(str(run_id), 0.0) >= PROGRESS_SAVE_S:
+                _progress_saved_at[str(run_id)] = now
+                _save_runs()
+    except Exception as exc:  # observability must never break the work it observes
+        logger.debug("activity: note_progress failed: %s", exc, exc_info=True)
 
 
 _RUN_SUMMARY_KEYS = frozenset({
@@ -510,14 +547,23 @@ def list_runs(*, owner: Optional[str] = None, session_id: Optional[str] = None,
         # state, not just `running`.
         rows = [r for r in rows if r.get("status") in LIVE_RUN_STATUSES]
     rows.sort(key=lambda r: r.get("started_at") or 0, reverse=True)
-    return [dict(r) for r in rows[: max(1, min(int(limit or 50), MAX_RUNS))]]
+    return [_copy_run(r) for r in rows[: max(1, min(int(limit or 50), MAX_RUNS))]]
 
 
 def get_run(run_id: str) -> Optional[dict]:
     with _lock:
         _load_runs()
         rec = _runs.get(run_id)
-        return dict(rec) if rec else None
+        return _copy_run(rec) if rec else None
+
+
+def _copy_run(rec: dict) -> dict:
+    # `progress` is mutated in place by note_progress; hand out a copy so a
+    # caller serialising the record never iterates a dict that is changing.
+    out = dict(rec)
+    if isinstance(out.get("progress"), dict):
+        out["progress"] = dict(out["progress"])
+    return out
 
 
 def run_events(run_id: str, *, limit: int = 300) -> List[dict]:
@@ -589,6 +635,7 @@ def _reset_for_tests() -> None:
         _seq.clear()
         _loaded.clear()
         _runs.clear()
+        _progress_saved_at.clear()
         _runs_loaded = False
         _subscribers.clear()
         _active_turns.clear()
