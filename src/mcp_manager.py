@@ -1627,6 +1627,17 @@ class McpManager:
             "github_write",
         }
 
+    def get_tool_input_schema(self, qualified_name: str) -> Optional[Dict]:
+        """The input schema a connected server advertised for a tool, or None."""
+        parts = qualified_name.split("__", 2)
+        if len(parts) != 3 or parts[0] != "mcp":
+            return None
+        for tool in self._tools.get(parts[1], []):
+            if tool.get("name") == parts[2]:
+                schema = tool.get("input_schema")
+                return schema if isinstance(schema, dict) else None
+        return None
+
     def get_server_status(self, server_id: str) -> Dict:
         """Get connection status for a server."""
         return self._connections.get(server_id, {"status": "disconnected"})
