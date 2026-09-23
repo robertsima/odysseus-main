@@ -6,27 +6,14 @@ web_search branch emitted a bare query string and dropped time_filter. These pin
 that a valid filter is passed through as JSON, while plain/invalid cases stay a
 bare string (back-compat).
 """
-import sys
-from unittest.mock import MagicMock
+import json
 
-# Clean up any mocks from previous tests to ensure we load real modules.
-for mod in ['src.agent_tools', 'src.tool_parsing', 'src.tool_schemas', 'src.tool_execution']:
-    sys.modules.pop(mod, None)
-
-# Mock heavy database/model dependencies before importing (avoids the
-# src.tool_schemas <-> src.agent_tools circular import pulling in the DB layer).
-for mod in [
-    'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
-    'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
-    'src.database', 'core.models', 'core.database', 'core.auth'
-]:
-    if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
-
-import json  # noqa: E402
-
-import src.agent_tools  # noqa: E402, F401
-from src.tool_schemas import function_call_to_tool_block  # noqa: E402
+# No sys.modules surgery here -- see the note in tests/test_fenced_inline_args.py.
+# tests/conftest.py already pre-imports the real sqlalchemy/core.database, and
+# evicting src.tool_execution rebuilt its NO_TOOL_SECURITY_CONTEXT sentinel out
+# from under every test file collected before this one.
+import src.agent_tools  # noqa: F401
+from src.tool_schemas import function_call_to_tool_block
 
 
 def test_time_filter_is_preserved_as_json():

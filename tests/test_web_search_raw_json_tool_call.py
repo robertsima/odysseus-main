@@ -9,21 +9,13 @@ That is an intended tool call in non-native/textual tool mode, but older parsing
 only recognized fenced blocks, [TOOL_CALL], XML invoke, and tool_code markup.
 """
 import json
-import sys
-from unittest.mock import MagicMock
 
-for mod in ['src.agent_tools', 'src.tool_parsing', 'src.tool_schemas', 'src.tool_execution']:
-    sys.modules.pop(mod, None)
-for mod in [
-    'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
-    'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
-    'src.database', 'core.models', 'core.database', 'core.auth'
-]:
-    if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
-
-import src.agent_tools  # noqa: E402, F401
-from src.tool_parsing import parse_tool_blocks, strip_tool_blocks  # noqa: E402
+# No sys.modules surgery here -- see the note in tests/test_fenced_inline_args.py.
+# tests/conftest.py already pre-imports the real sqlalchemy/core.database, and
+# evicting src.tool_execution rebuilt its NO_TOOL_SECURITY_CONTEXT sentinel out
+# from under every test file collected before this one.
+import src.agent_tools  # noqa: F401
+from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 
 
 def test_raw_json_after_web_search_phrase_runs_as_web_search():

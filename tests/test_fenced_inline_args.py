@@ -5,21 +5,19 @@ with the args on the same line as the tag; the parser must execute those. The
 relaxed tag pattern must NOT prefix-match longer fence tags: ```python3 is a
 language hint, not a "python" tool call with content "3\n...".
 """
-import sys
-from unittest.mock import MagicMock
-
-for mod in ['src.agent_tools', 'src.tool_parsing', 'src.tool_schemas', 'src.tool_execution']:
-    sys.modules.pop(mod, None)
-for mod in [
-    'sqlalchemy', 'sqlalchemy.orm', 'sqlalchemy.ext', 'sqlalchemy.ext.declarative',
-    'sqlalchemy.ext.hybrid', 'sqlalchemy.sql', 'sqlalchemy.sql.expression',
-    'src.database', 'core.models', 'core.database', 'core.auth'
-]:
-    if mod not in sys.modules:
-        sys.modules[mod] = MagicMock()
-
-import src.agent_tools  # noqa: E402, F401
-from src.tool_parsing import parse_tool_blocks, strip_tool_blocks  # noqa: E402
+# No sys.modules surgery here. This file used to evict the tool-pipeline
+# modules (including src.tool_execution) and stub sqlalchemy/core.database
+# before importing, to make sure it got the *real* modules. tests/conftest.py
+# now pre-imports the real sqlalchemy, core.database and src.database before
+# any test module can stub them, so the eviction bought nothing -- and it cost
+# a lot: re-importing src.tool_execution builds a new module object with a new
+# NO_TOOL_SECURITY_CONTEXT sentinel, while every test file already collected
+# keeps the old one. execute_tool_block compares that sentinel by identity, so
+# those files failed with "security_context must be a ToolRunSecurityContext or
+# NO_TOOL_SECURITY_CONTEXT" in a full-suite run only. See
+# tests/test_function_call_non_object_args.py for the same reasoning.
+import src.agent_tools  # noqa: F401
+from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 
 
 def test_inline_args_on_tag_line_parse():
