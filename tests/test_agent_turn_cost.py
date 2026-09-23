@@ -199,65 +199,16 @@ def test_inflected_forms_still_fire(text):
     assert _asked(text)
 
 
-# ── The HTTP embedding lane must not build the fallback it discards ────
-
-
-def test_the_custom_lane_never_builds_the_fastembed_fallback(monkeypatch):
-    """It called a factory whose contract is "HTTP, else FastEmbed", then threw
-    a FastEmbed result away for being the wrong type -- after paying for an ONNX
-    load and a probe encode, on every offload and every stored-output search."""
-    from src import embedding_lanes
-    import src.embeddings as embeddings_mod
-
-    embeddings_mod.reset_http_embed_state()
-    http_probes, fastembed_builds = [], []
-
-    class _DownHttp:
-        def __init__(self, *a, **k):
-            http_probes.append(1)
-
-        def get_sentence_embedding_dimension(self):
-            raise RuntimeError("endpoint down")
-
-    def _fastembed(*a, **k):
-        fastembed_builds.append(1)
-        raise AssertionError("the HTTP lane must never build the FastEmbed fallback")
-
-    monkeypatch.setattr(embeddings_mod, "EmbeddingClient", _DownHttp)
-    monkeypatch.setattr(embeddings_mod, "FastEmbedClient", _fastembed)
-
-    for _ in range(3):
-        with pytest.raises(RuntimeError, match="HTTP embedding lane unavailable"):
-            embedding_lanes._build_custom_client()
-
-    assert not fastembed_builds
-    # The existing once-per-process latch is preserved: probe once, then skip.
-    assert len(http_probes) == 1
-    embeddings_mod.reset_http_embed_state()
-
-
-def test_a_healthy_http_lane_is_still_returned(monkeypatch):
-    """The default EmbeddingClient URL counts as a lane worth probing, so this
-    must not be short-circuited on "nothing configured"."""
-    from src import embedding_lanes
-    import src.embeddings as embeddings_mod
-
-    embeddings_mod.reset_http_embed_state()
-    monkeypatch.setattr(embedding_lanes, "_load_custom_endpoint", lambda: {}, raising=False)
-
-    class _HealthyHttp:
-        url = "http://localhost:11434/v1/embeddings"
-        model = "all-minilm"
-
-        def __init__(self, *a, **k):
-            pass
-
-        def get_sentence_embedding_dimension(self):
-            return 768
-
-    monkeypatch.setattr(embeddings_mod, "EmbeddingClient", _HealthyHttp)
-    assert isinstance(embedding_lanes._build_custom_client(), _HealthyHttp)
-    embeddings_mod.reset_http_embed_state()
+# ── The HTTP embedding lane ────────────────────────────────────────────
+#
+# Two tests here covered `_build_custom_client`: that the HTTP lane never paid
+# for an ONNX load by building the FastEmbed fallback it would discard, and
+# that a healthy endpoint was still returned. Commit a43bcb0 ("fix: route tools
+# and simplify retrieval runtime") deleted that factory -- retrieval is the one
+# local FastEmbed lane per `specs/retrieval-runtime.md`, and no HTTP endpoint is
+# probed at all, so the cost they guarded against cannot be paid. They were
+# removed with it; the repeated-work cost of the surviving lane is covered by
+# test_the_fastembed_fallback_client_is_built_once above.
 
 
 def test_the_recall_schema_advertises_the_ceiling_it_actually_enforces():

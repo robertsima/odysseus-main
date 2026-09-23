@@ -1,3 +1,15 @@
+"""VectorRAG against the embedding lanes.
+
+Commit a43bcb0 ("fix: route tools and simplify retrieval runtime") collapsed
+retrieval to the single local FastEmbed lane described by
+`specs/retrieval-runtime.md`. The tests that staged a custom HTTP lane beside
+it (`_build_custom_client`) were rewritten for one lane. What went with the
+lane is the cross-lane claim itself: a batch index "continuing past" a failing
+custom lane into a healthy FastEmbed one has nothing to continue into now, so
+that test asserts the plain single-lane write, and the failure case is
+`test_vector_rag_batch_index_reports_failure_when_the_lane_fails`.
+"""
+
 from src.embedding_lanes import (
     EmbeddingLane,
     LANE_FASTEMBED,
@@ -11,13 +23,12 @@ from tests.helpers.embedding_lanes import (
 )
 
 
-def test_vector_rag_writes_both_lanes_and_falls_back_to_fastembed(monkeypatch):
+def test_vector_rag_writes_and_searches_the_fastembed_lane(monkeypatch):
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: None)
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.rag_vector import VectorRAG
@@ -32,35 +43,32 @@ def test_vector_rag_writes_both_lanes_and_falls_back_to_fastembed(monkeypatch):
     assert results[0]["embedding_lane"] == LANE_FASTEMBED
 
 
-def test_vector_rag_batch_index_continues_when_custom_lane_fails(monkeypatch, tmp_path):
+def test_vector_rag_batch_index_writes_the_fastembed_lane(monkeypatch, tmp_path):
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FailingEmbedder(768, "nomic", "http://embeddings/v1"))
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.rag_vector import VectorRAG
 
     rag = VectorRAG(persist_directory=str(tmp_path))
     result = rag.add_documents_batch([
-        ("batch fallback document", {"source": "/tmp/a.md", "owner": "alice"}),
+        ("batch indexed document", {"source": "/tmp/a.md", "owner": "alice"}),
     ])
 
     assert result["success"]
     assert result["added_count"] == 1
-    assert fake.collections["odysseus_rag_custom"].count() == 0
     assert fake.collections["odysseus_rag_fastembed"].count() == 1
 
 
-def test_vector_rag_batch_index_reports_failure_when_all_lanes_fail(monkeypatch, tmp_path):
+def test_vector_rag_batch_index_reports_failure_when_the_lane_fails(monkeypatch, tmp_path):
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FailingEmbedder(768, "nomic", "http://embeddings/v1"))
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FailingEmbedder(384, "mini", "local://fastembed"))
 
     from src.rag_vector import VectorRAG
@@ -71,7 +79,6 @@ def test_vector_rag_batch_index_reports_failure_when_all_lanes_fail(monkeypatch,
     ])
 
     assert not result["success"]
-    assert fake.collections["odysseus_rag_custom"].count() == 0
     assert fake.collections["odysseus_rag_fastembed"].count() == 0
 
 
@@ -95,13 +102,14 @@ def test_rag_rebuild_does_not_reimport_legacy_collection(monkeypatch, tmp_path):
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: None)
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.rag_vector import VectorRAG
 
     rag = VectorRAG(persist_directory=str(tmp_path))
-    assert fake.collections["odysseus_rag_fastembed"].count() == 1
+    # Startup imports nothing from the legacy collection, so the lane starts
+    # empty; the rebuild then has to leave it that way.
+    assert fake.collections["odysseus_rag_fastembed"].count() == 0
 
     assert rag.rebuild_index()
 

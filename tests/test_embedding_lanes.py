@@ -1,7 +1,22 @@
-import pytest
+"""Embedding-lane construction and collection resets.
+
+Commit a43bcb0 ("fix: route tools and simplify retrieval runtime") collapsed
+retrieval to a single local FastEmbed lane, and `specs/retrieval-runtime.md`
+records that as the contract: `build_embedding_lanes()` creates exactly one
+`fastembed` lane, HTTP/custom embedding endpoints are never probed or selected,
+and legacy unsuffixed collections are never queried or migrated.
+
+The tests that asserted the removed design -- the custom lane
+(`_build_custom_client`), the two-lane build, the `ODYSSEUS_FASTEMBED_LANE`
+switch choosing between lanes, and the legacy-collection read cache -- were
+deleted with it. That coverage went deliberately; it was not lost by accident.
+The behaviour that survived the collapse (lane reset on a fingerprint change,
+re-embedding from stored documents, keeping or restoring the existing
+collection when a rewrite fails, `primary_collection` pairing) is exercised
+below through the one lane.
+"""
 
 from src.embedding_lanes import (
-    LANE_CUSTOM,
     LANE_FASTEMBED,
     build_embedding_lanes,
 )
@@ -13,400 +28,207 @@ from tests.helpers.embedding_lanes import (
 )
 
 
-def test_build_embedding_lanes_keeps_custom_and_fastembed_dimensions_separate(monkeypatch):
+def _fastembed(monkeypatch, client):
+    import src.embedding_lanes as lanes
+
+    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: client)
+
+
+def test_build_embedding_lanes_returns_only_the_fastembed_lane(monkeypatch):
+    fake = FakeChroma()
+    patch_chroma(monkeypatch, fake)
+    _fastembed(monkeypatch, FakeEmbedder(384, "sentence-transformers/all-MiniLM-L6-v2", "local://fastembed"))
+
+    built = build_embedding_lanes("odysseus_tool_index")
+
+    assert [lane.name for lane in built] == [LANE_FASTEMBED]
+    assert built[0].collection_name == "odysseus_tool_index_fastembed"
+    assert built[0].dimension == 384
+    assert set(fake.collections) == {"odysseus_tool_index_fastembed"}
+
+
+def test_build_embedding_lanes_returns_nothing_when_fastembed_is_unavailable(monkeypatch):
+    """No lane rather than another implementation: an unavailable embedder has
+    to surface as degraded retrieval, not a silent switch."""
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(
-        lanes,
-        "_build_custom_client",
-        lambda: FakeEmbedder(768, "nomic-embed-text", "http://embeddings/v1"),
-    )
-    monkeypatch.setattr(
-        lanes,
-        "_build_fastembed_client",
-        lambda: FakeEmbedder(384, "sentence-transformers/all-MiniLM-L6-v2", "local://fastembed"),
-    )
-
-    built = build_embedding_lanes("odysseus_memories")
-
-    assert [lane.name for lane in built] == [LANE_CUSTOM, LANE_FASTEMBED]
-    assert built[0].collection_name == "odysseus_memories_custom"
-    assert built[0].dimension == 768
-    assert built[1].collection_name == "odysseus_memories_fastembed"
-    assert built[1].dimension == 384
-
-    built[0].collection.add(ids=["custom"], embeddings=built[0].encode(["a"]), documents=["a"])
-    built[1].collection.add(ids=["fast"], embeddings=built[1].encode(["a"]), documents=["a"])
-
-    with pytest.raises(RuntimeError, match="dimension"):
-        built[0].collection.query(query_embeddings=built[1].encode(["bad"]), n_results=1)
-
-
-def test_build_embedding_lanes_recreates_only_custom_when_fingerprint_changes(monkeypatch):
-    fake = FakeChroma()
-    old_custom = fake.get_or_create_collection(
-        "odysseus_rag_custom",
-        metadata={
-            "embedding_lane": "custom",
-            "embedding_dimension": 768,
-            "embedding_fingerprint": "old",
-        },
-    )
-    old_custom.add(ids=["old"], embeddings=[[0.0] * 768], documents=["old"])
-    fast = fake.get_or_create_collection(
-        "odysseus_rag_fastembed",
-        metadata={
-            "embedding_lane": "fastembed",
-            "embedding_dimension": 384,
-        },
-    )
-    fast.add(ids=["fast"], embeddings=[[0.0] * 384], documents=["fast"])
-    patch_chroma(monkeypatch, fake)
-
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(1024, "bge-large", "http://embeddings/v1"))
-    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "sentence-transformers/all-MiniLM-L6-v2", "local://fastembed"))
-
-    built = build_embedding_lanes("odysseus_rag")
-
-    assert "odysseus_rag_custom" in fake.deleted
-    assert fake.collections["odysseus_rag_custom"].count() == 1
-    assert len(fake.collections["odysseus_rag_custom"].rows["old"]["embedding"]) == 1024
-    assert fake.collections["odysseus_rag_fastembed"].count() == 1
-    assert built[0].dimension == 1024
-
-
-def test_lane_reset_reembeds_existing_documents_on_fingerprint_change(monkeypatch):
-    fake = FakeChroma()
-    old_custom = fake.get_or_create_collection(
-        "odysseus_memories_custom",
-        metadata={
-            "embedding_lane": "custom",
-            "embedding_dimension": 384,
-            "embedding_fingerprint": "old",
-        },
-    )
-    old_custom.add(
-        ids=["existing-memory"],
-        embeddings=[[0.0] * 384],
-        documents=["existing custom memory"],
-        metadatas=[{"source": "memory"}],
-    )
-    patch_chroma(monkeypatch, fake)
-
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
 
     def fail_fastembed():
         raise RuntimeError("fastembed missing")
 
     monkeypatch.setattr(lanes, "_build_fastembed_client", fail_fastembed)
 
+    assert build_embedding_lanes("odysseus_memories") == []
+    assert fake.collections == {}
+
+
+def test_lane_reset_reembeds_existing_documents_on_fingerprint_change(monkeypatch):
+    fake = FakeChroma()
+    stale = fake.get_or_create_collection(
+        "odysseus_memories_fastembed",
+        metadata={
+            "embedding_lane": "fastembed",
+            "embedding_dimension": 384,
+            "embedding_fingerprint": "old",
+        },
+    )
+    stale.add(
+        ids=["existing-memory"],
+        embeddings=[[0.0] * 384],
+        documents=["existing memory"],
+        metadatas=[{"source": "memory"}],
+    )
+    patch_chroma(monkeypatch, fake)
+    _fastembed(monkeypatch, FakeEmbedder(768, "bge-large", "local://fastembed"))
+
     built = build_embedding_lanes("odysseus_memories")
 
-    assert [lane.name for lane in built] == [LANE_CUSTOM]
-    assert "odysseus_memories_custom" in fake.deleted
-    rebuilt = fake.collections["odysseus_memories_custom"]
+    assert [lane.name for lane in built] == [LANE_FASTEMBED]
+    assert "odysseus_memories_fastembed" in fake.deleted
+    rebuilt = fake.collections["odysseus_memories_fastembed"]
     assert rebuilt.count() == 1
     assert rebuilt.get()["ids"] == ["existing-memory"]
     assert len(rebuilt.rows["existing-memory"]["embedding"]) == 768
 
 
+def test_lane_reset_is_skipped_when_the_fingerprint_still_matches(monkeypatch):
+    """The reset path deletes the collection, so it must run only on a real
+    change -- a matching fingerprint keeps the rows and the collection."""
+    fake = FakeChroma()
+    patch_chroma(monkeypatch, fake)
+    _fastembed(monkeypatch, FakeEmbedder(384, "mini", "local://fastembed"))
+
+    first = build_embedding_lanes("odysseus_memories")
+    first[0].collection.add(
+        ids=["mem-1"],
+        embeddings=first[0].encode(["a memory"]),
+        documents=["a memory"],
+        metadatas=[{"source": "memory"}],
+    )
+
+    second = build_embedding_lanes("odysseus_memories")
+
+    assert fake.deleted == []
+    assert second[0].fingerprint == first[0].fingerprint
+    assert second[0].collection.count() == 1
+
+
 def test_lane_reset_keeps_existing_collection_when_reembed_fails(monkeypatch):
     fake = FakeChroma()
-    old_custom = fake.get_or_create_collection(
-        "odysseus_memories_custom",
+    stale = fake.get_or_create_collection(
+        "odysseus_memories_fastembed",
         metadata={
-            "embedding_lane": "custom",
+            "embedding_lane": "fastembed",
             "embedding_dimension": 384,
             "embedding_fingerprint": "old",
         },
     )
-    old_custom.add(
+    stale.add(
         ids=["existing-memory"],
         embeddings=[[0.0] * 384],
-        documents=["existing custom memory"],
+        documents=["existing memory"],
         metadatas=[{"source": "memory"}],
     )
     patch_chroma(monkeypatch, fake)
-
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FailingEmbedder(768, "nomic", "http://embeddings/v1"))
-    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
+    _fastembed(monkeypatch, FailingEmbedder(768, "bge-large", "local://fastembed"))
 
     built = build_embedding_lanes("odysseus_memories")
 
-    assert [lane.name for lane in built] == [LANE_FASTEMBED]
-    assert "odysseus_memories_custom" not in fake.deleted
-    assert fake.collections["odysseus_memories_custom"].count() == 1
-    assert len(fake.collections["odysseus_memories_custom"].rows["existing-memory"]["embedding"]) == 384
+    assert built == []
+    assert "odysseus_memories_fastembed" not in fake.deleted
+    assert fake.collections["odysseus_memories_fastembed"].count() == 1
+    assert len(fake.collections["odysseus_memories_fastembed"].rows["existing-memory"]["embedding"]) == 384
 
 
 def test_lane_reset_keeps_existing_collection_when_preserve_read_fails(monkeypatch):
     fake = FakeChroma()
-    old_custom = fake.get_or_create_collection(
-        "odysseus_memories_custom",
+    stale = fake.get_or_create_collection(
+        "odysseus_memories_fastembed",
         metadata={
-            "embedding_lane": "custom",
+            "embedding_lane": "fastembed",
             "embedding_dimension": 384,
             "embedding_fingerprint": "old",
         },
     )
-    old_custom.add(
+    stale.add(
         ids=["existing-memory"],
         embeddings=[[0.0] * 384],
-        documents=["existing custom memory"],
+        documents=["existing memory"],
         metadatas=[{"source": "memory"}],
     )
 
     def fail_get(*_args, **_kwargs):
         raise RuntimeError("chroma read failed")
 
-    old_custom.get = fail_get
+    stale.get = fail_get
     patch_chroma(monkeypatch, fake)
-
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
-
-    def fail_fastembed():
-        raise RuntimeError("fastembed missing")
-
-    monkeypatch.setattr(lanes, "_build_fastembed_client", fail_fastembed)
+    _fastembed(monkeypatch, FakeEmbedder(768, "bge-large", "local://fastembed"))
 
     built = build_embedding_lanes("odysseus_memories")
 
     assert built == []
-    assert "odysseus_memories_custom" not in fake.deleted
-    assert "odysseus_memories_custom" in fake.collections
+    assert "odysseus_memories_fastembed" not in fake.deleted
+    assert "odysseus_memories_fastembed" in fake.collections
 
 
 def test_lane_reset_restores_existing_collection_when_rewrite_fails(monkeypatch):
     fake = FakeChroma()
-    old_custom = fake.get_or_create_collection(
-        "odysseus_memories_custom",
+    stale = fake.get_or_create_collection(
+        "odysseus_memories_fastembed",
         metadata={
-            "embedding_lane": "custom",
+            "embedding_lane": "fastembed",
             "embedding_dimension": 384,
             "embedding_fingerprint": "old",
         },
     )
-    old_custom.add(
+    stale.add(
         ids=["existing-memory"],
         embeddings=[[0.0] * 384],
-        documents=["existing custom memory"],
+        documents=["existing memory"],
         metadatas=[{"source": "memory"}],
     )
-    fake.fail_next_add_for["odysseus_memories_custom"] = 1
+    fake.fail_next_add_for["odysseus_memories_fastembed"] = 1
     patch_chroma(monkeypatch, fake)
-
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
-
-    def fail_fastembed():
-        raise RuntimeError("fastembed missing")
-
-    monkeypatch.setattr(lanes, "_build_fastembed_client", fail_fastembed)
+    _fastembed(monkeypatch, FakeEmbedder(768, "bge-large", "local://fastembed"))
 
     built = build_embedding_lanes("odysseus_memories")
 
     assert built == []
-    restored = fake.collections["odysseus_memories_custom"]
+    restored = fake.collections["odysseus_memories_fastembed"]
     assert restored.count() == 1
     assert restored.get()["ids"] == ["existing-memory"]
     assert len(restored.rows["existing-memory"]["embedding"]) == 384
 
 
-def test_build_embedding_lanes_uses_fastembed_when_custom_unavailable(monkeypatch):
-    fake = FakeChroma()
-    patch_chroma(monkeypatch, fake)
+def test_the_fastembed_lane_env_switch_is_inert(monkeypatch):
+    """`ODYSSEUS_FASTEMBED_LANE` chose whether the local lane was built beside a
+    custom one. There is no second lane to choose against any more: the value is
+    still parsed, but the single lane is built either way."""
+    from src.embedding_lanes import fastembed_lane_mode
 
-    import src.embedding_lanes as lanes
-
-    def fail_custom():
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(lanes, "_build_custom_client", fail_custom)
-    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
-
-    built = build_embedding_lanes("odysseus_tool_index")
-
-    assert [lane.name for lane in built] == [LANE_FASTEMBED]
-    assert built[0].collection_name == "odysseus_tool_index_fastembed"
-
-
-def test_custom_lane_preserves_default_embedding_client_probe(monkeypatch):
-    import src.embedding_lanes as lanes
-    import src.embeddings as embeddings
-
-    embeddings.reset_http_embed_state()
-    monkeypatch.setattr(lanes, "_load_custom_endpoint", lambda: {})
-
-    calls = []
-
-    class DefaultClient(FakeEmbedder):
-        def __init__(self, url=None, model=None, api_key=None):
-            calls.append({"url": url, "model": model, "api_key": api_key})
-            super().__init__(768, model or "all-minilm:l6-v2", url or "http://localhost:11434/v1/embeddings")
-
-    monkeypatch.setattr(embeddings, "EmbeddingClient", DefaultClient)
-
-    client = lanes._build_custom_client()
-
-    assert calls == [{"url": None, "model": None, "api_key": None}]
-    assert client.url == "http://localhost:11434/v1/embeddings"
-    embeddings.reset_http_embed_state()
-
-
-def test_custom_lane_uses_http_down_latch(monkeypatch):
-    import src.embedding_lanes as lanes
-    import src.embeddings as embeddings
-
-    embeddings.reset_http_embed_state()
-    calls = []
-
-    class DownClient:
-        def __init__(self, url=None, model=None, api_key=None):
-            calls.append({"url": url, "model": model, "api_key": api_key})
-
-        def get_sentence_embedding_dimension(self):
-            raise RuntimeError("endpoint down")
-
-    class LocalFastEmbed(FakeEmbedder):
-        def __init__(self):
-            super().__init__(384, "mini", "local://fastembed")
-
-    monkeypatch.setattr(embeddings, "EmbeddingClient", DownClient)
-    monkeypatch.setattr(embeddings, "FastEmbedClient", LocalFastEmbed)
-
-    with pytest.raises(RuntimeError, match="HTTP embedding lane unavailable"):
-        lanes._build_custom_client()
-    with pytest.raises(RuntimeError, match="HTTP embedding lane unavailable"):
-        lanes._build_custom_client()
-
-    assert calls == [{"url": None, "model": None, "api_key": None}]
-    embeddings.reset_http_embed_state()
-
-
-# ── the FastEmbed lane off-switch ───────────────────────────────────────────
-#
-# ChromaDB is the vector store; FastEmbed is one of the embedders that fills
-# it. They are layers, not alternatives, and until now the FastEmbed lane was
-# unconditional -- "we run a real embedding model, stop maintaining a second
-# 384-dimension MiniLM index beside it" was not a thing that could be said.
-
-def _both_clients(monkeypatch):
-    import src.embedding_lanes as lanes
-
-    monkeypatch.setattr(
-        lanes, "_build_custom_client",
-        lambda: FakeEmbedder(768, "nomic-embed-text", "http://embeddings/v1"),
-    )
-    monkeypatch.setattr(
-        lanes, "_build_fastembed_client",
-        lambda: FakeEmbedder(384, "sentence-transformers/all-MiniLM-L6-v2", "local://fastembed"),
-    )
-
-
-def test_fastembed_lane_defaults_to_on(monkeypatch):
     patch_chroma(monkeypatch, FakeChroma())
-    _both_clients(monkeypatch)
+    _fastembed(monkeypatch, FakeEmbedder(384, "mini", "local://fastembed"))
+
     monkeypatch.delenv("ODYSSEUS_FASTEMBED_LANE", raising=False)
+    assert fastembed_lane_mode() == "auto"
+    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_FASTEMBED]
 
-    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [
-        LANE_CUSTOM, LANE_FASTEMBED
-    ]
-
-
-def test_fastembed_lane_off_skips_it_when_the_custom_lane_is_up(monkeypatch):
-    patch_chroma(monkeypatch, FakeChroma())
-    _both_clients(monkeypatch)
     monkeypatch.setenv("ODYSSEUS_FASTEMBED_LANE", "off")
-
-    assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_CUSTOM]
-
-
-def test_fastembed_lane_off_still_falls_back_when_the_endpoint_is_down(monkeypatch):
-    """`off` must degrade retrieval, never delete it: with no custom lane the
-    fallback is built anyway rather than leaving the store with no lanes."""
-    import src.embedding_lanes as lanes
-
-    patch_chroma(monkeypatch, FakeChroma())
-    _both_clients(monkeypatch)
-    monkeypatch.setattr(
-        lanes, "_build_custom_client",
-        lambda: (_ for _ in ()).throw(RuntimeError("HTTP embedding lane unavailable")),
-    )
-    monkeypatch.setenv("ODYSSEUS_FASTEMBED_LANE", "off")
-
+    assert fastembed_lane_mode() == "off"
     assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_FASTEMBED]
 
 
 def test_primary_collection_pairs_with_the_lane_the_store_embeds_through(monkeypatch):
-    """Stores keep one `_collection` and one embedder. The embedder was
-    lanes[0] (custom when configured) while the collection preferred the
-    FastEmbed lane -- different models, different dimensions."""
+    """Stores keep one `_collection` and one embedder, and they have to be the
+    same lane's -- embedding with one and querying the other is a dimension
+    error waiting for a second lane to exist again."""
     from src.embedding_lanes import primary_collection
 
     patch_chroma(monkeypatch, FakeChroma())
-    _both_clients(monkeypatch)
-    monkeypatch.delenv("ODYSSEUS_FASTEMBED_LANE", raising=False)
+    _fastembed(monkeypatch, FakeEmbedder(384, "mini", "local://fastembed"))
 
     built = build_embedding_lanes("odysseus_memories")
     assert primary_collection(built) is built[0].collection
     assert primary_collection([]) is None
-
-
-def test_missing_legacy_collection_is_cached_without_hiding_other_chroma_errors(monkeypatch):
-    import src.embedding_lanes as lanes
-
-    class MissingLegacyChroma(FakeChroma):
-        def __init__(self):
-            super().__init__()
-            self.legacy_reads = 0
-
-        def get_collection(self, name):
-            if name == "legacy":
-                self.legacy_reads += 1
-                raise RuntimeError("404 collection not found")
-            return super().get_collection(name)
-
-    fake = MissingLegacyChroma()
-    monkeypatch.setattr("src.chroma_client.get_chroma_client", lambda: fake)
-    lanes._legacy_missing_until.clear()
-    lane = type("Lane", (), {"collection": fake.get_or_create_collection("legacy_fastembed")})()
-
-    lanes.migrate_legacy_collection("legacy", [lane])
-    lanes.migrate_legacy_collection("legacy", [lane])
-
-    assert fake.legacy_reads == 1
-
-
-def test_legacy_migration_does_not_cache_a_transport_failure(monkeypatch):
-    import src.embedding_lanes as lanes
-
-    class UnavailableChroma(FakeChroma):
-        def __init__(self):
-            super().__init__()
-            self.legacy_reads = 0
-
-        def get_collection(self, name):
-            self.legacy_reads += 1
-            raise RuntimeError("connection refused")
-
-    fake = UnavailableChroma()
-    monkeypatch.setattr("src.chroma_client.get_chroma_client", lambda: fake)
-    lanes._legacy_missing_until.clear()
-    lane = type("Lane", (), {"collection": fake.get_or_create_collection("legacy_fastembed")})()
-
-    lanes.migrate_legacy_collection("legacy", [lane])
-    lanes.migrate_legacy_collection("legacy", [lane])
-
-    assert fake.legacy_reads == 2
