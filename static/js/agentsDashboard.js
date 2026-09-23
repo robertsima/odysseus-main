@@ -619,6 +619,15 @@ function loadoutWorkspaceHtml() {
     ${configEditorHtml(row)}
   </section>`;
 }
+/** The card's "what it is doing" line. A worker that has only started reports
+ *  its run title ("Worker · Scout · Write a poem"), which restates the card's
+ *  own name ("↳ Scout: Write a poem") next to the profile already in `meta`. */
+function latestText(r) {
+  const latest = String(r.latest || '');
+  const core = latest.replace(/^(Worker|Sub-agent)\s*·\s*/, '').replace(/^[^·:]+[·:]\s*/, '').trim().replace(/…$/, '');
+  const name = String(r.name || '').replace(/^↳\s*/, '');
+  return core && name.includes(core.slice(0, 40)) ? 'Started' : latest;
+}
 function rowHtml(r, nest = {}) {
   const sel = r.session_id === state.selected;
   const dur = r.status === 'running' && r.started_at ? fmtDur(r.started_at) : '';
@@ -642,7 +651,7 @@ function rowHtml(r, nest = {}) {
     <div class="ag-card-copy">
       <div class="ag-row-top"><button type="button" class="ag-row-name ag-card-select" data-ag="select-agent" data-sid="${esc(r.session_id)}" aria-pressed="${sel ? 'true' : 'false'}" title="Inspect ${esc(r.name)}">${esc(r.name)}</button>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
       <div class="ag-card-status">${pill(status)}${blocked}</div>
-      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(r.latest)}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
+      <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
       ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>

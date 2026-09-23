@@ -322,6 +322,12 @@ async function refreshAgentRuns({ force = false } = {}) {
       }
       state.agentRuns = next;
       state.agentRunsAt = Date.now();
+      // A run first seen through a message on this chat's feed ("→ worker …")
+      // was titled by that message; the server's title names the run itself.
+      for (const row of next.values()) {
+        const known = state.runs.get(row.run_id);
+        if (known && row.title && known.title !== row.title) { known.title = row.title; refreshCardTitle(known); }
+      }
     } catch (e) {
       // Keep whatever we had, but say why -- a silent failure here is what
       // made four rounds of fixes look identical from the outside.
@@ -410,7 +416,7 @@ function stripRowHtml(run) {
   return `<div class="agent-strip-row${running ? '' : ' done'}" data-run="${esc(run.run_id)}">
     ${statusPill(run.status)}
     ${sourceChip(run.source)}
-    <span class="agent-strip-title" title="${esc(run.detail || run.title || '')}">${esc(String(run.title || '').replace(/^(Sub-agent|Claude Code|Background job)\s*[·:]\s*/, ''))}</span>
+    <span class="agent-strip-title" title="${esc(run.detail || run.title || '')}">${esc(String(run.title || '').replace(/^(Sub-agent|Claude Code|Background job|Worker)\s*[·:]\s*/, ''))}</span>
     <span class="agent-strip-activity" title="${esc(latestActivity(run))}">${esc(latestActivity(run))}</span>
     <span class="agent-strip-time" data-started="${run.started_at || ''}" data-running="${running ? 1 : 0}">${esc(fmtDur(run.started_at, end))}</span>
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="open" data-run="${esc(run.run_id)}" title="${esc(openTitle)}">${openLabel}</button>
@@ -1174,6 +1180,10 @@ function restoreChatCards() {
       status: row.status, started_at: row.started_at, finished_at: null, events: [], data: { ...(row.summary || {}) }, tools: 0, errors: 0 });
     updateChatCard({ run_id: row.run_id, source: row.source, session_id: state.sessionId, kind: 'restore' });
   }
+}
+function refreshCardTitle(run) {
+  const title = state.chatCards.get(run.run_id)?.querySelector('.agent-run-title');
+  if (title) { title.textContent = run.title || ''; title.title = run.title || ''; }
 }
 function updateChatCard(ev) {
   if (!ev.run_id || !CHAT_CARD_SOURCES.has(ev.source)) return;

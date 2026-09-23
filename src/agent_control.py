@@ -708,7 +708,9 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         detail=task[:1500],
     )
     if parent_session:
-        activity.publish(parent_session, "message", f"→ worker {sess.name}: {task[:160]}", source="session",
+        # The worker chat's name already carries the loadout and the task
+        # ("↳ Scout: Write a short poem…"); the full task is in `detail`.
+        activity.publish(parent_session, "message", f"→ worker {sess.name}", source="session",
                          run_id=run_id, owner=owner, detail=task[:2000])
 
     async def _run():

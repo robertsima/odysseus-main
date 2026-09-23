@@ -455,3 +455,18 @@ async def test_chat_can_be_put_under_a_loadout_and_back_to_default(env, monkeypa
     with pytest.raises(HTTPException) as foreign:
         await eps[("POST", "/api/agents/sessions/{session_id}/loadout")](_req({"profile": "Researcher"}), "b1")
     assert foreign.value.status_code == 404
+
+
+async def test_a_loadout_workers_run_is_listed_under_its_parent_not_itself(env):
+    """A worker's run is filed under the worker's own chat. The parent's
+    "Child workers" list used to miss it entirely, while the worker listed its
+    own run as its child (with an Open button back to itself)."""
+    mgr, eps = env
+    mgr.sessions["w1"] = _Sess("w1", "↳ Scout: dig")
+    act.run_started("w1", "session", "Worker · Scout · dig", owner="alice",
+                    data={"target_session": "w1", "parent_session": "a1"})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    rows = {r["session_id"]: r for r in out["rows"]}
+    assert [c["title"] for c in rows["a1"]["children"]] == ["Worker · Scout · dig"]
+    assert rows["a1"]["status"] == "idle"          # the parent's own turn is not running
+    assert rows["w1"]["status"] == "running" and rows["w1"]["children"] == []

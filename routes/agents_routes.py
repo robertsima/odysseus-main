@@ -99,21 +99,31 @@ def setup_agents_routes(session_manager) -> APIRouter:
         now = time.time()
         chat_runs = {r["session_id"]: r for r in agent_runs.list_runs(set(owned))}
         by_session: Dict[str, list] = {}
+        # Runs of workers this chat started. A worker's run is filed under the
+        # worker's own chat, so the parent's "Child workers" list never showed
+        # a loadout worker (only send_to_session sub-agents, which are filed
+        # under the parent). They are listed, but do not make the parent
+        # itself read as running.
+        delegated: Dict[str, list] = {}
         for rec in activity.list_runs(limit=400):
             sid = rec.get("session_id")
-            if sid not in owned or rec.get("source") == "odysseus":
+            if rec.get("source") == "odysseus":
                 continue
             fin = rec.get("finished_at")
             if rec.get("status") != "running" and (not fin or now - fin > _RECENT_S):
                 continue
-            by_session.setdefault(sid, []).append(rec)
+            if sid in owned:
+                by_session.setdefault(sid, []).append(rec)
+            parent_sid = (rec.get("summary") or {}).get("parent_session")
+            if parent_sid and parent_sid != sid and parent_sid in owned:
+                delegated.setdefault(parent_sid, []).append(rec)
         pending: Dict[str, int] = {}
         for rec in tool_approvals.tool_approval_store.pending_for_sessions(owner=user, session_ids=set(owned)):
             pending[rec.session_id] = pending.get(rec.session_id, 0) + 1
         from core.database import get_session_settings
 
         rows = []
-        visible_ids = set(chat_runs) | set(by_session) | set(pending)
+        visible_ids = set(chat_runs) | set(by_session) | set(pending) | set(delegated)
         if show_archived:
             # An archive is a recovery surface, not a recent-activity view:
             # show every stored archived agent chat, even if its last run aged
@@ -141,7 +151,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
                            if e.get("kind") in ("tool_start", "tool_result", "message", "status", "run_started")), None)
             settings = get_session_settings(sid)
             hidden_runs = {str(run_id) for run_id in (settings.get("hidden_agent_runs") or [])}
+            own_ids = {c.get("run_id") for c in children}
+            children = children + [c for c in delegated.get(sid, []) if c.get("run_id") not in own_ids]
             children = [child for child in children if child.get("run_id") not in hidden_runs]
+            # A worker's own run is filed under its chat and decides its status
+            # above, but it is the chat itself, not a child of it: listing it
+            # under "Child workers" offered an Open button back to this chat.
+            children = [child for child in children
+                        if (child.get("summary") or {}).get("target_session") != sid]
             from src.session_settings import effective_worker_limit
             config = {
                 "agent_profile": settings.get("agent_profile"),
