@@ -2666,8 +2666,13 @@
             <div class="agent-profiles-actions">
               <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
               <button type="button" class="ats-btn" id="set-agentProfileSave">Save profiles</button>
+              <button type="button" class="ats-btn" id="set-agentProfileExport" title="Download the saved profiles as a JSON file. Credentials pasted into a profile's text are redacted.">Export</button>
+              <button type="button" class="ats-btn" id="set-agentProfileImport" title="Load profiles from an exported JSON file. Each one is validated like a normal save.">Import</button>
+              <select id="set-agentProfileImportMode" class="settings-select" style="max-width:220px" title="What Import does with profiles that already exist"><option value="merge">Merge, overwrite same names</option><option value="rename">Merge, keep both</option><option value="replace">Replace all profiles</option></select>
+              <input type="file" id="set-agentProfileImportFile" accept=".json,application/json" hidden>
               <span id="set-agentProfileMsg" class="admin-toggle-sub"></span>
             </div>
+            <div id="set-agentProfileImportReport" class="admin-toggle-sub" style="margin-top:6px" hidden></div>
           </div>
           <div class="admin-card" style="margin-bottom:12px;" id="set-claudeCodeCard">
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Claude Code delegation</h2>

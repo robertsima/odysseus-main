@@ -355,6 +355,11 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
 
 _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        # Looking at loadouts (and exporting them) changes nothing; every other
+        # action keeps the tool's full write/egress effects below.
+        "manage_agent_loadout": frozenset(
+            {"list", "get", "capabilities", "preflight", "status", "export"}
+        ),
         "manage_calendar": frozenset({"list_calendars", "list_events"}),
         "manage_contact": frozenset({"list"}),
         "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
@@ -369,6 +374,10 @@ _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
 
 _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        # import writes the shared agent_profiles setting exactly as create does.
+        "manage_agent_loadout": frozenset(
+            {"create", "update", "delete", "import", "start", "stop"}
+        ),
         "manage_calendar": frozenset(
             {"create_event", "update_event", "delete_event"}
         ),
@@ -421,6 +430,7 @@ _ACTION_DESTRUCTIVE: Mapping[str, frozenset[str]] = MappingProxyType(
 
 _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
     {
+        "manage_agent_loadout": "list",
         "manage_calendar": "list_events",
         "manage_documents": "list",
         "manage_research": "list",

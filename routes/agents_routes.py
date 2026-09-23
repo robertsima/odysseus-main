@@ -15,6 +15,10 @@ stop and launch their agents.
 * ``GET  /approvals``           — pending tool approvals across the caller's chats.
 * ``POST /launch``              — start a worker profile in a fresh chat.
 * ``GET  /profiles``            — the configured loadouts, for pickers.
+* ``GET  /profiles/export``     — admin: the loadouts as a JSON download
+  (``?names=a,b`` for some of them).
+* ``POST /profiles/import``     — admin: store loadouts from such a file
+  (merge or replace), validated exactly like a Settings save.
 * ``POST /sessions/{id}/loadout`` — run an existing chat under a loadout, or
   (``profile: null``) return it to the default setup.
 * ``POST /sessions/{id}/archive`` — safely hide an idle chat without deleting
@@ -567,6 +571,66 @@ def setup_agents_routes(session_manager) -> APIRouter:
                               "memory_access": p.get("memory_access", "read"),
                               "delegation_policy": p.get("delegation_policy", "explicit")}
                              for p in agent_profiles.load_profiles()]}
+
+    def _require_profile_admin(request: Request) -> str:
+        """The same gate as saving profiles through ``POST /api/auth/settings``:
+        an admin in a browser session (or the single-user deployment). A bearer
+        token is refused; that route never accepted one either."""
+        from src.auth_helpers import is_delegated_credential, require_user
+        from src.tool_security import owner_is_admin_or_single_user
+
+        if is_delegated_credential(request):
+            raise HTTPException(403, "Admin only")
+        user = require_user(request)
+        if not owner_is_admin_or_single_user(user):
+            raise HTTPException(403, "Admin only")
+        return user or ""
+
+    @router.get("/profiles/export")
+    async def export_profiles(request: Request, names: Optional[str] = Query(default=None)):
+        """The configured loadouts as a portable JSON download."""
+        _require_profile_admin(request)
+        from fastapi.responses import JSONResponse
+        from src import agent_profile_transfer
+        try:
+            document = agent_profile_transfer.export_profiles(names)
+        except ValueError as exc:
+            raise HTTPException(404, str(exc))
+        stamp = document["exported_at"][:10]
+        return JSONResponse(document, headers={
+            "Content-Disposition": f'attachment; filename="odysseus-agent-profiles-{stamp}.json"'})
+
+    @router.post("/profiles/import")
+    async def import_profiles(request: Request):
+        """Store loadouts from an export. Body: the export document itself (with
+        ``?mode=`` / ``?rename_conflicts=``), or ``{"document": ..., "mode":
+        "merge"|"replace", "rename_conflicts": bool}``."""
+        user = _require_profile_admin(request)
+        from src import agent_profile_transfer
+        from src.agent_tools.loadout_tools import _model_problem
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Expected a JSON body")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Expected a JSON object")
+        params = request.query_params
+        wrapped = "document" in body and "format" not in body
+        document = body.get("document") if wrapped else body
+        mode = (body.get("mode") if wrapped else None) or params.get("mode") or "merge"
+        rename = body.get("rename_conflicts") if wrapped else None
+        if rename is None:
+            rename = str(params.get("rename_conflicts") or "").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            report = agent_profile_transfer.import_profiles(
+                document, mode=str(mode), rename_conflicts=bool(rename),
+                check_model=lambda spec: _model_problem(spec, user or None))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        from src import agent_profiles
+        return {"ok": report["written"] or not report["errors"],
+                "message": agent_profile_transfer.summary_line(report),
+                "report": report, "profiles": agent_profiles.load_profiles()}
 
     @router.post("/sessions/{session_id}/loadout")
     async def apply_loadout(request: Request, session_id: str):

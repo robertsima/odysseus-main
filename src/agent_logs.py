@@ -147,14 +147,19 @@ _URL_WITH_QUERY = re.compile(r"\b[a-z][a-z0-9+.\-]*://[^\s\"'<>]*\?[^\s\"'<>]*")
 
 def redact_line(line: str) -> str:
     """Remove credential material from one log line."""
-    out = line or ""
+    return redact_text(line)[:MAX_LINE_CHARS]
+
+
+def redact_text(text: str) -> str:
+    """:func:`redact_line` without the log-line length cap, for any text."""
+    out = text or ""
     # URLs first: userinfo and query strings carry keys, and redact_url strips
     # both while keeping scheme/host/path readable.
     for pattern in (_URL_WITH_USERINFO, _URL_WITH_QUERY):
         out = pattern.sub(lambda m: redact_url(m.group(0)), out)
     for pattern, replacement in _REDACTIONS:
         out = pattern.sub(replacement, out)
-    return out[:MAX_LINE_CHARS]
+    return out
 
 
 def _tail_lines(path: str, limit: int) -> List[str]:
