@@ -1,3 +1,13 @@
+"""MemoryVectorStore against the embedding lanes.
+
+Commit a43bcb0 ("fix: route tools and simplify retrieval runtime") collapsed
+retrieval to the single local FastEmbed lane described by
+`specs/retrieval-runtime.md`, so the tests that staged a custom HTTP lane
+beside it (`_build_custom_client`) were rewritten for one lane. The assertion
+about search preferring the custom lane's hit went with the lane; nothing else
+here lost coverage.
+"""
+
 from src.embedding_lanes import (
     EmbeddingLane,
     LANE_CUSTOM,
@@ -12,13 +22,12 @@ from tests.helpers.embedding_lanes import (
 )
 
 
-def test_memory_vector_store_writes_both_lanes_and_prefers_custom(monkeypatch):
+def test_memory_vector_store_writes_and_searches_the_fastembed_lane(monkeypatch):
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FakeEmbedder(768, "nomic", "http://embeddings/v1"))
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.memory_vector import MemoryVectorStore
@@ -26,12 +35,12 @@ def test_memory_vector_store_writes_both_lanes_and_prefers_custom(monkeypatch):
     store = MemoryVectorStore("data")
     store.add("mem-1", "Nicholai likes direct memory systems")
 
-    assert fake.collections["odysseus_memories_custom"].count() == 1
+    assert set(fake.collections) == {"odysseus_memories_fastembed"}
     assert fake.collections["odysseus_memories_fastembed"].count() == 1
 
     results = store.search("direct memory", k=5)
     assert results[0]["memory_id"] == "mem-1"
-    assert results[0]["embedding_lane"] == LANE_CUSTOM
+    assert results[0]["embedding_lane"] == LANE_FASTEMBED
 
 
 def test_memory_search_merges_fallback_only_results_before_limit():
@@ -111,13 +120,14 @@ def test_memory_rebuild_does_not_reimport_legacy_collection(monkeypatch):
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: None)
     monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
 
     from src.memory_vector import MemoryVectorStore
 
     store = MemoryVectorStore("data")
-    assert fake.collections["odysseus_memories_fastembed"].count() == 1
+    # Startup imports nothing from the legacy collection, so the lane is empty
+    # before the rebuild and everything in it after one came from `memories`.
+    assert fake.collections["odysseus_memories_fastembed"].count() == 0
 
     store.rebuild([{"id": "current-memory", "text": "current rebuilt memory"}])
 
@@ -168,20 +178,21 @@ def test_memory_remove_deletes_inactive_lane_collection(monkeypatch):
     assert fast_collection.count() == 0
 
 
-def test_memory_rebuild_continues_when_custom_lane_fails(monkeypatch):
+def test_memory_rebuild_survives_a_failing_lane(monkeypatch):
+    """A lane whose embedder fails mid-rebuild is dropped from the rebuild, not
+    raised out of it: `rebuild` is called from the memory audit, which must not
+    take the caller down with the embedder."""
     fake = FakeChroma()
     patch_chroma(monkeypatch, fake)
 
     import src.embedding_lanes as lanes
 
-    monkeypatch.setattr(lanes, "_build_custom_client", lambda: FailingEmbedder(768, "nomic", "http://embeddings/v1"))
-    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FakeEmbedder(384, "mini", "local://fastembed"))
+    monkeypatch.setattr(lanes, "_build_fastembed_client", lambda: FailingEmbedder(384, "mini", "local://fastembed"))
 
     from src.memory_vector import MemoryVectorStore
 
     store = MemoryVectorStore("data")
     store.rebuild([{"id": "current-memory", "text": "current rebuilt memory"}])
 
-    assert fake.collections["odysseus_memories_custom"].count() == 0
-    assert fake.collections["odysseus_memories_fastembed"].count() == 1
-    assert fake.collections["odysseus_memories_fastembed"].get()["ids"] == ["current-memory"]
+    assert store.healthy
+    assert fake.collections["odysseus_memories_fastembed"].count() == 0
