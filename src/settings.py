@@ -184,7 +184,7 @@ DEFAULT_SETTINGS = {
     # long build→test→fix or multi-repository delegation turn is not cut off;
     # the repeat/stall detectors still catch a genuinely stuck loop.
     "agent_max_tool_calls": 500,
-    "agent_max_rounds": 100,  # per-message agent step cap (clamped 1..500)
+    "agent_max_rounds": 100,  # advisory per-message round budget (clamped 1..500); never ends a run
     # Chat UI: fold an agent tool timeline after this many calls in one turn
     # (the first and last few stay visible; a summary bar expands the rest).
     # 0 = never fold.

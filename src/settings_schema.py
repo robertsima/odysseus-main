@@ -568,14 +568,16 @@ register_all([
         advanced=True,
     ),
     SettingSpec(
-        key="agent_input_token_hard_max", type="int", label="Automatic budget ceiling",
-        help="Maximum context budget chosen by automatic scaling; explicit custom budgets can exceed it.",
-        group="Agents", min_value=1000, max_value=2_000_000, step=1000, unit="tokens",
+        key="agent_input_token_hard_max", type="int", label="Agent context cap",
+        help=("Most context the agent sends the model per step when the context budget is automatic: "
+              "85% of the model's window, up to this cap. Explicit custom budgets can exceed it."),
+        group="Agents", min_value=16_000, max_value=2_000_000, step=1000, unit="tokens",
         advanced=True,
     ),
     SettingSpec(
-        key="agent_max_rounds", type="int", label="Maximum agent rounds",
-        help="Safety limit on reasoning/tool rounds in one turn before the agent must finish.",
+        key="agent_max_rounds", type="int", label="Round budget (advisory)",
+        help=("Advisory round budget per message. It does not stop a run; \"Maximum tool calls\", "
+              "stall detection, timeouts and Stop are the real limits."),
         group="Agents", min_value=1, max_value=500, unit="rounds", advanced=True,
     ),
     SettingSpec(

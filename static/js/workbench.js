@@ -141,6 +141,49 @@ function fmtDur(a, b) {
   if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
   return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
 }
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n < 1000) return String(n);
+  if (n < 1e6) return `${n < 10000 ? (n / 1000).toFixed(1) : Math.round(n / 1000)}k`;
+  return `${(n / 1e6).toFixed(1)}M`;
+}
+// A run with no round cap is flagged once it has gone this far: the loop
+// itself never stops it, so this is the only hint that it is still going.
+const PROGRESS_WARN_ROUNDS = 50;
+const PROGRESS_WARN_S = 15 * 60;
+/** A live run's counters (src/headless_agent._track_progress) as one line:
+ *  "round 108 · 23m · 4.1M in (92% cached) · 38k out · read_file".
+ *  Pure, so it is testable without a DOM. `warn` marks an uncapped run that
+ *  has gone long. */
+export function fmtProgress(progress, { startedAt = 0, finishedAt = 0, maxRounds = 0, now = Date.now() / 1000 } = {}) {
+  const p = progress || {};
+  const parts = [];
+  const round = Number(p.round) || 0;
+  if (round) parts.push(maxRounds ? `round ${round}/${maxRounds}` : `round ${round}`);
+  const elapsed = startedAt ? Math.max(0, (finishedAt || now) - startedAt) : 0;
+  if (elapsed >= 60) parts.push(elapsed < 3600 ? `${Math.floor(elapsed / 60)}m` : fmtDur(0, elapsed));
+  const input = Number(p.input_tokens) || 0;
+  if (input) {
+    const cached = Number(p.cached_tokens) || 0;
+    parts.push(`${fmtTokens(input)} in${cached ? ` (${Math.round((100 * cached) / input)}% cached)` : ''}`);
+  }
+  if (Number(p.output_tokens)) parts.push(`${fmtTokens(p.output_tokens)} out`);
+  if (p.current_tool) parts.push(String(p.current_tool));
+  const warn = !maxRounds && (round > PROGRESS_WARN_ROUNDS || elapsed > PROGRESS_WARN_S);
+  return { text: parts.join(' · '), warn };
+}
+function progressHtml(run, cls) {
+  const server = state.agentRuns.get(run.run_id);
+  const progress = run.progress || (server && server.progress);
+  if (!progress) return '';
+  const d = run.data || {};
+  const { text, warn } = fmtProgress(progress, {
+    startedAt: run.started_at, finishedAt: run.finished_at, maxRounds: Number(d.max_rounds) || 0,
+  });
+  if (!text) return '';
+  const hint = warn ? 'No round limit and still going; consider Wrap up' : 'Live counters for this run';
+  return `<span class="${cls}${warn ? ' wb-text-warn' : ''}" title="${esc(hint)}">${esc(text)}</span>`;
+}
 /** A path as dimmed directory + emphasised file name; the directory is what
  *  truncates, so the file name stays readable in narrow lists. */
 function pathHtml(path) {
@@ -361,6 +404,7 @@ function stripRuns() {
       run_id: row.run_id, source: row.source, session_id: row.session_id,
       title: row.title, status: row.status, started_at: row.started_at,
       finished_at: row.finished_at, data: row.summary || {}, detail: row.detail || '',
+      progress: row.progress || null,
     });
   }
   // A run the browser has seen live but the server has not listed yet (the
@@ -420,7 +464,9 @@ function stripRowHtml(run) {
     <span class="agent-strip-activity" title="${esc(latestActivity(run))}">${esc(latestActivity(run))}</span>
     <span class="agent-strip-time" data-started="${run.started_at || ''}" data-running="${running ? 1 : 0}">${esc(fmtDur(run.started_at, end))}</span>
     <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="open" data-run="${esc(run.run_id)}" title="${esc(openTitle)}">${openLabel}</button>
+    ${running ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-strip-act="wrap-up" data-run="${esc(run.run_id)}" title="Ask it to finish from what it already has within a round or two">Wrap up</button>` : ''}
     ${running ? `<button type="button" class="wb-btn wb-btn-sm" data-strip-act="stop" data-run="${esc(run.run_id)}" title="Stop this run; its partial result goes back to the chat">Stop</button>` : ''}
+    ${running ? progressHtml(run, 'agent-strip-progress') : ''}
   </div>`;
 }
 function renderAgentStrip() {
@@ -495,6 +541,20 @@ async function onStripAction(btn) {
       open(); loadTask(d.task_id);
     } else {
       open(); state.focusRun = run.run_id; setTab('activity');
+    }
+    return;
+  }
+  if (act === 'wrap-up') {
+    btn.disabled = true;
+    btn.textContent = 'Asking…';
+    try {
+      await post(`/api/workbench/runs/${encodeURIComponent(run.run_id)}/wrap-up`, {});
+      showToast('Asked it to wrap up; its result comes back within a round or two', 'success');
+      btn.textContent = 'Asked';
+    } catch (e) {
+      showToast(`Could not ask it to wrap up: ${e.message}`, 'warning');
+      btn.disabled = false;
+      btn.textContent = 'Wrap up';
     }
     return;
   }
@@ -680,7 +740,8 @@ function runCardHtml(run) {
   if (run.source === 'session' && d.target_session) {
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-open-chat" data-run="${esc(run.run_id)}" title="Open this agent's chat">Open chat</button>`);
   }
-  if (run.status === 'running') {
+  if (isLive(run.status)) {
+    actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-wrap-up" data-run="${esc(run.run_id)}" title="Ask it to finish from what it already has within a round or two">Wrap up</button>`);
     actions.push(`<button type="button" class="wb-btn wb-btn-sm" data-wb-act="run-stop" data-run="${esc(run.run_id)}" title="Stop this run; partial work remains available">Stop</button>`);
   }
   const excerpt = d.error || d.result_excerpt;
@@ -692,7 +753,8 @@ function runCardHtml(run) {
       <span class="wb-run-dur">${esc(dur)}</span>
     </div>
     <div class="wb-run-meta">${meta.join('')}</div>
-    ${excerpt && run.status !== 'running' ? `<div class="wb-run-excerpt${d.error ? ' wb-text-bad' : ''}">${esc(excerpt)}</div>` : ''}
+    ${isLive(run.status) ? progressHtml(run, 'wb-run-meta wb-run-progress') : ''}
+    ${excerpt && !isLive(run.status) ? `<div class="wb-run-excerpt${d.error ? ' wb-text-bad' : ''}">${esc(excerpt)}</div>` : ''}
     ${actions.length ? `<div class="wb-run-actions">${actions.join('')}</div>` : ''}
   </div>`;
 }
@@ -1380,6 +1442,7 @@ function onAction(b) {
     case 'run-transcript': showTranscript(b.dataset.task); break;
     case 'run-open-chat': openRunChat(b.dataset.run); break;
     case 'run-stop': stopWorkbenchRun(b.dataset.run); break;
+    case 'run-wrap-up': wrapUpWorkbenchRun(b.dataset.run); break;
     case 'unfocus': state.focusRun = null; renderActivity(); break;
     case 'popout': popout(state.selectedFile || 'Diff', renderDiffText(state.diffText || '', { mode: state.prefs.mode, path: state.selectedFile })); break;
     case 'popout-commit': { const k = state.selectedCommit; if (k && k.selectedFile) popout(`${(k.sha || '').slice(0, 7)} · ${k.selectedFile}`, renderDiffText(k.diffText || '', { mode: state.prefs.mode, path: k.selectedFile })); break; }
@@ -1406,7 +1469,7 @@ function openRunChat(runId) {
 
 async function stopWorkbenchRun(runId) {
   const run = state.runs.get(runId);
-  if (!run || run.status !== 'running') return;
+  if (!run || !isLive(run.status)) return;
   try {
     const result = await post(`/api/workbench/runs/${encodeURIComponent(runId)}/stop`, {});
     showToast(
@@ -1415,6 +1478,17 @@ async function stopWorkbenchRun(runId) {
     );
   } catch (error) {
     showToast(`Could not stop run: ${error.message}`, 'error');
+  }
+}
+
+async function wrapUpWorkbenchRun(runId) {
+  const run = state.runs.get(runId);
+  if (!run || !isLive(run.status)) return;
+  try {
+    await post(`/api/workbench/runs/${encodeURIComponent(runId)}/wrap-up`, {});
+    showToast('Asked the run to wrap up; its result comes back within a round or two', 'success');
+  } catch (error) {
+    showToast(`Could not ask the run to wrap up: ${error.message}`, 'warning');
   }
 }
 

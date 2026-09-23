@@ -1,0 +1,12 @@
+# Reviewed gitleaks false positives: fake credentials in test fixtures that
+# exist to prove redaction and key-file refusal work. None is a real secret.
+# Format: <commit>:<file>:<rule>:<line> (the fingerprint gitleaks prints).
+#
+# Stub "BEGIN RSA PRIVATE KEY" header line with no key body (file-tool refusal test).
+8a7e6dc23892932dd3d5d0e1b3825d1cffe25313:tests/test_agent_worktree_policy.py:private-key:251
+# Example api_key / JWT strings the log redaction tests feed in.
+7f3edbd3412dc3b585a4653d47d4148e4a3fb5a1:tests/test_agent_log_access.py:generic-api-key:99
+7f3edbd3412dc3b585a4653d47d4148e4a3fb5a1:tests/test_agent_log_access.py:generic-api-key:101
+7f3edbd3412dc3b585a4653d47d4148e4a3fb5a1:tests/test_agent_log_access.py:jwt:106
+# Placeholder "sk-live-abc..." the profile-export redaction test checks is stripped.
+46acaafd6a017b0e1ac90accf079c60be5986bf6:tests/test_agent_profile_transfer.py:generic-api-key:74

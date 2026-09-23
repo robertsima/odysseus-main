@@ -125,6 +125,11 @@ GITHUB_MCP_READ_TOOLS = (
     "actions_list",
     "actions_get",
     "get_job_logs",
+    # The server's own instructions tell the model to call get_me first, and
+    # list_issues / search_pull_requests are the plain ways to browse; all read-only.
+    "get_me",
+    "list_issues",
+    "search_pull_requests",
 )
 
 # add_comment_to_pending_review is the other half of pull_request_review_write:

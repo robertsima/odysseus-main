@@ -5,7 +5,10 @@ Odysseus never talks to Anthropic itself on this path. It runs the unmodified
 with the operator's own Claude login or API key doing the authentication. The
 harness never reads, stores, or forwards those credentials: the only thing it
 hands the child is (optionally) a scoped *Odysseus* token so Claude can call
-back into this instance during the job.
+back into this instance during the job. The child's environment is an
+allowlist (``_base_child_environment``), not the server's: no GitHub or other
+server credentials reach it, deletes/force/remote commands are denied with
+``--disallowedTools``, and its output is redacted before the model sees it.
 
 Two ways in:
 
@@ -103,13 +106,40 @@ SAFE_TOOL = re.compile(
     rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\)"
     rf"|Bash\({_CALLBACK_HELPER}(?::\*)?\))$"
 )
+# Deny rules passed as ``--disallowedTools`` on every run, whatever the
+# allowlist says. Claude Code evaluates deny before allow, so these close the
+# gaps a prefix-matched allow rule leaves open — ``Bash(git branch:*)`` would
+# otherwise also permit ``git branch -D main`` — and keep deleting or
+# rewriting history, touching a remote, and GitHub CLI access out of reach
+# even if a future allowlist entry is too broad. Delegated Claude may edit
+# and commit; it may not delete, force, or publish.
+DISALLOWED_TOOLS = (
+    # Filesystem deletion.
+    "Bash(rm:*)", "Bash(rmdir:*)", "Bash(unlink:*)", "Bash(shred:*)",
+    "Bash(find:*)", "Bash(xargs:*)", "Bash(sudo:*)",
+    # Branch/tag/ref deletion and force-moves.
+    "Bash(git branch -d:*)", "Bash(git branch -D:*)", "Bash(git branch --delete:*)",
+    "Bash(git branch -f:*)", "Bash(git branch --force:*)", "Bash(git branch -M:*)",
+    "Bash(git tag -d:*)", "Bash(git tag --delete:*)", "Bash(git update-ref:*)",
+    # History and working-tree destruction.
+    "Bash(git reset:*)", "Bash(git clean:*)", "Bash(git rm:*)", "Bash(git checkout:*)",
+    "Bash(git restore:*)", "Bash(git stash:*)", "Bash(git rebase:*)",
+    "Bash(git filter-branch:*)", "Bash(git reflog:*)", "Bash(git gc:*)", "Bash(git prune:*)",
+    "Bash(git worktree:*)", "Bash(git commit --amend:*)",
+    # Remotes and credentials: Claude never publishes (see _base_child_environment).
+    "Bash(git push:*)", "Bash(git pull:*)", "Bash(git fetch:*)", "Bash(git clone:*)",
+    "Bash(git remote:*)", "Bash(git config:*)", "Bash(git credential:*)",
+    "Bash(gh:*)", "Bash(curl:*)", "Bash(wget:*)",
+    # Reading the environment back.
+    "Bash(env:*)", "Bash(printenv:*)", "Bash(set:*)", "Bash(export:*)",
+)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]{1,80}$")
 # Flags the runner adapts to. Claude Code < 2.1.259 has no
 # --permission-prompts (prompts are denied anyway in a hostless -p run) and
 # older builds have no --restricted; both are detected from --help rather
 # than guessed from the version string.
 _OPTIONAL_FLAGS = ("--permission-prompts", "--restricted", "--bare", "--model",
-                   "--tools", "--allowedTools", "--no-session-persistence",
+                   "--tools", "--allowedTools", "--disallowedTools", "--no-session-persistence",
                    "--output-format", "--verbose", "--include-partial-messages")
 # Lines of the live transcript kept on the task record (the activity feed
 # keeps its own bounded copy per session).
@@ -378,19 +408,99 @@ def default_tools() -> list[str]:
     return tools
 
 
+# ── Child environment ──
+#
+# The child gets an allowlisted environment, never ``os.environ``. The server
+# process holds GitHub tokens (GITHUB_PERSONAL_ACCESS_TOKEN,
+# ODYSSEUS_AGENT_GITHUB_TOKEN, GitHub App keys), provider API keys, OAuth
+# client secrets, database URLs and SMTP passwords; anything placed in the
+# child's environment can be read back with `env` or `echo $X` by the
+# delegated session, whatever the calling session was allowed to see. Only
+# what the CLI needs to start, reach the network and authenticate is passed.
+_CHILD_ENV_EXACT = frozenset({
+    # Process basics: find binaries (git, node, the test runners), know who
+    # we are, pick a shell for Bash tool calls, and a temp dir. HOME is set
+    # separately to the Claude home.
+    "PATH", "USER", "LOGNAME", "SHELL", "TMPDIR", "TEMP", "TMP", "TZ",
+    # Terminal / locale, so output encoding and colour handling are sane.
+    "TERM", "COLORTERM", "NO_COLOR", "LANG", "LANGUAGE",
+    # Outbound network: containers commonly reach Anthropic through a proxy
+    # that re-signs TLS, so the proxy and CA bundle variables must survive or
+    # the CLI cannot connect at all.
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "ALL_PROXY",
+    "http_proxy", "https_proxy", "no_proxy", "all_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS", "GIT_SSL_CAINFO",
+    # Where Claude Code keeps its own login and settings (_claude_config_dir).
+    "CLAUDE_CONFIG_DIR",
+    # Claude Code's own authentication and endpoint. ANTHROPIC_API_KEY /
+    # ANTHROPIC_AUTH_TOKEN / CLAUDE_CODE_OAUTH_TOKEN are the *only* secrets
+    # the child receives, and it can read whichever one is set: the CLI
+    # cannot authenticate otherwise. A subscription login stored under
+    # CLAUDE_CONFIG_DIR needs none of them.
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL", "ANTHROPIC_SMALL_FAST_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    # Claude Code behaviour switches (no secrets).
+    "DISABLE_AUTOUPDATER", "DISABLE_TELEMETRY", "DISABLE_ERROR_REPORTING",
+    "DISABLE_COST_WARNINGS", "DISABLE_NON_ESSENTIAL_MODEL_CALLS",
+})
+# Locale categories (LC_ALL, LC_CTYPE, ...) and Claude Code's own
+# CLAUDE_CODE_* switches (CLAUDE_CODE_MAX_OUTPUT_TOKENS, ...).
+_CHILD_ENV_PREFIXES = ("LC_", "CLAUDE_CODE_")
+# CLAUDE_CODE_* names that are *Odysseus* configuration, not Claude Code's:
+# the child has no use for them, and the token-file path points at the
+# callback credential.
+_ODYSSEUS_CLAUDE_CODE_VARS = frozenset({
+    "CLAUDE_CODE_BINARY", "CLAUDE_CODE_REPOSITORY_ROOTS", "CLAUDE_CODE_DEFAULT_REPOSITORY",
+    "CLAUDE_CODE_MAX_CONCURRENT_TASKS", "CLAUDE_CODE_HOME", "CLAUDE_CODE_ODYSSEUS_URL",
+    "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE",
+})
+# A prefix-allowed name that still looks like a credential is dropped unless
+# it is listed explicitly above (CLAUDE_CODE_OAUTH_TOKEN is). Also used to
+# pick the server-side values masked out of child output.
+_SECRET_NAME = re.compile(r"(?i)(TOKEN(?!S)|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|AUTH(?!OR)|COOKIE|SESSION|PRIVATE|DSN|DATABASE_URL)")
+
+
+def _child_env_allowed(name: str) -> bool:
+    if name in _CHILD_ENV_EXACT:
+        return True
+    if name in _ODYSSEUS_CLAUDE_CODE_VARS:
+        return False
+    return name.startswith(_CHILD_ENV_PREFIXES) and not _SECRET_NAME.search(name)
+
+
+def _base_child_environment() -> dict[str, str]:
+    """The allowlisted environment every ``claude`` process gets (probes too).
+
+    Deliberately absent: every GitHub credential (GITHUB_*, GH_TOKEN,
+    ODYSSEUS_AGENT_GITHUB_TOKEN, GIT_ASKPASS, SSH_AUTH_SOCK, GIT_CONFIG_*
+    credential helpers). Claude commits in the local checkout only;
+    publishing goes through Odysseus' own human-gated path
+    (manage_agent_worktree request_publish/publish), so the child never
+    authenticates to GitHub. :data:`DISALLOWED_TOOLS` denies the matching
+    commands.
+    """
+    env = {name: value for name, value in os.environ.items() if _child_env_allowed(name)}
+    env["HOME"] = _claude_home()
+    # No TTY in a headless run: fail fast instead of hanging on a git
+    # credential prompt until the timeout.
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 def _claude_environment() -> dict[str, str]:
     """Build the child environment without persisting or exposing secrets.
 
-    A deployment may give delegated Claude sessions scoped access back to
-    Odysseus with a private token file. Keeping the token out of argv avoids
-    process-list exposure; the child receives it only in its environment.
-    The child's own Anthropic credentials (its OAuth login or API key) are
-    never read here — the unmodified binary resolves them itself.
+    Starts from :func:`_base_child_environment` — an allowlist, never
+    ``os.environ``. A deployment may give delegated Claude sessions scoped
+    access back to Odysseus with a private token file. Keeping the token out
+    of argv avoids process-list exposure; the child receives it only in its
+    environment (it is scoped to the /api/codex/* callback, which is the
+    point of handing it over).
     """
-    env = {
-        **os.environ,
-        "HOME": _claude_home(),
-    }
+    env = _base_child_environment()
     callback = _callback_config()
     if callback["url"]:
         env["ODYSSEUS_URL"] = callback["url"]
@@ -410,6 +520,56 @@ def _claude_environment() -> dict[str, str]:
             raise ValueError("Claude Code Odysseus token file is empty")
         env["ODYSSEUS_API_TOKEN"] = token
     return env
+
+
+# ── Output redaction ──
+
+def _secret_values() -> list[str]:
+    """Server-side secret values, longest first, for exact-match masking of
+    anything the child prints back (a checkout's .env, a test that echoes a
+    key, Claude's own API key in an error)."""
+    values = {value for name, value in os.environ.items()
+              if value and len(value) >= 8 and _SECRET_NAME.search(name)}
+    token_file = _callback_config()["token_file"]
+    if token_file:
+        try:
+            token = Path(token_file).expanduser().read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeDecodeError):
+            token = ""
+        if len(token) >= 8:
+            values.add(token)
+    return sorted(values, key=len, reverse=True)
+
+
+def _redact(value: Any, secrets: list[str]) -> Any:
+    """Scrub child-produced text (recursing into lists/dicts) before it reaches
+    the model or the activity feed: exact server secret values first, then
+    the credential shapes :func:`src.agent_logs.redact_text` knows."""
+    if isinstance(value, str):
+        if not value:
+            return value
+        for secret in secrets:
+            value = value.replace(secret, "***")
+        from src.agent_logs import redact_text
+        return redact_text(value)
+    if isinstance(value, list):
+        return [_redact(item, secrets) for item in value]
+    if isinstance(value, dict):
+        return {key: _redact(item, secrets) for key, item in value.items()}
+    return value
+
+
+# Fields of a run result that carry child-produced text.
+_CHILD_TEXT_FIELDS = ("output", "stderr", "error", "result", "transcript", "permission_denials", "claude",
+                      "commits")
+
+
+def _redact_result(result: dict, secrets: Optional[list[str]] = None) -> dict:
+    secrets = _secret_values() if secrets is None else secrets
+    for key in _CHILD_TEXT_FIELDS:
+        if key in result:
+            result[key] = _redact(result[key], secrets)
+    return result
 
 
 def _canonical_allowed_tool(value: str) -> str:
@@ -584,9 +744,11 @@ def _with_dropped(result: dict, parsed: dict) -> dict:
 # ── Binary probing ──
 
 async def _capture(binary: Path, *args: str, timeout: float = 30, env: Optional[dict] = None) -> tuple[int, str]:
+    # Probes (--version, --help) get the same allowlisted environment as a
+    # run, never the server's full one.
     proc = await asyncio.create_subprocess_exec(
         str(binary), *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env=env, cwd=str(binary.parent),
+        env=env if env is not None else _base_child_environment(), cwd=str(binary.parent),
     )
     try:
         out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -648,7 +810,8 @@ async def auth_status(binary: Optional[Path] = None) -> dict:
     except json.JSONDecodeError:
         parsed = {}
     if not isinstance(parsed, dict) or not parsed:
-        return {"checked": True, "logged_in": None, "error": out.strip()[-400:] or f"exit {code}"}
+        return {"checked": True, "logged_in": None,
+                "error": _redact(out.strip()[-400:], _secret_values()) or f"exit {code}"}
     return {
         "checked": True,
         "logged_in": bool(parsed.get("loggedIn")),
@@ -784,6 +947,12 @@ def _build_argv(binary: Path, prompt: str, tools: list[str], flags: list[str], *
         argv.append("--restricted")
     if model and "--model" in flags:
         argv += ["--model", model]
+    if "--disallowedTools" in flags:
+        # Deny rules win over allow rules: no delete, force, or remote access
+        # even where an allowed prefix would otherwise cover it. Placed before
+        # the variadic --tools/--allowedTools pair so each list ends at the
+        # next option.
+        argv += ["--disallowedTools", *DISALLOWED_TOOLS]
     argv += ["--tools", *tool_names, "--allowedTools", *tools]
     return argv
 
@@ -864,18 +1033,23 @@ class _Transcript:
         self.truncated = False
         self.envelope: Optional[dict] = None
         self.tool_names: dict[str, str] = {}
+        # Tool results carry whatever Claude read or ran; both the task
+        # record and the activity feed see them only redacted.
+        self.secrets = _secret_values()
 
     def _add(self, entry: dict) -> None:
         if len(self.entries) >= MAX_TRANSCRIPT_ENTRIES:
             self.truncated = True
             return
+        entry = _redact(entry, self.secrets)
         entry["ts"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
         self.entries.append(entry)
 
     def _publish(self, kind: str, title: str, *, detail: Optional[str] = None,
                  data: Optional[dict] = None, level: str = "info") -> None:
-        activity.publish(self.session_id, kind, title, source="claude_code", run_id=self.run_id,
-                         owner=self.owner, detail=detail, data=data, level=level)
+        activity.publish(self.session_id, kind, _redact(title, self.secrets), source="claude_code",
+                         run_id=self.run_id, owner=self.owner, detail=_redact(detail, self.secrets),
+                         data=_redact(data, self.secrets), level=level)
 
     def feed(self, raw: bytes) -> None:
         line = raw.decode("utf-8", errors="replace").strip()
@@ -1101,6 +1275,7 @@ async def _run_claude(
             result = {"error": f"Claude Code timed out after {timeout}s", "exit_code": 124,
                       "repository": str(repository), "transcript": transcript.entries}
             result.update(await _git_changes(repository, start_sha))
+            _redact_result(result, transcript.secrets)
             _finish_run(ctx, run_id, title, result)
             return result
         except asyncio.CancelledError:
@@ -1151,6 +1326,10 @@ async def _run_claude(
                 result["output_truncated"] = len(full_out) > RAW_TAIL_ON_ENVELOPE
         result.update(await _git_report(repository))
         result.update(await _git_changes(repository, start_sha))
+        # Everything above that came from the child (stdout, stderr, the
+        # envelope, error text, commit subjects) is redacted before it is
+        # returned to the model or published.
+        _redact_result(result, transcript.secrets)
         _finish_run(ctx, run_id, title, result)
         return result
 

@@ -298,30 +298,30 @@ FUNCTION_TOOL_SCHEMAS = [
             "strict": False,
             "description": (
                 "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
-                "Git workflows in approved local checkouts: repositories, status, diff, log, "
+                "Git workflows in approved local checkouts (configured roots and the active workspace's checkout): repositories, status, diff, log, "
                 "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
-                "stash_list/create/apply/pop/drop, push, force_push_with_lease, merge, reset, rebase, delete_branch, delete_remote_branch, set_upstream. "
+                "stash_list/create/apply/pop, push, merge, reset, rebase, set_upstream. "
                 "No shell/private-vault grant needed. "
                 "Use absolute repository paths from repositories. Stage explicit relative files; "
                 "commit uses local identity or supplied author. Pull/merge fast-forward only. "
                 "After first push, set_upstream can bind the current branch to its fetched/pushed "
                 "remote_branch on an existing configured remote; never replaces an upstream. "
-                "Push/merge/deletion/history rewrites and stash deletion require fresh confirmation bound to exact revisions. "
-                "Force push is force-with-lease only. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
+                "Push/merge/history rewrites require fresh confirmation bound to exact revisions. "
+                "Policy refuses every delete (branches, remote branches, stashes), force push and discard of work; no approval re-enables them. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
                 "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
                 "Odysseus self-publishing still uses manage_agent_worktree."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "stash_drop", "push", "force_push_with_lease", "merge", "reset", "rebase", "delete_branch", "delete_remote_branch", "set_upstream"]},
+                    "action": {"type": "string", "enum": ["repositories", "status", "diff", "log", "branches", "remotes", "clone", "init", "stage", "unstage", "commit", "branch", "tag", "switch", "fetch", "fetch_branch", "pull", "pull_with_restore", "stash_list", "stash_create", "stash_apply", "stash_pop", "push", "merge", "reset", "rebase", "set_upstream"]},
                     "repository": {"type": "string", "description": "All actions except repositories: absolute checkout path; clone/init use the new target path"},
-                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL"},
+                    "source": {"type": "string", "description": "clone only: credential-free https://github.com/owner/repository URL (or the configured GitHub Enterprise host)"},
                     "branch": {"type": "string", "description": "clone only: optional remote branch"},
                     "depth": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "clone only: optional shallow history depth"},
                     "initial_branch": {"type": "string", "description": "init only: initial branch, default main"},
                     "paths": {"type": "array", "items": {"type": "string"}, "maxItems": 100, "description": "stage/unstage only: exact relative file paths; no globs"},
-                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch/delete_branch)"},
+                    "name": {"type": "string", "description": "Branch/tag name (branch/tag/switch)"},
                     "ref": {"type": "string", "description": "Existing revision for log, branch, tag or merge"},
                     "message": {"type": "string", "description": "Commit or stash_create message"},
                     "index": {"type": "integer", "minimum": 0, "maximum": 99, "description": "stash action only: stash index, default 0"},
@@ -329,7 +329,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "author_email": {"type": "string", "description": "commit only: omit to use local Git identity"},
                     "limit": {"type": "integer", "minimum": 1, "maximum": 50, "description": "log only: maximum commits (default 20)"},
                     "staged": {"type": "boolean", "description": "diff only: compare index versus HEAD (default false)"},
-                    "remote_branch": {"type": "string", "description": "fetch_branch/push/force_push_with_lease/delete_remote_branch/set_upstream: configured remote's branch name"},
+                    "remote_branch": {"type": "string", "description": "fetch_branch/push/set_upstream: configured remote's branch name"},
                     "remote": {"type": "string", "description": "fetch_branch/set_upstream only: existing configured remote name; omit when origin or one remote is unambiguous"},
                     "expected_head": {"type": "string", "description": "Exact current HEAD being confirmed for publish/integration/history rewrite"},
                     "expected_target": {"type": "string", "description": "Exact target/stash/remote-lease commit being confirmed; 40 zeros means absent remote for force-with-lease"}
@@ -365,7 +365,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request", "remove",
+                                 "publish", "list_requests", "show_request",
                                  "repo_list", "repo_status", "repo_pull"],
                         "description": "Operation to perform (default: status)"
                     },
@@ -1340,7 +1340,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop"], "description": "Default list. stop = actually stop a worker this chat started (run_id from start/status; or worker_session); use it when the user says to stop/cancel a worker, not message_agent. capabilities = the ceiling a loadout authored here may reach. preflight = READY/DEGRADED/BLOCKED for a saved loadout right now: each tool's state, selected skills' dependencies, document-index currency, indexed vs raw private access, web lookup, with the repair for each failure. start = launch a worker: REQUIRES 'task' (optionally 'name'), e.g. {\"action\":\"start\",\"name\":\"Auditor\",\"task\":\"Review X and report Y\"}. status = what the workers this chat started actually did, including which ran out of rounds. Use status instead of searching logs or guessing."},
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop", "export", "import"], "description": "Default list. export = the saved loadouts (all, or 'names') as a portable JSON document. import = store a document from export ('document', 'mode'); each loadout is clamped to this chat's policy exactly as create is. stop = actually stop a worker this chat started (run_id from start/status; or worker_session); use it when the user says to stop/cancel a worker, not message_agent. capabilities = the ceiling a loadout authored here may reach. preflight = READY/DEGRADED/BLOCKED for a saved loadout right now: each tool's state, selected skills' dependencies, document-index currency, indexed vs raw private access, web lookup, with the repair for each failure. start = launch a worker: REQUIRES 'task' (optionally 'name'), e.g. {\"action\":\"start\",\"name\":\"Auditor\",\"task\":\"Review X and report Y\"}. status = what the workers this chat started actually did, including which ran out of rounds. Use status instead of searching logs or guessing."},
                     "detail": {"type": "boolean", "description": "capabilities ONLY: include the complete allowed tool-name list. Omit for the compact count/examples summary. Not a start parameter."},
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
                     "task": {"type": "string", "description": "REQUIRED for start: the whole assignment, in full. The worker begins with no other context — it has not seen this conversation. A start without task does nothing."},
@@ -1366,13 +1366,17 @@ FUNCTION_TOOL_SCHEMAS = [
                     "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
-                    "max_rounds": {"type": "integer", "description": "Agent rounds the worker may take (1-40)."},
+                    "max_rounds": {"type": "integer", "description": "Advisory round budget for the worker (0 = unlimited, the default; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."},
                     "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
                     "run_id": {"type": "string", "description": "stop only: the worker run to stop (from start/status). Omit when exactly one worker is running."},
                     "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},
                     "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
                     "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "start only: what the task needs. A worker that cannot meet a need is refused before it starts, with the fix."},
-                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."}
+                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."},
+                    "names": {"type": "array", "items": {"type": "string"}, "description": "export only: loadouts to export. Omit for all."},
+                    "document": {"type": "object", "description": "import only: the JSON document an export returned ({\"format\": \"odysseus-agent-profiles\", \"version\": 1, \"profiles\": [...]})."},
+                    "mode": {"type": "string", "enum": ["merge", "replace"], "description": "import only: merge (default) adds new loadouts and overwrites same-named ones; replace makes the document the whole list."},
+                    "rename_conflicts": {"type": "boolean", "description": "import merge only: store a same-named loadout under a new name instead of overwriting."}
                 },
                 "required": ["action"]
             }
@@ -1395,7 +1399,7 @@ FUNCTION_TOOL_SCHEMAS = [
                             "skills": {"type": "array", "items": {"type": "string"}},
                             "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
                             "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},
-                            "max_rounds": {"type": "integer", "minimum": 1, "maximum": 40}
+                            "max_rounds": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Advisory round budget for this specialist (0 = unlimited; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."}
                         }, "required": ["name", "task", "tools"]
                     }},
                     "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {

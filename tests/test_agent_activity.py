@@ -247,3 +247,39 @@ def test_global_history_is_bounded(data_dir):
     for i in range(60):
         act.publish(f"chat-{i % 5}", "note", f"event {i}", source="system")
     assert len(act.history(act.GLOBAL_FEED, limit=10)) == 10
+
+
+def test_note_progress_merges_into_the_run_without_publishing(data_dir):
+    rid = act.run_started("s-prog", "session", "Worker: long task")
+    before = act.last_seq("s-prog")
+    act.note_progress(rid, round=3, input_tokens=1000)
+    act.note_progress(rid, round=4, current_tool="read_file")
+    # Counters change every round; they must not spend the 500-event ring.
+    assert act.last_seq("s-prog") == before
+    rec = act.get_run(rid)
+    assert rec["progress"] == {"round": 4, "input_tokens": 1000, "current_tool": "read_file"}
+    listed = act.list_runs(session_id="s-prog")[0]
+    assert listed["progress"]["round"] == 4
+    # A copy: mutating what a caller got never reaches the registry.
+    listed["progress"]["round"] = 99
+    assert act.get_run(rid)["progress"]["round"] == 4
+    # Unknown runs and a missing id are ignored, never raised.
+    act.note_progress("nope", round=1)
+    act.note_progress(None, round=1)
+
+
+def test_note_progress_is_persisted_at_a_bounded_rate(data_dir, monkeypatch):
+    rid = act.run_started("s-prog2", "session", "Worker")
+    saves = []
+    real_save = act._save_runs
+    monkeypatch.setattr(act, "_save_runs", lambda: (saves.append(1), real_save()))
+    clock = [1000.0]
+    monkeypatch.setattr(act.time, "time", lambda: clock[0])
+    for i in range(10):
+        act.note_progress(rid, round=i)
+    assert len(saves) == 1
+    clock[0] += act.PROGRESS_SAVE_S
+    act.note_progress(rid, round=11)
+    assert len(saves) == 2
+    act._reset_for_tests()  # a restart reads back the last saved counters
+    assert act.get_run(rid)["progress"]["round"] == 11

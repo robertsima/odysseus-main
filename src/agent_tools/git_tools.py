@@ -15,12 +15,45 @@ from src.git_tool_contract import (
     REQUIRED_REVISIONS,
     RISKY_ACTIONS,
     normalize_git_arguments,
+    policy_refusal,
 )
 from src.tool_utils import _parse_tool_args
 
 from .worktree_tools import _err, _repository_read_token
 
 logger = logging.getLogger(__name__)
+
+
+# Credential shapes a Git result must never carry. Narrower than
+# src.agent_logs.redact_text on purpose: that one also strips URL query
+# strings and every `password=`/`secret:` value, which would silently rewrite
+# ordinary source lines in a diff the agent is reviewing.
+_GIT_SECRET_PATTERNS = (
+    # https://user:token@host/... and https://token@host/... -> https://***@host/...
+    (re.compile(r"(?i)\b([a-z][a-z0-9+.\-]*://)[^/\s\"'<>@]+@"), r"\1***@"),
+    (re.compile(r"\bgh[pousr]_[A-Za-z0-9]{20,}"), "***"),
+    (re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}"), "***"),
+    (re.compile(r"(?i)\bx-access-token:[^@\s\"']+"), "x-access-token:***"),
+    (re.compile(r"(?i)\b(authorization\s*:\s*(?:bearer|token|basic)\s+)[^\s\"',;]+"), r"\1***"),
+)
+
+
+def _redact_output(value):
+    """Strip credential material from every string a Git result carries.
+
+    Remotes are already refused unless credential-free, but commit messages,
+    diffs, branch names and error text are repository content, and a token
+    pasted into any of them must not reach the model.
+    """
+    if isinstance(value, str):
+        for pattern, replacement in _GIT_SECRET_PATTERNS:
+            value = pattern.sub(replacement, value)
+        return value
+    if isinstance(value, dict):
+        return {k: _redact_output(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_output(v) for v in value]
+    return value
 
 
 def _write_token(ctx: dict) -> str | None:
@@ -41,10 +74,11 @@ def _write_token(ctx: dict) -> str | None:
         not isinstance(allowed, list) or not {"*", "github_write"}.intersection(allowed)
     ):
         return None
-    # The shared credential is usable only at the fixed public GitHub host.
+    # The shared credential is usable only at its own host (github.com or
+    # GITHUB_HOST); repository_sync._transport drops it for any other remote.
     from src.github_credentials import github_token_from_env
 
-    return github_token_from_env(public_only=True)
+    return github_token_from_env()
 
 
 class GitTool:
@@ -70,6 +104,11 @@ class GitTool:
         except ValueError:
             return _err("Git requires JSON arguments.", code="invalid_arguments"), None, None
         action = str(args.get("action") or "repositories").strip().lower()
+        # Deletes, force pushes and discards are refused outright -- first, so
+        # no approval is ever requested for them.
+        refusal = policy_refusal(action)
+        if refusal:
+            return _err(refusal, code="forbidden_by_policy"), args, action
         allowed = LOCAL_ACTIONS.get(
             action,
             CREATION_ACTIONS.get(
@@ -130,6 +169,11 @@ class GitTool:
         return None, args, action
 
     async def execute(self, content: str, ctx: dict) -> dict:
+        # Every result and error, including RepositorySyncError text, is
+        # redacted on the way out.
+        return _redact_output(await self._execute(content, ctx))
+
+    async def _execute(self, content: str, ctx: dict) -> dict:
         from src.tool_security import owner_is_admin_or_single_user
 
         if not owner_is_admin_or_single_user(ctx.get("owner")):

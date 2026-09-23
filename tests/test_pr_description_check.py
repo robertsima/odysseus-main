@@ -47,7 +47,7 @@ Run the focused checker regression tests and inspect their exact assertions.
 """
 
 
-def _run_checker(files, body, *, missing_labels=(), draft=False):
+def _run_checker(files, body, *, missing_labels=(), draft=False, has_issues=None):
     harness = r"""
 const checkPrDescription = require(process.argv[1]);
 const input = JSON.parse(process.argv[2]);
@@ -88,6 +88,7 @@ const context = {
       body: input.body,
       draft: input.draft,
     },
+    ...(input.hasIssues === null ? {} : { repository: { has_issues: input.hasIssues } }),
   },
   repo: { owner: 'odysseus-dev', repo: 'odysseus' },
 };
@@ -109,6 +110,7 @@ checkPrDescription({ github, context, core })
             "body": body,
             "missingLabels": list(missing_labels),
             "draft": draft,
+            "hasIssues": has_issues,
         }
     )
     proc = subprocess.run(
@@ -325,3 +327,25 @@ def test_privileged_pr_workflow_executes_only_base_code():
     assert "ref: ${{ github.base_ref }}" in workflow
     assert "persist-credentials: false" in workflow
     assert "github.event.pull_request.head" not in workflow
+
+
+def _without_issue_link(body):
+    return body.replace("Fixes #5934", "None. The repository has Issues turned off.")
+
+
+def test_linked_issue_is_required_while_issues_are_enabled():
+    for has_issues in (None, True):
+        calls = _run_checker(["README.md"], _without_issue_link(_body()), has_issues=has_issues)
+
+        assert any(call["method"] == "setFailed" for call in calls)
+        assert "Linked Issue" in _comment(calls)
+
+
+def test_linked_issue_is_not_required_when_issues_are_disabled():
+    """With Issues off there is nothing to link, so the requirement would fail
+    every PR in the repository."""
+    calls = _run_checker(["README.md"], _without_issue_link(_body()), has_issues=False)
+
+    assert not any(call["method"] == "setFailed" for call in calls)
+    assert not _comment(calls)
+    assert _added_labels(calls) == {"ready for review"}

@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
 from src import agent_activity as activity
@@ -91,6 +92,11 @@ def steering_run_id(session_id: Optional[str]) -> Optional[str]:
     return next(iter(runs)) if len(runs) == 1 else None
 
 
+def serves_run(session_id: Optional[str], run_id: Optional[str]) -> bool:
+    """Whether ``run_id`` is a headless wrapper draining ``session_id``'s steers."""
+    return bool(run_id) and str(run_id) in _STEER_RUNS.get(str(session_id or ""), set())
+
+
 def has_steering_runs(session_id: Optional[str]) -> bool:
     """Whether a headless owner exists, including an ambiguous set of owners."""
     return bool(_STEER_RUNS.get(str(session_id or "")))
@@ -161,7 +167,40 @@ def _rounds_exhausted_note(state: Dict[str, Any]) -> str:
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
     "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
     "manage_session", "manage_agent_worktree",
+    # Both can start workers too: orchestrate_agents fans out specialists and
+    # manage_agent_loadout's `start` launches one detached.
+    "orchestrate_agents", "manage_agent_loadout",
 })
+
+
+def worker_tool_budget() -> int:
+    """The per-run tool-call ceiling for a headless run; 0 = unlimited.
+
+    The same `agent_max_tool_calls` setting and margin the chat route applies
+    to a foreground turn. Headless runs used to pass nothing, so the ceiling
+    every "rounds are advisory" comment names as a worker's real bound never
+    applied to workers at all: a worker was observed running 108 rounds over
+    23 minutes with nothing but the stall detector able to end it.
+    """
+    try:
+        from src.settings import get_setting
+        budget = int(get_setting("agent_max_tool_calls", 0) or 0)
+    except (TypeError, ValueError):
+        budget = 0
+    except Exception:
+        logger.debug("worker tool budget unavailable; running without one", exc_info=True)
+        budget = 0
+    return budget + max(10, budget // 10) if budget > 0 else 0
+
+
+def _budget_exhausted_note(state: Dict[str, Any]) -> str:
+    """The hand-back line for a run the tool-call ceiling cut off."""
+    events = state.get("tool_events") or []
+    limit = int(state.get("budget_limit") or 0)
+    last = next((ev.get("tool") for ev in reversed(events) if ev.get("tool")), "")
+    return (f"(ran out of tool calls: the per-run budget of {limit} was spent with the task unfinished"
+            f"{f', the last call was {last}' if last else ''}. Everything above is partial work, not a "
+            "final answer; continue from there rather than starting over.)")
 
 
 async def run_headless(
@@ -169,6 +208,7 @@ async def run_headless(
     messages: List[Dict[str, Any]],
     *,
     max_rounds: int = 12,
+    max_tool_calls: Optional[int] = None,
     disabled_tools: Optional[Set[str]] = frozenset(),
     activity_session_id: Optional[str] = None,
     run_id: Optional[str] = None,
@@ -237,7 +277,10 @@ async def run_headless(
     if run_id and stop_event is not None:
         _STOP_EVENTS[run_id] = stop_event
         _STEER_RUNS.setdefault(str(getattr(sess, "id", "")), set()).add(run_id)
-    drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds, owner=effective_owner,
+    if max_tool_calls is None:
+        max_tool_calls = worker_tool_budget()
+    drain = asyncio.ensure_future(_drain(sess, messages, state, max_rounds=max_rounds,
+                                         max_tool_calls=max_tool_calls, owner=effective_owner,
                                          blocked=blocked, activity_session_id=activity_session_id,
                                          run_id=run_id, source=source, on_event=on_event,
                                          allow_private=allow_private, approval_mode=approval_mode,
@@ -293,6 +336,14 @@ async def run_headless(
             outcome["rounds_exhausted"] = True
             outcome["rounds"] = int(state.get("exhausted_rounds") or 0)
         full = (full.rstrip() + "\n\n" if full.strip() else "") + _rounds_exhausted_note(state)
+    elif state.get("budget_exhausted"):
+        # Reported through the same `rounds_exhausted` flag so every caller
+        # already records the run as incomplete rather than finished.
+        if outcome is not None:
+            outcome["rounds_exhausted"] = True
+            outcome["budget_exhausted"] = True
+            outcome["rounds"] = int(state.get("round") or 0)
+        full = (full.rstrip() + "\n\n" if full.strip() else "") + _budget_exhausted_note(state)
     elif state.get("awaiting_approval"):
         # The run ended on an approval card, not because the work is done. Say
         # so to whoever reads the result, and let the caller record the run as
@@ -306,7 +357,44 @@ async def run_headless(
     return full, state["tool_events"]
 
 
+# Loop frames that move a run's live counters (see ``_track_progress``).
+_PROGRESS_EVENTS = frozenset({"agent_step", "tool_start", "tool_output", "round_usage"})
+
+
+def _track_progress(run_id: str, d: Dict[str, Any], state: Dict[str, Any]) -> None:
+    """Fold one loop frame into the run's live ``progress`` record.
+
+    A detached run was otherwise visible only as its last event title: the
+    round it was on, how many tokens it had burned and how much of that the
+    provider cached lived in the log alone, which is how a 108-round worker
+    looked no different from a 3-round one. Totals are kept on ``state`` so
+    they cover the whole run, and are written through ``note_progress`` (no
+    event, bounded saves).
+    """
+    kind = d.get("type")
+    if kind not in _PROGRESS_EVENTS:
+        return
+    p = state.setdefault("progress", {"round": 1, "tool_calls": 0, "current_tool": None,
+                                      "input_tokens": 0, "cached_tokens": 0, "output_tokens": 0})
+    if kind == "agent_step":
+        p["round"] = d.get("round", p["round"])
+    elif kind == "tool_start":
+        p["current_tool"] = d.get("tool")
+    elif kind == "tool_output":
+        p["current_tool"] = None
+        p["tool_calls"] += 1
+    else:
+        for key, total in (("input", "input_tokens"), ("cached", "cached_tokens"), ("output", "output_tokens")):
+            try:
+                p[total] += int(d.get(key) or 0)
+            except (TypeError, ValueError):
+                pass
+    p["last_event_at"] = time.time()
+    activity.note_progress(run_id, **p)
+
+
 async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owner: Optional[str],
+                 max_tool_calls: int = 0,
                  blocked: Optional[Set[str]], activity_session_id: Optional[str], run_id: Optional[str],
                  source: str, on_event, allow_private: bool = False,
                  approval_mode: Optional[str] = None, workspace: Optional[str] = None,
@@ -325,6 +413,7 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
         # drain or cancel the worker's correction (and vice versa).
         steer_run_id=run_id,
         max_rounds=max_rounds,
+        max_tool_calls=max_tool_calls,
         owner=owner,
         disabled_tools=blocked,
         allow_private=allow_private,
@@ -367,6 +456,8 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                 await on_event(d)
             except Exception:  # a listener must never stop the drain
                 logger.debug("headless agent listener failed", exc_info=True)
+        if run_id:
+            _track_progress(run_id, d, state)
         if "delta" in d:
             delta = d.get("delta")
             if isinstance(delta, str) and not d.get("thinking"):
@@ -398,6 +489,17 @@ async def _drain(sess, messages, state: Dict[str, Any], *, max_rounds: int, owne
                                  source=source, run_id=run_id, owner=owner,
                                  data={"rounds": state["exhausted_rounds"],
                                        "tool_calls": d.get("tool_calls")},
+                                 level="warning")
+        elif d.get("type") == "budget_exceeded":
+            # The loop stops right after this frame with no closing answer, so
+            # the run must hand back as incomplete, like a rounds_exhausted one.
+            state["budget_exhausted"] = True
+            state["budget_limit"] = int(d.get("limit") or 0)
+            if activity_session_id:
+                activity.publish(activity_session_id, "note",
+                                 f"Ran out of tool calls after {state['budget_limit']} — handing back partial work",
+                                 source=source, run_id=run_id, owner=owner,
+                                 data={"limit": state["budget_limit"], "used": d.get("used")},
                                  level="warning")
         elif d.get("type") == "tool_start" and activity_session_id:
             activity.publish(activity_session_id, "tool_start",

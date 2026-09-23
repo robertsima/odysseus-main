@@ -602,6 +602,43 @@ async def stop_run(run_id: str) -> dict:
     raise ValueError(f"{source or 'This'} runs can't be stopped individually")
 
 
+# ── wrap up (soft stop) ───────────────────────────────────────────────────
+
+WRAP_UP_TEXT = ("Wrap up now: stop starting new work, and within the next one or two rounds "
+                "return your result from what you already have, noting anything left unfinished.")
+
+
+def wrap_up(run_id: str, *, owner: Optional[str] = None) -> dict:
+    """Ask a live agent run to finish with what it has, instead of killing it.
+
+    Stop cancels the drain and hands back whatever text happened to exist; a
+    long worker is usually mid-tool at that point, so the parent gets partial
+    work with no summary. This queues an ordinary steer, bound to the run the
+    way the loop drains it, so the model itself writes the hand-back. Raises
+    ``LookupError`` when unknown and ``ValueError`` when the run has no agent
+    loop that would read the message.
+    """
+    rec = activity.get_run(run_id)
+    if rec is None:
+        raise LookupError("Run not found")
+    if rec.get("status") not in activity.LIVE_RUN_STATUSES:
+        raise ValueError("This run is not running")
+    session_id = str(rec.get("session_id") or "")
+    from src.headless_agent import serves_run
+
+    if serves_run(session_id, run_id):
+        # A detached worker drains exactly its wrapper run's queue.
+        target = run_id
+    elif (rec.get("source") == "odysseus" and activity.active_turn(session_id) == run_id
+          and is_steerable(session_id)):
+        # A chat turn drains the queue its stream allocated, which is not the
+        # activity run id; let `steer` resolve it from the live stream.
+        target = None
+    else:
+        raise ValueError("This run has no agent rounds to deliver a wrap-up to; stop it instead")
+    return steer(session_id, WRAP_UP_TEXT, owner=owner or rec.get("owner"), run_id=target)
+
+
 # ── launch a worker ───────────────────────────────────────────────────────
 
 _WORKERS: Dict[str, asyncio.Task] = {}

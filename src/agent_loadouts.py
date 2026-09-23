@@ -435,7 +435,13 @@ def summarize(profile: Dict[str, Any]) -> Dict[str, Any]:
         "approval_mode": profile["approval_mode"],
         "max_parallel_workers": profile["max_parallel_workers"],
         "max_rounds": profile["max_rounds"],
+        **{key: profile[key] for key in _VOICE_FIELDS if profile.get(key) not in (None, "")},
     }
+
+
+# Optional voice/sampling fields: shown by summarize() only when the loadout
+# sets them, so ``get`` reports what a chat under it actually runs with.
+_VOICE_FIELDS = ("persona_name", "temperature", "max_tokens", "reasoning_effort")
 
 
 def discovery_summary(profile: Dict[str, Any]) -> Dict[str, Any]:

@@ -162,3 +162,15 @@ def test_the_agent_loop_offloads_each_formatted_result():
     assert "maybe_offload" in block
     assert 'not _awaiting_user and "ask_user" not in result' in block
     assert '_relevant_tools.add("recall_tool_output")' in block
+
+
+def test_github_mcp_json_gets_room_before_it_is_offloaded():
+    """A GitHub search page or issue_read cut at 4k left one issue sliced
+    mid-object and the agent spent rounds recalling the rest."""
+    from src.tool_output_store import inline_limit
+
+    assert inline_limit("mcp__github_read__search_issues") >= 16_000
+    assert inline_limit("mcp__github_read__issue_read") >= 16_000
+    assert inline_limit("mcp__other__thing") == inline_limit("")
+    # A larger profile limit still wins over the per-prefix one.
+    assert inline_limit("mcp__github_read__search_issues", {"tool_output_inline_limit": 30_000}) == 30_000

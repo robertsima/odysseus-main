@@ -212,9 +212,15 @@ async def test_expanded_git_call_preserves_required_empty_values_for_validation(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["push", "merge", "delete_branch"])
+@pytest.mark.parametrize("action, expected_code", [
+    ("push", "missing_revision"),
+    ("merge", "missing_revision"),
+    # Deleting a branch is refused by policy before any revision proof is
+    # read (tests/test_git_delete_secret_policy.py).
+    ("delete_branch", "forbidden_by_policy"),
+])
 async def test_expanded_risky_git_call_refuses_empty_revision_proofs(
-    repository, monkeypatch, action
+    repository, monkeypatch, action, expected_code
 ):
     _allow_git_tool(monkeypatch)
 
@@ -224,7 +230,7 @@ async def test_expanded_risky_git_call_refuses_empty_revision_proofs(
     )
 
     assert result["exit_code"] == 1
-    assert result["code"] == "missing_revision"
+    assert result["code"] == expected_code
 
 
 @_REPORT_BACKLOG

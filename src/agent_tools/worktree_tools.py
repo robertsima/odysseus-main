@@ -20,8 +20,13 @@ from src.tool_utils import _parse_tool_args
 logger = logging.getLogger(__name__)
 
 _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request", "remove",
+            "publish", "list_requests", "show_request",
             "repo_list", "repo_status", "repo_pull")
+
+# Refused by policy rather than merely unknown: `remove` runs
+# `git worktree remove --force` and then prunes, which discards uncommitted
+# work. Agents may create and publish worktrees but never delete them.
+_FORBIDDEN_ACTIONS = ("remove",)
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
@@ -29,7 +34,7 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
-_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "remove")
+_BRANCH_ACTIONS = ("commit", "diff", "request_publish")
 
 
 def _next_step(code: str, action: str, branch: str) -> Dict[str, Any]:
@@ -71,9 +76,12 @@ def _repository_read_token(ctx: dict) -> str | None:
         not isinstance(allowed, list) or not {"*", "github_read"}.intersection(allowed)
     ):
         return None
+    # The token GitHub MCP uses, for the host it uses (github.com or
+    # GITHUB_HOST). Which remote actually receives it is decided per URL by
+    # repository_sync._transport: only that same host, never another.
     from src.github_credentials import github_token_from_env
 
-    return github_token_from_env(public_only=True)
+    return github_token_from_env()
 
 
 class AgentWorktreeTool:
@@ -86,6 +94,13 @@ class AgentWorktreeTool:
             return _err(f"manage_agent_worktree: invalid JSON arguments ({exc})")
 
         action = str(args.get("action") or "status").strip().lower()
+        if action in _FORBIDDEN_ACTIONS:
+            return _err(
+                f"manage_agent_worktree: action {action!r} is not permitted by policy: "
+                "removing a worktree discards its uncommitted work. Commit and "
+                "request_publish instead, or ask the user to remove it.",
+                code="forbidden_by_policy",
+            )
         if action not in _ACTIONS:
             return _err(
                 f"manage_agent_worktree: unknown action {action!r}. "
@@ -164,8 +179,6 @@ class AgentWorktreeTool:
                     return _err("manage_agent_worktree: 'request_id' is required")
                 return {"exit_code": 0, "request": approval_mod.get_request(request_id, cfg=cfg)}
 
-            if action == "remove":
-                return {"exit_code": 0, "result": await service.remove_worktree(branch, cfg=cfg)}
         except Exception as exc:  # noqa: BLE001 - surfaced to the model as text
             # Messages from this package are already credential-scrubbed.
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)

@@ -1034,8 +1034,8 @@ def setup_session_routes(
         return {
             "settings": settings,
             "approval_mode": session_settings.effective_approval_mode(settings),
-            # Empty until approval modes are enforced again; the chat settings
-            # UI hides its mode controls when there is nothing to choose from.
+            # Empty only if approval_modes.ENFORCED is switched off; the chat
+            # settings UI hides its mode controls when there is nothing to choose from.
             "approval_modes": list(approval_modes.MODES) if approval_modes.ENFORCED else [],
             "forked_from": forked,
             "parent_session": parent,

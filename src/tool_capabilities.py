@@ -15,7 +15,11 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
 from src.tool_approval_scopes import CHAT_SESSION_APPROVAL_CONTEXT_MARKER
-from src.tool_security import BUILTIN_EMAIL_TOOLS, is_public_blocked_tool
+from src.tool_security import (
+    BUILTIN_EMAIL_TOOLS,
+    github_mcp_policy_refusal,
+    is_public_blocked_tool,
+)
 
 
 class ToolEffect(str, Enum):
@@ -340,6 +344,10 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
     """Return deterministic capabilities; malformed and unknown tools fail high."""
     if not isinstance(tool_name, str) or not tool_name:
         return _UNKNOWN_CAPABILITIES
+    # GitHub delete/remove/archive tools are refused by policy at dispatch;
+    # whatever else claims them, they classify as destructive (fail high).
+    if github_mcp_policy_refusal(tool_name):
+        return _UNKNOWN_CAPABILITIES
     capabilities = TOOL_CAPABILITIES.get(tool_name)
     if capabilities is not None:
         return capabilities
@@ -355,6 +363,11 @@ def capabilities_for_tool(tool_name: Any) -> ToolCapabilities:
 
 _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        # Looking at loadouts (and exporting them) changes nothing; every other
+        # action keeps the tool's full write/egress effects below.
+        "manage_agent_loadout": frozenset(
+            {"list", "get", "capabilities", "preflight", "status", "export"}
+        ),
         "manage_calendar": frozenset({"list_calendars", "list_events"}),
         "manage_contact": frozenset({"list"}),
         "manage_documents": frozenset({"list", "read", "view", "open", "get"}),
@@ -369,6 +382,10 @@ _PRIVATE_ACTION_READS: Mapping[str, frozenset[str]] = MappingProxyType(
 
 _PRIVATE_ACTION_WRITES: Mapping[str, frozenset[str]] = MappingProxyType(
     {
+        # import writes the shared agent_profiles setting exactly as create does.
+        "manage_agent_loadout": frozenset(
+            {"create", "update", "delete", "import", "start", "stop"}
+        ),
         "manage_calendar": frozenset(
             {"create_event", "update_event", "delete_event"}
         ),
@@ -412,15 +429,20 @@ _ACTION_DESTRUCTIVE: Mapping[str, frozenset[str]] = MappingProxyType(
         "manage_tokens": frozenset({"delete"}),
         "manage_webhooks": frozenset({"delete"}),
         # History rewrites and discards (src/git_tool_contract.RISKY_ACTIONS).
+        # The deletes and force push are also refused outright by policy
+        # (src/git_tool_contract.POLICY_FORBIDDEN_ACTIONS).
         "manage_git": frozenset({
             "delete_branch", "delete_remote_branch", "force_push_with_lease",
             "reset", "stash_drop",
         }),
+        # `git worktree remove --force` discards the worktree's uncommitted work.
+        "manage_agent_worktree": frozenset({"remove"}),
     }
 )
 
 _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
     {
+        "manage_agent_loadout": "list",
         "manage_calendar": "list_events",
         "manage_documents": "list",
         "manage_research": "list",

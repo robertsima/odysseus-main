@@ -1548,7 +1548,7 @@ async function initAgentSettings() {
       await _postSettings(payload);
       if (fold != null && window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(fold);
       msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' steps/message' : '') +
+        (rounds != null ? ' · ' + rounds + ' rounds/message (advisory)' : '') +
         (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
         (cap != null ? ' · context cap ' + Math.round(cap / 1000) + 'k' : '') +
         (supInput && supInput.checked ? ' · supervisor on' : '');
@@ -1564,7 +1564,7 @@ async function initAgentSettings() {
   var cur = parseInt(toolsInput.value, 10) || 0;
   var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
   msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' steps/message' : '') +
+    (curR != null ? ' · ' + curR + ' rounds/message (advisory)' : '') +
     (supInput && supInput.checked ? ' · supervisor on' : '');
 
 }
@@ -2641,8 +2641,8 @@ function initAgentProfilesEditor(initial) {
       var head = document.createElement('div');
       head.className = 'agent-profile-head';
       head.appendChild(field('Name', mk('input', 'name', { placeholder: 'researcher', maxlength: '40' })));
-      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'empty = calling chat’s model' }), 'model or model@endpoint'));
-      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '1', max: '40', placeholder: '12' })));
+      head.appendChild(field('Model', mk('input', 'model', { placeholder: 'workers: empty = calling chat’s model' }), 'model or model@endpoint. Applies to delegated workers only; a chat switched to this loadout keeps its own model.'));
+      head.appendChild(field('Rounds', mk('input', 'max_rounds', { type: 'number', min: '0', max: '200', placeholder: '0 = unlimited' }), 'Advisory round budget (0 = unlimited, max 200). It does not stop a run; the tool call limit, stall detection and timeouts do.'));
       var remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'ats-btn agent-profile-remove';
@@ -2707,7 +2707,7 @@ function initAgentProfilesEditor(initial) {
   }
   addBtn && addBtn.addEventListener('click', function () {
     profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
-      max_rounds: 12, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
+      max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
       private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
       persona_name: '', temperature: null, max_tokens: null });
@@ -2733,7 +2733,118 @@ function initAgentProfilesEditor(initial) {
       note.textContent = 'Saved';
     } catch (e) { note.textContent = 'Failed to save'; note.style.color = 'var(--red)'; }
   });
+  initAgentProfilesTransfer(note, function (next) {
+    profiles = (next || []).map(function (p) { return Object.assign({}, p); });
+    render();
+  });
   render();
+}
+
+// Export / Import for the profile editor. Export downloads
+// /api/agents/profiles/export; Import posts an exported file to
+// /api/agents/profiles/import, which validates every profile like a normal
+// save and returns a report plus the stored list to re-render.
+function initAgentProfilesTransfer(note, replaceProfiles) {
+  var exportBtn = el('set-agentProfileExport');
+  var importBtn = el('set-agentProfileImport');
+  var modeSel = el('set-agentProfileImportMode');
+  var fileInput = el('set-agentProfileImportFile');
+  var reportBox = el('set-agentProfileImportReport');
+  if (!exportBtn || !importBtn || !fileInput) return;
+
+  function say(text, bad) {
+    note.textContent = text;
+    note.style.color = bad ? 'var(--red)' : 'var(--fg)';
+  }
+
+  async function ask(text, confirmText) {
+    try {
+      return await (uiModule && uiModule.styledConfirm
+        ? uiModule.styledConfirm(text, { confirmText: confirmText, cancelText: 'Cancel' })
+        : Promise.resolve(window.confirm(text)));
+    } catch (_) { return false; }
+  }
+
+  function showReport(report) {
+    if (!reportBox) return;
+    reportBox.textContent = '';
+    var lines = [];
+    [['added', 'Added'], ['updated', 'Updated'], ['removed', 'Removed']].forEach(function (pair) {
+      var names = report[pair[0]] || [];
+      if (names.length) lines.push(pair[1] + ': ' + names.join(', '));
+    });
+    Object.keys(report.narrowed || {}).forEach(function (name) {
+      lines.push('Narrowed ' + name + ': ' + report.narrowed[name].join('; '));
+    });
+    (report.skipped || []).forEach(function (s) { lines.push('Skipped ' + s.name + ': ' + s.reason); });
+    (report.errors || []).forEach(function (e) {
+      lines.push('Error in ' + (e.name || ('profile ' + (e.index + 1))) + ': ' + e.error);
+    });
+    (report.warnings || []).forEach(function (w) { lines.push('Warning: ' + w); });
+    lines.forEach(function (line) {
+      var row = document.createElement('div');
+      row.textContent = line;
+      reportBox.appendChild(row);
+    });
+    reportBox.hidden = !lines.length;
+  }
+
+  exportBtn.addEventListener('click', async function () {
+    if (note.textContent === 'Unsaved changes') say('Exporting the saved profiles (unsaved changes are not included)');
+    try {
+      var r = await fetch('/api/agents/profiles/export', { credentials: 'same-origin' });
+      if (!r.ok) {
+        var err = null;
+        try { err = await r.json(); } catch (e) {}
+        say((err && err.detail) || ('Export failed (' + r.status + ')'), true);
+        return;
+      }
+      var blob = await r.blob();
+      var match = (r.headers.get('Content-Disposition') || '').match(/filename="?([^";]+)"?/);
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = match ? match[1] : 'odysseus-agent-profiles.json';
+      a.click();
+      URL.revokeObjectURL(a.href);
+      say('Export downloaded');
+    } catch (e) { say('Export failed', true); }
+  });
+
+  importBtn.addEventListener('click', async function () {
+    if (note.textContent === 'Unsaved changes' &&
+        !(await ask('Importing reloads the profile list from the server. Discard unsaved changes?', 'Discard'))) return;
+    fileInput.value = '';
+    fileInput.click();
+  });
+
+  fileInput.addEventListener('change', async function () {
+    var file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    var mode = modeSel ? modeSel.value : 'merge';
+    if (mode === 'replace' &&
+        !(await ask('Replace all profiles with the ones in ' + file.name + '? Profiles not in the file are deleted.', 'Replace'))) return;
+    var doc;
+    try {
+      doc = JSON.parse((await file.text()).replace(/^﻿/, ''));
+    } catch (e) { say('Not a JSON file: ' + e.message, true); return; }
+    say('Importing…');
+    try {
+      var r = await fetch('/api/agents/profiles/import', { method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ document: doc, mode: mode === 'rename' ? 'merge' : mode,
+          rename_conflicts: mode === 'rename' }) });
+      var body = null;
+      try { body = await r.json(); } catch (e) {}
+      if (!r.ok || !body) {
+        showReport({});
+        say((body && body.detail) || ('Import failed (' + r.status + ')'), true);
+        return;
+      }
+      if (Array.isArray(body.profiles)) replaceProfiles(body.profiles);
+      showReport(body.report || {});
+      say(body.message || 'Imported', !body.ok);
+    } catch (e) { say('Import failed', true); }
+  });
 }
 
 async function initClaudeCodeSettings() {

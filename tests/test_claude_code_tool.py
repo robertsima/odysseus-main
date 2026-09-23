@@ -112,34 +112,45 @@ def test_rejection_lists_roots_and_candidates(approved_repo):
     assert "(dev)" in text
 
 
-async def test_tool_rejects_push_permission(approved_repo):
+async def _run_with_allowed_tools(monkeypatch, repo, allowed):
+    """Unsafe entries are dropped, not granted: the run goes ahead with the
+    safe defaults and the result names what was refused. Returns the result
+    and the tools the CLI would actually have received."""
+    seen = {}
+
+    async def fake_run(repository, prompt, timeout, tools, on_process=None, model=None):
+        seen["tools"] = list(tools)
+        return {"exit_code": 0, "result": "ok", "repository": str(repository)}
+
+    monkeypatch.setattr(cct, "_run_claude", fake_run)
     result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": str(approved_repo),
+        "repository": str(repo),
         "prompt": "inspect",
-        "allowed_tools": ["Bash(git push:*)"],
+        "allowed_tools": allowed,
     }), {})
-    assert result["exit_code"] == 1
-    assert "unsafe" in result["error"]
+    return result, seen["tools"]
 
 
-async def test_tool_rejects_sudo_permission(approved_repo):
-    result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": str(approved_repo),
-        "prompt": "inspect",
-        "allowed_tools": ["Bash(sudo:*)"],
-    }), {})
-    assert result["exit_code"] == 1
-    assert "unsafe" in result["error"]
+async def test_tool_rejects_push_permission(approved_repo, monkeypatch):
+    result, tools = await _run_with_allowed_tools(monkeypatch, approved_repo, ["Bash(git push:*)"])
+    assert "Bash(git push:*)" not in tools
+    assert tools == cct.default_tools()
+    assert result["dropped_tools"] == ["Bash(git push:*)"]
+    assert "unsafe" in result["dropped_note"]
 
 
-async def test_tool_rejects_arbitrary_shell(approved_repo):
-    result = await ClaudeCodeTool().execute(json.dumps({
-        "repository": str(approved_repo),
-        "prompt": "inspect",
-        "allowed_tools": ["Bash"],
-    }), {})
-    assert result["exit_code"] == 1
-    assert "unsafe" in result["error"]
+async def test_tool_rejects_sudo_permission(approved_repo, monkeypatch):
+    result, tools = await _run_with_allowed_tools(monkeypatch, approved_repo, ["Bash(sudo:*)"])
+    assert not any("sudo" in tool for tool in tools)
+    assert result["dropped_tools"] == ["Bash(sudo:*)"]
+    assert "unsafe" in result["dropped_note"]
+
+
+async def test_tool_rejects_arbitrary_shell(approved_repo, monkeypatch):
+    result, tools = await _run_with_allowed_tools(monkeypatch, approved_repo, ["Bash"])
+    assert "Bash" not in tools
+    assert result["dropped_tools"] == ["Bash"]
+    assert "unsafe" in result["dropped_note"]
 
 
 async def test_tool_rejects_malformed_json():
@@ -181,6 +192,160 @@ def test_callback_token_is_added_only_to_child_environment(tmp_path, monkeypatch
     child = cct._claude_environment()
     assert child["ODYSSEUS_API_TOKEN"] == "ody_secret"
     assert child["ODYSSEUS_URL"] == "http://127.0.0.1:7000"
+
+
+# ── Child environment: allowlist, not os.environ ──
+
+_SERVER_SECRETS = {
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_" + "a" * 36,
+    "ODYSSEUS_AGENT_GITHUB_TOKEN": "github_pat_" + "b" * 40,
+    "GH_TOKEN": "gho_" + "c" * 36,
+    "OPENAI_API_KEY": "sk-" + "d" * 40,
+    "GOOGLE_CLIENT_SECRET": "client-secret-value-1234",
+    "DATABASE_URL": "postgresql://odysseus:dbpass1234@db/odysseus",
+    "SMTP_PASSWORD": "smtp-password-5678",
+    "ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/app.pem",
+    "GIT_ASKPASS": "/usr/local/bin/odysseus-askpass",
+    "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
+    "GIT_CONFIG_PARAMETERS": "'credential.helper'='store'",
+    "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE": "",
+    "CLAUDE_CODE_SOME_SECRET": "should-not-pass-9999",
+}
+
+
+@pytest.fixture
+def server_env(monkeypatch, tmp_path):
+    for name, value in _SERVER_SECRETS.items():
+        if value:
+            monkeypatch.setenv(name, value)
+        else:
+            monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_ODYSSEUS_URL", raising=False)
+    monkeypatch.setenv("PATH", "/usr/local/bin:/usr/bin:/bin")
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setenv("LC_ALL", "C.UTF-8")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.local:3128")
+    monkeypatch.setenv("NO_PROXY", "localhost")
+    monkeypatch.setenv("SSL_CERT_FILE", "/etc/ssl/ca.pem")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/etc/ssl/ca.pem")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-" + "e" * 40)
+    monkeypatch.setenv("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8000")
+    monkeypatch.setenv("CLAUDE_CODE_HOME", str(tmp_path / "claude-home"))
+    return tmp_path
+
+
+def test_child_environment_drops_server_secrets(server_env):
+    child = cct._claude_environment()
+    for name in _SERVER_SECRETS:
+        assert name not in child, name
+    values = "\n".join(child.values())
+    for value in _SERVER_SECRETS.values():
+        if value:
+            assert value not in values
+
+
+def test_child_environment_keeps_allowlisted_variables(server_env):
+    child = cct._claude_environment()
+    assert child["PATH"] == "/usr/local/bin:/usr/bin:/bin"
+    assert child["LANG"] == child["LC_ALL"] == "C.UTF-8"
+    assert child["HTTPS_PROXY"] == "http://proxy.local:3128"
+    assert child["NO_PROXY"] == "localhost"
+    assert child["SSL_CERT_FILE"] == child["NODE_EXTRA_CA_CERTS"] == "/etc/ssl/ca.pem"
+    assert child["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] == "8000"
+    assert child["HOME"] == str(server_env / "claude-home")
+    assert child["GIT_TERMINAL_PROMPT"] == "0"
+    # Claude Code's own credential is the one secret the CLI needs to run.
+    assert child["ANTHROPIC_API_KEY"].startswith("sk-ant-")
+    # Odysseus' own CLAUDE_CODE_* configuration is not Claude Code's.
+    assert "CLAUDE_CODE_HOME" not in child
+
+
+def test_child_environment_has_no_github_credentials_by_default(server_env):
+    child = cct._claude_environment()
+    assert not [name for name in child if "GITHUB" in name or name.startswith(("GH_", "GIT_ASKPASS", "GIT_CONFIG"))]
+    assert "SSH_AUTH_SOCK" not in child
+
+
+async def test_binary_probe_uses_the_allowlisted_environment(server_env, tmp_path):
+    script = tmp_path / "printenv-claude"
+    script.write_text("#!/bin/sh\nenv\n", encoding="utf-8")
+    script.chmod(0o755)
+    code, out = await cct._capture(script, "--version")
+    assert code == 0
+    assert "GITHUB_PERSONAL_ACCESS_TOKEN" not in out
+    assert _SERVER_SECRETS["OPENAI_API_KEY"] not in out
+
+
+# ── Deletes, force and remotes are denied in the invocation ──
+
+def test_argv_denies_destructive_commands():
+    tools = cct.default_tools()
+    argv = cct._build_argv(Path("/x/claude"), "fix it", tools, list(cct._OPTIONAL_FLAGS))
+    assert "--disallowedTools" in argv
+    denied = argv[argv.index("--disallowedTools") + 1:argv.index("--tools")]
+    for rule in ("Bash(rm:*)", "Bash(git branch -D:*)", "Bash(git branch -d:*)", "Bash(git push:*)",
+                 "Bash(git reset:*)", "Bash(git clean:*)", "Bash(gh:*)", "Bash(git tag -d:*)",
+                 "Bash(env:*)", "Bash(printenv:*)"):
+        assert rule in denied, rule
+    # The deny list is never itself something the allowlist could grant.
+    assert not [rule for rule in denied if rule in tools]
+    # And the allowlist still never grants a destructive command.
+    assert not [tool for tool in tools if cct.SAFE_TOOL.fullmatch(tool) is None]
+    for unsafe in ("Bash(git push:*)", "Bash(rm:*)", "Bash(gh:*)", "Bash(git reset:*)", "Bash(git clean:*)"):
+        assert cct.SAFE_TOOL.fullmatch(unsafe) is None
+
+
+def test_argv_without_disallowed_flag_support_still_runs():
+    argv = cct._build_argv(Path("/x/claude"), "fix it", ["Read"],
+                           ["--tools", "--allowedTools", "--output-format", "--no-session-persistence"])
+    assert "--disallowedTools" not in argv
+
+
+# ── Redaction of what the child prints back ──
+
+def test_redact_result_masks_server_secrets_and_known_shapes(server_env):
+    result = {
+        "output": "token=" + _SERVER_SECRETS["GITHUB_PERSONAL_ACCESS_TOKEN"],
+        "stderr": "db " + _SERVER_SECRETS["DATABASE_URL"],
+        "error": "failed with " + _SERVER_SECRETS["SMTP_PASSWORD"],
+        "result": "found key " + _SERVER_SECRETS["OPENAI_API_KEY"] + " and ghp_" + "z" * 36,
+        "transcript": [{"kind": "tool_result", "excerpt": "ANTHROPIC_API_KEY=sk-ant-" + "e" * 40}],
+        "exit_code": 0,
+        "repository": "/repo",
+    }
+    cct._redact_result(result)
+    text = json.dumps(result)
+    for value in _SERVER_SECRETS.values():
+        if value and len(value) >= 8 and value.startswith(("ghp_", "github_pat_", "sk-", "postgresql", "smtp")):
+            assert value not in text
+    assert "sk-ant-" + "e" * 40 not in text
+    assert "ghp_" + "z" * 36 not in text
+    assert result["exit_code"] == 0 and result["repository"] == "/repo"
+
+
+async def test_run_output_is_redacted_before_it_is_returned(server_env, monkeypatch, tmp_path, fake_binary_info):
+    monkeypatch.setattr(cct, "DEFAULT_BINARY", "/bin/sh")
+    monkeypatch.setattr(cct, "_git_report", lambda repository: _async_result({}))
+    monkeypatch.setattr(cct, "_git_changes", lambda repository, start: _async_result({}))
+    monkeypatch.setattr(cct, "_git_head", lambda repository: _async_result(None))
+    leaked = _SERVER_SECRETS["GITHUB_PERSONAL_ACCESS_TOKEN"]
+
+    class FakeProc:
+        returncode = 1
+
+        async def communicate(self):
+            return f"not json {leaked}".encode(), f"auth failed for {leaked}".encode()
+
+    async def fake_exec(*argv, **kwargs):
+        assert leaked not in "\n".join(kwargs["env"].values())
+        return FakeProc()
+
+    monkeypatch.setattr(cct.asyncio, "create_subprocess_exec", fake_exec)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    result = await cct._run_claude(repo, "x", 30, ["Read"])
+    assert leaked not in json.dumps(result)
+    assert "***" in result["error"] and "***" in result["stderr"]
 
 
 # ── Per-repository serialization ──

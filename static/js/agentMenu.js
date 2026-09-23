@@ -162,7 +162,7 @@ async function choose(name) {
     await loadCurrent();
     syncButton();
     try { window.chatSettingsModule?.refresh?.(); } catch (_) {}
-    uiModule.showToast(name ? `This chat now runs as ${name}` : 'Loadout cleared — default setup', 'success');
+    uiModule.showToast(name ? `This chat now runs as ${name} (its model applies to delegated workers only)` : 'Loadout cleared — default setup', 'success');
   } catch (err) {
     uiModule.showToast(`Could not apply loadout: ${err.message}`, 'error');
   }
