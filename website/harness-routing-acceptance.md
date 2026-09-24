@@ -12,8 +12,11 @@ schema construction, parsing, and discovery dispatch.
   schema in round 2, and then executed.
 - Native-function and fenced-tool models receive the newly loaded definition.
   The fenced prompt contains a usable signature, not merely a tool name.
-- Discovery is bounded by `max_results` and the turn schema budget. Initial
-  schemas have stable ordering and remain within the configured bound.
+- Discovery is bounded by `max_results` per call and by its own per-turn
+  allowance (32 tools / 4,096 schema-token estimates by default). The allowance
+  counts only what discovery loads: schemas the round already sends are
+  reported as already attached, never loaded twice, and never spend it. Initial
+  schemas have stable ordering.
 - Disabled, private, admin-only, unknown, and connector-restricted names are
   neither returned nor attached. Discovery output cannot grant permission or
   activate an arbitrary MCP server.
@@ -35,10 +38,21 @@ ceilings. Mocked multi-round tests separately verify native and dynamic MCP
 fenced calls, concurrent live-loop isolation, immutable caller inputs, context
 reserve growth and mid-turn revocation.
 
-Default advisory budgets are 24 initial tools / 3,000 schema-token estimates,
-and 32 / 5,000 across the turn. Explicit bindings may exceed these bounds and
-are reported. Discovery metadata, tool outputs, reasoning and conversation text
-are additional costs; do not confuse a schema bound with a total-request bound.
+Default schema bounds, all advisory:
+
+- The initial selection is trimmed toward `agent_tool_budget` (40 tools) by
+  dropping domain-seeded tools. Retrieved, forced and other protected tools
+  always stay, so it can exceed 40. It has no schema-token cap.
+- A chat's sticky tool set restarts from the turn's own selection once it would
+  pass 48 tools.
+- Small connected MCP servers stay bound up to 8 tools per server and 24 in
+  total; a larger server is demoted to retrieval.
+- Discovery adds at most 32 tools / 4,096 schema-token estimates per turn, on
+  top of whatever the round already sends.
+
+Explicit bindings may exceed these bounds and are reported. Discovery metadata,
+tool outputs, reasoning and conversation text are additional costs; do not
+confuse a schema bound with a total-request bound.
 
 ## Live-provider checklist
 

@@ -199,6 +199,90 @@ def _is_dead_transport_error(error: Optional[BaseException]) -> bool:
 _STDERR_TAIL_BYTES = 2000
 
 
+# Error text meaning the server process is fine but could not reach the service
+# it wraps. On 2026-09-24 every Penpot call failed with "MCP error -32603: Tool
+# execution failed: fetch failed" -- Node's fetch rejecting before any HTTP
+# response, because PENPOT_API_URL was not reachable from inside the Odysseus
+# container -- while the server showed green, and nothing said the problem was
+# an address rather than the tool. Node and undici spell it as error codes (the
+# Penpot package drops the cause, leaving only "fetch failed"); Python servers
+# spell the same failures out in words. HTTP-level failures (401, 404) are not
+# listed: they prove the service was reached. Nor are the bare words SSL/TLS or
+# "certificate has expired": the error text also carries the service's own
+# response body and the call's arguments, so "Invalid value for SSL mode", a
+# `tls` argument field, a path under /etc/ssl and Penpot's webhook
+# "ssl-validation-error" (Penpot reached, the model's webhook URI bad) all
+# matched. TLS failures are listed by their library spellings instead:
+# OpenSSL's "SSL routines", Python's "[SSL: ...]", Node's ERR_SSL_/ERR_TLS_ and
+# certificate codes.
+_NETWORK_FAILURE_RE = re.compile(
+    r"fetch failed|unknown scheme|getaddrinfo|UND_ERR_CONNECT_TIMEOUT"
+    r"|\bE(?:CONNREFUSED|CONNRESET|NOTFOUND|AI_AGAIN|TIMEDOUT|HOSTUNREACH|NETUNREACH)\b"
+    r"|connection refused|name or service not known|temporary failure in name resolution"
+    r"|no route to host|certificate verify failed|self[- ]signed certificate"
+    r"|unable to (?:get|verify) (?:the )?(?:local issuer |first )?certificate"
+    r"|\b(?:CERT_HAS_EXPIRED|UNABLE_TO_VERIFY_LEAF_SIGNATURE|DEPTH_ZERO_SELF_SIGNED_CERT"
+    r"|SELF_SIGNED_CERT_IN_CHAIN)\b"
+    r"|ERR_(?:SSL|TLS)_|SSL routines|\[SSL(?::\s*\w+)?\]",
+    re.IGNORECASE,
+)
+# The server rejecting the call's arguments: JSON-RPC "invalid params"
+# (-32602) or an SDK's "Invalid arguments for tool ...". Such an error quotes
+# the arguments back, so a URL field or model-supplied host in them must not
+# turn it into a network failure the user is sent to fix in the settings.
+_ARGUMENT_ERROR_RE = re.compile(r"-32602\b|\binvalid (?:params|arguments)\b", re.IGNORECASE)
+
+
+def _env_key_words(key: Any) -> List[str]:
+    return [w for w in re.split(r"[^A-Z0-9]+", str(key or "").upper()) if w]
+
+
+def _is_url_env_key(key: Any) -> bool:
+    """An env key whose value is meant to be a full URL: PENPOT_API_URL,
+    BASE_URL, WEBHOOKURL, SERVICE_URI, API_ENDPOINT. Whole words only: "BASE"
+    inside PGDATABASE or SUPABASE_ACCESS_TOKEN and "URI" inside SECURITY_TOKEN
+    name no address."""
+    return any(
+        w in ("URL", "URI", "URLS", "ENDPOINT") or (len(w) > 4 and w.endswith(("URL", "URI")))
+        for w in _env_key_words(key)
+    )
+
+
+def _is_address_env_key(key: Any) -> bool:
+    """A URL key, or a *_HOST / *_HOSTNAME one (a bare host by design)."""
+    return _is_url_env_key(key) or any(w in ("HOST", "HOSTNAME") for w in _env_key_words(key))
+
+
+def _redacted_origin(value: Any) -> Optional[str]:
+    """scheme://host[:port] of an http(s) URL, or None for anything else.
+
+    Only the origin is quoted: reachability depends on nothing else, and every
+    other part can carry a secret -- userinfo and query strings obviously, but
+    paths too (Slack/Discord webhook URLs, ntfy topics and some hosted remote
+    MCP URLs put the credential in the path).
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(str(value or "").strip())
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        return None
+    if parts.scheme.lower() not in ("http", "https") or not host:
+        return None
+    # An unencoded "/", "?" or "#" in the userinfo (base64 tokens, passwords)
+    # ends the netloc early, and part of the secret parses as host and port:
+    # "https://ghp_x/Q+w==@api.example.com" gives host "ghp_x". That malformed
+    # URL is exactly the one whose fetch fails and brings the hint here, so an
+    # "@" anywhere after the netloc means nothing is quoted.
+    if "@" in parts.path or "@" in parts.query or "@" in parts.fragment:
+        return None
+    if ":" in host:
+        host = f"[{host}]"  # IPv6 literal
+    return f"{parts.scheme.lower()}://{host}" + (f":{port}" if port is not None else "")
+
+
 def _format_mcp_connection_error(name: str, command: str = "", args: Optional[List[str]] = None, error: Exception = None) -> str:
     """Return a user-actionable MCP connection error message."""
     args = args or []
@@ -301,6 +385,17 @@ _MCP_WRITE_VERBS = (
     "record", "complete", "close", "cancel", "run", "exec", "start", "stop",
     "kill", "restart", "deploy", "merge", "push", "approve", "reply", "follow",
     "like", "repost", "block", "mute", "subscribe", "unsubscribe", "enable", "disable",
+    # A write verb missing from this list is only harmless while nothing in the
+    # name reads: once a later word does, the noun-first fallback below calls
+    # the tool read-only. Penpot's `ignore_file_library_sync_status` ("status")
+    # and GitHub's `mark_all_notifications_read` ("read") both classed as reads,
+    # so they would run unprompted under ask_risky/ask_all and pass plan mode
+    # (2026-09-24). `unlock`/`unlink` are separate entries because matching is
+    # by prefix; `execute` because "ute" is not a verb ending of `exec`, so
+    # `execute_query` read as a query.
+    "ignore", "sync", "restore", "lock", "unlock", "link", "unlink", "leave",
+    "mark", "toggle", "revoke", "accept", "reject", "share", "invite", "assign",
+    "execute", "replace", "store",
 )
 _VERB_ENDINGS = frozenset({"s", "d", "e", "es", "ed", "ing", "ion"})
 
@@ -333,9 +428,19 @@ def mcp_tool_is_readonly(tool: Dict) -> bool:
     # (`mood_summarize_period`) reads only when a read verb appears and no
     # write verb does, so `mood_log_entry` and `delete_list_item` stay writes.
     name = (tool.get("name") or "").lower()
+    words = [w for w in re.split(r"[_.-]+", name) if w]
+    # A conjunction starts a second action, and a leading read verb says
+    # nothing about it: `search_and_replace`, `get_or_create_label` and
+    # `read_and_delete_message` write. They classed as reads, which let naming
+    # a server attach them as its "read" tools and ask_risky run them
+    # without a card.
+    if any(
+        word in ("and", "or", "then") and _is_write_word(following)
+        for word, following in zip(words, words[1:])
+    ):
+        return False
     if name.startswith(_MCP_READONLY_VERBS):
         return True
-    words = [w for w in re.split(r"[_.-]+", name) if w]
     if any(_is_write_word(w) for w in words):
         return False
     return any(w.startswith(_MCP_READONLY_VERBS) for w in words[1:])
@@ -1136,6 +1241,14 @@ class McpManager:
                 logger.error(f"MCP tool call failed: {qualified_name}: {detail}")
                 return {"error": detail, "exit_code": 1}
 
+        # A server can also report the failure as a result (isError) instead
+        # of raising: the Python SDK and FastMCP do that for every tool
+        # exception, so "[Errno 111] Connection refused" arrives here, not in
+        # _describe_call_failure. Same hint, after the server's own text.
+        if result.get("exit_code") == 1 and result.get("stderr"):
+            hint = self._network_failure_hint(server_id, result["stderr"])
+            if hint:
+                result["stderr"] = f"{result['stderr']}\n\n{hint}"
         return result
 
     async def _do_call(self, session, tool_name: str, arguments: Dict) -> Dict:
@@ -1231,10 +1344,13 @@ class McpManager:
         The bare exception is frequently useless -- anyio raises a messageless
         ClosedResourceError when the server's pipe is gone -- so name the server,
         say the subprocess exited, and quote whatever it printed on the way out.
+        A live server that could not reach its own backend gets a network hint.
         """
         desc = _describe_exception(error)
         if not _is_dead_transport_error(error):
-            return desc
+            code = getattr(getattr(error, "error", None), "code", None)  # McpError's JSON-RPC code
+            hint = self._network_failure_hint(server_id, desc, code=code)
+            return f"{desc}\n\n{hint}" if hint else desc
 
         config = self._configs.get(server_id, {})
         conn = self._connections.get(server_id, {})
@@ -1258,6 +1374,95 @@ class McpManager:
                 "(command, args, and env such as URL/token/topic values)."
             )
         return "\n\n".join(lines)
+
+    def _network_failure_hint(self, server_id: str, error_text: str, code: Any = None) -> str:
+        """Explain a network-level tool failure, naming the configured address.
+
+        "Connected" only ever proved the process started and listed its tools;
+        a bare "fetch failed" then reads like a broken tool, so the agent retried
+        and the user had nothing to fix (2026-09-24, Penpot). Only origins of
+        http(s) values under address-like env keys are quoted (see
+        _redacted_origin) -- never any other env value, so never a token.
+
+        The error text cannot say whose address failed: a server that fetches
+        a URL the model passed it fails with the same "fetch failed" or
+        "getaddrinfo ENOTFOUND" as one whose own backend is unreachable. So the
+        hint sends the model to its arguments first and only then the user to
+        the settings, and a call the server rejected as invalid params gets no
+        hint at all.
+        """
+        text = error_text or ""
+        if code == -32602 or _ARGUMENT_ERROR_RE.search(text) or not _NETWORK_FAILURE_RE.search(text):
+            return ""
+        config = self._configs.get(server_id, {})
+        conn = self._connections.get(server_id, {})
+        name = config.get("name") or conn.get("name") or server_id
+        arguments_first = "If this call's arguments include a URL or host, check that first. Otherwise"
+        if config.get("transport") in ("http", "sse"):
+            origin = _redacted_origin(config.get("url"))
+            where = f" at {origin}" if origin else ""
+            return (
+                f"This is a network failure (DNS lookup, refused connection, timeout, or "
+                f"TLS/certificate). MCP server '{name}' is a remote server{where}. "
+                f"{arguments_first} either Odysseus could not reach it, or it could not reach "
+                "the service behind it, and retrying the same call unchanged will not help "
+                "until that address or the remote service is fixed."
+            )
+        addresses = []
+        schemeless = "unknown scheme" in text.lower()
+        unparsed = False
+        for key, value in (config.get("env") or {}).items():
+            if not _is_address_env_key(key):
+                continue
+            origin = _redacted_origin(value)
+            if origin:
+                addresses.append(f"{key}={origin}")
+                continue
+            # Scheme advice only for a value that should be an http(s) URL and
+            # is not one: "homelab.nas:9001" under PENPOT_API_URL. A *_HOST
+            # value ("imap.gmail.com") has no scheme by design, and a
+            # postgresql:// DSN is right as it is; telling either to start
+            # with http:// breaks a working address.
+            raw = str(value or "").strip()
+            if not raw or not _is_url_env_key(key):
+                continue
+            if raw.lower().startswith(("http://", "https://")):
+                # _redacted_origin refused it: an unencoded "/", "?" or "#" in
+                # a password, or an "@" later on that could be one. Say it was
+                # not quoted, not that it is wrong: ".../@alice" is valid.
+                unparsed = True
+            elif "://" not in raw:
+                schemeless = True
+        parts = []
+        if addresses:
+            parts.append("Configured address(es): " + ", ".join(addresses) + ".")
+        if schemeless:
+            parts.append(
+                "An address setting in its env has no scheme: an http service needs "
+                "http:// or https:// in front (http://host:port)."
+            )
+        if unparsed:
+            parts.append(
+                "An http(s) address in its env was not quoted because it could not be read "
+                "safely as scheme://host:port; check that it is well-formed and that any "
+                "user:password in it is percent-encoded."
+            )
+        if not parts:
+            parts.append(
+                "Check the address it connects to in its env and args: host, port, and the "
+                "scheme if it is a URL."
+            )
+        configured = " ".join(parts)
+        return (
+            f"This is a network failure (DNS lookup, refused connection, timeout, or "
+            f"TLS/certificate). MCP server '{name}' is running. {arguments_first} its process "
+            "could not reach the service it wraps: stdio MCP servers run inside Odysseus's own "
+            "network, so when Odysseus runs in Docker, localhost/127.0.0.1 is the Odysseus "
+            "container itself, not the Docker host, and LAN hostnames resolve through the "
+            f"container's DNS. {configured} Fix the address in this server's MCP settings and "
+            "reconnect it, or start the service if it is down; retrying the same call "
+            "unchanged will not help."
+        )
 
     async def _reconnect_server(self, server_id: str) -> bool:
         """Restart a crashed MCP server using the config it was connected with.
@@ -1569,7 +1774,17 @@ class McpManager:
                 continue
             if self.is_builtin(server_id) and server_id not in _BUILTIN_FUNCTION_CALLING_SERVERS:
                 continue
-            requested_server = server_mentioned(server_id, conn.get("name", server_id))
+            # The builtin browser's label is the everyday word "browser"
+            # ("builtin" is generic), so "my browser keeps crashing" named it.
+            # In the agent loop any browser name then makes
+            # `_expand_browser_mcp_tools` attach the whole Playwright catalogue,
+            # browser_click / browser_evaluate / browser_run_code included,
+            # and took such a first message off the tool-free reply. Browser
+            # tools keep their own route (retrieval, the builtin_browser
+            # sentinel); here only an exact name or a binding brings one in.
+            requested_server = server_id != "builtin_browser" and server_mentioned(
+                server_id, conn.get("name", server_id)
+            )
             disabled = (disabled_map or {}).get(server_id, set())
             for tool in tools:
                 name = tool["name"]
@@ -1592,8 +1807,17 @@ class McpManager:
                 # from names. No description matching: untrusted marketing prose
                 # must not make an unrelated schema win this deterministic path.
                 overlap = len(set(normalize(name).split()) & query_words)
-                candidates.append((not bound, not exact, -overlap, qualified))
-        return {row[3] for row in sorted(candidates)[:max_tools]}
+                # Then tools callable with no arguments. "check that penpot
+                # works" names no tool, so the 8 slots went alphabetically to
+                # get_comment_thread..get_profile, nearly all needing ids the
+                # model does not have yet, and list_teams -- the call that
+                # actually proves the server reaches Penpot -- was cut
+                # (2026-09-24). Required args are read off the model-visible
+                # schema: a dispatcher-injected _odysseus_ arg is not the
+                # model's to supply.
+                needs_args = bool(_model_visible_schema(tool.get("input_schema")).get("required"))
+                candidates.append((not bound, not exact, -overlap, needs_args, qualified))
+        return {row[-1] for row in sorted(candidates)[:max_tools]}
 
     def plan_mode_blocked_mcp(self) -> Tuple[Dict[str, Set[str]], Set[str]]:
         """Plan mode: block every MCP tool that isn't clearly read-only.
@@ -1712,6 +1936,11 @@ class McpManager:
                 # targeted re-arm then matches the tool name verbatim. Reusing
                 # that existing path beats inventing a second one -- it already
                 # handles the identical case for the builtin catalogs.
+                # The last sentence exists because on 2026-09-24 the only Penpot
+                # schemas attached were writes, and the model "tested" the
+                # server with update_team. list_ over get_ because Penpot's
+                # get_profile answers "Anonymous User" with no valid token, so
+                # it passes even when nothing else will.
                 _why = ("it is too large to attach to every turn"
                         if sid in _demoted_ids
                         else "this catalog is attached on demand")
@@ -1722,7 +1951,10 @@ class McpManager:
                     "get one attached, call `discover_tools` with its full mcp__ name, or state "
                     "that you do not have the exact tool available by that full name; either "
                     "way it is attached and this same turn continues, so never ask the user "
-                    "to repeat the request.)"
+                    "to repeat the request. To check whether this server works, call one of its "
+                    "read-only list_/get_ tools, preferring a list_ tool because some get_profile "
+                    "tools answer even without valid credentials, and never use a "
+                    "create/update/delete tool as a test.)"
                 )
             for t in server_tools:
                 # One line per tool, truncated. A multi-line description

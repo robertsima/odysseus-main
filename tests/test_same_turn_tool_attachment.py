@@ -177,6 +177,22 @@ def test_answers_that_mention_tools_do_not_rearm():
     )
 
 
+def test_a_bare_mcp_name_is_not_guessed_into_a_server():
+    """2026-09-24: the Penpot refusal named `get_profile` bare. Resolving that
+    to the one mcp__*__get_profile was tried and dropped: a bare name does not
+    say which server ("no list_projects tool for Jira" is not Penpot's), and
+    after a failed call "list_projects isn't available" is about the service,
+    so the re-arm would order the model to stop saying so. Discovery finds the
+    tool by name instead, now that it has room to load it."""
+    permitted = PERMITTED | {"mcp__c5ec6d7a__get_profile", "mcp__c5ec6d7a__list_projects"}
+    for text in (
+        "Penpot is connected, but the safe health-check tools (`get_profile` and `list_teams`) "
+        "could not be attached because the tool-schema budget is exhausted.",
+        "I can't list your Jira projects: I don't have a `list_projects` tool for Jira available.",
+    ):
+        assert not _missing_tools_to_attach(text, sent=set(), permitted=permitted), text
+
+
 # ── Discovery signals the same turn continues ───────────────────────────
 
 def test_discovery_says_the_turn_continues():

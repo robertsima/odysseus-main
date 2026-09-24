@@ -182,6 +182,23 @@ def test_ask_risky_asks_for_integration_writes_but_not_reads(monkeypatch):
         assert "integration" in decision.reason
 
 
+@pytest.mark.parametrize("mode", ["ask_risky", "ask_all"])
+def test_penpot_writes_ask_and_its_reads_run(monkeypatch, mode):
+    # 2026-09-24: Penpot's MCP server declares no annotations, so its tool
+    # names decide. ignore_file_library_sync_status ends in "status" and used
+    # to class as a read, so it would have run without a card in either mode.
+    import src.mcp_manager as mcp
+
+    monkeypatch.setattr(mcp, "mcp_tool_metadata", lambda name: {"name": name.rsplit("__", 1)[-1]})
+    ctx = _ctx(mode)
+    for tool in ("get_profile", "list_teams"):
+        assert ctx.decision_for(f"mcp__c5ec6d7a__{tool}", "{}").allowed, tool
+    for tool in ("update_team", "delete_team", "ignore_file_library_sync_status"):
+        decision = ctx.decision_for(f"mcp__c5ec6d7a__{tool}", "{}")
+        assert not decision.allowed, tool
+        assert "integration" in decision.reason
+
+
 def test_ask_risky_asks_before_calendar_creates_and_edits():
     ctx = _ctx("ask_risky")
     assert ctx.decision_for("manage_calendar", '{"action": "list_events"}').allowed

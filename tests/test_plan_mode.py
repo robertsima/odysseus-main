@@ -69,6 +69,33 @@ def test_mcp_readonly_classification():
     assert ro({"name": "search_docs"}) is True
     assert ro({"name": "send_message"}) is False
     assert ro({"name": "frobnicate"}) is False
+    # A write verb followed by a read-looking noun is still a write. These
+    # used to fall through to the noun-first read fallback ("status", "read",
+    # "query"), so plan mode let them run (2026-09-24, Penpot).
+    assert ro({"name": "ignore_file_library_sync_status"}) is False
+    assert ro({"name": "mark_all_notifications_read"}) is False
+    assert ro({"name": "execute_query"}) is False
+    # A conjunction starts a second action, and a leading read verb says
+    # nothing about it.
+    for name in ("search_and_replace", "find_and_replace", "get_or_create_label",
+                 "fetch_and_store", "read_and_delete_message", "list_and_archive_threads"):
+        assert ro({"name": name}) is False, name
+    assert ro({"name": "list_and_count_files"}) is True
+    # A leading read verb still wins over a write word later in the name.
+    assert ro({"name": "get_sync_status"}) is True
+    assert ro({"name": "get_team_shared_files"}) is True
+    assert ro({"name": "get_team_stats"}) is True
+
+    from src.mcp_manager import McpManager
+
+    mgr = McpManager()
+    mgr._tools["c5ec6d7a"] = [
+        {"name": "ignore_file_library_sync_status"},
+        {"name": "list_teams"},
+        {"name": "get_profile"},
+    ]
+    _, blocked = mgr.plan_mode_blocked_mcp()
+    assert blocked == {"mcp__c5ec6d7a__ignore_file_library_sync_status"}
 
 
 def test_fail_closed_fallback_blocks_mutations(monkeypatch):

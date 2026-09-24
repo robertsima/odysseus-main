@@ -233,6 +233,14 @@ discloses nothing, while a denied tool it never asked about stays invisible. An
 empty result also says which kind of empty it is, so "nothing matched" can no
 longer be reported as "nothing fitted".
 
+Discovery's own limits (32 tools / 4,096 schema-token estimates per turn by
+default) count only what discovery loads, not the schemas the round already
+sends; those are reported as already attached and never loaded twice. The
+limits used to be shared with the round's payload, which upstream's selection
+fills with 37-48 schemas, so on 2026-09-24 every `discover_tools` call came
+back budget-limited, even for an exact `mcp__…` name. When a real budget stop
+coincides with matches that are already attached, the reply says both.
+
 ### 2.4 Assembling the schema list
 
 `_tool_schemas_for_round` turns the selection into the exact list sent. Three

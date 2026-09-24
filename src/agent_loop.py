@@ -2830,6 +2830,51 @@ def _tools_named_by_user(messages: List[Dict], known: Set[str], *, include_previ
     return {tok for tok in _TOOL_NAME_TOKEN_RE.findall(text or "") if tok in known}
 
 
+def _requested_mcp_read_tools(
+    mcp_mgr,
+    query: str,
+    *,
+    disabled_map: Optional[Dict[str, set]],
+    disabled_tools: Set[str],
+    allowed_servers,
+    readonly: bool,
+) -> Set[str]:
+    """Read-only tools of each connected MCP server the user's message names.
+
+    A server over the always-bound cap is gated: its schemas reach the model
+    only through retrieval, which ranks by cosine similarity with no
+    preference for reads. On 2026-09-24 "Penpot" (81 tools) was named and
+    retrieval offered only delete_team / update_team, so the model probed
+    the server with update_team. The fork's rule was that naming a server
+    attaches its read tools (`McpManager.discover_requested_tools`); the
+    upstream sync (c72cb40c) dropped its only caller.
+
+    ``enabled_tools`` stays None: the chat's allowlist is already folded into
+    ``disabled_tools`` / ``disabled_map`` by the caller, and the method's
+    literal membership test would read an ``mcp__srv__*`` grant as denying
+    every tool. With no bindings the method returns reads only. A mention
+    never names the builtin browser (see the method): here any browser name
+    would make `_expand_browser_mcp_tools` attach its whole catalogue.
+    """
+    if not mcp_mgr or not query or not hasattr(mcp_mgr, "discover_requested_tools"):
+        return set()
+    try:
+        found = mcp_mgr.discover_requested_tools(
+            query,
+            disabled_map=disabled_map or {},
+            disabled_tools=disabled_tools,
+            allowed_servers=allowed_servers if isinstance(allowed_servers, list) else None,
+            enabled_tools=None,
+            readonly=readonly,
+        )
+    except Exception as err:
+        logger.debug("[tool-routing] requested MCP tool scan failed: %s", err)
+        return set()
+    if not isinstance(found, (set, frozenset, list, tuple)):
+        return set()
+    return {str(name) for name in found if name} - set(disabled_tools or ())
+
+
 def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_chars: int = 600) -> str:
     """Build the tool-retrieval query from the last few USER turns, not just
     the latest one.
@@ -5389,6 +5434,28 @@ async def stream_agent_loop(
     # Runs unconditionally: the native wellbeing tool needs the same gate as
     # the Lotus MCP tools, and it exists whether or not an MCP manager does.
     _apply_private_mcp_filter(endpoint_url, _mcp_disabled_map, disabled_tools, owner=owner)
+    # Plan mode and read-only workflow workers: the server-mention path must
+    # return reads only for them, whatever else it is later given.
+    _mcp_request_readonly = bool(plan_mode or _agent_settings.get("workflow_readonly"))
+    # The keyword classifier knows no server names, so a first message such as
+    # "check that penpot works" reads as low-signal and the direct path below
+    # would answer it with no tools at all: the server-mention attachment
+    # further down never ran. Naming a connected server the chat may use is a
+    # request for its tools, not small talk.
+    if (
+        _direct_low_signal
+        and not _casual_low_signal_turn
+        and _requested_mcp_read_tools(
+            mcp_mgr, _last_user,
+            disabled_map=_mcp_disabled_map, disabled_tools=disabled_tools,
+            allowed_servers=_allowed_mcp_servers, readonly=_mcp_request_readonly,
+        )
+    ):
+        logger.info(
+            "[agent] latest=%r names a connected MCP server; taking the tool path, not the direct reply",
+            _last_user[:80],
+        )
+        _direct_low_signal = False
     if _direct_low_signal:
         logger.info("[agent] direct low-signal reply path for latest=%r", _last_user[:80])
         # A short reply ("hi", "thanks") still answers as the chat's persona and
@@ -5945,6 +6012,32 @@ async def stream_agent_loop(
             _relevant_tools.update(_named)
             logger.info("[tool-rag] User named tools: %s", sorted(_named))
 
+    # Naming a connected server attaches its read-only tools, whatever
+    # retrieval scored (`_requested_mcp_read_tools` has the 2026-09-24
+    # incident). Not under a pinned role: the pin already is every tool its
+    # policy allows, and `_reassert_pinned_toolset` would undo an addition.
+    _mcp_requested_tools: Set[str] = set()
+    if not guide_only and _pinned_tools is None:
+        # A short follow-up ("try again") inherits the server its previous
+        # message named, as a named tool does above; otherwise the retry of
+        # "check that penpot works" was left with whatever retrieval picked
+        # for the words "try again" (delete_team, on 2026-09-24).
+        _mcp_request_text = (
+            _recent_context_for_retrieval(messages, max_user=2, max_chars=2000)
+            if _low_signal_turn and _existing_conversation else _last_user
+        )
+        _mcp_requested_tools = _requested_mcp_read_tools(
+            mcp_mgr, _mcp_request_text,
+            disabled_map=_mcp_disabled_map, disabled_tools=disabled_tools,
+            allowed_servers=_allowed_mcp_servers, readonly=_mcp_request_readonly,
+        )
+        if _mcp_requested_tools:
+            if _relevant_tools is None:
+                from src.tool_index import ALWAYS_AVAILABLE
+                _relevant_tools = set(ALWAYS_AVAILABLE)
+            _relevant_tools.update(_mcp_requested_tools)
+            logger.info("[tool-routing] requested_mcp_attached=%s", sorted(_mcp_requested_tools))
+
     if not guide_only and _relevant_tools is not None:
         _relevant_tools = _expand_browser_mcp_tools(_relevant_tools, mcp_mgr)
 
@@ -6056,7 +6149,7 @@ async def stream_agent_loop(
     ):
         from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS
         _protected = (set(_ALWAYS) | set(_pre_domain_tools) | _skill_required_tools
-                      | _routing_protected | {"manage_skills"})
+                      | _routing_protected | _mcp_requested_tools | {"manage_skills"})
         _protected |= {t for t in (forced_tools or ()) if t not in disabled_tools}
         if _active_document_relevant:
             _protected |= {"edit_document", "update_document", "suggest_document"}

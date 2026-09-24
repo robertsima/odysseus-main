@@ -94,6 +94,12 @@ Initial advisory limits are 24 tools / 3,000 estimated schema tokens. Initial
 attachments and all later automatic additions share 32 tools / 5,000 estimated
 schema tokens. Explicit caller/profile/named-tool/skill bindings can exceed the
 advisory initial limit and this is recorded as `explicit_budget_override`.
+(Superseded since the 2026-09-18 upstream sync: the loop no longer plans an
+initial selection with these limits, and discovery's own allowance, 32 tools /
+4,096 estimated schema tokens a turn by default, covers only what discovery
+loads. Schemas the round already sends are reported as already attached and do
+not spend it; sharing the ceiling with them left no room on 37-48-schema rounds
+(2026-09-24). See website/agent-runtime.md §2.3.)
 Discovery returns at most eight new tools per call, skips attached definitions,
 and reports budget exhaustion separately from missing capabilities. Exact-name
 lookups need no embedding request. Semantic fallback has a two-second timeout.

@@ -142,11 +142,18 @@ the model.
   the loop builds a `TurnToolDiscovery` over native and MCP schemas, hands it
   to the executor, and attaches what it loads to the next round
   (`continue_same_turn: true`). It is always offered, including on
-  caller-provided selections. A deterministic, exact-name form of the
+  caller-provided selections. Its allowance (32 tools / 4,096 estimated
+  schema tokens a turn) covers only what discovery loads: schemas the round
+  already sends no longer spend it. On 2026-09-24 they had, on every busy
+  chat, so each call returned `budget_limited`, even for the exact
+  `mcp__…__get_profile` the prompt listed. A deterministic, exact-name form of the
   missing-tool re-arm: a short final answer that says it lacks a named,
   permitted tool gets that tool attached and one more round, at most twice a
-  turn (`_missing_tools_to_attach`). The fork's prose-shape detectors and
-  starved-domain repair are still on the backlog. Covered by
+  turn (`_missing_tools_to_attach`). Bare names (`get_profile` for
+  `mcp__c5ec6d7a__get_profile`) are deliberately not resolved: a bare name
+  does not say which server, and after a failed call "list_projects isn't
+  available" is about the service, not the schema. The fork's prose-shape
+  detectors and starved-domain repair are still on the backlog. Covered by
   `tests/test_same_turn_tool_attachment.py`.
 - **Skill routing through `skill_declared_tools`**. Matched skills, a skill
   loaded with `manage_skills view`, and a profile's selected skills resolve
@@ -175,7 +182,7 @@ the model.
 | Steering beyond delivery: tools added because of a steer, and continuing a turn that would end while a steer is pending | Steers and peer-agent messages are delivered between rounds (see Kept). A steer that arrives after the last round is dropped with a visible `steer_dropped` event. | `75988e56`, `4c4ce597` |
 | Prompt and schema efficiency: stable prefix, schema ledger, cache-shard affinity, reasoning replay, context accounting | Upstream's | `97b6691c`, `913a605d`, `f4bdeed2`, `c129bbcc`, `8cca5a1e`, `d47e5160` |
 | Schema-level hiding: private-grant tools, Lotus, loadout-disallowed tools | Offered to the model but refused at execution | `da53f2c4`, `0ea6b80b`, `cabbe6d1` |
-| Git, research and MCP routing prompts | Upstream's | `e16d1ec5`, `94fa0d17`, `982e60eb`, `9f7062d0`, `836eb7d8` |
+| Git, research and MCP routing prompts | Upstream's, except server-mention read tools, now re-ported: a message naming a connected MCP server attaches up to 8 of its read-only tools (`McpManager.discover_requested_tools`; never writes), kept out of the tool budget's reach, and such a message no longer takes the tool-free first-turn reply. The word "browser" does not name the builtin browser, whose expansion would attach its whole catalogue, writes included (`tests/test_requested_mcp_routing.py`) | `e16d1ec5`, `94fa0d17`, `982e60eb`, `9f7062d0`, `836eb7d8` |
 | Knowledge-base and vault routing | Upstream's | `68646700`, `8dfacd08`, `4360acf2`, `98a4e3ff` |
 | Request self-heal, `site:` handling | Upstream's | `0611fa1e` |
 

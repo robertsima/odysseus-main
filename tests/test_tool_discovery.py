@@ -3,7 +3,7 @@ import json
 import time
 from types import SimpleNamespace
 
-from src.tool_discovery import TurnToolDiscovery
+from src.tool_discovery import TurnToolDiscovery, _compact_schema_cost
 from src import tool_execution
 from src.tool_parsing import parse_tool_blocks, strip_tool_blocks
 
@@ -35,6 +35,56 @@ CATALOG = [
     schema("mcp__social__create-post", "Create a social post", {"readOnlyHint": False}),
     schema("mcp__private__read-journal", "Read private journal", {"readOnlyHint": True}),
 ]
+
+PENPOT_SID = "c5ec6d7a"
+
+
+def penpot(tool, description, required=(), optional=()):
+    """A Penpot tool the way McpManager.get_all_openai_schemas emits it: the
+    server id in the name, the display name only as a description prefix, and
+    no MCP annotations (@zcubekr/penpot-mcp-server declares none)."""
+    properties = {name: {"type": "string"} for name in (*required, *optional)}
+    return {"type": "function", "function": {
+        "name": f"mcp__{PENPOT_SID}__{tool}",
+        "description": f"[MCP:Penpot] {description}",
+        "parameters": {"type": "object", "properties": properties, "required": list(required)},
+    }}
+
+
+def pp(tool):
+    return f"mcp__{PENPOT_SID}__{tool}"
+
+
+# A slice of the real 81-tool server (2026-09-24), descriptions and required
+# arguments as the package ships them.
+PENPOT = [
+    penpot("get_profile", "Get current user profile"),
+    penpot("list_teams", "List all teams the user has access to"),
+    penpot("get_team", "Get detailed information about a specific team (provide either teamId or fileId)",
+           optional=("teamId", "fileId")),
+    penpot("list_comment_threads", "List all comment threads in a file or team (provide either fileId or teamId)",
+           optional=("fileId", "teamId", "shareId")),
+    penpot("list_projects", "List all projects in a team", ("teamId",)),
+    penpot("get_team_members", "Get list of all members in a team", ("teamId",)),
+    penpot("list_files", "List all files in a project", ("projectId",)),
+    penpot("get_file", "Get detailed information about a file", ("fileId",)),
+    penpot("has_file_libraries", "Check if a file uses any component libraries (returns boolean)", ("fileId",)),
+    penpot("update_team", "Update team information (name)", ("teamId", "name")),
+    penpot("delete_team", "Delete a team (requires owner permissions)", ("teamId",)),
+    penpot("delete_team_invitation", "Delete a pending team invitation by email", ("teamId", "email")),
+    penpot("delete_team_member", "Remove a member from a team", ("teamId", "memberId")),
+    penpot("leave_team", "Leave a team (current user leaves the team)", ("teamId",), ("reassignTo",)),
+    penpot("update_shape", "Update shape properties including position, size, colors, gradients",
+           ("fileId", "pageId", "shapeId")),
+    penpot("create_rectangle", "Create a rectangle shape with colors, gradients, images, borders",
+           ("fileId", "pageId")),
+]
+# Reads that take no arguments: what "is Penpot working?" should reach first.
+PENPOT_PROBES = {pp("get_profile"), pp("list_teams"), pp("get_team"), pp("list_comment_threads")}
+PENPOT_WRITES = {pp(name) for name in (
+    "update_team", "delete_team", "delete_team_invitation", "delete_team_member",
+    "leave_team", "update_shape", "create_rectangle",
+)}
 
 
 def run(discovery, query, **kwargs):
@@ -85,7 +135,7 @@ def test_budget_exhaustion_is_not_reported_as_a_missing_capability():
     assert "exceed this turn's tool budget" in result["output"]
 
 
-def test_attached_tools_consume_shared_budgets_without_becoming_discovery_results():
+def test_attached_tools_are_reported_without_spending_the_discovery_allowance():
     discovery = TurnToolDiscovery(CATALOG, max_loaded=1, max_schema_tokens=10_000)
     discovery.set_attached(["web_search"])
     result = run(discovery, "web search")
@@ -94,17 +144,27 @@ def test_attached_tools_consume_shared_budgets_without_becoming_discovery_result
     assert "already available" in result["output"]
     assert discovery.loaded_names == set()
     assert discovery.loaded_schema_tokens == 0
-    # The attached tool consumes the only count slot, so another match cannot load.
-    assert run(discovery, "manage memory")["loaded_names"] == []
+    # The attached tool is not discovery's to count: the one slot is still free.
+    assert run(discovery, "manage memory")["loaded_names"] == ["manage_memory"]
+    # ...and what discovery loaded does spend it.
+    spent = run(discovery, "list models")
+    assert spent["loaded_names"] == []
+    assert spent["discovery"]["budget_limited"] is True
 
 
-def test_set_attached_replaces_snapshot_and_schema_budget_blocks_autoadd():
+def test_set_attached_replaces_snapshot_and_schema_allowance_blocks_autoadd():
     discovery = TurnToolDiscovery(CATALOG, max_loaded=2, max_schema_tokens=1)
-    discovery.set_attached(["web_search"])
-    assert run(discovery, "manage memory")["loaded_names"] == []
+    discovery.set_attached(["manage_memory"])
+    attached = run(discovery, "manage memory")
+    assert attached["loaded_names"] == []
+    assert attached["already_attached_names"] == ["manage_memory"]
     discovery.set_attached([])
-    # Replacement frees count but the one-token schema ceiling remains too small.
-    assert run(discovery, "manage memory")["loaded_names"] == []
+    # The replaced snapshot no longer reports it, and the one-token schema
+    # allowance is too small for discovery to load it instead.
+    replaced = run(discovery, "manage memory")
+    assert replaced["loaded_names"] == []
+    assert replaced["already_attached_names"] == []
+    assert replaced["discovery"]["budget_limited"] is True
 
 
 def test_cumulative_schema_token_budget_uses_compact_cost_and_keeps_canonical_output():
@@ -365,3 +425,181 @@ def test_a_denied_tool_the_caller_never_named_is_not_disclosed():
     # ...and an empty answer still says which kind of empty it is, so there is
     # no room to invent a budget that was never hit.
     assert "not a schema-budget result" in result["output"]
+
+
+def test_a_wide_round_still_leaves_discovery_its_own_allowance():
+    """The 2026-09-24 Penpot turn. The round already sent 37 schemas, and the
+    32-tool / 4096-token ceilings were shared with them, so every discover_tools
+    call -- even for the exact name the prompt listed -- came back
+    budget_limited and the model told the user its tool budget was exhausted.
+    Built like production: the real native registry plus Penpot schemas as
+    get_all_openai_schemas emits them, on the class defaults agent_loop uses.
+    """
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    native = [s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS if s["function"]["name"] != "discover_tools"]
+    sent = native[:35] + [pp("delete_team"), pp("delete_team_invitation")]
+    assert len(sent) == 37
+    discovery = TurnToolDiscovery(list(FUNCTION_TOOL_SCHEMAS) + PENPOT)
+    discovery.set_attached(sent)
+
+    exact = run(discovery, pp("get_profile"))
+    assert exact["loaded_names"] == [pp("get_profile")]
+    assert exact["discovery"]["budget_limited"] is False
+    assert "same turn" in exact["output"]
+
+    discovery.set_attached(sent + [pp("get_profile")])
+    named = run(discovery, "penpot get_profile list_teams")
+    assert named["loaded_names"][0] == pp("list_teams")
+    assert pp("get_profile") in named["already_attached_names"]
+    # What the round already sends is never loaded again or charged to discovery.
+    assert not set(named["loaded_names"]) & set(sent)
+    assert discovery.loaded_names == {pp("get_profile"), *named["loaded_names"]}
+    assert discovery.loaded_schema_tokens == sum(
+        _compact_schema_cost(item) for item in discovery.loaded_tools
+    )
+
+    fresh = TurnToolDiscovery(list(FUNCTION_TOOL_SCHEMAS) + PENPOT)
+    fresh.set_attached(sent)
+    assert run(fresh, "penpot get_profile list_teams")["loaded_names"][:2] == [pp("get_profile"), pp("list_teams")]
+
+
+def test_a_budget_stop_is_reported_even_when_other_matches_are_attached():
+    """"Matching tools are already available: ..." alone read as the whole
+    answer, hiding that the tools actually asked for were withheld."""
+    discovery = TurnToolDiscovery(CATALOG, max_loaded=1)
+    assert run(discovery, "web search")["loaded_names"] == ["web_search"]
+    discovery.set_attached(["web_search", "list_models"])
+    result = run(discovery, "list models manage memory")
+    assert result["loaded_names"] == []
+    assert result["already_attached_names"] == ["list_models"]
+    assert result["discovery"]["budget_limited"] is True
+    assert "already available: list_models" in result["output"]
+    assert "withheld by this turn's discovery budget" in result["output"]
+    assert "not a schema-budget result" not in result["output"]
+    # The attached match is callable now, so the turn still continues.
+    assert result["continue_same_turn"] is True
+
+
+def test_a_query_naming_the_server_finds_its_reads_first():
+    discovery_catalog = CATALOG + PENPOT
+    for query in ("penpot", "penpot health check", "check penpot works"):
+        result = run(TurnToolDiscovery(discovery_catalog), query, max_results=8)
+        loaded = result["loaded_names"]
+        assert set(loaded[:4]) == PENPOT_PROBES, query
+        assert not set(loaded) & PENPOT_WRITES, query
+        assert len(loaded) == 8, query
+    # Bounded by max_results even though the query ties the whole server.
+    assert len(run(TurnToolDiscovery(discovery_catalog), "penpot", max_results=99)["loaded_names"]) == 8
+    assert set(run(TurnToolDiscovery(discovery_catalog), "penpot")["loaded_names"]) >= {
+        pp("get_profile"), pp("list_teams"),
+    }
+
+
+def test_a_tool_the_query_describes_outranks_the_servers_reads():
+    """Naming the server ties all its tools on the name; the rest of the query
+    still picks the tool it describes instead of five unrelated reads."""
+    distribute = penpot("distribute_shapes", "Distribute multiple shapes evenly with equal spacing",
+                        ("fileId", "pageId", "shapeIds", "direction"))
+    discovery_catalog = CATALOG + PENPOT + [distribute]
+    assert run(TurnToolDiscovery(discovery_catalog), "penpot equal spacing")["loaded_names"][0] == pp(
+        "distribute_shapes"
+    )
+    # One describing word is not a description match (has_file_libraries
+    # says "Check"), so a health check still reaches the reads.
+    assert set(run(TurnToolDiscovery(discovery_catalog), "penpot health check")["loaded_names"][:4]) == PENPOT_PROBES
+
+
+def test_name_tokens_and_exact_names_outrank_the_read_preference():
+    discovery_catalog = CATALOG + PENPOT
+    assert run(TurnToolDiscovery(discovery_catalog), "penpot delete team")["loaded_names"][0] == pp("delete_team")
+    assert run(TurnToolDiscovery(discovery_catalog), "penpot update team")["loaded_names"][0] == pp("update_team")
+    assert run(TurnToolDiscovery(discovery_catalog), pp("update_team"))["loaded_names"] == [pp("update_team")]
+
+
+def test_server_label_matching_ignores_the_account_and_generic_words():
+    tool = penpot("get_profile", "Get current user profile")
+    tool["function"]["description"] = "[MCP:Penpot MCP Server (robert@example.com)] Get current user profile"
+    # Each is one description word (below the two-word fallback), so only a
+    # label hit could match: the connected account and "mcp"/"server" name
+    # no server.
+    for query in ("mcp", "server", "robert"):
+        assert run(TurnToolDiscovery([tool]), query)["loaded_names"] == [], query
+    assert run(TurnToolDiscovery([tool]), "penpot")["loaded_names"] == [pp("get_profile")]
+    # A tool without the manager's prefix gains no label from its prose.
+    plain = schema("mcp__x__get_profile", "Penpot profile reader [MCP:Penpot]")
+    assert run(TurnToolDiscovery([plain]), "penpot")["loaded_names"] == []
+
+
+def github_read(tool, description, required=("owner", "repo")):
+    """A tool of the builtin GitHub Read server, labelled as the manager
+    labels it (src/builtin_mcp.py names the server "Built-in: GitHub Read")."""
+    return {"type": "function", "function": {
+        "name": f"mcp__github_read__{tool}",
+        "description": f"[MCP:Built-in: GitHub Read] {description}",
+        "parameters": {"type": "object", "properties": {name: {"type": "string"} for name in required},
+                       "required": list(required)},
+    }}
+
+
+GITHUB_READ = [
+    github_read("get_me", "Get details of the authenticated GitHub user.", required=()),
+    github_read("actions_list", "Tools for listing GitHub Actions resources.", ("method", "owner", "repo")),
+    github_read("get_commit", "Get details for a commit from a GitHub repository", ("owner", "repo", "sha")),
+    github_read("issue_read", "Get information about a specific issue in a GitHub repository.",
+                ("method", "owner", "repo", "issue_number")),
+    github_read("list_branches", "List branches in a GitHub repository"),
+    github_read("list_commits", "Get list of commits of a branch in a GitHub repository."),
+]
+DOCUMENT_TOOLS = [
+    schema("create_document", "Create a new document in the editor panel."),
+    schema("edit_document", "Edit a document open in the editor panel."),
+    schema("read_file", "Read a file from disk."),
+]
+
+
+def test_builtin_server_labels_do_not_make_everyday_words_name_every_tool():
+    """Counting each label word would make "built" and "read" name hits for
+    all of GitHub Read's tools, and "read the document" would load get_me,
+    actions_list and get_commit but no document tool."""
+    catalog = CATALOG + DOCUMENT_TOOLS + GITHUB_READ
+    loaded = run(TurnToolDiscovery(catalog), "read the document", max_results=8)["loaded_names"]
+    assert {"create_document", "edit_document", "read_file"} <= set(loaded)
+    # Only the GitHub tool whose own name says "read".
+    assert [name for name in loaded if name.startswith("mcp__github_read__")] == ["mcp__github_read__issue_read"]
+    assert run(TurnToolDiscovery(catalog), "built")["loaded_names"] == []
+    # The whole label still names the server.
+    named = run(TurnToolDiscovery(catalog), "is github read working", max_results=8)["loaded_names"]
+    assert {schema_["function"]["name"] for schema_ in GITHUB_READ} <= set(named)
+
+
+def test_a_tool_name_hit_outranks_a_server_name_hit():
+    loaded = run(TurnToolDiscovery(CATALOG + PENPOT), "list penpot models", max_results=8)["loaded_names"]
+    assert loaded[0] == "list_models"
+    # list_teams matches a word of its own name; get_profile only the server's.
+    assert loaded.index(pp("list_teams")) < loaded.index(pp("get_profile"))
+
+
+def test_the_description_still_breaks_ties_between_tool_name_hits():
+    """Reads-first ahead of the description is for a query that only names a
+    server. Past a tool-name hit it would load list_branches and then
+    unrelated no-argument list_* tools instead of list_commits."""
+    loaded = run(TurnToolDiscovery(CATALOG + GITHUB_READ), "list my github branches")["loaded_names"]
+    assert loaded[:2] == ["mcp__github_read__list_branches", "mcp__github_read__list_commits"]
+    assert loaded.index("mcp__github_read__list_commits") < loaded.index("list_models")
+
+
+def test_readonly_workflows_discover_unannotated_mcp_reads_like_the_executor_allows():
+    """The executor lets a read-only worker call an unannotated MCP read by its
+    name (mcp_call_is_readonly) and plan mode blocks by the same heuristic, but
+    discovery failed closed on every unannotated MCP name, so neither could
+    ever be offered one."""
+    catalog = [
+        schema("mcp__penpot__get_profile", "[MCP:Penpot] Get current user profile"),
+        schema("mcp__penpot__update_team", "[MCP:Penpot] Update team information (name)"),
+    ]
+    for settings in ({"workflow_readonly": True}, {"plan_mode": True}):
+        discovery = TurnToolDiscovery(catalog)
+        assert discovery.permitted_names(settings) == {"mcp__penpot__get_profile"}
+        assert run(discovery, "get profile", settings=settings)["loaded_names"] == ["mcp__penpot__get_profile"]
+        assert run(discovery, "update team", settings=settings)["loaded_names"] == []

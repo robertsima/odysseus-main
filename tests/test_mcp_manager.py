@@ -1,10 +1,13 @@
 import asyncio
 from unittest.mock import patch
 
+import pytest
+
 from src.mcp_manager import (
     _describe_exception,
     _format_mcp_connection_error,
     _is_dead_transport_error,
+    _redacted_origin,
     McpManager,
 )
 
@@ -302,6 +305,240 @@ def test_http_server_is_not_auto_reconnected_mid_call():
 
     assert reconnected is False
     connect.assert_not_called()
+
+
+# ── A live server that cannot reach the service it wraps (2026-09-24) ──────
+#
+# Penpot showed green while every call failed with "fetch failed": its
+# PENPOT_API_URL was unreachable from inside the Odysseus container, and the
+# bare error read like a broken tool.
+
+def _penpot_manager(env=None, transport="stdio", url=None):
+    mgr = McpManager()
+    mgr._sessions["c5ec6d7a"] = object()
+    mgr._connections["c5ec6d7a"] = {"status": "connected", "name": "Penpot"}
+    mgr._configs["c5ec6d7a"] = {
+        "server_id": "c5ec6d7a",
+        "name": "Penpot",
+        "transport": transport,
+        "command": "npx" if transport == "stdio" else None,
+        "args": ["-y", "@zcubekr/penpot-mcp-server"] if transport == "stdio" else [],
+        "env": dict(env or {}),
+        "url": url,
+    }
+    return mgr
+
+
+def _call_failing_with(mgr, message, code=-32603):
+    from mcp.shared.exceptions import McpError
+    from mcp.types import ErrorData
+
+    async def fake_do_call(session, tool_name, arguments):
+        raise McpError(ErrorData(code=code, message=message))
+
+    with patch.object(McpManager, "_do_call", side_effect=fake_do_call):
+        return asyncio.run(mgr.call_tool("mcp__c5ec6d7a__list_teams", {}))
+
+
+def test_network_failure_names_the_configured_address_without_secrets():
+    mgr = _penpot_manager(env={
+        "PENPOT_API_URL": "http://user:pw@localhost:9001/?t=x",
+        "PENPOT_ACCESS_TOKEN": "s3cret",
+    })
+    result = _call_failing_with(mgr, "MCP error -32603: Tool execution failed: fetch failed")
+
+    assert result["exit_code"] == 1
+    error = result["error"]
+    assert error.startswith("MCP error -32603: Tool execution failed: fetch failed")
+    assert "network failure" in error
+    assert "PENPOT_API_URL=http://localhost:9001." in error
+    assert "localhost/127.0.0.1 is the Odysseus container itself" in error
+    for secret in ("s3cret", "pw", "t=x", "PENPOT_ACCESS_TOKEN"):
+        assert secret not in error, secret
+
+
+def test_network_hint_sends_the_model_to_its_own_url_arguments_first():
+    # "fetch failed" is also what a server that fetches a URL the model passed
+    # it says when that URL is wrong; the text cannot tell the two apart.
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "http://localhost:9001"})
+    error = _call_failing_with(mgr, "MCP error -32603: Failed to fetch https://exmaple.com/page: fetch failed")["error"]
+
+    assert "If this call's arguments include a URL or host, check that first." in error
+    assert "not a problem with the call's arguments" not in error
+
+
+def test_invalid_params_never_get_the_network_hint():
+    # JSON-RPC -32602 is the server rejecting the arguments, whatever words
+    # its text happens to contain.
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "http://localhost:9001"})
+    message = "Invalid URL in 'uri': getaddrinfo ENOTFOUND exmaple.com"
+
+    assert _call_failing_with(mgr, message, code=-32602)["error"] == message
+
+
+def test_tool_error_that_reached_the_service_gets_no_network_hint():
+    # A 401 proves the address works; the hint would send the user after the
+    # wrong setting.
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "http://192.168.1.122:9001"})
+    message = "Tool execution failed: Failed to list teams: {authentication-required}"
+
+    assert _call_failing_with(mgr, message)["error"] == message
+
+
+@pytest.mark.parametrize("text, network", [
+    ("fetch failed", True),
+    ("getaddrinfo ENOTFOUND homelab.nas", True),
+    ("connect ECONNREFUSED 127.0.0.1:9001", True),
+    ("request failed: UND_ERR_CONNECT_TIMEOUT", True),
+    ("[Errno -3] Temporary failure in name resolution", True),
+    ("[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed", True),
+    ("TypeError: unknown scheme", True),
+    ("MCP error -32603: Failed to fetch https://exmaple.com/page: fetch failed", True),
+    ("getaddrinfo ENOTFOUND exmaple.com", True),
+    ("error:0A00010B:SSL routines::wrong version number", True),
+    ("[SSL: WRONG_VERSION_NUMBER] wrong version number (_ssl.c:1006)", True),
+    ("request to https://penpot.local/api failed, reason: CERT_HAS_EXPIRED", True),
+    ("net::ERR_SSL_PROTOCOL_ERROR", True),
+    ("Failed to list teams: {}", False),
+    ("Invalid arguments: teamId is required", False),
+    ("Timed out while waiting for response to ClientRequest. Waited 30.0 seconds.", False),
+    # The server rejecting the arguments, or answering from the service: the
+    # words SSL/TLS/certificate in them say nothing about the connection.
+    ("MCP error -32602: Invalid params: 'tls' must be a boolean", False),
+    ('Tool execution failed: [{"code":"invalid_type","expected":"boolean","path":["tls"]}]', False),
+    ("ENOENT: no such file or directory, open '/etc/ssl/certs/custom.pem'", False),
+    ('Failed to update zone: {"errors":[{"message":"Invalid value for SSL mode: strict"}]}', False),
+    ('Failed to create webhook: {"type":"validation","code":"webhook-validation",'
+     '"hint":"ssl-validation-error"}', False),
+    ("min_tls_version must be one of TLS 1.2, TLS 1.3", False),
+    ("400 Bad Request: The uploaded certificate has expired", False),
+])
+def test_only_network_level_errors_get_the_hint(text, network):
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "http://localhost:9001"})
+    message = mgr._describe_call_failure("c5ec6d7a", RuntimeError(text))
+
+    assert message.startswith(text)
+    assert ("network failure" in message) is network
+
+
+def test_scheme_less_address_is_flagged_without_echoing_any_value():
+    # "homelab.nas:9001" is what undici calls an unknown scheme. The value is
+    # not a URL, so nothing about it may be quoted -- only how to fix it.
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "homelab.nas:9001", "PENPOT_ACCESS_TOKEN": "s3cret"})
+    message = mgr._describe_call_failure("c5ec6d7a", RuntimeError("fetch failed"))
+
+    assert "http:// or https://" in message
+    assert "homelab.nas" not in message
+    assert "s3cret" not in message
+
+
+@pytest.mark.parametrize("env,error", [
+    # A *_HOST is a bare name by design, and a DSN is not an http URL: the
+    # fix is never "make it start with http://".
+    ({"IMAP_HOST": "imap.gmail.com", "IMAP_PASSWORD": "s3cret"}, "getaddrinfo ENOTFOUND imap.gmail.com"),
+    ({"DATABASE_URL": "postgresql://u:s3cret@localhost:5432/db"}, "connect ECONNREFUSED 127.0.0.1:5432"),
+    ({}, "connect ECONNREFUSED 127.0.0.1:5432"),
+    # "BASE" inside DATABASE / SUPABASE and "URI" inside SECURITY name no URL.
+    ({"PGHOST": "localhost", "PGDATABASE": "app", "PGPASSWORD": "s3cret"},
+     "connect ECONNREFUSED 127.0.0.1:5432"),
+    ({"SUPABASE_ACCESS_TOKEN": "s3cret", "AIRTABLE_BASE_ID": "app1", "SECURITY_TOKEN": "s3cret"},
+     "fetch failed"),
+])
+def test_a_non_http_service_is_not_told_to_use_an_http_scheme(env, error):
+    mgr = _penpot_manager(env=env)
+    message = mgr._describe_call_failure("c5ec6d7a", RuntimeError(error))
+
+    assert "network failure" in message
+    assert "http:// or https://" not in message
+    assert "host, port" in message
+    assert "s3cret" not in message
+
+
+def test_a_valid_url_that_cannot_be_quoted_is_not_called_malformed():
+    # "@" after the host could be a broken-up password, so it is not quoted,
+    # but it is not declared wrong either, and no http:// advice is given.
+    mgr = _penpot_manager(env={"MASTODON_URL": "https://mastodon.social/@alice"})
+    message = mgr._describe_call_failure("c5ec6d7a", RuntimeError("fetch failed"))
+
+    assert "was not quoted" in message
+    assert "alice" not in message
+    assert "has no scheme" not in message
+
+
+def test_a_failure_the_server_returns_as_a_result_gets_the_hint():
+    """FastMCP and the Python SDK report a tool exception as isError, not by
+    raising, so the hint must also reach that path."""
+    from types import SimpleNamespace
+
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "http://localhost:9001", "PENPOT_ACCESS_TOKEN": "s3cret"})
+
+    class _Session:
+        async def call_tool(self, tool_name, arguments):
+            return SimpleNamespace(
+                content=[SimpleNamespace(text="Error executing tool list_teams: [Errno 111] Connection refused")],
+                isError=True,
+            )
+
+    mgr._sessions["c5ec6d7a"] = _Session()
+    result = asyncio.run(mgr.call_tool("mcp__c5ec6d7a__list_teams", {}))
+
+    assert result["exit_code"] == 1
+    assert result["stderr"].startswith("Error executing tool list_teams")
+    assert "network failure" in result["stderr"]
+    assert "PENPOT_API_URL=http://localhost:9001" in result["stderr"]
+    assert "s3cret" not in result["stderr"]
+    assert result["untrusted_content"] is True
+
+    class _Unauthorized(_Session):
+        async def call_tool(self, tool_name, arguments):
+            return SimpleNamespace(content=[SimpleNamespace(text="Failed to list teams: {}")], isError=True)
+
+    mgr._sessions["c5ec6d7a"] = _Unauthorized()
+    assert "network failure" not in asyncio.run(mgr.call_tool("mcp__c5ec6d7a__list_teams", {}))["stderr"]
+
+
+def test_remote_server_network_failure_names_only_its_origin():
+    mgr = _penpot_manager(
+        transport="http",
+        url="https://key:tok@mcp.example.com:8443/s/SECRETPATH/mcp?api_key=abc#frag",
+    )
+    message = mgr._describe_call_failure("c5ec6d7a", RuntimeError("connect ECONNREFUSED"))
+
+    assert "remote server at https://mcp.example.com:8443." in message
+    assert "localhost/127.0.0.1" not in message  # the stdio/Docker explanation
+    for secret in ("key:", "tok", "SECRETPATH", "api_key", "abc", "frag"):
+        assert secret not in message, secret
+
+
+@pytest.mark.parametrize("value, origin", [
+    ("http://user:pw@localhost:9001/?t=x", "http://localhost:9001"),
+    ("HTTPS://Example.COM/hooks/T0/B0/secret", "https://example.com"),
+    ("https://[::1]:8443/api", "https://[::1]:8443"),
+    ("homelab.nas:9001", None),
+    ("postgres://u:p@db:5432/app", None),
+    ("http://host:notaport/", None),
+    ("s3cret", None),
+    (None, None),
+    # Unencoded "/", "?" or "#" in the userinfo ends the netloc early, and part
+    # of the secret would be quoted as the host and port.
+    ("https://ghp_AbC123xyz/Q+w==@api.example.com", None),
+    ("https://admin:1234/abc@penpot.local:9001", None),
+    ("http://user:9876?x@host", None),
+    ("https://tok#en@host", None),
+    ("https://a@b/c@host", None),
+])
+def test_redacted_origin_keeps_only_scheme_host_and_port(value, origin):
+    assert _redacted_origin(value) == origin
+
+
+def test_malformed_credentials_in_the_address_are_never_quoted():
+    mgr = _penpot_manager(env={"PENPOT_API_URL": "https://admin:1234/abc@penpot.local:9001/api"})
+    error = _call_failing_with(mgr, "MCP error -32603: Tool execution failed: fetch failed")["error"]
+
+    assert "network failure" in error
+    assert "percent-encoded" in error
+    for secret in ("admin", "1234", "abc@"):
+        assert secret not in error, secret
 
 
 class _FakeStack:
