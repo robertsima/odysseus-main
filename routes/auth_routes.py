@@ -731,6 +731,7 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
             raise HTTPException(403, "Admin only")
         body = await request.json()
         current = _load_settings()
+        _profile_edits = None
         # Per-key validation for numeric settings: coerce to int and clamp to a
         # sane range so a bad value can't disable the agent or let it run away.
         _INT_RANGES = {
@@ -849,9 +850,11 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 from src.agent_profiles import validate_profiles
 
                 try:
+                    _old_profiles = current.get(key) or []
                     current[key] = validate_profiles(val)
                 except ValueError as exc:
                     raise HTTPException(400, f"agent_profiles: {exc}")
+                _profile_edits = (_old_profiles, current[key])
                 continue
             if key == "agent_approval_mode":
                 from src.approval_modes import MODES as _APPROVAL_MODES
@@ -884,6 +887,17 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 val = max(lo, min(val, hi))
             current[key] = val
         _save_settings(current)
+        if _profile_edits is not None:
+            # A chat switched to a loadout holds a copy of its policy; without
+            # this, editing the loadout here changed nothing for those chats.
+            try:
+                from src.agent_profiles import propagate_profile_edits
+
+                _updated = propagate_profile_edits(*_profile_edits)
+                if _updated:
+                    logger.info("[agent-profiles] loadout edits applied to chats: %s", _updated)
+            except Exception:
+                logger.warning("loadout edits were saved but not applied to existing chats", exc_info=True)
         return without_retired_settings(current)
 
     # ---- Context profiles (per endpoint/model window tuning) ----

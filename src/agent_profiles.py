@@ -210,6 +210,77 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
     return patch
 
 
+# What a loadout edit may carry into chats already running under it: policy,
+# not voice. `session_patch` snapshots the persona on purpose (an existing
+# agent must not silently acquire a newly edited personality), so the voice
+# keys stay whatever the chat was given.
+_VOICE_KEYS = frozenset({"agent_profile", "agent_instructions", "agent_persona_name",
+                         "agent_temperature", "agent_max_tokens", "agent_reasoning_effort"})
+
+
+def _same_setting(a: Any, b: Any) -> bool:
+    if isinstance(a, list) and isinstance(b, list):
+        return sorted(map(str, a)) == sorted(map(str, b))
+    return a == b
+
+
+def propagate_profile_edits(old_profiles: Any, new_profiles: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Carry a loadout's policy edits into the user chats that run under it.
+
+    A chat switched to a loadout gets a *copy* of its policy (`session_patch`),
+    so editing the loadout in Settings used to change nothing for those chats —
+    only the Agents Control Room, which edits the chat's own copy, took effect.
+    That read as "the settings page does not work" (2026-09-24: delegation set
+    to "Agent decides" in Settings, chat still refused to launch agents).
+
+    Three-way merge, per key: a chat's value is replaced only where it still
+    equals what the OLD loadout gave it, so a setting someone changed on that
+    one chat in the Control Room is left alone. Worker chats (those with a
+    `parent_session`) are skipped: they were launched for one task under the
+    loadout as it was, and changing their tools mid-task is not an edit anyone
+    asked for. Returns ``{profile name: chats updated}``.
+    """
+    try:
+        old_by_name = {p["name"].casefold(): p for p in validate_profiles(old_profiles or [])}
+    except ValueError:
+        return {}
+    changed = {}
+    for new in new_profiles or []:
+        old = old_by_name.get(new["name"].casefold())
+        if old is None:
+            continue
+        before, after = session_patch(old), session_patch(new)
+        keys = {k for k in set(before) | set(after) if k not in _VOICE_KEYS
+                and not _same_setting(before.get(k), after.get(k))}
+        if keys:
+            changed[new["name"]] = (before, after, keys)
+    if not changed:
+        return {}
+
+    import json
+    from core.database import Session, get_db_session, update_session_settings
+
+    updated: Dict[str, int] = {}
+    with get_db_session() as db:
+        rows = db.query(Session.id, Session.settings_json).filter(Session.settings_json.isnot(None)).all()
+    for session_id, raw in rows:
+        try:
+            settings = json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(settings, dict) or settings.get("parent_session"):
+            continue
+        name = str(settings.get("agent_profile") or "")
+        match = next((v for k, v in changed.items() if k.casefold() == name.casefold()), None) if name else None
+        if match is None:
+            continue
+        before, after, keys = match
+        patch = {k: after.get(k) for k in keys if _same_setting(settings.get(k), before.get(k))}
+        if patch and update_session_settings(session_id, patch) is not None:
+            updated[name] = updated.get(name, 0) + 1
+    return updated
+
+
 def load_profiles() -> List[Dict[str, Any]]:
     try:
         from src.settings import get_setting
