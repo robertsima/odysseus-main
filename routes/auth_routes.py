@@ -737,6 +737,8 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         _INT_RANGES = {
             "agent_max_rounds": (1, 500),
             "agent_max_tool_calls": (0, 2000),  # 0 = unlimited
+            # Worker hops below a chat a person started (1 = workers never nest).
+            "agent_max_worker_depth": (1, 4),
             # Ceiling on the agent's per-round prompt when the budget scales to
             # the model's window (src/context_budget.py).
             "agent_input_token_hard_max": (16_000, 1_000_000),

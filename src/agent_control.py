@@ -669,6 +669,16 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     task = str(task or "").strip()
     if not task:
         raise ValueError("task is empty")
+    if parent_session:
+        # Defence in depth for the nesting rule: a worker's own tool list
+        # already lacks the launchers at the limit (headless_agent.
+        # child_blocked_tools), and this refuses the launch itself.
+        from src.headless_agent import max_worker_depth, worker_depth
+
+        if worker_depth(parent_session) + 1 > max_worker_depth():
+            raise ValueError(
+                f"worker nesting limit reached ({max_worker_depth()} levels below a chat you started); "
+                "do this part yourself or return it to the chat that started you")
     manager = get_session_manager()
     if manager is None:
         raise RuntimeError("session manager unavailable")
@@ -825,7 +835,17 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
                              data={"status": status, "target_session": sess.id, "parent_session": parent_session,
                                    "max_rounds": total_rounds, "rounds_exhausted": exhausted,
                                    **({"error": error_detail} if error_detail else {})})
-            if handoff:
+            waiting_on = live_children(sess.id) if handoff and status == "completed" else 0
+            if waiting_on:
+                # A lead that launched its own workers and ended its turn is not
+                # done: its result is what it writes after they report back
+                # (_continue_parent hands that up). Handing this turn's "I
+                # started the implementors" to the parent read as the finished job.
+                activity.publish(parent_session, "note",
+                                 f"Worker {sess.name} is waiting on {waiting_on} sub-worker(s); "
+                                 "its result arrives when they finish",
+                                 source="session", run_id=run_id, owner=owner)
+            elif handoff:
                 try:
                     await _hand_off(manager, parent_session, sess, task, text, status, owner)
                 except Exception:
@@ -1050,3 +1070,29 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
     activity.run_finished(parent_id, "session", run_id, f"Continued after worker {worker.name}", status=status,
                           owner=owner, data={"target_session": worker.id, "steps": len(events),
                                              "result_excerpt": reply[:400]})
+    await _hand_up_when_done(manager, parent_id, parent, reply, status, owner)
+
+
+async def _hand_up_when_done(manager, chat_id: str, chat, reply: str, status: str, owner: Optional[str]) -> None:
+    """If ``chat`` is itself a worker, pass its finished result to ITS parent.
+
+    A lead engineer continues in its own chat after each implementor reports.
+    That reply used to stay there: nothing handed it on, so the chat that
+    started the lead never heard the outcome. Once the lead has no sub-worker
+    still running, its latest reply is its result, handed up exactly as a
+    worker's first-run result is.
+    """
+    try:
+        from core.database import get_session_settings
+
+        grandparent = (get_session_settings(chat_id) or {}).get("parent_session")
+    except Exception:
+        return
+    if not grandparent or live_children(chat_id):
+        return
+    first_task = next((str(getattr(m, "content", "") or "") for m in (getattr(chat, "history", None) or [])
+                       if getattr(m, "role", None) == "user"), "")
+    try:
+        await _hand_off(manager, str(grandparent), chat, first_task, reply, status, owner)
+    except Exception:
+        logger.warning("hand-up from worker %s to %s failed", chat_id, grandparent, exc_info=True)

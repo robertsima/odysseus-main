@@ -497,7 +497,10 @@ async def test_a_detached_worker_runs_under_its_own_chats_approval_mode(monkeypa
     assert seen["approval_mode"] == "ask_all"
     # A child still gets the anti-fan-out set, and NOT the chat's own denials:
     # `subagent=True` means "extra denials only", so `bash` above is not merged.
-    assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= set(seen["disabled_tools"])
+    # A first-level worker keeps the two nestable launchers (a lead engineer
+    # starting implementors); tests/test_worker_nesting.py covers the limit.
+    assert (headless_agent.SUBAGENT_BLOCKED_TOOLS - headless_agent.NESTABLE_LAUNCH_TOOLS
+            <= set(seen["disabled_tools"]))
 
 
 async def test_a_headless_child_cannot_start_a_worker_via_the_loadout_tool(monkeypatch):
@@ -516,7 +519,9 @@ async def test_a_headless_child_cannot_start_a_worker_via_the_loadout_tool(monke
     _pin_owner_baseline(monkeypatch)
     # `caller_policy` reads the chat's policy with strict=True and fails closed
     # if it cannot, so the stub has to accept that keyword.
-    monkeypatch.setattr(core_db, "get_session_settings", lambda sid, **kw: {})
+    # At the nesting limit: this child is two worker hops below the user's chat.
+    chain = {"child": {"parent_session": "lead"}, "lead": {"parent_session": "user-chat"}}
+    monkeypatch.setattr(core_db, "get_session_settings", lambda sid, **kw: dict(chain.get(sid, {})))
 
     await headless_agent.run_headless(_Sess(), [])
     assert "manage_agent_loadout" in set(seen["disabled_tools"])

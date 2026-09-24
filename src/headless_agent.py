@@ -182,6 +182,65 @@ SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
 })
 
 
+# The two launchers a worker may keep when nesting is allowed. A lead engineer
+# starting implementors needs exactly these; the rest of SUBAGENT_BLOCKED_TOOLS
+# (other chats, coding CLIs, worktrees) stays off at every depth.
+NESTABLE_LAUNCH_TOOLS: frozenset = frozenset({"manage_agent_loadout", "orchestrate_agents"})
+#: user chat (0) -> worker (1) -> sub-worker (2). Deeper is refused.
+DEFAULT_MAX_WORKER_DEPTH = 2
+
+
+def max_worker_depth() -> int:
+    try:
+        from src.settings import get_setting
+        return max(1, min(4, int(get_setting("agent_max_worker_depth", DEFAULT_MAX_WORKER_DEPTH))))
+    except Exception:
+        return DEFAULT_MAX_WORKER_DEPTH
+
+
+def worker_depth(session_id: Optional[str]) -> int:
+    """How many worker hops ``session_id`` is below a chat a person started.
+
+    Read from the ``parent_session`` each worker chat stores. A cycle or an
+    unreadable row stops the walk; an absurdly long chain reads as deep, so a
+    broken chain can only ever narrow what a worker may do.
+    """
+    from core.database import get_session_settings
+
+    depth, seen, sid = 0, set(), str(session_id or "")
+    while sid:
+        if sid in seen or depth >= 10:
+            return 10
+        seen.add(sid)
+        try:
+            parent = (get_session_settings(sid) or {}).get("parent_session")
+        except Exception:
+            return 10
+        if not parent:
+            return depth
+        depth += 1
+        sid = str(parent)
+    return depth
+
+
+def child_blocked_tools(session_id: Optional[str], settings: Optional[Dict[str, Any]] = None) -> Set[str]:
+    """What a worker chat may never call: every launcher, unless it may nest.
+
+    A worker keeps ``NESTABLE_LAUNCH_TOOLS`` only while it is above the depth
+    limit and its loadout's delegation policy is not ``never``. Whether it has
+    those tools at all is still its loadout's allowlist, so nesting is opt-in
+    per loadout (a lead engineer's grants manage_agent_loadout; an
+    implementor's does not) and the parent chat's worker limit
+    (``max_parallel_workers``) bounds the fan-out at each level.
+    """
+    settings = settings or {}
+    depth = max(1, worker_depth(session_id))
+    policy = str(settings.get("delegation_policy") or "explicit").lower()
+    if policy == "never" or depth >= max_worker_depth():
+        return set(SUBAGENT_BLOCKED_TOOLS)
+    return set(SUBAGENT_BLOCKED_TOOLS) - NESTABLE_LAUNCH_TOOLS
+
+
 def worker_tool_budget() -> int:
     """The per-run tool-call ceiling for a headless run; 0 = unlimited.
 
@@ -311,7 +370,7 @@ async def run_headless(
     baseline = owner_baseline_disabled_tools(effective_owner)
     extra = set(disabled_tools or ())
     if subagent:
-        blocked = set(SUBAGENT_BLOCKED_TOOLS) | extra | baseline
+        blocked = child_blocked_tools(getattr(sess, "id", None), chat_settings) | extra | baseline
     else:
         # A chat continuing ITSELF — after a worker it launched finished, or
         # after a background job it started did. It is the user's own chat, so
@@ -328,6 +387,11 @@ async def run_headless(
         # stop a *child* minting grandchildren; the parent delegating is the
         # normal case, not the thing being prevented.
         blocked = extra | stored_disabled_tools(chat_settings) | baseline
+        if chat_settings.get("parent_session"):
+            # A WORKER's chat continuing itself after its own sub-workers
+            # finished (a lead engineer picking up its implementors' results).
+            # It is still a worker: the depth rule applies to this run too.
+            blocked |= child_blocked_tools(getattr(sess, "id", None), chat_settings)
     blocked = blocked or None
 
     state: Dict[str, Any] = {"full": "", "tool_events": [], "round": 1}

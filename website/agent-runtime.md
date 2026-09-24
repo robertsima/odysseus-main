@@ -530,14 +530,27 @@ explicit `disabled_tools` entry still overrides that.
 `run_headless(subagent=...)` answers two separate questions that used to share
 one argument. `disabled_tools` is only extra denials; `subagent` says what kind
 of run this is. `True` (the default, because policy fails closed) is a detached
-child of another agent and additionally gets `SUBAGENT_BLOCKED_TOOLS` so it
-cannot fan out grandchildren. `False` is a chat continuing *itself* — after a
+child of another agent and additionally gets `headless_agent.child_blocked_tools`.
+`False` is a chat continuing *itself* — after a
 worker it launched finished (`agent_control._hand_off`) or after a background
 job did (`src/bg_monitor.py`) — and runs under that chat's own stored tool
 policy, read through the one definition in
 `session_settings.stored_disabled_tools` so the allowlist shape is resolved the
 same way the live chat route resolves it. Either kind runs under the approval
 mode of the chat it happens in.
+
+**Nesting.** A worker may start workers of its own (a lead engineer starting
+implementors) down to `agent_max_worker_depth` hops below the chat a person
+started (default 2: chat → lead → implementors). Above the limit a worker keeps
+`manage_agent_loadout` and `orchestrate_agents` if its loadout grants them and
+its delegation policy is not `never`; every other entry in
+`SUBAGENT_BLOCKED_TOOLS` stays off at every depth, and at the limit all of it
+does. `launch_worker` refuses a launch past the limit as well. A worker that
+ends its turn with sub-workers still running does not hand off; it hands up
+the reply it writes after the last one reports back
+(`agent_control._hand_up_when_done`), so the chat that started the lead gets
+the lead's final result, not "I started the implementors". A worker chat
+continuing itself keeps the depth rule too.
 
 An agent can author loadouts too (`manage_agent_loadout`). The rule that makes
 that safe is in `src/agent_loadouts.py`: **every capability in a loadout an
