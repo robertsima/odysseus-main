@@ -22,6 +22,11 @@
 #   * The exporter published 4403 -> 19403. Nothing listens there (the
 #     exporter serves 6061 and is only reached through the frontend). Removed.
 #
+#   * The backend had no enable-access-tokens, so it ignored the
+#     `Authorization: Token ...` header the Odysseus Penpot MCP server
+#     (@zcubekr/penpot-mcp-server) sends. The flag must be on the BACKEND;
+#     the frontend's copy only shows Settings > Access tokens in the UI.
+#
 # Keep PENPOT_FLAGS, PENPOT_PUBLIC_URI and PENPOT_SECRET_KEY identical across
 # the services that declare them. YAML anchors are avoided on purpose because
 # the ZimaOS importer re-serialises the file.
@@ -46,7 +51,7 @@ services:
       penpot-exporter:
         condition: service_started
     environment:
-      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp
+      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp enable-access-tokens
       PENPOT_PUBLIC_URI: http://homelab.nas:9001
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
       # Internal upstreams nginx proxies to. Service names resolve on the
@@ -78,7 +83,7 @@ services:
       penpot-redis:
         condition: service_healthy
     environment:
-      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp
+      PENPOT_FLAGS: enable-registration enable-login-with-password disable-email-verification disable-secure-session-cookies enable-smtp enable-mcp enable-access-tokens
       PENPOT_PUBLIC_URI: http://homelab.nas:9001
       PENPOT_HTTP_SERVER_MAX_BODY_SIZE: "367001600"
       # Master key; sessions/invitations/export tokens derive from it, so the

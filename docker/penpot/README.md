@@ -63,3 +63,40 @@ docker logs --tail 100 big-bear-penpot-backend
 - The MCP service publishes 19400 (plugin server), 19401 (MCP HTTP `/mcp`),
   19402 (plugin websocket) on the NAS, and the frontend also proxies
   `/mcp/stream`, `/mcp/sse`, `/mcp/ws` on 9001 via the `enable-mcp` flag.
+  That official MCP drives the Penpot plugin, so it needs a browser tab open.
+
+## Odysseus MCP without a browser tab
+
+Odysseus talks to Penpot's HTTP API instead, through the stdio server
+`@zcubekr/penpot-mcp-server` (Settings > MCP):
+
+```
+command: npx
+args:    -y @zcubekr/penpot-mcp-server
+env:     PENPOT_API_URL=http://192.168.1.122:9001
+         PENPOT_ACCESS_TOKEN=<Penpot > Your account > Access tokens>
+```
+
+- `PENPOT_API_URL` is the base URL only: no trailing `/api` (that becomes
+  `/api/api/rpc`, a 404) and plain `http` (9001 is not TLS).
+- The server runs **inside the Odysseus container**, so `localhost:9001` is
+  the Odysseus container, not the NAS. A green "connected" dot only means the
+  process started and listed its tools; it never contacts Penpot. An
+  unreachable URL shows up on the first tool call as
+  `Tool execution failed: fetch failed`. A bad token shows up as an HTTP 401
+  (`authentication-required`) instead.
+- Test with `list_teams`, not `get_profile`: Penpot answers `get-profile` for
+  anyone, with "Anonymous User" when the token is missing or wrong.
+- The backend needs `enable-access-tokens` in `PENPOT_FLAGS` (it is in the
+  compose above), or it ignores the token and every call is a 401.
+
+Check what the Odysseus container can reach, from the ZimaOS terminal:
+
+```bash
+C=$(docker ps --filter publish=7000 --format '{{.Names}}' | head -1); echo "container: $C"
+for u in http://192.168.1.122:9001 http://homelab.nas:9001 http://host.docker.internal:9001 http://localhost:9001; do
+  docker exec "$C" node -e 'const u=process.argv[1];fetch(u+"/api/rpc/command/get-teams",{method:"POST",headers:{"Content-Type":"application/json",Accept:"application/json"},body:"{}",signal:AbortSignal.timeout(8000)}).then(r=>console.log(u,"-> HTTP",r.status,r.status===401?"(reachable; 401 is expected without a token)":"")).catch(e=>console.log(u,"-> FAIL:",e.message,(e.cause&&(e.cause.code||e.cause.message))||""))' "$u"
+done
+```
+
+Use the first URL that prints `HTTP 401` as `PENPOT_API_URL`.
