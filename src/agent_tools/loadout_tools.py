@@ -207,6 +207,40 @@ def _available_model_ids(owner: Optional[str], limit: int = 40) -> List[str]:
     return seen[:limit]
 
 
+# Which fields a narrowing note is about, by its label. An update that supplies
+# none of them did not ask for that change.
+_NOTE_FIELDS = {
+    "tools": {"tool_access", "enabled_tools", "disabled_tools"},
+    "models": {"model", "model_fallbacks", "model_access", "allowed_models"},
+    "model": {"model", "model_fallbacks", "model_access", "allowed_models"},
+    "allowed_models": {"model", "model_fallbacks", "model_access", "allowed_models"},
+    "model_fallbacks": {"model", "model_fallbacks", "model_access", "allowed_models"},
+    "mcp_access": {"mcp_access", "allowed_mcp_servers", "tool_access", "enabled_tools"},
+    "allowed_mcp_servers": {"mcp_access", "allowed_mcp_servers", "tool_access", "enabled_tools"},
+    "skill_access": {"skill_access", "skill_names"},
+    "skill_names": {"skill_access", "skill_names"},
+}
+
+
+def _unrequested_narrowings(notes: List[str], supplied: Dict[str, Any]) -> List[str]:
+    """Narrowings an ``update`` would apply to fields the call never touched.
+
+    The clamp narrows the WHOLE merged loadout to the calling chat's ceiling,
+    so a worker that only edited Lead Engineer's instructions also rewrote its
+    delegation auto -> explicit and its worker limit 2 -> 1 (2026-09-24) —
+    the user's settings, silently lowered because a narrower chat saved it.
+    """
+    out = []
+    for note in notes:
+        label = note.split(":", 1)[0].strip()
+        if "tool allowlist can reach" in note:
+            continue  # normalisation of the stored shape, not the caller's ceiling
+        fields = _NOTE_FIELDS.get(label, {label})
+        if not (fields & set(supplied)):
+            out.append(note)
+    return out
+
+
 def _supplied(args: Dict[str, Any]) -> Dict[str, Any]:
     """The loadout fields this call actually carries, given inline or under `loadout`."""
     nested = args.get("loadout")
@@ -506,6 +540,25 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         except ValueError as exc:
             return {"error": f"manage_agent_loadout: {exc}", "exit_code": 1}
         narrowed = [*scope_notes, *narrowed]
+        if action == "update":
+            unrequested = _unrequested_narrowings(narrowed, supplied)
+            if unrequested:
+                # Refuse rather than store a downgrade nobody asked for. This
+                # chat cannot keep those settings (it may not grant more than
+                # it has), and it must not quietly lower them either.
+                return {
+                    "error": (
+                        f"update: {requested['name']!r} was not saved. This loadout has settings wider than "
+                        "this chat may grant, and saving it from here would lower them although this call "
+                        "did not change them: " + "; ".join(unrequested) + ". Ask the user to make this edit "
+                        "in Settings > Agent loadouts, or change only fields this chat can grant. Do not "
+                        "start another agent to retry it: a worker's limits are never wider than its parent's."
+                    ),
+                    "blocked": True,
+                    "blocked_reason": "update_would_downgrade_untouched_fields",
+                    "would_narrow": unrequested,
+                    "exit_code": 1,
+                }
         matrix = agent_loadouts.capability_matrix(requested_tools, required_tools, profile, policy, owner)
         if matrix["mission_critical_missing"]:
             # A profile that saves without what its mission needs is the
@@ -619,6 +672,32 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             ),
             "exit_code": 1,
         }
+    # A worker starting its own loadout again is handing its task to a copy of
+    # itself one level deeper, where it has the same tools or fewer. On
+    # 2026-09-24 an Odysseus Admin worker whose loadout edit was clamped did
+    # exactly that to "retry with a wider ceiling"; the copy sat at the depth
+    # limit and could do nothing. Workers only: a person's chat running under a
+    # loadout may still start another one of it to work in parallel.
+    if started_profile is not None and session_id:
+        try:
+            from core.database import get_session_settings
+
+            _caller = get_session_settings(session_id) or {}
+        except Exception:
+            _caller = {}
+        if (_caller.get("parent_session")
+                and str(_caller.get("agent_profile") or "").casefold() == started_profile["name"].casefold()):
+            return {
+                "error": (
+                    f"start: this worker already runs as {started_profile['name']!r}; starting another copy "
+                    "gives the task to an agent with the same limits or fewer. Do the work yourself, or "
+                    "report what blocks you to the chat that started you."
+                ),
+                "blocked": True,
+                "blocked_reason": "worker_started_its_own_loadout",
+                "exit_code": 1,
+            }
+
     # A worker that cannot read, search or run anything will spend its whole
     # round budget explaining that. Refuse at launch rather than produce one.
     unusable = agent_loadouts.unusable_reason(started_profile) if started_profile else None

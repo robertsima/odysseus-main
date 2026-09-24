@@ -921,3 +921,56 @@ def test_stale_mcp_grants_ignores_wildcards_and_disconnected_servers(monkeypatch
         "mcp__penpot__*", "mcp__offline__some_tool", "read_file"]}
     assert agent_loadouts.stale_mcp_grants(profile) == {}
     assert agent_loadouts.stale_mcp_grants({"tool_access": "all"}) == {}
+
+
+async def test_an_update_from_a_narrower_chat_does_not_downgrade_untouched_settings(monkeypatch, store):
+    """2026-09-24: a worker edited Lead Engineer's instructions and the save
+    also lowered its delegation auto -> explicit and workers 2 -> 1."""
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Lead Engineer", "tool_access": "selected",'
+        ' "enabled_tools": ["read_file"], "delegation_policy": "auto", "max_parallel_workers": 2}',
+        "c", owner="u")
+    assert store["profiles"][0]["delegation_policy"] == "auto"
+    monkeypatch.setattr(agent_loadouts, "caller_policy",
+                        lambda sid, owner: policy(delegation_policy="explicit", max_parallel_workers=1))
+
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Lead Engineer", "instructions": "lead the team"}', "worker", owner="u")
+
+    assert result["exit_code"] == 1
+    assert result["blocked_reason"] == "update_would_downgrade_untouched_fields"
+    assert store["profiles"][0]["delegation_policy"] == "auto"
+    assert store["profiles"][0]["max_parallel_workers"] == 2
+
+    # Asking for the narrower value itself is still allowed.
+    result = await manage_agent_loadout(
+        '{"action": "update", "name": "Lead Engineer", "delegation_policy": "explicit",'
+        ' "max_parallel_workers": 1}', "worker", owner="u")
+    assert result["exit_code"] == 0
+
+
+async def test_a_worker_may_not_start_a_copy_of_its_own_loadout(monkeypatch, store):
+    await manage_agent_loadout(
+        '{"action": "create", "name": "Admin", "tool_access": "selected", "enabled_tools": ["read_file"]}',
+        "c", owner="u")
+    monkeypatch.setattr("src.agent_control.live_children", lambda sid: 0)
+    settings = {"worker": {"parent_session": "user-chat", "agent_profile": "Admin"},
+                "user-chat": {"agent_profile": "Admin"}}
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **k: settings.get(sid, {}))
+    launched = []
+
+    async def fake_launch(**kwargs):
+        launched.append(kwargs)
+        return {"session_id": "w-1", "session_name": "Admin 1", "run_id": "r-1", "model": "m", "max_rounds": 0}
+
+    monkeypatch.setattr("src.agent_control.launch_worker", fake_launch)
+
+    blocked = await manage_agent_loadout('{"action": "start", "name": "Admin", "task": "retry it"}',
+                                         "worker", owner="u")
+    assert blocked["blocked_reason"] == "worker_started_its_own_loadout"
+    assert not launched
+
+    # A person's chat running under the same loadout may still start one.
+    ok = await manage_agent_loadout('{"action": "start", "name": "Admin", "task": "in parallel"}',
+                                    "user-chat", owner="u")
+    assert ok["exit_code"] == 0 and launched

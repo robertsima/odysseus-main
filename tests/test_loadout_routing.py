@@ -48,3 +48,8 @@ def test_the_note_says_whether_the_model_may_launch():
     assert "manage_agent_loadout" in routing_note(fits, may_launch=True)
     assert "ask whether to start it" in routing_note(fits, may_launch=False)
     assert routing_note([], may_launch=True) == ""
+
+
+def test_work_on_the_loadouts_themselves_suggests_none_of_them():
+    text = "Reconcile the Lead Engineer and Penpot Product Designer presets"
+    assert suggest_loadouts(text, [], profiles=PROFILES) == []

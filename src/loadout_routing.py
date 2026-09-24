@@ -37,6 +37,9 @@ _STOPWORDS = frozenset("""
 """.split())
 
 
+_ABOUT_LOADOUTS_RE = re.compile(r"\b(?:loadouts?|presets?|agent\s+profiles?)\b", re.IGNORECASE)
+
+
 def _words(text: str) -> Set[str]:
     return {w for w in _WORD_RE.findall(str(text or "").lower()) if len(w) >= 4 and w not in _STOPWORDS}
 
@@ -88,6 +91,10 @@ def suggest_loadouts(
         return []
     from src.agent_loadouts import unusable_reason
 
+    if _ABOUT_LOADOUTS_RE.search(str(query or "")):
+        # Work ON the loadouts (edit, reconcile, compare them) names them all
+        # and is not a request to hand the work to one of them.
+        return []
     denied_mcp = sorted({t for t in denied_tools or () if str(t).startswith("mcp__")})
     query_words = _words(query)
     current = str(current_profile or "").casefold()
@@ -107,7 +114,8 @@ def suggest_loadouts(
             servers = sorted({t.split("__")[1] for t in gap})
             reasons.append(f"it has tools this chat lacks for the request (MCP server {', '.join(servers)})")
         if name_hits or desc_hits:
-            reasons.append("the request mentions " + ", ".join(sorted(name_hits | desc_hits)))
+            words = sorted(name_hits) + sorted(desc_hits - name_hits)
+            reasons.append("the request mentions " + ", ".join(words[:5]))
         ranked.append(((len(gap), len(name_hits), len(desc_hits)),
                        {"name": name, "reason": "; ".join(reasons), "tools": gap[:5]}))
     ranked.sort(key=lambda row: row[0], reverse=True)
