@@ -5238,7 +5238,21 @@ async def stream_agent_loop(
         disabled_tools.update(_allowlist_denied)
         _mark_dropped(_allowlist_denied, f"tool-access:{_tool_access}")
     _delegation_policy = str(_agent_settings.get("delegation_policy") or "explicit")
+    # Blocked by something other than the delegation gate below (a worker's
+    # no-grandchildren rule, this chat's allowlist, the owner's policy): no
+    # loadout suggestion can be acted on, so none is made.
+    _launcher_policy_blocked = "manage_agent_loadout" in disabled_tools
     _gated_delegation = _delegation_gated_tools(_delegation_policy, _last_user)
+    if "manage_agent_loadout" in _gated_delegation and _delegation_policy != "never":
+        # Naming a saved agent is asking for it: "yes, start Penpot Product
+        # Designer" after the loop suggested that loadout.
+        try:
+            from src.loadout_routing import loadout_named_in
+
+            if loadout_named_in(_spoken_user_text(_last_user)):
+                _gated_delegation.discard("manage_agent_loadout")
+        except Exception:
+            logger.debug("[tool-routing] loadout-name check skipped", exc_info=True)
     if _gated_delegation:
         disabled_tools.update(_gated_delegation)
         _mark_dropped(_gated_delegation, f"delegation-policy:{_delegation_policy}")
@@ -5995,6 +6009,7 @@ async def stream_agent_loop(
     # disabled list). Those could never be sent, yet they counted toward the
     # tool budget below and showed up as "relevant" in the logs, which made a
     # worker that was never offered GitHub search look like it had it.
+    _denied_relevant: Set[str] = set()
     if not guide_only and _relevant_tools is not None and disabled_tools:
         _denied_relevant = _relevant_tools & set(disabled_tools)
         if _denied_relevant:
@@ -6004,6 +6019,35 @@ async def stream_agent_loop(
                 len(_denied_relevant), sorted(_denied_relevant)[:15],
             )
 
+    # Pick the agent for the user. A saved loadout that fits the request —
+    # it has the tools this chat was just denied, or the request names its
+    # subject — is put in front of the model, with the launcher when this
+    # chat may use it. Without this the model never learned which loadouts
+    # exist and answered "I lack the tools" (src/loadout_routing.py).
+    _routing_protected: Set[str] = set()
+    if (not guide_only and not plan_mode and not _launcher_policy_blocked
+            and not _casual_low_signal_turn):
+        try:
+            from src.loadout_routing import routing_note, suggest_loadouts
+
+            _loadout_fits = suggest_loadouts(
+                _last_user, _denied_relevant,
+                current_profile=_agent_settings.get("agent_profile"),
+            )
+            if _loadout_fits:
+                _may_launch = "manage_agent_loadout" not in disabled_tools
+                if _may_launch and _relevant_tools is not None:
+                    _relevant_tools.add("manage_agent_loadout")
+                    _routing_protected.add("manage_agent_loadout")
+                messages = _insert_before_latest_user(
+                    messages, _harness_directive(routing_note(_loadout_fits, may_launch=_may_launch)))
+                logger.info(
+                    "[tool-routing] loadout fit: %s (may_launch=%s)",
+                    [f"{s['name']}: {s['reason']}" for s in _loadout_fits], _may_launch,
+                )
+        except Exception:
+            logger.debug("[tool-routing] loadout routing skipped", exc_info=True)
+
     if (
         not guide_only
         and _relevant_tools is not None
@@ -6011,7 +6055,8 @@ async def stream_agent_loop(
         and not _terminus_toolset
     ):
         from src.tool_index import ALWAYS_AVAILABLE as _ALWAYS
-        _protected = set(_ALWAYS) | set(_pre_domain_tools) | _skill_required_tools | {"manage_skills"}
+        _protected = (set(_ALWAYS) | set(_pre_domain_tools) | _skill_required_tools
+                      | _routing_protected | {"manage_skills"})
         _protected |= {t for t in (forced_tools or ()) if t not in disabled_tools}
         if _active_document_relevant:
             _protected |= {"edit_document", "update_document", "suggest_document"}
