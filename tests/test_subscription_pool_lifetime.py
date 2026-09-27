@@ -5,7 +5,7 @@ import threading
 import time
 
 import pytest
-from sqlalchemy import Column, String, create_engine
+from sqlalchemy import Column, String, create_engine, event
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -38,10 +38,30 @@ def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp
         poolclass=QueuePool,
         pool_size=1,
         max_overflow=0,
-        pool_timeout=0.15,
+        # Generous on purpose: the short read/write sections still contend for
+        # the single connection, and under CI load eight of them queued behind
+        # each other can exceed a sub-second timeout without anything being
+        # wrong. The hold itself is asserted directly below, not inferred from
+        # a checkout timing out.
+        pool_timeout=10,
     )
     mapped.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
+
+    # Which thread currently holds each checked-out pool connection.
+    holders = {}
+    holders_lock = threading.Lock()
+
+    @event.listens_for(engine, "checkout")
+    def _on_checkout(_dbapi_conn, record, _proxy):
+        with holders_lock:
+            holders[id(record)] = threading.get_ident()
+
+    @event.listens_for(engine, "checkin")
+    def _on_checkin(_dbapi_conn, record):
+        with holders_lock:
+            holders.pop(id(record), None)
+
     with factory() as db:
         db.add_all([
             Auth(id=f"auth-{i}", provider="test", owner="owner",
@@ -53,17 +73,32 @@ def test_concurrent_refresh_does_not_hold_queuepool_connections(monkeypatch, tmp
 
     monkeypatch.setattr(base, "database_handles", lambda: (Auth, factory, lambda: "now"))
 
+    # Every refresh must be in flight at the same time. With one pooled
+    # connection that is only possible if no refresh holds it: a thread that
+    # kept its connection across the "network" call would leave the other seven
+    # blocked in checkout and the barrier would break.
+    all_refreshing = threading.Barrier(8, timeout=5)
+    held_during_refresh = []
+
+    def refresh(i):
+        with holders_lock:
+            if threading.get_ident() in holders.values():
+                held_during_refresh.append(i)
+        all_refreshing.wait()
+        return {"access_token": f"fresh-{i}"}
+
     def resolve(i):
         return base.resolve_runtime_credentials_via_db(
             f"auth-{i}", "owner", provider_id="test",
             default_base_url="https://example.invalid", auth_mode="oauth",
             is_expiring=lambda _token: True,
-            refresh=lambda _access, _refresh: (time.sleep(0.25) or {"access_token": f"fresh-{i}"}),
+            refresh=lambda _access, _refresh: refresh(i),
         )["api_key"]
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
         assert list(executor.map(resolve, range(8))) == [f"fresh-{i}" for i in range(8)]
 
+    assert held_during_refresh == []
     assert engine.pool.checkedout() == 0
     engine.dispose()
 

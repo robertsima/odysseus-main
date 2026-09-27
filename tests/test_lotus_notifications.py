@@ -62,6 +62,12 @@ def _base_prefs(**overrides):
     return prefs
 
 
+def _recent_base(*, days_ago):
+    """09:00 UTC ``days_ago`` days before now — inside any real-clock window."""
+    today = datetime.now(UTC).replace(hour=9, minute=0, second=0, microsecond=0)
+    return today - timedelta(days=days_ago)
+
+
 def _checkin(store, *, offset_hours=0, emotion="calm", energy=0.4, note=NOTE_TEXT, base=None):
     moment = (base or datetime(2026, 8, 3, 9, 0, tzinfo=UTC)) + timedelta(hours=offset_hours)
     return store.create_checkin(
@@ -533,8 +539,11 @@ def test_wellbeing_tool_returns_aggregates_only(monkeypatch, tmp_path):
     from src.tools.wellbeing import do_manage_wellbeing
 
     store = LotusCheckinStore("alice")
+    # The tool windows on the real clock ("last N days"), so the check-ins must
+    # be recent relative to now, not pinned to a calendar date that ages out.
+    base = _recent_base(days_ago=5)
     for day in range(4):
-        _checkin(store, base=datetime(2026, 8, 3, 9, 0, tzinfo=UTC) + timedelta(days=day))
+        _checkin(store, base=base + timedelta(days=day))
 
     summary = asyncio.run(do_manage_wellbeing(json.dumps({"action": "summary", "days": 30}), owner="alice"))
     assert summary["exit_code"] == 0
@@ -587,7 +596,7 @@ def test_wellbeing_tool_is_refused_on_a_non_local_endpoint(monkeypatch, tmp_path
     monkeypatch.setenv("LOTUS_DATA_DIR", str(tmp_path / "lotus"))
     from src import tool_execution, tool_implementations
 
-    _checkin(LotusCheckinStore("alice"))
+    _checkin(LotusCheckinStore("alice"), base=_recent_base(days_ago=1))
     block = SimpleNamespace(tool_type="manage_wellbeing", content=json.dumps({"action": "summary"}))
 
     # No resolvable session -> cannot prove the endpoint is local -> refuse.

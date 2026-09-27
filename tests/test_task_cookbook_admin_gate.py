@@ -58,17 +58,24 @@ def task_db(monkeypatch, tmp_path):
 
 
 @pytest.fixture()
-def configured_auth(monkeypatch):
+def configured_auth(monkeypatch, tmp_path):
+    """A real, configured auth store: ``admin`` is an admin, ``alice`` is not.
+
+    The privilege check reads the process-wide ``core.auth.get_auth_manager()``
+    cache, not a fresh ``AuthManager()``. Patching the ``AuthManager`` class
+    therefore did nothing once any earlier test had populated that cache (the
+    gate then saw an unconfigured store and treated everyone as admin), and in
+    isolation it made the cached constructor raise so everyone was refused.
+    Point the accessor at a manager built on this test's own auth file instead.
+    """
     _restore_module_binding(monkeypatch, "core.auth", core_auth)
     monkeypatch.setenv("AUTH_ENABLED", "true")
 
-    class FakeAuthManager:
-        is_configured = True
-
-        def is_admin(self, user):
-            return user == "admin"
-
-    monkeypatch.setattr(core_auth, "AuthManager", FakeAuthManager)
+    manager = core_auth.AuthManager(str(tmp_path / "auth.json"))
+    assert manager.setup("admin", "correct-horse-battery-staple")
+    assert manager.create_user("alice", "correct-horse-battery-staple", is_admin=False)
+    monkeypatch.setattr(core_auth, "get_auth_manager", lambda *a, **k: manager)
+    return manager
 
 
 @pytest.fixture()
