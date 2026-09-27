@@ -3046,7 +3046,12 @@ def _sticky_tool_selection(
     if offerable is not None:
         previous = previous & offerable
     union = (previous | set(selected)) - drop
-    if len(union) > _STICKY_TOOLS_MAX:
+    # Restart only when this turn would GROW the set past the cap. A turn
+    # whose selection the remembered set already covers changes nothing, so
+    # restarting there traded a guaranteed cache hit for a miss: on 2026-09-26
+    # a 52-tool turn was followed by a 22-tool turn inside those 52, and the
+    # restart re-billed a ~120k-token prompt from its first byte.
+    if len(union) > _STICKY_TOOLS_MAX and not union <= previous:
         logger.info(
             "[tool-cache] session=%s tool set passed %d; restarting from this turn's %d",
             session_id, _STICKY_TOOLS_MAX, len(selected),
@@ -3503,14 +3508,15 @@ def _build_system_prompt(
         "mcp__email__delete_email", "mcp__email__mark_email_read",
         "mcp__email__scan_email_unsubscribes", "mcp__email__unsubscribe_email",
     }
+    _email_tools_offered = bool(relevant_tools and (_EMAIL_TOOL_HINTS & set(relevant_tools)))
     if active_document and active_document.language == "email":
         _inject_style = True
-    elif relevant_tools and (_EMAIL_TOOL_HINTS & set(relevant_tools)):
+    elif _email_tools_offered:
         # Avoid adding email style for unrelated UI-only requests unless the
         # user's words are email-ish.
         _last_user_text = _extract_last_user_message(messages).lower()
         _inject_style = any(tok in _last_user_text for tok in ("email", "mail", "reply", "send", "inbox"))
-    if _inject_style and not suppress_local_context:
+    if (_inject_style or _email_tools_offered) and not suppress_local_context:
         try:
             from src.settings import load_settings as _load_settings
             _settings = _load_settings()
@@ -3525,10 +3531,21 @@ def _build_system_prompt(
                 _style = str(_by_account.get(_style_account_id) or "").strip()
             if not _style:
                 _style = (_settings.get("email_writing_style", "") or "").strip()
-            if _style:
-                # Hardcoded identity/style rules stay in the trusted system prompt.
+            _any_style_saved = bool(_style) or (
+                isinstance(_by_account, dict)
+                and any(str(_v or "").strip() for _v in _by_account.values())
+            )
+            if _any_style_saved:
+                # Hardcoded identity/style rules stay in the trusted system
+                # prompt. They follow the offered tools (or an open email
+                # draft), not this turn's wording: gated on words like "send"
+                # they were appended on one turn and gone the next, and each
+                # change to the system prompt re-billed the whole chat behind
+                # it. Scoped to email by their first line, since they can now
+                # ride along on a turn that is not about email.
                 agent_prompt += (
                     "\n\n"
+                    "Email writing rules (apply to any email you draft, reply to or send):\n"
                     "Hard identity rule: write as the user/mailbox owner only. Do not sign as, speak as, "
                     "or imply you are the recipient, original sender, quoted sender, spouse, assistant, "
                     "company, or any other third party. If a signature is needed, use only the name/signature "
@@ -3537,8 +3554,10 @@ def _build_system_prompt(
                     "For English emails, default to Hi [Name] or Hiya from the saved style rather than Hey. "
                     "If the saved style specifies Best/newline/name, use that sign-off when a sign-off is natural."
                 )
+            if _inject_style and _style:
                 # User-editable style text is untrusted — wrap it so a malicious
-                # style value cannot inject system-role instructions.
+                # style value cannot inject system-role instructions. It is a
+                # tail message, so it may follow the turn's wording.
                 _email_style_message = untrusted_context_message(
                     "email writing style",
                     "EMAIL WRITING STYLE AND IDENTITY — FOLLOW FOR ANY EMAIL DRAFT OR SEND:\n" + _style,
@@ -4398,7 +4417,11 @@ PLAN_MODE_DIRECTIVE = (
 
 
 def build_active_plan_note(approved_plan: str) -> str:
-    """System note that pins an approved plan during execution.
+    """Note that pins an approved plan during execution.
+
+    Delivered beside the request as a harness directive, not in the system
+    prompt: its checkboxes change every step, and the system prompt is the
+    front of the provider's cached prefix.
 
     Sent back by the frontend each turn so a long plan on a weak model survives
     history truncation — the agent can always re-read it. Returns "" for empty
@@ -6213,6 +6236,13 @@ async def stream_agent_loop(
         # chat's policy already allows.
         _relevant_tools.add("discover_tools")
         _base_relevant_tools.add("discover_tools")
+    if not guide_only and _base_relevant_tools is not None and _admin_tools:
+        # The admin tools this request's keywords named join the selection
+        # itself, so they are remembered like any other offered tool. Added
+        # per turn beside it instead, a turn that said "task" put
+        # manage_tasks in the tool list and the next turn took it out again:
+        # two changes to the start of the prompt, two full re-prefills.
+        _base_relevant_tools.update(set(_admin_tools) - disabled_tools)
     if not guide_only and _base_relevant_tools is not None:
         _offerable = {
             schema.get("function", {}).get("name") for schema in FUNCTION_TOOL_SCHEMAS
@@ -6538,16 +6568,23 @@ async def stream_agent_loop(
             owner,
             headers=candidate_headers,
         )
+        _compact_prompt = is_api or is_native_ollama or is_ollama_compat
         route_messages, route_mcp_schemas = _build_system_prompt(
             _strip_agent_injected_messages(compacted_source),
             candidate_model,
             _prompt_active_document,
             mcp_mgr,
             disabled_tools,
-            needs_admin=_needs_admin,
+            # A native-tools prompt lists exactly the tools it is sent, and the
+            # keyword-named admin tools are already in the selection (see where
+            # `_admin_tools` joins it). needs_admin here would list all fifteen
+            # admin tools on any turn that said "task" or "settings" -- tools
+            # the schema list does not carry -- and drop them again next turn,
+            # rewriting the system prompt both times.
+            needs_admin=_needs_admin and (route_tools is None or not _compact_prompt),
             relevant_tools=route_tools,
             mcp_disabled_map=_mcp_disabled_map,
-            compact=is_api or is_native_ollama or is_ollama_compat,
+            compact=_compact_prompt,
             owner=owner,
             suppress_local_context=guide_only,
             suppress_skills=_low_signal_turn,
@@ -6576,14 +6613,27 @@ async def stream_agent_loop(
         ):
             route_messages = _minimal_odysseus_general_messages(route_messages, include_memory=True)
             route_mcp_schemas = []
+        # Notes whose presence or text changes from one turn to the next go
+        # beside the request, not at the head of the system prompt. The head
+        # is the first byte of the provider's cached prefix: prepending the
+        # shell note on a turn whose selection held bash, or an approved plan
+        # whose checkboxes moved, re-billed the whole chat from byte 0
+        # (cached=0 on 2026-09-26). Plan mode and guide-only stay in the
+        # system prompt: they are modes the user switches, not per-turn state.
+        _turn_notes: List[str] = []
         if plan_mode and not guide_only:
             _prepend_agent_directive(route_messages, PLAN_MODE_DIRECTIVE)
         elif approved_plan and approved_plan.strip() and not guide_only:
-            _prepend_agent_directive(route_messages, build_active_plan_note(approved_plan))
+            _turn_notes.append(build_active_plan_note(approved_plan))
         if guide_only:
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
         elif _private_shell_note and (route_tools is None or {"bash", "python"} & set(route_tools)):
-            _prepend_agent_directive(route_messages, _private_shell_text)
+            _turn_notes.append(_private_shell_text)
+        for _note in _turn_notes:
+            _note_msg = _harness_directive(_note)
+            # Marked so a fallback route's rebuild strips it and adds its own.
+            _note_msg["_agent_injected"] = "context"
+            route_messages = _insert_before_latest_user(route_messages, _note_msg)
         return {
             "messages": route_messages,
             "mcp_schemas": route_mcp_schemas,
