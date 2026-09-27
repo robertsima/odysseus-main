@@ -94,3 +94,14 @@ the prompt is past 85%; `[agent-usage]` carries `session=`; `[prompt-prefix]`
 carries `first_diff_item`/`prev_items`/`diff_kind`, `instr_diff_at` and
 `tools_added`/`tools_removed`, so the next bundle can pin the two unexplained
 turn-start misses to an input index.
+
+Tool-set churn (the first two rows): on hosted API routes with a 128k+ window
+the sticky cap is 96/128 instead of 48, the set grows by whole domain chunks,
+a restart keeps the chat's most-used tools and the turn's domains, a
+`discover_tools` load brings its domain siblings, and tools that join later
+are appended to the end of the tools array (`_sticky_tool_cap`,
+`_sticky_tool_selection`, `_sticky_order_schemas`). A 30-turn, multi-domain
+simulation (`tests/test_tool_set_stability.py`) went from 453 to 205
+tool-set changes over 20 chats, and its re-billed-token proxy from ~2.3M to
+~0.8M per chat. Codex still misses on any tools change; the remaining
+changes are mostly tools no domain covers, picked for the first time.

@@ -3069,9 +3069,131 @@ def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], 
 # (an MCP server removed) is dropped every turn, and past a size cap the set
 # restarts from this turn's selection (one cache miss instead of a bloated
 # tool list).
+#
+# Large-window API routes (specs/prompt-prefix-stability.md, "Tool-set
+# churn"): on 2026-09-27 a gpt-6-luna chat (400k window, Codex Responses)
+# grew its set by 2-4 tools on almost every turn (31 -> 33 -> 37 -> ... -> 48,
+# then a restart) and discover_tools added more mid-turn. The Codex backend's
+# cached prefix starts at the tools array, so each growth re-sent 30-55k
+# tokens uncached (~485k over 12 events), while one more cached schema costs
+# ~70 tokens a request. So on those routes the cap is larger, and when the set
+# must grow it grows by whole domain chunks (the domain map tool-RAG and
+# intent seeding use), and a restart keeps the chat's most-used tools and
+# this turn's domains, so the following turns in the same domains fit.
+# Local/LAN routes and small windows keep the lean behaviour above.
 _STICKY_TOOLS: "collections.OrderedDict[str, Set[str]]" = collections.OrderedDict()
 _STICKY_TOOLS_MAX = 48
 _STICKY_TOOLS_SESSIONS = 512
+# Auto caps for API routes whose window is at least this big (see
+# `_sticky_tool_cap`; `agent_sticky_tools_max` overrides).
+_STICKY_TOOLS_LARGE_WINDOW = 128_000
+_STICKY_TOOLS_MAX_LARGE = 96
+_STICKY_TOOLS_HUGE_WINDOW = 256_000
+_STICKY_TOOLS_MAX_HUGE = 128
+# How full a chunked restart may start, as a share of the cap: room is left
+# for the next few turns to grow before the next restart.
+_STICKY_RESTART_FILL = 2 / 3
+
+# The groups a chunked growth adds whole. The intent/tool-RAG domains, minus
+# the ones whose tools are privileged ("settings": app_api, tokens, MCP and
+# endpoint admin) or single-tool, plus two families retrieval picks together
+# that no domain covers. Admin tools and the open-document editing tools
+# (`_sticky_chunk_exempt`) are never chunk siblings: they join a selection
+# only when a request names them or targets a document.
+_STICKY_CHUNK_GROUPS: Dict[str, frozenset] = {
+    **{
+        domain: frozenset(tools) for domain, tools in _DOMAIN_TOOL_MAP.items()
+        if domain not in {"settings", "ui", "integrations"}
+    },
+    "git": frozenset({"manage_git", "manage_agent_worktree"}),
+    "diagnostics": frozenset({"read_app_logs", "inspect_runtime"}),
+}
+
+
+class _StickyToolSet(set):
+    """A chat's remembered tool set, with the order its schemas were first
+    sent in (`_sticky_order_schemas`) and how often each tool ran
+    (`_record_sticky_tool_use`), both carried across turns and restarts."""
+
+    __slots__ = ("order", "uses")
+
+    def __init__(self, names=(), *, order=None, uses=None):
+        super().__init__(names)
+        self.order: List[str] = list(order or ())
+        self.uses: collections.Counter = collections.Counter(uses or {})
+
+
+def _sticky_route_window(endpoint_url: str, model: str, context_length: int = 0) -> tuple:
+    """``(window, api_route)`` for the cap decision, without a network probe
+    or a second route lookup: the window the caller already resolved when it
+    is a real one (the bare 128k DEFAULT_CONTEXT fallback proves nothing),
+    else the known-models table; and whether the endpoint is a hosted API
+    (``classify_endpoint_scope`` == "api"), the routes that bill a cached
+    prefix at a discount. Local and LAN servers are never "api"."""
+    try:
+        from src.model_context import DEFAULT_CONTEXT, _lookup_known, classify_endpoint_scope
+
+        window = int(context_length or 0)
+        if window == DEFAULT_CONTEXT or window <= 0:
+            window = int(_lookup_known(model or "") or 0)
+        return window, classify_endpoint_scope(endpoint_url or "") == "api"
+    except Exception:
+        logger.debug("[tool-cache] route window unavailable", exc_info=True)
+        return 0, False
+
+
+def _sticky_tool_cap(context_window: Optional[int], is_api_route: bool) -> tuple:
+    """``(cap, chunked)`` for a route: the most tools the chat's remembered set
+    may hold before a growth restarts it, and whether it grows in chunks.
+
+    Chunked growth is for hosted API routes (provider prefix caching) with a
+    window of at least 128k tokens. Local/LAN routes and smaller windows keep
+    the lean 48 and bare growth: there every schema is prompt a small model
+    reads, and re-prefill is local compute rather than a bill. A positive
+    ``agent_sticky_tools_max`` replaces the cap (not the chunking rule).
+    """
+    try:
+        window = int(context_window or 0)
+    except (TypeError, ValueError):
+        window = 0
+    chunked = bool(is_api_route) and window >= _STICKY_TOOLS_LARGE_WINDOW
+    if not chunked:
+        cap = _STICKY_TOOLS_MAX
+    elif window >= _STICKY_TOOLS_HUGE_WINDOW:
+        cap = _STICKY_TOOLS_MAX_HUGE
+    else:
+        cap = _STICKY_TOOLS_MAX_LARGE
+    try:
+        explicit = int(get_setting("agent_sticky_tools_max", 0) or 0)
+    except (TypeError, ValueError):
+        explicit = 0
+    if explicit > 0:
+        cap = explicit
+    return cap, chunked
+
+
+def _sticky_chunk_exempt() -> Set[str]:
+    return set(_ADMIN_TOOLS) | set(_DOCUMENT_TARGET_TOOLS)
+
+
+def _sticky_domain_chunk(names, permitted) -> Dict[str, Set[str]]:
+    """``{group: tools}`` to add alongside ``names``: every permitted, non-exempt
+    tool of each chunk group a name belongs to. A tool in several groups
+    (resolve_contact: email and contacts) brings only its smallest."""
+    permitted = set(permitted or ())
+    exempt = _sticky_chunk_exempt()
+    chunks: Dict[str, Set[str]] = {}
+    for name in names or ():
+        groups = [(g, tools) for g, tools in _STICKY_CHUNK_GROUPS.items() if name in tools]
+        if not groups:
+            continue
+        smallest = min(len(tools) for _, tools in groups)
+        for group, tools in groups:
+            if len(tools) == smallest:
+                siblings = (set(tools) & permitted) - exempt
+                if siblings:
+                    chunks.setdefault(group, set()).update(siblings)
+    return chunks
 
 
 def _sticky_tool_selection(
@@ -3080,26 +3202,98 @@ def _sticky_tool_selection(
     disabled=(),
     excluded=(),
     offerable: Optional[Set[str]] = None,
+    *,
+    cap: Optional[int] = None,
+    chunk_permitted: Optional[Set[str]] = None,
 ) -> Set[str]:
+    """This turn's offered tools: the chat's remembered set plus ``selected``.
+
+    ``cap`` defaults to ``_STICKY_TOOLS_MAX``. ``chunk_permitted`` turns on
+    chunked growth (see the comment above `_STICKY_TOOLS`): it is the set of
+    tools the chat's policy permits, and nothing outside it is ever added as a
+    sibling. None keeps growth to exactly what the turn selected and a restart
+    to the bare selection.
+    """
     if not session_id or selected is None:
         return selected
+    cap = _STICKY_TOOLS_MAX if cap is None else int(cap)
     drop = set(disabled or ()) | set(excluded or ())
-    previous = _STICKY_TOOLS.get(session_id, set())
+    entry = _STICKY_TOOLS.get(session_id)
+    previous = set(entry) if entry is not None else set()
     if offerable is not None:
         previous = previous & offerable
-    union = (previous | set(selected)) - drop
+    chosen = set(selected) - drop
+    union = (previous | chosen) - drop
+    new = union - previous
+    chunked = chunk_permitted is not None
+    uses = collections.Counter(getattr(entry, "uses", None) or {})
+    order = list(getattr(entry, "order", None) or ())
+
+    def _chunk_for(names) -> Dict[str, Set[str]]:
+        if not chunked:
+            return {}
+        out = {}
+        for group, tools in _sticky_domain_chunk(names, chunk_permitted).items():
+            tools = tools - drop
+            if offerable is not None:
+                tools &= offerable
+            if tools:
+                out[group] = tools
+        return out
+
     # Restart only when this turn would GROW the set past the cap. A turn
     # whose selection the remembered set already covers changes nothing, so
     # restarting there traded a guaranteed cache hit for a miss: on 2026-09-26
     # a 52-tool turn was followed by a 22-tool turn inside those 52, and the
     # restart re-billed a ~120k-token prompt from its first byte.
-    if len(union) > _STICKY_TOOLS_MAX and not union <= previous:
+    if len(union) > cap and new:
+        union = set(chosen)
+        kept_used = kept_chunk = 0
+        if chunked:
+            # Restart to a superset the next turns can live inside: the tools
+            # this chat actually ran most, then this turn's domain chunks,
+            # then the used tools' chunks, up to the restart fill.
+            target = max(len(union), int(cap * _STICKY_RESTART_FILL))
+            most_used = [
+                name for name, _n in uses.most_common()
+                if name in previous and name not in drop
+            ]
+            fill = [("used", most_used)]
+            fill += [("chunk", sorted(t)) for _g, t in sorted(_chunk_for(chosen).items())]
+            fill += [("chunk", sorted(t)) for _g, t in sorted(_chunk_for(most_used).items())]
+            for kind, names in fill:
+                for name in names:
+                    if len(union) >= target:
+                        break
+                    if name not in union:
+                        union.add(name)
+                        if kind == "used":
+                            kept_used += 1
+                        else:
+                            kept_chunk += 1
         logger.info(
-            "[tool-cache] session=%s tool set passed %d; restarting from this turn's %d",
-            session_id, _STICKY_TOOLS_MAX, len(selected),
+            "[tool-cache] session=%s tool set passed %d (cap %d); restarting from this turn's %d"
+            " (+%d most-used, +%d domain chunk) = %d",
+            session_id, cap, cap, len(chosen), kept_used, kept_chunk, len(union),
         )
-        union = set(selected) - drop
-    _STICKY_TOOLS[session_id] = set(union)
+        order = [name for name in order if name in union]
+    elif new:
+        added_chunks: Dict[str, Set[str]] = {}
+        # Whole groups, smallest first, while they fit under the cap.
+        for group, tools in sorted(_chunk_for(new).items(), key=lambda kv: (len(kv[1]), kv[0])):
+            extra = tools - union
+            if extra and len(union) + len(extra) <= cap:
+                union |= extra
+                added_chunks[group] = extra
+        chunk_count = sum(len(v) for v in added_chunks.values())
+        logger.info(
+            "[tool-cache] session=%s grew by %d to %d (cap %d; selected %s; domain chunk: %s)",
+            session_id, len(union) - len(previous & union), len(union), cap,
+            _name_list(new, 12),
+            (", ".join(f"{g}+{len(t)}" for g, t in sorted(added_chunks.items())) if chunk_count
+             else "none"),
+        )
+    _STICKY_TOOLS[session_id] = _StickyToolSet(union, order=order, uses=uses)
     _STICKY_TOOLS.move_to_end(session_id)
     while len(_STICKY_TOOLS) > _STICKY_TOOLS_SESSIONS:
         _STICKY_TOOLS.popitem(last=False)
@@ -3110,6 +3304,45 @@ def _remember_attached_tools(session_id, names) -> None:
     """Tools attached mid-turn (discover_tools, re-arm) stay offered later."""
     if session_id and session_id in _STICKY_TOOLS:
         _STICKY_TOOLS[session_id].update(names)
+
+
+def _record_sticky_tool_use(session_id, name) -> None:
+    """Count a tool call, so a chunked restart keeps what the chat really uses."""
+    entry = _STICKY_TOOLS.get(session_id) if session_id else None
+    if name and entry is not None and hasattr(entry, "uses"):
+        entry.uses[str(name)] += 1
+
+
+def _sticky_order_schemas(session_id, schemas: List[Dict]) -> List[Dict]:
+    """Send a chat's schemas in the order they were first sent: a tool that
+    joins later (a growth, a discover_tools attach) goes at the END instead of
+    at its place in the canonical order, so the part of the tools array ahead
+    of it keeps its bytes. Providers that cache a prefix inside the tools
+    array (Anthropic, OpenAI) keep that part; Codex misses on any tools change
+    either way, which is what the chunked growth is for. A new chat's first
+    list is the canonical order, so nothing changes for it."""
+    entry = _STICKY_TOOLS.get(session_id) if session_id else None
+    order = getattr(entry, "order", None)
+    if order is None or not schemas:
+        return schemas
+
+    def _name(schema) -> str:
+        return str((schema.get("function") or {}).get("name") or schema.get("name") or "")
+
+    rank = {name: index for index, name in enumerate(order)}
+    indexed = list(enumerate(schemas))
+    indexed.sort(key=lambda item: (0, rank[_name(item[1])], 0) if _name(item[1]) in rank
+                 else (1, 0, item[0]))
+    for _i, schema in indexed:
+        name = _name(schema)
+        if name and name not in rank:
+            rank[name] = len(order)
+            order.append(name)
+    if len(order) > 1024:
+        # Bounded: forget names this list no longer carries.
+        sent = {_name(schema) for schema in schemas}
+        order[:] = [name for name in order if name in sent or name in entry]
+    return [schema for _i, schema in indexed]
 
 
 def _sticky_trim(dropped_by_route: Dict[tuple, Set[int]], key, route_messages, trim):
@@ -6333,6 +6566,10 @@ async def stream_agent_loop(
         # manage_tasks in the tool list and the next turn took it out again:
         # two changes to the start of the prompt, two full re-prefills.
         _base_relevant_tools.update(set(_admin_tools) - disabled_tools)
+    # Set below for this chat's remembered tool set; read again when
+    # discover_tools attaches tools mid-turn.
+    _sticky_cap = _STICKY_TOOLS_MAX
+    _sticky_chunk_permitted: Optional[Set[str]] = None
     if not guide_only and _base_relevant_tools is not None:
         _offerable = {
             schema.get("function", {}).get("name") for schema in FUNCTION_TOOL_SCHEMAS
@@ -6343,15 +6580,46 @@ async def stream_agent_loop(
                 for schema in mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {})
             )
         _before = len(_base_relevant_tools)
+        # The primary route decides the cap: an API route with a large window
+        # grows in domain chunks under a bigger cap (see `_sticky_tool_cap`).
+        # Only the harness's own selection is chunked: a caller-provided
+        # `relevant_tools` (scheduler, workers) or a pinned role toolset is a
+        # deliberate choice, and chunking would widen it.
+        _sticky_window, _sticky_is_api = await asyncio.to_thread(
+            _sticky_route_window, endpoint_url, model, context_length,
+        )
+        _sticky_cap, _sticky_chunked = _sticky_tool_cap(_sticky_window, _sticky_is_api)
+        if (
+            _sticky_chunked
+            and not relevant_tools
+            and _pinned_tools is None
+            and _turn_discovery is not None
+        ):
+            try:
+                # The same permission view discover_tools gets: allowlists,
+                # the private-vault gate, plan/read-only modes, disabled tools.
+                _sticky_chunk_permitted = _turn_discovery.permitted_names(
+                    _rearm_policy_settings(session_id, disabled_tools, allow_private)
+                ) - disabled_tools - _turn_pruned_tools
+            except Exception:
+                logger.debug("[tool-cache] chunk permission view unavailable", exc_info=True)
+                _sticky_chunk_permitted = None
+        logger.info(
+            "[tool-cache] session=%s cap=%d chunked=%s window=%s api_route=%s",
+            session_id, _sticky_cap, _sticky_chunk_permitted is not None,
+            _sticky_window, _sticky_is_api,
+        )
         _base_relevant_tools = _sticky_tool_selection(
             session_id, _base_relevant_tools, disabled_tools,
             excluded=_turn_pruned_tools, offerable=_offerable,
+            cap=_sticky_cap, chunk_permitted=_sticky_chunk_permitted,
         )
         _relevant_tools = set(_base_relevant_tools)
         if len(_base_relevant_tools) != _before:
             logger.info(
-                "[tool-cache] session=%s kept %d earlier tools offered (now %d) so the prompt prefix stays cached",
-                session_id, len(_base_relevant_tools) - _before, len(_base_relevant_tools),
+                "[tool-cache] session=%s offering %d tools (this turn selected %d; the rest are earlier "
+                "turns' tools and domain chunks) so the prompt prefix stays cached",
+                session_id, len(_base_relevant_tools), _before,
             )
     _tool_rearms = 0
 
@@ -6362,6 +6630,31 @@ async def stream_agent_loop(
         _runtime_skill_tools.update(names)
         if _base_relevant_tools is not None:
             _base_relevant_tools.update(names)
+
+    def _discover_domain_siblings(found: Set[str]) -> Set[str]:
+        """The rest of the domains ``found`` belong to, attached in the same
+        change: a later discovery in that domain would otherwise be one more
+        tools-array change, and one more full cache miss, a round or two
+        later. Only on chunked routes, only what the chat's policy permits
+        right now (the executor's fresh view), and only whole groups that fit
+        under the chat's cap."""
+        if _sticky_chunk_permitted is None or _turn_discovery is None or _relevant_tools is None:
+            return set()
+        try:
+            permitted = _turn_discovery.permitted_names(
+                _rearm_policy_settings(session_id, disabled_tools, allow_private)
+            )
+        except Exception:
+            return set()
+        permitted = (permitted & _sticky_chunk_permitted) - disabled_tools - _turn_pruned_tools
+        held = set(_STICKY_TOOLS.get(session_id) or ()) | set(_relevant_tools) | set(found)
+        siblings: Set[str] = set()
+        chunks = _sticky_domain_chunk(found, permitted)
+        for _group, tools in sorted(chunks.items(), key=lambda kv: (len(kv[1]), kv[0])):
+            extra = tools - held - siblings
+            if extra and len(held) + len(siblings) + len(extra) <= _sticky_cap:
+                siblings |= extra
+        return siblings
 
     def _route_finetune_modes(candidate_model: str):
         is_ody = _is_odysseus_qwen_model(candidate_model)
@@ -6949,7 +7242,8 @@ async def stream_agent_loop(
             # reconnect is reflected immediately rather than a round later.
             mcp_gated_names=_gated_mcp_names(mcp_mgr, _mcp_disabled_map),
         )
-        return _filter_route_tool_schemas(schemas)
+        # Append-only across rounds and turns: see `_sticky_order_schemas`.
+        return _sticky_order_schemas(session_id, _filter_route_tool_schemas(schemas))
 
     _approved_result_injected = False
     if exact_approval is not None:
@@ -8249,6 +8543,7 @@ async def stream_agent_loop(
                 break
 
             total_tool_calls += 1
+            _record_sticky_tool_use(session_id, block.tool_type)
             # Build a short display string for the frontend tool bubble.
             # Document tools show a brief summary instead of dumping full content.
             is_doc_tool = block.tool_type in ("create_document", "update_document", "edit_document", "suggest_document")
@@ -8572,8 +8867,12 @@ async def stream_agent_loop(
             ):
                 _found = {str(n) for n in (result.get("loaded_names") or ()) if n} - disabled_tools
                 if _found:
-                    _attach_turn_tools(_found)
-                    logger.info("[tool-rag] discover_tools attached for next round: %s", sorted(_found))
+                    _siblings = _discover_domain_siblings(_found)
+                    _attach_turn_tools(_found | _siblings)
+                    logger.info(
+                        "[tool-rag] discover_tools attached for next round: %s (domain siblings: %s)",
+                        sorted(_found), sorted(_siblings) if _siblings else "none",
+                    )
 
             # Extract structured web sources from web_search tool output.
             # web_search returns {"output": ..., "exit_code": 0}; check "output"

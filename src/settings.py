@@ -240,6 +240,11 @@ DEFAULT_SETTINGS = {
     # Most tools one agent turn is offered from retrieval and keyword domains
     # (src.agent_loop._apply_tool_budget). 0 = no limit.
     "agent_tool_budget": 40,
+    # Most tools a chat's remembered (cache-stable) tool set holds before a
+    # turn that needs more restarts it (src.agent_loop._sticky_tool_cap).
+    # 0 = automatic: 48, or 96/128 on API routes with a 128k/256k+ window,
+    # where the set also grows by whole domains to keep the prompt cached.
+    "agent_sticky_tools_max": 0,
     # bash/python without the private-vault grant run in a bubblewrap sandbox
     # that sees only the chat's workspace (src/shell_sandbox.py). "off" keeps
     # the old rule: no grant, no shell. The network toggle cuts the sandbox off

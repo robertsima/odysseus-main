@@ -287,13 +287,36 @@ dropped, used to cost a full cache miss.
 
 `_sticky_tool_selection` keeps a per-chat union: each turn offers what earlier
 turns (and `discover_tools` / the missing-tool re-arm) offered, plus this
-turn's selection, in the fixed schema order. Stale tools are still never
+turn's selection. Stale tools are still never
 offered. Whatever the current policy disables, whatever a turn deliberately
 prunes (the email-draft fetch tools) and whatever no longer exists (a removed
-MCP server) is dropped every turn. Past 48 tools the set restarts from the
-turn's own selection: one miss rather than an ever-growing list. A tool
-attached mid-turn still changes that round's prefix once; after that it stays.
-The `[tool-cache]` log line reports when earlier tools were kept.
+MCP server) is dropped every turn. Past the cap (48 by default) the set
+restarts from the turn's own selection: one miss rather than an
+ever-growing list. A tool attached mid-turn still changes that round's prefix
+once; after that it stays.
+
+Hosted API routes with a 128k+ window (`_sticky_tool_cap`) get a larger cap:
+96, or 128 from a 256k window (`agent_sticky_tools_max` overrides; 0 is
+automatic). There one more cached schema costs ~70 tokens a request, while a
+change to the tool list re-bills the whole prompt, so the set changes less
+often:
+
+- When it must grow, it grows by whole domain chunks (`_STICKY_CHUNK_GROUPS`:
+  the intent/tool-RAG domains, minus settings, plus git and diagnostics).
+  Siblings come only from what the chat's policy permits (the same view
+  `discover_tools` gets: allowlists, the private-vault gate, plan and
+  read-only modes, disabled tools). Admin tools and the open-document editors
+  are never siblings. Caller-provided selections (scheduler, workers) and
+  pinned role toolsets are not chunked.
+- A restart keeps the chat's most-used tools and this turn's domains, up to
+  two thirds of the cap, so the next turns do not grow it again at once.
+- A tool `discover_tools` loads brings its domain siblings in the same change.
+
+Local/LAN routes and smaller windows keep the lean behaviour. On every route a
+tool that joins later is appended at the end of the tools array instead of at
+its canonical position (`_sticky_order_schemas`), so the part ahead of it keeps
+its bytes. The `[tool-cache]` lines report the cap in use, each growth
+(`grew by N ... domain chunk: email+13`) and each restart.
 
 ---
 

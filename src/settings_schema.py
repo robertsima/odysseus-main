@@ -551,6 +551,15 @@ register_all([
         group="Agents", min_value=0, max_value=200, unit="tools", advanced=True,
     ),
     SettingSpec(
+        key="agent_sticky_tools_max", type="int", label="Tools kept across turns",
+        help=("A chat keeps offering the tools earlier turns used, so the model's "
+              "prompt cache stays valid; past this many, a turn that needs more starts "
+              "the set over. 0 = automatic: 48, or 96 (128 from a 256k window) for API "
+              "models with a 128k+ context window, which also add whole tool domains at "
+              "once so the set changes less often."),
+        group="Agents", min_value=0, max_value=400, unit="tools", advanced=True,
+    ),
+    SettingSpec(
         key="agent_approval_ttl_seconds", type="int", label="Approval link lifetime",
         help="How long a one-time agent publishing approval remains valid.",
         group="Agents", min_value=60, max_value=3600, step=60, unit="seconds",
