@@ -115,6 +115,22 @@ def build_retrieval_query(current: str, history: list[dict[str, Any]]) -> tuple[
     history when this helper runs, so the first matching user message is skipped.
     """
     current = str(current or "").strip()
+    # A reply that approves the assistant's last message ("i like that idea",
+    # "go ahead", "can u do that") is about that message. Retrieval gets the
+    # proposal it answers plus the request that proposal answered, so memory
+    # and documents follow the proposal rather than an older task. This is the
+    # one case where assistant prose steers retrieval: it is the antecedent.
+    try:
+        from src.intent_assessment import anchored_retrieval_query, proposal_reply_anchor
+
+        _anchor = proposal_reply_anchor(history or [], current)
+    except Exception:
+        _anchor = ""
+    if _anchor:
+        query = anchored_retrieval_query(history or [], _anchor)
+        if current not in query:
+            query = f"{current}\n{query}"
+        return query[:_RETRIEVAL_QUERY_MAX_CHARS], "proposal_reply"
     if not current or len(current) > 180 or len(current.split()) > 24 or not _FOLLOW_UP_RE.match(current):
         return current, "current"
 

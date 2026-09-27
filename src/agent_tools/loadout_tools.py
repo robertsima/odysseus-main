@@ -352,17 +352,28 @@ def _requested_wait(args: Dict[str, Any]) -> float:
         return 0.0
 
 
-def _status_rows(session_id: Optional[str], limit: int, run_id: str) -> List[Dict[str, Any]]:
+def _status_rows(session_id: Optional[str], limit: int, run_id: str,
+                 loadout: str = "") -> List[Dict[str, Any]]:
     from src import agent_activity
 
     rows = []
-    runs = agent_activity.list_runs(session_id=session_id, limit=max(limit, 100) if run_id else limit,
+    wanted = loadout.strip().casefold()
+    runs = agent_activity.list_runs(session_id=session_id,
+                                    limit=max(limit, 100) if (run_id or wanted) else limit,
                                     include_descendants=True)
     for run in runs:
         if run_id and run.get("run_id") != run_id:
             continue
         summary = run.get("summary") or {}
         progress = run.get("progress") or {}
+        # status with a loadout name reports that loadout's workers only. It
+        # used to ignore the name and return up to 20 of the chat's runs, so
+        # "status of Lead Engineer" came back as a page of unrelated failures
+        # the model then took for the task at hand (2026-09-27).
+        if wanted and str(summary.get("profile") or "").strip().casefold() != wanted:
+            continue
+        if len(rows) >= limit:
+            break
         row = {
             "run_id": run["run_id"], "status": run["status"], "title": run["title"],
             "worker_session": summary.get("target_session") or run.get("session_id"),
@@ -388,12 +399,20 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
         limit = int(args.get("limit") or 20)
     except (TypeError, ValueError):
         limit = 20
-    rows = _status_rows(session_id, limit, run_id)
+    loadout = str(args.get("name") or "").strip()
+    rows = _status_rows(session_id, limit, run_id, loadout)
     if run_id and not rows:
-        known = [row["run_id"] for row in _status_rows(session_id, limit, "")]
-        return {"error": (f"status: no worker run {run_id!r} was started by this chat. "
+        known = [row["run_id"] for row in _status_rows(session_id, limit, "", loadout)]
+        return {"error": (f"status: no worker run {run_id!r}"
+                          + (f" of loadout {loadout!r}" if loadout else "")
+                          + " was started by this chat. "
                           + (f"Its runs: {', '.join(known[:10])}." if known else "It has started none.")),
                 "exit_code": 1}
+    if loadout and not rows:
+        return {"response": (f"This chat has started no worker runs with loadout {loadout!r}. "
+                             "Omit name to see every worker this chat started."),
+                "runs": [], "running": 0, "loadout": loadout, "exit_code": 0,
+                "progress_key": "[]"}
 
     waited = 0.0
     running_ids = [row["run_id"] for row in rows if row.get("status") == "running"]
@@ -411,13 +430,15 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
                        for rid in running_ids):
                     break
             waited = round(time.monotonic() - started, 1)
-            rows = _status_rows(session_id, limit, run_id)
+            rows = _status_rows(session_id, limit, run_id, loadout)
     running = sum(1 for row in rows if row.get("status") == "running")
     if not running:
         _last_status_checks.pop(f"{session_id}|{run_id or '*'}", None)
     cut_off = [row["run_id"] for row in rows if row.get("ran_out_of_rounds")]
     response = (
-        f"{len(rows)} worker run(s) for this chat; {running} still running."
+        f"{len(rows)} worker run(s) for this chat"
+        + (f" with loadout {loadout!r}" if loadout else "")
+        + f"; {running} still running."
         + (f" Cut off before finishing: {', '.join(cut_off)} — these did NOT finish their task; "
            "restart them with a narrower task rather than reporting their partial work as done."
            if cut_off else "")
@@ -430,6 +451,8 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
             f"user, or call status again with wait_seconds (up to {MAX_STATUS_WAIT_S}) to block until it is done."
         )
     out: Dict[str, Any] = {"response": response, "runs": rows, "running": running, "exit_code": 0}
+    if loadout:
+        out["loadout"] = loadout
     if waited:
         out["waited_seconds"] = waited
     # The loop's stall detector reads this instead of the whole result, so a

@@ -242,10 +242,16 @@ def test_terse_followup_inherits_only_human_turns():
     ]
     assessment = assess_request(messages)
     assert assessment.continuation
-    assert assessment.retrieval_query == "yes\nsearch for the release notes"
+    # "yes" answers the assistant's question, so that question joins the
+    # human turns (tests/test_approval_anchoring.py); runtime envelopes,
+    # tool output and peer-agent text never do.
+    assert assessment.retrieval_query == "yes\nsearch for the release notes\nShould I check online?"
+    assert assessment.proposal_excerpt == "Should I check online?"
+    for injected in ("email calendar", "manage_settings", "worker"):
+        assert injected not in assessment.retrieval_query
     assert latest_human_text(messages) == "yes"
     assert human_turn_count(messages) == 2
-    assert recent_human_context(messages) == assessment.retrieval_query
+    assert recent_human_context(messages) == "yes\nsearch for the release notes"
 
 
 def test_clearly_casual_stays_low_signal_but_casual_preface_request_does_not():

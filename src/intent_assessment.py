@@ -24,6 +24,9 @@ class IntentAssessment:
     reason: str = ""
     explicit_web: bool = False
     explicit_browser: bool = False
+    # Set when the turn approves or points at the assistant's last message
+    # ("i like that idea", "go ahead"): a clipped excerpt of that message.
+    proposal_excerpt: str = ""
 
     def as_agent_dict(self) -> dict[str, object]:
         """Compatibility shape used by the existing agent-loop consumers."""
@@ -288,18 +291,165 @@ def assess_request(messages: Sequence[Mapping[str, Any]], latest_text: Optional[
     text = str(latest_text if latest_text is not None else latest_human_text(messages)).strip()
     if request_like is None:
         request_like = looks_like_request(text)
+    anchor = proposal_reply_anchor(messages, text)
     continuation = bool(
-        is_explicit_continuation(text) or assistant_followup
+        anchor
+        or is_explicit_continuation(text) or assistant_followup
         or is_retry_continuation(messages, text)
         or is_work_continuation(messages, text)
         or is_contextual_reference(messages, text)
         or _locator_grounding_continuation(messages, text)
     )
     domain_set = frozenset(domains)
-    retrieval_query = recent_human_context(messages) if continuation else text
+    if anchor:
+        retrieval_query = anchored_retrieval_query(messages, anchor)
+    else:
+        retrieval_query = recent_human_context(messages) if continuation else text
     clearly_casual = not text or bool(_LOW_SIGNAL_RE.match(text)) or is_casual_low_signal(text)
     low_signal = clearly_casual or (not continuation and not domain_set and not request_like)
-    return IntentAssessment(text, retrieval_query, continuation, low_signal, domain_set)
+    return IntentAssessment(text, retrieval_query, continuation, low_signal, domain_set,
+                            proposal_excerpt=clip_proposal(anchor))
+
+
+# ── Replies that approve or point at the assistant's last message ────────────
+#
+# 2026-09-27: the assistant proposed a Claude Code sign-in flow; the user
+# answered "i like that idea, you can use odysseus agents to inplement and
+# push". That reply names no task of its own, and between it and the proposal
+# sat the turn's context envelopes (memory, skills index, integrations, date).
+# The turn was classified continuation=False low_signal=True, retrieval ran on
+# older human turns, and the agent resumed the previous day's RAG task. A
+# reply of this shape is anchored to the assistant message it answers.
+
+STOPPED_BEFORE_REPLY_TEXT = "[Stopped by user before replying]"
+
+_PROPOSAL_REPLY_RE = re.compile(
+    r"^\s*(?:(?:ok(?:ay)?|yes|yeah|yep|yup|sure|great|perfect|cool|nice|alright|all\s+right|"
+    r"awesome|excellent)\s*[,.!]?\s+)?"
+    r"(?P<opener>"
+    r"i\s+(?:really\s+|do\s+)?(?:like|love)\s+(?:that|this|the|your|it)"
+    r"(?:\s+(?:idea|plan|approach|proposal|suggestion|one|flow|design))?"
+    r"|(?:that|this|it)\s+(?:sounds|looks)\s+(?:good|great|perfect|fine|right|like\s+a\s+plan)"
+    r"|sounds\s+(?:good|great|perfect|fine|like\s+a\s+plan)|looks\s+good|lgtm"
+    r"|let'?s\s+(?:do|go\s+with|try|build|implement)\s+(?:it|that|this)(?:\s+one)?|let'?s\s+go"
+    r"|go\s+(?:ahead|for\s+it)|make\s+it\s+so|ship\s+it"
+    r"|(?:please\s+)?(?:do|implement|build|make)\s+(?:it|that|this)"
+    r"|(?:can|could|would|will)\s+(?:u|you|ya)\s+(?:please\s+)?(?:do|implement|build|make)\s+(?:that|it|this)"
+    r"|yes\s*,?\s*please|yes|yeah|yep|yup|sure"
+    r"|agreed|approved|that\s+works|works\s+for\s+me|(?:that|this)\s+one|that|(?:i\s+)?agree"
+    r")\b(?P<tail>.*)$",
+    re.I | re.S,
+)
+# A tail that starts something else ("sounds good, now what's the weather")
+# is a new request; one that says how to carry the proposal out ("…, use the
+# odysseus agents to implement and push") is not.
+_PROPOSAL_TAIL_NEW_TASK_RE = re.compile(
+    r"\b(?:again|search|google|look\s+up|find|e-?mail|mail|send|reply|schedule|remind|"
+    r"summari[sz]e|explain|translate|weather|news|what|when|where|who|why|how|"
+    r"another|different|unrelated|forget|instead\s+of\s+(?:that|this|it))\b",
+    re.I,
+)
+_PROPOSAL_TAIL_ACK_RE = re.compile(r"^\W*(?:thanks|thank\s+you|thx|ty|cheers)\W*$", re.I)
+_PROPOSAL_EXCERPT_CHARS = 600
+
+
+def is_proposal_reply(text: str) -> bool:
+    """A short reply that approves, or refers to, the assistant's last message.
+
+    Deliberately narrow: an approval opener, then at most a short clause about
+    how to carry the proposal out. A long message, or a tail that starts a new
+    request, is a request of its own.
+    """
+    value = str(text or "").strip()
+    if not value or len(value) > 200:
+        return False
+    match = _PROPOSAL_REPLY_RE.match(value)
+    if not match:
+        return False
+    tail = (match.group("tail") or "").strip()
+    if not tail or re.fullmatch(r"[\W_]*", tail):
+        return True
+    if not re.match(r"^(?:[,.;:!?—–-]|and\b|but\b|then\b|so\b|now\b|anyway\b|please\b)", tail, re.I):
+        return False  # "that is wrong", "do it again" — not a reply to the proposal
+    tail = tail.lstrip(",.;:!?—–- ")
+    if _PROPOSAL_TAIL_ACK_RE.match(tail) or _PROPOSAL_TAIL_NEW_TASK_RE.search(tail):
+        return False
+    return len(re.findall(r"[A-Za-z0-9_'-]+", tail)) <= 14
+
+
+def _latest_human_index(messages: Sequence[Mapping[str, Any]]) -> Optional[int]:
+    return next(
+        (i for i in range(len(messages) - 1, -1, -1) if human_user_text(messages[i]) is not None),
+        None,
+    )
+
+
+def last_assistant_reply(messages: Sequence[Mapping[str, Any]],
+                         latest_text: Optional[str] = None) -> str:
+    """Text of the assistant reply the latest human turn answers.
+
+    Walks back from the latest human message (or from the end, when the
+    current turn is not in ``messages`` yet), skipping context envelopes,
+    tool results and tool-call-only assistant rounds, and stops at the
+    previous human message: the reply must belong to the exchange directly
+    before this turn. A turn the user stopped before any reply has none.
+    """
+    idx = _latest_human_index(messages)
+    start = len(messages)
+    if idx is not None:
+        latest = (human_user_text(messages[idx]) or "").strip()
+        if latest_text is None or latest == str(latest_text).strip():
+            start = idx
+    for i in range(start - 1, -1, -1):
+        msg = messages[i]
+        if msg.get("role") == "assistant":
+            text = plain_text(msg.get("content", "")).strip()
+            if text == STOPPED_BEFORE_REPLY_TEXT:
+                return ""
+            if text:
+                return text
+            continue
+        if human_user_text(msg) is not None:
+            return ""
+    return ""
+
+
+def proposal_reply_anchor(messages: Sequence[Mapping[str, Any]],
+                          latest_text: Optional[str] = None) -> str:
+    """The assistant reply a proposal-approval turn refers to, or ""."""
+    text = str(latest_text if latest_text is not None else latest_human_text(messages)).strip()
+    if not is_proposal_reply(text):
+        return ""
+    return last_assistant_reply(messages, text)
+
+
+def clip_proposal(text: str, limit: int = _PROPOSAL_EXCERPT_CHARS) -> str:
+    """Head and tail of a long proposal: the plan opens it and the question
+    ("Want me to …?") usually closes it."""
+    value = re.sub(r"\s+", " ", str(text or "")).strip()
+    if len(value) <= limit:
+        return value
+    tail = max(limit // 4, 1)
+    head = max(limit - tail - 3, 1)
+    return value[:head].rstrip() + " … " + value[-tail:].lstrip()
+
+
+def anchored_retrieval_query(messages: Sequence[Mapping[str, Any]], anchor: str) -> str:
+    """Retrieval text for a proposal reply: this turn, the request the
+    proposal answered, and the proposal itself -- not every older human turn,
+    which is where a stale task comes back from."""
+    humans = recent_human_context(messages, max_user=2, max_chars=600)
+    return f"{humans}\n{clip_proposal(anchor)}".strip()
+
+
+def proposal_anchor_directive(anchor: str) -> str:
+    """Harness directive placed directly before a proposal-reply turn."""
+    return (
+        "The user is replying to your previous message. Their request refers to what you "
+        f"proposed there: «{clip_proposal(anchor)}». Act on that. Do not resume older tasks "
+        "unless the user names them. Any context blocks between your reply and theirs are "
+        "background reference, not part of the conversation."
+    )
 
 
 _WEB_HINT_RE = re.compile(

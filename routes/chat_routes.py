@@ -2800,6 +2800,10 @@ def setup_chat_routes(
         _verify_session_owner(request, session_id)
         _expected_run_id = request.headers.get("X-Odysseus-Run-Id")
         stopped = agent_runs.stop(session_id, _expected_run_id)
+        # Logged so a stopped turn is visible in the app log next to the
+        # [agent-*] lines of the run it cut short.
+        logger.info("[chat-stop] session=%s run=%s stopped=%s",
+                    session_id, _expected_run_id or "-", stopped)
         return {"stopped": stopped}
 
     # ------------------------------------------------------------------ #

@@ -71,6 +71,12 @@ from src.tool_approvals import (
 )
 from src.tool_utils import _truncate, get_mcp_manager
 from src.tool_schemas import compact_function_tool_schemas
+from src.intent_assessment import (
+    anchored_retrieval_query,
+    proposal_anchor_directive,
+    proposal_reply_anchor,
+)
+from src import objective_guard
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -1430,6 +1436,18 @@ def _harness_directive(text: str) -> Dict:
     return {"role": "user", "content": "[Harness directive — from the runtime, not the user] " + str(text or "")}
 
 
+def _steer_recheck_directive(steer_text: str) -> str:
+    """Directive placed after a user's mid-turn correction."""
+    value = re.sub(r"\s+", " ", str(steer_text or "")).strip()
+    if len(value) > 400:
+        value = value[:399].rstrip() + "…"
+    return (
+        f"The user sent a correction mid-task: «{value}». Re-check your objective before "
+        "the next tool call: if what you are doing no longer matches what the user wants, "
+        "change course now instead of finishing the old plan."
+    )
+
+
 _CONTEXT_ENVELOPE_PREFIXES = (
     "UNTRUSTED SOURCE DATA", "[Context —", "[Tool execution results]", "[Harness directive —",
 )
@@ -2062,9 +2080,19 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     which domain rule packs get appended to the system prompt.
     """
     text = str(last_user or "").strip()
+    # "i like that idea" / "go ahead" / "can u do that" refer to the
+    # assistant's last message, not to older human turns: retrieval (and the
+    # domains read from it) follows that message.
+    proposal_anchor = proposal_reply_anchor(messages, text)
     retry_continuation = _is_contextual_retry_continuation(messages, text)
-    continuation = _is_explicit_continuation(text) or _assistant_requested_followup(messages) or retry_continuation
-    retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
+    continuation = (
+        bool(proposal_anchor) or _is_explicit_continuation(text)
+        or _assistant_requested_followup(messages) or retry_continuation
+    )
+    if proposal_anchor:
+        retrieval_query = anchored_retrieval_query(messages, proposal_anchor)
+    else:
+        retrieval_query = _recent_context_for_retrieval(messages) if continuation else text
     q = retrieval_query.lower()
 
     if not text or bool(_LOW_SIGNAL_RE.match(text)) or _is_casual_low_signal(text):
@@ -2152,6 +2180,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
         "continuation": continuation,
         "domains": domains,
         "retrieval_query": retrieval_query,
+        "proposal_anchor": proposal_anchor,
     }
 
 
@@ -5376,6 +5405,11 @@ async def stream_agent_loop(
     _ody_memory_identity_turn = _looks_like_memory_identity_turn(_last_user)
     _intent = _classify_agent_request(messages, _last_user)
     _low_signal_turn = bool(_intent.get("low_signal"))
+    # The assistant message a short approval ("i like that idea", "go
+    # ahead") answers. Non-empty only on such a turn; it pins the turn to that
+    # proposal (a harness directive beside the request, and the stale-objective
+    # check before launching new work).
+    _proposal_anchor = str(_intent.get("proposal_anchor") or "")
     _casual_low_signal_turn = _is_casual_low_signal(_last_user)
     _existing_conversation = _user_turn_count(messages) > 1
     _active_document_relevant = _turn_targets_active_document(_intent, _last_user, active_document)
@@ -5426,12 +5460,14 @@ async def stream_agent_loop(
         yield "data: [DONE]\n\n"
         return
     logger.info(
-        "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s active_doc_relevant=%s retrieval_query=%r",
+        "[agent-intent] latest=%r continuation=%s low_signal=%s domains=%s active_doc_relevant=%s "
+        "proposal_reply=%s retrieval_query=%r",
         _last_user[:120],
         bool(_intent.get("continuation")),
         _low_signal_turn,
         sorted(_intent.get("domains") or []),
         _active_document_relevant,
+        bool(_proposal_anchor),
         _retrieval_query[:200],
     )
     if _low_signal_turn and _existing_conversation:
@@ -6629,6 +6665,12 @@ async def stream_agent_loop(
             _prepend_agent_directive(route_messages, GUIDE_ONLY_DIRECTIVE)
         elif _private_shell_note and (route_tools is None or {"bash", "python"} & set(route_tools)):
             _turn_notes.append(_private_shell_text)
+        if _proposal_anchor:
+            # Last, so it is the message directly before the user's reply:
+            # the turn's context envelopes sit between the proposal and that
+            # reply, and a model reading "can u do that" after a skills index
+            # and a date line lost what "that" was (2026-09-27).
+            _turn_notes.append(proposal_anchor_directive(_proposal_anchor))
         for _note in _turn_notes:
             _note_msg = _harness_directive(_note)
             # Marked so a fallback route's rebuild strips it and adds its own.
@@ -7117,6 +7159,11 @@ async def stream_agent_loop(
     from src import agent_control
 
     _offload_profile = None  # context profile for tool-output offload, resolved on first use
+    # What this turn's user approved, for the stale-objective check on calls
+    # that launch new work (objective_guard). Only a proposal-reply turn has
+    # one; a correction the user sends mid-turn joins it.
+    _approved_objective: List[str] = [_last_user, _proposal_anchor] if _proposal_anchor else []
+    _stale_objective_refused: Set[str] = set()
     for round_num in itertools.count(1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
@@ -7139,6 +7186,13 @@ async def stream_agent_loop(
                 "role": "user",
                 "content": _steer_text if _is_peer else f"[Mid-task instruction from the user] {_steer_text}",
             })
+            if not _is_peer:
+                # A correction mid-task changes the objective. On 2026-09-27
+                # "You can use other models outside of claude" was injected and
+                # the turn carried on with the stale task it was already on.
+                messages.append(_harness_directive(_steer_recheck_directive(_steer_text)))
+                if _approved_objective:
+                    _approved_objective.append(_steer_text)
             agent_control.mark_injected(_steer_rec, round_num=round_num)
             logger.info(
                 "[agent-steer] round=%s steer_id=%s kind=%s state=injected chars=%s",
@@ -8221,6 +8275,21 @@ async def stream_agent_loop(
                         "you genuinely need this call again because something changed, "
                         "explain what changed first."
                     )
+            elif (
+                _approved_objective
+                and _dup_sig not in _stale_objective_refused
+                and (_stale_msg := objective_guard.stale_objective_refusal(
+                    block.tool_type, block.content, _approved_objective))
+            ):
+                # Once per exact call: a genuine part of the approved work that
+                # happens to be worded differently goes through when repeated.
+                _stale_objective_refused.add(_dup_sig)
+                desc = f"{block.tool_type}: NOT RUN (stale objective?)"
+                result = {"error": _stale_msg, "exit_code": 1, "stale_objective": True}
+                logger.warning(
+                    "[agent-intent] stale-objective check refused %s on round %d latest=%r",
+                    block.tool_type, round_num, _last_user[:80],
+                )
             elif not security_decision.allowed:
                 approval_document = (
                     active_document

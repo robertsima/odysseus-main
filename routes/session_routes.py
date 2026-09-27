@@ -131,6 +131,19 @@ def _verify_session_owner(request: Request, session_id: str, session_manager=Non
 
 logger = logging.getLogger(__name__)
 
+
+def _injected_message_kind(message) -> str:
+    """Role plus what kind of record it is, for the inject_messages log line.
+    Never the text: this is logged at INFO."""
+    if not isinstance(message, dict):
+        return "invalid"
+    role = str(message.get("role") or "?")
+    metadata = message.get("metadata") if isinstance(message.get("metadata"), dict) else {}
+    if metadata.get("cancelled") or metadata.get("stopped"):
+        return f"{role}:stopped"
+    return f"{role}:{'empty' if not str(message.get('content') or '').strip() else 'text'}"
+
+
 router = APIRouter(
     prefix="/api",
     tags=["sessions"],
@@ -611,6 +624,11 @@ def setup_session_routes(
                 metadata=sanitize_client_message_metadata(m.get("metadata")),
             ))
         session_manager.save_sessions()
+        logger.info(
+            "[inject-messages] session=%s count=%s kinds=%s",
+            sid, len(messages),
+            ",".join(_injected_message_kind(m) for m in messages[:10]) or "-",
+        )
         return {"ok": True, "count": len(messages)}
 
     @router.post("/session/{sid}/delete")

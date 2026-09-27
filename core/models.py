@@ -75,6 +75,29 @@ def _history_grants_chat_session_approval(
     return False
 
 
+def _model_view(message: Dict[str, Any]) -> Dict[str, Any]:
+    """How one stored message reads to the model.
+
+    Stop before any reply persists an empty assistant message (metadata
+    ``stopped``/``cancelled``) so the transcript keeps the "[Cancelled by
+    user]" bubble across a refresh. Sent as-is, the model saw an assistant
+    turn with nothing in it and no hint that the user had cut it off. It reads
+    as an explicit marker instead; the stored message and the UI bubble are
+    unchanged.
+    """
+    if message.get("role") != "assistant":
+        return message
+    metadata = message.get("metadata") or {}
+    if not (metadata.get("stopped") or metadata.get("cancelled")):
+        return message
+    content = message.get("content")
+    if isinstance(content, str) and not content.strip():
+        from src.intent_assessment import STOPPED_BEFORE_REPLY_TEXT
+
+        return {**message, "content": STOPPED_BEFORE_REPLY_TEXT}
+    return message
+
+
 @dataclass
 class ChatMessage:
     """A single chat message."""
@@ -161,7 +184,7 @@ class Session:
         unaffected.
         """
         messages = [
-            msg.to_dict()
+            _model_view(msg.to_dict())
             for msg in self.history
             if (msg.metadata or {}).get("source") != "slash"
         ]
