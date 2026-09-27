@@ -154,7 +154,11 @@ services:
     # tag blocks the whole app from starting. 2026.6.2 crashes on boot with
     # `KeyError: 'default_doi_resolver'`, failing the healthcheck (issue #1414).
     # Bump this deliberately after verifying a newer tag boots clean.
-    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    # 2026.9.25-12f8b6515 is what the ZimaOS server runs; it carries the Bing
+    # engine fix (searxng#6671: Bing searched only the first word and returned
+    # junk). On it mojeek is inactive and presearch is gone -- see
+    # SEARXNG_GENERAL_ENGINES in services/search/providers.py.
+    image: docker.io/searxng/searxng:2026.9.25-12f8b6515
     entrypoint:
       - /bin/sh
       - -c

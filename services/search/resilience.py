@@ -68,6 +68,10 @@ class GateLimits:
 _DEFAULT_LIMITS: Dict[str, GateLimits] = {
     "searxng": GateLimits(_env_int("ODYSSEUS_SEARXNG_CONCURRENCY", 4), 0.15, 0.25, 30.0),
     "duckduckgo": GateLimits(_env_int("ODYSSEUS_DDG_CONCURRENCY", 2), 0.5, 0.5, 15.0),
+    # GitHub's search API allows 10 requests/minute without a token (30 with
+    # one). One at a time, ~6 s apart, and a short wait: a worker that cannot
+    # get a slot quickly falls through to SearXNG instead of queueing.
+    "github_issues": GateLimits(1, 6.0, 0.5, 8.0),
 }
 _FALLBACK_LIMITS = GateLimits(4, 0.0, 0.0, 30.0)
 
@@ -176,6 +180,56 @@ class CircuitBreaker:
             )
         else:
             logger.debug("%s probe failed; circuit stays open for %.0fs", self.name, self.cooldown)
+
+
+# ----------------------------------------------------------------------
+# Named cooldowns (SearXNG engines, GitHub search)
+# ----------------------------------------------------------------------
+class Cooldowns:
+    """Remember names that asked us to back off, each until a deadline.
+
+    SearXNG reports rate-limited or CAPTCHA-blocked engines in
+    ``unresponsive_engines``; leaving those out of the next requests keeps a
+    pinned engine list from being spent on engines that cannot answer. The
+    GitHub issue search parks itself here when its rate limit runs out.
+    Each start of a cooldown logs one INFO line.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._until: Dict[str, Tuple[float, str]] = {}
+
+    def cool(self, name: str, seconds: float, reason: str = "") -> None:
+        if seconds <= 0:
+            return
+        with self._lock:
+            now = _now()
+            current = self._until.get(name)
+            fresh = current is None or current[0] <= now
+            until = now + seconds
+            if current and current[0] > until:
+                until = current[0]
+            self._until[name] = (until, reason)
+        if fresh:
+            logger.info("%s: %s; leaving it out for %.0fs", name, (reason or "backing off")[:120], seconds)
+
+    def remaining(self, name: str) -> float:
+        with self._lock:
+            entry = self._until.get(name)
+            if entry is None:
+                return 0.0
+            left = entry[0] - _now()
+            if left <= 0:
+                self._until.pop(name, None)
+                return 0.0
+            return left
+
+    def is_cooling(self, name: str) -> bool:
+        return self.remaining(name) > 0
+
+    def clear(self) -> None:
+        with self._lock:
+            self._until.clear()
 
 
 # ----------------------------------------------------------------------
@@ -321,6 +375,7 @@ _gates: Dict[str, ProviderGate] = {}
 _breakers: Dict[str, CircuitBreaker] = {}
 search_results_cache = SingleFlightCache()
 failed_fetches = FailedFetchCache()
+cooldowns = Cooldowns()
 
 
 def get_gate(provider: str) -> ProviderGate:
@@ -348,3 +403,4 @@ def reset_state() -> None:
         _breakers.clear()
     search_results_cache.clear()
     failed_fetches.clear()
+    cooldowns.clear()

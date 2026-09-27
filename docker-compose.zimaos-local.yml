@@ -134,7 +134,7 @@ services:
       - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/chromadb:/chroma/chroma
 
   searxng:
-    image: docker.io/searxng/searxng:2026.5.31-7159b8aed
+    image: docker.io/searxng/searxng:2026.9.25-12f8b6515
     cap_drop:
       - ALL
     cap_add:

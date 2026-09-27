@@ -126,22 +126,109 @@ def _safesearch_for(provider: str) -> Optional[str]:
 
 _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "idag")
 
-# Default general engines (google/duckduckgo/brave/startpage/wikipedia) are
-# routinely rate-limited / CAPTCHA-blocked on this instance and return nothing.
-# Pin engines that actually respond so non-news queries get results without any
-# third-party API fallback. Override via SEARXNG_GENERAL_ENGINES.
-_GENERAL_ENGINES = os.environ.get("SEARXNG_GENERAL_ENGINES", "bing,mojeek,presearch")
+# SearXNG's default general engines (brave, duckduckgo, google cse, wikipedia,
+# wikidata on the 2026.9.25 image) are rate-limited from a home IP under
+# research load: in the 2026-09-27 22:30-22:55 logs brave reported "too many
+# requests" on 365 of 366 requests, duckduckgo timed out on 365 and google cse
+# was suspended on 346. Pin engines that answer instead. Override with
+# SEARXNG_GENERAL_ENGINES (comma-separated SearXNG engine names; an empty value
+# sends no pin and lets SearXNG use its enabled general engines).
+#
+# The pin only works without a ``categories`` parameter: SearXNG *adds* every
+# enabled engine of a requested category to an explicit ``engines`` list
+# (searx/webadapter.py parse_generic), which is how the old
+# ``engines=bing,mojeek,presearch&categories=general`` request reached all of
+# the rate-limited defaults on every query. mojeek is inactive and presearch
+# no longer exists on current images, so that pin was really "bing + defaults".
+_DEFAULT_GENERAL_ENGINES = "bing,yahoo"
+
+# Engines that SearXNG reports as blocked are left out of the pin for this
+# long (SEARXNG_ENGINE_COOLDOWN_SECONDS). SearXNG suspends them itself, but a
+# request pinned only to suspended engines is a wasted round trip that then
+# pays for two retries.
+_ENGINE_BLOCK_MARKERS = (
+    "suspended", "too many requests", "captcha", "access denied", "forbidden",
+    "403", "429",
+)
+
+
+def _general_engines() -> List[str]:
+    """Engines to pin for general searches, read at call time."""
+    raw = os.environ.get("SEARXNG_GENERAL_ENGINES")
+    if raw is None:
+        raw = _DEFAULT_GENERAL_ENGINES
+    names: List[str] = []
+    for name in raw.split(","):
+        name = name.strip()
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _engine_cooldown_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("SEARXNG_ENGINE_COOLDOWN_SECONDS", "") or 300))
+    except ValueError:
+        return 300.0
+
+
+def _engine_cooldown_key(engine: str) -> str:
+    return f"searxng engine {engine}"
+
+
+def _active_general_engines() -> tuple:
+    """Return ``(pin, all_cooling)``: the configured pin minus cooling engines.
+
+    ``all_cooling`` is True when a pin is configured but every engine in it is
+    cooling down -- the caller then asks SearXNG's own defaults instead.
+    """
+    from .resilience import cooldowns
+
+    pinned = _general_engines()
+    active = [e for e in pinned if not cooldowns.is_cooling(_engine_cooldown_key(e))]
+    return active, bool(pinned) and not active
+
+
+def _note_unresponsive_engines(unresponsive) -> None:
+    """Cool down pinned engines SearXNG reported as blocked/suspended."""
+    from .resilience import cooldowns
+
+    pinned = set(_general_engines())
+    seconds = _engine_cooldown_seconds()
+    for entry in unresponsive or []:
+        if not isinstance(entry, (list, tuple)) or not entry:
+            continue
+        name = str(entry[0])
+        reason = str(entry[1]) if len(entry) > 1 else ""
+        if name not in pinned:
+            continue
+        if any(marker in reason.casefold() for marker in _ENGINE_BLOCK_MARKERS):
+            cooldowns.cool(_engine_cooldown_key(name), seconds, f"SearXNG reported {reason!r}")
+
+
+def _engine_tally(results) -> str:
+    """``"bing=14, wikipedia=1"`` for the engines behind SearXNG's rows."""
+    counts: dict = {}
+    for row in results or []:
+        if not isinstance(row, dict):
+            continue
+        names = row.get("engines") or ([row["engine"]] if row.get("engine") else [])
+        for name in names:
+            counts[name] = counts.get(name, 0) + 1
+    return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
                        time_filter: Optional[str] = None) -> List[dict]:
-    """Search using SearXNG JSON API. Returns list of {title, url, snippet}."""
+    """Search using SearXNG JSON API. Returns list of {title, url, snippet, engine}."""
     count = count if count is not None else _get_result_count()
     instance = _get_search_instance()
     api_key = ""
     headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+    pinned_engines, pin_exhausted = _active_general_engines()
+    pinned_param = ",".join(pinned_engines)
     # News/fresh queries do badly in the 'general' category — it favours
     # encyclopedic/tourism pages, ignores recency, and (with no language pin)
     # bleeds in foreign-language results. When the agent layer detected
@@ -169,29 +256,50 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
     is_news = not scoped_to_site and (
         time_filter in ("day", "week", "month") or any(h in q_lc for h in _NEWS_HINTS)
     )
+
+    def _pin_general(target: dict) -> None:
+        # An explicit engine list replaces the category: sending both makes
+        # SearXNG query the pin *and* every default engine of the category.
+        if pinned_param:
+            target.pop("categories", None)
+            target["engines"] = pinned_param
+        else:
+            target["categories"] = "general"
+            target.pop("engines", None)
+
     if is_news and categories == "general":
         params["categories"] = "news"
         if time_filter in ("day", "week", "month", "year"):
             # 'day' is too sparse on most SearXNG news engines — widen to a week
             # so there's enough volume; the news category already biases recent.
             params["time_range"] = "week" if time_filter in ("day", "week") else time_filter
+    elif categories == "general":
+        _pin_general(params)
     else:
         params["categories"] = categories
-        # Route general queries to engines that aren't blocked (default general
-        # set returns 0 on this instance — see _GENERAL_ENGINES).
-        if categories == "general" and _GENERAL_ENGINES:
-            params["engines"] = _GENERAL_ENGINES
+    if pin_exhausted and categories == "general":
+        logger.info(
+            "SearXNG: every pinned engine (%s) is cooling down; using SearXNG's defaults for %r",
+            ",".join(_general_engines()), query,
+        )
     try:
         def _parse_results(results):
-            return [
-                {
+            parsed = []
+            for r in results:
+                if len(parsed) >= count:
+                    break
+                if not isinstance(r, dict) or not r.get("url"):
+                    continue
+                engines = r.get("engines") or ([r["engine"]] if r.get("engine") else [])
+                parsed.append({
                     "title": r.get("title", ""),
                     "url": r.get("url", ""),
                     "snippet": r.get("content", ""),
-                }
-                for r in results[:count]
-                if r.get("url")
-            ]
+                    # Which upstream engine(s) produced the row; logged by the
+                    # relevance gate so junk can be traced to its engine.
+                    "engine": ",".join(str(e) for e in engines),
+                })
+            return parsed
 
         def _run(search_params):
             response = httpx.get(
@@ -202,7 +310,16 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             )
             response.raise_for_status()
             data = response.json()
-            return _parse_results(data.get("results", [])), data
+            if not isinstance(data, dict):
+                data = {}
+            raw_rows = data.get("results", []) or []
+            _note_unresponsive_engines(data.get("unresponsive_engines"))
+            logger.info(
+                "SearXNG answered %d row(s) for %r (engines: %s; asked: %s)",
+                len(raw_rows), query, _engine_tally(raw_rows) or "none",
+                search_params.get("engines") or f"categories={search_params.get('categories')}",
+            )
+            return _parse_results(raw_rows), data
 
         active_params = params
         parsed, data = _run(active_params)
@@ -214,11 +331,9 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
                 "q": query,
                 "format": "json",
                 "language": "en",
-                "categories": "general",
                 "safesearch": _safesearch_for("searxng"),
             }
-            if _GENERAL_ENGINES:
-                fallback["engines"] = _GENERAL_ENGINES
+            _pin_general(fallback)
             logger.info(
                 "SearXNG news search returned 0 results for %r; retrying general engines",
                 query,
@@ -237,6 +352,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         if not parsed and active_params.get("engines"):
             fallback = dict(active_params)
             fallback.pop("engines", None)
+            fallback["categories"] = "general"
             logger.info(
                 "SearXNG pinned engines returned 0 results for %r; retrying default engines",
                 query,
@@ -289,6 +405,154 @@ def searxng_search(query, max_results=10):
             return results
     except Exception as e:
         logger.error(f"SearXNG search failed: {e}")
+    return []
+
+
+# ── GitHub issue search (public API, optional) ──
+
+_GITHUB_API = "https://api.github.com"
+_GITHUB_SNIPPET_CHARS = 300
+
+
+def github_issue_search_enabled() -> bool:
+    """On unless ODYSSEUS_GITHUB_ISSUE_SEARCH is 0/false/off/no."""
+    raw = (os.environ.get("ODYSSEUS_GITHUB_ISSUE_SEARCH") or "").strip().casefold()
+    return raw not in ("0", "false", "off", "no", "disabled")
+
+
+def _github_headers() -> dict:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": WEB_FETCH_USER_AGENT,
+    }
+    try:
+        from src.github_credentials import github_token_from_env
+        # public_only: an Enterprise token must never be sent to github.com.
+        token = github_token_from_env(public_only=True)
+    except Exception:
+        token = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_rate_limit_wait(response) -> Optional[float]:
+    """Seconds until GitHub's search quota resets, or None when not limited."""
+    status = getattr(response, "status_code", 0)
+    if status not in (403, 429):
+        return None
+    hdrs = getattr(response, "headers", {}) or {}
+    retry_after = hdrs.get("retry-after") or hdrs.get("Retry-After")
+    if retry_after:
+        try:
+            return min(600.0, max(5.0, float(retry_after)))
+        except ValueError:
+            pass
+    remaining = hdrs.get("x-ratelimit-remaining") or hdrs.get("X-RateLimit-Remaining")
+    reset = hdrs.get("x-ratelimit-reset") or hdrs.get("X-RateLimit-Reset")
+    if status == 429 or remaining == "0":
+        try:
+            import time as _time
+            return min(600.0, max(5.0, float(reset) - _time.time()))
+        except (TypeError, ValueError):
+            return 60.0
+    return None
+
+
+def _github_issue_rows(items, count: int) -> List[dict]:
+    rows = []
+    for item in items or []:
+        if not isinstance(item, dict) or not item.get("html_url"):
+            continue
+        repo = ""
+        repo_url = item.get("repository_url") or ""
+        if "/repos/" in repo_url:
+            repo = repo_url.split("/repos/", 1)[1]
+        number = item.get("number")
+        state = item.get("state") or ""
+        kind = "PR" if item.get("pull_request") else "Issue"
+        title = str(item.get("title") or "").strip()
+        label = f"{title} · {kind} #{number}" if number is not None else title
+        if repo:
+            label += f" · {repo}"
+        if state:
+            label += f" ({state})"
+        body = re.sub(r"\s+", " ", str(item.get("body") or "")).strip()
+        rows.append({
+            "title": label,
+            "url": item["html_url"],
+            "snippet": body[:_GITHUB_SNIPPET_CHARS],
+            "age": str(item.get("updated_at") or "")[:10],
+            "engine": "github",
+        })
+        if len(rows) >= count:
+            break
+    return rows
+
+
+def github_issue_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
+    """Answer a GitHub-issue-scoped query from GitHub's issue search API.
+
+    Only queries :func:`services.search.query.github_issue_scope` accepts are
+    sent (``site:github.com/<org>/<repo>/issues ...`` and friends). GitHub
+    ANDs every term, so the query carries at most five subject terms and is
+    retried once with the first three when the longer form matches nothing.
+    Uses ``GITHUB_PERSONAL_ACCESS_TOKEN`` when set for github.com (30
+    searches/minute instead of 10). When the quota runs out the provider
+    cools down until GitHub's reset time and the chain falls through to
+    SearXNG. ``time_filter`` is ignored: issue relevance does not track a
+    year-wide recency hint.
+    """
+    from .query import github_issue_scope
+    from .resilience import cooldowns
+
+    count = count if count is not None else _get_result_count()
+    if not github_issue_search_enabled():
+        return []
+    scope = github_issue_scope(query)
+    if not scope:
+        return []
+    if cooldowns.is_cooling("github issue search"):
+        return []
+    qualifiers = [f"is:{scope['kind']}"]
+    if scope.get("repo"):
+        qualifiers.insert(0, f"repo:{scope['repo']}")
+    terms = list(scope["terms"])
+    attempts = [terms]
+    if len(terms) > 3:
+        attempts.append(terms[:3])
+    headers = _github_headers()
+    for attempt in attempts:
+        q = " ".join(attempt + qualifiers)
+        try:
+            response = httpx.get(
+                f"{_GITHUB_API}/search/issues",
+                params={"q": q, "per_page": max(1, min(int(count) * 2, 30))},
+                headers=headers,
+                timeout=REQUEST_TIMEOUT,
+            )
+        except httpx.HTTPError as e:
+            logger.warning("GitHub issue search failed for %r: %s", q, e)
+            return []
+        wait = _github_rate_limit_wait(response)
+        if wait is not None:
+            cooldowns.cool("github issue search", wait, f"rate limit reached (HTTP {response.status_code})")
+            return []
+        if response.status_code == 422:
+            # Invalid query (e.g. an unknown repo): nothing to find there.
+            logger.info("GitHub issue search rejected %r (HTTP 422)", q)
+            return []
+        try:
+            response.raise_for_status()
+            data = response.json()
+        except (httpx.HTTPError, ValueError) as e:
+            logger.warning("GitHub issue search failed for %r: %s", q, e)
+            return []
+        rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count)
+        logger.info("GitHub issue search %r returned %d row(s)", q, len(rows))
+        if rows:
+            return rows
     return []
 
 

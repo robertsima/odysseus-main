@@ -138,6 +138,100 @@ def simplify_query(query: str, max_terms: int = MAX_SIMPLIFIED_TERMS) -> str:
     return f"site:{site} {simplified}" if site else simplified
 
 
+# ----------------------------------------------------------------------
+# GitHub issue scope
+# ----------------------------------------------------------------------
+# Research agents ask for `site:github.com/<org>/<repo>/issues <keywords>`
+# (84 of ~190 searches in the 2026-09-27 22:30-22:55 logs). SearXNG's engines
+# ignore `site:`, so those queries came back as off-domain rows and were
+# thrown away. GitHub's own issue search answers them exactly; this decides
+# when a query is one and what to send it.
+_GITHUB_HOSTS = {"github.com", "www.github.com"}
+_GITHUB_REPO_RE = re.compile(
+    r"(?:https?://)?(?:www\.)?github\.com/([A-Za-z0-9][A-Za-z0-9-]*)/([A-Za-z0-9._-]+)",
+    flags=re.I,
+)
+# First path segments of github.com that are not an owner.
+_GITHUB_RESERVED = {
+    "issues", "pulls", "pull", "search", "topics", "orgs", "marketplace",
+    "features", "explore", "discussions", "notifications", "settings", "sponsors",
+}
+_ISSUE_INTENT = {"issue", "issues", "bug", "bugs", "pull", "pulls", "pr", "prs", "regression"}
+_PR_SEGMENTS = {"pull", "pulls"}
+MAX_GITHUB_TERMS = 5
+
+
+def github_issue_scope(query: str) -> Optional[Dict[str, object]]:
+    """Describe a GitHub issue search for *query*, or None when it is not one.
+
+    A query qualifies when it is scoped to a repository
+    (``site:github.com/<org>/<repo>[/issues]`` or a bare
+    ``github.com/<org>/<repo>`` token), or to github.com together with an
+    issue word (``site:github.com/issues ...``, ``site:github.com ... issue``,
+    ``GitHub issue ...``). Returns ``{"repo": "org/repo" | None, "kind":
+    "issue" | "pr", "terms": [...]}`` where ``terms`` are at most
+    ``MAX_GITHUB_TERMS`` subject keywords -- GitHub ANDs every term, so a
+    twelve-word research query would match nothing.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return None
+    rest, site = _extract_site_filter(query)
+    repo: Optional[str] = None
+    kind = "issue"
+    on_github = False
+    if site:
+        bare = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site.strip(), flags=re.I)
+        host, _, path = bare.partition("/")
+        if host.lower() not in _GITHUB_HOSTS:
+            return None
+        on_github = True
+        segments = [s for s in path.split("/") if s]
+        if len(segments) >= 2 and segments[0].lower() not in _GITHUB_RESERVED:
+            repo = f"{segments[0]}/{segments[1]}"
+            if len(segments) >= 3 and segments[2].lower() in _PR_SEGMENTS:
+                kind = "pr"
+        elif segments and segments[0].lower() in _PR_SEGMENTS:
+            kind = "pr"
+        elif segments and segments[0].lower() in ("issues",):
+            kind = "issue"
+    else:
+        match = _GITHUB_REPO_RE.search(rest)
+        if match and match.group(1).lower() not in _GITHUB_RESERVED:
+            repo = f"{match.group(1)}/{match.group(2).rstrip('.')}"
+            on_github = True
+    if repo:
+        rest = _GITHUB_REPO_RE.sub(" ", rest)
+    words = [w.strip(".,;:!?'`*\"()[]").casefold() for w in rest.split()]
+    has_issue_word = any(w in _ISSUE_INTENT for w in words)
+    path_says_issues = bool(site) and re.search(r"/(?:issues|pulls?)\b", site, flags=re.I)
+    if not repo:
+        if not on_github:
+            # "GitHub issue <subject>" without any site: scope.
+            if not ("github" in words and has_issue_word):
+                return None
+        elif not (has_issue_word or path_says_issues):
+            # site:github.com alone asks for repositories/code, not issues.
+            return None
+    terms: List[str] = []
+    seen = set()
+    for raw in _OPERATOR_RE.sub(" ", rest).split():
+        if raw in ("OR", "AND", "NOT", "|", "&") or raw.startswith("-"):
+            continue
+        token = re.sub(r"[\"“”„()\[\]{}]", "", raw).strip(".,;:!?'`*")
+        low = token.casefold()
+        if (not re.search(r"\w", token) or low in _SIMPLIFY_DROP or low in _ISSUE_INTENT
+                or low in {"github", "github.com", "repo", "repository"}
+                or _YEAR_RE.match(token) or low in seen):
+            continue
+        seen.add(low)
+        terms.append(token)
+        if len(terms) >= MAX_GITHUB_TERMS:
+            break
+    if not terms:
+        return None
+    return {"repo": repo, "kind": kind, "terms": terms}
+
+
 def _boost_entities_in_query(base_query: str, entities: Dict[str, List[str]]) -> str:
     """Append extracted entities to the query using OR to increase relevance."""
     parts = [base_query]

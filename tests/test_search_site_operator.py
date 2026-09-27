@@ -100,13 +100,14 @@ def test_site_query_with_year_filter_skips_the_news_category(monkeypatch):
     seen = _capture_searxng(monkeypatch, [{"title": "t", "url": "https://lucide.dev/license", "content": ""}])
     providers.searxng_search_api("site:lucide.dev license", count=5, time_filter="year")
     assert len(seen) == 1, "one request: no news attempt first"
-    assert seen[0]["categories"] == "general"
+    assert seen[0].get("categories") != "news"
+    assert seen[0]["engines"], "general searches go to the pinned engines"
 
 
 def test_year_filter_alone_is_not_a_news_signal(monkeypatch):
     seen = _capture_searxng(monkeypatch, [{"title": "t", "url": "https://x.test/", "content": ""}])
     providers.searxng_search_api("ISO 29148 requirements traceability", count=5, time_filter="year")
-    assert len(seen) == 1 and seen[0]["categories"] == "general"
+    assert len(seen) == 1 and seen[0].get("categories") != "news"
 
 
 def test_week_filter_and_news_words_still_use_the_news_category(monkeypatch):

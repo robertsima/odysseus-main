@@ -1,6 +1,6 @@
 # Search
 
-Last updated: dev@e71f8ce | 2026-08-25
+Last updated: dev@6a205599 | 2026-09-27
 
 ## Scope
 
@@ -51,10 +51,14 @@ Runtime behavior:
 
 - disabled search returns disabled/unavailable text in the comprehensive path;
 - missing keyed-provider secrets return empty provider results instead of exposing secrets;
-- SearXNG retries through JSON variants before HTML fallback, pins English/general-engine defaults where needed, and maps news/recency settings into provider time filters;
+- SearXNG general searches send `engines=<pin>` and **no** `categories`. SearXNG adds every enabled engine of a requested category to an explicit engine list, so `engines=...&categories=general` also queried all the rate-limited defaults. The pin is `SEARXNG_GENERAL_ENGINES` (default `bing,yahoo`, read per call); an empty value sends `categories=general` with no pin. News lookups keep `categories=news`. Retries go news -> pinned general, then without `language`, then SearXNG's defaults (`categories=general`, no pin), then the HTML fallback;
+- SearXNG's `unresponsive_engines` is fed back into the pin. A pinned engine reported as suspended, too many requests, CAPTCHA, access denied, 403 or 429 is left out for `SEARXNG_ENGINE_COOLDOWN_SECONDS` (default 300). Plain timeouts do not count. When every pinned engine is cooling, the request goes to SearXNG's defaults. Every JSON answer logs `SearXNG answered N row(s) for ... (engines: bing=12, yahoo=7; asked: ...)`, and parsed rows carry an `engine` field;
+- the comprehensive chain asks SearXNG for 20 rows, which costs no extra upstream requests. It applies the `site:` filter and relevance gate to all of them, then trims to the requested count;
+- `site:` scoping keeps on-domain rows and puts rows under the scope's path first (on code hosts, the `/<owner>/<repo>` part). When no on-domain row came back, the provider is retried once with the domain as a keyword, plus `owner/repo` for `site:github.com/<owner>/<repo>/...`;
+- GitHub-issue-scoped queries first try GitHub's public issue search API (`providers.github_issue_search`). These are `site:github.com/<owner>/<repo>[/issues|/pulls]`, `site:github.com/issues ...`, `site:github.com ... issue`, a bare `github.com/<owner>/<repo>` token, or `GitHub ... issue ...` (see `query.github_issue_scope`). The request carries at most five subject terms plus `repo:` and `is:issue`/`is:pr`, and is retried once with three terms. `GITHUB_PERSONAL_ACCESS_TOKEN` is sent only to public github.com. Requests go one at a time, about 6 s apart, and a rate-limit answer starts a cooldown until GitHub's reset. GitHub rows skip the relevance gate because GitHub already ANDs every term. The simplified retry pass does not ask GitHub again. `ODYSSEUS_GITHUB_ISSUE_SEARCH=0` turns the step off;
 - comprehensive search walks the fallback chain once per provider; when every provider comes back empty (or only with rows the relevance gate rejects) and `simplify_query()` yields a shorter query (operators, quotes, years and research scaffolding dropped, first six terms, `site:` kept), the chain runs once more with it;
-- the relevance gate needs one significant query token per row, two once the query has five or more;
-- `services/search/resilience.py` holds process-wide load guards: a per-provider concurrency gate with jittered start spacing (`ODYSSEUS_SEARXNG_CONCURRENCY`, default 4; `ODYSSEUS_DDG_CONCURRENCY`, default 2), a circuit breaker that skips DuckDuckGo for 90 s after three consecutive transport failures (one INFO line on trip and on recovery), and a single-flight in-memory cache of chain outcomes (5 min for results, 60 s for honest empties, errors never cached);
+- the relevance gate needs one significant query token per row, two once the query has five or more. Stopwords, research scaffolding (`github`, `issue(s)`, `official`, `documentation`, ...) and bare years are not significant. Tokens match as whole words after light suffix folding (`embeddings`/`embedding`, `benchmarking`/`benchmark`), and `llama_index`/`llama-index` also match `LlamaIndex`. On a long query, one hit is enough in two cases: the hit is an identifier-like token (CamelCase, snake_case or letters+digits, such as `LongMemEval`, `refresh_ref_docs`, `BM25`), or the row sits inside the `site:` scope (under the scoped path, or on a specific domain; `github.com` alone is not specific). Each gate event logs `dropped host[engine]:hits` for the rejected rows. A provider whose rows were all rejected is reported as `irrelevant (0/n)` and cached like an empty answer. The failure message then tells the model to retry with 3-6 specific terms;
+- `services/search/resilience.py` holds process-wide load guards: a per-provider concurrency gate with jittered start spacing (`ODYSSEUS_SEARXNG_CONCURRENCY`, default 4; `ODYSSEUS_DDG_CONCURRENCY`, default 2; GitHub issue search 1), a circuit breaker that skips DuckDuckGo for 90 s after three consecutive transport failures (one INFO line on trip and on recovery), and a single-flight in-memory cache of chain outcomes (5 min for results, 60 s for honest empties, errors never cached). It also holds named cooldowns (`resilience.cooldowns`) for SearXNG engines and the GitHub issue search;
 - `/api/search/query` is a direct provider test/query path and does not use the comprehensive fallback chain. Direct provider result limits can be controlled dynamically by the caller.
 
 ## Content Fetching
@@ -132,6 +136,53 @@ Deep research wraps fetched webpage content through `untrusted_context_message("
 Compose preserves retained SearXNG settings but runs `scripts/migrate_searxng_settings.py` before startup to add missing `use_default_settings: true` inheritance. The migration accepts only a regular single-document YAML mapping, preserves BOM/newline/style/ownership/mode, writes and directory-fsyncs atomically, and no-ops when the key exists. Compose treats migration failure as non-fatal so SearXNG health reports the retained-file problem instead of the wrapper command preventing startup.
 
 `httpx` and BeautifulSoup are required runtime dependencies for the active search/fetch path.
+
+## Operator Notes
+
+These notes cover the 2026-09-27 changes. They come from the bundle `odysseus-diagnostics-20260927-225514`, recorded while the server already ran SearXNG `latest` (= 2026.9.25-12f8b6515).
+
+- 174 web searches from about 5 parallel research workers made 366 SearXNG requests.
+- SearXNG listed brave ("too many requests") and duckduckgo (timeout) as unresponsive on 365 of them, and google cse on 346. Odysseus pinned `bing,mojeek,presearch`, but sent the pin together with `categories=general`, which makes SearXNG query every default general engine as well. On this image mojeek is `inactive` and presearch no longer exists.
+- The relevance gate kept 0 of 5 rows on 132 of 189 checks. Eight of those queries were replayed through a working search engine. On titles and URLs alone, the old gate kept 35 of 42 of its rows and the new gate keeps 42 of 42. So the rows SearXNG returned were mostly off-topic engine output, not good rows rejected by a strict gate.
+- 52 searches used `site:github.com...`, which SearXNG's engines ignore.
+
+Server-side steps. The ZimaOS compose file is a separate copy of the repo's, so apply these by hand:
+
+1. In the server's compose file, pin the SearXNG image to the tag the server already runs, instead of `latest`:
+
+   ```yaml
+   searxng:
+     image: docker.io/searxng/searxng:2026.9.25-12f8b6515
+   ```
+
+   Then run `docker compose pull searxng && docker compose up -d searxng`, or change the image in the ZimaOS app settings and restart the app. Check the version with `docker logs <searxng-container> 2>&1 | grep -m1 '^SearXNG '`. Keep the existing entrypoint, volumes, cap set and healthcheck unchanged.
+2. Optional: set these in the Odysseus service environment, only if you want to change the defaults:
+   - `SEARXNG_GENERAL_ENGINES=bing,yahoo` (the default). Engines marked `disabled: true` in SearXNG's defaults still answer when named explicitly. Engines marked `inactive: true` (mojeek and startpage on this image) do not. An empty value sends SearXNG's own general set.
+   - `SEARXNG_ENGINE_COOLDOWN_SECONDS=300`.
+   - `ODYSSEUS_GITHUB_ISSUE_SEARCH=0` turns off the GitHub issue step. `GITHUB_PERSONAL_ACCESS_TOKEN`, which the GitHub integration already uses, raises GitHub search from 10 to 30 requests a minute.
+3. Optional: take pressure off the rate-limited engines for the times Odysseus falls back to SearXNG's defaults. Edit the retained settings file on the host, the one mounted at `/etc/searxng/settings.yml`. Compose never overwrites it once it exists. Add this under the existing `use_default_settings: true`:
+
+   ```yaml
+   engines:
+     - name: bing
+       disabled: false
+     - name: yahoo
+       disabled: false
+     - name: brave
+       disabled: true
+     - name: duckduckgo
+       disabled: true
+     - name: google cse
+       disabled: true
+   ```
+
+   With `use_default_settings: true`, SearXNG merges these entries into its defaults by name. Restart the searxng container afterwards. Leave the rest of the file alone, including `server.secret_key` and `search.formats`, which must keep `json`.
+4. Verify from the Odysseus container: `python -c "import httpx;r=httpx.get('http://searxng:8080/search',params={'q':'pgvector hybrid search','format':'json','engines':'bing,yahoo'},timeout=20).json();print(len(r['results']),r.get('unresponsive_engines'),sorted({e for x in r['results'] for e in x.get('engines',[])}))"`. Expect a non-zero row count with rows from `bing` and/or `yahoo`, and neither engine listed as unresponsive. If `yahoo` never appears, drop it from the pin (step 2).
+5. In the next diagnostics bundle, check these log lines:
+   - `SearXNG answered N row(s) ... (engines: ...; asked: bing,yahoo)`. If an engine never contributes rows, remove it from `SEARXNG_GENERAL_ENGINES`.
+   - `Relevance gate ... dropped host[engine]:hits`. Dropped rows with 0-1 hits from one engine mean that engine returns junk. Dropped rows from good hosts mean the gate is too strict.
+   - `GitHub issue search '...' returned N row(s)`.
+   - The cooldown lines `github issue search: rate limit reached` and `searxng engine X: SearXNG reported ...`.
 
 ## Current Gaps
 

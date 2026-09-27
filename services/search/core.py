@@ -22,10 +22,17 @@ from .cache import (
     generate_cache_key,
     cleanup_cache,
 )
-from .query import _cache_duration_for_query, _extract_site_filter, simplify_query
+from .query import (
+    _cache_duration_for_query,
+    _extract_site_filter,
+    github_issue_scope,
+    simplify_query,
+)
 from .ranking import rank_search_results
 from . import resilience
 from .providers import (
+    github_issue_search,
+    github_issue_search_enabled,
     searxng_search_api,
     brave_search,
     duckduckgo_search,
@@ -46,6 +53,9 @@ from .content import (
 
 logger = logging.getLogger(__name__)
 
+# Chain step for GitHub-issue-scoped queries (not a user-selectable provider).
+GITHUB_ISSUES = "github_issues"
+
 # Search engines occasionally return a perfectly valid-looking result set for
 # the wrong intent (for example, travel pages for a repository/poller query).
 # Keep this list deliberately small: a query made entirely from these terms is
@@ -63,16 +73,28 @@ _RELEVANCE_STOPWORDS = {
     # also keep generic/navigational calls from being rejected on sparse
     # provider metadata.
     "test", "query", "web", "page", "pages", "result", "results",
+    # Research scaffolding (the words simplify_query drops): they describe the
+    # kind of page wanted, not its subject. "github" and "issues" in
+    # particular matched the URL of *every* github.com issue, so a junk issue
+    # passed a "GitHub issue <subject>" query on scaffolding alone.
+    "official", "documentation", "docs", "doc", "discussion", "discussions",
+    "evidence", "example", "examples", "case", "study", "studies", "paper",
+    "papers", "report", "reports", "survey", "issue", "issues", "github",
+    "competitors", "alternatives", "products", "pain", "points", "current",
+    "overview", "guide", "review", "reviews", "analysis",
 }
+
+_YEAR_TOKEN_RE = re.compile(r"^(?:19|20)\d{2}$")
 
 
 def _significant_query_tokens(query: str) -> Set[str]:
     """Return normalized subject tokens suitable for a relevance gate.
 
-    Search operators (especially ``site:``) and ordinary stopwords are not
-    evidence that a result is about the requested subject. Keep numeric IDs
-    when they have at least two digits, since standards/issues/versions often
-    use them as the only useful signal.
+    Search operators (especially ``site:``), ordinary stopwords, research
+    scaffolding and bare years (the time filter carries recency; a date in a
+    junk snippet is not subject evidence) are left out. Keep other numeric
+    IDs when they have at least two digits, since standards/issues/versions
+    often use them as the only useful signal.
     """
     rest, _ = _site_scope(query or "")
     normalized = unicodedata.normalize("NFKC", rest).casefold()
@@ -80,9 +102,63 @@ def _significant_query_tokens(query: str) -> Set[str]:
     return {
         token for token in tokens
         if token not in _RELEVANCE_STOPWORDS
+        and not _YEAR_TOKEN_RE.match(token)
         and ((len(token) >= 3 and not token.isdigit())
              or (token.isdigit() and len(token) >= 2))
     }
+
+
+def _distinctive_query_tokens(query: str) -> Set[str]:
+    """Tokens spelled like identifiers: CamelCase, snake_case, letters+digits.
+
+    ``LongMemEval``, ``LlamaIndex``, ``refresh_ref_docs``, ``BM25``, ``mem0``
+    name one thing; a row that mentions one of them is about the subject even
+    when it shares no second query word (a real search engine's rows for
+    "LongMemEval benchmark temporal reasoning knowledge updates" were dropped
+    for saying "Benchmarking" and "Long-Term Memory" instead).
+    """
+    rest, _ = _site_scope(query or "")
+    out: Set[str] = set()
+    for raw in re.findall(r"\w+", unicodedata.normalize("NFKC", rest), flags=re.UNICODE):
+        if len(raw) < 3 or raw.isdigit() or _YEAR_TOKEN_RE.match(raw):
+            continue
+        if (re.search(r"[a-z][A-Z]", raw) or "_" in raw.strip("_")
+                or (re.search(r"[A-Za-z]", raw) and re.search(r"\d", raw))):
+            low = raw.casefold()
+            if low not in _RELEVANCE_STOPWORDS:
+                out.add(low)
+    return out
+
+
+def _stem(token: str) -> str:
+    """Crude suffix folding so "embeddings"/"embedding"/"embedded" meet.
+
+    Applied identically to query and row tokens, so it only has to be
+    consistent, not linguistically right.
+    """
+    t = token
+    if len(t) > 4 and t.endswith("ies"):
+        t = t[:-3] + "y"
+    elif len(t) > 3 and t.endswith("s") and not t.endswith("ss"):
+        t = t[:-1]
+    for suffix in ("ing", "ed"):
+        if len(t) - len(suffix) >= 4 and t.endswith(suffix):
+            t = t[: -len(suffix)]
+            break
+    if len(t) > 4 and t.endswith("e"):
+        t = t[:-1]
+    return t
+
+
+def _token_forms(tokens) -> Set[str]:
+    forms: Set[str] = set()
+    for token in tokens:
+        forms.add(token)
+        forms.add(_stem(token))
+        squashed = re.sub(r"[_]", "", token)
+        if squashed != token:
+            forms.add(squashed)
+    return forms
 
 
 def _result_text_for_relevance(result: dict) -> str:
@@ -103,12 +179,60 @@ def _result_text_for_relevance(result: dict) -> str:
     return " ".join(str(part) for part in (title, snippet, url_text) if part)
 
 
+def _result_forms(result: dict) -> Set[str]:
+    """Normalized word forms present in a row (plus joined identifiers).
+
+    ``llama_index``, ``llama-index`` and ``llama.index`` also yield
+    ``llamaindex`` so they match a query that wrote ``LlamaIndex``.
+    """
+    text = unicodedata.normalize("NFKC", _result_text_for_relevance(result)).casefold()
+    tokens = re.findall(r"\w+", text, flags=re.UNICODE)
+    joined = [
+        re.sub(r"[-_.]", "", chunk)
+        for chunk in re.findall(r"\w+(?:[-_.]\w+)+", text, flags=re.UNICODE)
+    ]
+    return _token_forms(tokens) | set(joined)
+
+
 # A query with this many significant tokens needs two of them in a row before
 # the row counts as relevant. Long research queries otherwise let one-word
 # matches through: the 2026-09-27 logs show merriam-webster.com/dictionary/
 # offline, /official, /customer and investopedia term pages fetched ~80 times
 # because "offline" or "customer" was one of 12 query words.
 _STRICT_RELEVANCE_MIN_TOKENS = 5
+
+# Hosts where being on the domain says nothing about the subject.
+_GENERIC_SITE_HOSTS = {
+    "github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "reddit.com",
+    "stackoverflow.com", "stackexchange.com", "medium.com", "dev.to", "youtube.com",
+    "x.com", "twitter.com", "news.ycombinator.com", "huggingface.co", "arxiv.org",
+    "wikipedia.org", "en.wikipedia.org",
+}
+
+
+def _row_host(result: dict) -> str:
+    try:
+        return (urlparse(result.get("url", "")).hostname or "").lower()
+    except (TypeError, ValueError, AttributeError):
+        return ""
+
+
+def _row_in_scope(result: dict, domain: Optional[str], path_prefix: Optional[str]) -> bool:
+    """True when a row sits where a ``site:`` scope pointed with some precision.
+
+    Either under the scope's path (``site:github.com/org/repo/issues`` ->
+    ``/org/repo``) or on a domain specific enough to identify the subject
+    (``site:lucide.dev``; not ``site:github.com``).
+    """
+    if not domain or not _url_on_site(result.get("url", ""), domain):
+        return False
+    if path_prefix:
+        try:
+            path = (urlparse(result.get("url", "")).path or "").casefold()
+        except (TypeError, ValueError):
+            return False
+        return path == path_prefix or path.startswith(path_prefix + "/")
+    return domain not in _GENERIC_SITE_HOSTS
 
 
 def _keep_relevant_results(query: str, results: List[dict]) -> List[dict]:
@@ -117,28 +241,47 @@ def _keep_relevant_results(query: str, results: List[dict]) -> List[dict]:
     If the query has no meaningful tokens (for example a short navigational
     request made solely from stopwords), leave the provider's rows untouched.
     Otherwise a row survives when at least one significant query token occurs
-    as a whole token in its title, snippet, or URL host/path -- two distinct
-    tokens once the query has ``_STRICT_RELEVANCE_MIN_TOKENS`` or more.
+    as a whole word (after light suffix folding) in its title, snippet, or URL
+    host/path -- two distinct tokens once the query has
+    ``_STRICT_RELEVANCE_MIN_TOKENS`` or more. One hit is enough on a long
+    query when the hit is an identifier-like token (see
+    ``_distinctive_query_tokens``) or the row sits inside the query's
+    ``site:`` scope (``_row_in_scope``).
+
+    Every drop is logged with the row's host, engine and hit count so the
+    diagnostics bundle shows whether engines returned junk or the gate was
+    too strict.
     """
     query_tokens = _significant_query_tokens(query)
     if not query_tokens:
         return results
-    token_re = re.compile(r"\b(?:" + "|".join(
-        re.escape(token) for token in sorted(query_tokens, key=len, reverse=True)
-    ) + r")\b", flags=re.IGNORECASE | re.UNICODE)
     required = 2 if len(query_tokens) >= _STRICT_RELEVANCE_MIN_TOKENS else 1
+    distinctive = _distinctive_query_tokens(query) & query_tokens
+    token_forms = {token: _token_forms([token]) for token in query_tokens}
+    _, domain = _site_scope(query or "")
+    path_prefix = _site_path_prefix(query) if domain else None
 
-    def _hits(result: dict) -> int:
-        text = _result_text_for_relevance(result)
-        return len({m.casefold() for m in token_re.findall(text)})
-
-    kept = [
-        result for result in results
-        if isinstance(result, dict) and _hits(result) >= required
-    ]
+    kept: List[dict] = []
+    dropped: List[str] = []
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        forms = _result_forms(result)
+        hits = {token for token, variants in token_forms.items() if variants & forms}
+        relevant = len(hits) >= required or bool(
+            hits and (hits & distinctive or _row_in_scope(result, domain, path_prefix))
+        )
+        if relevant:
+            kept.append(result)
+        else:
+            engine = result.get("engine") or ""
+            dropped.append(
+                f"{_row_host(result) or '?'}{'[' + engine + ']' if engine else ''}:{len(hits)}"
+            )
     if len(kept) < len(results):
         logger.info(
-            "Relevance gate for %r kept %d/%d result(s)", query, len(kept), len(results)
+            "Relevance gate for %r kept %d/%d result(s) (needs %d of %d terms); dropped host[engine]:hits = %s",
+            query, len(kept), len(results), required, len(query_tokens), ", ".join(dropped[:12]),
         )
     return kept
 
@@ -210,6 +353,54 @@ def _site_scope(query: str) -> Tuple[str, Optional[str]]:
     return rest.strip(), domain or None
 
 
+_CODE_HOSTS = {"github.com", "gitlab.com", "codeberg.org", "bitbucket.org"}
+_CODE_HOST_RESERVED = {
+    "issues", "pulls", "pull", "search", "topics", "orgs", "explore",
+    "marketplace", "discussions", "notifications", "features", "sponsors",
+}
+
+
+def _site_path_segments(query: str) -> Tuple[Optional[str], List[str]]:
+    rest, site = _extract_site_filter(query or "")
+    if not site:
+        return None, []
+    bare = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site.strip(), flags=re.I)
+    host, _, path = bare.partition("/")
+    host = host.split("?", 1)[0].strip(".").lower()
+    if host.startswith("*."):
+        host = host[2:]
+    if host.startswith("www.") and host[4:] in _CODE_HOSTS:
+        host = host[4:]
+    path = path.split("?", 1)[0].split("#", 1)[0]
+    return host or None, [s for s in path.split("/") if s]
+
+
+def _site_path_prefix(query: str) -> Optional[str]:
+    """The path a ``site:`` scope narrows to, casefolded, or None.
+
+    On code hosts only the ``/<owner>/<repo>`` part counts (the model writes
+    ``site:github.com/org/repo/issues`` but wants the repository);
+    ``site:github.com/issues`` has no repository and yields None. Elsewhere
+    the whole path is the prefix (``site:docs.python.org/3/library``).
+    """
+    host, segments = _site_path_segments(query)
+    if not host or not segments:
+        return None
+    if host in _CODE_HOSTS:
+        if len(segments) < 2 or segments[0].lower() in _CODE_HOST_RESERVED:
+            return None
+        return ("/" + "/".join(segments[:2])).casefold()
+    return ("/" + "/".join(segments)).casefold()
+
+
+def _repo_hint(query: str) -> str:
+    """``owner/repo`` for a code-host ``site:`` scope, else ''."""
+    host, segments = _site_path_segments(query)
+    if host in _CODE_HOSTS and len(segments) >= 2 and segments[0].lower() not in _CODE_HOST_RESERVED:
+        return f"{segments[0]}/{segments[1]}"
+    return ""
+
+
 def _url_on_site(url: str, domain: str) -> bool:
     """True when *url*'s host is *domain* or a subdomain of it."""
     try:
@@ -219,8 +410,36 @@ def _url_on_site(url: str, domain: str) -> bool:
     return host == domain or host.endswith("." + domain)
 
 
-def _keep_on_site(results: List[dict], domain: str) -> List[dict]:
-    return [r for r in results if isinstance(r, dict) and _url_on_site(r.get("url", ""), domain)]
+def _keep_on_site(results: List[dict], domain: str, path_prefix: Optional[str] = None) -> List[dict]:
+    """Rows on *domain*; rows under *path_prefix* (if any) are moved first."""
+    on_site = [r for r in results if isinstance(r, dict) and _url_on_site(r.get("url", ""), domain)]
+    if not path_prefix:
+        return on_site
+    inside = [r for r in on_site if _row_in_scope(r, domain, path_prefix)]
+    return inside + [r for r in on_site if r not in inside]
+
+
+def _hosts_summary(rows: List[dict], limit: int = 8) -> str:
+    counts: Dict[str, int] = {}
+    for row in rows:
+        if isinstance(row, dict):
+            host = _row_host(row) or "?"
+            counts[host] = counts.get(host, 0) + 1
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+    return ", ".join(f"{h}×{n}" if n > 1 else h for h, n in ordered)
+
+
+# SearXNG merges 10-30 rows per page but used to be read five at a time, so a
+# `site:github.com` query kept the one GitHub row among the first five and the
+# relevance gate judged five rows where twenty were already paid for. The
+# chain asks SearXNG for more rows (no extra upstream requests) and trims back
+# to the caller's count after the site filter and relevance gate. Direct
+# callers of _call_provider (/api/search/query, deep research) get their count.
+_PROVIDER_POOL = {"searxng": 20}
+
+
+def _pool_size(provider_name: str, count: int) -> int:
+    return max(count, _PROVIDER_POOL.get(provider_name, count))
 
 
 def _call_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
@@ -231,28 +450,35 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
     Missouri driver-licence pages, which were then fetched and handed to the
     model as if they were the icon library's licence. Off-domain results are
     dropped; when nothing on the domain remains, the provider is asked once
-    more with the domain as a plain keyword. An empty list lets the provider
+    more with the domain (and, for ``site:github.com/<owner>/<repo>/...``,
+    the ``owner/repo``) as plain keywords. An empty list lets the provider
     chain fall through to a provider that does honour the operator.
+
+    Returns at most *count* rows; ``_run_chain`` passes a larger pool
+    (``_PROVIDER_POOL``) and trims after the relevance gate.
     """
     results = _call_provider_raw(provider_name, query, count, time_filter)
     rest, domain = _site_scope(query)
     if not domain or not results:
         return results
-    kept = _keep_on_site(results, domain)
+    path_prefix = _site_path_prefix(query)
+    kept = _keep_on_site(results, domain, path_prefix)
     if kept:
         if len(kept) < len(results):
+            off = [r for r in results if r not in kept]
             logger.info(
-                "%s: dropped %d result(s) outside site:%s",
-                provider_name, len(results) - len(kept), domain,
+                "%s: dropped %d result(s) outside site:%s (%s)",
+                provider_name, len(off), domain, _hosts_summary(off),
             )
         return kept
+    repo = _repo_hint(query)
+    alt_query = " ".join(part for part in (rest, repo, domain) if part).strip()
     logger.info(
-        "%s ignored the site: operator for %r (%d off-domain results dropped); "
-        "retrying with %r as a keyword",
-        provider_name, query, len(results), domain,
+        "%s ignored the site: operator for %r (%d off-domain results dropped: %s); "
+        "retrying with %r",
+        provider_name, query, len(results), _hosts_summary(results), alt_query,
     )
-    alt_query = f"{rest} {domain}".strip() if rest else domain
-    return _keep_on_site(_call_provider_raw(provider_name, alt_query, count, time_filter), domain)
+    return _keep_on_site(_call_provider_raw(provider_name, alt_query, count, time_filter), domain, path_prefix)
 
 
 def _call_provider_raw(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
@@ -270,6 +496,8 @@ def _call_provider_raw(provider_name: str, query: str, count: int, time_filter: 
 def _dispatch_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
     if provider_name == "searxng":
         return searxng_search_api(query, count, time_filter=time_filter)
+    elif provider_name == GITHUB_ISSUES:
+        return github_issue_search(query, count, time_filter)
     elif provider_name == "brave":
         return brave_search(query, count, time_filter)
     elif provider_name == "duckduckgo":
@@ -308,10 +536,12 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
     """Ask each provider in order until one returns relevant rows.
 
     Returns ``(results, attempts)`` where attempts maps provider to
-    ``"ok (n)"``, ``"empty"``, ``"cooling down"``, ``"busy"`` or
-    ``"error: ..."``. Provider implementations own their retries: an empty
-    SearXNG answer followed by a DuckDuckGo fallback costs one call each.
-    A provider whose circuit breaker is open is skipped without waiting.
+    ``"ok (n)"``, ``"empty"``, ``"irrelevant (0/n)"`` (rows came back but
+    the relevance gate rejected all of them), ``"cooling down"``, ``"busy"``
+    or ``"error: ..."``. Provider implementations own their retries: an
+    empty SearXNG answer followed by a DuckDuckGo fallback costs one call
+    each. A provider whose circuit breaker is open is skipped without
+    waiting. At most *count* rows are returned.
     """
     attempts: Dict[str, str] = {}
     for provider_name in chain:
@@ -324,10 +554,11 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
         results: List[dict] = []
         try:
             logger.info(f"Attempting {provider_name} search")
-            results = _call_provider(provider_name, query, count, time_filter)
+            results = _call_provider(provider_name, query, _pool_size(provider_name, count), time_filter)
         except resilience.ProviderBusy as e:
             attempts[key] = "busy"
-            logger.warning(str(e))
+            # The GitHub step is an optional shortcut; being busy is normal.
+            (logger.info if provider_name == GITHUB_ISSUES else logger.warning)(str(e))
             continue
         except (NetworkError, ParseError, RateLimitError) as e:
             error_logger.error(f"{provider_name} search error: {e}")
@@ -342,27 +573,50 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
             # does not report transport outcomes, or answered honestly
             # empty) must not keep the breaker waiting on it forever.
             breaker.release_probe()
-        if results:
+        raw_count = len(results) if results else 0
+        if results and provider_name != GITHUB_ISSUES:
+            # GitHub's issue search ANDs every term itself; its rows are
+            # matches by construction and their bodies are cut to a snippet.
             results = _keep_relevant_results(query, results)
         if results:
+            results = results[:count]
             attempts[key] = f"ok ({len(results)})"
             logger.info(f"{provider_name} search returned {len(results)} relevant results")
             return results, attempts
-        attempts[key] = "empty"
+        attempts[key] = f"irrelevant (0/{raw_count})" if raw_count else "empty"
     return [], attempts
+
+
+def _is_empty_attempt(outcome: str) -> bool:
+    return outcome == "empty" or outcome.startswith("irrelevant")
+
+
+def _with_github_step(query: str, chain: List[str]) -> List[str]:
+    """Put the GitHub issue search in front of the chain when it applies."""
+    if GITHUB_ISSUES in chain or not github_issue_search_enabled():
+        return chain
+    if not github_issue_scope(query):
+        return chain
+    if resilience.cooldowns.is_cooling("github issue search"):
+        return chain
+    return [GITHUB_ISSUES] + list(chain)
 
 
 def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
                            chain: List[str]) -> Tuple[List[dict], Dict[str, str], str]:
     """Run the provider chain, then once more with a simplified query if empty.
 
+    GitHub-issue-scoped queries (``site:github.com/<org>/<repo>/issues ...``,
+    ``GitHub issue ...``) ask GitHub's issue search first; only the first
+    pass does, since that step already retries with fewer terms itself.
     Identical ``(query, count, time_filter, chain)`` requests share one
     outcome for a few minutes (single-flight: parallel workers asking the
     same thing wait for the first instead of all hitting the providers).
     Returns ``(results, attempts, query_that_answered)``.
     """
     def compute():
-        results, attempts = _run_chain(query, count, time_filter, chain)
+        first_chain = _with_github_step(query, chain)
+        results, attempts = _run_chain(query, count, time_filter, first_chain)
         used = query
         if not results:
             simplified = simplify_query(query)
@@ -372,7 +626,8 @@ def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
                     query, simplified,
                 )
                 results, retry_attempts = _run_chain(
-                    simplified, count, time_filter, chain, label="[simplified]"
+                    simplified, count, time_filter,
+                    [p for p in chain if p != GITHUB_ISSUES], label="[simplified]",
                 )
                 attempts.update(retry_attempts)
                 used = simplified
@@ -384,7 +639,7 @@ def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
             return resilience.RESULT_TTL_HIT
         # Only an honest "nothing found" is worth repeating; an outcome shaped
         # by errors, a busy provider or an open breaker should be retried.
-        if attempts and all(v == "empty" for v in attempts.values()):
+        if attempts and all(_is_empty_attempt(v) for v in attempts.values()):
             return resilience.RESULT_TTL_EMPTY
         return 0.0
 
@@ -537,8 +792,13 @@ def comprehensive_web_search(
     if not search_results:
         tally = ", ".join(f"{p}:{r}" for p, r in provider_attempts.items()) or "no providers configured"
         any_errors = any(
-            r.startswith(("error", "busy", "cooling down")) for r in provider_attempts.values()
+            r.startswith(("error", "busy", "cooling down"))
+            for p, r in provider_attempts.items()
+            # The GitHub issue step is an optional shortcut; its being busy
+            # says nothing about whether web search works.
+            if not p.startswith(GITHUB_ISSUES)
         )
+        any_irrelevant = any(r.startswith("irrelevant") for r in provider_attempts.values())
         if any_errors:
             msg = f"Web search failed — all providers errored or returned empty. Tried: {tally}"
             if any(r == "cooling down" for r in provider_attempts.values()):
@@ -551,6 +811,15 @@ def comprehensive_web_search(
                 f"No search results found. Tried: {tally}. "
                 "All providers returned empty — possibly a niche query or upstream rate-limiting; "
                 "rephrasing or using the browser tool for a specific URL may help."
+            )
+        if any_irrelevant:
+            # Engines answered, but with rows about other things. Long
+            # model-written keyword lists are the usual cause: web engines
+            # match one or two of the words and return dictionary/SEO pages.
+            msg += (
+                " The search engine did answer, but none of its rows mentioned enough of the "
+                "query's terms. Search again with 3-6 specific terms (a product, project, error "
+                "or identifier name plus one or two topic words) rather than a long keyword list."
             )
         _, _site_domain = _site_scope(query)
         if _site_domain:

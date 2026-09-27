@@ -24,3 +24,19 @@ def test_searxng_image_is_pinned_not_latest():
     )
     # A real version tag (date-based, e.g. 2026.5.31-7159b8aed), not a moving ref.
     assert re.match(r"\d{4}\.\d", tag), f"expected a versioned tag, got {tag!r}"
+
+
+def test_every_compose_file_pins_the_same_searxng_tag():
+    """The CPU, GPU and ZimaOS compose files must not drift apart: the server
+    runs 2026.9.25-12f8b6515 (Bing first-word fix, searxng#6671) and the
+    engine pin in services/search/providers.py assumes that image's engine
+    set (mojeek inactive, presearch removed)."""
+    root = COMPOSE.parent
+    tags = {}
+    for path in sorted(root.glob("docker-compose*.yml")):
+        m = re.search(r"image:\s*\S*searxng/searxng:(\S+)", path.read_text(encoding="utf-8"))
+        if m:
+            tags[path.name] = m.group(1)
+    assert "docker-compose.yml" in tags
+    assert len(set(tags.values())) == 1, tags
+    assert tags["docker-compose.yml"] == "2026.9.25-12f8b6515"
