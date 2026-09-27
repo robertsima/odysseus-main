@@ -697,7 +697,9 @@ A turn's behaviour is reconstructable from these lines.
 | `[agent-steer]` | which queued message reached which round, and what tools its human instruction added |
 | `[context-profile]` | the profile, inline limit and trim target in force |
 | `[agent-timing]` | prep breakdown, per-round elapsed, time to first token |
-| `[agent-usage]` | input / cached / output tokens per round |
+| `[agent-usage]` | input / cached / output tokens per round; `session=` is the first 8 characters of the chat id, to join it to `[prompt-prefix]` |
+| `[prompt-prefix]` | per Codex request: hashes of instructions and tools, `first_diff_item`/`prev_items`/`diff_kind` (where `input` first differs from the session's previous request; equal to `prev_items` when it only appended), `instr_diff_at`, `tools_added`/`tools_removed`, then `changed=` |
+| `[agent] execution ledger` | a ledger batch: entries, chars saved, `first_index` (where the cached prefix now ends), prompt vs budget |
 | `[agent] missing-tool self-unblock` | that recovery fired, with scope and which detector |
 | `[tool-output] offloaded` | a result moved to the output store, with its recall id |
 

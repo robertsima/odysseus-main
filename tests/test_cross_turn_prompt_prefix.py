@@ -145,3 +145,72 @@ def test_a_turn_inside_an_oversized_tool_set_does_not_restart_it(monkeypatch):
     assert _sticky_tool_selection("s", {"a", "b"}) == {"a", "b", "c", "d"}
     # One that would grow it past the cap still restarts.
     assert _sticky_tool_selection("s", {"e"}) == {"e"}
+
+
+def _turn_payloads(monkeypatch, messages, rounds):
+    """Every round's Responses payload for one turn; `rounds` is a list of
+    (text, native_calls) the fake model answers with."""
+    payloads = []
+
+    async def _fake_stream(_candidates, _messages, **kw):
+        request = await kw["candidate_request_factory"](0, URL, MODEL, {})
+        payloads.append(_build_chatgpt_responses_payload(
+            MODEL, request["messages"], 0.3, 4096,
+            tools=request["kwargs"]["tools"], cache_key=SESSION, target_url_hint=URL,
+        ))
+        text, calls = rounds[min(len(payloads) - 1, len(rounds) - 1)]
+        if text:
+            yield f'data: {json.dumps({"delta": text})}\n\n'
+        if calls:
+            yield f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    _collect(al.stream_agent_loop(
+        URL, MODEL, messages, max_rounds=len(rounds), session_id=SESSION, allow_private=False,
+        relevant_tools={"read_file", "grep"},
+    ))
+    return payloads
+
+
+def test_the_next_turn_rewrites_only_the_previous_turns_tail(monkeypatch, caplog):
+    """Across a tool-using turn, the next turn's first request may drop the
+    turn's tool items (they are not persisted) and its request-local context,
+    but everything before the previous request stays byte-identical, so the
+    cached prefix covers the whole prior history. The fingerprint's
+    `first_diff_item` is the check a production bundle can run on this."""
+    import logging
+
+    from src import llm_core
+
+    prior = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi, what can I do?"},
+    ]
+    call = [{"name": "read_file", "arguments": json.dumps({"path": "a.txt"})}]
+    first = _turn_payloads(
+        monkeypatch, _chat_request(prior, "read a.txt please", "one"),
+        [(None, call), (None, call), ("Done.", None)],
+    )
+    second = _turn_payloads(
+        monkeypatch,
+        _chat_request(
+            prior + [{"role": "user", "content": "read a.txt please"}, {"role": "assistant", "content": "Done."}],
+            "thanks", "two",
+        ),
+        [("ok", None)],
+    )
+    # Within the turn every round only appends.
+    for earlier, later in zip(first, first[1:]):
+        assert later["input"][: len(earlier["input"])] == earlier["input"]
+    llm_core._PREFIX_FINGERPRINTS.pop(SESSION, None)
+    with caplog.at_level(logging.INFO, logger="src.llm_core"):
+        llm_core._log_prompt_prefix(SESSION, MODEL, first[-1])
+        llm_core._log_prompt_prefix(SESSION, MODEL, second[0])
+    line = [r.getMessage() for r in caplog.records if "[prompt-prefix]" in r.getMessage()][-1]
+    fields = dict(part.split("=", 1) for part in line.split() if "=" in part)
+    assert fields["changed"] in {"none", "history_shrank"}
+    # The divergence is at the previous turn's request-local context, after the
+    # whole prior history -- never at the front of the conversation.
+    assert int(fields["first_diff_item"]) >= len(prior)
+    assert second[0]["input"][: len(prior)] == first[-1]["input"][: len(prior)]

@@ -66,3 +66,31 @@ drop at the batch prune.
   report the first changed index when an earlier message is replaced or
   removed. Diagnostic logs contain hashes and counts only.
 - Existing reasoning-replay, Responses-tools and agent-loop tests pass.
+
+## Follow-up — 2026-09-27 bundle (Codex backend, gpt-6-luna admin chat + 15 workers)
+
+Joined `[prompt-prefix]` to `[agent-usage]` per session: 6.10M input tokens,
+1.67M uncached (72.7% cached). Uncached tokens beyond normal tail growth, by
+cause:
+
+| cause | events | excess uncached |
+| --- | --- | --- |
+| tool list / instructions changed at a turn start (sticky set grew 2-4 tools every turn, restarted at the 48 cap) | 8 | ~307k |
+| tools attached mid-turn by `discover_tools` | 4 | ~178k |
+| execution-ledger batches (2 went back to the turn start for resolved deferred failures; 4 on a turn's last round) | 9 | ~165k |
+| worker rounds at 0% with nothing changed (backend eviction/routing; 28-238 s gaps) | ~9 | ~90k |
+| worker cold starts | 16 | ~85k |
+| turn start with only `history_shrank`, yet only instructions+tools cached | 2 | ~65k |
+
+Every tools-only change cached 0 and the one instructions-only change kept
+~4.6k (the 64 tool schemas), so the Codex backend's prefix is tools, then
+instructions, then `input`. No soft-trim or compaction ran (400k window,
+200k budget): `history_shrank` here is the previous turn's tool items not being
+persisted, not a sliding trim.
+
+Changes: the ledger waits for context pressure (60% of the route's input
+budget) and no longer rewrites a deferred failure behind its own stretch unless
+the prompt is past 85%; `[agent-usage]` carries `session=`; `[prompt-prefix]`
+carries `first_diff_item`/`prev_items`/`diff_kind`, `instr_diff_at` and
+`tools_added`/`tools_removed`, so the next bundle can pin the two unexplained
+turn-start misses to an input index.

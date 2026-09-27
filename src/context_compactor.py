@@ -556,6 +556,15 @@ async def maybe_compact(
     return compacted, context_length, True
 
 
+def has_pending_compaction(compaction_state: Optional[Dict[str, Any]]) -> bool:
+    """Whether ``compaction_state`` is a plan that has not been applied yet."""
+
+    state = compaction_state if isinstance(compaction_state, dict) else None
+    if not state or state.get("applied"):
+        return False
+    return isinstance(state.get("summary"), str) and isinstance(state.get("split_point"), int)
+
+
 def apply_compaction_state(session, compaction_state: Optional[Dict[str, Any]]) -> bool:
     """Persist a route-specific compaction after that route commits output.
 
@@ -565,14 +574,12 @@ def apply_compaction_state(session, compaction_state: Optional[Dict[str, Any]]) 
     so callers hold this small plan and apply only the winning route's plan.
     """
 
-    state = compaction_state if isinstance(compaction_state, dict) else None
-    if not state or state.get("applied"):
+    if not has_pending_compaction(compaction_state):
         return False
+    state = compaction_state
     summary = state.get("summary")
     split_point = state.get("split_point")
     system_msg_count = state.get("system_msg_count", 0)
-    if not isinstance(summary, str) or not isinstance(split_point, int):
-        return False
     _update_session_history(
         session,
         split_point,
@@ -587,9 +594,20 @@ def apply_compaction_state_for_session(
     session_id: Optional[str],
     compaction_state: Optional[Dict[str, Any]],
 ) -> bool:
-    """Resolve an in-memory session and apply a deferred compaction plan."""
+    """Resolve an in-memory session and apply a deferred compaction plan.
 
-    if not session_id:
+    The agent loop calls this on EVERY streamed text delta of a run that has
+    no ``history_session`` (headless workers). Resolving the session goes
+    through ``SessionManager.get_session``, which is several synchronous
+    SQLite statements and a commit -- ~20-35 ms on the event loop. A worker
+    streaming a 30K-character report paid that ~7,000 times, and fifteen of
+    them together starved the loop for tens of seconds (every UI poll, the
+    heartbeat, and every other worker's stream stalled with it). Almost
+    every call has no plan to apply, so decide that before touching the
+    session at all.
+    """
+
+    if not session_id or not has_pending_compaction(compaction_state):
         return False
     try:
         from core.models import get_session_manager_instance
@@ -727,7 +745,15 @@ def _update_session_history(session, split_point: int, summary: str,
 #      byte-identical, so the invalidation point advances monotonically toward
 #      the tail. A single growing consolidated ledger message would instead have
 #      to be rewritten on every batch, moving the boundary back to the front of
-#      the conversation each time — worse than doing nothing.
+#      the conversation each time — worse than doing nothing. A failure an
+#      earlier batch deferred is the one thing behind that boundary; it is
+#      revisited only when the caller passes `rewind` (it needs the room).
+#   3. A batch costs a re-prefill of everything after its first rewrite, paid
+#      back only at the cached-token rate on the rounds that remain. The agent
+#      loop therefore runs it only under context pressure (see
+#      `_ledger_budget_for_round` in agent_loop): on 2026-09-27 nine batches on
+#      prompts of 40-108k tokens in a 400k window re-sent ~165k tokens
+#      uncached and saved ~17k, four of them on a turn's final round.
 #
 # Note the deliberate difference from `maybe_compact` above, which REPLACES
 # prior summaries per `specs/bounded-recursive-compaction.md`. That rule exists
@@ -1034,14 +1060,24 @@ def compact_tool_exchanges(
     keep_rounds: int = LEDGER_KEEP_ROUNDS,
     slack_rounds: int = LEDGER_SLACK_ROUNDS,
     session_id: Optional[str] = None,
+    rewind: bool = False,
 ) -> Dict[str, int]:
     """Collapse completed tool exchanges into ledger entries, in batches.
 
-    Mutates `messages` in place. Returns counts for logging. Never raises: this
-    sits on the hot path of every agent turn, and a bug here must degrade to
-    "context stays large", never to "the turn fails".
+    Mutates `messages` in place. Returns counts for logging (`first_index` is
+    the earliest message a batch rewrote, i.e. where the provider's cached
+    prefix now ends; -1 when nothing was). Never raises: this sits on the hot
+    path of every agent turn, and a bug here must degrade to "context stays
+    large", never to "the turn fails".
+
+    `rewind` lets a batch go back to an exchange an EARLIER batch deferred (a
+    failure since resolved). That exchange sits before everything this batch
+    would otherwise touch, so collapsing it moves the cache boundary back to it
+    and re-bills everything after it: on 2026-09-27 two such batches re-sent
+    25k and 52k tokens uncached to save 1-3k per remaining round, one of them on
+    the turn's last round. Only a caller that needs the room passes it.
     """
-    stats = {"groups": 0, "entries": 0, "chars_before": 0, "chars_after": 0}
+    stats = {"groups": 0, "entries": 0, "chars_before": 0, "chars_after": 0, "first_index": -1}
     if not _ledger_enabled() or not messages:
         return stats
 
@@ -1077,11 +1113,12 @@ def compact_tool_exchanges(
                 resolved.add(_ledger_tool_name(body) or None)
     resolved.discard(None)
 
-    # Everything before the keep window is in scope for this batch — including
-    # exchanges a PREVIOUS batch deferred because their failure was still
-    # unresolved, since the round that resolved it may have arrived since. Ones
+    # Everything before the keep window is in scope for this batch. Ones
     # already finalized (`LEDGER_MARK is True`) are skipped, so no byte that is
-    # already cached is ever rewritten twice.
+    # already cached is ever rewritten twice. Exchanges a PREVIOUS batch
+    # deferred (a failure still unresolved then) are reconsidered only with
+    # `rewind`: they precede this batch's own stretch, so rewriting them would
+    # move the invalidation point back instead of forward.
     keep_first = unprocessed[-keep]
     cutoff = len(groups)
     for pos, group in enumerate(groups):
@@ -1095,6 +1132,8 @@ def compact_tool_exchanges(
             msg = messages[idx]
             if msg.get(LEDGER_MARK) is True:
                 continue
+            if msg.get(LEDGER_MARK) == "deferred" and not rewind:
+                continue
             body = msg.get("content")
             deferred = False
             if isinstance(body, str) and len(body) >= LEDGER_MIN_RESULT_CHARS:
@@ -1105,6 +1144,8 @@ def compact_tool_exchanges(
                     stats["entries"] += 1
                     msg["content"] = entry
                     collapsed_here = True
+                    if stats["first_index"] < 0 or idx < stats["first_index"]:
+                        stats["first_index"] = idx
             # Marked either way, so the batch gate can fall back below its
             # threshold and the next batch is a window away rather than next
             # round. "deferred" still counts as processed for the gate.

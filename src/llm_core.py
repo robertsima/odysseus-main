@@ -1692,8 +1692,21 @@ def _chatgpt_reasoning_effort(session_id: Optional[str]) -> str:
 
 # Last cache-prefix fingerprint per session, so a round whose prompt cache
 # misses can be traced to the part that changed (specs/prompt-prefix-stability.md).
-_PREFIX_FINGERPRINTS: Dict[str, Tuple[str, str, int]] = {}
+# Each entry is a _PrefixFingerprint; the table and every digest list in it are
+# bounded (8 bytes per input item / tool / instructions chunk).
+_PREFIX_FINGERPRINTS: Dict[str, "_PrefixFingerprint"] = {}
 _PREFIX_FINGERPRINTS_MAX = 256
+# Input items hashed per request. A miss past this index is still reported as
+# "somewhere after it"; the prefix a cache miss is about is at the front.
+_PREFIX_ITEMS_MAX = 2048
+_PREFIX_INSTRUCTION_CHUNK = 256
+
+
+class _PrefixFingerprint(tuple):
+    """(instructions_hash, tools_hash, input_items, item_digests,
+    instruction_chunk_digests, tool_digests, tool_names)."""
+
+    __slots__ = ()
 
 
 def _short_hash(value) -> str:
@@ -1704,30 +1717,103 @@ def _short_hash(value) -> str:
     return hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()[:10]
 
 
+def _digest8(value) -> bytes:
+    if isinstance(value, str):
+        encoded = value
+    else:
+        try:
+            encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            encoded = str(value)
+    return hashlib.blake2b(encoded.encode("utf-8", "replace"), digest_size=8).digest()
+
+
+def _first_diff(previous: bytes, current: bytes, width: int = 8) -> int:
+    """Index of the first differing `width`-byte digest; the shorter length
+    when one sequence is a prefix of the other."""
+    n = min(len(previous), len(current)) // width
+    for i in range(n):
+        start = i * width
+        if previous[start:start + width] != current[start:start + width]:
+            return i
+    return n
+
+
+def _input_item_kind(item) -> str:
+    if not isinstance(item, dict):
+        return "other"
+    return str(item.get("type") if item.get("type") not in (None, "message") else item.get("role") or "other")[:24]
+
+
 def _log_prompt_prefix(session_id: Optional[str], model: str, payload: dict) -> None:
     """Log hashes of the cached prefix (instructions, tools) and name what
-    changed since this session's previous request. Hashes only; no content."""
+    changed since this session's previous request. Hashes, counts and offsets
+    only; no content.
+
+    `first_diff_item` is the index of the first `input` item that differs from
+    the session's previous request (== `prev_items` when this request only
+    appended to it). A prompt-cache miss with `changed=none` and a small
+    `first_diff_item` means something rewrote the conversation's front — a
+    compaction, a reordered or re-serialised message, an envelope inserted
+    mid-history — and `diff_kind` says what sort of item it was.
+    """
     if not session_id or not isinstance(payload, dict):
         return
     try:
-        instructions = _short_hash(payload.get("instructions") or "")
-        tools = _short_hash(payload.get("tools") or [])
-        items = len(payload.get("input") or [])
+        raw_instructions = payload.get("instructions") or ""
+        raw_tools = payload.get("tools") or []
+        raw_input = payload.get("input") or []
+        instructions = _short_hash(raw_instructions)
+        tools = _short_hash(raw_tools)
+        items = len(raw_input)
+        item_digests = b"".join(_digest8(item) for item in raw_input[:_PREFIX_ITEMS_MAX])
+        text = raw_instructions if isinstance(raw_instructions, str) else str(raw_instructions)
+        chunk = _PREFIX_INSTRUCTION_CHUNK
+        instruction_digests = b"".join(
+            _digest8(text[i:i + chunk]) for i in range(0, len(text), chunk)
+        )
+        tool_digests = b"".join(_digest8(tool) for tool in raw_tools)
+        tool_names = tuple(
+            str(tool.get("name") or "") if isinstance(tool, dict) else "" for tool in raw_tools
+        )
         previous = _PREFIX_FINGERPRINTS.get(session_id)
         changed = []
+        extra = ""
         if previous:
-            if previous[0] != instructions:
+            prev_instructions, prev_tools, prev_items, prev_item_digests, prev_instruction_digests, prev_tool_digests, prev_tool_names = previous
+            if prev_instructions != instructions:
                 changed.append("instructions")
-            if previous[1] != tools:
+                at = _first_diff(prev_instruction_digests, instruction_digests) * chunk
+                extra += f" instr_diff_at={at}/{len(text)}"
+            if prev_tools != tools:
                 changed.append("tools")
-            if items < previous[2]:
+                added = [n for n in tool_names if n not in set(prev_tool_names)]
+                removed = [n for n in prev_tool_names if n not in set(tool_names)]
+                extra += " tools_diff_at=%d" % _first_diff(prev_tool_digests, tool_digests)
+                if added:
+                    extra += " tools_added=" + ",".join(added[:6]) + ("…" if len(added) > 6 else "")
+                if removed:
+                    extra += " tools_removed=" + ",".join(removed[:6]) + ("…" if len(removed) > 6 else "")
+            if items < prev_items:
                 changed.append("history_shrank")
+            diff_at = _first_diff(prev_item_digests, item_digests)
+            if diff_at >= _PREFIX_ITEMS_MAX:
+                first_diff = f">={_PREFIX_ITEMS_MAX}"
+            else:
+                first_diff = str(diff_at)
+            kind = _input_item_kind(raw_input[diff_at]) if diff_at < min(items, _PREFIX_ITEMS_MAX) else "-"
+            extra = f" first_diff_item={first_diff} prev_items={prev_items} diff_kind={kind}" + extra
+        else:
+            extra = " first_diff_item=- prev_items=-"
         if len(_PREFIX_FINGERPRINTS) >= _PREFIX_FINGERPRINTS_MAX and session_id not in _PREFIX_FINGERPRINTS:
             _PREFIX_FINGERPRINTS.pop(next(iter(_PREFIX_FINGERPRINTS)))
-        _PREFIX_FINGERPRINTS[session_id] = (instructions, tools, items)
+        _PREFIX_FINGERPRINTS[session_id] = _PrefixFingerprint((
+            instructions, tools, items, item_digests, instruction_digests, tool_digests, tool_names,
+        ))
+        # `changed=` stays the last field: existing log readers split on it.
         logger.info(
-            "[prompt-prefix] session=%s model=%s instructions=%s tools=%s(%d) input_items=%d changed=%s",
-            session_id, model, instructions, tools, len(payload.get("tools") or []), items,
+            "[prompt-prefix] session=%s model=%s instructions=%s tools=%s(%d) input_items=%d%s changed=%s",
+            session_id, model, instructions, tools, len(raw_tools), items, extra,
             ",".join(changed) if changed else ("first" if previous is None else "none"),
         )
     except Exception:

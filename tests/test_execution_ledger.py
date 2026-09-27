@@ -238,14 +238,9 @@ def test_a_failure_resolved_by_a_later_success_may_collapse_but_keeps_the_error(
     assert "**exit_code:** 1" in first["content"]
 
 
-def test_a_deferred_failure_is_reconsidered_once_a_later_round_resolves_it():
-    """Deferral, not permanent exemption — and without re-arming the batch gate.
-
-    A failing test run that is fixed three rounds later should not ride along
-    for the rest of the turn, but revisiting it must not make a batch fire every
-    round either. The mark distinguishes "deferred" from "finalized" so both
-    hold.
-    """
+def _deferred_then_resolved(rewind):
+    """A failing run a first batch defers, then a round that fixes it and a
+    second batch. Returns (messages, the deferred result, per-round fired, stats)."""
     msgs = _transcript(0)
     msgs.extend(_native_round(0, _bash_result("pytest -q", exit_code=1), tool="bash"))
     for i in range(1, LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 2):
@@ -256,17 +251,53 @@ def test_a_deferred_failure_is_reconsidered_once_a_later_round_resolves_it():
     assert first[LEDGER_MARK] == "deferred"
     assert "Execution ledger" not in first["content"]
 
-    fired = []
+    fired, batches = [], []
     for i in range(100, 100 + LEDGER_SLACK_ROUNDS + 1):
         tool = "bash" if i == 100 else "read_file"  # the round that fixes it
         text = _bash_result("pytest -q") if i == 100 else _read_result(f"/srv/app/n{i}.py")
         msgs.extend(_native_round(i, text, tool=tool))
-        fired.append(compact_tool_exchanges(msgs)["entries"] > 0)
+        stats = compact_tool_exchanges(msgs, rewind=rewind)
+        fired.append(stats["entries"] > 0)
+        if stats["entries"]:
+            batches.append(stats)
+    return msgs, first, fired, batches
 
+
+def test_a_resolved_deferred_failure_is_not_rewound_into_by_default():
+    """A later batch never reaches back behind its own stretch.
+
+    The deferred exchange precedes everything the second batch compacts, so
+    rewriting it moves the provider's cache boundary BACK to it. 2026-09-27: two
+    such batches re-sent 25k and 52k tokens uncached (cached fell back to the
+    turn's first round) to save 1-3k tokens a round -- one of them on the turn's
+    final round. By default it stays verbatim and the boundary only advances.
+    """
+    msgs, first, fired, batches = _deferred_then_resolved(rewind=False)
     assert fired.count(True) == 1  # still one batch per window
+    assert "Execution ledger" not in first["content"]
+    assert first[LEDGER_MARK] == "deferred"  # a caller that needs room can still take it
+    first_idx = msgs.index(first)
+    assert batches[0]["first_index"] > first_idx
+
+
+def test_a_deferred_failure_is_reconsidered_when_the_caller_needs_the_room():
+    """Deferral, not permanent exemption -- under pressure (`rewind`) a failing
+    test run fixed three rounds later does not ride along for the rest of the
+    turn, and revisiting it still does not make a batch fire every round."""
+    msgs, first, fired, batches = _deferred_then_resolved(rewind=True)
+    assert fired.count(True) == 1
     assert "Execution ledger" in first["content"]
     assert "**exit_code:** 1" in first["content"]
     assert first[LEDGER_MARK] is True
+    assert batches[0]["first_index"] == msgs.index(first)
+
+
+def test_the_first_rewritten_index_is_reported():
+    msgs = _transcript(LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 1)
+    stats = compact_tool_exchanges(msgs)
+    first_tool = next(i for i, m in enumerate(msgs) if m.get("role") == "tool")
+    assert stats["entries"] and stats["first_index"] == first_tool
+    assert compact_tool_exchanges(msgs)["first_index"] == -1
 
 
 def test_recall_results_are_never_collapsed():
@@ -410,6 +441,46 @@ def test_the_agent_loop_actually_calls_it():
         # Monotonic growth is what the audit found; the ledger must break it.
         assert min(sizes[1:]) < max(sizes) / 1.5
         assert any(m.get(LEDGER_MARK) for m in msgs)
+
+
+def _loop_rounds(ledger_budget, rounds=LEDGER_KEEP_ROUNDS + LEDGER_SLACK_ROUNDS + 2):
+    from src.agent_loop import _append_tool_results
+
+    msgs = [{"role": "system", "content": "sys"}, {"role": "user", "content": "go"}]
+    for i in range(rounds):
+        body = _read_result(f"/srv/app/f{i}.py", 6000, seed=f"s{i}")
+        calls = [{"id": f"c{i}", "name": "read_file", "arguments": "{}"}]
+        _append_tool_results(msgs, "reading", calls, [body], [body], True, i, ledger_budget=ledger_budget)
+    return msgs
+
+
+def test_the_loop_leaves_a_roomy_transcript_alone():
+    """Under a budget the ledger waits for pressure. A batch re-bills every
+    token after its first rewrite and is repaid only at the cached rate on the
+    rounds left: on 2026-09-27 nine batches on 40-108k prompts in a 400k window
+    re-sent ~165k tokens uncached to save ~17k, four on a turn's last round."""
+    msgs = _loop_rounds(ledger_budget=10 * estimate_tokens(_loop_rounds(0)))
+    assert not any(m.get(LEDGER_MARK) for m in msgs)
+    assert not any("Execution ledger" in str(m.get("content")) for m in msgs)
+
+
+def test_the_loop_compacts_once_the_transcript_presses_on_the_budget(caplog):
+    import logging
+
+    size = estimate_tokens(_loop_rounds(0))
+    with caplog.at_level(logging.INFO, logger="src.agent_loop"):
+        msgs = _loop_rounds(ledger_budget=size)  # ends at ~100% of budget
+    assert any("Execution ledger" in str(m.get("content")) for m in msgs)
+    line = next(r.getMessage() for r in caplog.records if "execution ledger:" in r.getMessage())
+    assert "first_index=" in line and f"budget={size}" in line
+
+
+def test_ledger_budget_prefers_the_route_budget():
+    from src.agent_loop import _ledger_budget_for_round
+
+    assert _ledger_budget_for_round(200_000, 400_000) == 200_000
+    assert _ledger_budget_for_round(0, 32_768) == 32_768
+    assert _ledger_budget_for_round(None, None) == 0
 
 
 # ── The measurement ─────────────────────────────────────────────────────────

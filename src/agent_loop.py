@@ -728,7 +728,20 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
             continue
         starved.append(domain)
     if starved:
-        logger.warning(
+        # Expected, not a fault, inside a detached worker: its loadout is an
+        # allowlist (a research specialist bound to web_search), so every other
+        # domain its task text mentions is off on purpose. Only a top-level
+        # chat losing a domain is worth a WARNING.
+        import sys
+
+        try:
+            _task = asyncio.current_task()
+        except RuntimeError:
+            _task = None
+        # Not imported here: no worker can be running if nothing loaded it.
+        _workers = getattr(sys.modules.get("src.agent_control"), "_WORKERS", None) or {}
+        logger.log(
+            logging.INFO if _task is not None and _task in _workers.values() else logging.WARNING,
             "[agent-intent] domains %s detected but no usable tools remain "
             "(every tool for them is in disabled_tools)",
             starved,
@@ -4032,6 +4045,30 @@ def _resolve_tool_blocks(
     return tool_blocks, used_native, converted_calls
 
 
+# The execution ledger fires once the transcript uses this share of the
+# route's input budget (the one the per-round trim enforces, same estimator),
+# and may go back for deferred failures past the second. Below it the prompt
+# fits comfortably and a batch only costs cache. Replayed against 2026-09-27:
+# 0.6 skips 8 of 9 batches (prompts up to ~118k estimated in a 200k budget),
+# about 114k uncached tokens avoided for ~17k of cached-rate savings forgone,
+# and still leaves 40% of the budget -- several research rounds -- before trim.
+_LEDGER_PRESSURE_RATIO = 0.6
+_LEDGER_REWIND_RATIO = 0.85
+
+
+def _ledger_budget_for_round(route_budget: Optional[int], context_length: Optional[int]) -> int:
+    """The budget the ledger's pressure gate measures against: the route's
+    effective input budget, else its context window, else 0 (no gate)."""
+    for value in (route_budget, context_length):
+        try:
+            value = int(value or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
 def _append_tool_results(
     messages: List[Dict],
     round_response: str,
@@ -4042,8 +4079,13 @@ def _append_tool_results(
     round_num: int,
     round_reasoning: str = "",
     tool_result_records: Optional[list] = None,
+    ledger_budget: int = 0,
 ):
     """Append tool execution results back into the message history for the next LLM round.
+
+    `ledger_budget` is the route's input-token budget: when set, the execution
+    ledger runs only once the transcript has used a real share of it (see
+    `_ledger_budget_for_round`). 0 runs it on its batch gate alone.
 
     `round_reasoning` (DeepSeek / vLLM reasoning-parser deltas) is echoed
     back via `reasoning_content` on the assistant message — DeepSeek's API
@@ -4166,18 +4208,30 @@ def _append_tool_results(
     # per-round trim to the context budget dropped whole results, so the agent
     # re-read what it had lost and every round was a full-prompt cache miss.
     # Batched (see the design note in context_compactor) so it invalidates the
-    # cached prefix once per window, not every round. Never raises.
+    # cached prefix once per window, not every round. Under a budget it waits
+    # for context pressure: a batch re-bills everything after its first rewrite
+    # and is paid back only at the cached rate on the rounds left: on
+    # 2026-09-27 nine batches on 40-108k prompts in a 400k window re-sent ~165k
+    # tokens uncached to save ~17k. Never raises.
     try:
         from src.context_compactor import compact_tool_exchanges
 
-        _ledger_stats = compact_tool_exchanges(messages)
+        _ledger_prompt = 0
+        _ledger_rewind = False
+        if ledger_budget and ledger_budget > 0:
+            _ledger_prompt = estimate_tokens(messages)
+            if _ledger_prompt < ledger_budget * _LEDGER_PRESSURE_RATIO:
+                return
+            _ledger_rewind = _ledger_prompt >= ledger_budget * _LEDGER_REWIND_RATIO
+        _ledger_stats = compact_tool_exchanges(messages, rewind=_ledger_rewind)
         if _ledger_stats.get("entries"):
             logger.info(
                 "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
-                "%s -> %s chars (round %s)",
+                "%s -> %s chars (round %s) first_index=%s prompt=%s budget=%s rewind=%s",
                 _ledger_stats["entries"], _ledger_stats["groups"],
                 _ledger_stats["chars_before"], _ledger_stats["chars_after"],
-                round_num,
+                round_num, _ledger_stats.get("first_index", -1),
+                _ledger_prompt or "-", ledger_budget or "-", _ledger_rewind,
             )
     except Exception as _ledger_exc:
         logger.warning("[agent] execution ledger skipped: %s", _ledger_exc)
@@ -6493,6 +6547,11 @@ async def stream_agent_loop(
 
     _t2 = time.time()
     _route_context_lengths = {}
+    # Each route's effective input budget, and the one the latest request was
+    # built for. The execution ledger runs only under pressure against it; see
+    # _ledger_budget_for_round.
+    _route_input_budgets: Dict[tuple, int] = {}
+    _ledger_route: Dict[str, int] = {}
     # Messages a route's trim removed, by identity, per (url, model), for the
     # rest of this turn. See _sticky_trim below.
     _route_trim_dropped: Dict[tuple, Set[int]] = {}
@@ -6523,6 +6582,7 @@ async def stream_agent_loop(
             _route_context_lengths[(candidate_url, candidate_model)] = candidate_context
             soft_budget = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
             if soft_budget <= 0:
+                _route_input_budgets[(candidate_url, candidate_model)] = int(candidate_context or 0)
                 return _without_protection(route_messages)
             before_trim_tokens = estimate_tokens(route_messages)
             reserve_tokens = min(max(max_tokens or 1024, 512), 2048)
@@ -6542,6 +6602,7 @@ async def stream_agent_loop(
                 budget_is_explicit,
                 hard_max=hard_max,
             )
+            _route_input_budgets[(candidate_url, candidate_model)] = int(effective_budget or 0)
             trimmed_messages = _sticky_trim(
                 _route_trim_dropped,
                 (candidate_url, candidate_model),
@@ -7314,6 +7375,7 @@ async def stream_agent_loop(
                 context_length,
             )
             _last_route_context_length = state["context_length"]
+            _ledger_route["budget"] = _route_input_budgets.get((candidate_url, candidate_model), 0)
             run_security.observe_messages(request_messages)
             candidate_tools = _tool_schemas_for_route(
                 state,
@@ -7712,8 +7774,12 @@ async def stream_agent_loop(
             # Whether the provider served this round's prompt from its cache.
             # A long turn whose rounds read ~0% cached is re-prefilling its
             # whole prompt every round, which is where round latency goes.
+            # `session=` is the first 8 characters of the id `[prompt-prefix]`
+            # logs in full, so a bundle's usage lines join to their requests
+            # exactly even when parallel workers interleave.
             logger.info(
-                "[agent-usage] round=%s model=%s input=%s cached=%s (%s%%) output=%s",
+                "[agent-usage] session=%s round=%s model=%s input=%s cached=%s (%s%%) output=%s",
+                str(session_id or "-")[:8],
                 round_num,
                 _round_actual_model or model,
                 _round_real_input_tokens,
@@ -8975,7 +9041,10 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
-                             tool_result_records=tool_result_records)
+                             tool_result_records=tool_result_records,
+                             ledger_budget=_ledger_budget_for_round(
+                                 _ledger_route.get("budget"), _last_route_context_length or context_length,
+                             ))
 
         # Duplicate-call correction, delivered after the round's tool results so
         # it reads as a reply to the repeat it is about. Capped by

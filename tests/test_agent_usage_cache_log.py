@@ -39,6 +39,9 @@ def test_round_logs_cached_input_tokens(monkeypatch, caplog):
     lines = [r.getMessage() for r in caplog.records if "[agent-usage]" in r.getMessage()]
     assert lines, "no [agent-usage] line logged"
     assert "input=12000 cached=9000 (75%) output=40" in lines[0]
+    # The session (first 8 chars of the id `[prompt-prefix]` logs) joins each
+    # usage line to its request when parallel sessions interleave; "-" here.
+    assert lines[0].startswith("[agent-usage] session=- round=1 ")
 
 
 def test_round_usage_is_also_yielded_as_a_frame(monkeypatch):
