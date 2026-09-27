@@ -9,6 +9,7 @@ This is the single place that handles:
 """
 
 import json
+import time
 import uuid
 import logging
 from datetime import datetime, timezone, timedelta
@@ -524,8 +525,22 @@ class SessionManager:
         finally:
             db.close()
 
+    # ``last_accessed`` only feeds the idle-session cleanup, which thinks in
+    # days. Writing it on every ``get_session`` made each read a SQLite write
+    # (a commit, i.e. a write lock and journal fsyncs), and hot paths call
+    # get_session many times a second.
+    TOUCH_INTERVAL_S = 60.0
+
     def _touch_session(self, session_id: str):
-        """Update last_accessed timestamp."""
+        """Update last_accessed timestamp (at most once a minute per session)."""
+        touched = self.__dict__.setdefault("_touched_at", {})
+        now = time.monotonic()
+        last = touched.get(session_id)
+        if last is not None and now - last < self.TOUCH_INTERVAL_S:
+            return
+        if len(touched) > 5000:
+            touched.clear()
+        touched[session_id] = now
         db = SessionLocal()
         try:
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()

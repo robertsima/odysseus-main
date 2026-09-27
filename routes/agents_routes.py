@@ -109,16 +109,37 @@ def setup_agents_routes(session_manager) -> APIRouter:
         except Exception:
             return {}
 
+    # Identifies this router's answers in the shared poll cache (tests and
+    # embedders build several routers over different session managers).
+    _poll_ns = object()
+
     @router.get("/overview")
     async def overview(request: Request, current_session: Optional[str] = Query(default=None),
                        archived: bool = Query(default=False)):
         user, owned = _owned(request)
+        show_archived = archived is True
+        # The dashboard polls this on a timer from every open tab. Building it
+        # reads session settings and crew rows from SQLite and the activity
+        # registry behind a threading lock, per visible chat -- on the event
+        # loop that blocked every agent stream whenever SQLite was busy. Build
+        # it in a worker thread, once for concurrent identical polls.
+        from src.poll_coalesce import coalesced
+
+        key_session = current_session if isinstance(current_session, str) else None
+        snapshot = dict(owned)
+        return await coalesced(
+            ("agents.overview", _poll_ns, user, key_session, show_archived),
+            lambda: _overview_sync(user, snapshot, current_session, show_archived),
+            ttl=0,
+        )
+
+    def _overview_sync(user: Optional[str], owned: Dict[str, Any], current_session: Optional[str],
+                       show_archived: bool) -> Dict[str, Any]:
         # Keep cleanup recoverable: archived chats are intentionally absent
         # from the normal fleet, but can be requested by an archive browser.
         # Endpoint functions are also called directly by a few embedders and
         # tests, where FastAPI's Query default is still a Query object.  Only
-        # the literal boolean True opts into the archive view.
-        show_archived = archived is True
+        # the literal boolean True opts into the archive view (see overview).
         if show_archived:
             owned.update(_archived_owned(user))
         owned = {sid: sess for sid, sess in owned.items()

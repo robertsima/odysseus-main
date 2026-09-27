@@ -209,10 +209,15 @@ def _load_runs() -> None:
 
 
 def _save_runs() -> None:
-    try:
-        from core.atomic_io import atomic_write_json
-    except Exception:  # pragma: no cover - core is always importable in the app
-        atomic_write_json = None
+    """Evict (under ``_lock``, which every caller holds) and schedule a write.
+
+    The write itself happens on a background thread, coalesced: this used to
+    ``json.dump`` the whole registry (hundreds of runs, ~400 KB, through the
+    pure-Python encoder) and fsync it inline -- ~25 ms on a desktop SSD, far
+    more on a NAS -- on the event loop and under ``_lock``, every time any of
+    fifteen workers started, finished or reported progress. Every UI poll
+    that lists runs waited behind it.
+    """
     if len(_runs) > MAX_RUNS:
         # Evict FINISHED runs, oldest first. A still-working run must never be
         # dropped to make room: this registry is the only server-side truth the
@@ -227,15 +232,57 @@ def _save_runs() -> None:
         )
         for run_id, _ in evictable[: len(_runs) - MAX_RUNS]:
             _runs.pop(run_id, None)
-    try:
-        os.makedirs(activity_dir(), exist_ok=True)
-        if atomic_write_json:
-            atomic_write_json(_runs_file(), _runs, indent=1)
-        else:
-            with open(_runs_file(), "w", encoding="utf-8") as fh:
-                json.dump(_runs, fh)
-    except OSError as exc:
-        logger.debug("activity: could not persist runs: %s", exc)
+    _schedule_runs_write()
+
+
+# Bursts of saves (fifteen workers each reporting) collapse into one write.
+RUNS_WRITE_DEBOUNCE_S = 0.5
+_runs_write_pending = threading.Event()
+_runs_write_lock = threading.Lock()
+_runs_writer: Optional[threading.Thread] = None
+# Where the pending write goes: the runs file as it was when the change was
+# made (callers hold _lock), exactly like the old inline write. Resolving it
+# at flush time instead could land one data dir's registry in another's.
+_runs_write_path: Optional[str] = None
+
+
+def _schedule_runs_write() -> None:
+    global _runs_writer, _runs_write_path
+    _runs_write_path = _runs_file()
+    _runs_write_pending.set()
+    if _runs_writer is None or not _runs_writer.is_alive():
+        _runs_writer = threading.Thread(target=_runs_writer_loop, name="activity-runs-writer", daemon=True)
+        _runs_writer.start()
+
+
+def _runs_writer_loop() -> None:
+    while True:
+        _runs_write_pending.wait()
+        time.sleep(RUNS_WRITE_DEBOUNCE_S)
+        flush_runs()
+
+
+def flush_runs() -> None:
+    """Write the registry now if a save is pending (shutdown, tests)."""
+    with _runs_write_lock:
+        if not _runs_write_pending.is_set():
+            return
+        _runs_write_pending.clear()
+        try:
+            with _lock:
+                # json.dumps (one shot, no indent) takes the C encoder; the
+                # snapshot is consistent because every mutation holds _lock.
+                text = json.dumps(_runs, ensure_ascii=False, default=str)
+                path = _runs_write_path or _runs_file()
+        except (TypeError, ValueError) as exc:
+            logger.debug("activity: could not serialise runs: %s", exc)
+            return
+        try:
+            from core.atomic_io import atomic_write_text
+
+            atomic_write_text(path, text)
+        except OSError as exc:
+            logger.debug("activity: could not persist runs: %s", exc)
 
 
 # ── publishing ───────────────────────────────────────────────────────────────
@@ -628,8 +675,12 @@ async def subscribe(session_id: str, *, since_seq: int = 0, owner: Optional[str]
 
 
 def _reset_for_tests() -> None:
-    """Forget everything in memory (tests relocate DATA_DIR between cases)."""
+    """Forget everything in memory (tests relocate DATA_DIR between cases).
+
+    A pending registry write lands first, the way a clean shutdown flushes
+    it, so "restart" tests read back what was saved."""
     global _runs_loaded
+    flush_runs()
     with _lock:
         _events.clear()
         _seq.clear()

@@ -1111,6 +1111,9 @@ async def _startup_event():
     global upload_cleanup_task
     logger.info("Application starting up...")
     webhook_manager.set_loop(asyncio.get_running_loop())
+    # Log when synchronous work stalls the shared event loop, and where.
+    from src.loop_lag import start_monitor as _start_loop_lag_monitor
+    _start_loop_lag_monitor()
     # Wipe any leftover incognito sessions from previous process — they're
     # ephemeral by design and must not survive a restart.
     try:
@@ -1366,6 +1369,11 @@ async def _startup_event():
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    try:
+        from src.loop_lag import stop_monitor as _stop_loop_lag_monitor
+        await _stop_loop_lag_monitor()
+    except Exception:
+        pass
     if upload_cleanup_task:
         upload_cleanup_task.cancel()
         try:
@@ -1393,6 +1401,13 @@ async def _shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    try:
+        # The run registry is written by a debounced background thread; land
+        # the last change before the process exits.
+        from src.agent_activity import flush_runs as _flush_activity_runs
+        await asyncio.to_thread(_flush_activity_runs)
+    except Exception:
+        pass
     logger.info("Application shutdown complete")
 
 

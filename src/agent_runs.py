@@ -152,13 +152,15 @@ def list_runs(session_ids: Optional[set] = None) -> List[Dict]:
     passes the user's sessions so one user never sees another's activity.
     """
     rows: Dict[str, Dict] = {}
-    for sid, rec in _FINISHED.items():
+    # list(...) copies each registry in one C-level step: the Agents overview
+    # builds its answer in a worker thread while the loop keeps mutating these.
+    for sid, rec in list(_FINISHED.items()):
         rows[sid] = dict(rec)
-    for sid, run in _RUNS.items():
+    for sid, run in list(_RUNS.items()):
         if run.status == "running" or sid not in rows:
             rows[sid] = {"session_id": sid, "status": run.status, "source": run.source, "owner": run.owner,
                          "started_at": run.started_at, "finished_at": run.finished_at}
-    for sid, rec in _EXTERNAL.items():
+    for sid, rec in list(_EXTERNAL.items()):
         rows[sid] = dict(rec)
     out = [row for sid, row in rows.items() if session_ids is None or sid in session_ids]
     out.sort(key=lambda row: (row["status"] != "running", -(row.get("finished_at") or row["started_at"])))

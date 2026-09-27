@@ -438,7 +438,10 @@ def pending_steer(session_id: str, *, run_id: Optional[str] = None) -> List[dict
     # Public overview callers historically ask by session.  Keep that useful
     # aggregate while run loops must opt into their exact bucket above.
     sid = str(session_id)
-    return [rec for (queued_session, _), queue in _STEER.items() if queued_session == sid for rec in queue]
+    # Snapshots (list(...) is one C-level copy): the Agents overview reads
+    # this from a worker thread while the loop appends and drains.
+    return [rec for (queued_session, _), queue in list(_STEER.items()) if queued_session == sid
+            for rec in list(queue)]
 
 
 def clear_steer_records(session_id: Optional[str], *,

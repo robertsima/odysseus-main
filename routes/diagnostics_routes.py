@@ -144,8 +144,9 @@ def setup_diagnostics_routes(
     async def get_route_latency(request: Request) -> Dict[str, Any]:
         """Return content-free, normalized per-route latency aggregates."""
         require_admin(request)
+        from src.loop_lag import snapshot as loop_lag_snapshot
         from src.route_latency import stats as route_latency_stats
-        return {"routes": route_latency_stats()}
+        return {"routes": route_latency_stats(), "event_loop": loop_lag_snapshot()}
 
     @router.get("/api/db/stats")
     async def get_database_stats(request: Request) -> Dict[str, Any]:

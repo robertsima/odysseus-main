@@ -2841,8 +2841,17 @@ def setup_chat_routes(
         children: Dict[str, int] = {}
         try:
             from src import agent_activity as _activity
+            from src.poll_coalesce import coalesced
 
-            for rec in _activity.list_runs(limit=200, active_only=True):
+            # Same answer for every user and tab (filtered below), built off
+            # the event loop and once for concurrent polls: the registry sits
+            # behind a threading lock its writers hold.
+            live = await coalesced(
+                ("activity.active_runs", 200),
+                lambda: _activity.list_runs(limit=200, active_only=True),
+                ttl=0,
+            )
+            for rec in live:
                 sid = rec.get("session_id")
                 if sid in owned and rec.get("source") != "odysseus":
                     children[sid] = children.get(sid, 0) + 1

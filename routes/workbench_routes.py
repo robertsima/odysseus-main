@@ -104,9 +104,19 @@ def setup_workbench_routes() -> APIRouter:
     async def runs(request: Request, session_id: Optional[str] = None, limit: int = 50,
                    active: bool = False):
         _admin(request)
-        # The chat's strip also shows workers its workers started.
-        rows = activity.list_runs(session_id=session_id, limit=limit, active_only=active,
-                                  include_descendants=bool(session_id))
+        # The chat's strip also shows workers its workers started. Every open
+        # tab polls this every few seconds; build the answer in a worker
+        # thread (the registry sits behind a threading lock that writers hold)
+        # and once for concurrent identical polls, so a busy registry can
+        # never stall the event loop that every agent stream shares.
+        from src.poll_coalesce import coalesced
+
+        rows = await coalesced(
+            ("workbench.runs", session_id, limit, bool(active)),
+            lambda: activity.list_runs(session_id=session_id, limit=limit, active_only=active,
+                                       include_descendants=bool(session_id)),
+            ttl=0,
+        )
         if session_id:
             # The agent strip polls this every few seconds, so log a line only
             # when the answer changes. One line per change is enough to tell,

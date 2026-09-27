@@ -2551,7 +2551,7 @@ def setup_email_routes():
                 "folder": folder,
                 "sync": {"source": "fixture"},
             }
-        try:
+        def _index_counts():
             account_key = _account_cache_key(account_id, owner)
             conn = _sql3.connect(SCHEDULED_DB)
             try:
@@ -2572,6 +2572,12 @@ def setup_email_routes():
                 ).fetchone()
             finally:
                 conn.close()
+            return row, total_row
+
+        try:
+            # Polled by every tab. sqlite3 waits up to 5s on a locked database,
+            # so the read runs in a worker thread, never on the event loop.
+            row, total_row = await _asyncio.to_thread(_index_counts)
             indexed_total = int((total_row or [0])[0] or 0)
             if indexed_total:
                 return {
@@ -5714,11 +5720,18 @@ def setup_email_routes():
         import json as _json
         _slug = "".join(c if (c.isalnum() or c in "-_.@") else "_" for c in (owner or "default"))
         path = _P(DATA_DIR) / f"email_urgency_state_{_slug}.json"
-        if not path.exists():
-            return {"total_unread": 0, "total_urgent": 0, "max_score": 0, "per_uid": {}}
+
+        def _read():
+            if not path.exists():
+                return None
+            return _json.loads(path.read_text(encoding="utf-8"))
+
         try:
-            data = _json.loads(path.read_text(encoding="utf-8"))
+            # A UI poll: keep the file read off the event loop.
+            data = await _asyncio.to_thread(_read)
         except Exception:
+            data = None
+        if not isinstance(data, dict):
             return {"total_unread": 0, "total_urgent": 0, "max_score": 0, "per_uid": {}}
         # Drop `notified_uids` from the payload — it's an internal scheduler
         # debounce, not UI-relevant.
