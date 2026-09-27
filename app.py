@@ -1381,6 +1381,12 @@ async def _shutdown_event():
         await webhook_manager.close()
     except Exception as e:
         logger.warning(f"Webhook manager shutdown error: {e}")
+    # Kill a pending Claude Code sign-in (Settings > Tools > Claude Code)
+    try:
+        from src import claude_code_login
+        await claude_code_login.ashutdown()
+    except Exception as e:
+        logger.warning(f"Claude Code sign-in shutdown error: {e}")
     # Disconnect all MCP servers
     try:
         await mcp_manager.disconnect_all()

@@ -110,7 +110,7 @@ before proposing any change to how Claude is reached.
 |---|---|---|
 | "not an existing Git repository or worktree" | wrong path (e.g. `/app`) | use a path from `status`/`list_repositories` |
 | "outside Claude Code approved roots" | path not under the configured roots | pick an approved one or ask the operator to add the root in Settings |
-| `ready: false`, `auth.logged_in: false` | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise tell the operator to sign in once as the container user or set up the cloud runner |
+| `ready: false`, `auth.logged_in: false` ("Not logged in") | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise ask the admin to open Settings > Tools > Claude Code delegation > **Sign in** and finish it in their browser (no SSH). You cannot do this step or handle the code for them; never ask them to paste it into chat |
 | "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Tools > Claude Code |
 | `error_kind: claude_code_outdated` ("Claude Code X does not support this model; version Y or newer is required") | the installed CLI is too old for the model | call `{"action": "update"}` (add `"version": "Y"` if the default channel stays too old), check `version_after`, then retry the task once. Never install or update Claude Code from bash: that makes a second copy the delegation never runs |
 | update refused: "run(s) are in progress" | an update would replace the binary under a running job | poll or cancel those task ids first, then update |

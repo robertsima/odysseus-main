@@ -2678,6 +2678,17 @@
             <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>Claude Code delegation</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">The agent hands bounded coding tasks to the locally installed Claude Code CLI (<code>delegate_to_claude_code</code>) inside an approved Git checkout. Claude Code signs in with your own account; Odysseus never stores those credentials. Values here override the <code>CLAUDE_CODE_*</code> environment variables — leave a field empty to keep the environment default.</div>
             <div id="set-ccStatus" class="cc-status" style="margin-bottom:10px;"></div>
+            <div id="set-ccLogin" class="cc-login" style="margin-bottom:10px;">
+              <div class="settings-row" style="gap:8px;flex-wrap:wrap;">
+                <button type="button" id="set-ccLoginStart" class="btn btn-secondary" title="Runs claude auth login inside the container; you finish it in your browser. No SSH needed.">Sign in</button>
+                <select id="set-ccLoginMethod" class="settings-select" style="width:auto;max-width:280px;" aria-label="Account type">
+                  <option value="claudeai">Claude subscription (Pro, Max, Team, Enterprise)</option>
+                  <option value="console">Anthropic Console (API usage billing)</option>
+                </select>
+                <button type="button" id="set-ccLogout" class="btn btn-secondary" title="Runs claude auth logout. Refused while a delegation is running.">Sign out</button>
+              </div>
+              <div id="set-ccLoginFlow" class="cc-status cc-login-flow" aria-live="polite" hidden></div>
+            </div>
             <div class="settings-col">
               <div class="settings-row">
                 <label class="settings-label">Binary path</label>

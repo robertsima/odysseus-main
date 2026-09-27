@@ -16,9 +16,10 @@ narrowly-scoped token never gets more than it was issued.
 from fastapi import APIRouter, Body, HTTPException, Request
 from typing import Any
 
-from core.middleware import require_admin
+from core.middleware import INTERNAL_TOOL_HEADER, require_admin
 from src.agent_tools.claude_code_tools import UPDATE_TIMEOUT_S, get_task_runner, status_report, update_binary
 from src.auth_helpers import require_user
+from src.owner_identity import INTERNAL_TOOL_USER
 
 CLAUDE_CODE_READ_SCOPES = {"claude_code:read", "claude_code:write"}
 CLAUDE_CODE_WRITE_SCOPES = {"claude_code:write"}
@@ -41,6 +42,24 @@ def _require_claude_code_scope(request: Request, allowed: set[str]) -> str:
         if not owner:
             raise HTTPException(403, "API token has no owner")
         return owner
+    owner = require_user(request)
+    require_admin(request)
+    return owner
+
+
+def _require_admin_browser(request: Request) -> str:
+    """Authorize the sign-in routes: an admin's own browser session, nothing
+    else. API tokens are refused whatever their scopes (a token's caller is
+    usually a model), and so is the in-process internal-tool token that lets
+    agent tools reach admin routes over loopback: the in-app agent must never
+    be able to start a sign-in or submit a code."""
+    if getattr(request.state, "api_token", False):
+        raise HTTPException(403, "Claude Code sign-in is only available from an admin's browser session, "
+                                 "not with an API token.")
+    headers = getattr(request, "headers", None) or {}
+    if headers.get(INTERNAL_TOOL_HEADER) or getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
+        raise HTTPException(403, "Claude Code sign-in cannot be driven by an agent tool; use Settings > Tools > "
+                                 "Claude Code > Sign in.")
     owner = require_user(request)
     require_admin(request)
     return owner
@@ -79,6 +98,59 @@ def setup_claude_code_routes() -> APIRouter:
             # Rejected before anything ran (bad version, no binary).
             raise HTTPException(400, result["error"])
         return result
+
+    # ── sign-in without SSH (src/claude_code_login.py) ──
+    # Admin browser session only. The code pasted here is written to the CLI's
+    # stdin and never logged or echoed back.
+    @router.get("/login/status")
+    async def login_status(request: Request):
+        _require_admin_browser(request)
+        from src import claude_code_login
+        return claude_code_login.status()
+
+    @router.post("/login/start")
+    async def login_start(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
+        """Start ``claude auth login``; returns the authorization URL to open.
+        Body: ``{method?: "claudeai"|"console"}``. One start per 10s."""
+        _require_admin_browser(request)
+        from src import claude_code_login
+        body = body if isinstance(body, dict) else {}
+        try:
+            return await claude_code_login.start(str(body.get("method") or "claudeai"))
+        except claude_code_login.LoginError as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    @router.post("/login/code")
+    async def login_code(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
+        """Body: ``{session_id, code}``. Answers with the session state only."""
+        _require_admin_browser(request)
+        from src import claude_code_login
+        body = body if isinstance(body, dict) else {}
+        try:
+            return await claude_code_login.submit_code(str(body.get("session_id") or ""),
+                                                       str(body.get("code") or ""))
+        except claude_code_login.LoginError as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    @router.post("/login/cancel")
+    async def login_cancel(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
+        _require_admin_browser(request)
+        from src import claude_code_login
+        body = body if isinstance(body, dict) else {}
+        try:
+            return await claude_code_login.cancel(str(body.get("session_id") or "") or None)
+        except claude_code_login.LoginError as exc:
+            raise HTTPException(exc.status, str(exc))
+
+    @router.post("/logout")
+    async def logout(request: Request):
+        """``claude auth logout``. 409 while a delegation or update runs."""
+        _require_admin_browser(request)
+        from src import claude_code_login
+        try:
+            return await claude_code_login.logout()
+        except claude_code_login.LoginError as exc:
+            raise HTTPException(exc.status, str(exc))
 
     # ── cloud runner (Claude Code in GitHub Actions; src/claude_cloud.py) ──
     @router.get("/cloud/status")

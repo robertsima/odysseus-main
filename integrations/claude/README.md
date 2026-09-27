@@ -133,6 +133,65 @@ at `action=update` or `action=status` instead: an npm or script install from
 the shell creates a second copy that delegation never runs, and that copy is
 lost when the container is recreated.
 
+### Signing in without SSH
+
+The binary in the container needs its own Claude sign-in. You can do it from
+the browser instead of `docker exec`-ing into the NAS:
+
+1. Settings > Tools > **Claude Code delegation** > pick the account type
+   (Claude subscription, or Anthropic Console for API billing) > **Sign in**.
+2. Odysseus runs `claude auth login --claudeai` (or `--console`) in the
+   container, as the app user, with the delegation environment (`HOME`,
+   `CLAUDE_CONFIG_DIR`, proxy/CA variables; no server secrets). The card
+   shows the authorization link the CLI prints. Open it on your own
+   computer and sign in with your Claude account.
+3. The browser cannot reach the CLI's localhost callback inside the
+   container, so the authorization page shows a code instead (Claude Code's
+   documented fallback for SSH sessions and containers). Paste it into the
+   card and press **Submit code**.
+4. Odysseus writes the code to the waiting CLI's stdin. The CLI exchanges it
+   with its own PKCE verifier, stores the login in
+   `$CLAUDE_CONFIG_DIR/.credentials.json` (mode 0600, written by the CLI),
+   and exits. Odysseus then runs `claude auth status`; the card shows the
+   signed-in account, plan, and auth method, and **Check status** turns ready.
+
+**Sign out** runs `claude auth logout`. It is refused while a delegation or
+an update is running. If `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or
+`CLAUDE_CODE_OAUTH_TOKEN` is set in the container, it takes precedence over
+the stored sign-in. The card names the variable but never shows its value.
+
+Guarantees:
+
+- Odysseus never sees a Claude token. The login stays in the CLI's own store,
+  as it would after an SSH login. The pasted code is useless without the
+  CLI's verifier. Odysseus writes it to the process and drops it: it is not
+  logged, stored, returned in a response, kept in browser storage, or put in
+  chat/task history. The log records only state transitions
+  (`[claude-login] session=… awaiting_code -> verifying`), so the diagnostics
+  bundle cannot contain it either.
+- One sign-in runs at a time. It expires after 10 minutes, and its process is
+  killed on expiry, cancel, a new **Sign in**, or app shutdown. Starting is
+  limited to once per 10 seconds.
+- The routes (`GET /api/claude-code/login/status`, `POST
+  /api/claude-code/login/start|code|cancel`, `POST /api/claude-code/logout`)
+  accept only an admin's browser session. API tokens are refused whatever
+  their scopes, and so is the internal token agent tools use for loopback
+  calls. The in-app agent cannot start a sign-in or submit a code:
+  `delegate_to_claude_code action=status` only tells the admin to use this
+  card.
+
+Why `claude auth login` and not `claude setup-token`: `auth login` is a plain
+subcommand that reads the code from stdin, so it works over ordinary pipes
+with no terminal. `setup-token` and the interactive `/login` are full-screen
+terminal UIs that need a TTY. `setup-token` also prints a year-long token
+that Odysseus would then have to store and pass to every run, which the
+terms below rule out. To keep the credential out of the container entirely,
+use the cloud runner.
+
+If the card cannot start the CLI (binary missing, too old to have `auth
+login`), fall back to `docker exec -it -u <PUID> odysseus
+/app/data/claude-code/bin/claude auth login` with the same `HOME`.
+
 ### Terms of use (why this shape)
 
 Anthropic's Claude Code legal page permits running the **unmodified** binary
@@ -145,7 +204,9 @@ Claude.ai credentials. Odysseus therefore:
 
 - runs the binary as published and never modifies it or its auth methods;
 - never reads, stores, or forwards Claude's OAuth/session token or API key —
-  the operator signs in once as the container user (`HOME=$CLAUDE_CODE_HOME`);
+  the operator signs in once as the container user (`HOME=$CLAUDE_CODE_HOME`),
+  from Settings (above: Odysseus only relays the one-time code to the CLI) or
+  over SSH;
 - does **not** offer "Claude" as a chat model backed by that sign-in. To chat
   with Claude models directly, add an Anthropic **API key** as a model
   endpoint (billed per token under the Commercial Terms).

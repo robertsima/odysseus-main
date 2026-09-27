@@ -3022,11 +3022,216 @@ async function initClaudeCodeSettings() {
   });
   // Load lazily the first time the Tools tab becomes visible so opening
   // Settings never spawns a `claude --version` probe by itself.
+  var login = initClaudeCodeLogin(function () { checkStatus(); });
   var tab = document.querySelector('[data-settings-tab="tools"]');
   var loadedOnce = false;
-  function lazy() { if (loadedOnce) return; loadedOnce = true; checkStatus(); loadTasks(); }
+  function lazy() { if (loadedOnce) return; loadedOnce = true; checkStatus(); loadTasks(); if (login) login.resume(); }
   if (tab) tab.addEventListener('click', lazy);
   if (window._isAdmin && card.offsetParent !== null) lazy();
+}
+
+// ── Claude Code sign-in without SSH (Claude Code card) ──
+// Drives /api/claude-code/login/*: the server runs `claude auth login` in the
+// container and hands back the authorization URL; the admin signs in on their
+// own desktop and pastes the code the page shows. The code goes straight to
+// the server and is cleared from the field: it is never kept in a variable
+// past the request, in storage, or in the DOM after submission.
+function initClaudeCodeLogin(onSignedIn) {
+  var startBtn = el('set-ccLoginStart');
+  var methodSel = el('set-ccLoginMethod');
+  var logoutBtn = el('set-ccLogout');
+  var box = el('set-ccLoginFlow');
+  if (!startBtn || !box || startBtn.dataset.wired) return null;
+  startBtn.dataset.wired = '1';
+  var session = null;
+  var pollTimer = null;
+
+  function node(tag, props, children) {
+    var n = document.createElement(tag);
+    Object.keys(props || {}).forEach(function (k) {
+      if (k === 'text') n.textContent = props[k];
+      else if (k === 'className') n.className = props[k];
+      else n.setAttribute(k, props[k]);
+    });
+    (children || []).forEach(function (c) { if (c) n.appendChild(c); });
+    return n;
+  }
+  function line(children, cls) { return node('div', { className: 'cc-status-line' + (cls ? ' ' + cls : '') }, children); }
+  function pill(text, cls) { return node('span', { className: 'cc-pill ' + cls, text: text }); }
+  function show(children) {
+    box.textContent = '';
+    (children || []).forEach(function (c) { if (c) box.appendChild(c); });
+    box.hidden = !children || !children.length;
+  }
+  function busy(on) {
+    startBtn.disabled = !!on;
+    if (logoutBtn) logoutBtn.disabled = !!on;
+    if (methodSel) methodSel.disabled = !!on;
+  }
+  function stopPolling() { if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; } }
+  function schedulePoll(delay) {
+    stopPolling();
+    pollTimer = setTimeout(async function () {
+      pollTimer = null;
+      if (!session || box.hidden || (session.state !== 'awaiting_code' && session.state !== 'verifying')) return;
+      var was = session.state;
+      try {
+        var r = await fetch('/api/claude-code/login/status', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        var s = await r.json();
+        // Keep the typed code: re-render only when the state moved on.
+        if (!s || s.session_id !== session.session_id || s.state !== was) render(s);
+        else { session = s; schedulePoll(delay); }
+      } catch (e) { schedulePoll(delay); }
+    }, delay || 15000);
+  }
+  async function post(path, body) {
+    var r = await fetch(path, { method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+    var data = null;
+    try { data = await r.json(); } catch (e) {}
+    if (!r.ok) throw new Error((data && data.detail) || ('HTTP ' + r.status));
+    return data;
+  }
+  function cancelButton() {
+    var b = node('button', { type: 'button', className: 'ats-btn', text: 'Cancel' });
+    b.addEventListener('click', async function () {
+      stopPolling();
+      try { await post('/api/claude-code/login/cancel', { session_id: session && session.session_id }); } catch (e) {}
+      session = null;
+      busy(false);
+      show([line([node('span', { text: 'Sign-in cancelled.', style: 'opacity:.7' })])]);
+    });
+    return b;
+  }
+  function codeForm(s) {
+    var input = node('input', { type: 'password', className: 'settings-select', autocomplete: 'off',
+      autocapitalize: 'off', spellcheck: 'false', 'aria-label': 'Authorization code',
+      placeholder: 'Paste the code from the authorization page', style: 'width:320px;max-width:100%;',
+      'data-lpignore': 'true', 'data-1p-ignore': 'true', 'data-form-type': 'other' });
+    var toggle = node('button', { type: 'button', className: 'ats-btn', text: 'Show', 'aria-pressed': 'false' });
+    toggle.addEventListener('click', function () {
+      var hidden = input.type === 'password';
+      input.type = hidden ? 'text' : 'password';
+      toggle.textContent = hidden ? 'Hide' : 'Show';
+      toggle.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+    });
+    var submit = node('button', { type: 'button', className: 'btn btn-secondary', text: 'Submit code' });
+    async function send() {
+      if (!input.value.trim()) { input.focus(); return; }
+      var payload = JSON.stringify({ session_id: s.session_id, code: input.value.trim() });
+      input.value = '';
+      stopPolling();
+      render({ state: 'verifying', session_id: s.session_id });
+      try {
+        var r = await fetch('/api/claude-code/login/code', { method: 'POST', credentials: 'same-origin',
+          headers: { 'Content-Type': 'application/json' }, body: payload });
+        payload = null;
+        var data = null;
+        try { data = await r.json(); } catch (e) {}
+        if (!r.ok) {
+          // A rejected paste leaves the CLI waiting; show the form again.
+          render(Object.assign({}, s, { error: (data && data.detail) || ('HTTP ' + r.status) }));
+          return;
+        }
+        render(data);
+      } catch (e) {
+        payload = null;
+        render(Object.assign({}, s, { error: 'Could not reach Odysseus: ' + (e.message || e) }));
+      }
+    }
+    submit.addEventListener('click', send);
+    input.addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); send(); } });
+    var row = node('div', { className: 'settings-row', style: 'gap:8px;flex-wrap:wrap;margin-top:4px;' }, [input, toggle, submit, cancelButton()]);
+    setTimeout(function () { try { input.focus(); } catch (e) {} }, 0);
+    return row;
+  }
+  function render(s) {
+    var prev = session;
+    session = s && s.state && s.state !== 'idle' ? s : null;
+    stopPolling();
+    if (!session) { busy(false); show([]); return; }
+    var st = session.state;
+    busy(st === 'starting' || st === 'verifying');
+    if (st === 'starting') {
+      show([line([pill('starting', 'run'), node('span', { text: ' Starting Claude Code sign-in…' })])]);
+    } else if (st === 'awaiting_code') {
+      var url = String(session.url || '');
+      var items = [];
+      if (/^https:\/\//i.test(url)) {
+        var host = '';
+        try { host = new URL(url).host; } catch (e) {}
+        items.push(line([node('b', { text: '1. ' }), node('span', { text: 'Open this link and sign in' + (host ? ' (' + host + ')' : '') + ': ' }),
+          node('a', { href: url, target: '_blank', rel: 'noopener noreferrer', text: 'Open sign-in page ↗' })]));
+      } else {
+        items.push(line([node('span', { text: 'Claude Code did not print a usable link. Cancel and try again.', style: 'color:var(--red)' })]));
+      }
+      items.push(line([node('b', { text: '2. ' }), node('span', { text: 'After you authorize, the page shows a code. Paste it here:' })]));
+      if (session.error) items.push(line([node('span', { text: session.error, style: 'color:var(--red)' })]));
+      items.push(codeForm(session));
+      var mins = Math.max(1, Math.round((session.expires_in || 0) / 60));
+      items.push(line([node('span', { text: 'This sign-in expires in about ' + mins + ' min. The code is sent only to the Claude Code process in the container.', style: 'opacity:.7' })]));
+      show(items);
+      schedulePoll();
+    } else if (st === 'verifying') {
+      show([line([pill('verifying', 'run'), node('span', { text: ' Verifying with Claude Code…' })])]);
+      if (session.session_id) schedulePoll(3000);
+    } else if (st === 'done') {
+      var acct = session.account || {};
+      var who = [acct.email, acct.organization, acct.subscription, acct.auth_method].filter(Boolean).join(' · ');
+      show([line([pill('signed in', 'ok'), node('span', { text: ' ' + (session.message || 'Claude Code is signed in.') + (who ? ' ' + who : '') })])]);
+      var repeat = prev && prev.state === 'done' && prev.session_id === session.session_id;
+      if (!repeat && typeof onSignedIn === 'function') onSignedIn();
+    } else {
+      var label = st === 'expired' ? 'expired' : st === 'cancelled' ? 'cancelled' : 'failed';
+      show([line([pill(label, 'bad'), node('span', { text: ' ' + (session.error || 'Sign-in did not complete.') })]),
+        line([node('span', { text: 'Press Sign in to try again.', style: 'opacity:.7' })])]);
+    }
+  }
+
+  startBtn.addEventListener('click', async function () {
+    busy(true);
+    render({ state: 'starting' });
+    try {
+      render(await post('/api/claude-code/login/start', { method: (methodSel && methodSel.value) || 'claudeai' }));
+    } catch (e) {
+      busy(false);
+      show([line([pill('failed', 'bad'), node('span', { text: ' ' + (e.message || e) })])]);
+    }
+  });
+
+  if (logoutBtn) logoutBtn.addEventListener('click', async function () {
+    var ok;
+    try {
+      ok = await (uiModule && uiModule.styledConfirm
+        ? uiModule.styledConfirm('Sign Claude Code out? Delegations will fail until someone signs in again.', { confirmText: 'Sign out', cancelText: 'Cancel' })
+        : Promise.resolve(window.confirm('Sign Claude Code out?')));
+    } catch (e) { ok = false; }
+    if (!ok) return;
+    busy(true);
+    try {
+      var r = await post('/api/claude-code/logout', {});
+      session = null;
+      show([line([pill(r.logged_in ? 'still signed in' : 'signed out', r.logged_in ? 'bad' : 'ok'),
+        node('span', { text: ' ' + (r.note || r.message || (r.logged_in ? 'Claude Code still reports a credential.' : 'Claude Code is signed out.')) })])]);
+      if (typeof onSignedIn === 'function') onSignedIn();
+    } catch (e) {
+      show([line([pill('not signed out', 'bad'), node('span', { text: ' ' + (e.message || e) })])]);
+    }
+    busy(false);
+  });
+
+  return {
+    // Pick up a sign-in that is still waiting (e.g. after reopening Settings).
+    resume: async function () {
+      try {
+        var r = await fetch('/api/claude-code/login/status', { credentials: 'same-origin' });
+        if (!r.ok) return;
+        var s = await r.json();
+        if (s && (s.state === 'awaiting_code' || s.state === 'verifying')) render(s);
+      } catch (e) {}
+    },
+  };
 }
 
 function initAll() {
