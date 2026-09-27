@@ -133,7 +133,22 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
         "max_parallel_workers": effective_worker_limit(settings),
         "approval_mode": effective_approval_mode(settings),
         "session_model": str(settings.get("_model") or ""),
+        # How far below a person's chat the caller is. What it starts runs one
+        # level deeper, and preflight has to judge the loadout at that depth.
+        "worker_depth": _caller_depth(session_id),
     }
+
+
+def _caller_depth(session_id: Optional[str]) -> int:
+    if not session_id:
+        return 0
+    try:
+        from src.headless_agent import worker_depth
+
+        return worker_depth(session_id)
+    except Exception:
+        logger.debug("loadout: worker depth unavailable for %s", session_id, exc_info=True)
+        return 0
 
 
 def _caller_may_grant_mcp(entry: str, policy: Dict[str, Any]) -> bool:
@@ -292,8 +307,46 @@ def stale_mcp_grants(profile: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, L
     return {server: b for server, b in out.items() if b["missing"]}
 
 
+def worker_withheld_tools(profile: Dict[str, Any], caller_depth: int = 0) -> Dict[str, str]:
+    """Tools this loadout grants that a worker started from the caller won't get.
+
+    ``{tool: why}``. A worker runs one level below the chat that starts it and
+    loses the launchers :func:`src.headless_agent.blocked_at_depth` names for
+    that depth. The loadout's allowlist still says it has them, so without
+    this preflight read READY for a worker that would be denied them.
+    """
+    from src.headless_agent import blocked_at_depth, withheld_reason
+
+    if profile.get("tool_access") != "selected":
+        return {}
+    blocked = blocked_at_depth(int(caller_depth or 0) + 1, profile.get("delegation_policy"))
+    return {tool: withheld_reason(tool)
+            for tool in sorted(set(profile.get("enabled_tools") or []) & blocked)}
+
+
+# What a worker needs to do repository work end to end: see status, diffs and
+# history (manage_git), and commit on a branch and ask a human to publish
+# (manage_agent_worktree). A loadout that edits code without them can change
+# files and nothing else.
+REPOSITORY_TOOLS = ("manage_git", "manage_agent_worktree")
+_CODE_EDIT_TOOLS = frozenset({"edit_file", "apply_patch"})
+
+
+def missing_repository_tools(profile: Optional[Dict[str, Any]]) -> List[str]:
+    """Repository tools a selected-tools loadout does not bind (``[]`` otherwise)."""
+    if not profile or profile.get("tool_access") != "selected":
+        return []
+    enabled = set(profile.get("enabled_tools") or []) - set(profile.get("disabled_tools") or [])
+    return [tool for tool in REPOSITORY_TOOLS if tool not in enabled]
+
+
+def edits_code(profile: Optional[Dict[str, Any]]) -> bool:
+    return bool(profile) and bool(set(profile.get("enabled_tools") or []) & _CODE_EDIT_TOOLS)
+
+
 def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
-                      policy: Dict[str, Any], owner: Optional[str] = None) -> Dict[str, Any]:
+                      policy: Dict[str, Any], owner: Optional[str] = None,
+                      *, as_worker: bool = False) -> Dict[str, Any]:
     """Every state a requested tool can be in, and why each missing one is missing.
 
     "Available" used to mean any of five things: the name exists, its MCP
@@ -302,6 +355,11 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
     while a tool its mission depended on was dropped by the clamp, and the
     worker then said the capability did not exist. ``required_tools`` names
     what the mission cannot do without; any of those denied is BLOCKED.
+
+    Two more ways a bound tool is not callable are always checked: a name the
+    loadout's own ``disabled_tools`` also lists (the denial wins), and, with
+    ``as_worker`` (preflight judges the loadout as the worker it starts), a
+    tool a worker at that depth is never given.
     """
     from src.private_access import tool_requires_private_grant
     from src.tool_security import owner_baseline_disabled_tools
@@ -331,8 +389,19 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
             return f"MCP server {server} is {status}"
         return None
 
+    expand_disabled = agent_profiles.expand_tool_aliases(profile.get("disabled_tools") or [])
+    withheld = worker_withheld_tools(profile, policy.get("worker_depth", 0)) if as_worker else {}
+
     denied, effective, conditional = [], [], []
     for tool in wanted:
+        if tool in selected and tool in expand_disabled and profile.get("tool_access") == "selected":
+            denied.append({"tool": tool, "reason": "profile_disabled", "detail": (
+                "listed in this loadout's enabled_tools AND its disabled_tools; the denial wins")})
+            continue
+        if tool in selected and tool in withheld:
+            denied.append({"tool": tool, "reason": "worker_policy",
+                           "detail": f"a worker started from this chat does not get it: {withheld[tool]}"})
+            continue
         if tool in selected and not mcp_problem(tool):
             effective.append(tool)
             if tool_requires_private_grant(tool) and not profile.get("private_vault_access"):
@@ -375,7 +444,18 @@ def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str])
     if prof["tool_access"] == "none":
         wanted: Set[str] = set()
     elif prof["tool_access"] == "selected":
-        wanted = set(prof.get("enabled_tools") or []) - explicit_denied
+        listed = set(prof.get("enabled_tools") or [])
+        wanted = listed - explicit_denied
+        conflicting = sorted(listed & explicit_denied)
+        if conflicting:
+            # The denial wins, as it does at execution. It used to win
+            # silently, so a loadout "repaired" by adding manage_git saved
+            # without it and reported success (2026-09-26).
+            notes.append(
+                f"tools: {', '.join(conflicting[:8])}{'…' if len(conflicting) > 8 else ''} listed in both "
+                "enabled_tools and disabled_tools, so not granted; remove them from disabled_tools "
+                "(or name disabled_tools in 'clear') to grant them"
+            )
     else:
         wanted = (known | _caller_mcp_grants(policy)) - explicit_denied
 

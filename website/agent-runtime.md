@@ -552,8 +552,10 @@ implementors) down to `agent_max_worker_depth` hops below the chat a person
 started (default 2: chat → lead → implementors). Above the limit a worker keeps
 `manage_agent_loadout` and `orchestrate_agents` if its loadout grants them and
 its delegation policy is not `never`; every other entry in
-`SUBAGENT_BLOCKED_TOOLS` stays off at every depth, and at the limit all of it
-does. `launch_worker` refuses a launch past the limit as well. A worker that
+`SUBAGENT_BLOCKED_TOOLS` (other chats, coding CLIs) stays off at every depth,
+and at the limit all of it does. `manage_agent_worktree` is not in that set: it
+starts no agent, so a worker gets it when its loadout grants it, and publishing
+still needs the human approval code. `launch_worker` refuses a launch past the limit as well. A worker that
 ends its turn with sub-workers still running does not hand off; it hands up
 the reply it writes after the last one reports back
 (`agent_control._hand_up_when_done`), so the chat that started the lead gets

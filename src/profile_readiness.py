@@ -68,18 +68,60 @@ def _skill_rows(profile: Dict[str, Any], disabled: set) -> List[Dict[str, Any]]:
     return rows
 
 
+def _repository_row(profile: Dict[str, Any], tools: set, policy: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """A loadout that edits code but cannot use git is a crippled coding worker.
+
+    2026-09-26: Lead Engineer bound read/write/patch tools but not manage_git
+    or manage_agent_worktree, preflight read READY, and the worker it started
+    on a repository task stopped with "Blocked before implementation: ... tool
+    policy denies manage_git and manage_agent_worktree". Say so here, where the
+    loadout can still be fixed.
+    """
+    if not agent_loadouts.edits_code(profile):
+        return None
+    missing = [t for t in agent_loadouts.REPOSITORY_TOOLS if t not in tools]
+    if not missing:
+        return None
+    grantable = [t for t in missing if t in (policy.get("allowed_tools") or ())]
+    repair = (f"add {' and '.join(grantable)} to enabled_tools (action='update', enabled_tools=[...existing, "
+              + ", ".join(f"'{t}'" for t in grantable) + "])" if grantable else "")
+    ungrantable = [t for t in missing if t not in grantable]
+    if ungrantable:
+        repair = ((repair + "; ") if repair else "") + (
+            f"{', '.join(ungrantable)} must first be granted to the calling chat (Settings > Agent loadouts, "
+            "or this chat's Loadout in the Agents panel)")
+    return _check("repository tools", False,
+                  f"binds code-editing tools but not {', '.join(missing)}: its worker can change files but "
+                  "cannot see git status, diffs or history"
+                  + (" or commit on a branch and request publishing" if "manage_agent_worktree" in missing else ""),
+                  repair)
+
+
 def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
-                      owner: Optional[str] = None, *, required_tools=()) -> Dict[str, Any]:
+                      owner: Optional[str] = None, *, required_tools=(), requested_tools=None) -> Dict[str, Any]:
+    """Readiness of ``profile`` as the worker the calling chat would start.
+
+    ``requested_tools`` (a create/update's request) adds tools the author
+    asked for to the check, so one the save dropped reads as a failure rather
+    than disappearing from the report.
+    """
     from src.tool_security import owner_baseline_disabled_tools
 
     checks: List[Dict[str, Any]] = []
+    wanted = list(profile.get("enabled_tools") or [])
+    if requested_tools:
+        wanted = sorted(set(wanted) | {str(t) for t in requested_tools if t})
     matrix = agent_loadouts.capability_matrix(
-        list(profile.get("enabled_tools") or []), list(required_tools or []), profile, policy, owner)
+        wanted, list(required_tools or []), profile, policy, owner, as_worker=True)
     for row in matrix["denied"]:
         checks.append(_check(f"tool {row['tool']}", False, f"{row['reason']}: {row['detail']}",
                              {"mcp_server": "reconnect the MCP server or allow it for this profile",
                               "parent_policy": "grant it to the calling chat first",
                               "owner_policy": "an admin must allow it for this user",
+                              "profile_disabled": "remove it from the loadout's disabled_tools",
+                              "worker_policy": ("drop it from enabled_tools, or do that step from the chat "
+                                                "that starts the worker"),
+                              "not_requested": "add it to enabled_tools",
                               "unknown": "use an exact tool name from action=capabilities"}.get(row["reason"])))
     for row in matrix["conditional"]:
         checks.append(_check(f"tool {row['tool']}", True, row["condition"]))
@@ -91,6 +133,9 @@ def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
     checks.extend(_skill_rows(profile, owner_baseline_disabled_tools(owner)))
 
     tools = set(matrix["selected_for_profile"])
+    repository = _repository_row(profile, tools, policy)
+    if repository:
+        checks.append(repository)
     private = bool(profile.get("private_vault_access"))
     try:
         from src.retrieval_health import cached_problems

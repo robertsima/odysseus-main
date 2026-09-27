@@ -463,6 +463,11 @@ _ACTION_DEFAULTS: Mapping[str, str] = MappingProxyType(
 
 _ACTION_ALIASES: Mapping[str, Mapping[str, str]] = MappingProxyType(
     {
+        # The tool accepts these as `status` (loadout_tools._ACTION_ALIASES);
+        # classify them the same, as reads, rather than as unknown actions.
+        "manage_agent_loadout": MappingProxyType(
+            {"poll": "status", "wait": "status", "check": "status"}
+        ),
         "manage_calendar": MappingProxyType(
             {
                 "create": "create_event",

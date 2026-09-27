@@ -9,8 +9,10 @@ report back exactly which parts of a request were narrowed.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from src import agent_loadouts, agent_profiles
@@ -21,6 +23,24 @@ logger = logging.getLogger(__name__)
 
 _ACTIONS = ("list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop",
             "export", "import")
+# Spellings models use for "how is that worker doing". 2026-09-26: gpt-6-luna
+# called {"action": "poll", "run_id": ...} (delegate_to_claude_code's verb) and
+# got "action must be one of ...". Kept out of `_ACTIONS`, which is the schema
+# enum, so the schema still teaches the one canonical name.
+_ACTION_ALIASES = {"poll": "status", "wait": "status", "check": "status"}
+
+# A status wait blocks this tool call, not a model round: a parent that wants
+# to wait for its worker spends one call instead of one ~100k-token round per
+# check. Bounded like delegate_to_claude_code's poll wait.
+MAX_STATUS_WAIT_S = 300
+_STATUS_WAIT_POLL_SECONDS = 2.0
+# Repeated status checks on the same run(s) soon after the last one get an
+# automatic wait, doubling to a ceiling (claude_code_tools._poll_wait's rule):
+# the 2026-09-26 parent re-checked a running worker in a tight loop.
+_STATUS_BACKOFF_START_S = 15
+_STATUS_BACKOFF_MAX_S = 120
+_STATUS_REPEAT_WINDOW_S = 600
+_last_status_checks: Dict[str, Tuple[float, int]] = {}
 # Fields an agent may set. `name` is required; everything else falls back to
 # agent_profiles' own defaults.
 _FIELDS = (
@@ -275,6 +295,151 @@ def _requested(args: Dict[str, Any], base: Optional[Dict[str, Any]] = None) -> D
     return merged
 
 
+def _release_stale_denials(requested: Dict[str, Any], base: Dict[str, Any], supplied: Dict[str, Any],
+                           required_tools: Any) -> List[str]:
+    """Let an update grant a tool the stored ``disabled_tools`` snapshot names.
+
+    A stored selected-tools loadout carries ``disabled_tools`` = every tool it
+    did NOT grant when it was saved (``agent_loadouts._clamp_tools``' complement
+    snapshot). An update that adds a tool to ``enabled_tools`` merged that
+    snapshot back in, and the clamp removed the new tool again because it was
+    "denied" — silently, with exit_code 0 and a READY readiness. That is how
+    Lead Engineer was "repaired" to include manage_git on 2026-09-26 and still
+    started workers without it.
+
+    Only when this call names the tools (``enabled_tools`` or
+    ``required_tools``) and leaves ``disabled_tools`` alone; a call that sends
+    ``disabled_tools`` states it outright. The clamp still caps every name at
+    what this chat may grant. Returns the notes to report.
+    """
+    if "disabled_tools" in supplied or requested.get("tool_access") != "selected":
+        return []
+    named = set(supplied.get("enabled_tools") or []) | {str(t) for t in (required_tools or [])}
+    if not named:
+        return []
+    granted = agent_profiles.expand_tool_aliases(set(requested.get("enabled_tools") or []) & named)
+    stored = list(requested.get("disabled_tools") or base.get("disabled_tools") or [])
+    released = sorted(t for t in stored if t in granted)
+    if not released:
+        return []
+    requested["disabled_tools"] = [t for t in stored if t not in granted]
+    return [f"tools: now granting {', '.join(released[:8])}{'…' if len(released) > 8 else ''}, "
+            "which the stored disabled_tools had denied"]
+
+
+def _status_wait(key: str, requested: float) -> float:
+    """Seconds this status check should wait: the caller's request, or the
+    backoff floor when it re-checks the same runs soon after the last check."""
+    now = time.monotonic()
+    last = _last_status_checks.get(key)
+    repeats = last[1] + 1 if last and now - last[0] < _STATUS_REPEAT_WINDOW_S else 0
+    _last_status_checks[key] = (now, repeats)
+    for stale in [k for k, (ts, _) in _last_status_checks.items() if now - ts > _STATUS_REPEAT_WINDOW_S]:
+        _last_status_checks.pop(stale, None)
+    if repeats == 0:
+        return requested
+    floor = min(_STATUS_BACKOFF_MAX_S, _STATUS_BACKOFF_START_S * 2 ** min(repeats - 1, 8))
+    return max(requested, floor)
+
+
+def _requested_wait(args: Dict[str, Any]) -> float:
+    raw = args.get("wait_seconds")
+    if raw is None and not isinstance(args.get("wait"), bool):
+        raw = args.get("wait")
+    try:
+        return max(0.0, min(float(MAX_STATUS_WAIT_S), float(raw or 0)))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _status_rows(session_id: Optional[str], limit: int, run_id: str) -> List[Dict[str, Any]]:
+    from src import agent_activity
+
+    rows = []
+    runs = agent_activity.list_runs(session_id=session_id, limit=max(limit, 100) if run_id else limit,
+                                    include_descendants=True)
+    for run in runs:
+        if run_id and run.get("run_id") != run_id:
+            continue
+        summary = run.get("summary") or {}
+        progress = run.get("progress") or {}
+        row = {
+            "run_id": run["run_id"], "status": run["status"], "title": run["title"],
+            "worker_session": summary.get("target_session") or run.get("session_id"),
+            "loadout": summary.get("profile"), "model": summary.get("model"),
+            "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
+            "tool_calls": summary.get("steps") or (progress.get("tool_calls") if run["status"] == "running" else None),
+            "round": progress.get("round") if run["status"] == "running" else None,
+            "current_tool": progress.get("current_tool") if run["status"] == "running" else None,
+            "max_rounds": summary.get("max_rounds"),
+            "ran_out_of_rounds": bool(summary.get("rounds_exhausted")),
+            "result_excerpt": summary.get("result_excerpt"),
+            "error": summary.get("error"),
+        }
+        rows.append({key: value for key, value in row.items() if value not in (None, "")})
+    return rows
+
+
+async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+    """``status`` (alias ``poll``/``wait``/``check``), optionally for one run
+    and optionally waiting, bounded, until a running worker finishes."""
+    run_id = str(args.get("run_id") or "").strip()
+    try:
+        limit = int(args.get("limit") or 20)
+    except (TypeError, ValueError):
+        limit = 20
+    rows = _status_rows(session_id, limit, run_id)
+    if run_id and not rows:
+        known = [row["run_id"] for row in _status_rows(session_id, limit, "")]
+        return {"error": (f"status: no worker run {run_id!r} was started by this chat. "
+                          + (f"Its runs: {', '.join(known[:10])}." if known else "It has started none.")),
+                "exit_code": 1}
+
+    waited = 0.0
+    running_ids = [row["run_id"] for row in rows if row.get("status") == "running"]
+    if running_ids:
+        key = f"{session_id}|{run_id or '*'}"
+        wait = _status_wait(key, _requested_wait(args))
+        if wait > 0:
+            started = time.monotonic()
+            deadline = started + wait
+            from src import agent_activity
+
+            while time.monotonic() < deadline:
+                await asyncio.sleep(min(_STATUS_WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+                if any((agent_activity.get_run(rid) or {}).get("status", "running") != "running"
+                       for rid in running_ids):
+                    break
+            waited = round(time.monotonic() - started, 1)
+            rows = _status_rows(session_id, limit, run_id)
+    running = sum(1 for row in rows if row.get("status") == "running")
+    if not running:
+        _last_status_checks.pop(f"{session_id}|{run_id or '*'}", None)
+    cut_off = [row["run_id"] for row in rows if row.get("ran_out_of_rounds")]
+    response = (
+        f"{len(rows)} worker run(s) for this chat; {running} still running."
+        + (f" Cut off before finishing: {', '.join(cut_off)} — these did NOT finish their task; "
+           "restart them with a narrower task rather than reporting their partial work as done."
+           if cut_off else "")
+        + " A result_excerpt is the worker's own claim, not verified work."
+    )
+    if running:
+        response += (
+            f" Still running{f' after waiting {waited:g}s' if waited else ''}. Its result is handed back to "
+            "this chat automatically when it finishes, so do not keep checking: end your turn and tell the "
+            f"user, or call status again with wait_seconds (up to {MAX_STATUS_WAIT_S}) to block until it is done."
+        )
+    out: Dict[str, Any] = {"response": response, "runs": rows, "running": running, "exit_code": 0}
+    if waited:
+        out["waited_seconds"] = waited
+    # The loop's stall detector reads this instead of the whole result, so a
+    # re-check that shows only a later timestamp is not taken for progress.
+    out["progress_key"] = json.dumps(
+        [[row["run_id"], row.get("status"), row.get("tool_calls"), row.get("current_tool")] for row in rows],
+        default=str)
+    return out
+
+
 def _import_prepare(policy: Dict[str, Any]):
     """The ``create`` rule for each imported profile, as a transfer ``prepare``.
 
@@ -306,6 +471,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         return {"error": "manage_agent_loadout: JSON object required", "exit_code": 1}
 
     action = str(args.get("action") or "list").strip().lower()
+    action = _ACTION_ALIASES.get(action, action)
     if action not in _ACTIONS:
         return {"error": f"action must be one of {', '.join(_ACTIONS)}", "exit_code": 1}
 
@@ -327,38 +493,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         # way to find out was to grep the activity JSONL by hand -- which is
         # exactly what the 2026-09-17 transcript spent twenty rounds doing,
         # while the answer sat in the run registry the whole time.
-        from src import agent_activity
-
-        rows = []
-        for run in agent_activity.list_runs(session_id=session_id, limit=int(args.get("limit") or 20),
-                                            include_descendants=True):
-            summary = run.get("summary") or {}
-            row = {
-                "run_id": run["run_id"], "status": run["status"], "title": run["title"],
-                "worker_session": summary.get("target_session") or run.get("session_id"),
-                "loadout": summary.get("profile"), "model": summary.get("model"),
-                "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
-                "tool_calls": summary.get("steps"),
-                "max_rounds": summary.get("max_rounds"),
-                "ran_out_of_rounds": bool(summary.get("rounds_exhausted")),
-                "result_excerpt": summary.get("result_excerpt"),
-                "error": summary.get("error"),
-            }
-            rows.append({key: value for key, value in row.items() if value not in (None, "")})
-        running = sum(1 for row in rows if row.get("status") == "running")
-        cut_off = [row["run_id"] for row in rows if row.get("ran_out_of_rounds")]
-        return {
-            "response": (
-                f"{len(rows)} worker run(s) for this chat; {running} still running."
-                + (f" Cut off before finishing: {', '.join(cut_off)} — these did NOT finish their task; "
-                   "restart them with a narrower task rather than reporting their partial work as done."
-                   if cut_off else "")
-                + " A result_excerpt is the worker's own claim, not verified work."
-            ),
-            "runs": rows,
-            "running": running,
-            "exit_code": 0,
-        }
+        return await _status(args, session_id)
 
     if action == "stop":
         # Actually stop a worker this chat started. Without it, "stop the
@@ -535,6 +670,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         if required_tools and requested.get("tool_access") == "selected":
             requested["enabled_tools"] = sorted(set(requested_tools) | {str(t) for t in required_tools})
             requested_tools = requested["enabled_tools"]
+        # A widening the call asked for, not a narrowing: reported apart from
+        # `narrowed`, and never mistaken for a downgrade of untouched fields.
+        released = _release_stale_denials(requested, base, supplied, required_tools) if base is not None else []
         try:
             profile, narrowed = agent_loadouts.clamp(requested, policy)
         except ValueError as exc:
@@ -598,10 +736,16 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         response = f"{'Updated' if action == 'update' else 'Created'} loadout {saved['name']!r}"
         if narrowed:
             response += f"; narrowed to this chat's own policy in {len(narrowed)} place(s)"
+        if released:
+            response += "; " + "; ".join(note.split(": ", 1)[-1] for note in released)
         try:
             from src.profile_readiness import profile_readiness, render
 
-            readiness = profile_readiness(saved, policy, owner, required_tools=required_tools)
+            # Judged against what this call ASKED for, not only what was kept:
+            # a requested tool the save dropped is a failed check, so the
+            # readiness line cannot say READY for a loadout missing it.
+            readiness = profile_readiness(saved, policy, owner, required_tools=required_tools,
+                                          requested_tools=requested_tools)
             response += ". Readiness " + render(readiness)
         except Exception as exc:
             logger.warning("loadout: readiness check failed for %s", saved["name"], exc_info=True)
@@ -616,7 +760,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             response += ". WARNING: the stored loadout read back with different bindings"
         return {"response": response, "loadout": agent_loadouts.summarize(saved),
                 "capabilities": matrix, "readiness": readiness, "readback_consistent": consistent,
-                "narrowed": narrowed, "exit_code": 0}
+                "narrowed": narrowed, **({"granted": released} if released else {}), "exit_code": 0}
 
     # action == "start"
     task = str(args.get("task") or "").strip()
@@ -741,6 +885,28 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     if stale:
         stale_note = " Note: these granted MCP tools do not exist on their server and will not be available: " + \
             ", ".join(sorted(n for b in stale.values() for n in b["missing"])) + "."
+    # Say before the worker runs what it will not have, rather than letting it
+    # discover that mid-task and hand back "blocked" (2026-09-26: a repository
+    # task started on a loadout with no git tool).
+    withheld = (agent_loadouts.worker_withheld_tools(started_profile, policy.get("worker_depth", 0))
+                if started_profile else {})
+    missing_repo: List[str] = []
+    if started_profile is not None:
+        from src.worker_preflight import task_needs_workspace
+
+        if task_needs_workspace(task):
+            missing_repo = agent_loadouts.missing_repository_tools(started_profile)
+    gap_note = ""
+    if withheld:
+        gap_note += (" This worker will NOT get " + ", ".join(sorted(withheld))
+                     + " although the loadout lists " + ("them" if len(withheld) > 1 else "it") + ": "
+                     + "; ".join(sorted(set(withheld.values()))) + ".")
+    if missing_repo:
+        gap_note += (f" The task is repository work but loadout {started_profile['name']!r} does not grant "
+                     f"{' or '.join(missing_repo)}, so the worker cannot see git status, diffs or history"
+                     + (" or commit on a branch" if "manage_agent_worktree" in missing_repo else "")
+                     + ". If the task needs that, stop it and add "
+                     + " and ".join(missing_repo) + " to the loadout's enabled_tools (action='update').")
 
     # A worker always reports to the chat that started it. `parent_session`
     # used to accept "" (standalone) or any chat the user owns, and a model
@@ -805,6 +971,8 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         "tool_count": None if isinstance(granted, str) else len(granted),
         "skills": started_profile["skill_names"] if started_profile else [],
         "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
+        **({"withheld_from_worker": withheld} if withheld else {}),
+        **({"missing_repository_tools": missing_repo} if missing_repo else {}),
         **(result.get("preflight") or {}),
     }
     tool_note = _tool_list_note(granted)
@@ -823,7 +991,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             f"with these tools: {tool_note}. It runs until the task is done — a round count never "
             f"cuts it off{wrap_note} — and it runs detached, so its progress appears on this chat's activity feed "
             "and in action='status'. If those tools cannot do the task you just described, stop it "
-            "and fix the loadout instead of waiting for the result." + stale_note
+            "and fix the loadout instead of waiting for the result." + stale_note + gap_note
+            + " Its result is handed back to this chat automatically when it finishes, so there is no need "
+            "to poll: end your turn, or use action='status' with wait_seconds to block until it is done."
         ),
         "preflight": preflight,
         **{key: value for key, value in result.items() if key != "preflight"},

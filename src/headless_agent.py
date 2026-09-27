@@ -173,9 +173,21 @@ def _rounds_exhausted_note(state: Dict[str, Any]) -> str:
 # so both gates pass on the first call. The set is enforced by tool name, so
 # the loadout CRUD actions go with it: a child that may not start a worker has
 # no use for authoring one.
+#
+# `manage_agent_worktree` used to be in this set and is deliberately NOT any
+# more. It starts no agent: it makes a checkout, commits in it and asks a human
+# to publish, all in this process (agent_loop's delegation-gate comment makes
+# the same call for the same tool). Blocking it here meant no worker could ever
+# use it whatever its loadout granted, and nothing said so: on 2026-09-26 a
+# "Lead Engineer" worker started on a repository task finished "Blocked before
+# implementation ... this chat's tool policy denies manage_agent_worktree"
+# while the chat that started it held the tool. Whether a worker has it is now
+# its loadout's allowlist, like manage_git, bash or write_file; publishing is
+# still behind the human approval code, and non-admins still never get it
+# (NON_ADMIN_BLOCKED_TOOLS).
 SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
     "send_to_session", "create_session", "pipeline", "delegate_to_agent", "delegate_to_claude_code",
-    "manage_session", "manage_agent_worktree",
+    "manage_session",
     # Both can start workers too: orchestrate_agents fans out specialists and
     # manage_agent_loadout's `start` launches one detached.
     "orchestrate_agents", "manage_agent_loadout",
@@ -184,7 +196,7 @@ SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
 
 # The two launchers a worker may keep when nesting is allowed. A lead engineer
 # starting implementors needs exactly these; the rest of SUBAGENT_BLOCKED_TOOLS
-# (other chats, coding CLIs, worktrees) stays off at every depth.
+# (other chats, coding CLIs) stays off at every depth.
 NESTABLE_LAUNCH_TOOLS: frozenset = frozenset({"manage_agent_loadout", "orchestrate_agents"})
 #: user chat (0) -> worker (1) -> sub-worker (2). Deeper is refused.
 DEFAULT_MAX_WORKER_DEPTH = 2
@@ -234,11 +246,30 @@ def child_blocked_tools(session_id: Optional[str], settings: Optional[Dict[str, 
     (``max_parallel_workers``) bounds the fan-out at each level.
     """
     settings = settings or {}
-    depth = max(1, worker_depth(session_id))
-    policy = str(settings.get("delegation_policy") or "explicit").lower()
-    if policy == "never" or depth >= max_worker_depth():
+    return blocked_at_depth(max(1, worker_depth(session_id)), settings.get("delegation_policy"))
+
+
+def blocked_at_depth(depth: int, delegation_policy: Optional[str] = None) -> Set[str]:
+    """What a worker ``depth`` hops below a person's chat may never call.
+
+    The rule :func:`child_blocked_tools` applies to a running worker, exposed
+    so a loadout's preflight can say, before anything starts, which of the
+    tools it grants its worker will not get.
+    """
+    policy = str(delegation_policy or "explicit").lower()
+    if policy == "never" or max(1, int(depth)) >= max_worker_depth():
         return set(SUBAGENT_BLOCKED_TOOLS)
     return set(SUBAGENT_BLOCKED_TOOLS) - NESTABLE_LAUNCH_TOOLS
+
+
+# Why each worker-withheld tool is withheld, for a preflight or start message
+# the model can act on instead of "the tool policy denies it".
+def withheld_reason(tool: str) -> str:
+    if tool in NESTABLE_LAUNCH_TOOLS:
+        return ("it starts other workers, and a worker at this depth (or with delegation 'never') may not; "
+                f"agent_max_worker_depth is {max_worker_depth()}")
+    return ("it hands work to another chat or coding agent, which a worker may never do; "
+            "do that part from the chat that starts the worker")
 
 
 def worker_tool_budget() -> int:
