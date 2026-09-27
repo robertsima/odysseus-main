@@ -30,6 +30,7 @@ import contextvars
 import json
 import os
 import re
+import shutil
 import time
 import uuid
 from contextlib import contextmanager
@@ -455,7 +456,7 @@ _CHILD_ENV_PREFIXES = ("LC_", "CLAUDE_CODE_")
 _ODYSSEUS_CLAUDE_CODE_VARS = frozenset({
     "CLAUDE_CODE_BINARY", "CLAUDE_CODE_REPOSITORY_ROOTS", "CLAUDE_CODE_DEFAULT_REPOSITORY",
     "CLAUDE_CODE_MAX_CONCURRENT_TASKS", "CLAUDE_CODE_HOME", "CLAUDE_CODE_ODYSSEUS_URL",
-    "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE",
+    "CLAUDE_CODE_ODYSSEUS_TOKEN_FILE", "CLAUDE_CODE_AUTO_UPDATE",
 })
 # A prefix-allowed name that still looks like a credential is dropped unless
 # it is listed explicitly above (CLAUDE_CODE_OAUTH_TOKEN is). Also used to
@@ -821,6 +822,348 @@ async def auth_status(binary: Optional[Path] = None) -> dict:
     }
 
 
+# ── Updating the CLI (action=update) ──
+#
+# 2026-09-26: a run failed with "Claude Code 2.1.267 does not support this
+# model; version 2.1.280 or newer is required", the agent then tried
+# `npm install -g @anthropic-ai/claude-code@latest` from bash, the bash guard
+# refused it, and no supported way to upgrade was left. The binary lives in
+# the persistent data directory (DEFAULT_BINARY), not in the image, so the
+# fix is to run *that* install's own updater with the child's allowlisted
+# environment:
+#
+# * an npm install — ``npm install -g --prefix /app/data/claude-code
+#   @anthropic-ai/claude-code`` leaves <prefix>/bin/claude as a symlink into
+#   <prefix>/lib/node_modules/@anthropic-ai/claude-code — is updated with npm
+#   against that same prefix. `claude update` on an npm install targets npm's
+#   *global* prefix (/usr/local in the image: neither persistent nor writable
+#   by the app user), which is also why a bare `npm install -g` from bash
+#   would not have fixed anything;
+# * anything else is a native install, updated with the binary's own
+#   ``claude update`` (``claude install <version>`` for an explicit target),
+#   which downloads into ~/.local/share/claude/versions/ and repoints its
+#   launcher. A configured path that is itself a symlink pinned to one file
+#   in that versions directory is repointed to the newest one afterwards.
+UPDATE_TIMEOUT_S = 600
+_NPM_PACKAGE = "@anthropic-ai/claude-code"
+_UPDATE_TARGET = re.compile(r"^(?:latest|stable|\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)$")
+_SEMVER = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# "Claude Code 2.1.267 does not support this model; version 2.1.280 or newer
+# is required. Run 'claude update', ..." — returned by the API (a 400) when the
+# requested model needs a newer client.
+_OUTDATED = re.compile(
+    r"Claude Code\s+v?(?P<installed>\d+\.\d+\.\d+)\S*\s+does not support this model[;,.]?\s*"
+    r"(?:version\s+)?v?(?P<required>\d+\.\d+\.\d+)\S*\s+or newer is required",
+    re.IGNORECASE,
+)
+OUTDATED_ERROR_KIND = "claude_code_outdated"
+_UPDATE_STATE: dict = {"running": False, "last": None}
+# Claude processes in flight or waiting for the gate (chat runs and task
+# runner jobs both pass through _run_claude). An update refuses while any
+# exist; runs that start during an update wait for it (_wait_for_update).
+_ACTIVE_RUNS = 0
+# The newest "version X or newer is required" a run reported, so status can
+# say why the binary needs an update even after the failing turn is gone.
+_VERSION_REQUIREMENT: dict = {}
+
+
+def _version_tuple(text: Any) -> Optional[tuple[int, int, int]]:
+    match = _SEMVER.search(str(text or ""))
+    return tuple(int(part) for part in match.groups()) if match else None  # type: ignore[return-value]
+
+
+def _auto_update_enabled() -> bool:
+    env_default = (os.environ.get("CLAUDE_CODE_AUTO_UPDATE") or "").strip().lower() in ("1", "true", "yes", "on")
+    return _flag_setting("claude_code_auto_update", env_default)
+
+
+def update_in_progress() -> bool:
+    return bool(_UPDATE_STATE["running"])
+
+
+def detect_outdated(result: Any) -> Optional[dict]:
+    """``{"installed", "required"}`` when a run failed because the CLI is too
+    old for the requested model, else None."""
+    if not isinstance(result, dict):
+        return None
+    for key in ("error", "result", "stderr", "output"):
+        value = result.get(key)
+        if isinstance(value, str) and value:
+            match = _OUTDATED.search(value)
+            if match:
+                return {"installed": match["installed"], "required": match["required"]}
+    return None
+
+
+def _annotate_outdated(result: dict) -> dict:
+    """Turn the CLI's version refusal into a structured, actionable error.
+    Only a failed run qualifies: a successful one may merely quote the text."""
+    failed = bool(result.get("error") or result.get("is_error")) or result.get("exit_code") not in (0, None)
+    found = detect_outdated(result) if failed else None
+    if not found:
+        return result
+    binary = str(binary_path())
+    original = str(result.get("error") or result.get("result") or "")
+    _VERSION_REQUIREMENT.clear()
+    _VERSION_REQUIREMENT.update({
+        "installed": found["installed"], "required": found["required"], "model": result.get("model"),
+        "binary": binary, "seen_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    })
+    result.update({
+        "error_kind": OUTDATED_ERROR_KIND,
+        "installed_version": found["installed"],
+        "required_version": found["required"],
+        "claude_error": _clip(original, 600),
+        "error": (
+            f"Claude Code {found['installed']} at {binary} is too old for the requested model: version "
+            f"{found['required']} or newer is required. Call delegate_to_claude_code with action=update "
+            "(admin) to upgrade the configured binary, then retry this task. Do not install Claude Code "
+            "from bash: that installs a second copy and leaves the configured binary as it is."
+        ),
+        "fix": {"tool": "delegate_to_claude_code", "action": "update"},
+        "exit_code": result.get("exit_code") or 1,
+    })
+    return result
+
+
+def version_requirement() -> dict:
+    """The last recorded minimum version, from memory or the persisted task
+    records (so it survives a restart)."""
+    if _VERSION_REQUIREMENT:
+        return dict(_VERSION_REQUIREMENT)
+    try:
+        records = list(get_task_runner().tasks.values())
+    except Exception:
+        return {}
+    latest = None
+    for record in records:
+        if record.get("error_kind") == OUTDATED_ERROR_KIND and record.get("required_version"):
+            if latest is None or (record.get("finished_at") or "") > (latest.get("finished_at") or ""):
+                latest = record
+    if latest is None:
+        return {}
+    return {"installed": latest.get("installed_version"), "required": latest["required_version"],
+            "model": latest.get("model"), "seen_at": latest.get("finished_at"), "task_id": latest.get("task_id")}
+
+
+def _install_method(binary: Path) -> dict:
+    """How the configured binary was installed, so the matching updater runs."""
+    try:
+        resolved = binary.resolve()
+    except (OSError, RuntimeError):
+        resolved = binary
+    parts = resolved.parts
+    for i in range(len(parts) - 2):
+        if parts[i] == "node_modules" and parts[i + 1] == "@anthropic-ai" and parts[i + 2] == "claude-code":
+            owner = Path(*parts[:i]) if i else Path(".")
+            if owner.name == "lib":  # <prefix>/lib/node_modules: an `npm -g --prefix` layout
+                return {"method": "npm", "prefix": str(owner.parent), "global": True, "resolved": str(resolved)}
+            return {"method": "npm", "prefix": str(owner), "global": False, "resolved": str(resolved)}
+    # A copied (not symlinked) launcher next to an npm prefix.
+    prefix = binary.parent.parent
+    if binary.parent.name == "bin" and (prefix / "lib" / "node_modules" / "@anthropic-ai" / "claude-code").is_dir():
+        return {"method": "npm", "prefix": str(prefix), "global": True, "resolved": str(resolved)}
+    versions_dir = str(resolved.parent) if resolved.parent.name == "versions" else None
+    return {"method": "native", "resolved": str(resolved), "versions_dir": versions_dir}
+
+
+def _update_environment() -> dict[str, str]:
+    """The run's allowlisted environment (HOME, CLAUDE_CONFIG_DIR, PATH,
+    proxy/CA), plus npm's own non-secret configuration (registry, cache)."""
+    env = _base_child_environment()
+    for name, value in os.environ.items():
+        if name.lower().startswith("npm_config_") and not _SECRET_NAME.search(name):
+            env[name] = value
+    return env
+
+
+def _update_command(binary: Path, method: dict, target: Optional[str], env: dict) -> tuple[list[str], str, str]:
+    """``(argv, cwd, note)`` for the updater that matches the install."""
+    note = ""
+    if method["method"] == "npm":
+        npm = shutil.which("npm", path=env.get("PATH"))
+        if npm:
+            argv = [npm, "install", *(["-g"] if method.get("global") else []), "--prefix", method["prefix"],
+                    "--no-fund", "--no-audit", f"{_NPM_PACKAGE}@{target or 'latest'}"]
+            return argv, method["prefix"], note
+        note = "npm is not on PATH, so the binary's own updater was used instead."
+    if target:
+        return [str(binary), "install", target], str(binary.parent), note
+    return [str(binary), "update"], str(binary.parent), note
+
+
+async def _exec_capture(argv: list[str], *, cwd: str, env: dict, timeout: float) -> tuple[int, str]:
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, env=env, cwd=cwd,
+    )
+    try:
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return 124, f"timed out after {int(timeout)}s"
+    return proc.returncode or 0, (out or b"").decode("utf-8", errors="replace")
+
+
+async def _probe_version(binary: Path, env: dict) -> str:
+    try:
+        _, out = await _capture(binary, "--version", timeout=45, env=env)
+    except OSError:
+        return ""
+    out = _ANSI.sub("", out or "").strip()
+    return out.splitlines()[0].strip() if out else ""
+
+
+def _relink_native(binary: Path, method: dict, before: Optional[tuple]) -> Optional[str]:
+    """Repoint a configured symlink that is pinned to one file in the native
+    versions directory at the newest version there. The native updater only
+    moves its own launcher (~/.local/bin/claude), so without this a
+    ``claude_code_binary`` pointing straight into versions/ never moves."""
+    versions_dir = method.get("versions_dir")
+    if not versions_dir or not binary.is_symlink():
+        return None
+    candidates = []
+    for entry in Path(versions_dir).iterdir():
+        if re.fullmatch(r"\d+\.\d+\.\d+", entry.name) and entry.is_file() and os.access(entry, os.X_OK):
+            candidates.append((_version_tuple(entry.name), entry))
+    if not candidates:
+        return None
+    newest_version, newest = max(candidates, key=lambda item: item[0])
+    if before and newest_version <= before:
+        return None
+    temp = binary.with_name(f".{binary.name}.odysseus-relink")
+    if temp.is_symlink() or temp.exists():
+        temp.unlink()
+    os.symlink(str(newest), str(temp))
+    os.replace(str(temp), str(binary))
+    return str(newest)
+
+
+def _active_task_ids() -> list[str]:
+    try:
+        return [task_id for task_id, record in get_task_runner().tasks.items()
+                if record.get("status") in _ACTIVE_STATUSES]
+    except Exception:
+        return []
+
+
+async def _wait_for_update(limit: float = UPDATE_TIMEOUT_S + 120) -> None:
+    """Hold a new run back while the binary is being replaced."""
+    deadline = time.monotonic() + limit
+    while _UPDATE_STATE["running"] and time.monotonic() < deadline:
+        await asyncio.sleep(0.25)
+
+
+async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_TIMEOUT_S) -> dict:
+    """Update the configured Claude Code binary with its own updater.
+
+    Refuses while any Claude run is in flight (the binary would be replaced
+    under it); runs that start meanwhile wait until the update is done.
+    Returns the version before and after, the command, and its redacted
+    output. ``target`` is ``latest``/``stable``/an exact version, or None
+    for the install's default channel.
+    """
+    target = str(target or "").strip() or None
+    if target and target.lower() in ("latest", "stable"):
+        target = target.lower()
+    if target and not _UPDATE_TARGET.fullmatch(target):
+        return {"error": _tool_error("version must be 'latest', 'stable', or an exact version such as 2.1.280"),
+                "exit_code": 1}
+    binary = binary_path()
+    if not binary.is_file() or not os.access(binary, os.X_OK):
+        return {"error": _tool_error(
+            f"binary unavailable at {binary}, so there is nothing to update. Install Claude Code there first "
+            "(see integrations/claude/README.md) or set Settings > Tools > Claude Code binary."), "exit_code": 1}
+    if _UPDATE_STATE["running"]:
+        return {"error": _tool_error("an update is already running; call action=status in a minute"),
+                "update_in_progress": True, "exit_code": 1}
+    if _ACTIVE_RUNS:
+        ids = _active_task_ids()
+        listing = f" (task ids: {', '.join(ids)})" if ids else ""
+        return {"error": _tool_error(
+            f"{_ACTIVE_RUNS} Claude Code run(s) are in progress{listing}; updating now would replace the binary "
+            "under them. Wait for them (action=poll with wait_seconds) or cancel them, then call action=update "
+            "again."), "active_task_ids": ids, "active_runs": _ACTIVE_RUNS, "exit_code": 1}
+    # No await between the check above and this flag, so no run can slip in.
+    _UPDATE_STATE["running"] = True
+    hints: list[str] = []
+    relinked = None
+    try:
+        env = _update_environment()
+        method = _install_method(binary)
+        before = await _probe_version(binary, env)
+        argv, cwd, note = _update_command(binary, method, target, env)
+        if note:
+            hints.append(note)
+        try:
+            code, out = await _exec_capture(argv, cwd=cwd, env=env, timeout=timeout)
+        except OSError as exc:
+            code, out = 127, f"could not start {argv[0]}: {exc}"
+        _BINARY_INFO.clear()
+        after = await _probe_version(binary, env)
+        if code == 0 and method["method"] == "native" and _version_tuple(after) == _version_tuple(before):
+            try:
+                relinked = _relink_native(binary, method, _version_tuple(before))
+            except OSError as exc:
+                hints.append(f"could not repoint {binary} at the newest downloaded version: {exc}")
+            if relinked:
+                _BINARY_INFO.clear()
+                after = await _probe_version(binary, env)
+    finally:
+        _UPDATE_STATE["running"] = False
+    before_v, after_v = _version_tuple(before), _version_tuple(after)
+    requirement = version_requirement()
+    required_v = _version_tuple(requirement.get("required"))
+    satisfies = None if not required_v else bool(after_v and after_v >= required_v)
+    text = _ANSI.sub("", out or "").strip()
+    result: dict = {
+        "binary": str(binary),
+        "method": method["method"],
+        "command": argv,
+        "target": target or ("latest" if argv[0] != str(binary) else "the install's release channel"),
+        "version_before": before,
+        "version_after": after,
+        "updated": bool(before_v and after_v and after_v > before_v),
+        "output": _redact(text[-4000:], _secret_values()),
+        "exit_code": code,
+    }
+    if method["method"] == "npm":
+        result["npm_prefix"] = method["prefix"]
+    if relinked:
+        result["relinked_to"] = relinked
+    if required_v:
+        result["required_version"] = requirement.get("required")
+        result["satisfies_requirement"] = satisfies
+    if code != 0:
+        tail = " | ".join(line for line in result["output"].splitlines()[-4:] if line.strip())
+        result["error"] = _tool_error(f"update command exited {code}: {tail or 'no output'}")
+        if "EACCES" in text or "permission denied" in text.lower():
+            hints.append(f"The install at {method.get('prefix') or method['resolved']} is not writable by the "
+                         "Odysseus process; chown it to the container's PUID:PGID and retry.")
+        if "DISABLE_UPDATES" in text:
+            hints.append("Updates are disabled by DISABLE_UPDATES in Claude Code's settings; remove it to update.")
+    elif required_v and not satisfies:
+        result["exit_code"] = 1
+        result["error"] = _tool_error(
+            f"the updater finished but the binary reports {after or 'no version'}, still older than the "
+            f"{requirement.get('required')} the model needs. Retry with version=\"latest\" or "
+            f"version=\"{requirement.get('required')}\".")
+    if result["exit_code"] == 0:
+        if required_v and satisfies:
+            _VERSION_REQUIREMENT.clear()
+        result["response"] = (f"Claude Code updated from {before or '?'} to {after or '?'}." if result["updated"]
+                              else f"Claude Code is at {after or before or '?'}; no newer version was installed.")
+    if hints:
+        result["hints"] = hints
+    _UPDATE_STATE["last"] = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "method": method["method"],
+        "version_before": before, "version_after": after, "exit_code": result["exit_code"],
+    }
+    return result
+
+
 async def status_report() -> dict:
     """Everything the primary agent needs before delegating.
 
@@ -878,7 +1221,7 @@ async def status_report() -> dict:
                      "Claude Code > Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
                      "the repository's secrets." % _claude_home())
     if info["available"] and "--permission-prompts" not in info["flags"]:
-        hints.append("Claude Code is older than 2.1.259; upgrade for --permission-prompts none "
+        hints.append("Claude Code is older than 2.1.259; upgrade (action=update) for --permission-prompts none "
                      "(prompts are still denied in headless mode, but Claude may retry them).")
     if default_repo is None:
         hints.append(how)
@@ -893,6 +1236,19 @@ async def status_report() -> dict:
             "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
+    update_required = None
+    requirement = version_requirement() if info["available"] else {}
+    required_v = _version_tuple(requirement.get("required"))
+    if required_v:
+        installed_v = _version_tuple(info.get("version"))
+        if installed_v is None or installed_v < required_v:
+            update_required = {**requirement, "installed": info.get("version") or requirement.get("installed")}
+            model = f" (model {requirement['model']})" if requirement.get("model") else ""
+            hints.insert(0, f"Claude Code {info.get('version') or requirement.get('installed') or '?'} is older than "
+                            f"{requirement['required']}, which a previous run's model required{model}. Call "
+                            "delegate_to_claude_code with action=update to upgrade the configured binary.")
+        else:
+            _VERSION_REQUIREMENT.clear()
     available_slots = max(0, _PROCESS_LIMIT_SIZE - len(active))
     return {
         "response": (
@@ -916,6 +1272,15 @@ async def status_report() -> dict:
         "active_tasks": len(active),
         "available_task_slots": available_slots,
         "hints": hints,
+        # A previous run's "version X or newer is required", while the binary
+        # is still older; action=update fixes it.
+        "update_required": update_required,
+        "update": {
+            "method": _install_method(binary)["method"] if info["available"] else None,
+            "in_progress": update_in_progress(),
+            "auto_update": _auto_update_enabled(),
+            "last": _UPDATE_STATE["last"],
+        },
         "exit_code": 0 if ready else 1,
     }
 
@@ -1224,6 +1589,58 @@ async def _run_claude(
     on_process=None,
     model: Optional[str] = None,
 ) -> dict:
+    """Run the Claude Code CLI once (see :func:`_run_claude_process`).
+
+    Waits while the binary is being updated, counts itself as in flight so an
+    update cannot start underneath it, and turns the CLI's "version X or
+    newer is required" refusal into a structured error naming action=update.
+    """
+    global _ACTIVE_RUNS
+    await _wait_for_update()
+    _ACTIVE_RUNS += 1
+    try:
+        result = await _run_claude_process(repository, prompt, timeout, tools, on_process=on_process, model=model)
+    finally:
+        _ACTIVE_RUNS -= 1
+    return _annotate_outdated(result) if isinstance(result, dict) else result
+
+
+async def _run_with_auto_update(repository: Path, prompt: str, timeout: int, tools: list[str], **kwargs) -> dict:
+    """``_run_claude``, plus one update-and-retry when the CLI is too old for
+    the model and ``claude_code_auto_update`` (CLAUDE_CODE_AUTO_UPDATE) is on.
+
+    Off by default: an update replaces the binary every delegation uses. Only
+    retried when the failed run left the checkout untouched (the refusal
+    comes before Claude's first turn, so it normally does).
+    """
+    result = await _run_claude(repository, prompt, timeout, tools, **kwargs)
+    if not isinstance(result, dict) or result.get("error_kind") != OUTDATED_ERROR_KIND or not _auto_update_enabled():
+        return result
+    if result.get("changes") or result.get("commits"):
+        result["auto_update"] = {"skipped": "the failed run changed the checkout; update manually with action=update"}
+        return result
+    update = await update_binary()
+    summary = {key: update.get(key) for key in ("response", "error", "method", "version_before", "version_after",
+                                                  "satisfies_requirement", "exit_code") if key in update}
+    if update.get("exit_code") != 0 or update.get("satisfies_requirement") is False:
+        result["auto_update"] = summary
+        result["error"] += f" An automatic update was attempted and did not fix it: {update.get('error') or 'no newer version'}"
+        return result
+    retry = await _run_claude(repository, prompt, timeout, tools, **kwargs)
+    if isinstance(retry, dict):
+        retry["auto_update"] = summary
+        retry["retried_after_update"] = True
+    return retry
+
+
+async def _run_claude_process(
+    repository: Path,
+    prompt: str,
+    timeout: int,
+    tools: list[str],
+    on_process=None,
+    model: Optional[str] = None,
+) -> dict:
     """Run the Claude Code CLI once, serialized per repository.
 
     ``on_process`` (optional) is called with the live ``Process`` as soon as
@@ -1335,7 +1752,8 @@ async def _run_claude(
         return result
 
 
-_ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_repositories", "repositories")
+_ACTIONS = ("run", "start", "poll", "get", "cancel", "list", "status", "list_repositories", "repositories",
+            "update", "upgrade")
 # Longest a single poll may block. The 2026-09-12 logs show the agent
 # alternating `bash sleep 20..120` with poll for ten minutes until the
 # loop-breaker ended the turn; one poll that waits on the job replaces both.
@@ -1405,6 +1823,8 @@ class ClaudeCodeTool:
     * ``start`` / ``poll`` / ``cancel`` / ``list`` — the same job as a background
       task, so the primary agent can keep working (or coordinate several
       Claude jobs across repositories) and pick the result up later.
+    * ``update`` (alias ``upgrade``) — run the configured binary's own
+      updater (:func:`update_binary`); optional ``version``.
     """
 
     async def execute(self, content: str, ctx: dict) -> dict:
@@ -1430,6 +1850,16 @@ class ClaudeCodeTool:
                 except Exception as exc:
                     report["cloud"] = {"ready": False, "hints": [str(exc)]}
             return report
+        if action in ("update", "upgrade"):
+            # The tool is admin-only (tool_security), so this is too.
+            try:
+                timeout = max(60, min(1800, int(args.get("timeout_seconds") or UPDATE_TIMEOUT_S)))
+            except (TypeError, ValueError):
+                timeout = UPDATE_TIMEOUT_S
+            result = await update_binary(args.get("version") or args.get("target"), timeout=timeout)
+            if "error" in result:
+                result["error"] = result["error"].replace(_DEFAULT_TOOL_NAME + ":", invoked_tool + ":", 1)
+            return result
         cloud = await _cloud_action(action, args, owner=owner, session_id=session_id, tool_name=invoked_tool)
         if cloud is not None:
             return cloud
@@ -1484,8 +1914,8 @@ class ClaudeCodeTool:
             return {**parsed, "exit_code": 1}
         label = str(args.get("label") or "").strip()[:120] or None
         with run_context(session_id=session_id, owner=owner, label=label, tool_name=invoked_tool):
-            result = await _run_claude(parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
-                                       model=parsed["model"])
+            result = await _run_with_auto_update(parsed["repository"], parsed["prompt"], parsed["timeout"],
+                                                 parsed["tools"], model=parsed["model"])
         return _with_dropped(result, parsed)
 
 
@@ -1523,7 +1953,7 @@ _RETENTION_S = 86400
 _SUMMARY_FIELDS = ("task_id", "status", "repository", "owner", "created_at", "started_at",
                    "finished_at", "exit_code", "branch", "commit", "changed_files", "error",
                    "num_turns", "total_cost_usd", "model", "label", "session_id", "start_commit",
-                   "total_additions", "total_deletions")
+                   "total_additions", "total_deletions", "error_kind", "required_version")
 
 
 def _prune(tasks: dict, now: float) -> bool:
@@ -1645,7 +2075,7 @@ class ClaudeCodeTaskRunner:
             with run_context(session_id=record.get("session_id"), owner=record.get("owner"),
                              task_id=task_id, label=record.get("label"),
                              tool_name=record.get("tool_name")):
-                result = await _run_claude(
+                result = await _run_with_auto_update(
                     parsed["repository"], parsed["prompt"], parsed["timeout"], parsed["tools"],
                     on_process=_register, model=parsed.get("model"),
                 )

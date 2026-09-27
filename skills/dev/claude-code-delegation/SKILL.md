@@ -2,7 +2,7 @@
 name: claude-code-delegation
 description: Delegate bounded coding work in an approved Git checkout to the locally installed Claude Code CLI through delegate_to_claude_code; preflight the integration, size the task, verify the result, and coordinate several Claude jobs from the primary harness.
 metadata:
-  version: 1.0.0
+  version: 1.1.0
   category: dev
   status: published
   source: bundled
@@ -33,6 +33,10 @@ before proposing any change to how Claude is reached.
    - `hints` names the exact repair when something is missing (binary path,
      sign-in, no checkout under the roots). Report it; do not try to fix a
      sign-in problem from the chat.
+   - `update_required` is set when an earlier run said the CLI is too old for
+     its model. `{"action": "update"}` (admin) runs the configured binary's
+     own updater and reports `version_before`/`version_after`; it is refused
+     while any delegation is running.
 2. If the user names a repository, match it against `repositories`. If it is
    not listed, say so and offer the listed ones — never guess a path, and
    never pass the application root (`/app`).
@@ -108,6 +112,8 @@ before proposing any change to how Claude is reached.
 | "outside Claude Code approved roots" | path not under the configured roots | pick an approved one or ask the operator to add the root in Settings |
 | `ready: false`, `auth.logged_in: false` | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise tell the operator to sign in once as the container user or set up the cloud runner |
 | "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Tools > Claude Code |
+| `error_kind: claude_code_outdated` ("Claude Code X does not support this model; version Y or newer is required") | the installed CLI is too old for the model | call `{"action": "update"}` (add `"version": "Y"` if the default channel stays too old), check `version_after`, then retry the task once. Never install or update Claude Code from bash: that makes a second copy the delegation never runs |
+| update refused: "run(s) are in progress" | an update would replace the binary under a running job | poll or cancel those task ids first, then update |
 | `permission_denials` mentions push/remote | Claude tried to publish | expected; publishing goes through `manage_agent_worktree` |
 | exit 124 | timed out | narrow the task or split it |
 

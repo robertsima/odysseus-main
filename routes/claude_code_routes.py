@@ -17,7 +17,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from typing import Any
 
 from core.middleware import require_admin
-from src.agent_tools.claude_code_tools import get_task_runner, status_report
+from src.agent_tools.claude_code_tools import UPDATE_TIMEOUT_S, get_task_runner, status_report, update_binary
 from src.auth_helpers import require_user
 
 CLAUDE_CODE_READ_SCOPES = {"claude_code:read", "claude_code:write"}
@@ -57,6 +57,28 @@ def setup_claude_code_routes() -> APIRouter:
         tool's action=status."""
         _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
         return await status_report()
+
+    @router.post("/update")
+    async def update_claude_code(request: Request, body: dict[str, Any] = Body(default_factory=dict)):
+        """Update the configured Claude Code binary with its own updater (the
+        chat tool's action=update). Body: ``{version?: "latest"|"stable"|"X.Y.Z",
+        timeout_seconds?}``. Replaces the binary every delegation runs, so it
+        needs the write scope *and* an admin — an API token only when its
+        owner is one. 409 while a delegation or another update is running."""
+        _require_claude_code_scope(request, CLAUDE_CODE_WRITE_SCOPES)
+        require_admin(request)
+        body = body if isinstance(body, dict) else {}
+        try:
+            timeout = max(60, min(1800, int(body.get("timeout_seconds") or UPDATE_TIMEOUT_S)))
+        except (TypeError, ValueError):
+            timeout = UPDATE_TIMEOUT_S
+        result = await update_binary(body.get("version"), timeout=timeout)
+        if result.get("update_in_progress") or result.get("active_runs"):
+            raise HTTPException(409, result["error"])
+        if "version_before" not in result and result.get("error"):
+            # Rejected before anything ran (bad version, no binary).
+            raise HTTPException(400, result["error"])
+        return result
 
     # ── cloud runner (Claude Code in GitHub Actions; src/claude_cloud.py) ──
     @router.get("/cloud/status")

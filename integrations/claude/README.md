@@ -56,6 +56,7 @@ The tool takes an `action`:
 | `list_repositories` | the approved checkouts/worktrees with their branch |
 | `run` (default) | delegate and wait (`timeout_seconds`, 30–1800, default 900) |
 | `start` / `poll` / `cancel` / `list` | the same job in the background: the primary agent keeps working, can run several repositories in parallel (jobs on one checkout queue), and picks the result up later |
+| `update` (alias `upgrade`) | update the configured binary with its own updater (below); optional `version`: `latest`, `stable`, or an exact version |
 
 `repository` may be omitted: the configured default, `ODYSSEUS_AGENT_SOURCE_REPO`,
 the active workspace, or the only approved checkout is used, in that order. A
@@ -83,6 +84,7 @@ environment variables as the fallback:
 | `claude_code_model` | — | Claude model alias passed with `--model` (empty = Claude Code's default) |
 | `claude_code_restricted` | — | run with `--restricted` (default on): ignore hooks/MCP servers declared inside the checkout, confine file tools to it, refuse bypassPermissions |
 | `claude_code_odysseus_url` / `claude_code_odysseus_token_file` | `CLAUDE_CODE_ODYSSEUS_URL` / `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` | callback into this Odysseus (below) |
+| `claude_code_auto_update` | `CLAUDE_CODE_AUTO_UPDATE` | off by default. On: a run refused with "version X or newer is required" triggers one `update` and one retry, when no other delegation is running and the failed run left the checkout untouched |
 
 The same card shows the live preflight (`GET /api/claude-code/status`) and
 recent delegations (`GET /api/claude-code/tasks`), with a cancel button for
@@ -92,6 +94,44 @@ The runner adapts to the installed version: `--permission-prompts none` is
 passed when the binary supports it (2.1.259+; older builds deny prompts in
 headless mode anyway), `--restricted` when supported and enabled. `--bare`
 is deliberately **not** used: it skips the operator's own sign-in.
+
+### Updating Claude Code
+
+The binary is not part of the image. It lives in the persistent data
+directory (default `/app/data/claude-code/bin/claude`), typically installed
+once with `npm install -g --prefix /app/data/claude-code
+@anthropic-ai/claude-code` as the container user, or with the native
+installer. When a model needs a newer client, a run fails with "Claude Code
+X does not support this model; version Y or newer is required". The tool
+returns that as `error_kind: "claude_code_outdated"` with
+`installed_version`, `required_version`, and the fix, and `status` keeps
+reporting it (`update_required`) until the binary is new enough.
+
+`delegate_to_claude_code {"action": "update"}` (admin only), or
+`POST /api/claude-code/update` with body `{version?, timeout_seconds?}`, runs
+the updater that matches how the configured binary was installed. It uses
+the same allowlisted environment as a delegation (`HOME`, `CLAUDE_CONFIG_DIR`,
+proxy and CA variables, no server secrets):
+
+- **npm install** (the binary resolves into
+  `<prefix>/lib/node_modules/@anthropic-ai/claude-code`): `npm install -g
+  --prefix <prefix> @anthropic-ai/claude-code@<version|latest>`. The bare
+  `claude update` would target npm's global prefix in the image instead.
+- **native install**: `claude update`, or `claude install <version>` when a
+  version is given. If the configured path is a symlink pinned to one file in
+  the native `versions/` directory, it is repointed to the newest version.
+
+The reply carries `version_before`, `version_after`, the command, and its
+redacted output, and the cached `--version`/`--help` probe is dropped. The
+update is refused (HTTP 409) while any delegation is running, since it would
+replace the binary under it. Delegations that start during the update wait
+for it to finish.
+
+The bash tool does not accept `claude update`, `claude --version`,
+`npm install -g @anthropic-ai/claude-code`, or the install script. It points
+at `action=update` or `action=status` instead: an npm or script install from
+the shell creates a second copy that delegation never runs, and that copy is
+lost when the container is recreated.
 
 ### Terms of use (why this shape)
 
@@ -164,6 +204,9 @@ session (automation, CI, another admin tool):
   `clean`/`status` (changed files).
 - `POST /api/claude-code/tasks/{task_id}/cancel` — kills the task's Claude
   Code subprocess if still running; idempotent on an already-finished task.
+- `POST /api/claude-code/update` — updates the binary (see "Updating Claude
+  Code"). Requires `claude_code:write` *and* an admin; 409 while a
+  delegation or another update is running.
 
 Jobs are serialized per repository (a second task against the same checkout
 queues behind the first). Aggregate Claude subprocess concurrency is capped by

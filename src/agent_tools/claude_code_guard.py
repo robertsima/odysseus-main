@@ -13,6 +13,16 @@ Like ``agent_worktree.push_guard`` this is narrow: only a command whose
 executable basename is exactly ``claude`` is matched, at a command position.
 ``grep claude file``, ``python claude_tool.py`` and ``echo claude`` are left
 alone.
+
+Installing or updating Claude Code from the shell is redirected too, to
+``delegate_to_claude_code {"action": "update"}`` (2026-09-26 logs: a run
+failed with "version 2.1.280 or newer is required", the agent ran
+``claude --version && npm install -g @anthropic-ai/claude-code@latest``, and
+the refusal named no way to upgrade). The binary delegation uses lives in the
+persistent data directory; ``npm install -g`` or the install script would put
+a second copy in the image that delegation never runs and that is lost when
+the container is recreated. ``claude --version`` stays redirected to
+``action=status``, which reports the version alongside everything else.
 """
 
 from __future__ import annotations
@@ -33,6 +43,26 @@ _CLAUDE = re.compile(
     _COMMAND_START + _ENV_ASSIGNMENTS + r"(?:\S*/)?claude(?=\s|$)",
     re.IGNORECASE,
 )
+# A `claude` invocation whose intent is the version or an upgrade.
+_CLAUDE_UPGRADE = re.compile(
+    _COMMAND_START + _ENV_ASSIGNMENTS
+    + r"(?:\S*/)?claude\s+(?:update|upgrade|install|doctor|--version|-v)(?=\s|$|[;&|)])",
+    re.IGNORECASE,
+)
+# Installing the CLI with a package manager or the install script.
+_PACKAGE = r"@anthropic-ai/claude-code(?:@\S*)?(?=\s|$|[;&|)])"
+_CLAUDE_INSTALL = re.compile(
+    _COMMAND_START + _ENV_ASSIGNMENTS
+    + r"(?:(?:sudo\s+)?(?:npm|pnpm|yarn|bun)\s+(?:[^;&|\n]*\s)?(?:install|i|add|update|upgrade|up)\s+[^;&|\n]*"
+    + _PACKAGE
+    + r"|(?:curl|wget|irm|iwr|Invoke-RestMethod|Invoke-WebRequest)\s[^;&|\n]*claude\.ai/install\.(?:sh|ps1|cmd))",
+    re.IGNORECASE,
+)
+# Running the CLI through a package runner skips delegation just the same.
+_CLAUDE_RUNNER = re.compile(
+    _COMMAND_START + _ENV_ASSIGNMENTS + r"(?:npx|bunx|pnpm\s+dlx)\s+(?:-\S+\s+)*" + _PACKAGE,
+    re.IGNORECASE,
+)
 
 
 def _guard_disabled() -> bool:
@@ -43,10 +73,44 @@ def detect_claude_invocation(command: object) -> bool:
     """True when `command` would run the Claude Code binary directly."""
     if not isinstance(command, str) or not command.strip():
         return False
-    return _CLAUDE.search(command) is not None
+    return any(pattern.search(command) for pattern in (_CLAUDE, _CLAUDE_INSTALL, _CLAUDE_RUNNER))
+
+
+def detect_upgrade_intent(command: object) -> bool:
+    """True when `command` checks the Claude Code version, or installs or
+    updates it."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    return bool(_CLAUDE_UPGRADE.search(command) or _CLAUDE_INSTALL.search(command))
+
+
+def _upgrade_guidance(command: str) -> str:
+    head = command.strip().splitlines()[0][:120]
+    return "\n".join([
+        "Installing or updating Claude Code from bash is not the supported path: delegation runs the "
+        "configured binary in the persistent data directory, and `npm install -g` or the install script "
+        "would put a second copy in the image that delegation never uses (and that is lost when the "
+        "container is recreated).",
+        "",
+        f"  blocked: {head}",
+        "",
+        "Use the delegate_to_claude_code tool instead:",
+        '  1. delegate_to_claude_code {"action": "update"}',
+        "     Runs the configured binary's own updater (npm against its install prefix, or the native "
+        "`claude update`) with the delegation environment and reports the version before and after. "
+        'Add "version": "latest", "stable", or an exact version such as "2.1.280" when a run said '
+        '"version X or newer is required". Admin-only; refused while a delegation is running.',
+        '  2. delegate_to_claude_code {"action": "status"}',
+        "     Reports the installed version, sign-in state, and whether a previous run needs a newer "
+        "version. Use this instead of `claude --version` or `claude doctor`.",
+        "",
+        "Then retry the delegation.",
+    ])
 
 
 def guidance(command: str) -> str:
+    if detect_upgrade_intent(command):
+        return _upgrade_guidance(command)
     head = command.strip().splitlines()[0][:120]
     return "\n".join([
         "Running Claude Code from bash is not the supported path: it bypasses the "
@@ -65,6 +129,8 @@ def guidance(command: str) -> str:
         '  3. delegate_to_claude_code {"action": "start", ...} then {"action": "poll", "task_id": "...", "wait_seconds": 300}',
         "     Runs the job in the background so you can keep working or use several repositories. "
         "poll with wait_seconds blocks until it finishes; never sleep in the shell to wait.",
+        '  4. delegate_to_claude_code {"action": "update"}',
+        '     Upgrades the configured Claude Code binary (when a run says "version X or newer is required").',
         "",
         "The reply carries Claude's result text, permission_denials, and the resulting "
         "branch, commit, and changed files. Publishing still goes through manage_agent_worktree.",
@@ -77,8 +143,12 @@ def check(command: object) -> Optional[dict]:
         return None
     if not detect_claude_invocation(command):
         return None
-    return {
-        "error": guidance(command if isinstance(command, str) else ""),
+    text = command if isinstance(command, str) else ""
+    result = {
+        "error": guidance(text),
         "exit_code": 1,
         "blocked_reason": "claude_code_requires_delegation_tool",
     }
+    if detect_upgrade_intent(text):
+        result["suggested_call"] = {"tool": "delegate_to_claude_code", "arguments": {"action": "update"}}
+    return result

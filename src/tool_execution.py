@@ -1226,6 +1226,8 @@ def _failure_detail(result: Any, limit: int = 200) -> str:
 
 _DELEGATION_INSPECTION_ACTIONS = frozenset({
     "poll", "get", "cancel", "list", "status", "list_repositories", "repositories",
+    # Upgrading the CLI starts no delegated work (claude_code_tools.update_binary).
+    "update", "upgrade",
 })
 
 

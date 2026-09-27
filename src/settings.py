@@ -210,6 +210,9 @@ DEFAULT_SETTINGS = {
     "claude_code_max_concurrent_tasks": 0,
     "claude_code_model": "",
     "claude_code_restricted": True,
+    # Opt-in: when a delegation fails because the installed CLI is too old for
+    # the model, run the updater once and retry (claude_code_tools).
+    "claude_code_auto_update": False,
     # Cloud runner (src/claude_cloud.py): Claude Code in GitHub Actions on
     # these owner/repo slugs, with the operator's credential kept in each
     # repository's secrets. "local" (default) or "cloud" decides where a
