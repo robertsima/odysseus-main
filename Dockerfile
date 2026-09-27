@@ -155,7 +155,8 @@ COPY . .
 # invalidates the layers below.
 ARG ODYSSEUS_GIT_SHA=""
 ARG ODYSSEUS_BUILD_TIME=""
-ENV ODYSSEUS_GIT_SHA=${ODYSSEUS_GIT_SHA} \n    ODYSSEUS_BUILD_TIME=${ODYSSEUS_BUILD_TIME}
+ENV ODYSSEUS_GIT_SHA=${ODYSSEUS_GIT_SHA} \
+    ODYSSEUS_BUILD_TIME=${ODYSSEUS_BUILD_TIME}
 
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
