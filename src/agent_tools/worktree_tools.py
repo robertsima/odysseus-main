@@ -259,8 +259,10 @@ class ReadAppLogsTool:
                                    f"{', '.join(found['log_files']) or 'no log files'}"
                                    + (" (showing the newest)" if found["truncated"] else "")
                                    + f"\n{body}\n\nActivity runs:\n{runs}")}
+            if action == "bundle":
+                return await self._bundle(args, ctx)
             if action != "tail":
-                return _err(f"read_app_logs: unknown action {action!r} (use 'list', 'tail' or 'trace')")
+                return _err(f"read_app_logs: unknown action {action!r} (use 'list', 'tail', 'trace' or 'bundle')")
             result = agent_logs.read_log(
                 args.get("name"),
                 lines=args.get("lines", agent_logs.DEFAULT_LINES),
@@ -280,4 +282,30 @@ class ReadAppLogsTool:
             "exit_code": 0,
             "output": f"{header}\n{body}",
             "log": {k: v for k, v in result.items() if k != "lines"},
+        }
+
+    @staticmethod
+    async def _bundle(args: Dict[str, Any], ctx: dict) -> Dict[str, Any]:
+        """Write a diagnostics bundle (src/diagnostics_bundle.py) under the
+        data dir for the admin to download. Never includes message text: the
+        agent cannot opt a chat's content into a file meant to be shared."""
+        from src import diagnostics_bundle
+
+        ids = [s for s in (args.get("id"), args.get("session_id"), ctx.get("session_id")) if s]
+        result = await diagnostics_bundle.build_bundle(
+            minutes=args.get("since_minutes") or diagnostics_bundle.DEFAULT_MINUTES,
+            session_ids=ids, include_messages=False, owner=ctx.get("owner"),
+        )
+        path = diagnostics_bundle.write_bundle(result)
+        summary = result.summary
+        return {
+            "exit_code": 0,
+            "path": path,
+            "summary": summary,
+            "output": (f"Diagnostics bundle written to {path} ({len(result.data)} bytes zipped, "
+                       f"{summary.get('files', 0)} files, {summary.get('log_lines', 0)} log lines, "
+                       f"{len(summary.get('sessions') or [])} chat(s), "
+                       f"{len(summary.get('loadouts') or [])} loadout(s), "
+                       f"{len(summary.get('errors') or [])} component error(s)). No message text is included. "
+                       "The admin can also download one from Settings > System > Diagnostics bundle."),
         }

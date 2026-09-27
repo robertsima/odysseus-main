@@ -394,18 +394,20 @@ FUNCTION_TOOL_SCHEMAS = [
                 "action='list' enumerates available log files; action='tail' returns the last N "
                 "lines of one, optionally filtered by substring or minimum level; action='trace' with "
                 "id (a workflow-, run or session ID) gathers every app-log line mentioning it across "
-                "rotated logs plus that ID's activity run records. Read-only, and "
-                "credential material is redacted before you see it."
+                "rotated logs plus that ID's activity run records; action='bundle' writes a diagnostics "
+                "zip (recent logs plus the config of the chats, workers and loadouts they mention, this "
+                "chat included, never message text) under the data dir and returns its path, for the "
+                "admin to download or share. Credential material is redacted before you see it."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "tail", "trace"], "description": "Default: tail"},
-                    "id": {"type": "string", "description": "trace only: the workflow-, run or session ID to audit."},
+                    "action": {"type": "string", "enum": ["list", "tail", "trace", "bundle"], "description": "Default: tail"},
+                    "id": {"type": "string", "description": "trace: the workflow-, run or session ID to audit. bundle: an extra chat (session ID) to include."},
                     "name": {"type": "string", "description": "Log file name, e.g. app.log. Defaults to the app log."},
                     "lines": {"type": "integer", "description": "How many lines to return (1-500, default 100)"},
                     "contains": {"type": "string", "description": "Only lines containing this substring"},
-                    "since_minutes": {"type": "number", "description": "Only entries from the last N minutes, e.g. 10 for 'the last 10 minutes'"},
+                    "since_minutes": {"type": "number", "description": "Only entries from the last N minutes, e.g. 10 for 'the last 10 minutes' (bundle: its window, default 60)"},
                     "level": {
                         "type": "string",
                         "enum": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],

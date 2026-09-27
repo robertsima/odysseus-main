@@ -266,3 +266,15 @@ user enables the matching toggle in Settings > Integrations > Claude Agent.
 The `claude_agent` token profile bundles the scopes a Claude Code session
 typically needs against `/api/codex/*` (todos, documents, memory, and the
 public vault).
+
+`diagnostics:read` is opt-in and in no profile: it lets the token download the
+diagnostics bundle (redacted logs plus the config of the chats, workers and
+loadouts they mention; never chat messages) so Claude Code can debug Odysseus
+without you pasting log lines. It is honoured only for a token owned by an
+admin. Enable *Diagnostics* on the Claude Agent token, then:
+
+```bash
+curl -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/diagnostics/bundle?minutes=60" -o bundle.zip
+```
+
+See `website/agent-worktree.md` (Diagnostics bundle) for the layout.

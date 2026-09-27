@@ -37,6 +37,10 @@ ALLOWED_SCOPES = {
     # journal text to a hosted provider.
     "vault:read",
     "vault:read_private",
+    # Download the diagnostics bundle (/api/diagnostics/bundle[/summary]):
+    # redacted logs plus chat/loadout/system configuration. Opt-in only — no
+    # profile below grants it — and honoured only for an admin-owned token.
+    "diagnostics:read",
 }
 TOKEN_PROFILES = {
     "chat": ["chat"],

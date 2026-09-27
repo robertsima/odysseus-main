@@ -1,16 +1,52 @@
-"""Diagnostics routes — /api/db/stats, /api/rag/stats, /api/test/youtube, /api/test-research."""
+"""Diagnostics routes — /api/diagnostics/*, /api/db/stats, /api/rag/stats, /api/test/youtube, /api/test-research."""
 
+import asyncio
 import logging
 import os
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional
 
-from fastapi import APIRouter, HTTPException, Form, Request
+from fastapi import APIRouter, HTTPException, Form, Query, Request
+from fastapi.responses import Response
 
 from services.youtube.youtube_handler import extract_youtube_id, extract_transcript_async
 from core.constants import DEFAULT_HOST, DATA_DIR
 from core.middleware import require_admin
 
 logger = logging.getLogger(__name__)
+
+# Opt-in API-token scope for pulling the diagnostics bundle from outside the
+# browser (e.g. Claude Code on another machine with an Odysseus token). Never
+# part of a token profile, so no existing or newly minted token has it unless
+# an admin switches it on.
+DIAGNOSTICS_READ_SCOPE = "diagnostics:read"
+
+
+def _require_diagnostics_reader(request: Request, *, include_messages: bool = False) -> Optional[str]:
+    """Authorize a diagnostics-bundle route; return the owner it runs as.
+
+    A browser session must be an admin. An API token needs the
+    ``diagnostics:read`` scope and an owner who is still an admin, because the
+    bundle spans every user's log lines. A token can never ask for message
+    content: that can carry private vault text, and a token's caller is
+    usually a hosted model.
+    """
+    if getattr(request.state, "api_token", False):
+        scopes = set(getattr(request.state, "api_token_scopes", []) or [])
+        if DIAGNOSTICS_READ_SCOPE not in scopes:
+            raise HTTPException(403, f"API token missing required scope: {DIAGNOSTICS_READ_SCOPE}")
+        owner = getattr(request.state, "api_token_owner", None)
+        if not owner:
+            raise HTTPException(403, "API token has no owner")
+        auth_mgr = getattr(request.app.state, "auth_manager", None)
+        if auth_mgr is not None and getattr(auth_mgr, "is_configured", False) and not auth_mgr.is_admin(owner):
+            raise HTTPException(403, "Diagnostics bundle needs a token owned by an admin")
+        if include_messages:
+            raise HTTPException(403, "include_messages is only available from an admin browser session")
+        return owner
+    require_admin(request)
+    from src.auth_helpers import get_current_user
+
+    return get_current_user(request)
 
 
 def setup_diagnostics_routes(
@@ -52,6 +88,57 @@ def setup_diagnostics_routes(
         except Exception as e:
             logger.error(f"Diagnostics logs retrieval error: {e}")
             raise HTTPException(500, f"Failed to retrieve logs: {str(e)}")
+
+    @router.get("/api/diagnostics/bundle")
+    async def get_diagnostics_bundle(
+        request: Request,
+        minutes: float = 60,
+        session: Optional[List[str]] = Query(None),
+        include_messages: bool = False,
+        max_lines: Optional[int] = None,
+    ) -> Response:
+        """Zip of recent redacted logs plus the configuration of every chat,
+        worker, and loadout they mention (src/diagnostics_bundle.py).
+        ``session`` may repeat or be comma-separated; those chats are always
+        included, with their parent and child workers."""
+        owner = _require_diagnostics_reader(request, include_messages=include_messages)
+        from src import diagnostics_bundle
+
+        result = await diagnostics_bundle.build_bundle(
+            minutes=minutes, session_ids=session, include_messages=include_messages,
+            max_lines=max_lines or diagnostics_bundle.DEFAULT_MAX_LINES, owner=owner,
+            rag_manager=rag_manager, memory_vector=memory_vector,
+        )
+        logger.info(
+            "[diagnostics] bundle built for %s: %d file(s), %d byte(s), %d session(s), messages=%s, errors=%d",
+            owner or "-", result.summary["files"], len(result.data), len(result.summary["sessions"]),
+            bool(include_messages), len(result.summary["errors"]),
+        )
+        return Response(
+            content=result.data,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{result.filename}"',
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @router.get("/api/diagnostics/bundle/summary")
+    async def get_diagnostics_bundle_summary(
+        request: Request,
+        minutes: float = 60,
+        session: Optional[List[str]] = Query(None),
+        max_lines: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Preview of a bundle: log line counts and the chats and loadouts
+        it would include. Reads logs and stores only; no probes."""
+        _require_diagnostics_reader(request)
+        from src import diagnostics_bundle
+
+        return await asyncio.to_thread(
+            diagnostics_bundle.summarize, minutes=minutes, session_ids=session,
+            max_lines=max_lines or diagnostics_bundle.DEFAULT_MAX_LINES,
+        )
 
     @router.get("/api/diagnostics/route_latency")
     async def get_route_latency(request: Request) -> Dict[str, Any]:

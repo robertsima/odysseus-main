@@ -309,6 +309,56 @@ keys, JWTs, URLs carrying userinfo or query keys) before returning lines.
 Log directories searched, in order: `<data>/logs/`, `<repo>/logs/`,
 `/tmp/odysseus-tmux/`.
 
+## Diagnostics bundle
+
+Raw log lines pasted into another tool lose the context that explains them:
+which chat or worker a line belongs to, the loadout, model and tool policy it
+ran under, whether the shell or private vault was granted, and how workers link
+to their parents. The diagnostics bundle packs that into one zip
+(`src/diagnostics_bundle.py`):
+
+| path | contents |
+|---|---|
+| `manifest.json`, `README.txt` | window, app version and git sha, file list, redaction notice, `errors` (a component that failed) and `truncated` (what the 20 MB cap cut), and what the logs referenced |
+| `logs/<name>` | every log above, limited to the window and 20,000 lines per file, redacted like `read_app_logs` |
+| `sessions/<id>.json` | each chat the logs mention (`session=`, `for chat`, `"session_id":`, `child=`, worker run ids) or you name: model, endpoint (no credentials), stored settings, effective tool policy (allowed/denied tools, bash, private vault, approval mode, delegation policy, worker limit, depth), loadout, lineage (parent, child workers, runs with status, rounds, tool calls and errors) and a content-free summary of the last turn |
+| `loadouts/<name>.json` | the portable loadout export (already redacted) plus its readiness |
+| `system/` | Claude Code status, MCP servers (connection state and tool counts only: no env, args or headers), service health, scheduler lanes, and the settings store |
+
+Every JSON file is masked on the way out: string values under keys matching
+`secret|token|key|password|credential|cookie|auth` become `***` (the key stays,
+so you can see it is set), long credential-shaped strings become `***`, and
+URLs keep only scheme, host and path. Redaction is pattern-based, so skim a
+bundle before sharing it outside your own machines.
+
+Chat messages are **not** included by default. Ticking *Include chat messages*
+adds the last 20 messages of each included chat (credential-redacted only).
+They can carry private vault notes and email, which is why the box is off by
+default and asks for confirmation. Messages of another user's chat are
+withheld even then.
+
+Three ways to get one:
+
+- **Settings > System > Diagnostics Bundle**: pick 15 minutes, 60 minutes or 4
+  hours, optionally a chat ID (*Current chat* fills in the open one), then
+  *Preview* or *Export diagnostics bundle*.
+- **HTTP**, for an admin browser session or an API token with the opt-in
+  `diagnostics:read` scope. No token profile grants that scope, and it is
+  honoured only for a token owned by an admin. Token callers cannot request
+  messages.
+
+  ```bash
+  curl -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/diagnostics/bundle?minutes=60" -o bundle.zip
+  curl -H "Authorization: Bearer $ODYSSEUS_API_TOKEN" "$ODYSSEUS_URL/api/diagnostics/bundle/summary?minutes=60&session=<chat id>"
+  ```
+
+  Parameters: `minutes` (1 to 10080, default 60), `session` (repeatable or
+  comma-separated), `include_messages` (browser sessions only), `max_lines`
+  (per log).
+- **The agent**: `read_app_logs` with `action="bundle"` writes one (never with
+  messages, always including the calling chat) to
+  `<data>/exports/diagnostics/` and returns the path. The newest 10 are kept.
+
 ## Access control
 
 Both tools are admin-only. They are in `NON_ADMIN_BLOCKED_TOOLS` and in the

@@ -2665,6 +2665,7 @@ const _TOKEN_SCOPES = [
   { key: 'vault:read_private', label: 'Vault private',    detail: 'Also reach directories marked private, such as Journal' },
   { key: 'cookbook:read',     label: 'Cookbook read',     detail: 'List cookbook tasks + tail their tmux output' },
   { key: 'cookbook:launch',   label: 'Cookbook launch',   detail: 'Launch and stop cookbook serve tasks' },
+  { key: 'diagnostics:read',  label: 'Diagnostics read',  detail: 'Download the diagnostics bundle (redacted logs + chat/loadout config); admin-owned tokens only' },
 ];
 
 function _renderTokenScopeRows(t) {
@@ -3307,6 +3308,112 @@ function initRouteLatencyView() {
   loadRouteLatency();
 }
 
+/* ── Diagnostics bundle (/api/diagnostics/bundle) ── */
+function _diagBundleParams(includeMessages) {
+  const params = new URLSearchParams({ minutes: el('diag-bundle-minutes')?.value || '60' });
+  const session = (el('diag-bundle-session')?.value || '').trim();
+  if (session) params.append('session', session);
+  if (includeMessages) params.set('include_messages', 'true');
+  return params;
+}
+
+async function _diagErrorText(res) {
+  try {
+    const data = await res.json();
+    return data.detail || data.error || `HTTP ${res.status}`;
+  } catch (_) {
+    return `HTTP ${res.status}`;
+  }
+}
+
+function initDiagnosticsBundle() {
+  const exportBtn = el('diag-bundle-export-btn');
+  if (!exportBtn) return;
+  const previewBtn = el('diag-bundle-preview-btn');
+  const msgBox = el('diag-bundle-msg');
+  const messagesCb = el('diag-bundle-messages');
+  const warning = el('diag-bundle-messages-warning');
+  const setMsg = (text, cls = '') => {
+    msgBox.textContent = text;
+    msgBox.className = 'settings-diag-bundle-msg' + (cls ? ' ' + cls : '');
+  };
+
+  if (messagesCb && warning) {
+    messagesCb.addEventListener('change', () => warning.classList.toggle('hidden', !messagesCb.checked));
+  }
+
+  const currentBtn = el('diag-bundle-current-btn');
+  if (currentBtn) currentBtn.addEventListener('click', async () => {
+    try {
+      const mod = await import('./sessions.js');
+      const sid = (mod.default && mod.default.getCurrentSessionId && mod.default.getCurrentSessionId())
+        || (mod.getCurrentSessionId && mod.getCurrentSessionId()) || '';
+      if (!sid) { setMsg('No chat is open.', 'admin-error'); return; }
+      el('diag-bundle-session').value = sid;
+      setMsg('');
+    } catch (e) {
+      setMsg('Could not read the open chat: ' + e.message, 'admin-error');
+    }
+  });
+
+  if (previewBtn) previewBtn.addEventListener('click', async () => {
+    previewBtn.disabled = true;
+    setMsg('Reading logs...');
+    try {
+      const res = await fetch(`/api/diagnostics/bundle/summary?${_diagBundleParams(false)}`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(await _diagErrorText(res));
+      const d = await res.json();
+      const logs = (d.logs || []).filter(l => l.lines).map(l => `${l.name} (${l.lines})`).join(', ') || 'none';
+      const sessions = (d.sessions || []).map(s => `  ${s.id}${s.title ? ' - ' + s.title : ''}${s.model ? ' [' + s.model + ']' : ''}`);
+      const lines = [
+        `${d.total_lines || 0} log line(s) in the last ${d.window_minutes} min: ${logs}`,
+        `${(d.sessions || []).length} chat(s)${d.sessions_capped ? ' (capped)' : ''}:`,
+        ...(sessions.length ? sessions : ['  none found in the logs']),
+        `Loadouts: ${(d.loadouts || []).join(', ') || 'none'}`,
+      ];
+      if ((d.sessions_not_found || []).length) lines.push(`Mentioned but gone: ${d.sessions_not_found.length} chat(s)`);
+      if ((d.errors || []).length) lines.push(`Errors: ${d.errors.map(e => e.component).join(', ')}`);
+      setMsg(lines.join('\n'));
+    } catch (e) {
+      setMsg('Preview failed: ' + e.message, 'admin-error');
+    } finally {
+      previewBtn.disabled = false;
+    }
+  });
+
+  exportBtn.addEventListener('click', async () => {
+    const includeMessages = !!(messagesCb && messagesCb.checked);
+    if (includeMessages && !await uiModule.styledConfirm(
+      'The bundle will contain the last messages of each included chat. They can hold private vault notes, email and anything else those chats saw. Export anyway?',
+      { confirmText: 'Export with messages', danger: true })) return;
+    const label = exportBtn.textContent;
+    exportBtn.disabled = true;
+    exportBtn.textContent = 'Building...';
+    setMsg('');
+    try {
+      const res = await fetch(`/api/diagnostics/bundle?${_diagBundleParams(includeMessages)}`, { credentials: 'same-origin' });
+      if (!res.ok) throw new Error(await _diagErrorText(res));
+      const blob = await res.blob();
+      const disposition = res.headers.get('Content-Disposition') || '';
+      const match = disposition.match(/filename="?([^";]+)"?/);
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = match ? match[1] : 'odysseus-diagnostics.zip';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      setMsg(`Downloaded ${a.download} (${Math.max(1, Math.round(blob.size / 1024))} KB).`
+        + (includeMessages ? ' It contains chat messages.' : ''), 'admin-success');
+    } catch (e) {
+      setMsg('Export failed: ' + e.message, 'admin-error');
+    } finally {
+      exportBtn.disabled = false;
+      exportBtn.textContent = label;
+    }
+  });
+}
+
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
@@ -3314,7 +3421,8 @@ function initAll() {
   modalEl = el('settings-modal');
   const inits = [
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
-    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRouteLatencyView, initRag,
+    initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRouteLatencyView,
+    initDiagnosticsBundle, initRag,
     () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {

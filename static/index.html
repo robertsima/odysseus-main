@@ -2851,6 +2851,34 @@
               </div>
             </div>
           </div>
+          <div class="admin-card" id="settings-diag-bundle-card">
+            <h2>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="settings-system-logs-svg"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              Diagnostics Bundle
+            </h2>
+            <div class="admin-toggle-sub settings-system-logs-toggle-sub">One zip with recent redacted logs plus the configuration of every chat, worker and loadout they mention, Claude Code status, MCP servers and service health. Hand it to whoever is debugging instead of pasting log lines.</div>
+            <div class="settings-col settings-system-logs-col">
+              <div class="settings-system-logs-controls">
+                <select id="diag-bundle-minutes" class="settings-system-logs-select" aria-label="Time window">
+                  <option value="15">Last 15 min</option>
+                  <option value="60" selected>Last 60 min</option>
+                  <option value="240">Last 4 hours</option>
+                </select>
+                <input type="text" id="diag-bundle-session" placeholder="Chat/session ID (optional)" class="settings-system-logs-search" spellcheck="false" autocomplete="off">
+                <button type="button" class="admin-btn-sm" id="diag-bundle-current-btn" title="Fill in the chat that is open now">Current chat</button>
+              </div>
+              <label class="settings-diag-bundle-messages">
+                <input type="checkbox" id="diag-bundle-messages">
+                <span>Include chat messages</span>
+              </label>
+              <div id="diag-bundle-messages-warning" class="settings-diag-bundle-warning hidden">The last messages of each included chat go into the bundle (redacted for credentials only). They can contain private vault notes, email and anything else the chat saw. Only share this bundle with someone you would show those chats to.</div>
+              <div class="settings-system-logs-controls">
+                <button type="button" class="admin-btn-sm" id="diag-bundle-preview-btn">Preview</button>
+                <button type="button" class="admin-btn-add" id="diag-bundle-export-btn">Export diagnostics bundle</button>
+              </div>
+              <div id="diag-bundle-msg" class="settings-diag-bundle-msg"></div>
+            </div>
+          </div>
           <div class="admin-card">
             <h2>Route Latency</h2>
             <div class="admin-toggle-sub" style="margin-bottom:8px">Per-route request timing. Refresh manually; this panel does not auto-poll.</div>
