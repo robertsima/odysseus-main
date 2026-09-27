@@ -149,6 +149,14 @@ RUN pip install --no-cache-dir --no-deps /tmp/odysseus-wheels/*.whl \
 # Copy app code
 COPY . .
 
+# The commit this image was built from (.git is not in the build context).
+# Shown in the [runtime] start log line and the diagnostics bundle, so a
+# report can say which build is running. Declared after COPY so it only
+# invalidates the layers below.
+ARG ODYSSEUS_GIT_SHA=""
+ARG ODYSSEUS_BUILD_TIME=""
+ENV ODYSSEUS_GIT_SHA=${ODYSSEUS_GIT_SHA} \n    ODYSSEUS_BUILD_TIME=${ODYSSEUS_BUILD_TIME}
+
 # Create data directory (mount a volume here for persistence)
 RUN mkdir -p data logs services/cache/search
 

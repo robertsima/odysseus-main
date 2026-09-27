@@ -732,7 +732,22 @@ def _app_info() -> Dict[str, Any]:
         from src.constants import APP_VERSION
     except Exception:
         APP_VERSION = None
-    return {"version": APP_VERSION, **_git_info()}
+    info: Dict[str, Any] = {"version": APP_VERSION, **_git_info()}
+    # Which build and process wrote these logs: ODYSSEUS_GIT_SHA/BUILD_TIME
+    # are baked into the image (Dockerfile), and the process start time says
+    # whether a deploy happened inside the window.
+    info["build_time"] = os.environ.get("ODYSSEUS_BUILD_TIME") or None
+    info["deployment"] = os.environ.get("ODYSSEUS_DEPLOYMENT_ID") or os.environ.get("HOSTNAME") or None
+    info["process_started_at"] = None
+    try:
+        import psutil  # optional
+        info["process_started_at"] = datetime.fromtimestamp(psutil.Process().create_time()).isoformat(timespec="seconds")
+    except Exception:
+        try:  # Linux without psutil: /proc/self is created with the process
+            info["process_started_at"] = datetime.fromtimestamp(os.stat("/proc/self").st_ctime).isoformat(timespec="seconds")
+        except OSError:
+            pass
+    return info
 
 
 # ── entry points ────────────────────────────────────────────────────────── #

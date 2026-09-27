@@ -67,6 +67,9 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          build-args: |
+            ODYSSEUS_GIT_SHA=${{ github.sha }}
+            ODYSSEUS_BUILD_TIME=${{ github.event.head_commit.timestamp }}
       - name: Export digest
         run: |
           mkdir -p /tmp/digests

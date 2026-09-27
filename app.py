@@ -133,8 +133,9 @@ logger = logging.getLogger(__name__)
 # which data directory. An audit of a log file otherwise cannot tell this
 # runtime from another instance or checkout sharing the path.
 logger.info(
-    "[runtime] start pid=%s mode=runtime deployment=%s data_dir=%s",
+    "[runtime] start pid=%s mode=runtime deployment=%s build=%s data_dir=%s",
     os.getpid(), os.environ.get("ODYSSEUS_DEPLOYMENT_ID") or os.environ.get("HOSTNAME") or "local",
+    (os.environ.get("ODYSSEUS_GIT_SHA") or "unknown")[:12],
     os.path.realpath(DATA_DIR),
 )
 
