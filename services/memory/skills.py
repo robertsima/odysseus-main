@@ -234,7 +234,9 @@ class SkillsManager:
             return None
 
     def _write_skill(self, sk: Skill) -> str:
-        path = self._skill_file(sk.category or "general", sk.name)
+        return self._write_skill_at(sk, self._skill_file(sk.category or "general", sk.name))
+
+    def _write_skill_at(self, sk: Skill, path: str) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         from core.atomic_io import atomic_write_text
         atomic_write_text(path, sk.to_markdown())
@@ -574,6 +576,11 @@ class SkillsManager:
                 continue
 
             old_dir = os.path.dirname(path)
+            # What the caller is actually asking to move: a name or category
+            # change. A skill that merely sits at a non-canonical path (dropped
+            # in by hand, a duplicate, an older layout) is NOT a rename request.
+            orig_name = sk.name
+            orig_cat = slugify(sk.category or "general", fallback="general")
 
             scalar_keys = (
                 "description", "version", "category", "status", "confidence",
@@ -610,8 +617,25 @@ class SkillsManager:
                 # Move the whole skill directory if rename or recategorize
                 new_dir = os.path.dirname(new_path)
                 if os.path.isdir(new_dir):
-                    logger.warning(f"Skill rename target exists: {new_dir}")
-                    return False
+                    move_requested = (
+                        sk.name != orig_name
+                        or slugify(sk.category or "general", fallback="general") != orig_cat
+                    )
+                    if move_requested:
+                        logger.warning(f"Skill rename target exists: {new_dir}")
+                        return False
+                    # The canonical slot is taken (typically by a same-named
+                    # duplicate) and nobody asked to move this skill: update it
+                    # where it lives instead of failing. Previously every
+                    # status/confidence write from the nightly audit tried to
+                    # "rename" such a skill onto the occupied slot, logged a
+                    # warning, and silently dropped the update — every night.
+                    logger.debug(
+                        "Skill %s is at non-canonical %s (canonical %s is taken); updating in place",
+                        sk.name, old_dir, new_dir,
+                    )
+                    self._write_skill_at(sk, path)
+                    return True
                 os.makedirs(os.path.dirname(new_dir), exist_ok=True)
                 os.rename(old_dir, new_dir)
                 # Also rename usage key

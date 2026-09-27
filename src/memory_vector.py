@@ -85,19 +85,89 @@ class MemoryVectorStore:
         for lane in self._lanes:
             add(lane.collection)
 
+        # Also purge an *inactive* lane's collection so a memory deleted under
+        # one embedding lane cannot resurface after switching lanes. That is a
+        # deliberate probe: a 404 on e.g. ``odysseus_memories_custom`` just
+        # means that lane was never built. Skip names an active lane already
+        # covers — re-fetching them was a wasted round-trip per delete.
         try:
             from src.chroma_client import get_chroma_client
 
             client = get_chroma_client()
             for lane_name in (LANE_CUSTOM, LANE_FASTEMBED):
+                name = collection_name(self.COLLECTION_NAME, lane_name)
+                if name in seen:
+                    continue
                 try:
-                    add(client.get_collection(collection_name(self.COLLECTION_NAME, lane_name)))
+                    add(client.get_collection(name))
                 except Exception:
                     pass
         except Exception:
             pass
 
         return collections
+
+    # Chroma caps request sizes; page existence checks and embeddings.
+    _GET_PAGE = 500
+    _ADD_PAGE = 100
+
+    def add_many(self, items) -> int:
+        """Add ``(memory_id, text)`` pairs, skipping ids already indexed.
+
+        Same semantics as calling :meth:`add` per item, but one
+        ``get(ids=[...])`` per lane (paged) instead of one per memory — the
+        memory tidy used to issue ~N sequential ``/get`` round-trips after
+        every run. Returns the number of vectors added across lanes.
+        """
+        if not self._healthy:
+            return 0
+        wanted: Dict[str, str] = {}
+        for memory_id, text in items or []:
+            mid = str(memory_id or "")
+            if mid and text and mid not in wanted:
+                wanted[mid] = str(text)
+        if not wanted:
+            return 0
+        ids = list(wanted)
+        added = 0
+        for lane in self._lanes:
+            missing: List[str] = []
+            for start in range(0, len(ids), self._GET_PAGE):
+                page = ids[start:start + self._GET_PAGE]
+                try:
+                    existing = lane.collection.get(ids=page, include=[])
+                    have = set(existing.get("ids") or [])
+                except Exception as e:
+                    logger.warning("memory add_many: existence check failed in %s lane: %s", lane.name, e)
+                    continue
+                missing.extend(i for i in page if i not in have)
+            for start in range(0, len(missing), self._ADD_PAGE):
+                batch = missing[start:start + self._ADD_PAGE]
+                texts = [wanted[i] for i in batch]
+                try:
+                    lane.collection.add(
+                        ids=batch,
+                        embeddings=lane.encode(texts),
+                        documents=texts,
+                        metadatas=[{"source": "memory"}] * len(batch),
+                    )
+                    added += len(batch)
+                except Exception as e:
+                    logger.warning("memory add_many failed in %s lane: %s", lane.name, e)
+        return added
+
+    def remove_many(self, memory_ids) -> None:
+        """Remove several memory entries with one delete per collection."""
+        if not self._healthy:
+            return
+        ids = [str(i) for i in dict.fromkeys(memory_ids or []) if i]
+        if not ids:
+            return
+        for collection in self._collections_for_delete():
+            try:
+                collection.delete(ids=ids)
+            except Exception as e:
+                logger.warning("memory remove_many (%d ids): %s", len(ids), e)
 
     def add(self, memory_id: str, text: str):
         """Add a single memory entry to the vector index."""

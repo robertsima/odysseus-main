@@ -736,11 +736,16 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 _vec = getattr(_ai, "_memory_vector", None)
                 if _vec is not None and getattr(_vec, "healthy", False):
                     _ids_after = {str(m.get("id")) for m in all_memories if m.get("id")}
-                    for _gone in _ids_before - _ids_after:
-                        _vec.remove(_gone)
-                    for m in all_memories:
-                        if m.get("id") and m.get("text"):
-                            _vec.add(str(m["id"]), str(m["text"]))
+                    # Batched: one delete and one (paged) existence get per
+                    # collection, not a Chroma round-trip per memory.
+                    _gone = sorted(_ids_before - _ids_after)
+                    if _gone:
+                        _vec.remove_many(_gone)
+                    _vec.add_many(
+                        (str(m["id"]), str(m["text"]))
+                        for m in all_memories
+                        if m.get("id") and m.get("text")
+                    )
             except Exception:
                 logger.debug("memory tidy: vector index sync skipped", exc_info=True)
             if ai_used:

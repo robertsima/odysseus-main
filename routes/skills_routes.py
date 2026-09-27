@@ -719,6 +719,7 @@ def _audit_finalize_status(skills_manager, name: str, owner, verdict: str,
 def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
     """Parse + persist an edited SKILL.md. Returns True on success."""
     try:
+        import os
         from services.memory.skill_format import Skill, slugify
         sk = Skill.from_markdown(md)
         # Pin the identity: the audit's fixer is now allowed to edit frontmatter
@@ -726,6 +727,21 @@ def _apply_skill_md(skills_manager, name: str, md: str, owner) -> bool:
         # skill — a changed `name` would move the dir and orphan the usage/audit
         # sidecar entries that the caller keeps writing under the original name.
         sk.name = name
+        # The fixer may recategorize, but never onto a slot another skill
+        # already occupies: that is a rename the manager refuses, which dropped
+        # the whole edit and re-logged "Skill rename target exists" on every
+        # audit run. Keep the current category and land the rest of the edit.
+        current = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
+        if current is not None:
+            cur_cat = current.get("category") or "general"
+            if (slugify(sk.category or "general", fallback="general")
+                    != slugify(cur_cat, fallback="general")
+                    and os.path.isdir(skills_manager._skill_dir(sk.category, name))):
+                logger.info(
+                    "Audit: keeping skill %s in category %r; %r already has a skill of that name",
+                    name, cur_cat, sk.category,
+                )
+                sk.category = cur_cat
         return bool(skills_manager.update_skill(name, {
             "name": sk.name, "description": sk.description, "version": sk.version,
             "category": sk.category, "tags": sk.tags, "platforms": sk.platforms,
