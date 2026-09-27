@@ -392,11 +392,68 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
     expand_disabled = agent_profiles.expand_tool_aliases(profile.get("disabled_tools") or [])
     withheld = worker_withheld_tools(profile, policy.get("worker_depth", 0)) if as_worker else {}
 
-    denied, effective, conditional = [], [], []
+    def mcp_group(entry, server_key):
+        """What an `mcp__*` / `mcp__<server>__*` grant reaches right now."""
+        reachable, unavailable = {}, {}
+        for qualified, (server, _status) in mcp.items():
+            if server_key != "*" and server != server_key:
+                continue
+            if qualified in expand_disabled or qualified in owner_denied:
+                continue
+            problem = mcp_problem(qualified)
+            if problem:
+                unavailable.setdefault(server, problem)
+            else:
+                reachable.setdefault(server, set()).add(qualified)
+        tools = set().union(*reachable.values()) if reachable else set()
+        return {
+            "entry": entry,
+            "servers": sorted(reachable),
+            "server_count": len(reachable),
+            "tool_count": len(tools),
+            "deferred_count": len(tools & deferred_names),
+            "unavailable_servers": dict(sorted(unavailable.items())),
+        }
+
+    denied, effective, conditional, groups = [], [], [], []
+    wildcard_known, wildcard_connected = set(), set()
     for tool in wanted:
         if tool in selected and tool in expand_disabled and profile.get("tool_access") == "selected":
             denied.append({"tool": tool, "reason": "profile_disabled", "detail": (
                 "listed in this loadout's enabled_tools AND its disabled_tools; the denial wins")})
+            continue
+        server_key = mcp_wildcard_server(tool)
+        if server_key is not None:
+            # A grant by shape (manage_agent_loadout: "mcp__<server>__* for a
+            # whole server, mcp__* for all of them"), not a tool name, so it is
+            # never "unknown": report what it expands to instead. 2026-09-27:
+            # Odysseus Admin read DEGRADED only because `mcp__*` was looked up
+            # as if it were a tool called "mcp__*".
+            group = mcp_group(tool, server_key)
+            wildcard_known.add(tool)
+            if group["tool_count"]:
+                wildcard_connected.add(tool)
+            # `selected` for an "all" profile is `wanted & authorized`, and the
+            # caller's authorized set holds tool names, never a wildcard — so
+            # for those profiles the grant is judged the way the clamp judges it.
+            granted = tool in selected or (
+                profile.get("tool_access") not in {"selected", "none"}
+                and _caller_may_grant_mcp(tool, policy))
+            if not granted:
+                reason, detail = (
+                    ("not_requested", "not in this profile's enabled_tools")
+                    if _caller_may_grant_mcp(tool, policy)
+                    else ("parent_policy", "the calling chat may not use it, so it cannot grant it"))
+                denied.append({"tool": tool, "reason": reason, "detail": detail})
+            elif server_key == "*" or group["tool_count"]:
+                # "Every connected server" asks for whatever is connected, so
+                # none connected right now is information, not a broken grant.
+                effective.append(tool)
+                groups.append(group)
+            else:
+                denied.append({"tool": tool, "reason": "mcp_server", "detail": (
+                    group["unavailable_servers"].get(server_key)
+                    or f"MCP server {server_key} offers no tools right now (not connected, or not configured)")})
             continue
         if tool in selected and tool in withheld:
             denied.append({"tool": tool, "reason": "worker_policy",
@@ -425,15 +482,32 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
         "status": "BLOCKED" if missing else ("DEGRADED" if denied else "READY"),
         "requested": requested,
         "required": required,
-        "known": [t for t in wanted if t in known],
-        "connected": [t for t in wanted if t in known and (t not in mcp or mcp[t][1] == "connected")],
-        "authorized": [t for t in wanted if t in authorized],
+        "known": [t for t in wanted if t in known or t in wildcard_known],
+        "connected": [t for t in wanted if (t in known and (t not in mcp or mcp[t][1] == "connected"))
+                      or t in wildcard_connected],
+        "authorized": [t for t in wanted if t in authorized
+                       or (t in wildcard_known and _caller_may_grant_mcp(t, policy))],
         "selected_for_profile": sorted(effective),
         "deferred_schema": sorted(set(effective) & deferred_names),
+        # One row per MCP wildcard grant: what `mcp__*` / `mcp__<server>__*`
+        # reaches right now, since the tools themselves cannot be listed.
+        "mcp_groups": groups,
         "conditional": conditional,
         "denied": denied,
         "mission_critical_missing": missing,
     }
+
+
+def mcp_wildcard_server(entry: str) -> Optional[str]:
+    """``"*"`` for ``mcp__*``, the server id for ``mcp__<server>__*``, else None."""
+    from src.tool_policy import ALL_MCP_WILDCARD, split_mcp_tool_name
+
+    if entry == ALL_MCP_WILDCARD:
+        return "*"
+    parts = split_mcp_tool_name(entry)
+    if parts and parts[1] == "*":
+        return parts[0]
+    return None
 
 
 def _clamp_tools(prof: Dict[str, Any], policy: Dict[str, Any], notes: List[str]) -> None:

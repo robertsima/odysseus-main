@@ -577,6 +577,9 @@ class TaskScheduler:
         # Manual runs are foreground work by definition: they skip the idle gate
         # and survive the foreground-activity sweeps that cancel background jobs.
         self._manual_runs = {}
+        # task_id -> reason for runs the foreground sweep cancelled; see
+        # _foreground_preemptions().
+        self._foreground_preempted = {}
 
     def _manual_run_begin(self, task_id: str):
         self._manual_runs[task_id] = self._manual_runs.get(task_id, 0) + 1
@@ -1290,16 +1293,28 @@ class TaskScheduler:
         except asyncio.CancelledError:
             # If cancellation happens while queued behind the semaphore,
             # _execute_task_locked never runs and cannot update the Activity row.
-            self._mark_run_aborted(task_id, run_id)
+            preempt = self._foreground_preemptions()
+            if task_id in preempt:
+                self._mark_run_aborted(
+                    task_id, run_id, message=self._foreground_pause_message(preempt[task_id]),
+                )
+            else:
+                self._mark_run_aborted(task_id, run_id)
             # Only automatic dispatch gets deferred: stopping a manual run means
             # the user stopped that one run, not the task's timetable.
             if not manual:
-                self._defer_immediately_due_task(task_id, delay=timedelta(minutes=15))
+                self._defer_immediately_due_task(task_id, delay=self._FOREGROUND_PREEMPT_RETRY)
             raise
         finally:
             handle = self._task_handles.get(task_id)
             if handle is current:
                 self._task_handles.pop(task_id, None)
+            if handle is None or handle is current:
+                # Consumed: this run has finished its cancellation handling
+                # (_execute_task_locked may already have dropped the handle),
+                # and a later run must start clean. A mark made against some
+                # other live handle for this task belongs to that run.
+                self._foreground_preemptions().pop(task_id, None)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -1343,6 +1358,38 @@ class TaskScheduler:
                 db.close()
         except Exception:
             logger.debug("Failed to defer cancelled queued task %s", task_id, exc_info=True)
+
+    #: How long a background run preempted by foreground activity waits before
+    #: it is tried again. Both preemption paths (the in-run monitor and the
+    #: request/heartbeat sweep) use it.
+    _FOREGROUND_PREEMPT_RETRY = timedelta(minutes=15)
+
+    def _foreground_preemptions(self) -> dict:
+        """task_id -> reason, for runs cancelled because the user became active.
+
+        A run's CancelledError handler cannot tell "the user pressed Stop" from
+        "a foreground request swept background work away" — both arrive as a
+        bare cancel. The sweep records its reason here *before* cancelling, so
+        the handler can label the run, schedule the short retry and do the
+        Activity accounting exactly once. Lazy for the same ``__new__`` reason
+        as :meth:`_transient_retry_counts`.
+        """
+        marks = getattr(self, "_foreground_preempted", None)
+        if marks is None:
+            marks = {}
+            self._foreground_preempted = marks
+        return marks
+
+    @classmethod
+    def _foreground_pause_message(cls, reason: str | None = None) -> str:
+        """Activity text for a preempted run.
+
+        Keeps the "Odysseus became active" phrase: runtime_introspection maps
+        it to the ``foreground_interrupt`` abort cause.
+        """
+        minutes = int(cls._FOREGROUND_PREEMPT_RETRY.total_seconds() // 60)
+        detail = f" ({reason})" if reason and "became active" not in reason else ""
+        return f"Paused because Odysseus became active{detail}; retrying in {minutes} min"
 
     #: Backoff for re-running a task whose failure looked like a transient
     #: upstream outage. Capped: once these are used up the run takes the normal
@@ -1803,9 +1850,15 @@ class TaskScheduler:
                 task = db.query(ScheduledTask).filter(ScheduledTask.id == task_id).first()
                 if not task:
                     return
+                # Two ways to be preempted by the user becoming active: this
+                # run's own monitor, or the request/heartbeat sweep
+                # (stop_background_tasks_for_foreground), which records its
+                # reason before cancelling. Both get the same label and retry.
+                _sweep = self._foreground_preemptions()
+                preempted = bool(foreground_cancel.get("hit")) or task_id in _sweep
                 msg = (
-                    "Paused because Odysseus became active"
-                    if foreground_cancel.get("hit")
+                    self._foreground_pause_message(_sweep.get(task_id))
+                    if preempted
                     else "Stopped by user"
                 )
                 logger.info("Task '%s' %s", task.name, msg)
@@ -1816,8 +1869,8 @@ class TaskScheduler:
                     run_obj.result = run_obj.result or msg
                     run_obj.finished_at = _utcnow()
                 task.last_run = _utcnow()
-                if foreground_cancel.get("hit"):
-                    task.next_run = _utcnow() + timedelta(minutes=15)
+                if preempted:
+                    task.next_run = _utcnow() + self._FOREGROUND_PREEMPT_RETRY
                 elif (task.trigger_type or "schedule") == "schedule":
                     task.next_run = compute_next_run(
                         task.schedule, task.scheduled_time,
@@ -1975,7 +2028,13 @@ class TaskScheduler:
             # Release the read transaction before marking Activity terminal;
             # the outer dispatcher still handles deferring automatic work.
             db.close()
-            self._mark_run_aborted(task_id, run_id)
+            _sweep = self._foreground_preemptions()
+            if task_id in _sweep:
+                self._mark_run_aborted(
+                    task_id, run_id, message=self._foreground_pause_message(_sweep[task_id]),
+                )
+            else:
+                self._mark_run_aborted(task_id, run_id)
             raise
         except Exception as exec_exc:
             # An earlier query/commit may have left this transaction failed.
@@ -3494,13 +3553,24 @@ class TaskScheduler:
         """
         async with self._executing_lock:
             task_ids = [t for t in self._executing if t not in self._manual_runs]
+        preempt = self._foreground_preemptions()
         stopped = 0
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)
             if handle and not handle.done():
+                if task_id in preempt:
+                    # An earlier sweep already cancelled this run and it is
+                    # still unwinding. Cancelling again would count it twice
+                    # and could interrupt its cleanup mid-way.
+                    continue
+                # Mark before cancelling: the run's own CancelledError handler
+                # reads this to label the run "Paused because Odysseus became
+                # active", schedule the short retry and write Activity once.
+                preempt[task_id] = reason
                 handle.cancel()
                 stopped += 1
-            if self._mark_run_aborted(task_id):
+            elif self._mark_run_aborted(task_id, message=self._foreground_pause_message(reason)):
+                # No live coroutine left to record its own outcome.
                 stopped += 1
         if stopped:
             logger.info("Stopped %d background scheduler task(s): %s", stopped, reason)

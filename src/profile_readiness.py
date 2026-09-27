@@ -47,11 +47,16 @@ def _skill_rows(profile: Dict[str, Any], disabled: set) -> List[Dict[str, Any]]:
         if name.casefold() not in found:
             rows.append(_check(f"skill {name}", False, "no skill with this name is installed",
                                "install or rename the skill, or remove it from skill_names"))
+    from src.tool_policy import allowlist_permits
+
     enabled = set(profile.get("enabled_tools") or [])
     manager = get_mcp_manager()
     for skill in skills:
         tools, unknown = skill_declared_tools([skill], set(), manager)
-        missing = sorted(t for t in tools if profile.get("tool_access") == "selected" and t not in enabled)
+        # allowlist_permits, not membership: `mcp__*` / `mcp__<server>__*`
+        # bind the skill's MCP tools without naming each one.
+        missing = sorted(t for t in tools if profile.get("tool_access") == "selected"
+                         and not allowlist_permits(t, "selected", enabled))
         problems = []
         if unknown:
             problems.append("declares toolsets that name nothing: " + ", ".join(sorted(unknown)))
@@ -66,6 +71,22 @@ def _skill_rows(profile: Dict[str, Any], disabled: set) -> List[Dict[str, Any]]:
             "add the missing tools to enabled_tools, or fix the skill's requires_toolsets",
         ))
     return rows
+
+
+def _group_detail(group: Dict[str, Any]) -> str:
+    """``mcp__* → 16 connected servers, 212 tools`` for a wildcard grant."""
+    servers = group["server_count"]
+    text = (f"{group['entry']} → {servers} connected server{'s' if servers != 1 else ''}, "
+            f"{group['tool_count']} tool{'s' if group['tool_count'] != 1 else ''}")
+    if group.get("deferred_count"):
+        text += f" ({group['deferred_count']} attached on demand)"
+    if not servers:
+        text += "; no MCP server is connected right now"
+    unavailable = group.get("unavailable_servers") or {}
+    if unavailable:
+        text += "; not reachable: " + "; ".join(list(unavailable.values())[:4]) + (
+            f" (+{len(unavailable) - 4} more)" if len(unavailable) > 4 else "")
+    return text
 
 
 def _repository_row(profile: Dict[str, Any], tools: set, policy: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -125,10 +146,17 @@ def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
                               "unknown": "use an exact tool name from action=capabilities"}.get(row["reason"])))
     for row in matrix["conditional"]:
         checks.append(_check(f"tool {row['tool']}", True, row["condition"]))
+    groups = matrix.get("mcp_groups") or []
+    for group in groups:
+        checks.append(_check(f"tool {group['entry']}", True, _group_detail(group)))
     if not matrix["denied"]:
-        checks.append(_check("tools", True, f"{len(matrix['selected_for_profile'])} bound tool(s) callable"
+        wildcards = {group["entry"] for group in groups}
+        named = [t for t in matrix["selected_for_profile"] if t not in wildcards]
+        checks.append(_check("tools", True, f"{len(named)} bound tool(s) callable"
                              + (f", {len(matrix['deferred_schema'])} attached on demand"
-                                if matrix["deferred_schema"] else "")))
+                                if matrix["deferred_schema"] else "")
+                             + (f", plus {sum(g['tool_count'] for g in groups)} MCP tool(s) via "
+                                + ", ".join(sorted(wildcards)) if groups else "")))
 
     checks.extend(_skill_rows(profile, owner_baseline_disabled_tools(owner)))
 

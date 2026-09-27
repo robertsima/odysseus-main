@@ -2363,6 +2363,10 @@ async function _prewarmUnreadEmailsNow({ limit = 8, maxUid = 0 } = {}, { signal,
       account_id: accountId || undefined,
     }), {
       credentials: 'same-origin',
+      // Fired by the 60s unread ticker (emailInbox._refreshUnreadCount), not a
+      // person: without this it read as user activity and paused background
+      // tasks (src/interactive_gate.py POLL_HEADER).
+      headers: { 'X-Odysseus-Poll': '1' },
       signal,
     });
     if (!_isEmailPrewarmCurrent(generation, signal) || !res.ok) return false;
