@@ -739,9 +739,15 @@ def repair_starved_domains(relevant_tools, domains, disabled_tools,
         except RuntimeError:
             _task = None
         # Not imported here: no worker can be running if nothing loaded it.
-        _workers = getattr(sys.modules.get("src.agent_control"), "_WORKERS", None) or {}
+        # `in_child_run` is what identifies a worker: run_headless drains this
+        # loop in a task of its own, so the current task is never the
+        # `_WORKERS` one (every workflow child logged WARNING through that).
+        _ac = sys.modules.get("src.agent_control")
+        _workers = getattr(_ac, "_WORKERS", None) or {}
+        _in_child = getattr(_ac, "in_child_run", None)
+        _is_child = bool(_in_child and _in_child()) or (_task is not None and _task in _workers.values())
         logger.log(
-            logging.INFO if _task is not None and _task in _workers.values() else logging.WARNING,
+            logging.INFO if _is_child else logging.WARNING,
             "[agent-intent] domains %s detected but no usable tools remain "
             "(every tool for them is in disabled_tools)",
             starved,

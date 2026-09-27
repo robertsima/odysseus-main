@@ -254,6 +254,65 @@ def test_component_failure_is_recorded_not_fatal(env, monkeypatch):
     assert "logs/app.log" in zf.namelist()  # the rest of the bundle still built
 
 
+SYSTEM_COMPONENTS = ("system/claude_code.json", "system/service_health.json", "system/mcp_servers.json",
+                     "system/scheduler.json", "system/settings.json")
+
+
+def _written_or_failed(zf):
+    manifest = json.loads(zf.read("manifest.json"))
+    failed = {e["component"]: e["error"] for e in manifest["errors"]}
+    return set(zf.namelist()), failed
+
+
+def test_every_system_component_is_written_or_recorded(env, monkeypatch):
+    """A missing system/*.json with an empty manifest.errors left nothing to
+    go on. Each component now either lands in the zip or says why not."""
+    import src.service_health as service_health
+
+    async def slow_health(*a, **k):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(bundle_mod, "_COMPONENT_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(service_health, "collect_service_health", slow_health)
+    monkeypatch.setattr(bundle_mod, "settings_snapshot", lambda: None)
+    names, failed = _written_or_failed(_open(_build(minutes=60, include_health=True).data))
+    for component in SYSTEM_COMPONENTS:
+        assert (component in names) != (component in failed), component
+    assert failed["system/service_health.json"] == "TimeoutError"
+    assert failed["system/settings.json"] == "produced no data"
+
+
+def test_health_left_out_of_an_export_is_recorded(env):
+    names, failed = _written_or_failed(_open(_build(minutes=60, include_health=False).data))
+    assert "system/service_health.json" not in names
+    assert failed["system/service_health.json"].startswith("skipped")
+
+
+def test_a_component_that_cannot_be_written_is_recorded(env, monkeypatch):
+    real = bundle_mod._Bundle.add_json
+
+    def picky(self, path, obj):
+        if path == "system/settings.json":
+            raise ValueError("circular reference")
+        return real(self, path, obj)
+
+    monkeypatch.setattr(bundle_mod._Bundle, "add_json", picky)
+    names, failed = _written_or_failed(_open(_build(minutes=60).data))
+    assert "system/settings.json" not in names
+    assert "circular reference" in failed["system/settings.json"]
+    assert "system/scheduler.json" in names  # the rest still built
+
+
+def test_a_failing_component_is_recorded_once(env, monkeypatch):
+    def boom():
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(bundle_mod, "settings_snapshot", boom)
+    zf = _open(_build(minutes=60).data)
+    errors = json.loads(zf.read("manifest.json"))["errors"]
+    assert [e["component"] for e in errors].count("system/settings.json") == 1
+
+
 def test_size_cap_truncates_oldest_log_lines(env):
     big = "\n".join(f"{_stamp()} - x - INFO - line {i} " + "x" * 200 for i in range(20000))
     (env / "logs" / "app.log").write_text(big + "\n", encoding="utf-8")

@@ -13,8 +13,11 @@ Two cheap probes, started once from the app lifespan:
   (the classic drift probe), aggregating the worst lag per report window;
 * a watchdog thread that notices when that coroutine has not ticked for
   ``threshold`` seconds and, *while the loop is still stuck*, records the
-  loop thread's current stack -- application frames only, as
-  ``file:line:function`` (no locals, no arguments, no SQL).
+  loop thread's current stack -- application frames, led by the innermost
+  library frame (``lib:<package path>``) when the loop is inside a library
+  call, as ``file:line:function`` (no locals, no arguments, no SQL). A stall
+  with no application frame names its library frames; one the watchdog could
+  not sample (GIL held throughout) says so, or names the GC pass that caused it.
 
 A stall logs one WARNING, rate-limited::
 
@@ -28,6 +31,7 @@ Knobs: ``ODYSSEUS_LOOP_LAG_WARN_SECONDS`` (default 1.0, 0 disables),
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import sys
@@ -50,21 +54,48 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _is_app_file(norm: str) -> bool:
+    return norm.startswith(_APP_ROOT) and norm != _SELF and "site-packages" not in norm
+
+
+def _lib_label(filename: str) -> str:
+    """Short, recognisable name for a library frame's file:
+    ``sqlalchemy/orm/session.py`` for an installed package, ``asyncio/events.py``
+    for the stdlib."""
+    parts = Path(filename).parts
+    for marker in ("site-packages", "dist-packages"):
+        if marker in parts:
+            return "/".join(parts[parts.index(marker) + 1:])
+    return "/".join(parts[-2:])
+
+
 def app_stack(frame, limit: int = 6) -> List[str]:
     """``file:line:function`` for the innermost application frames of a stack.
 
-    Library frames (sqlite3, sqlalchemy, json) are skipped: the useful answer
-    is which of *our* call sites was on the loop. Innermost first.
+    The useful answer is which of *our* call sites was on the loop, so library
+    frames are skipped -- except the innermost one, kept first as
+    ``lib:<package path>:line:function`` when the loop was stuck inside a
+    library call. A stall entirely inside library code (an anyio/mcp task, an
+    asyncio callback: no project frame on the stack at all) is reported by its
+    innermost library frames instead of an empty list, which the log used to
+    print as ``blocked_in=unknown``. Innermost first.
     """
     out: List[str] = []
+    lib: List[str] = []
     depth = 0
     while frame is not None and depth < 80 and len(out) < limit:
         filename = frame.f_code.co_filename
         norm = os.path.normcase(filename)
-        if norm.startswith(_APP_ROOT) and norm != _SELF and "site-packages" not in norm:
+        if _is_app_file(norm):
             out.append(f"{Path(filename).name}:{frame.f_lineno}:{frame.f_code.co_name}")
+        elif norm != _SELF and not out and len(lib) < 3:
+            lib.append(f"lib:{_lib_label(filename)}:{frame.f_lineno}:{frame.f_code.co_name}")
         frame = frame.f_back
         depth += 1
+    if not out:
+        return lib
+    if lib:
+        out = [lib[0], *out[:max(1, limit - 1)]]
     return out
 
 
@@ -93,24 +124,60 @@ class LoopLagMonitor:
         self._window_worst = 0.0
         self._window_stack: List[str] = []
         self._last_report = 0.0
+        # Garbage-collection time since the ticker last woke. A collection
+        # holds the GIL, so the watchdog cannot sample the loop while it runs;
+        # timing it is the only way to name that kind of stall.
+        self._gc_started: Optional[float] = None
+        self._gc_since_tick = 0.0
+        self._gc_worst: Optional[Dict[str, Any]] = None
 
     # ── probes ───────────────────────────────────────────────────────────────
 
     async def _ticker(self) -> None:
         self._loop_thread_id = threading.get_ident()
+        # The first wake-up also measures the time since start(): startup work
+        # that blocks the loop before this task ever ran is a stall too.
+        with self._lock:
+            since_start = time.monotonic() - self._last_tick
+        self._end_tick(since_start)
         while not self._stop.is_set():
             start = time.monotonic()
             with self._lock:
                 self._last_tick = start
             await asyncio.sleep(self.interval)
-            lag = time.monotonic() - start - self.interval
-            with self._lock:
-                self._last_tick = time.monotonic()
-                stack = self._stall_stack
-                self._stall_stack = []
-                self._stall_reported = False
-            if lag >= self.threshold:
-                self._record(lag, stack)
+            self._end_tick(time.monotonic() - start - self.interval)
+
+    def _end_tick(self, lag: float) -> None:
+        with self._lock:
+            self._last_tick = time.monotonic()
+            stack = self._stall_stack
+            self._stall_stack = []
+            self._stall_reported = False
+            gc_s, gc_info = self._gc_since_tick, self._gc_worst
+            self._gc_since_tick, self._gc_worst = 0.0, None
+        if lag < self.threshold:
+            return
+        if gc_info is not None and gc_s >= lag * 0.5:
+            stack = [f"gc(generation={gc_info['generation']}, {gc_s:.2f}s)", *stack]
+        elif not stack:
+            # The watchdog never got to sample while the loop was stuck: the
+            # loop thread held the GIL the whole time (a C extension that does
+            # not release it) and resumed first.
+            stack = ["unsampled(the loop thread held the GIL; a C call or GC that does not release it)"]
+        self._record(lag, stack)
+
+    def _gc_callback(self, phase: str, info: Dict[str, Any]) -> None:
+        if phase == "start":
+            self._gc_started = time.monotonic()
+            return
+        started, self._gc_started = self._gc_started, None
+        if started is None:
+            return
+        took = time.monotonic() - started
+        with self._lock:
+            self._gc_since_tick += took
+            if self._gc_worst is None or took >= self._gc_worst["seconds"]:
+                self._gc_worst = {"seconds": took, "generation": info.get("generation")}
 
     def _watchdog(self) -> None:
         poll = max(0.05, min(self.threshold / 4.0, 0.5))
@@ -158,8 +225,13 @@ class LoopLagMonitor:
         if self.threshold <= 0 or self._task is not None:
             return False
         self._stop.clear()
+        # Known before the first tick: startup work that blocks the loop right
+        # after start() (before the ticker ever ran) is sampled too.
+        self._loop_thread_id = threading.get_ident()
         with self._lock:
             self._last_tick = time.monotonic()
+        if self._gc_callback not in gc.callbacks:
+            gc.callbacks.append(self._gc_callback)
         self._task = asyncio.get_running_loop().create_task(self._ticker(), name="loop-lag-probe")
         self._thread = threading.Thread(target=self._watchdog, name="loop-lag-watchdog", daemon=True)
         self._thread.start()
@@ -167,6 +239,10 @@ class LoopLagMonitor:
 
     async def stop(self) -> None:
         self._stop.set()
+        try:
+            gc.callbacks.remove(self._gc_callback)
+        except ValueError:
+            pass
         task, self._task = self._task, None
         if task is not None:
             task.cancel()

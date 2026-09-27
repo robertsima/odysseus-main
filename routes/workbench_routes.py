@@ -84,11 +84,22 @@ def setup_workbench_routes() -> APIRouter:
     async def activity_history(request: Request, session_id: str = Query(...),
                                since: int = Query(default=0), limit: int = Query(default=200)):
         _admin(request)
-        return {
-            "session_id": session_id,
-            "events": activity.history(session_id, since_seq=max(0, since), limit=limit),
-            "seq": activity.last_seq(session_id),
-        }
+        # Loading a chat's timeline reads and parses its JSONL file behind the
+        # activity lock; on the event loop that stalled every agent stream
+        # (loop-lag blocked_in=agent_activity._load_session). Build it in a
+        # worker thread, once for concurrent identical polls.
+        from src.poll_coalesce import coalesced
+
+        since = max(0, since)
+
+        def _build():
+            return {
+                "session_id": session_id,
+                "events": activity.history(session_id, since_seq=since, limit=limit),
+                "seq": activity.last_seq(session_id),
+            }
+
+        return await coalesced(("workbench.activity", session_id, since, limit), _build, ttl=0)
 
     @router.get("/activity/stream")
     async def activity_stream(request: Request, session_id: str = Query(default=activity.GLOBAL_FEED),

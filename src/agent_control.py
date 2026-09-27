@@ -21,6 +21,8 @@ owner-scoped by the routes; this module only knows run ids and session ids.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import contextvars
 import logging
 import time
 import uuid
@@ -646,6 +648,29 @@ def wrap_up(run_id: str, *, owner: Optional[str] = None) -> dict:
 
 _WORKERS: Dict[str, asyncio.Task] = {}
 
+# True while an agent turn runs as somebody's child: a launched worker (which
+# covers every orchestrate_agents / workflow child) or a send_to_session
+# sub-agent exchange. `run_headless` drains the loop in a task of its own, so
+# `asyncio.current_task()` inside the loop is never the `_WORKERS` task; a
+# context variable is inherited by that task and scoped to the child's run, so
+# the parent's own continuation after the hand-off is not mistaken for one.
+_IN_CHILD_RUN: contextvars.ContextVar[bool] = contextvars.ContextVar("odysseus_in_child_run", default=False)
+
+
+def in_child_run() -> bool:
+    """Whether the current agent turn is a worker / sub-agent, not a top-level chat."""
+    return _IN_CHILD_RUN.get()
+
+
+@contextlib.contextmanager
+def child_run_scope():
+    """Mark the agent turn run inside this block as a child run."""
+    token = _IN_CHILD_RUN.set(True)
+    try:
+        yield
+    finally:
+        _IN_CHILD_RUN.reset(token)
+
 
 async def launch_worker(*, owner: Optional[str], task: str, profile_name: Optional[str] = None,
                         parent_session: Optional[str] = None, model: Optional[str] = None,
@@ -774,7 +799,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         outcome: Dict[str, Any] = {}
         status, text, events, error_detail = "completed", "", [], ""
         try:
-            with agent_runs.track_external(sess.id, source="worker", owner=owner):
+            with agent_runs.track_external(sess.id, source="worker", owner=owner), child_run_scope():
                 text, events = await run_headless(
                     sess, list(context),
                     max_rounds=rounds,

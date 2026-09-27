@@ -134,31 +134,79 @@ def _clamp_data(data: Any) -> Any:
     return {"repr": _clamp(raw, 2000)}
 
 
-def _load_session(session_id: str) -> None:
-    """Pull the persisted tail of a session's timeline into memory once."""
-    if session_id in _loaded:
-        return
-    _loaded.add(session_id)
+# A timeline file rotates at ROTATE_BYTES, but a failed rotate lets it grow;
+# never read more than this from its end.
+MAX_TAIL_READ_BYTES = 2 * ROTATE_BYTES
+
+
+def _read_tail(session_id: str) -> Tuple[Deque[dict], int]:
+    """The newest MAX_EVENTS_PER_SESSION events persisted for a session, and
+    the highest seq among them. Touches no shared state, so callers run it
+    outside ``_lock`` (and, from a request, off the event loop).
+
+    Only the lines that will be kept are parsed: a 2 MB timeline used to be
+    JSON-decoded whole, on the event loop, under the lock every publisher
+    takes -- one GET /api/workbench/activity stalled all agent streams ~1 s.
+    """
     path = _session_file(session_id)
-    buf: Deque[dict] = deque(maxlen=MAX_EVENTS_PER_SESSION)
     top = 0
+    kept: List[dict] = []
     try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    ev = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(ev, dict) and isinstance(ev.get("seq"), int):
-                    buf.append(ev)
-                    top = max(top, ev["seq"])
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            start = max(0, size - MAX_TAIL_READ_BYTES)
+            fh.seek(start)
+            raw = fh.read()
     except OSError:
-        pass
+        return deque(maxlen=MAX_EVENTS_PER_SESSION), 0
+    lines = raw.splitlines()
+    if start > 0 and lines:
+        lines = lines[1:]  # the first line was cut by the seek
+    for line in reversed(lines):
+        if len(kept) >= MAX_EVENTS_PER_SESSION:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line.decode("utf-8", errors="replace"))
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and isinstance(ev.get("seq"), int):
+            kept.append(ev)
+            top = max(top, ev["seq"])
+    kept.reverse()
+    return deque(kept, maxlen=MAX_EVENTS_PER_SESSION), top
+
+
+def _install_loaded(session_id: str, buf: Deque[dict], top: int) -> None:
+    # Caller holds _lock.
+    _loaded.add(session_id)
     _events[session_id] = buf
     _seq[session_id] = max(_seq.get(session_id, 0), top)
+
+
+def _load_session(session_id: str) -> None:
+    """Pull the persisted tail of a session's timeline into memory once.
+    Caller holds ``_lock``; prefer :func:`_ensure_loaded` before taking it."""
+    if session_id in _loaded:
+        return
+    buf, top = _read_tail(session_id)
+    _install_loaded(session_id, buf, top)
+
+
+def _ensure_loaded(session_id: str) -> None:
+    """:func:`_load_session` with the file read done outside ``_lock``.
+
+    If another thread loaded (or published into) the session meanwhile, its
+    state wins and this read is discarded."""
+    if session_id in _loaded:
+        return
+    buf, top = _read_tail(session_id)
+    with _lock:
+        if session_id not in _loaded:
+            _install_loaded(session_id, buf, top)
 
 
 def _append_line(session_id: str, ev: dict) -> None:
@@ -319,6 +367,7 @@ def publish(
         kind = kind if kind in KINDS else "note"
         source = source if source in SOURCES else "system"
         level = level if level in ("info", "warning", "error") else "info"
+        _ensure_loaded(sid)
         with _lock:
             _load_session(sid)
             _load_runs()
@@ -525,13 +574,18 @@ def history(session_id: str, *, since_seq: int = 0, limit: int = 200) -> List[di
         # nothing at all. Merge the real sessions instead. `subscribe` still
         # replays nothing for GLOBAL_FEED, so there is no double-delivery:
         # history comes from here, live frames from there.
+        # Bounded: only the most recently written timelines can hold the
+        # newest ``limit`` events, so an install with hundreds of chats does
+        # not parse every file it ever wrote.
         merged: List[dict] = []
-        for name in sessions_with_activity():
+        for name in _recent_sessions_with_activity(GLOBAL_HISTORY_MAX_SESSIONS):
+            _ensure_loaded(name)
             with _lock:
                 _load_session(name)
                 merged.extend(_events.get(name, ()))
         merged.sort(key=lambda ev: ev.get("ts") or 0)
         return merged[-limit:]
+    _ensure_loaded(sid)
     with _lock:
         _load_session(sid)
         rows = [ev for ev in _events.get(sid, ()) if ev.get("seq", 0) > since_seq]
@@ -540,6 +594,7 @@ def history(session_id: str, *, since_seq: int = 0, limit: int = 200) -> List[di
 
 def last_seq(session_id: str) -> int:
     sid = str(session_id or "global")
+    _ensure_loaded(sid)
     with _lock:
         _load_session(sid)
         return _seq.get(sid, 0)
@@ -627,6 +682,22 @@ def sessions_with_activity() -> List[str]:
     except OSError:
         return []
     return sorted(n[:-6] for n in names if n.endswith(".jsonl"))
+
+
+# How many timelines the "All sessions" history merges (newest first).
+GLOBAL_HISTORY_MAX_SESSIONS = 40
+
+
+def _recent_sessions_with_activity(limit: int) -> List[str]:
+    """Up to ``limit`` session ids whose timeline file was written most recently."""
+    stamped = []
+    for name in sessions_with_activity():
+        try:
+            stamped.append((os.path.getmtime(_session_file(name)), name))
+        except OSError:
+            continue
+    stamped.sort(reverse=True)
+    return [name for _, name in stamped[:max(1, int(limit))]]
 
 
 # ── live feed ────────────────────────────────────────────────────────────────

@@ -198,6 +198,31 @@ class _Bundle:
     def _room(self) -> int:
         return max(0, self.max_bytes - _MANIFEST_RESERVE - self.used)
 
+    def _has_error(self, component: str) -> bool:
+        return any(e.get("component") == component for e in self.errors)
+
+    def add_component(self, path: str, data: Any) -> bool:
+        """Write one component's JSON, or say in ``errors`` why it is absent.
+
+        Every component either lands in the zip or leaves an ``errors`` entry:
+        a collector that returned nothing, a value that could not be
+        serialized, or no room left under the size cap used to leave the file
+        missing with nothing in the manifest to say so.
+        """
+        if data is None:
+            if not self._has_error(path):  # a failing guard already recorded it
+                self.errors.append({"component": path, "error": "produced no data"})
+            return False
+        try:
+            written = self.add_json(path, data)
+        except Exception as exc:
+            logger.warning("diagnostics bundle: %s could not be written: %s", path, type(exc).__name__)
+            self.errors.append({"component": path, "error": f"not written: {_err_text(exc)}"})
+            return False
+        if not written:
+            self.errors.append({"component": path, "error": "not written: bundle size cap reached"})
+        return written
+
     def add_json(self, path: str, obj: Any) -> bool:
         data = _json_bytes(mask(obj))
         if len(data) > self._room():
@@ -856,21 +881,19 @@ def _collect_sync(bundle: _Bundle, *, minutes: float, max_lines: int, ids: List[
                 related.insert(0, str(lineage["parent_session"]))
             queue.extend(s for s in related if s not in records)
     for sid, rec in records.items():
-        bundle.add_json(f"sessions/{_safe_filename(sid)}.json", rec)
+        bundle.add_component(f"sessions/{_safe_filename(sid)}.json", rec)
 
     resolved = bundle.guard("loadouts/resolve", resolve_loadouts, loadout_names) or ([], [])
     loadouts, loadouts_missing = resolved
     for name in loadouts:
         rec = bundle.guard(f"loadouts/{name}", loadout_record, name, owner)
         if rec is not None:
-            bundle.add_json(f"loadouts/{_safe_filename(name, 'loadout')}.json", rec)
+            bundle.add_component(f"loadouts/{_safe_filename(name, 'loadout')}.json", rec)
 
     for path, fn, args in (("system/mcp_servers.json", mcp_servers, ()),
                            ("system/scheduler.json", scheduler_state, (owner,)),
                            ("system/settings.json", settings_snapshot, ())):
-        data = bundle.guard(path, fn, *args)
-        if data is not None:
-            bundle.add_json(path, data)
+        bundle.add_component(path, bundle.guard(path, fn, *args))
 
     log_index = []
     for log in logs:
@@ -918,18 +941,19 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
 
         return await status_report()
 
-    cc = await _guard_async(bundle, "system/claude_code.json", claude_code())
-    if cc is not None:
-        bundle.add_json("system/claude_code.json", cc)
+    bundle.add_component("system/claude_code.json",
+                         await _guard_async(bundle, "system/claude_code.json", claude_code()))
     if include_health:
         async def health():
             from src.service_health import collect_service_health
 
             return await collect_service_health(rag_manager, memory_vector)
 
-        report = await _guard_async(bundle, "system/service_health.json", health())
-        if report is not None:
-            bundle.add_json("system/service_health.json", report)
+        bundle.add_component("system/service_health.json",
+                             await _guard_async(bundle, "system/service_health.json", health()))
+    else:
+        bundle.errors.append({"component": "system/service_health.json",
+                              "error": "skipped: health probes were not requested for this export"})
 
     contents = await asyncio.to_thread(
         _collect_sync, bundle, minutes=minutes_v, max_lines=lines_v, ids=ids,

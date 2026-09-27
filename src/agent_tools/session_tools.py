@@ -84,6 +84,22 @@ def _parse_send_extras(content: str) -> Dict:
     }
 
 
+def _find_session(manager, session_id: Optional[str]):
+    """``manager.get_session`` that answers None for a chat that does not exist.
+
+    ``SessionManager.get_session`` raises KeyError for an id with no DB row (a
+    deleted child chat, a mistyped or hallucinated id). Every caller here
+    already handles None with a "not found" tool error; the KeyError instead
+    escaped the tool and failed the calling chat's whole run.
+    """
+    if not session_id or manager is None:
+        return None
+    try:
+        return manager.get_session(session_id)
+    except KeyError:
+        return None
+
+
 def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
     """The workspace of the chat delegating the task: the one bound to the
     turn that is calling this tool, else the one saved on that chat."""
@@ -112,7 +128,7 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
     The child runs on the profile's model when it names one, else on the
     parent chat's model; it remembers its parent so the UI can link back.
     """
-    parent = manager.get_session(parent_id) if parent_id else None
+    parent = _find_session(manager, parent_id)
     if profile and profile.get("model"):
         resolved = None
         failures = []
@@ -374,7 +390,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
 
         target_settings: Dict = {}
         if target_sid.lower() != "new":
-            existing = _session_manager.get_session(target_sid)
+            existing = _find_session(_session_manager, target_sid)
             if existing is not None and (not owner or getattr(existing, "owner", None) == owner):
                 try:
                     from core.database import get_session_settings
@@ -405,9 +421,9 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         mode = "agent"
         extras["_child_created"] = True  # already on the profile's model
     else:
-        sess = _session_manager.get_session(target_sid)
+        sess = _find_session(_session_manager, target_sid)
     if not sess:
-        return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
+        return {"error": f"Session '{target_sid}' not found. It may have been deleted; use list_sessions and pass an exact id it returned, or session_id 'new' for a fresh chat.", "exit_code": 1}
 
     # Owner-scope: reject access to another user's session. When the caller is
     # authenticated, a null-owner (legacy / auth-was-off) session is not theirs
@@ -490,8 +506,11 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
         from src import agent_runs
 
         try:
-            # The child chat shows as working in every sidebar while it runs.
-            with agent_runs.track_external(target_sid, source="subagent", owner=owner):
+            # The child chat shows as working in every sidebar while it runs;
+            # its agent turn is a child run, not a top-level chat's.
+            from src.agent_control import child_run_scope
+
+            with agent_runs.track_external(target_sid, source="subagent", owner=owner), child_run_scope():
                 if mode == "agent":
                     from src.headless_agent import run_headless
 
@@ -808,7 +827,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                 except ValueError:
                     pass
 
-            source = _session_manager.get_session(target_sid)
+            source = _find_session(_session_manager, target_sid)
             if not source:
                 return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
 

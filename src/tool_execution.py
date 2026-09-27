@@ -1481,7 +1481,7 @@ async def execute_tool_block(
 
     token = _active_workspace.set(workspace or None)
     try:
-        output = await _execute_tool_block_impl(
+        output = await _execute_tool_block_with_backstop(
             block,
             session_id=session_id,
             disabled_tools=disabled_tools,
@@ -1516,6 +1516,30 @@ async def execute_tool_block(
         return output
     finally:
         _active_workspace.reset(token)
+
+
+async def _execute_tool_block_with_backstop(block: Any, **kwargs) -> Tuple[str, Dict]:
+    """Run one tool; an unexpected exception becomes that tool's error result.
+
+    A tool handler that raises (a KeyError for a chat that was deleted, a bug
+    in one handler) used to propagate out of the agent loop and fail the whole
+    run, discarding every round before it. The model can read an error and
+    recover; a dead run cannot. Cancellation is not an Exception and still
+    propagates.
+    """
+    try:
+        return await _execute_tool_block_impl(block, **kwargs)
+    except Exception as exc:
+        tool = getattr(block, "tool_type", None) or "tool"
+        logger.error("[tool-error] %s raised %s: %s", tool, type(exc).__name__, exc, exc_info=True)
+        detail = exc.args[0] if isinstance(exc, KeyError) and exc.args else exc
+        return (
+            f"{tool}: ERROR",
+            {
+                "error": f"{tool} failed: {type(exc).__name__}: {detail}",
+                "exit_code": 1,
+            },
+        )
 
 
 async def _execute_tool_block_impl(
