@@ -22,8 +22,9 @@ from .cache import (
     generate_cache_key,
     cleanup_cache,
 )
-from .query import _cache_duration_for_query, _extract_site_filter
+from .query import _cache_duration_for_query, _extract_site_filter, simplify_query
 from .ranking import rank_search_results
+from . import resilience
 from .providers import (
     searxng_search_api,
     brave_search,
@@ -102,13 +103,22 @@ def _result_text_for_relevance(result: dict) -> str:
     return " ".join(str(part) for part in (title, snippet, url_text) if part)
 
 
+# A query with this many significant tokens needs two of them in a row before
+# the row counts as relevant. Long research queries otherwise let one-word
+# matches through: the 2026-09-27 logs show merriam-webster.com/dictionary/
+# offline, /official, /customer and investopedia term pages fetched ~80 times
+# because "offline" or "customer" was one of 12 query words.
+_STRICT_RELEVANCE_MIN_TOKENS = 5
+
+
 def _keep_relevant_results(query: str, results: List[dict]) -> List[dict]:
     """Drop result rows with no meaningful token overlap with *query*.
 
     If the query has no meaningful tokens (for example a short navigational
     request made solely from stopwords), leave the provider's rows untouched.
     Otherwise a row survives when at least one significant query token occurs
-    as a whole token in its title, snippet, or URL host/path.
+    as a whole token in its title, snippet, or URL host/path -- two distinct
+    tokens once the query has ``_STRICT_RELEVANCE_MIN_TOKENS`` or more.
     """
     query_tokens = _significant_query_tokens(query)
     if not query_tokens:
@@ -116,9 +126,15 @@ def _keep_relevant_results(query: str, results: List[dict]) -> List[dict]:
     token_re = re.compile(r"\b(?:" + "|".join(
         re.escape(token) for token in sorted(query_tokens, key=len, reverse=True)
     ) + r")\b", flags=re.IGNORECASE | re.UNICODE)
+    required = 2 if len(query_tokens) >= _STRICT_RELEVANCE_MIN_TOKENS else 1
+
+    def _hits(result: dict) -> int:
+        text = _result_text_for_relevance(result)
+        return len({m.casefold() for m in token_re.findall(text)})
+
     kept = [
         result for result in results
-        if isinstance(result, dict) and token_re.search(_result_text_for_relevance(result))
+        if isinstance(result, dict) and _hits(result) >= required
     ]
     if len(kept) < len(results):
         logger.info(
@@ -240,7 +256,18 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
 
 
 def _call_provider_raw(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
-    """Call a search provider by name. Returns list of results or empty list."""
+    """Call a search provider by name. Returns list of results or empty list.
+
+    Each call holds one of the provider's concurrency slots with paced starts
+    (see ``resilience.ProviderGate``), so fifteen parallel research workers do
+    not burst the upstream engines into 429s/CAPTCHAs. Raises
+    ``resilience.ProviderBusy`` when no slot frees up in time.
+    """
+    with resilience.get_gate(provider_name).slot():
+        return _dispatch_provider(provider_name, query, count, time_filter)
+
+
+def _dispatch_provider(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
     if provider_name == "searxng":
         return searxng_search_api(query, count, time_filter=time_filter)
     elif provider_name == "brave":
@@ -274,6 +301,99 @@ def _build_provider_chain(primary: str) -> List[str]:
         if fb and fb != primary and fb not in chain and fb != "disabled":
             chain.append(fb)
     return chain
+
+
+def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[str],
+               label: str = "") -> Tuple[List[dict], Dict[str, str]]:
+    """Ask each provider in order until one returns relevant rows.
+
+    Returns ``(results, attempts)`` where attempts maps provider to
+    ``"ok (n)"``, ``"empty"``, ``"cooling down"``, ``"busy"`` or
+    ``"error: ..."``. Provider implementations own their retries: an empty
+    SearXNG answer followed by a DuckDuckGo fallback costs one call each.
+    A provider whose circuit breaker is open is skipped without waiting.
+    """
+    attempts: Dict[str, str] = {}
+    for provider_name in chain:
+        key = f"{provider_name}{label}"
+        breaker = resilience.get_breaker(provider_name)
+        if not breaker.allow():
+            attempts[key] = "cooling down"
+            logger.debug("Skipping %s: circuit open for another %.0fs", provider_name, breaker.remaining())
+            continue
+        results: List[dict] = []
+        try:
+            logger.info(f"Attempting {provider_name} search")
+            results = _call_provider(provider_name, query, count, time_filter)
+        except resilience.ProviderBusy as e:
+            attempts[key] = "busy"
+            logger.warning(str(e))
+            continue
+        except (NetworkError, ParseError, RateLimitError) as e:
+            error_logger.error(f"{provider_name} search error: {e}")
+            attempts[key] = f"error: {e}"
+            continue
+        except Exception as e:
+            error_logger.error(f"Unexpected error during {provider_name} search: {e}")
+            attempts[key] = f"error: {e}"
+            continue
+        finally:
+            # A half-open probe that ended without a verdict (the provider
+            # does not report transport outcomes, or answered honestly
+            # empty) must not keep the breaker waiting on it forever.
+            breaker.release_probe()
+        if results:
+            results = _keep_relevant_results(query, results)
+        if results:
+            attempts[key] = f"ok ({len(results)})"
+            logger.info(f"{provider_name} search returned {len(results)} relevant results")
+            return results, attempts
+        attempts[key] = "empty"
+    return [], attempts
+
+
+def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
+                           chain: List[str]) -> Tuple[List[dict], Dict[str, str], str]:
+    """Run the provider chain, then once more with a simplified query if empty.
+
+    Identical ``(query, count, time_filter, chain)`` requests share one
+    outcome for a few minutes (single-flight: parallel workers asking the
+    same thing wait for the first instead of all hitting the providers).
+    Returns ``(results, attempts, query_that_answered)``.
+    """
+    def compute():
+        results, attempts = _run_chain(query, count, time_filter, chain)
+        used = query
+        if not results:
+            simplified = simplify_query(query)
+            if simplified and simplified.casefold() != (query or "").strip().casefold():
+                logger.info(
+                    "No relevant results for %r; retrying with simplified query %r",
+                    query, simplified,
+                )
+                results, retry_attempts = _run_chain(
+                    simplified, count, time_filter, chain, label="[simplified]"
+                )
+                attempts.update(retry_attempts)
+                used = simplified
+        return results, attempts, used
+
+    def ttl_for(outcome) -> float:
+        results, attempts, _ = outcome
+        if results:
+            return resilience.RESULT_TTL_HIT
+        # Only an honest "nothing found" is worth repeating; an outcome shaped
+        # by errors, a busy provider or an open breaker should be retried.
+        if attempts and all(v == "empty" for v in attempts.values()):
+            return resilience.RESULT_TTL_EMPTY
+        return 0.0
+
+    key = ((query or "").strip(), count, time_filter, tuple(chain))
+    (results, attempts, used), hit = resilience.search_results_cache.get_or_compute(key, compute, ttl_for)
+    if hit:
+        logger.info("Search result cache hit for %r (%d results)", query, len(results))
+    # Callers rank/annotate rows in place; never hand out the cached dicts.
+    return [dict(r) for r in results], dict(attempts), used
 
 
 # ----------------------------------------------------------------------
@@ -319,27 +439,7 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
 
     provider_chain = _build_provider_chain(search_provider)
 
-    results: List[dict] = []
-    for provider_name in provider_chain:
-        try:
-            # Provider implementations own their fallback/error handling. A
-            # second outer call repeats every upstream request (and, for a
-            # site: query, repeats both the operator query and its keyword
-            # drift retry) without improving the result.
-            logger.info(f"Attempting {provider_name} search")
-            results = _call_provider(provider_name, query, count, time_filter)
-        except (NetworkError, ParseError, RateLimitError) as e:
-            error_logger.error(f"{provider_name} search error: {e}")
-            results = []
-        except Exception as e:
-            error_logger.error(f"Unexpected error during {provider_name} search: {e}")
-            results = []
-        if results:
-            results = _keep_relevant_results(query, results)
-            if results:
-                logger.info(f"{provider_name} search succeeded with {len(results)} relevant results")
-        if results:
-            break
+    results, _attempts, _used_query = _search_with_fallbacks(query, count, time_filter, provider_chain)
 
     success = bool(results)
     _record_query(query, success, cache_hit=False)
@@ -430,40 +530,22 @@ def comprehensive_web_search(
 
     provider_chain = _build_provider_chain(search_provider)
 
-    search_results = []
-    provider_attempts = {}
-    for provider_name in provider_chain:
-        last_err = None
-        empty = False
-        try:
-            # Do not retry an already-fallback-aware provider here. In
-            # particular, an empty SearXNG result followed by a DuckDuckGo
-            # fallback must cost one request per provider, not two.
-            search_results = _call_provider(provider_name, query, fetch_count, time_filter)
-            if search_results:
-                search_results = _keep_relevant_results(query, search_results)
-            if search_results:
-                provider_attempts[provider_name] = f"ok ({len(search_results)})"
-                logger.info(
-                    f"Comprehensive search: {provider_name} returned {len(search_results)} relevant results"
-                )
-            else:
-                empty = True
-        except Exception as e:
-            last_err = e
-            logger.warning(f"Comprehensive search: {provider_name} failed: {e}")
-        if search_results:
-            break
-        if last_err is not None:
-            provider_attempts[provider_name] = f"error: {last_err}"
-        elif empty:
-            provider_attempts[provider_name] = "empty"
+    search_results, provider_attempts, _used_query = _search_with_fallbacks(
+        query, fetch_count, time_filter, provider_chain
+    )
 
     if not search_results:
         tally = ", ".join(f"{p}:{r}" for p, r in provider_attempts.items()) or "no providers configured"
-        any_errors = any(r.startswith("error") for r in provider_attempts.values())
+        any_errors = any(
+            r.startswith(("error", "busy", "cooling down")) for r in provider_attempts.values()
+        )
         if any_errors:
             msg = f"Web search failed — all providers errored or returned empty. Tried: {tally}"
+            if any(r == "cooling down" for r in provider_attempts.values()):
+                msg += (
+                    ". A provider is paused after repeated timeouts and resumes on its own "
+                    "within a couple of minutes"
+                )
         else:
             msg = (
                 f"No search results found. Tried: {tally}. "

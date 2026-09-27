@@ -16,6 +16,7 @@ from src.constants import WEB_FETCH_SOFT_MAX_BYTES, WEB_FETCH_HARD_MAX_BYTES, WE
 from src import outbound_fetch as _outbound_fetch
 
 from .analytics import RateLimitError, error_logger
+from . import resilience as _resilience
 from .cache import (
     CONTENT_CACHE_DIR,
     content_cache_index,
@@ -59,11 +60,54 @@ def _get_public_url(url, headers, timeout, max_redirects=5, max_bytes=None):
     )
 
 
-# PDF extraction (optional dependency)
+# PDF extraction. pdfminer.six gives the best layout when it is installed, but
+# it is in no requirements file, so the Docker image never had it and every
+# fetched PDF came back empty ("pdfminer.six is not installed", 4x on
+# 2026-09-27). pypdf is a core dependency (requirements.txt) and is what the
+# document pipeline already uses, so it is the fallback.
 try:
     from pdfminer.high_level import extract_text as pdf_extract_text
 except ImportError:
     pdf_extract_text = None  # type: ignore
+
+_pdf_backend_warned = False
+
+
+def _pypdf_extract_text(stream) -> str:
+    from pypdf import PdfReader
+
+    reader = PdfReader(stream)
+    return "\n\n".join((page.extract_text() or "").strip() for page in reader.pages).strip()
+
+
+def _extract_pdf_text(pdf_bytes: bytes, url: str) -> str:
+    """Extract text with pdfminer.six when present, else pypdf; "" on failure."""
+    global _pdf_backend_warned
+    extractors = []
+    if pdf_extract_text is not None:
+        extractors.append(("pdfminer.six", pdf_extract_text))
+    try:
+        import pypdf  # noqa: F401
+        extractors.append(("pypdf", _pypdf_extract_text))
+    except ImportError:
+        pass
+    if not extractors:
+        if not _pdf_backend_warned:
+            _pdf_backend_warned = True
+            logger.warning(
+                "No PDF text extractor available; fetched PDFs return no text. "
+                "Install one with `pip install pypdf` (core requirement) or `pip install pdfminer.six`."
+            )
+        return ""
+    for name, extract in extractors:
+        try:
+            text = (extract(io.BytesIO(pdf_bytes)) or "").strip()
+        except Exception as e:
+            logger.warning(f"PDF extraction with {name} failed for {url}: {e}")
+            continue
+        if text:
+            return text
+    return ""
 
 
 # ----------------------------------------------------------------------
@@ -210,6 +254,19 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
             cache_file.unlink(missing_ok=True)
             content_cache_index.pop(cache_key, None)
 
+    # A URL that just answered 403/404/410/451 (or timed out twice) is not
+    # asked again for a while: parallel research workers fetched the same
+    # dictionary page seven times in three seconds on 2026-09-27.
+    remembered = _resilience.failed_fetches.lookup(url)
+    if remembered is not None:
+        cached_error, remaining = remembered
+        logger.debug(f"Negative fetch cache hit for {url} ({remaining:.0f}s left)")
+        result = _empty_result(
+            url, f"{cached_error} [cached failure; not retried for another {remaining:.0f}s]"
+        )
+        result["cached_failure"] = True
+        return result
+
     # Fetch
     try:
         headers = {
@@ -233,10 +290,15 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
         return _empty_result(url, f"TooLarge: {e}")
     except httpx.HTTPStatusError as e:
         error_logger.warning(f"HTTP {e.response.status_code} fetching {url}: {e}")
-        return _empty_result(url, f"HTTP {e.response.status_code}: {e}")
+        error = f"HTTP {e.response.status_code}: {e}"
+        _resilience.failed_fetches.record_status(url, e.response.status_code, error)
+        return _empty_result(url, error)
     except httpx.RequestError as e:
         error_logger.error(f"NetworkError fetching {url} (attempt {retry_attempt}): {e}")
-        return _empty_result(url, f"NetworkError: {e}")
+        error = f"NetworkError: {e}"
+        if isinstance(e, httpx.TimeoutException):
+            _resilience.failed_fetches.record_timeout(url, error)
+        return _empty_result(url, error)
     except RateLimitError as e:
         error_logger.error(str(e))
         return _empty_result(url, str(e))
@@ -262,16 +324,7 @@ def fetch_webpage_content(url: str, timeout: int = 5, retry_attempt: int = 0,
                 + (f" (size {_declared:,} bytes)" if _declared else "")
                 + "; retry with a larger budget if it fits under the hard cap",
             )
-        if pdf_extract_text is None:
-            logger.error("pdfminer.six is not installed; cannot extract PDF text.")
-            pdf_text = ""
-        else:
-            try:
-                pdf_bytes = io.BytesIO(response.content)
-                pdf_text = pdf_extract_text(pdf_bytes)
-            except Exception as e:
-                logger.warning(f"PDF extraction failed for {url}: {e}")
-                pdf_text = ""
+        pdf_text = _extract_pdf_text(response.content, url)
         result = {
             "url": url,
             "title": os.path.basename(url),

@@ -95,3 +95,33 @@ def pytest_collection_modifyitems(config, items):
         path = getattr(item, "path", None) or item.fspath
         for marker_name in markers_for_path(path):
             item.add_marker(getattr(pytest.mark, marker_name))
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_search_resilience_state():
+    """Give every test fresh search gates, breakers and caches.
+
+    ``services.search.resilience`` keeps process-wide state (per-provider
+    concurrency gates, circuit breakers, a short-TTL result cache and a
+    negative fetch cache). Without a reset, one test's mocked failure would
+    trip a breaker or be served from a cache in the next test. Pacing sleeps
+    are disabled; tests of the pacing itself install their own clock.
+    """
+    mod = sys.modules.get("services.search.resilience")
+    real_sleep = None
+    if mod is not None:
+        real_sleep = mod._sleep
+        mod.reset_state()
+        mod._sleep = lambda _seconds: None
+    try:
+        yield
+    finally:
+        if mod is not None:
+            mod._sleep = real_sleep
+        # The module may have been imported during the test itself.
+        late = sys.modules.get("services.search.resilience")
+        if late is not None:
+            late.reset_state()

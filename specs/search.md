@@ -52,7 +52,9 @@ Runtime behavior:
 - disabled search returns disabled/unavailable text in the comprehensive path;
 - missing keyed-provider secrets return empty provider results instead of exposing secrets;
 - SearXNG retries through JSON variants before HTML fallback, pins English/general-engine defaults where needed, and maps news/recency settings into provider time filters;
-- comprehensive search retries providers and then walks the fallback chain;
+- comprehensive search walks the fallback chain once per provider; when every provider comes back empty (or only with rows the relevance gate rejects) and `simplify_query()` yields a shorter query (operators, quotes, years and research scaffolding dropped, first six terms, `site:` kept), the chain runs once more with it;
+- the relevance gate needs one significant query token per row, two once the query has five or more;
+- `services/search/resilience.py` holds process-wide load guards: a per-provider concurrency gate with jittered start spacing (`ODYSSEUS_SEARXNG_CONCURRENCY`, default 4; `ODYSSEUS_DDG_CONCURRENCY`, default 2), a circuit breaker that skips DuckDuckGo for 90 s after three consecutive transport failures (one INFO line on trip and on recovery), and a single-flight in-memory cache of chain outcomes (5 min for results, 60 s for honest empties, errors never cached);
 - `/api/search/query` is a direct provider test/query path and does not use the comprehensive fallback chain. Direct provider result limits can be controlled dynamically by the caller.
 
 ## Content Fetching
@@ -73,6 +75,7 @@ Runtime behavior:
 - soft and hard download byte caps through `WEB_FETCH_SOFT_MAX_BYTES` and `WEB_FETCH_HARD_MAX_BYTES`, with declared-length and streaming-budget checks; requests prefer identity transfer encoding so compressed bodies cannot bypass the effective body cap;
 - JS-heavy empty result hints;
 - cache writes;
+- a negative cache (`resilience.failed_fetches`) that answers HTTP 403/404/410/451, or a URL that timed out twice, from memory for 10 minutes with the original error plus a `[cached failure ...]` note and `cached_failure: true`;
 - empty/error result shape, including explicit HTTP-status failures instead of raising through callers.
 
 `src/search/content.py` is now a compatibility alias to `services.search.content`; chat URL auto-fetch, agent `web_fetch`, and deep research keep the `src.search` import path but share the services implementation.
@@ -124,7 +127,7 @@ Deep research wraps fetched webpage content through `untrusted_context_message("
 
 ## Optional And Platform Behavior
 
-`ddgs` is optional; provider code has an HTML fallback. Search cache and analytics state live under the shared data dir and mkdir failures in read-only image layers are tolerated where possible. PDF extraction uses `pdfminer.six` only when installed. Native SearXNG defaults to `http://localhost:8080`; Docker uses the compose `searxng` service URL and pins the SearXNG image with a healthcheck.
+`ddgs` is optional; provider code has an HTML fallback, skipped when `ddgs` itself failed on the network (it already queried the same endpoint). Search cache and analytics state live under the shared data dir and mkdir failures in read-only image layers are tolerated where possible. PDF extraction uses `pdfminer.six` when installed and otherwise the core `pypdf` dependency. Native SearXNG defaults to `http://localhost:8080`; Docker uses the compose `searxng` service URL and pins the SearXNG image with a healthcheck.
 
 Compose preserves retained SearXNG settings but runs `scripts/migrate_searxng_settings.py` before startup to add missing `use_default_settings: true` inheritance. The migration accepts only a regular single-document YAML mapping, preserves BOM/newline/style/ownership/mode, writes and directory-fsyncs atomically, and no-ops when the key exists. Compose treats migration failure as non-fatal so SearXNG health reports the retained-file problem instead of the wrapper command preventing startup.
 

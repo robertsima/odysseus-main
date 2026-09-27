@@ -73,6 +73,71 @@ def _extract_site_filter(query: str) -> Tuple[str, Optional[str]]:
     return query, None
 
 
+# ----------------------------------------------------------------------
+# Simplified retry query
+# ----------------------------------------------------------------------
+# Research agents write 9-16 word keyword soups ("2025 agent infrastructure
+# reliability memory state tool call idempotency SDK products gaps developer
+# tools"). The web engines behind SearXNG answer those with pages matching one
+# word -- in the 2026-09-27 logs the relevance gate discarded all five rows for
+# 35 of 70 such queries, and the rest leaned on dictionary pages for "offline"
+# or "official". A shorter query made of the leading subject terms is what a
+# person would retry with, so the provider chain gets one more pass with it.
+MAX_SIMPLIFIED_TERMS = 6
+
+_OPERATOR_RE = re.compile(
+    r"\b(?:intitle|inurl|intext|allintitle|allinurl|allintext|filetype|ext|after|before|"
+    r"lang|related|cache|define):\S+",
+    flags=re.I,
+)
+_YEAR_RE = re.compile(r"^(?:19|20)\d{2}$")
+_SIMPLIFY_DROP = {
+    # function words
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for", "from",
+    "how", "in", "is", "it", "of", "on", "or", "the", "to", "vs", "what", "when",
+    "where", "which", "who", "why", "with", "not",
+    # research scaffolding that describes the kind of page wanted, not the subject
+    "official", "documentation", "docs", "doc", "discussion", "discussions",
+    "evidence", "example", "examples", "case", "study", "studies", "paper",
+    "papers", "report", "reports", "survey", "issue", "issues", "github",
+    "competitors", "alternatives", "products", "pain", "points", "latest",
+    "current", "overview", "guide", "review", "reviews", "analysis",
+}
+
+
+def simplify_query(query: str, max_terms: int = MAX_SIMPLIFIED_TERMS) -> str:
+    """Return a shorter keyword query for a retry, keeping any ``site:`` scope.
+
+    Drops quotes, boolean operators, exclusions, search operators other than
+    ``site:``, bare years (the time filter already carries recency), and
+    scaffolding words; then keeps the first ``max_terms`` distinct terms.
+    Returns the input unchanged when nothing useful would remain.
+    """
+    if not isinstance(query, str):
+        return ""
+    rest, site = _extract_site_filter(query)
+    rest = _OPERATOR_RE.sub(" ", rest)
+    rest = re.sub(r"[\"“”„()\[\]{}]", " ", rest)
+    terms: List[str] = []
+    seen = set()
+    for raw in rest.split():
+        if raw in ("OR", "AND", "NOT", "|", "&") or raw.startswith("-"):
+            continue
+        token = raw.strip(".,;:!?'`*")
+        low = token.casefold()
+        if (not re.search(r"\w", token) or low in _SIMPLIFY_DROP
+                or _YEAR_RE.match(token) or low in seen):
+            continue
+        seen.add(low)
+        terms.append(token)
+        if len(terms) >= max_terms:
+            break
+    if not terms:
+        return query
+    simplified = " ".join(terms)
+    return f"site:{site} {simplified}" if site else simplified
+
+
 def _boost_entities_in_query(base_query: str, entities: Dict[str, List[str]]) -> str:
     """Append extracted entities to the query using OR to increase relevance."""
     parts = [base_query]

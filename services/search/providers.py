@@ -243,10 +243,13 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             )
             parsed, data = _run(fallback)
         logger.info(f"SearXNG JSON API returned {len(parsed)} results for: {query}")
-        if not parsed:
-            unresponsive = data.get("unresponsive_engines") if isinstance(data, dict) else None
-            if unresponsive:
-                logger.info(f"SearXNG unresponsive engines for {query!r}: {unresponsive}")
+        # Logged whether or not rows came back: SearXNG answered 5 rows for
+        # all 344 queries on 2026-09-27 while the relevance gate threw away
+        # every row for half of them, and which engines were blocked
+        # (CAPTCHA / 429 / timeout) is the only clue to why.
+        unresponsive = data.get("unresponsive_engines") if isinstance(data, dict) else None
+        if unresponsive:
+            logger.info(f"SearXNG unresponsive engines for {query!r}: {unresponsive}")
         return parsed
     except Exception as e:
         logger.warning(f"SearXNG JSON API search failed: {e}")
@@ -391,15 +394,51 @@ def _resolve_ddg_redirect(raw: str) -> str:
     return resolved
 
 
+_TRANSPORT_ERROR_MARKERS = (
+    "timed out", "timeout", "error sending request", "connection", "decodeerror",
+    "reset", "ratelimit", "rate limit", "429", "eof occurred", "ssl",
+)
+
+
+def _is_transport_error(exc: BaseException) -> bool:
+    """True for failures of the network path (not an honest "no results")."""
+    if isinstance(exc, httpx.TransportError):
+        return True
+    msg = f"{type(exc).__name__} {exc}".lower()
+    return any(marker in msg for marker in _TRANSPORT_ERROR_MARKERS)
+
+
 def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
     """Search DuckDuckGo via the maintained ``ddgs`` package.
 
     The package is optional; when it is absent, the HTML endpoint remains a
     best-effort fallback so selecting DuckDuckGo still has honest degraded
     behavior rather than an import-time failure.
+
+    Transport outcomes feed the provider's circuit breaker
+    (``resilience.get_breaker("duckduckgo")``) so that, under parallel load,
+    workers stop waiting on it after a run of timeouts. When ``ddgs`` itself
+    failed on the network, the direct html.duckduckgo.com request is skipped:
+    ``ddgs`` already went to that endpoint, and on 2026-09-27 the follow-up
+    timed out 41 times and returned a result zero times.
     """
+    from .resilience import get_breaker
+
+    breaker = get_breaker("duckduckgo")
     count = count if count is not None else _get_result_count()
+
+    def _settle(results: List[dict], failure: Optional[BaseException]) -> List[dict]:
+        if results:
+            breaker.record_success()
+        elif failure is not None and _is_transport_error(failure):
+            breaker.record_failure(str(failure))
+        return results
+
     def _html_fallback() -> List[dict]:
+        results, failure = _html_fallback_raw()
+        return _settle(results, failure)
+
+    def _html_fallback_raw():
         try:
             response = httpx.get(
                 "https://html.duckduckgo.com/html/",
@@ -424,10 +463,10 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                     "snippet": snippet_el.get_text(" ", strip=True) if snippet_el else "",
                 })
             logger.info(f"DuckDuckGo HTML search returned {len(parsed)} results")
-            return parsed
+            return parsed, None
         except Exception as e:
             logger.warning(f"DuckDuckGo HTML search failed: {e}")
-            return []
+            return [], e
 
     try:
         from ddgs import DDGS
@@ -459,10 +498,14 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                 "snippet": item.get("body", ""),
             })
         logger.info(f"DuckDuckGo search returned {len(results)} results")
-        return results or _html_fallback()
     except Exception as e:
         logger.warning(f"DuckDuckGo search failed: {e}")
+        if _is_transport_error(e):
+            return _settle([], e)
         return _html_fallback()
+    if results:
+        return _settle(results, None)
+    return _html_fallback()
 
 
 # ── Google Programmable Search Engine ──
