@@ -6,6 +6,7 @@ workbench.js itself is DOM-bound, so it only gets a syntax check.
 """
 
 import json
+import re
 import shutil
 import subprocess
 import textwrap
@@ -123,7 +124,14 @@ def test_workbench_wired_into_page():
     html = (_REPO / "static" / "index.html").read_text(encoding="utf-8")
     assert 'id="workbench-modal"' in html and 'id="rail-workbench"' in html and 'id="set-workbenchCard"' in html
     app = (_REPO / "static" / "app.js").read_text(encoding="utf-8")
-    assert "import workbenchModule from './js/workbench.js'" in app and "'rail-workbench': 'Workbench'" in app
+    # The import may carry a cache-busting `?v=` tag, bumped on each release.
+    assert re.search(r"^import workbenchModule from '\./js/workbench\.js(\?v=[^']*)?';", app, re.M), \
+        "app.js no longer imports the Workbench module"
+    assert "'rail-workbench': 'Workbench'" in app
+    # Imported is not wired: the module must be initialised and exposed for
+    # the agents dashboard (window.workbenchModule.open / openRun).
+    assert "workbenchModule.init()" in app
+    assert "window.workbenchModule = workbenchModule" in app
     for name in ("chat.js", "chatRenderer.js"):
         src = (_REPO / "static" / "js" / name).read_text(encoding="utf-8")
         assert "renderDiffCard(" in src

@@ -2527,21 +2527,18 @@ async function initWorkbenchSettings() {
   initAgentProfilesEditor(loaded && Array.isArray(loaded.agent_profiles) ? loaded.agent_profiles : []);
   if (f.approval) f.approval.addEventListener('change', async function () {
     try {
-      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_approval_mode: f.approval.value }) });
+      var r = await _postSettings({ agent_approval_mode: f.approval.value });
       msg.textContent = r.ok ? 'Saved' : 'Not saved (' + r.status + ')';
       msg.style.color = r.ok ? 'var(--fg)' : 'var(--red)';
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   });
   async function save() {
     try {
-      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workbench_enabled: !!(f.enabled && f.enabled.checked),
-          workbench_auto_open: !!(f.autoOpen && f.autoOpen.checked),
-          claude_code_stream_transcript: !!(f.stream && f.stream.checked),
-        }) });
+      var r = await _postSettings({
+        workbench_enabled: !!(f.enabled && f.enabled.checked),
+        workbench_auto_open: !!(f.autoOpen && f.autoOpen.checked),
+        claude_code_stream_transcript: !!(f.stream && f.stream.checked),
+      });
       if (!r.ok) { msg.textContent = 'Not saved (' + r.status + ')'; msg.style.color = 'var(--red)'; return; }
       fill(await r.json());
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
@@ -2719,8 +2716,7 @@ function initAgentProfilesEditor(initial) {
     note.textContent = 'Saving…';
     note.style.color = 'var(--fg)';
     try {
-      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent_profiles: profiles }) });
+      var r = await _postSettings({ agent_profiles: profiles });
       var body = null;
       try { body = await r.json(); } catch (e) {}
       if (!r.ok) {
@@ -2904,8 +2900,7 @@ async function initClaudeCodeSettings() {
 
   async function save() {
     try {
-      var r = await fetch('/api/auth/settings', { method: 'POST', credentials: 'same-origin',
-        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload()) });
+      var r = await _postSettings(payload());
       if (!r.ok) {
         var err = {};
         try { err = await r.json(); } catch (e) {}

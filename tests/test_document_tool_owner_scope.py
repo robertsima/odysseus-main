@@ -2,6 +2,8 @@ import asyncio
 import sys
 import types
 
+import pytest
+
 from src.agent_tools import TOOL_HANDLERS
 from src.agent_tools.document_tools import (
     _owned_document_query,
@@ -153,13 +155,49 @@ def test_suggest_document_active_id_filters_to_calling_owner(monkeypatch):
     assert ("owner", "eq", "alice") in query.filters
 
 
-def test_document_tool_dispatch_forwards_owner():
-    source = open("src/tool_execution.py", encoding="utf-8").read()
+_DOCUMENT_TOOLS = (
+    "create_document", "update_document", "edit_document",
+    "suggest_document", "manage_documents",
+)
 
-    assert "_document_tool_dispatch(tool, content, session_id, owner)" in source
 
-    # Also verify TOOL_HANDLERS has the expected entries
-    for key in ("create_document", "update_document", "edit_document",
-                "suggest_document", "manage_documents"):
-        assert key in TOOL_HANDLERS, f"TOOL_HANDLERS missing key: {key}"
-        assert callable(TOOL_HANDLERS[key]), f"TOOL_HANDLERS[{key!r}] is not callable"
+@pytest.mark.parametrize("tool", _DOCUMENT_TOOLS)
+def test_document_tool_dispatch_forwards_owner(monkeypatch, tool):
+    """The agent's tool path must hand document tools the calling owner.
+
+    The owner filters above only protect anything if execute_tool_block — the
+    single entry point the agent loop dispatches through — puts the caller's
+    owner (and session) into the handler ctx. Driven end to end with the
+    registry handler swapped for a recorder, so a refactor of the dispatch
+    helper cannot drop the owner unnoticed.
+    """
+    # Resolve both modules live: other test modules pop and re-import
+    # src.tool_execution, so a top-level reference could be a stale copy.
+    import src.agent_tools as agent_tools
+    import src.tool_execution as te
+
+    assert callable(agent_tools.TOOL_HANDLERS.get(tool)), f"TOOL_HANDLERS missing {tool!r}"
+
+    seen = []
+
+    async def _record(content, ctx):
+        seen.append(ctx)
+        return {"output": "ok", "exit_code": 0}
+
+    monkeypatch.setitem(agent_tools.TOOL_HANDLERS, tool, _record)
+    # manage_documents is admin-gated for non-admins; the gate is covered
+    # elsewhere. Pass it here so every document tool reaches dispatch — an
+    # admin's documents are still owner-scoped, so the owner must still arrive.
+    monkeypatch.setattr(te, "_owner_is_admin", lambda owner: True)
+
+    _desc, result = asyncio.run(te.execute_tool_block(
+        agent_tools.ToolBlock(tool, '{"action":"list"}'),
+        session_id="sess-alice",
+        owner="alice",
+        security_context=te.NO_TOOL_SECURITY_CONTEXT,
+    ))
+
+    assert result.get("exit_code") == 0, result
+    assert len(seen) == 1, f"{tool} did not reach its registry handler"
+    assert seen[0]["owner"] == "alice"
+    assert seen[0]["session_id"] == "sess-alice"
