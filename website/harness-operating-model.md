@@ -81,7 +81,7 @@ judgment.
   result, branch and PR. Delegate with `repository: "owner/repo"` or
   `via: "cloud"`; `start` + `poll` as usual, and `status` includes a `cloud`
   section.
-- Configuration lives in Settings > Tools > Claude Code (`claude_code_*`
+- Configuration lives in Settings > Agent Tools > Claude Code (`claude_code_*`
   settings, admin-only) with `CLAUDE_CODE_*` environment variables as the
   fallback. The bundled `claude-code-delegation` skill carries the full
   procedure and the terms boundaries.

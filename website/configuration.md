@@ -266,7 +266,7 @@ the 123-token count in the grep is fully accounted for.
 | `ODYSSEUS_SGLANG_CMD_PY` | `routes/cookbook_routes.py:2404` | Bash-script-local: launch Python path in a generated SGLang serving runner. |
 | `ODYSSEUS_SGLANG_IMPORT_ERROR` | `routes/cookbook_routes.py:2421` | Bash-script-local: captured import-check error text. |
 | `ODYSSEUS_TMUX` | `routes/cookbook_routes.py:259` | Bash-script-local: resolved `tmux` binary path for a generated remote-session wrapper. |
-| `ODYSSEUS_TOKEN_FILE` | `src/agent_tools/claude_code_tools.py:329` | Regex artifact: the real variable is `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` (different prefix), already exposed as a UI setting ("Settings > Tools > Claude Code > Callback token file"). |
+| `ODYSSEUS_TOKEN_FILE` | `src/agent_tools/claude_code_tools.py:329` | Regex artifact: the real variable is `CLAUDE_CODE_ODYSSEUS_TOKEN_FILE` (different prefix), already exposed as a UI setting ("Settings > Agent Tools > Claude Code > Callback token file"). |
 | `ODYSSEUS_USER_PATH` | `routes/cookbook_helpers.py:362` | Bash-script-local: captured `$PATH` from the user's login shell, for a generated remote-exec wrapper. |
 | `ODYSSEUS_USER_SHELL` | `routes/cookbook_helpers.py:360` | Bash-script-local: resolved `$SHELL` in the same wrapper. |
 | `ODYSSEUS_VLLM_BIN` | `routes/cookbook_helpers.py:815` | Bash-script-local: resolved `vllm` CLI path in a generated runner. |

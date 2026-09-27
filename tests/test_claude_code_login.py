@@ -384,5 +384,5 @@ async def test_not_signed_in_hint_points_to_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(cct, "repository_roots", lambda: (tmp_path,))
     report = await cct.status_report()
     hint = next(h for h in report["hints"] if "not signed in" in h)
-    assert "Settings > Tools > Claude Code delegation > Sign in" in hint
+    assert "Settings > Agent Tools > Claude Code delegation > Sign in" in hint
     assert "agent cannot do this step" in hint

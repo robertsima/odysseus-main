@@ -70,7 +70,7 @@ what git reports afterwards (`branch`, `commit`, `changed_files`, `clean`).
 
 ### Settings
 
-Everything is configurable in **Settings > Tools > Claude Code delegation**
+Everything is configurable in **Settings > Agent Tools > Claude Code delegation**
 (admin-only, persisted in `settings.json`, no restart) with the `CLAUDE_CODE_*`
 environment variables as the fallback:
 

@@ -1230,7 +1230,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return {"error": _tool_error(
             f"binary unavailable at {binary}, so there is nothing to update. Install Claude Code there first "
-            "(see integrations/claude/README.md) or set Settings > Tools > Claude Code binary."), "exit_code": 1}
+            "(see integrations/claude/README.md) or set Settings > Agent Tools > Claude Code binary."), "exit_code": 1}
     if _UPDATE_STATE["running"]:
         return {"error": _tool_error("an update is already running; call action=status in a minute"),
                 "update_in_progress": True, "exit_code": 1}
@@ -1303,7 +1303,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
                     hints.append(
                         f"The native updater installed {launcher_version} at {launcher}, but the configured binary "
                         f"{binary} is a separate copy it never updates, and switching the setting failed "
-                        f"({problem}). Set Settings > Tools > Claude Code binary (manage_settings key "
+                        f"({problem}). Set Settings > Agent Tools > Claude Code binary (manage_settings key "
                         f"claude_code_binary) to {launcher}; no further update is needed.")
         if code == 0:
             others = await _other_installs(binary, env, (Path(rebound["from"]),) if rebound else ())
@@ -1452,7 +1452,7 @@ async def status_report() -> dict:
     elif info["error"]:
         hints.append(info["error"])
     if info["available"] and auth.get("logged_in") is False:
-        hints.append("The binary is not signed in. Ask the admin to open Settings > Tools > Claude Code "
+        hints.append("The binary is not signed in. Ask the admin to open Settings > Agent Tools > Claude Code "
                      "delegation > Sign in and complete the sign-in in their browser (no SSH needed; the "
                      "agent cannot do this step). Alternatively run `claude auth login` as the container "
                      "user (HOME=%s), or provide ANTHROPIC_API_KEY. "
@@ -1472,7 +1472,7 @@ async def status_report() -> dict:
             f"The callback token file {callback_status.get('token_file')} blocks delegation: {token_problem}. "
             "It must be a regular file, mode 0600 on POSIX (or protected by a "
             "restricted ACL on Windows), owned by the Odysseus process user "
-            "(Settings > Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
+            "(Settings > Agent Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
     update_required = None

@@ -102,7 +102,7 @@ before proposing any change to how Claude is reached.
 - Do not raise `timeout_seconds` above what the task needs; the process is
   killed at the limit and the working tree is left as-is.
 - Runs on one checkout are serialized; the aggregate limit is
-  `claude_code_max_concurrent_tasks` (Settings > Tools > Claude Code).
+  `claude_code_max_concurrent_tasks` (Settings > Agent Tools > Claude Code).
 
 ## When something fails
 
@@ -110,8 +110,8 @@ before proposing any change to how Claude is reached.
 |---|---|---|
 | "not an existing Git repository or worktree" | wrong path (e.g. `/app`) | use a path from `status`/`list_repositories` |
 | "outside Claude Code approved roots" | path not under the configured roots | pick an approved one or ask the operator to add the root in Settings |
-| `ready: false`, `auth.logged_in: false` ("Not logged in") | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise ask the admin to open Settings > Tools > Claude Code delegation > **Sign in** and finish it in their browser (no SSH). You cannot do this step or handle the code for them; never ask them to paste it into chat |
-| "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Tools > Claude Code |
+| `ready: false`, `auth.logged_in: false` ("Not logged in") | binary not signed in | if `cloud.ready` is true, delegate with `repository: "owner/repo"` (cloud runner); otherwise ask the admin to open Settings > Agent Tools > Claude Code delegation > **Sign in** and finish it in their browser (no SSH). You cannot do this step or handle the code for them; never ask them to paste it into chat |
+| "binary unavailable" | wrong `claude_code_binary` | operator fixes the path in Settings > Agent Tools > Claude Code |
 | `error_kind: claude_code_outdated` ("Claude Code X does not support this model; version Y or newer is required") | the installed CLI is too old for the model | call `{"action": "update"}` (add `"version": "Y"` if the default channel stays too old), check `version_after`, then retry the task once. Never install or update Claude Code from bash: that makes a second copy the delegation never runs |
 | update refused: "run(s) are in progress" | an update would replace the binary under a running job | poll or cancel those task ids first, then update |
 | `permission_denials` mentions push/remote | Claude tried to publish | expected; publishing goes through `manage_agent_worktree` |

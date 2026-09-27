@@ -72,7 +72,7 @@ def setup_claude_code_routes() -> APIRouter:
     async def get_status(request: Request):
         """Preflight for the integration: binary, sign-in state (no token is
         read), approved repositories, callback configuration, live task
-        count. Drives the Settings > Tools > Claude Code card and the chat
+        count. Drives the Settings > Agent Tools > Claude Code card and the chat
         tool's action=status."""
         _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
         return await status_report()
