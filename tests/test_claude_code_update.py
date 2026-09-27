@@ -33,6 +33,9 @@ def isolated(monkeypatch, tmp_path):
     """No settings file, no leftover module state, a private task store."""
     monkeypatch.setattr(cct, "_setting", lambda key, default=None: default)
     monkeypatch.delenv("CLAUDE_CODE_AUTO_UPDATE", raising=False)
+    # A private HOME: the developer's own ~/.local/bin/claude must not be
+    # mistaken for the container's native launcher.
+    monkeypatch.setenv("CLAUDE_CODE_HOME", str(tmp_path / "home"))
     monkeypatch.setattr(cct, "_ACTIVE_RUNS", 0)
     monkeypatch.setattr(cct, "_UPDATE_STATE", {"running": False, "last": None})
     monkeypatch.setattr(cct, "_VERSION_REQUIREMENT", {})

@@ -1434,7 +1434,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "prompt": {"type": "string", "description": "Bounded coding task instructions."},
                     "allowed_tools": {"type": "array", "items": {"type": "string"}},
                     "timeout_seconds": {"type": "integer"},
-                    "model": {"type": "string"},
+                    "model": {"type": "string", "description": "Optional, provider-specific; omit to use the provider's configured default. The local Claude Code CLI provider accepts only Claude models: an alias (opus, sonnet, haiku, fable, opusplan) or a Claude model ID such as claude-opus-5-5, claude-sonnet-5, claude-fable-5-1, claude-haiku-4-5-20251001 (append [1m] for 1M context); it rejects gpt-*, o3, gemini and other providers' models. A remote MCP coding agent takes its own model names."},
                     "task_id": {"type": "string"},
                     "wait_seconds": {"type": "integer"},
                     "label": {"type": "string"}
@@ -1458,7 +1458,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "prompt": {"type": "string", "description": "Task instructions for Claude Code (run/start). State the objective, likely files, constraints, and how to verify."},
                     "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrower Claude permission list. Omit for the defaults. Accepted: Read, Glob, Grep, Edit, Write, Bash(git status|diff|log|show|branch|rev-parse|add|commit:*), Bash(pytest|npm test|pnpm test|yarn test|./gradlew test|mvn test:*)."},
                     "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds (default 900)."},
-                    "model": {"type": "string", "description": "Optional Claude model alias for this job (e.g. sonnet, opus)."},
+                    "model": {"type": "string", "description": "Optional Claude model for this job; omit to use the configured default. Claude Code runs Claude models only: an alias (opus, sonnet, haiku, fable, opusplan) or a Claude model ID such as claude-opus-5-5, claude-sonnet-5, claude-fable-5-1, claude-haiku-4-5-20251001 (append [1m] for 1M context). Spellings like 'opus-5.5' are normalised; gpt-*, o3, gemini and other providers' models are rejected."},
                     "task_id": {"type": "string", "description": "Task id for poll/cancel."},
                     "wait_seconds": {"type": "integer", "description": "poll only: block up to this many seconds (max 600) for the task to finish. Use this rather than bash sleep."},
                     "label": {"type": "string", "description": "Short name for a background task (start)."},

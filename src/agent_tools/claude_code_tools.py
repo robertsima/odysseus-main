@@ -28,6 +28,7 @@ restarting the container.
 import asyncio
 import contextvars
 import json
+import logging
 import os
 import re
 import shutil
@@ -41,6 +42,8 @@ from typing import Any, Optional
 from core.atomic_io import atomic_write_json
 from src import agent_activity as activity
 from src.constants import CLAUDE_CODE_TASKS_FILE
+
+logger = logging.getLogger(__name__)
 
 # Who a run is for. Set by the chat tool / task runner around `_run_claude`
 # rather than threaded through its signature, so the many callers and test
@@ -135,6 +138,23 @@ DISALLOWED_TOOLS = (
     "Bash(env:*)", "Bash(printenv:*)", "Bash(set:*)", "Bash(export:*)",
 )
 _MODEL_RE = re.compile(r"^[A-Za-z0-9._\-]{1,80}$")
+# What the local Claude Code CLI's --model accepts: its aliases
+# (code.claude.com/docs/en/model-config) and Claude model IDs, either with an
+# optional "[1m]" (1M-token context) suffix. 2026-09-27: `opus-5.5` reached the
+# CLI and was refused only after a process had started, and `gpt-6-sol` was
+# sent to it through delegate_to_agent; both are now caught in _parse_args.
+_CLAUDE_MODEL_ALIASES = ("opus", "sonnet", "haiku", "fable", "best", "opusplan", "default")
+_CLAUDE_MODEL_EXAMPLES = ("claude-opus-5-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001")
+_CLAUDE_FAMILIES = "fable|opus|sonnet|haiku"
+# Families whose short ID is not the API's canonical one.
+_CLAUDE_MODEL_IDS = {("haiku", "4-5"): "claude-haiku-4-5-20251001"}
+# "opus-5.5", "Opus 5.5", "claude opus 5.5", "sonnet-5", "claude-opus-5-5".
+_HUMAN_CLAUDE_MODEL = re.compile(rf"^(?:claude[\s_\-]*)?({_CLAUDE_FAMILIES})(?:[\s_\-]*v?(\d+(?:[\s._\-]+\d+)*))?$")
+# Any other claude-* ID (older "claude-3-5-sonnet-20241022", Vertex "...@20251001"),
+# and Bedrock IDs ("us.anthropic.claude-sonnet-5-v1:0") for a CLI on that provider.
+_CLAUDE_MODEL_ID = re.compile(r"^(?:(?:[a-z]{2,6}\.)?anthropic\.)?claude-[a-z0-9][a-z0-9.\-]*(?:@\d{8})?(?::\d+)?$")
+_FOREIGN_MODEL = re.compile(r"^(?:gpt|chatgpt|o\d|gemini|gemma|llama|mistral|mixtral|codestral|devstral|deepseek|"
+                            r"qwen|grok|command|phi|kimi|glm|minimax|nova)", re.IGNORECASE)
 # Flags the runner adapts to. Claude Code < 2.1.259 has no
 # --permission-prompts (prompts are denied anyway in a hostless -p run) and
 # older builds have no --restricted; both are detected from --help rather
@@ -221,7 +241,28 @@ def repository_roots() -> tuple[Path, ...]:
         roots = [item for item in raw.replace("\n", os.pathsep).split(os.pathsep) if item.strip()]
     else:
         roots = list(DEFAULT_ROOTS)
-    return tuple(Path(root.strip()).expanduser().resolve() for root in roots)
+    resolved = [Path(root.strip()).expanduser().resolve() for root in roots]
+    # The harness's own worktree root is always approved. Saving
+    # claude_code_repository_roots (e.g. ["/app/data/development"]) replaces
+    # the default that listed /app/data/agent_worktrees, and 2026-09-27 runs on
+    # a worktree manage_agent_worktree had just created were refused as
+    # "outside Claude Code approved roots". manage_git's git_repository_roots
+    # admits the same root for the same reason; the harness creates and writes
+    # it, so approving it widens nothing.
+    worktree_root = _managed_worktree_root()
+    if worktree_root is not None and worktree_root not in resolved:
+        resolved.append(worktree_root)
+    return tuple(resolved)
+
+
+def _managed_worktree_root() -> Optional[Path]:
+    """The agent worktree root (``agent_worktree.config``), when it exists."""
+    try:
+        from src.agent_worktree.config import load_config
+        root = Path(load_config().worktree_root).expanduser().resolve()
+    except Exception:
+        return None
+    return root if root.is_dir() else None
 
 
 def configured_concurrency() -> int:
@@ -297,7 +338,10 @@ def discover_repositories(limit: int = 25) -> list[dict]:
             if key in seen or not (path / ".git").exists():
                 continue
             seen.add(key)
-            found.append({"path": key, "root": str(root), "branch": _head_branch(path)})
+            # A linked worktree's ".git" is a pointer file; say which it is so
+            # the agent can tell a harness worktree from the main checkout.
+            kind = "worktree" if (path / ".git").is_file() else "checkout"
+            found.append({"path": key, "root": str(root), "branch": _head_branch(path), "kind": kind})
             if len(found) >= limit:
                 return found
     return found
@@ -722,10 +766,22 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
         # and a malformed entry in it; dropping can only narrow Claude's rights.
         dropped = rejected[:10]
         tools = [item for item in tools if SAFE_TOOL.fullmatch(item)]
-    model = str(args.get("model") or _setting("claude_code_model", "") or "").strip() or None
-    if model and not _MODEL_RE.fullmatch(model):
-        return {"error": _tool_error("model must be a plain model name or alias", prefix), "exit_code": 1}
+    requested_model = str(args.get("model") or "").strip()
+    raw_model = requested_model or str(_setting("claude_code_model", "") or "").strip()
+    # Checked here, before any process starts: the CLI only reports a bad
+    # model after spawning, and only runs Claude models at all.
+    model, model_error = normalize_claude_model(raw_model)
+    if model_error:
+        source = "" if requested_model else " (from the claude_code_model setting)"
+        return {"error": _tool_error(f"{model_error}{source}", prefix), "error_kind": "invalid_model",
+                "exit_code": 1}
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
+    if raw_model and model != raw_model:
+        if model:
+            parsed["model_note"] = f"model {raw_model!r} was passed to Claude Code as {model!r}"
+        else:
+            parsed["model_note"] = f"model {raw_model!r} means the account default; no --model was passed"
+        logger.info("claude_code: model %r normalised to %r", raw_model, model)
     if dropped:
         parsed["dropped_tools"] = dropped
         parsed["dropped_note"] = dropped_note or f"Ignored unsafe allowed_tools {dropped}; ran with the rest. {accepted_hint}"
@@ -740,7 +796,50 @@ def _with_dropped(result: dict, parsed: dict) -> dict:
         result["dropped_note"] = parsed["dropped_note"]
         result["dropped_allowed_tools"] = parsed["dropped_tools"]
         result["allowed_tools_note"] = parsed["dropped_note"]
+    if parsed.get("model_note"):
+        result["model_note"] = parsed["model_note"]
     return result
+
+
+def normalize_claude_model(value: Any) -> tuple[Optional[str], Optional[str]]:
+    """``(model, error)`` for the local Claude Code CLI's ``--model``.
+
+    Aliases (``opus``, ``sonnet``, ``haiku``, ``fable``, ``best``,
+    ``opusplan``) and ``claude-*`` IDs pass, each with an optional ``[1m]``
+    suffix; human spellings are rewritten (``opus-5.5``, ``Opus 5.5``,
+    ``claude opus 5.5`` -> ``claude-opus-5-5``; ``sonnet-5`` ->
+    ``claude-sonnet-5``); ``default`` means the account default, so no model
+    (``None``) is passed. Anything else — ``gpt-*``, ``o3``, ``gemini-*`` —
+    is an error naming the valid choices. Only for the Claude CLI path:
+    delegate_to_agent's other providers never reach this.
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return None, None
+    text = re.sub(r"\s+", " ", raw.lower())
+    suffix = ""
+    if text.endswith("[1m]"):
+        suffix, text = "[1m]", text[:-4].strip()
+    choices = (f"Use an alias ({', '.join(_CLAUDE_MODEL_ALIASES)}) or a Claude model ID such as "
+               f"{', '.join(_CLAUDE_MODEL_EXAMPLES)} (append [1m] for the 1M-token context), or omit model "
+               "to use the configured default.")
+    if text in _CLAUDE_MODEL_ALIASES:
+        if text == "default":
+            return (None, None) if not suffix else (None, f"model {raw!r} is not valid: 'default' takes no [1m]. {choices}")
+        return text + suffix, None
+    human = _HUMAN_CLAUDE_MODEL.fullmatch(text)
+    if human:
+        family, version = human.group(1), human.group(2)
+        if not version:
+            return family + suffix, None
+        version = re.sub(r"[\s._\-]+", "-", version)
+        return _CLAUDE_MODEL_IDS.get((family, version), f"claude-{family}-{version}") + suffix, None
+    if _CLAUDE_MODEL_ID.fullmatch(text) and len(text) <= 100:
+        return text + suffix, None
+    if _FOREIGN_MODEL.match(text):
+        return None, (f"model {raw!r} is not a Claude model: it belongs to another provider, and the local "
+                      f"Claude Code CLI only runs Claude models. {choices}")
+    return None, f"model {raw!r} is not a Claude Code model name or alias. {choices}"
 
 
 # ── Binary probing ──
@@ -965,7 +1064,63 @@ def _install_method(binary: Path) -> dict:
     if binary.parent.name == "bin" and (prefix / "lib" / "node_modules" / "@anthropic-ai" / "claude-code").is_dir():
         return {"method": "npm", "prefix": str(prefix), "global": True, "resolved": str(resolved)}
     versions_dir = str(resolved.parent) if resolved.parent.name == "versions" else None
-    return {"method": "native", "resolved": str(resolved), "versions_dir": versions_dir}
+    # The native updater downloads into $HOME/.local/share/claude/versions/ and
+    # repoints *its* launcher, $HOME/.local/bin/claude — not whatever path
+    # claude_code_binary names. A plain copy elsewhere (2026-09-27:
+    # /app/data/claude-code/bin/claude) never moves; update_binary rebinds.
+    launcher = _native_launcher()
+    return {"method": "native", "resolved": str(resolved), "versions_dir": versions_dir,
+            "launcher": str(launcher), "is_launcher": _same_path(binary, launcher)}
+
+
+def _native_launcher(home: Optional[str] = None) -> Path:
+    """The launcher the native installer maintains for the child's HOME."""
+    launcher = Path(home or _claude_home()).expanduser() / ".local" / "bin" / "claude"
+    if os.name == "nt" and not launcher.exists() and launcher.with_suffix(".exe").exists():
+        return launcher.with_suffix(".exe")
+    return launcher
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    """Whether two paths name the same file *path* (not the same target: a
+    configured symlink into versions/ is not the launcher even when both
+    point at one version)."""
+    return os.path.normcase(os.path.abspath(str(a))) == os.path.normcase(os.path.abspath(str(b)))
+
+
+def _save_binary_setting(path: Path) -> Optional[str]:
+    """Point ``claude_code_binary`` at ``path`` the way manage_settings does.
+    Returns why it could not, or None."""
+    try:
+        from src.settings import load_settings, save_settings
+        settings = dict(load_settings())
+        settings["claude_code_binary"] = str(path)
+        save_settings(settings)
+    except Exception as exc:  # a read-only data dir, a bad settings file
+        return f"{type(exc).__name__}: {exc}"
+    if not _same_path(binary_path(), path):
+        # CLAUDE_CODE_BINARY cannot shadow a saved setting, but a caller that
+        # patched _setting (or a racing writer) can; report it rather than
+        # claiming the switch happened.
+        return f"the setting still resolves to {binary_path()}"
+    return None
+
+
+async def _other_installs(binary: Path, env: dict, extra: tuple = ()) -> list[dict]:
+    """Claude Code installs Odysseus knows about that ``binary`` is not: the
+    image default, the native launcher, and a path just rebound away from.
+    Reported, never deleted — the admin decides."""
+    found: list[dict] = []
+    seen = {os.path.normcase(os.path.abspath(str(binary)))}
+    for candidate in (*extra, Path(DEFAULT_BINARY).expanduser(), _native_launcher(env.get("HOME"))):
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key in seen:
+            continue
+        seen.add(key)
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        found.append({"path": str(candidate), "version": await _probe_version(candidate, env)})
+    return found
 
 
 def _update_environment() -> dict[str, str]:
@@ -1090,6 +1245,13 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
     _UPDATE_STATE["running"] = True
     hints: list[str] = []
     relinked = None
+    configured = binary
+    rebound: Optional[dict] = None
+    launcher: Optional[Path] = None  # a native launcher at another path than the configured binary
+    launcher_version = ""
+    others: list[dict] = []
+    requirement = version_requirement()
+    required_v = _version_tuple(requirement.get("required"))
     try:
         env = _update_environment()
         method = _install_method(binary)
@@ -1103,6 +1265,9 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
             code, out = 127, f"could not start {argv[0]}: {exc}"
         _BINARY_INFO.clear()
         after = await _probe_version(binary, env)
+        logger.info("claude_code update: method=%s command=%s %s before=%r after=%r exit=%s binary=%s",
+                    method["method"], os.path.basename(argv[0]), argv[1] if len(argv) > 1 else "",
+                    before, after, code, binary)
         if code == 0 and method["method"] == "native" and _version_tuple(after) == _version_tuple(before):
             try:
                 relinked = _relink_native(binary, method, _version_tuple(before))
@@ -1111,18 +1276,47 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
             if relinked:
                 _BINARY_INFO.clear()
                 after = await _probe_version(binary, env)
+                logger.info("claude_code update: relinked %s -> %s (now %r)", binary, relinked, after)
+        # 2026-09-27: the configured binary was a plain copy at
+        # /app/data/claude-code/bin/claude; `claude update` installed 2.1.283
+        # and repointed $HOME/.local/bin/claude, the copy stayed at 2.1.267,
+        # and five retries reported the same failure. When the updater's own
+        # launcher is newer than the configured path (and new enough for the
+        # model), point claude_code_binary at it.
+        candidate = Path(method["launcher"]) if method.get("launcher") and not method.get("is_launcher") else None
+        if code == 0 and candidate is not None and candidate.is_file() and os.access(candidate, os.X_OK):
+            launcher = candidate
+            launcher_version = await _probe_version(launcher, env)
+            launcher_v, current_v = _version_tuple(launcher_version), _version_tuple(after)
+            if (launcher_v and current_v == _version_tuple(before) and (current_v is None or launcher_v > current_v)
+                    and (not required_v or launcher_v >= required_v)):
+                problem = _save_binary_setting(launcher)
+                if problem is None:
+                    logger.info("claude_code update: rebound claude_code_binary %s (%r) -> %s (%r)",
+                                binary, after, launcher, launcher_version)
+                    rebound = {"from": str(binary), "to": str(launcher)}
+                    binary, after = launcher, launcher_version
+                    _BINARY_INFO.clear()
+                else:
+                    logger.warning("claude_code update: could not rebind claude_code_binary to %s: %s",
+                                   launcher, problem)
+                    hints.append(
+                        f"The native updater installed {launcher_version} at {launcher}, but the configured binary "
+                        f"{binary} is a separate copy it never updates, and switching the setting failed "
+                        f"({problem}). Set Settings > Tools > Claude Code binary (manage_settings key "
+                        f"claude_code_binary) to {launcher}; no further update is needed.")
+        if code == 0:
+            others = await _other_installs(binary, env, (Path(rebound["from"]),) if rebound else ())
     finally:
         _UPDATE_STATE["running"] = False
     before_v, after_v = _version_tuple(before), _version_tuple(after)
-    requirement = version_requirement()
-    required_v = _version_tuple(requirement.get("required"))
     satisfies = None if not required_v else bool(after_v and after_v >= required_v)
     text = _ANSI.sub("", out or "").strip()
     result: dict = {
         "binary": str(binary),
         "method": method["method"],
         "command": argv,
-        "target": target or ("latest" if argv[0] != str(binary) else "the install's release channel"),
+        "target": target or ("latest" if argv[0] != str(configured) else "the install's release channel"),
         "version_before": before,
         "version_after": after,
         "updated": bool(before_v and after_v and after_v > before_v),
@@ -1133,6 +1327,22 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
         result["npm_prefix"] = method["prefix"]
     if relinked:
         result["relinked_to"] = relinked
+    if rebound:
+        result["rebound_from"] = rebound["from"]
+        result["rebound_to"] = rebound["to"]
+    elif launcher is not None:
+        result["native_launcher"] = {"path": str(launcher), "version": launcher_version}
+    if others:
+        current_v = _version_tuple(after)
+        for other in others:
+            other_v = _version_tuple(other["version"])
+            other["stale"] = bool(current_v and (other_v is None or other_v <= current_v))
+        result["other_installs"] = others
+        stale = [f"{o['path']} ({o['version'] or 'no version'})" for o in others if o["stale"]]
+        if stale:
+            hints.append(f"Left in place: {', '.join(stale)} — an older Claude Code install Odysseus no longer "
+                         f"runs (it runs {binary}). Nothing was deleted; remove it by hand once nothing else "
+                         "points at it.")
     if required_v:
         result["required_version"] = requirement.get("required")
         result["satisfies_requirement"] = satisfies
@@ -1146,21 +1356,48 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
             hints.append("Updates are disabled by DISABLE_UPDATES in Claude Code's settings; remove it to update.")
     elif required_v and not satisfies:
         result["exit_code"] = 1
-        result["error"] = _tool_error(
-            f"the updater finished but the binary reports {after or 'no version'}, still older than the "
-            f"{requirement.get('required')} the model needs. Retry with version=\"latest\" or "
-            f"version=\"{requirement.get('required')}\".")
+        required = requirement.get("required")
+        launcher_v = _version_tuple(launcher_version)
+        if launcher is not None and launcher_v and launcher_v >= required_v:
+            # The rebind was attempted and failed (see hints): the fix is the
+            # setting, not another update.
+            result["error"] = _tool_error(
+                f"{binary} still reports {after or 'no version'}, older than the {required} the model needs, "
+                f"but the native updater's launcher {launcher} already reports {launcher_version}. Set "
+                f"claude_code_binary to {launcher} (manage_settings) and retry the task; do not update again.")
+        elif launcher is not None:
+            # The configured path is not what the native updater maintains.
+            # Suggesting the exact minimum here (as this message used to) got
+            # it run as `claude install <minimum>`, which moves the shared
+            # launcher *back* to that version.
+            result["error"] = _tool_error(
+                f"the updater finished but {binary} reports {after or 'no version'}, still older than the "
+                f"{required} the model needs. {binary} is not the native updater's launcher ({launcher}, now "
+                f"{launcher_version or 'no version'}), so updates land there. Retry with version=\"latest\" "
+                "(not an exact version, which would move that launcher back); the configured binary is switched "
+                "to the launcher once it is new enough.")
+        else:
+            result["error"] = _tool_error(
+                f"the updater finished but the binary reports {after or 'no version'}, still older than the "
+                f"{required} the model needs. Retry with version=\"latest\" or version=\"{required}\".")
     if result["exit_code"] == 0:
         if required_v and satisfies:
             _VERSION_REQUIREMENT.clear()
-        result["response"] = (f"Claude Code updated from {before or '?'} to {after or '?'}." if result["updated"]
-                              else f"Claude Code is at {after or before or '?'}; no newer version was installed.")
+        if rebound:
+            result["response"] = (
+                f"Claude Code now runs {rebound['to']} ({after or '?'}): the native updater installed there, not at "
+                f"the configured {rebound['from']} ({before or '?'}), so claude_code_binary was switched to it.")
+        else:
+            result["response"] = (f"Claude Code updated from {before or '?'} to {after or '?'}." if result["updated"]
+                                  else f"Claude Code is at {after or before or '?'}; no newer version was installed.")
     if hints:
         result["hints"] = hints
     _UPDATE_STATE["last"] = {
         "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), "method": method["method"],
         "version_before": before, "version_after": after, "exit_code": result["exit_code"],
     }
+    if rebound:
+        _UPDATE_STATE["last"]["rebound_to"] = rebound["to"]
     return result
 
 
@@ -1215,8 +1452,10 @@ async def status_report() -> dict:
     elif info["error"]:
         hints.append(info["error"])
     if info["available"] and auth.get("logged_in") is False:
-        hints.append("The binary is not signed in. Run `claude` once as the container user "
-                     "(HOME=%s) and log in with your own Claude account, or provide ANTHROPIC_API_KEY. "
+        hints.append("The binary is not signed in. Ask the admin to open Settings > Tools > Claude Code "
+                     "delegation > Sign in and complete the sign-in in their browser (no SSH needed; the "
+                     "agent cannot do this step). Alternatively run `claude auth login` as the container "
+                     "user (HOME=%s), or provide ANTHROPIC_API_KEY. "
                      "To avoid signing in inside the container, use the cloud runner instead: Settings > Tools > "
                      "Claude Code > Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
                      "the repository's secrets." % _claude_home())
@@ -1281,7 +1520,10 @@ async def status_report() -> dict:
             "auto_update": _auto_update_enabled(),
             "last": _UPDATE_STATE["last"],
         },
-        "exit_code": 0 if ready else 1,
+        # The report itself succeeded; "not ready" is its answer (``ready``),
+        # not a tool failure. exit_code=1 here was logged as a failed call on
+        # every preflight of a not-yet-signed-in install (2026-09-27).
+        "exit_code": 0,
     }
 
 

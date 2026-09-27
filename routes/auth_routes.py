@@ -808,8 +808,15 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 continue
             if key == "claude_code_model":
                 val = str(val or "").strip()
-                if val and not re.fullmatch(r"[A-Za-z0-9._\-]{1,80}", val):
-                    raise HTTPException(400, f"{key} must be a plain model name or alias")
+                if val:
+                    # Same rules the delegation applies, so a saved model
+                    # never fails later at run time (e.g. "Opus 5.5" is
+                    # stored as claude-opus-5-5; "default" as unset).
+                    from src.agent_tools.claude_code_tools import normalize_claude_model
+                    normalized, error = normalize_claude_model(val)
+                    if error:
+                        raise HTTPException(400, f"{key}: {error}")
+                    val = normalized or ""
                 current[key] = val
                 continue
             if key == "claude_code_restricted":
