@@ -271,6 +271,11 @@ DEFAULT_SETTINGS = {
     # `compute_input_token_budget`.
     "agent_input_token_hard_max": 200_000,
     "agent_stream_timeout_seconds": 300,
+    # Most a streaming call to a cloud model endpoint waits for the response
+    # headers before it is replayed once (then fails with a 504). Shorter than
+    # the stream timeout above so a request the server accepted and sat on
+    # costs two minutes, not five. 0 = off; local endpoints are never bounded.
+    "agent_stream_headers_timeout_seconds": 120,
     # How much MCP may stay bound on every turn without winning tool retrieval.
     # A connected server small enough to fit these caps is attached to every
     # round, so a vague follow-up ("continue") can never make it vanish; a

@@ -119,11 +119,27 @@ async def _local_model_slot(target_url: str, model: str, workload: Optional[str]
             has_foreground_activity = lambda: False  # type: ignore
             is_manual_foreground_run = lambda: False  # type: ignore
         manual = is_manual_foreground_run()
+        if _LOCAL_MODEL_WAITING_FOREGROUND > 0 or (not manual and has_foreground_activity()):
+            logger.info(
+                "[model-gate] background call model=%s waiting for foreground activity to end",
+                model,
+            )
         while _LOCAL_MODEL_WAITING_FOREGROUND > 0 or (not manual and has_foreground_activity()):
             await asyncio.sleep(0.25)
 
     acquired = False
     try:
+        if _LOCAL_MODEL_LOCK.locked():
+            # Say so: a request parked here looks, in the log, exactly like one
+            # the server never answered (no POST line, no first event).
+            holder = dict(_LOCAL_MODEL_CURRENT)
+            started = holder.get("started")
+            logger.info(
+                "[model-gate] %s call model=%s waiting for the local model slot "
+                "(held by %s call model=%s for %.1fs)",
+                kind, model, holder.get("workload") or "?", holder.get("model") or "?",
+                (time.time() - started) if isinstance(started, (int, float)) else 0.0,
+            )
         await _LOCAL_MODEL_LOCK.acquire()
         acquired = True
         if kind == "foreground":
@@ -172,6 +188,17 @@ class LLMConfig:
     # to fail.
     STREAM_CONNECT_RETRIES = 2
     STREAM_CONNECT_RETRY_DELAY = 0.5
+    # Most a streaming call to a CLOUD endpoint may wait for the response
+    # headers (the `POST ... 200 OK` log line) before it is abandoned and
+    # replayed once. httpx's read timeout also bounds that wait, but it is the
+    # whole agent_stream_timeout_seconds (300s): on 2026-09-27 a Codex worker's
+    # round 27 was sent and never answered, and sat silent for five minutes
+    # before failing the worker, while other chats' requests to the same
+    # endpoint came back in seconds. Setting `agent_stream_headers_timeout_seconds`
+    # (0 = off). Local endpoints are exempt: Ollama and friends hold the headers
+    # while a model loads, which legitimately takes minutes.
+    STREAM_HEADERS_TIMEOUT = 120
+    STREAM_HEADERS_RETRIES = 1
 
 
 class _FallbackIneligibleHTTPException(HTTPException):
@@ -188,6 +215,128 @@ def _call_timeout(read_timeout) -> httpx.Timeout:
 def _stream_timeout(read_timeout) -> httpx.Timeout:
     """Per-request timeout for streaming LLM calls (connect from config)."""
     return httpx.Timeout(connect=LLMConfig.CONNECT_TIMEOUT, read=float(read_timeout), write=30.0, pool=5.0)
+
+
+class _StreamHeadersTimeout(Exception):
+    """A streaming request got no response headers within the headers budget."""
+
+    def __init__(self, seconds: float, stage: str):
+        super().__init__(f"no response headers after {seconds:g}s (stage={stage})")
+        self.seconds = seconds
+        self.stage = stage
+
+
+def _stream_headers_timeout(target_url: str, read_timeout) -> Optional[float]:
+    """Seconds a stream may wait for response headers, or None for no bound.
+
+    None for local/LAN endpoints (a model load holds their headers), when the
+    setting is 0, or when it would not be shorter than the read timeout that
+    already bounds the same wait.
+    """
+    try:
+        from src.settings import get_setting
+        value = float(get_setting("agent_stream_headers_timeout_seconds",
+                                  LLMConfig.STREAM_HEADERS_TIMEOUT))
+    except (TypeError, ValueError):
+        value = float(LLMConfig.STREAM_HEADERS_TIMEOUT)
+    except Exception:
+        value = float(LLMConfig.STREAM_HEADERS_TIMEOUT)
+    if not math.isfinite(value) or value <= 0:
+        return None
+    try:
+        if value >= float(read_timeout):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        if is_local_endpoint(target_url):
+            return None
+    except Exception:
+        pass
+    return value
+
+
+# httpcore trace events -> where a request that never got headers was stuck.
+# "waiting_for_headers" means the whole request went out and the server sat on
+# it; the earlier stages mean it never left this process.
+_HEADERS_STAGE_BY_EVENT = (
+    ("receive_response_headers", "waiting_for_headers"),
+    ("send_request_body.complete", "waiting_for_headers"),
+    ("send_request", "sending_request"),
+    ("connect_tcp", "connecting"),
+    ("start_tls", "connecting"),
+)
+
+
+def _headers_stage(last_event: str) -> str:
+    if not last_event:
+        return "acquiring_connection"
+    for marker, stage in _HEADERS_STAGE_BY_EVENT:
+        if marker in last_event:
+            return stage
+    return last_event
+
+
+@asynccontextmanager
+async def _open_stream(client, method: str, url: str, *, headers_timeout: Optional[float] = None, **kwargs):
+    """``client.stream(...)`` with an optional deadline on the response headers.
+
+    The deadline covers only entering the stream (pool, connect, send, headers);
+    once headers are in, the body is bounded by httpx's own read timeout as
+    before. Raises ``_StreamHeadersTimeout`` naming the stage it was stuck in.
+    """
+    if not headers_timeout:
+        async with client.stream(method, url, **kwargs) as response:
+            yield response
+        return
+    trace_state = {"last": ""}
+
+    async def _trace(event_name, info):
+        trace_state["last"] = event_name
+
+    extensions = dict(kwargs.pop("extensions", None) or {})
+    extensions.setdefault("trace", _trace)
+    cm = client.stream(method, url, extensions=extensions, **kwargs)
+    try:
+        async with asyncio.timeout(headers_timeout):
+            response = await cm.__aenter__()
+    except TimeoutError:
+        raise _StreamHeadersTimeout(headers_timeout, _headers_stage(trace_state["last"])) from None
+    try:
+        yield response
+    except BaseException as exc:
+        if not await cm.__aexit__(type(exc), exc, exc.__traceback__):
+            raise
+    else:
+        await cm.__aexit__(None, None, None)
+
+
+def _headers_timeout_chunk(target_url: str, exc: "_StreamHeadersTimeout") -> str:
+    """SSE error for a request whose headers never came. Nothing was streamed,
+    so ``stream_llm`` may replay it (see ``_is_headers_timeout_chunk``)."""
+    logger.warning(
+        "[agent-timing] no response headers after %gs from %s (stage=%s)",
+        exc.seconds, _host_key(target_url), exc.stage,
+    )
+    payload = {
+        "error": f"No response from {_host_key(target_url)} after {exc.seconds:g}s",
+        "status": 504,
+        "headers_timeout": True,
+        "stage": exc.stage,
+    }
+    return f'event: error\ndata: {json.dumps(payload)}\n\n'
+
+
+def _is_headers_timeout_chunk(chunk: str) -> bool:
+    if not chunk.startswith("event: error"):
+        return False
+    for line in chunk.split("\n"):
+        if line.startswith("data: "):
+            try:
+                return bool(json.loads(line[6:]).get("headers_timeout"))
+            except Exception:
+                return False
+    return False
 
 
 # Cache for LLM responses
@@ -1539,6 +1688,50 @@ def _chatgpt_reasoning_effort(session_id: Optional[str]) -> str:
         return value if value in _REASONING_EFFORTS else ""
     except Exception:
         return ""
+
+
+# Last cache-prefix fingerprint per session, so a round whose prompt cache
+# misses can be traced to the part that changed (specs/prompt-prefix-stability.md).
+_PREFIX_FINGERPRINTS: Dict[str, Tuple[str, str, int]] = {}
+_PREFIX_FINGERPRINTS_MAX = 256
+
+
+def _short_hash(value) -> str:
+    try:
+        encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        encoded = str(value)
+    return hashlib.sha256(encoded.encode("utf-8", "replace")).hexdigest()[:10]
+
+
+def _log_prompt_prefix(session_id: Optional[str], model: str, payload: dict) -> None:
+    """Log hashes of the cached prefix (instructions, tools) and name what
+    changed since this session's previous request. Hashes only; no content."""
+    if not session_id or not isinstance(payload, dict):
+        return
+    try:
+        instructions = _short_hash(payload.get("instructions") or "")
+        tools = _short_hash(payload.get("tools") or [])
+        items = len(payload.get("input") or [])
+        previous = _PREFIX_FINGERPRINTS.get(session_id)
+        changed = []
+        if previous:
+            if previous[0] != instructions:
+                changed.append("instructions")
+            if previous[1] != tools:
+                changed.append("tools")
+            if items < previous[2]:
+                changed.append("history_shrank")
+        if len(_PREFIX_FINGERPRINTS) >= _PREFIX_FINGERPRINTS_MAX and session_id not in _PREFIX_FINGERPRINTS:
+            _PREFIX_FINGERPRINTS.pop(next(iter(_PREFIX_FINGERPRINTS)))
+        _PREFIX_FINGERPRINTS[session_id] = (instructions, tools, items)
+        logger.info(
+            "[prompt-prefix] session=%s model=%s instructions=%s tools=%s(%d) input_items=%d changed=%s",
+            session_id, model, instructions, tools, len(payload.get("tools") or []), items,
+            ",".join(changed) if changed else ("first" if previous is None else "none"),
+        )
+    except Exception:
+        logger.debug("prompt-prefix fingerprint skipped", exc_info=True)
 
 
 def _responses_prompt_cache_key_enabled() -> bool:
@@ -3106,9 +3299,11 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
     target_url = _stream_target_url(url)
     async with _local_model_slot(target_url, model, workload):
         attempt = 0
+        headers_attempt = 0
         while True:
             emitted = False
             retry_delay = None
+            headers_retry = False
             inner = _stream_llm_inner(
                 url,
                 model,
@@ -3125,7 +3320,20 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             async for chunk in inner:
                 # Only the very first chunk can be replayed: once anything has
                 # gone out, a second attempt would duplicate streamed tokens.
-                if (
+                if not emitted and _is_headers_timeout_chunk(chunk):
+                    # The server took the request and never answered. Replay it
+                    # once — a hung request is usually one stuck upstream, and
+                    # other requests to the same host are answered — then give
+                    # the caller the 504 rather than waiting any longer.
+                    if headers_attempt < LLMConfig.STREAM_HEADERS_RETRIES:
+                        headers_retry = True
+                        await inner.aclose()
+                        break
+                    logger.warning(
+                        "[agent-timing] no response headers from %s model=%s after %d attempt(s); giving up",
+                        _host_key(target_url), model, headers_attempt + 1,
+                    )
+                elif (
                     not emitted
                     and attempt < LLMConfig.STREAM_CONNECT_RETRIES
                     and _is_retryable_connect_chunk(chunk)
@@ -3136,6 +3344,14 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     break
                 emitted = True
                 yield chunk
+            if headers_retry:
+                headers_attempt += 1
+                logger.warning(
+                    "[agent-timing] retrying %s model=%s after no response headers (attempt %d/%d)",
+                    _host_key(target_url), model, headers_attempt + 1,
+                    LLMConfig.STREAM_HEADERS_RETRIES + 1,
+                )
+                continue
             if retry_delay is None:
                 return
             attempt += 1
@@ -3201,6 +3417,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             stream=True, tools=tools, tool_choice_none=tool_choice_none,
             target_url_hint=target_url, cache_key=session_id,
         )
+        _log_prompt_prefix(session_id, model, payload)
     else:
         target_url = _normalize_openai_chat_url(url)
         payload = {
@@ -3245,6 +3462,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     # connect blip (offshore/public endpoints) surfacing as a 503 on this stream
     # path, which -- unlike llm_call -- does not retry the connect.
     stream_timeout = _stream_timeout(timeout)
+    # Separate, shorter bound on the response headers for cloud endpoints, so
+    # a request the server accepted and then sat on is replayed by stream_llm
+    # instead of costing the whole read timeout.
+    headers_timeout = _stream_headers_timeout(target_url, timeout)
 
     if _is_host_dead(target_url):
         yield f'event: error\ndata: {json.dumps({"error": f"Upstream {_host_key(target_url)} unreachable (cooldown active)", "status": 503})}\n\n'
@@ -3298,7 +3519,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _responses_model_announced = False
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with _open_stream(client, 'POST', target_url, json=payload, headers=h, timeout=stream_timeout, headers_timeout=headers_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
@@ -3481,6 +3702,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"ChatGPT Subscription stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
+        except _StreamHeadersTimeout as e:
+            yield _headers_timeout_chunk(target_url, e)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.PoolTimeout:
@@ -3504,7 +3727,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _ollama_model_announced = False
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with _open_stream(client, 'POST', target_url, json=payload, headers=h, timeout=stream_timeout, headers_timeout=headers_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
@@ -3579,6 +3802,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Ollama stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
+        except _StreamHeadersTimeout as e:
+            yield _headers_timeout_chunk(target_url, e)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.PoolTimeout:
@@ -3609,7 +3834,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _anth_block_type = ""
         try:
             client = _get_http_client()
-            async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+            async with _open_stream(client, 'POST', target_url, json=payload, headers=h, timeout=stream_timeout, headers_timeout=headers_timeout) as r:
                 _clear_host_dead(target_url)
                 if r.status_code != 200:
                     raw = (await r.aread()).decode(errors="replace")
@@ -3742,6 +3967,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
             logger.warning(f"Anthropic stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
             yield _connect_error_chunk(target_url)
+        except _StreamHeadersTimeout as e:
+            yield _headers_timeout_chunk(target_url, e)
         except httpx.ReadTimeout:
             yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
         except httpx.PoolTimeout:
@@ -3798,7 +4025,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     try:
         client = _get_http_client()
         h = await apply_kimi_code_headers_async(client, h, target_url)
-        async with client.stream('POST', target_url, json=payload, headers=h, timeout=stream_timeout) as r:
+        async with _open_stream(client, 'POST', target_url, json=payload, headers=h, timeout=stream_timeout, headers_timeout=headers_timeout) as r:
             _clear_host_dead(target_url)
             if r.status_code != 200:
                 raw = (await r.aread()).decode(errors="replace")
@@ -4074,6 +4301,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         _tail = f" — host cooled for {DEAD_HOST_COOLDOWN:.0f}s" if _cooled else " — transient, will retry"
         logger.warning(f"Stream connect to {target_url} failed: {_connect_reason(e)}{_tail}")
         yield _connect_error_chunk(target_url)
+    except _StreamHeadersTimeout as e:
+        yield _headers_timeout_chunk(target_url, e)
     except httpx.ReadTimeout:
         yield f'event: error\ndata: {json.dumps({"error": "Read timeout", "status": 504})}\n\n'
     except httpx.PoolTimeout:
