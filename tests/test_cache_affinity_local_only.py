@@ -65,10 +65,21 @@ def test_public_host_with_local_kind_override_gets_affinity_fields(monkeypatch):
     assert payload == {"session_id": "sess-123", "cache_prompt": True}
 
 
-def test_no_session_id_is_a_noop(monkeypatch):
+def test_no_session_id_keeps_cache_prompt_but_sends_no_slot_id(monkeypatch):
+    # cache_prompt does not need slot affinity: a local server can reuse the
+    # prefix it already holds, and dropping the hint without a session id made
+    # every round of a tool-calling run re-prefill (fdbbc00a). Only the slot
+    # pin (session_id) needs one.
     monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda _u: None)
     payload = {}
     llm_core._apply_local_cache_affinity(payload, "http://localhost:8080/v1", None)
+    assert payload == {"cache_prompt": True}
+
+
+def test_no_session_id_on_a_cloud_host_is_a_noop(monkeypatch):
+    monkeypatch.setattr(model_context, "_configured_endpoint_kind", lambda _u: None)
+    payload = {}
+    llm_core._apply_local_cache_affinity(payload, "https://api.mistral.ai/v1", None)
     assert payload == {}
 
 

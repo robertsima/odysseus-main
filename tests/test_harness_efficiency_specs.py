@@ -184,9 +184,16 @@ def test_singular_agent_prose_keeps_delegation_off(text):
     assert _explicit_delegation_requested(text) is False
 
 
-def test_selected_delegation_tools_reach_the_round_schemas():
+def test_selected_delegation_tools_reach_the_round_schemas(monkeypatch):
     """End of the pipeline: what admin routing picked for the incident phrase
-    is what the model is actually offered."""
+    is what the model is actually offered.
+
+    The host must have a delegation provider for that: `code_delegation` is a
+    registered capability, and `_withhold_unavailable_tools` rightly keeps both
+    delegate tools out of the schema on a host with no coding-agent CLI or MCP
+    provider (a fresh CI runner). That gate has its own tests; here it is held
+    open so this one measures routing and policy, not what is installed."""
+    monkeypatch.setattr("src.capabilities.unavailable_tools", lambda: frozenset())
     text = ORCHESTRATION_REQUESTS[0]
     admin = _detect_admin_tools(_user(text))
     disabled = set() if _explicit_delegation_requested(text) else set(_DELEGATION_TOOLS)

@@ -105,6 +105,14 @@ the model.
   - `_append_tool_results` collapses completed exchanges in batches.
   - `tests/test_execution_ledger.py::test_the_agent_loop_actually_calls_it`
     runs again.
+- **Named files select the files domain** (`bd83989e`, `98a4e3ff`). A
+  request that names a file with a known extension (`notes.md`, `app.ts`), a
+  path (`/app/data/...`, `~/projects/x/`) or the vault by any of its names
+  (vault, Obsidian, knowledge base, AI Mind) seeds the `files` domain in
+  `_classify_agent_request` again. Without it "fix the bug in app.ts" was
+  offered no file tool. The rest of the fork's vault routing (seeding
+  `search_documents`) is still on the backlog.
+  `tests/test_agent_files_domain_filenames.py` runs in full again.
 
 ## Added to upstream's loop since
 

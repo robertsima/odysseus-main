@@ -2084,6 +2084,23 @@ def _assistant_requested_followup(messages: List[Dict]) -> bool:
     return False
 
 
+# A filename with a known extension ("notes.md", "app.ts", "config.yaml").
+_NAMED_FILE_PATTERN = (
+    r"\b\w[\w.\-]*\.(?:md|markdown|txt|rst|py|js|mjs|ts|tsx|jsx|json|ya?ml|"
+    r"toml|ini|cfg|conf|csv|tsv|html?|css|scss|sh|bash|zsh|sql|xml|log)\b"
+)
+# The user's knowledge base, by every name they call it. It is real Markdown
+# files in the workspace, so naming it is a file signal.
+_VAULT_REFERENCE_PATTERN = (
+    r"\bvaults?\b"
+    r"|\bobsidian\b"
+    r"|\bknowledge[\s\-]?base\b"
+    r"|\bai[\s\-]?mind\b"
+    r"|\bvault[\s\-]?mind\b"
+    r"|\bmind[\s\-]?vault\b"
+)
+
+
 def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, object]:
     """Classify only whether this turn deserves domain tool retrieval.
 
@@ -2155,6 +2172,19 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     if has(r"\b(session|chat history|rename chat|delete chat|archive chat|fork chat|list chats)\b"):
         domains.add("sessions")
     if has(r"\b(file|folder|directory|repo|git|grep|find in files|read file|edit file|shell|terminal|bash)\b"):
+        domains.add("files")
+    # Naming a concrete file, a path, or the vault is file work even when the
+    # word "file" never appears. "add X to models.md and architecture.md in my
+    # AI Mind vault" matched no domain, so selection fell through to embedding
+    # retrieval, which matched the query's own nouns ("token" -> manage_tokens,
+    # "models.md" -> list_models) and offered no file tool at all. Re-ported
+    # from the fork (bd83989e, 98a4e3ff); the extension list keeps it precise,
+    # so "version 1.2.3" and "3.50" stay non-files.
+    if has(
+        _NAMED_FILE_PATTERN,
+        _VAULT_REFERENCE_PATTERN,
+        r"(?:^|\s)[~.]?/[\w.\-]+/",
+    ):
         domains.add("files")
     if has(
         r"\b(run|execute|test|debug|fix|save|create|edit|read|open)\b.{0,40}\b("
