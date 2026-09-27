@@ -8,7 +8,11 @@ import pytest
 
 from core.models import ChatMessage, Session
 from src import agent_activity as activity, agent_control, agent_workflows as workflows
+from src.agent_tools import session_tools as _session_tools
 from src.agent_tools.workflow_tools import OrchestrateAgentsTool
+
+# The production child-session factory, captured before the fixture replaces it.
+_REAL_NEW_CHILD_SESSION = _session_tools._new_child_session
 
 
 @pytest.fixture
@@ -23,6 +27,15 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_control, "_WORKERS", {})
     monkeypatch.setattr(workflows, "_TASKS", {})
     monkeypatch.setattr(workflows, "_LIVE", {})
+    monkeypatch.setattr(workflows, "_FIRST_PASS", {})
+    monkeypatch.setattr(workflows, "_WAITERS", {})
+    monkeypatch.setattr(workflows, "_CONTINUATIONS", {})
+    continued = []
+
+    async def continue_parent(manager, parent_id, parent, worker, owner):
+        continued.append((parent_id, worker.id, worker.name, owner))
+
+    monkeypatch.setattr(agent_control, "_continue_parent", continue_parent)
     parent = Session("parent", "Parent", "https://llm.test", "test-model", owner="alice")
     parent.add_message(ChatMessage("user", "Use specialist agents to research the market"))
     sessions, settings = {parent.id: parent}, {}
@@ -61,7 +74,10 @@ def runtime(monkeypatch, tmp_path):
             {"tool": tool, "exit_code": 0} for tool in settings[sess.id]["enabled_tools"] if tool != "manage_skills"]
     monkeypatch.setattr(headless_agent, "run_headless", headless)
     agent_runs._EXTERNAL.clear()
-    yield SimpleNamespace(parent=parent, sessions=sessions, settings=settings, policy=policy, observed=observed)
+    yield SimpleNamespace(parent=parent, sessions=sessions, settings=settings, policy=policy, observed=observed,
+                          continued=continued)
+    for task in list(workflows._CONTINUATIONS.values()):
+        task.cancel()
     activity._reset_for_tests()
     agent_runs._EXTERNAL.clear()
 
@@ -237,10 +253,143 @@ async def test_zero_launches_and_policy_save_failure_are_not_success(runtime, mo
     import core.database as db
     original = db.update_session_settings
     monkeypatch.setattr(db, "update_session_settings", lambda sid, patch: original(sid, patch) if sid == "parent" else None)
-    result = await start_and_wait()
+    with pytest.raises(ValueError, match="No agents were launched") as excinfo:
+        await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    assert "Could not persist the worker's scoped policy" in str(excinfo.value)
+    (wid, manifest), = runtime.settings["parent"]["agent_workflows"].items()
+    result = await workflows.inspect(workflow_id=wid, session_id="parent", owner="alice")
     assert result["status"] == "failed" and result["launched_agents"] == 0
     assert result["synthesis_status"] == "not_started"
-    assert not agent_control._WORKERS
+    assert not agent_control._WORKERS and not workflows._TASKS and not workflows._FIRST_PASS
+
+
+@pytest.mark.parametrize("bad", ["Agent infrastructure, reliability & memory domain scout", "Sync/offline scout"])
+async def test_invalid_agent_name_is_named_in_the_error(runtime, bad):
+    # Production answered three starts with "profile 1: name must be ..." for
+    # whichever agent was wrong; the model could not tell which one to rename.
+    args = request()
+    args["specialists"][1]["name"] = bad
+    result = await OrchestrateAgentsTool().execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True,
+    })
+    assert result["exit_code"] == 1 and result["launched_agents"] == 0
+    assert repr(bad[:60]) in result["error"] and "profile 1" not in result["error"]
+    assert "1-40 characters" in result["error"]
+    assert len(runtime.sessions) == 1
+
+
+def _unknown_model_resolver(spec, owner=None):
+    # The production resolver's own message for a name no endpoint serves.
+    raise ValueError(f"Model '{spec}' not found on any configured endpoint")
+
+
+@pytest.mark.parametrize("value", ["default", "Default", " inherit ", "auto"])
+async def test_default_model_means_inherit_the_chats_model(runtime, monkeypatch, value):
+    # Production: the admin model sent model="default" for every agent; it was
+    # resolved as a literal model ID and every launch failed with ValueError.
+    monkeypatch.setattr(_session_tools, "_resolve_model", _unknown_model_resolver)
+    args = request()
+    for agent in args["specialists"] + [args["synthesis"]]:
+        agent["model"] = value
+    result = await start_and_wait(args)
+    assert result["status"] == "completed" and result["launched_agents"] == 4
+    assert all(row["model"] == "inherit" for row in result["preflight"])
+    assert all(runtime.sessions[row["session_id"]].model == "test-model" for row in result["children"])
+
+
+async def test_every_launch_failing_is_a_tool_error_not_a_started_workflow(runtime, monkeypatch, caplog):
+    # The real child-session factory with an unknown model: this is the
+    # ValueError production logged only as "error=ValueError", three times,
+    # while orchestrate_agents returned exit_code=0.
+    monkeypatch.setattr(_session_tools, "_new_child_session", _REAL_NEW_CHILD_SESSION)
+    monkeypatch.setattr(_session_tools, "_resolve_model", _unknown_model_resolver)
+    args = request()
+    for agent in args["specialists"] + [args["synthesis"]]:
+        agent["model"] = "gpt-typo"
+    caplog.set_level("WARNING", logger="src.agent_workflows")
+    result = await OrchestrateAgentsTool().execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True,
+    })
+    assert result["exit_code"] == 1 and result["launched_agents"] == 0
+    error = result["error"]
+    assert "No agents were launched" in error and "do not report these branches" in error
+    assert "Buyers [research]" in error and "Model 'gpt-typo' not found on any configured endpoint" in error
+    assert "Omit `model`" in error
+    # The log now carries the message, not just the exception class.
+    launch_logs = [r.getMessage() for r in caplog.records if "launch failed" in r.getMessage()]
+    assert len(launch_logs) == 3
+    assert all("name=" in line and "Model 'gpt-typo' not found" in line for line in launch_logs)
+    # A workflow that never started is not delivered or continued as a result.
+    assert not [m for m in runtime.parent.history if (m.metadata or {}).get("workflow_id")]
+    assert not runtime.continued and len(runtime.sessions) == 1
+    (manifest,) = runtime.settings["parent"]["agent_workflows"].values()
+    assert manifest["status"] == "failed" and manifest["launch_rejected"] is True
+    assert {row["name"]: row["status"] for row in manifest["children"]} == {
+        "Buyers": "failed", "Competitors": "failed", "Content": "failed", "Synthesis": "not_started"}
+
+
+async def test_some_launches_failing_are_named_in_the_start_result(runtime, monkeypatch):
+    fake_child = _session_tools._new_child_session
+
+    def child(manager, parent_id, owner, message, profile, **kwargs):
+        if profile["name"] == "Competitors":
+            return None, "Profile 'Competitors' has no available model: x: Model 'x' not found on any configured endpoint"
+        return fake_child(manager, parent_id, owner, message, profile)
+
+    monkeypatch.setattr(_session_tools, "_new_child_session", child)
+    result = await OrchestrateAgentsTool().execute(json.dumps(request(allow_partial_synthesis=True)), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True,
+    })
+    assert result.get("exit_code", 0) == 0 and result["launched_agents"] == 2
+    assert "Launch failed for Competitors" in result["response"]
+    assert "Model 'x' not found" in result["response"]
+
+
+async def test_finished_workflow_continues_an_idle_parent_chat_once(runtime):
+    # Production: results delivered at 18:54:46 sat unread until the user typed
+    # "Agents finished running" at 18:56:50.
+    started = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    await workflows._TASKS[started["workflow_id"]]
+    pending = workflows._CONTINUATIONS.get(started["workflow_id"])
+    if pending is not None:
+        await pending
+    assert len(runtime.continued) == 1
+    parent_id, source_id, name, owner = runtime.continued[0]
+    assert parent_id == "parent" and owner == "alice" and started["workflow_id"] in name
+    synthesis = next(c for c in runtime.settings["parent"]["agent_workflows"][started["workflow_id"]]["children"]
+                     if c["stage"] == "synthesis")
+    assert source_id == synthesis["session_id"]
+
+
+async def test_a_turn_that_waited_for_the_result_is_not_continued_again(runtime):
+    await start_and_wait()
+    await asyncio.sleep(0)
+    assert not runtime.continued and not workflows._CONTINUATIONS
+
+
+async def test_reading_the_final_status_cancels_a_pending_continuation(runtime):
+    from src import agent_runs
+    started = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    agent_runs._EXTERNAL["parent"] = {"session_id": "parent", "status": "running"}  # the chat's turn is busy
+    await workflows._TASKS[started["workflow_id"]]
+    pending = workflows._CONTINUATIONS[started["workflow_id"]]
+    result = await workflows.inspect(workflow_id=started["workflow_id"], session_id="parent", owner="alice")
+    assert result["status"] == "completed"
+    await asyncio.gather(pending, return_exceptions=True)
+    assert pending.cancelled() and not runtime.continued
+
+
+async def test_cancelled_workflow_does_not_continue_the_parent(runtime, monkeypatch):
+    from src import headless_agent
+
+    async def hanging(*args, **kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(headless_agent, "run_headless", hanging)
+    started = await workflows.start(session_id="parent", owner="alice", args=request(), delegation_authorized=True)
+    await workflows.inspect(workflow_id=started["workflow_id"], session_id="parent", owner="alice", action="cancel")
+    await asyncio.sleep(0)
+    assert not runtime.continued and not workflows._CONTINUATIONS
 
 
 async def test_restart_reports_interrupted_without_replay(runtime):

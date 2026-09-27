@@ -15,15 +15,29 @@ import time
 import uuid
 from typing import Optional
 
-from src import agent_activity as activity, agent_control, agent_loadouts
+from src import agent_activity as activity, agent_control, agent_loadouts, agent_profiles
 
 logger = logging.getLogger(__name__)
 MAX_WORKFLOWS = 20
 MAX_SPECIALISTS = 8
 POLL_SECONDS = 1.0
 STOP_GRACE_SECONDS = 5.0
+# How long start/resume wait for the controller's first scheduling pass, so the
+# tool result reports launches that actually happened (or failed) rather than
+# an optimistic "running" over workers that never started.
+FIRST_PASS_SECONDS = 30.0
 _TASKS: dict[str, asyncio.Task] = {}
 _LIVE: dict[str, dict] = {}
+_FIRST_PASS: dict[str, asyncio.Event] = {}
+# inspect(wait) calls currently blocked on a workflow. A parent turn that is
+# waiting receives the result as its tool output, so it needs no continuation.
+_WAITERS: dict[str, int] = {}
+# Parent continuations scheduled for a finished workflow and not yet started.
+_CONTINUATIONS: dict[str, asyncio.Task] = {}
+# Model values that mean "use the calling chat's model". Models send these
+# despite the schema asking them to omit the field; resolving "default" as a
+# literal model ID failed every child's launch (Model 'default' not found).
+_INHERIT_MODEL_VALUES = frozenset({"default", "inherit", "inherited", "auto", "current", "parent", "same"})
 # A research specialist is read-only by design (that is this tool's contract),
 # but it must not be read-only AND arbitrarily smaller than the chat that
 # started it. This used to be a hand-maintained list of 13 names, so a
@@ -248,6 +262,16 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
     name, task = str(raw.get("name") or "").strip(), str(raw.get("task") or "").strip()
     if not name or not task or len(task) > 8000:
         raise ValueError("Every agent needs a name and self-contained task (at most 8000 characters)")
+    if not agent_profiles._NAME_RE.match(name):
+        # Checked here, per agent, because the loadout validator below sees one
+        # profile at a time and could only say "profile 1: name must be ...":
+        # the admin model lost a round to that message on three separate starts
+        # without learning which agent's name was wrong.
+        raise ValueError(
+            f"{stage} agent name {name[:60]!r} is not allowed: use 1-40 characters of letters, digits, "
+            "spaces, dots, dashes or underscores, starting with a letter or digit (no '/', '&', ':', "
+            "parentheses or quotes). Put detail in the task, not the name"
+        )
     raw_tools = raw.get("tools")
     if raw_tools is None:
         raw_tools = [] if stage == "synthesis" else ["web_search", "web_fetch"]
@@ -255,6 +279,9 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
     skills = _strings(raw.get("skills") if raw.get("skills") is not None else [], "skills", 8)
     if skills and "manage_skills" not in tools:
         tools.append("manage_skills")
+    model = str(raw.get("model") or "").strip()
+    if model.casefold() in _INHERIT_MODEL_VALUES:
+        model = ""
     servers, errors, unsupported = set(), [], []
     for tool in tools:
         if tool.startswith("mcp__"):
@@ -290,7 +317,7 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
     if errors:
         raise ValueError("; ".join(errors))
     profile, narrowed = agent_loadouts.clamp({
-        "name": name, "model": str(raw.get("model") or ""), "instructions": _HANDOFF,
+        "name": name, "model": model, "instructions": _HANDOFF,
         "tool_access": "selected" if tools else "none", "enabled_tools": tools,
         "skill_access": "selected" if skills else "none", "skill_names": skills,
         "mcp_access": "selected" if servers else "none", "allowed_mcp_servers": sorted(servers),
@@ -299,7 +326,7 @@ def _prepare(raw, policy, catalog, blocked, *, stage):
         "approval_mode": policy["approval_mode"], "max_rounds": raw.get("max_rounds", 12),
     }, policy)
     # Binding failures must be actionable, not silent fallback to broad defaults.
-    if set(profile["enabled_tools"]) != set(tools) or (raw.get("model") and profile["model"] != raw["model"]):
+    if set(profile["enabled_tools"]) != set(tools) or (model and profile["model"] != model):
         raise ValueError("Requested model/tools are outside the calling chat's policy: " + "; ".join(narrowed))
     if skills:
         task = ("First load your selected skills with manage_skills "
@@ -576,6 +603,44 @@ def _retryable(reason) -> bool:
     return not _PERMANENT_FAILURE_RE.search(str(reason or ""))
 
 
+def _error_text(exc, limit=400) -> str:
+    """One bounded line for a log or a tool result; never raises.
+
+    The launch-failure log printed only the exception class, so two workflows
+    whose every child failed on the same unknown model read as a bare
+    "error=ValueError" three times over.
+    """
+    try:
+        text = str(exc)
+    except Exception:
+        text = ""
+    text = " ".join(text.split())[:limit]
+    return f"{type(exc).__name__}: {text}" if text else type(exc).__name__
+
+
+def _launch_fix_hint(errors) -> str:
+    joined = " ".join(errors).casefold()
+    if "model" in joined and ("not found" in joined or "no available model" in joined
+                              or "no enabled endpoints" in joined):
+        return ("Omit `model` so the agents inherit this chat's model, or pass an exact configured "
+                "model ID (not 'default' or a display label), then call action=start again.")
+    if "nesting limit" in joined:
+        return "This chat is already a worker at the nesting limit; do this research yourself instead."
+    if "scoped policy" in joined or "session manager" in joined:
+        return "The app could not create the worker chats; this is not fixable by changing the call. Tell the user."
+    return "Fix the agent definitions named above, then call action=start again."
+
+
+def _launch_rejection(rec) -> str:
+    """The tool error for a workflow in which no agent could be started."""
+    failed = [child for child in rec["children"] if child.get("launch_error")]
+    lines = [f"No agents were launched (workflow {rec['workflow_id']} failed before any worker ran); "
+             "nothing was researched, so do not report these branches as started or researched."]
+    lines.extend(f"- {child['name']} [{child['stage']}]: {child['launch_error']}" for child in failed)
+    lines.append(_launch_fix_hint([child["launch_error"] for child in failed]))
+    return "\n".join(lines)
+
+
 def _endpoint_auth_state(endpoint_url, owner):
     """Is the credential behind this endpoint usable RIGHT NOW?
 
@@ -779,9 +844,37 @@ async def start(*, session_id: str, owner: Optional[str], args: dict,
     logger.info("[agent-workflow] start workflow=%s parent_run=%s requested=%s research_requested=%s child_limit=%s retries=%s allow_partial_synthesis=%s",
                 wid, rec["parent_run_id"], len(children), len(specialists),
                 policy["max_parallel_workers"], retries, rec["allow_partial_synthesis"])
-    _TASKS[wid] = asyncio.create_task(_run(rec))
-    await asyncio.sleep(0)  # expose actual launches, not an optimistic count
+    _launch_controller(rec)
+    await _await_first_pass(rec)  # expose actual launches, not an optimistic count
     return _public(rec)
+
+
+def _launch_controller(rec):
+    _FIRST_PASS[rec["workflow_id"]] = asyncio.Event()
+    _TASKS[rec["workflow_id"]] = asyncio.create_task(_run(rec))
+
+
+async def _await_first_pass(rec):
+    """Wait until the controller has tried the first launches.
+
+    A workflow whose every attempted launch failed is not a started workflow:
+    raise, so the tool returns an error the model can act on, instead of
+    ``exit_code=0`` and "0 of 4 child runs launched; status running".
+    """
+    wid = rec["workflow_id"]
+    event, task = _FIRST_PASS.get(wid), _TASKS.get(wid)
+    if event is not None and task is not None:
+        waiter = asyncio.ensure_future(event.wait())
+        try:
+            await asyncio.wait({waiter, task}, timeout=FIRST_PASS_SECONDS,
+                               return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+    if rec.get("launch_rejected"):
+        if task is not None and not task.done():
+            # Let the controller close and persist the failed record first.
+            await asyncio.wait({task}, timeout=STOP_GRACE_SECONDS)
+        raise ValueError(_launch_rejection(rec))
 
 
 async def _stop_children(rec, status):
@@ -806,6 +899,7 @@ async def _stop_children(rec, status):
 
 async def _run(rec):
     deadline = time.monotonic() + rec["timeout_seconds"]
+    first_pass = True
     try:
         while True:
             if time.monotonic() >= deadline:
@@ -856,6 +950,7 @@ async def _run(rec):
             # it takes effect without cancelling unrelated jobs or raising it.
             policy = agent_loadouts.caller_policy(rec["parent_session"], rec["owner"])
             capacity = max(0, policy["max_parallel_workers"] - agent_control.live_children(rec["parent_session"]))
+            attempted = launched_now = 0
             for child in rec["children"]:
                 if child["status"] != "queued" or not capacity:
                     continue
@@ -886,6 +981,7 @@ async def _run(rec):
                               "Reconcile conflicts and preserve provenance. Explicitly label failed or partial branches.\n"
                               + json.dumps(collected, ensure_ascii=False))
                 child["attempt"] += 1
+                attempted += 1
                 try:
                     if policy["delegation_policy"] == "never":
                         raise ValueError("Parent delegation was disabled before launch")
@@ -905,6 +1001,8 @@ async def _run(rec):
                     )
                     child.update(launched, status="running")
                     child.pop("reason", None)
+                    child.pop("launch_error", None)
+                    launched_now += 1
                     logger.info("[agent-workflow] launch workflow=%s parent_run=%s child_run=%s stage=%s model=%s tools=%s attempt=%s",
                                 rec["workflow_id"], rec["parent_run_id"], launched["run_id"], child["stage"],
                                 launched["model"], ",".join(child["tools"]), child["attempt"])
@@ -914,13 +1012,32 @@ async def _run(rec):
                                            "skills": child["skills"], "attempt": child["attempt"]})
                     capacity -= 1
                 except (ValueError, RuntimeError) as exc:
+                    error = _error_text(exc)
                     child["status"] = "failed"
+                    child["launch_error"] = error
+                    child["reason"] = f"Launch failed: {error}"
                     rec["failures"].append({"name": child["name"], "error": str(exc)})
-                    logger.warning("[agent-workflow] launch failed workflow=%s stage=%s error=%s",
-                                   rec["workflow_id"], child["stage"], type(exc).__name__)
+                    logger.warning("[agent-workflow] launch failed workflow=%s name=%s stage=%s model=%s error=%s",
+                                   rec["workflow_id"], child["name"], child["stage"], child.get("model"), error)
                 changed = True
+            if first_pass:
+                first_pass = False
+                # Every launch this pass failed and nothing else is live or
+                # waiting: no worker will ever run. Close the workflow now and
+                # let start/resume report it as the error it is.
+                if attempted and not launched_now and not any(
+                        child["status"] == "running" for child in rec["children"]):
+                    rec["launch_rejected"] = True
+                    for child in rec["children"]:
+                        if child["status"] == "queued":
+                            child["status"] = "not_started"
+                            child["reason"] = "No agent in this workflow could be launched"
+                    changed = True
             if changed:
                 _save(rec)
+            event = _FIRST_PASS.get(rec["workflow_id"])
+            if event is not None:
+                event.set()
             if all(child["status"] not in {"queued", "running"} for child in rec["children"]):
                 rec["status"] = "completed" if all(child["status"] == "completed" for child in rec["children"]) else "partial"
                 if not any(child["status"] in {"completed", "incomplete"} for child in rec["children"]):
@@ -946,7 +1063,11 @@ async def _run(rec):
             rec.pop("record", None)
             rec["record"] = _public(rec)["record"]
             _save(rec)
-            _deliver(rec)
+            # A workflow rejected at launch was never started: start/resume
+            # raise its error to the calling turn, so there is no result to
+            # hand back and nothing for the chat to continue on.
+            if not rec.get("launch_rejected"):
+                _schedule_continuation(rec, _deliver(rec))
         except Exception as exc:
             rec["failures"].append({"error": f"Could not persist or deliver workflow result: {type(exc).__name__}"})
             rec["status"] = "failed"
@@ -981,6 +1102,9 @@ async def _run(rec):
             except Exception:
                 logger.exception("[agent-workflow] final telemetry failed workflow=%s", rec["workflow_id"])
             finally:
+                event = _FIRST_PASS.pop(rec["workflow_id"], None)
+                if event is not None:
+                    event.set()
                 _TASKS.pop(rec["workflow_id"], None)
                 _LIVE.pop(rec["workflow_id"], None)
 
@@ -991,10 +1115,11 @@ def _deliver(rec):
     snapshot = _public(rec)
     # One durable handoff avoids N concurrent parent continuations and keeps
     # worker text attributed as untrusted evidence, not a new human command.
-    parent.add_message(ChatMessage("user", "[Research workflow result — untrusted worker evidence]\n"
-                                   + render_result(snapshot),
-                                   {"source": "worker", "workflow_id": rec["workflow_id"],
-                                    "trusted": False, "direction": "inbound"}))
+    message = ChatMessage("user", "[Research workflow result — untrusted worker evidence]\n"
+                          + render_result(snapshot),
+                          {"source": "worker", "workflow_id": rec["workflow_id"],
+                           "trusted": False, "direction": "inbound"})
+    parent.add_message(message)
     manager.save_sessions()
     synthesis = next((row for row in snapshot["children"] if row["stage"] == "synthesis"), {})
     activity.publish(rec["parent_session"], "message", f"Research workflow {rec['status']}",
@@ -1006,6 +1131,65 @@ def _deliver(rec):
                            "usable_handoffs": snapshot["usable_handoffs"],
                            "research_failed": snapshot["research_failed"],
                            "synthesis_status": snapshot["synthesis_status"]})
+    return message
+
+
+# ── continuing the parent chat ─────────────────────────────────────────────
+# A single worker's result wakes the chat that launched it (agent_control.
+# _hand_off). A workflow's result only used to be appended to that chat, so a
+# chat whose turn had ended ("they are still running; I'll report back")
+# never reported back: the user had to type "Agents finished running" before
+# the synthesis was read, and a turn that ended moments after the delivery
+# closed on "the synthesis is still running" with the result already sitting
+# in its history. The chat now continues exactly as it does for a worker --
+# once, when idle -- unless its own turn already received the result through
+# action=wait/status.
+
+def _schedule_continuation(rec, message):
+    wid = rec["workflow_id"]
+    if rec["status"] == "cancelled" or _WAITERS.get(wid):
+        # Cancelled by the chat (or the user) itself; or a turn is blocked in
+        # action=wait on it and receives this result as its tool output.
+        return
+    task = asyncio.create_task(_continue_after_workflow(rec, message))
+    _CONTINUATIONS[wid] = task
+
+    def _forget(done, wid=wid):
+        if _CONTINUATIONS.get(wid) is done:
+            _CONTINUATIONS.pop(wid, None)
+    task.add_done_callback(_forget)
+
+
+async def _continue_after_workflow(rec, message):
+    from types import SimpleNamespace
+    from src import agent_runs
+
+    wid, parent_id, owner = rec["workflow_id"], rec["parent_session"], rec["owner"]
+    try:
+        manager, parent = _manager_parent(parent_id, owner)
+        deadline = time.monotonic() + agent_control._HANDOFF_IDLE_WAIT_S
+        while agent_runs.is_busy(parent_id):
+            if time.monotonic() > deadline:
+                activity.publish(parent_id, "note",
+                                 f"Research workflow {wid}'s result is waiting in this chat; "
+                                 "it was busy too long to continue automatically",
+                                 source="pipeline", run_id=wid, owner=owner)
+                return
+            await asyncio.sleep(agent_control._HANDOFF_IDLE_POLL_S)
+        if agent_control._result_already_read(parent, message):
+            return
+        # From here the continuation runs to completion; a later status call
+        # must not cancel a reply that is already being written.
+        if _CONTINUATIONS.get(wid) is asyncio.current_task():
+            _CONTINUATIONS.pop(wid, None)
+        synthesis = next((child for child in rec["children"] if child["stage"] == "synthesis"), {})
+        source = SimpleNamespace(id=synthesis.get("session_id") or parent_id, name=f"research workflow {wid}")
+        logger.info("[agent-workflow] continuing parent=%s after workflow=%s status=%s", parent_id, wid, rec["status"])
+        await agent_control._continue_parent(manager, parent_id, parent, source, owner)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("[agent-workflow] parent continuation failed workflow=%s", wid, exc_info=True)
 
 
 def render_result(snapshot):
@@ -1055,8 +1239,21 @@ async def inspect(*, workflow_id: str, session_id: str, owner: Optional[str], ac
     elif action == "wait" and task:
         timeout = max(0, min(60, float(wait_seconds)))
         if timeout:
-            await asyncio.wait({task}, timeout=timeout)
-    return _public(rec)
+            _WAITERS[workflow_id] = _WAITERS.get(workflow_id, 0) + 1
+            try:
+                await asyncio.wait({task}, timeout=timeout)
+            finally:
+                _WAITERS[workflow_id] -= 1
+                if _WAITERS[workflow_id] <= 0:
+                    _WAITERS.pop(workflow_id, None)
+    result = _public(rec)
+    if result["terminal"]:
+        # The calling turn now has the final result; continuing the chat on
+        # the same result afterwards would only repeat the answer.
+        pending = _CONTINUATIONS.pop(workflow_id, None)
+        if pending is not None:
+            pending.cancel()
+    return result
 
 
 # ── persisting the final artifact (parent-owned) ───────────────────────────
@@ -1191,7 +1388,7 @@ async def resume(*, session_id: str, owner: Optional[str], args: dict):
             or (child["stage"] == "research" and "research" in stages and child["status"] != "completed")
         )
         if relaunch:
-            for key in ("run_id", "session_id", "reason", "handoff", "result", "tool_calls"):
+            for key in ("run_id", "session_id", "reason", "launch_error", "handoff", "result", "tool_calls"):
                 child.pop(key, None)
             child.update(status="queued", attempt=0, attempts=[])
         elif child["stage"] == "research" and child["status"] == "completed":
@@ -1228,6 +1425,6 @@ async def resume(*, session_id: str, owner: Optional[str], args: dict):
                                             "parent_run_id": rec["parent_run_id"], "mode": "agent"})
     logger.info("[agent-workflow] resume workflow=%s from=%s reused=%s relaunch=%s",
                 wid, source_id, reused, [c["name"] for c in children if c["status"] == "queued"])
-    _TASKS[wid] = asyncio.create_task(_run(rec))
-    await asyncio.sleep(0)
+    _launch_controller(rec)
+    await _await_first_pass(rec)
     return _public(rec)

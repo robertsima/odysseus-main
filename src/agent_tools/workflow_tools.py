@@ -32,11 +32,16 @@ class OrchestrateAgentsTool:
                     allow_private=bool(ctx.get("allow_private")),
                 )
                 blocked = result.get("preflight_blocked") or []
+                launch_failed = [row for row in result.get("children") or [] if row.get("launch_error")]
                 return {**result, "action": "start", "response": (
                     f"Workflow {result['workflow_id']}: {result['launched_agents']} of "
                     f"{result['requested_agents']} child runs launched; status {result['status']}. "
                     + (f"Preflight blockers on {', '.join(blocked)} — see preflight for the reason; "
                        "do not report their branches as researched. " if blocked else "")
+                    + ("Launch failed for " + "; ".join(f"{row['name']} ({row['launch_error']})"
+                                                         for row in launch_failed)
+                       + " — those branches will not run; do not report them as researched. "
+                       if launch_failed else "")
                     + "Use wait/status to collect actual results; queued or running is not completed."
                 )}
             if action == "resume":
