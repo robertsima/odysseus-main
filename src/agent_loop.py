@@ -2918,11 +2918,18 @@ def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
     return stripped
 
 
+# The user reads the setting's name, not this note, so the model has to carry
+# the reason across: on 2026-09-26 it answered "shell access is disabled; turn
+# on Allow private vault reads", which read as a non sequitur to the user.
 _PRIVATE_SHELL_NOTE = (
-    "bash and python are unavailable in this chat: they can read private vault files, so "
-    "they run only when the user turns on 'Allow private vault reads' in this chat's "
-    "settings. Use the file tools (read_file, grep, glob, ls) instead. If the task needs a "
-    "shell (running tests, builds, git commands), say so and name that setting."
+    "bash and python are off in this chat. They are not confined to the workspace, so they "
+    "could read the user's private vault files; that is why they are tied to the chat setting "
+    "'Allow private vault reads' (Chat settings > Vault privacy), which turns on bash and "
+    "python as well as private vault reads. Use the file tools (read_file, grep, glob, ls) "
+    "instead. If the task needs a shell (running tests, builds, installs or upgrades, git "
+    "commands), tell the user both halves: the shell is off because it could read their private "
+    "vault, and turning on 'Allow private vault reads' enables bash and python for this chat "
+    "(and also lets private vault content reach this model)."
 )
 
 
@@ -5232,6 +5239,13 @@ async def stream_agent_loop(
     else:
         _private_shell_note = False
         _shell_sandboxed = False
+    # Which gate decided bash/python this turn. Without it a turn that suddenly
+    # offers the shell (2026-09-26, turn 2) cannot be told apart: the user
+    # enabled 'Allow private vault reads', or the workspace sandbox came up.
+    logger.info(
+        "[agent] shell gate: private_vault_grant=%s sandboxed=%s",
+        allow_private is True, _shell_sandboxed,
+    )
 
     if plan_mode:
         # Plan mode: investigate read-only, propose a plan, don't execute. The

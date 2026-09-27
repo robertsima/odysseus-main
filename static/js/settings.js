@@ -2691,7 +2691,7 @@ function initAgentProfilesEditor(initial) {
       var vault = document.createElement('label'); vault.className = 'agent-profile-private';
       var vaultCheck = document.createElement('input'); vaultCheck.type = 'checkbox'; vaultCheck.checked = !!p.private_vault_access;
       vaultCheck.addEventListener('change', function () { p.private_vault_access = vaultCheck.checked; note.textContent = 'Unsaved changes'; });
-      vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads'; vault.appendChild(vaultText); card.appendChild(vault);
+      vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads (also enables bash and python, which could read the vault)'; vault.appendChild(vaultText); card.appendChild(vault);
       var advanced = document.createElement('details'); advanced.className = 'agent-profile-capabilities';
       var summary = document.createElement('summary'); summary.textContent = 'Capability allowlists'; advanced.appendChild(summary);
       var advancedGrid = document.createElement('div'); advancedGrid.className = 'agent-profile-cap-grid';

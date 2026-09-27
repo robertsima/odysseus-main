@@ -93,6 +93,62 @@ COLLECTION_NAME = "odysseus_tool_index"
 # while rejecting the weak tail observed from unrelated connected services.
 _MIN_RETRIEVAL_SIMILARITY = 0.18
 
+# A large MCP server has dozens of CRUD-shaped tools, so for almost any request
+# one of them is a near neighbour on a verb alone. On 2026-09-26 "Can you
+# upgrade with shell" retrieved Penpot's update_webhook (0.25) and then
+# update_shape next to bash (0.29): "upgrade" is close to "update", and nothing
+# else in either tool matched. An MCP tool therefore needs more than a floor to
+# be retrieved: it must either score at least as well as the best built-in in
+# the same lane (the embedding says it IS the best fit), or share a
+# non-generic word with the request through its name or its server's name.
+# Recall does not depend on this alone: small servers are always bound, naming
+# a server attaches its reads (agent_loop `_requested_mcp_read_tools`), and
+# `discover_tools` is always offered.
+_GENERIC_TOOL_WORDS = frozenset({
+    # Verbs every CRUD-shaped server repeats.
+    "get", "list", "create", "update", "delete", "remove", "add", "set", "edit",
+    "read", "write", "run", "make", "new", "show", "find", "search", "check",
+    "open", "close", "start", "stop", "send", "change", "fix", "put", "post",
+    "patch", "fetch", "query", "manage", "move", "copy", "upload", "download",
+    "save", "load", "use", "can", "you", "please",
+    # Nouns and fillers just as generic.
+    "the", "and", "for", "from", "into", "with", "this", "that", "all", "any",
+    "your", "our", "its", "about", "what", "how", "file", "info", "information",
+    "data", "item", "detail", "tool", "mcp", "server", "built", "builtin",
+})
+_MCP_SERVER_IN_DOC = re.compile(r"\(server:\s*(.*)\)\s*$")
+
+
+def _anchor_words(text: str) -> Set[str]:
+    """Distinctive lowercase words of ``text`` (camelCase split, crude plural
+    folding), without the generic words above."""
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", str(text or ""))
+    words = set()
+    for word in re.findall(r"[a-z0-9]+", spaced.casefold()):
+        if len(word) > 4 and word.endswith("s") and not word.endswith("ss"):
+            word = word[:-1]
+        if len(word) >= 3 and not word.isdigit() and word not in _GENERIC_TOOL_WORDS:
+            words.add(word)
+    return words
+
+
+def _mcp_tool_anchors(name: str, document: str = "") -> Set[str]:
+    """The words that tie an MCP tool to a request: its own tool name, the
+    server segment of the qualified name, and the server label ToolIndex put
+    in the indexed text as ``(server: <label>)`` (minus the connected account
+    and a "Built-in:" prefix)."""
+    parts = str(name or "").split("__", 2)
+    anchors = _anchor_words(parts[-1])
+    if len(parts) == 3:
+        anchors |= _anchor_words(parts[1])
+    first_line = str(document or "").split("\n", 1)[0]
+    match = _MCP_SERVER_IN_DOC.search(first_line)
+    if match:
+        label = re.sub(r"\s*\([^)]*\)\s*$", "", match.group(1))
+        label = re.sub(r"^\s*built-?in\s*:\s*", "", label, flags=re.IGNORECASE)
+        anchors |= _anchor_words(label)
+    return anchors
+
 # Email tools are intentionally split by intent.  A bare word such as
 # ``send``/``message``/``reply`` is not enough to identify email work: those
 # words are also common in notification, agent-delegation, and chat requests.
@@ -254,7 +310,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "todowrite": "Maintain a structured task list for the current coding session. Use for multi-step code work: inspect, edit, test, and mark statuses current.",
     "manage_git": "Typed Git workflows: discover/clone/init repositories; status/diff/log; stage/commit; branch/tag/switch; fetch/pull; managed stash; fast-forward push; fast-forward merge; reset/rebase with recovery refs. Works in approved roots without shell or private-vault access. Publishing and history rewrites require exact-call human confirmation; deletes (branches, remote branches, stashes), force pushes and discards are refused by policy. GitHub API metadata cannot update local checkouts; arbitrary commands remain unavailable.",
     "manage_agent_worktree": "Odysseus's persistent agent/odysseus/* worktree and human-gated publishing: start/status/diff/commit/request_publish/publish/list_requests/show_request/remove. Publishing credentials belong to this reviewed path, not arbitrary bash commands. Use manage_git for ordinary repository workflows. Legacy repo_list/repo_status/repo_pull actions also support scoped checkout synchronization.",
-    "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working. Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
+    "delegate_to_claude_code": "Delegate a bounded coding task to the locally installed Claude Code CLI (a coding agent run as a subprocess — NOT a chat model; never try chat_with_model or list_models for 'Claude'), inside an approved Git repository/worktree. Use for 'have Claude Code do X', 'test the Claude Code integration', 'ask the coding harness to fix/implement X in <repo>', or any hand-off of inspect/edit/test/commit work in a checkout to an external coding agent. action=status reports whether the binary is installed and signed in plus the approved repositories; action=list_repositories lists them; action=run waits for the result; action=start/poll/cancel runs it in the background so you can keep working; action=update upgrades/updates the Claude Code CLI itself (e.g. 'does not support this model; version X or newer is required'). Returns Claude's result text plus the resulting branch, commit, and changed files. Admin-only; cannot push, use sudo, or run arbitrary shell — only repository file tools and a narrow git/test allowlist.",
     "manage_agent_loadout": "Define reusable worker loadouts (named policies: instructions, model, tools, skills, memory, MCP, delegation, approvals, worker limit) and start workers with them. Use for \u2018set up a researcher/reviewer/builder agent\u2019, \u2018make a worker that can only read files\u2019, \u2018spin up an agent to do X\u2019. A loadout you create is intersected with this chat\u2019s own policy, so it can never grant more than you already have; action=capabilities reports that ceiling.",
     "orchestrate_agents": "Run multiple scoped specialist research agents, collect evidence-backed handoffs and synthesize results. Use appropriately scoped agents and MCP tools for market research, competitor positioning, content research, and draft synthesis. Real start/status/wait/cancel lifecycle with per-agent tool bindings, not simply loading skills or generic deep research.",
     "delegate_to_agent": "Delegate a bounded coding task through the administrator-selected provider: a local subscription-backed CLI or a connected remote coding-agent MCP tool. Provider-neutral; use instead of assuming Claude is installed.",
@@ -552,21 +608,27 @@ class ToolIndex:
                 results = lane.collection.query(
                     query_embeddings=lane.encode([query]),
                     n_results=min(k, count),
-                    include=["metadatas", "distances"],
+                    include=["metadatas", "distances", "documents"],
                 )
                 if not results or not results.get("metadatas"):
                     continue
                 distances = results.get("distances") or []
+                documents = results.get("documents") or []
                 for list_idx, meta_list in enumerate(results["metadatas"]):
                     distance_list = distances[list_idx] if list_idx < len(distances) else []
+                    document_list = (documents[list_idx] if list_idx < len(documents) else None) or []
                     for idx, meta in enumerate(meta_list):
                         name = meta.get("tool_name", "")
                         if name:
                             distance = distance_list[idx] if idx < len(distance_list) else 1.0
+                            is_mcp = meta.get("tool_type") == "mcp" or name.startswith("mcp__")
                             rows.append({
                                 "tool_name": name,
                                 "score": round(1.0 - distance, 4),
                                 "embedding_lane": lane.name,
+                                "mcp_anchors": _mcp_tool_anchors(
+                                    name, document_list[idx] if idx < len(document_list) else "",
+                                ) if is_mcp else None,
                             })
             except Exception as e:
                 logger.warning("Tool retrieval failed in %s lane: %s", lane.name, e)
@@ -577,7 +639,36 @@ class ToolIndex:
                 "Tool retrieval rejected %d weak neighbour(s); best similarity=%.4f floor=%.2f",
                 len(rows), rows[0]["score"], _MIN_RETRIEVAL_SIMILARITY,
             )
+        above_floor = self._drop_unanchored_mcp(query, above_floor)
         return [row["tool_name"] for row in dedupe_results(above_floor, id_key="tool_name", limit=k)]
+
+    @staticmethod
+    def _drop_unanchored_mcp(query: str, rows: List[Dict]) -> List[Dict]:
+        """Drop MCP rows that neither beat the best built-in in their lane nor
+        share a distinctive word with the request (see `_GENERIC_TOOL_WORDS`).
+        Scores are only compared within a lane: two embedders' scales differ."""
+        best_builtin: Dict[str, float] = {}
+        for row in rows:
+            if row.get("mcp_anchors") is None:
+                lane = row["embedding_lane"]
+                best_builtin[lane] = max(best_builtin.get(lane, row["score"]), row["score"])
+        if not best_builtin:
+            return rows
+        query_words = _anchor_words(query)
+        kept, dropped = [], []
+        for row in rows:
+            anchors = row.get("mcp_anchors")
+            bar = best_builtin.get(row["embedding_lane"])
+            if anchors is not None and bar is not None and row["score"] < bar and not anchors & query_words:
+                dropped.append(row["tool_name"])
+                continue
+            kept.append(row)
+        if dropped:
+            logger.info(
+                "[tool-rag] dropped MCP neighbour(s) that ranked below the best built-in and share "
+                "no distinctive word with the request: %s", sorted(set(dropped)),
+            )
+        return kept
 
     # Structural recurring-schedule intent. Typo-resilient (matches "every dya"
     # via "every <word>"), and catches bare clock times ("at 7:30 am", "7am").

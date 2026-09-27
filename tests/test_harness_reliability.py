@@ -405,6 +405,23 @@ async def test_shell_tools_are_hidden_without_the_private_grant(monkeypatch):
     assert "bash" not in sent["tools"] and "python" not in sent["tools"]
     assert "read_file" in sent["tools"]
     assert any("Allow private vault reads" in str(m.get("content")) for m in sent["messages"])
+    # 2026-09-26: the model relayed only the setting's name, so the user could
+    # not tell why a vault switch would give it a shell. The note must say that
+    # the switch enables bash/python and why they are tied to it.
+    note = next(str(m.get("content")) for m in sent["messages"]
+                if "Allow private vault reads" in str(m.get("content")))
+    assert "enables bash and python" in note
+    assert "could read the user's private vault" in note
+    assert "Vault privacy" in note
+
+
+def test_private_tool_denial_says_the_setting_turns_on_the_shell():
+    from src.private_access import private_tool_denial
+
+    error = private_tool_denial("bash")["error"]
+    assert "Allow private vault reads" in error
+    assert "turns on bash, python" in error
+    assert "not merely repository access" in error
 
 
 def test_read_log_keeps_only_recent_entries(tmp_path, monkeypatch):

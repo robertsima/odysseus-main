@@ -530,7 +530,8 @@ register_all([
         help=("Lets bash and python run in chats without private vault access, confined to "
               "the chat's workspace: the sandbox cannot see the app's data, the vault, other "
               "folders or the app's environment. Needs bubblewrap and a container allowed to "
-              "create user namespaces. Off = the shell needs 'Allow private vault reads'."),
+              "create user namespaces. Off, or when it is unavailable, bash and python run only in "
+              "chats with 'Allow private vault reads' on (Chat settings > Vault privacy)."),
         group="Agents", choices=("auto", "off"),
         choice_labels=("On when available", "Off"),
     ),

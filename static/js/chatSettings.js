@@ -270,9 +270,9 @@ function renderPanel() {
     ${modesEnforced ? `<section class="csp-section"><h4>Approvals</h4>${modeRows}</section>` : ''}
     <section class="csp-section csp-privacy">
       <h4>Vault privacy</h4>
-      <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint.">
+      <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint. It also turns on the agent's shell (bash, python), which is not confined to permitted files and so could read the private vault.">
         <input type="checkbox" data-csp="private-vault"${privateVault ? ' checked' : ''}>
-        <span><b>Allow private vault reads</b><small>${privateVault ? 'Private excerpts may leave this machine via the selected model endpoint.' : 'Private vault content is hidden by default.'}</small></span>
+        <span><b>Allow private vault reads</b><small>${privateVault ? 'Private excerpts may leave this machine via the selected model endpoint. The agent shell (bash, python) is on.' : 'Private vault content is hidden by default. Also enables the agent shell (bash, python), which could read the vault.'}</small></span>
       </label>
     </section>
     <section class="csp-section">
@@ -286,7 +286,7 @@ function renderPanel() {
   }));
   panel.querySelector('[data-csp="private-vault"]')?.addEventListener('change', (e) => {
     const enabled = Boolean(e.target.checked);
-    save({ private_vault_access: enabled }, enabled ? 'Private vault reads enabled for this chat' : 'Private vault reads disabled for this chat');
+    save({ private_vault_access: enabled }, enabled ? 'Private vault reads and shell enabled for this chat' : 'Private vault reads and shell disabled for this chat');
   });
   panel.querySelectorAll('input[data-tool]').forEach((input) => input.addEventListener('change', () => {
     const next = new Set((state.data?.settings?.disabled_tools) || []);
