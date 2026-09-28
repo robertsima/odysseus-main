@@ -2436,22 +2436,17 @@ def setup_chat_routes(
                 _agent_round_endpoint_labels = {1: _agent_actual_endpoint_label}
                 try:
                     from src.settings import get_setting
-                    from src.agent_tools import MAX_AGENT_ROUNDS as _DEFAULT_ROUNDS
                     # Per-message tool budget from settings; guard defensively in
                     # case settings.json was hand-edited to a non-numeric value
                     # (the HTTP admin endpoint validates, but direct edits bypass
                     # it). 0 = unlimited, matching auth_routes set_settings().
+                    # There is no round budget: `agent_max_rounds` was only
+                    # logged by the loop, never enforced, and was removed on
+                    # 2026-09-28 (a round count never ends a run).
                     try:
                         _tool_budget = int(get_setting("agent_max_tool_calls", 0))
                     except (TypeError, ValueError):
                         _tool_budget = 0
-                    # Per-message round cap from settings; clamp defensively in
-                    # case settings.json was hand-edited to a bad value.
-                    try:
-                        _max_rounds = int(get_setting("agent_max_rounds", _DEFAULT_ROUNDS) or _DEFAULT_ROUNDS)
-                    except (TypeError, ValueError):
-                        _max_rounds = _DEFAULT_ROUNDS
-                    _max_rounds = max(1, min(_max_rounds, 500))
                     # The loop-breaker inside stream_agent_loop forces a final
                     # answer once the turn reaches the budget. The hard stop
                     # passed as max_tool_calls sits a margin above it so the
@@ -2480,7 +2475,6 @@ def setup_chat_routes(
                         max_tokens=ctx.preset.max_tokens,
                         prompt_type=preset_id,
                         max_tool_calls=_hard_budget,
-                        max_rounds=_max_rounds,
                         context_length=_selected_context_length,
                         active_document=active_doc,
                         active_email=active_email_ctx,

@@ -5,7 +5,7 @@ The HTTP admin endpoint validates/clamps this value, but a hand-edited or
 agent-written data/settings.json bypasses that. The read sits inside the agent
 streaming try-block whose only handler catches (CancelledError, GeneratorExit) —
 NOT ValueError — so an unguarded int() would propagate and break the SSE stream.
-It must be guarded like the agent_max_rounds read four lines below.
+It must be guarded with try/except (TypeError, ValueError).
 """
 import ast
 from pathlib import Path
@@ -50,7 +50,7 @@ def test_tool_budget_read_is_wrapped_in_try_except():
     source = _CHAT_ROUTES.read_text(encoding="utf-8")
     assert _tool_budget_read_is_guarded(source), (
         "_tool_budget = int(get_setting('agent_max_tool_calls', 0)) must be wrapped in "
-        "try/except (ValueError) like the agent_max_rounds read, so a non-numeric "
+        "try/except (ValueError), so a non-numeric "
         "settings.json value cannot crash chat_stream during agent init"
     )
 

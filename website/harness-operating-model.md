@@ -96,10 +96,10 @@ judgment.
 - `send_to_session` stores both the message and the reply in the target chat
   tagged `source=agent` with the sending chat's id and name; the UI labels
   them "Agent · <chat>" with a link back instead of showing them as "You".
-- The tool-call ceiling per turn is 500 (`agent_max_tool_calls`; 0 = none)
-  with up to 100 steps per message (`agent_max_rounds`), so a long
-  build→test→fix or multi-repository turn is not cut off. The repeat/stall
-  detectors still stop a loop that makes no progress.
+- The tool-call ceiling per turn is 500 (`agent_max_tool_calls`; 0 = none),
+  and there is no round ceiling, so a long build→test→fix or
+  multi-repository turn is not cut off. The repeat/stall detectors still stop
+  a loop that makes no progress.
 - In chat, a tool timeline folds after 12 calls (`chat_tool_fold_after`) and
   shows a summary bar (counts, failures, tools used, expand/collapse all).
 

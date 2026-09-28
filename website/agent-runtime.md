@@ -57,9 +57,10 @@ stops it (§5), or when the round budget runs out.
 turn or for a worker. Every incarnation of a ceiling did the same thing: stop an
 agent in the middle of a task it was still working on and hand back half of it.
 Raising the numbers only moved where that happened, so the mechanism is gone.
-`max_rounds` (and `agent_max_rounds`) are still accepted and still reported for
-display, but they are advisory — `stream_agent_loop` iterates until the work is
-done.
+`max_rounds` is still accepted and still reported for display, but it is
+advisory — `stream_agent_loop` iterates until the work is done. (The global
+`agent_max_rounds` setting, which fed only a debug log line, was removed on
+2026-09-28.)
 
 The one exception is a positive `max_rounds` someone set on a saved agent
 profile on purpose. A worker started from that profile (`send_to_session` with

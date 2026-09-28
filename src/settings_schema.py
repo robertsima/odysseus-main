@@ -24,8 +24,10 @@ pretending the click will stick.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+import os
+import re
+from dataclasses import dataclass, replace
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # Coarse types, chosen for what the UI must render rather than for Python.
 TYPES = ("bool", "int", "float", "string", "text", "choice", "list", "json", "path", "secret")
@@ -41,7 +43,8 @@ class SettingSpec:
     # Only an admin may change it. Everything touching the host, another
     # machine, or other users' data is admin-only.
     admin_only: bool = True
-    # Eligible for a per-user override (see settings._PER_USER_KEYS).
+    # Eligible for a per-user override. Derived from settings._PER_USER_KEYS
+    # when the spec is registered, so it cannot drift from the resolver.
     per_user: bool = False
     # The capability this belongs to; the UI hides the group when unavailable.
     capability: str = ""
@@ -70,6 +73,10 @@ class SettingSpec:
     unit: str = ""
     scale: float = 1.0
     advanced: bool = False
+    # Declared (so the completeness test holds and saves still validate) but
+    # left out of the generic Configuration panel: a dormant feature, or one
+    # whose only control lives in its own tab. The backend still reads it.
+    hidden: bool = False
 
     def as_dict(self, value: Any = None, locked: bool = False, default: Any = None) -> dict:
         out = {
@@ -107,6 +114,20 @@ _SPECS: Dict[str, SettingSpec] = {}
 
 
 def register(spec: SettingSpec) -> SettingSpec:
+    # `per_user` follows the resolver rather than the declaration. On
+    # 2026-09-28 the hand-set flags were wrong both ways: search_provider,
+    # search_safesearch and reminder_channel claimed a per-user override that
+    # get_user_setting never consults, while the default/utility/research/
+    # vision/image/STT model specs lacked the flag although their keys are
+    # resolved per user.
+    try:
+        from src.settings import _PER_USER_KEYS
+
+        per_user = spec.key in _PER_USER_KEYS
+    except Exception:  # pragma: no cover - settings unimportable at boot
+        per_user = spec.per_user
+    if per_user != spec.per_user:
+        spec = replace(spec, per_user=per_user)
     _SPECS[spec.key] = spec
     return spec
 
@@ -134,9 +155,12 @@ def missing_specs() -> List[str]:
     The completeness test asserts this is empty. Keys that are structured
     editor state rather than a single control are listed in EXEMPT below.
     """
-    from src.settings import DEFAULT_SETTINGS
+    from src.settings import DEFAULT_SETTINGS, RETIRED_SETTING_KEYS
 
-    return sorted(k for k in DEFAULT_SETTINGS if k not in _SPECS and k not in EXEMPT)
+    return sorted(
+        k for k in DEFAULT_SETTINGS
+        if k not in _SPECS and k not in EXEMPT and k not in RETIRED_SETTING_KEYS
+    )
 
 
 # Keys that are edited through a dedicated UI of their own rather than a
@@ -171,7 +195,6 @@ _MIGRATED_ENV_OVERRIDES = {
     "rag_tag_credit": "ODYSSEUS_RAG_TAG_CREDIT",
     "rag_temporal_intent_weight": "ODYSSEUS_RAG_TEMPORAL_INTENT_WEIGHT",
     "rag_temporal_weight": "ODYSSEUS_RAG_TEMPORAL_WEIGHT",
-    "slow_request_log_seconds": "ODYSSEUS_SLOW_REQUEST_LOG_SECONDS",
     "stt_beam_size": "ODYSSEUS_STT_BEAM_SIZE",
     "stt_max_audio_bytes": "ODYSSEUS_STT_MAX_AUDIO_BYTES",
     "stt_max_audio_seconds": "ODYSSEUS_STT_MAX_AUDIO_SECONDS",
@@ -247,8 +270,20 @@ def _validate_folder_sensitivity(value: Any) -> None:
             raise ValueError(f"{key!r}.readonly must be true or false")
 
 
+def _validate_model_fallbacks(value: Any) -> None:
+    if not isinstance(value, list):
+        raise ValueError("must be a list of {\"endpoint_id\": ..., \"model\": ...} objects")
+    for index, entry in enumerate(value):
+        if not isinstance(entry, dict):
+            raise ValueError(f"entry {index + 1} must be an object with endpoint_id and model")
+        if not all(isinstance(entry.get(field, ""), str) for field in ("endpoint_id", "model")):
+            raise ValueError(f"entry {index + 1}: endpoint_id and model must be text")
+
+
 VALIDATORS: Dict[str, Any] = {
     "vault_folder_sensitivity": _validate_folder_sensitivity,
+    "vision_model_fallbacks": _validate_model_fallbacks,
+    "utility_model_fallbacks": _validate_model_fallbacks,
 }
 
 
@@ -265,16 +300,281 @@ def validate_value(key: str, value: Any) -> None:
         check(value)
 
 
+# ── write-time normalisation shared by both settings routes ───────────────
+# Until 2026-09-28 the two write paths disagreed. POST /api/auth/settings (the
+# hand-built Settings tabs) checked paths, repository slugs, enums and ranges
+# key by key but never the schema's validators or choice lists, so a malformed
+# `vault_folder_sensitivity` saved from a tab slipped past the check written to
+# catch it. POST /api/settings/schema (the Configuration panel) checked the
+# schema and nothing else, so a gpt-* model saved there as `claude_code_model`
+# broke every delegation with invalid_model. One function now holds the rules;
+# the routes differ only in what they do with an out-of-range number.
+
+_GITHUB_SLUG = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}")
+_WORKFLOW_FILE = re.compile(r"[A-Za-z0-9._-]{1,100}\.ya?ml")
+_ANY_REPOSITORY = "*"
+# Search provider names that older builds (and the Research tab until
+# 2026-09-28) stored, mapped to the name the dispatcher knows. "google" matched
+# no provider, so Deep Research silently fell back to the default engine.
+# services/search/core.normalize_provider_name applies the same map on read.
+_SEARCH_PROVIDER_ALIASES = {"google": "google_pse"}
+# Per choice setting: stored spellings accepted and saved as the declared one.
+CHOICE_ALIASES: Dict[str, Dict[str, str]] = {
+    "research_search_provider": _SEARCH_PROVIDER_ALIASES,
+}
+# "No fallback at all" for search_fallback_chain; an empty chain keeps meaning
+# "the built-in default chain" (services/search/core._build_provider_chain).
+SEARCH_FALLBACK_NONE = "none"
+
+
+def _github_slug(value: Any) -> str:
+    slug = str(value or "").strip().strip("/")
+    if slug.lower().startswith("https://github.com/"):
+        slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
+    return slug
+
+
+def _norm_repository_roots(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        raise ValueError("must be a list of absolute paths")
+    cleaned = []
+    for item in value:
+        item = str(item or "").strip()
+        if not item:
+            continue
+        if not os.path.isabs(item):
+            raise ValueError(f"{item!r} is not an absolute path")
+        cleaned.append(os.path.normpath(item))
+    return cleaned
+
+
+def _norm_absolute_path(value: Any) -> str:
+    # Absolute paths only (or empty = unset), so a settings write cannot point
+    # the delegation at a relative or shell-expanded location.
+    text = str(value or "").strip()
+    if text and not os.path.isabs(os.path.expanduser(text)):
+        raise ValueError("must be an absolute path (or empty)")
+    return text
+
+
+def _norm_http_url(value: Any) -> str:
+    text = str(value or "").strip()
+    if text and not text.lower().startswith(("http://", "https://")):
+        raise ValueError("must be an http(s) URL (or empty)")
+    return text.rstrip("/")
+
+
+def _norm_claude_code_model(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    # Same rules the delegation applies, so a saved model never fails later at
+    # run time ("Opus 5.5" is stored as claude-opus-5-5, "default" as unset,
+    # and a gpt-* name is refused here instead of on every delegation).
+    from src.agent_tools.claude_code_tools import normalize_claude_model
+
+    normalized, error = normalize_claude_model(text)
+    if error:
+        raise ValueError(error)
+    return normalized or ""
+
+
+def _norm_reasoning_effort(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text and text not in ("minimal", "low", "medium", "high"):
+        raise ValueError("must be minimal, low, medium or high (or empty)")
+    return text
+
+
+def _norm_claude_code_backend(value: Any) -> str:
+    text = str(value or "local").strip().lower()
+    if text not in ("local", "cloud"):
+        raise ValueError("must be local or cloud")
+    return text
+
+
+def _split_names(value: Any) -> List[str]:
+    """A list, or text separated by commas/whitespace (one per line from a
+    textarea, "a, b" typed into one line); names never contain either."""
+    items = value if isinstance(value, (list, tuple)) else [value]
+    return [part for item in items for part in re.split(r"[\s,]+", str(item or "")) if part]
+
+
+def _norm_cloud_repositories(value: Any) -> List[str]:
+    items = _split_names(value)
+    cleaned: List[str] = []
+    for item in items:
+        if str(item or "").strip().strip("/") == _ANY_REPOSITORY:
+            # Any repository the GitHub credential can see.
+            if _ANY_REPOSITORY not in cleaned:
+                cleaned.append(_ANY_REPOSITORY)
+            continue
+        slug = _github_slug(item)
+        if not slug:
+            continue
+        if not _GITHUB_SLUG.fullmatch(slug):
+            raise ValueError(f"{slug!r} is not an owner/repo slug")
+        if slug.lower() not in {c.lower() for c in cleaned}:
+            cleaned.append(slug)
+    return cleaned[:50]
+
+
+def _norm_cloud_hub(value: Any) -> str:
+    slug = _github_slug(value)
+    if slug and not _GITHUB_SLUG.fullmatch(slug):
+        raise ValueError(f"{slug!r} is not an owner/repo slug")
+    return slug
+
+
+def _norm_cloud_workflow(value: Any) -> str:
+    text = str(value or "").strip() or "odysseus-claude.yml"
+    if not _WORKFLOW_FILE.fullmatch(text):
+        raise ValueError("must be a workflow file name like odysseus-claude.yml")
+    return text
+
+
+def _norm_approval_mode(value: Any) -> Any:
+    from src.approval_modes import MODES
+
+    if value not in MODES:
+        raise ValueError(f"must be one of {', '.join(MODES)}")
+    return value
+
+
+def _norm_agent_profiles(value: Any) -> Any:
+    from src.agent_profiles import validate_profiles
+
+    return validate_profiles(value)
+
+
+def _norm_context_profiles(value: Any) -> Any:
+    # A preferences blob, not a scalar: clamp what is out of range and drop
+    # what is unknown rather than refusing the whole save and costing the user
+    # every other field on the form.
+    from src.context_profiles import sanitize
+
+    return sanitize(value)
+
+
+def _norm_search_provider_name(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return _SEARCH_PROVIDER_ALIASES.get(text, text)
+
+
+def _norm_search_fallback_chain(value: Any) -> List[str]:
+    cleaned: List[str] = []
+    for item in _split_names(value):
+        name = _norm_search_provider_name(item)
+        if name and name not in cleaned:
+            cleaned.append(name)
+    # "none" cannot share a chain with a provider: it means there is no chain.
+    return [SEARCH_FALLBACK_NONE] if SEARCH_FALLBACK_NONE in cleaned else cleaned
+
+
+# Per-key rules that go beyond a type and a range. Each returns the value to
+# store or raises ValueError with an operator-readable reason.
+NORMALIZERS: Dict[str, Callable[[Any], Any]] = {
+    "claude_code_repository_roots": _norm_repository_roots,
+    "claude_code_binary": _norm_absolute_path,
+    "claude_code_home": _norm_absolute_path,
+    "claude_code_default_repository": _norm_absolute_path,
+    "claude_code_odysseus_token_file": _norm_absolute_path,
+    "claude_code_odysseus_url": _norm_http_url,
+    "claude_code_model": _norm_claude_code_model,
+    "chatgpt_reasoning_effort": _norm_reasoning_effort,
+    "claude_code_backend": _norm_claude_code_backend,
+    "claude_cloud_repositories": _norm_cloud_repositories,
+    "claude_cloud_hub_repository": _norm_cloud_hub,
+    "claude_cloud_workflow": _norm_cloud_workflow,
+    "agent_approval_mode": _norm_approval_mode,
+    "agent_profiles": _norm_agent_profiles,
+    "context_profiles": _norm_context_profiles,
+    "research_search_provider": _norm_search_provider_name,
+    "search_fallback_chain": _norm_search_fallback_chain,
+}
+
+
+def _coerce_declared_type(spec: SettingSpec, value: Any) -> Any:
+    """Bring a JSON value to the declared type, as far as that is unambiguous."""
+    kind = spec.type
+    if kind == "bool":
+        if isinstance(value, str):
+            # bool("false") is True: getting this wrong turns a switched-off
+            # feature back on.
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        return bool(value)
+    if kind in ("int", "float"):
+        if value is None or (isinstance(value, str) and not value.strip()):
+            # A cleared field means "back to the default", not a crash later.
+            from src.settings import DEFAULT_SETTINGS
+
+            value = DEFAULT_SETTINGS.get(spec.key, 0)
+        try:
+            return int(value) if kind == "int" else float(value)
+        except (TypeError, ValueError):
+            raise ValueError("must be an integer" if kind == "int" else "must be a number")
+    if kind in ("string", "text", "path", "secret") and value is None:
+        return ""
+    return value
+
+
+def normalize_value(key: str, value: Any, *, clamp: bool = False) -> Any:
+    """The value to store for ``key``, or ``ValueError`` saying what is wrong.
+
+    Applies, in order: the key's own rule (``NORMALIZERS``), the declared type,
+    the numeric range, the choice list, then ``validate_value``. With ``clamp``
+    an out-of-range number is pulled to the nearest bound instead of refused —
+    the Settings tabs have always clamped, and their inputs mirror it.
+    """
+    rule = NORMALIZERS.get(key)
+    if rule is not None:
+        value = rule(value)
+    spec = get_spec(key)
+    if spec is not None:
+        if rule is None:
+            value = _coerce_declared_type(spec, value)
+        if clamp and spec.type in ("int", "float"):
+            if spec.min_value is not None and value < spec.min_value:
+                value = type(value)(spec.min_value)
+            if spec.max_value is not None and value > spec.max_value:
+                value = type(value)(spec.max_value)
+        if spec.type == "choice" and spec.choices:
+            text = str(value).strip()
+            text = CHOICE_ALIASES.get(key, {}).get(text, text)
+            if text not in spec.choices:
+                raise ValueError(f"must be one of: {', '.join(repr(c) for c in spec.choices)}")
+            value = text
+    validate_value(key, value)
+    return value
+
+
 def ui_payload(owner: str = "", is_admin: bool = True) -> List[dict]:
     """Everything the settings UI needs to render, grouped, in one payload.
 
     Non-admins see only the settings they may change, so the page does not show
-    controls that will be refused on save.
+    controls that will be refused on save. Hidden specs are left out.
+
+    ``value`` is always the global setting, because that is what a save from
+    the panel writes (as the dedicated Settings tabs do). Until 2026-09-28 a
+    per-user key showed the admin's own override here instead, so the panel
+    displayed one value and saved another. A per-user key now also carries
+    ``user_value``: the viewer's own override, or None when they have none.
     """
-    from src.settings import DEFAULT_SETTINGS, get_setting, get_user_setting
+    from src.settings import DEFAULT_SETTINGS, get_setting
+
+    personal: Dict[str, Any] = {}
+    if owner:
+        try:
+            from routes.prefs_routes import _load_for_user
+
+            personal = _load_for_user(owner) or {}
+        except Exception:
+            personal = {}
 
     groups: Dict[str, List[dict]] = {}
     for spec in all_specs():
+        if spec.hidden:
+            continue
         if spec.admin_only and not is_admin:
             continue
         if spec.capability:
@@ -286,12 +586,15 @@ def ui_payload(owner: str = "", is_admin: bool = True) -> List[dict]:
                     continue
             except Exception:
                 pass
-        value = get_user_setting(spec.key, owner) if (spec.per_user and owner) else get_setting(spec.key)
-        groups.setdefault(spec.group, []).append(spec.as_dict(
-            value,
+        item = spec.as_dict(
+            get_setting(spec.key),
             locked=env_locked(spec),
             default=DEFAULT_SETTINGS.get(spec.key),
-        ))
+        )
+        if spec.per_user:
+            override = personal.get(spec.key)
+            item["user_value"] = None if override in (None, "") else override
+        groups.setdefault(spec.group, []).append(item)
 
     group_help = {
         "Agents": "Delegation, approvals, collaboration, and agent runtime limits.",
@@ -302,12 +605,11 @@ def ui_payload(owner: str = "", is_admin: bool = True) -> List[dict]:
         "Voice": "Speech recognition, speech output, and their resource limits.",
         "Images": "Image generation, vision, gallery analysis, and model choices.",
         "Search": "Web-search providers, filtering, and result behavior.",
-        "Remote hosts": "Machines this installation may use for remote work.",
     }
     order = (
         "General", "Agents", "Knowledge", "Models", "Voice", "Images",
         "Search", "Research", "Reminders", "Email", "Chat", "Documents",
-        "Skills", "Tasks", "Teacher", "Tools", "Remote hosts",
+        "Skills", "Tasks", "Teacher", "Tools",
         "Limits & uploads", "System",
     )
     rank = {name: i for i, name in enumerate(order)}
@@ -341,16 +643,69 @@ register_all([
             ("utility_model", "Utility model", "Model used for lightweight summaries and utility calls.", "Models"),
             ("research_model", "Research model", "Model used by Deep Research.", "Research"),
             ("task_model", "Task model", "Model used by scheduled and background tasks.", "Tasks"),
-            ("teacher_model", "Teacher model", "Model used for teacher and critique calls.", "Teacher"),
             ("image_model", "Image model", "Configured image-generation model.", "Images"),
             ("vision_model", "Vision model", "Configured image-understanding model.", "Images"),
-            ("claude_code_model", "Claude Code model", "Optional model override for Claude Code delegation.", "Agents"),
         )
     ],
+    # The Claude Code CLI runs Claude models only. This select used to list
+    # the Odysseus endpoints' models (gpt-*), and saving one broke every
+    # delegation with invalid_model; saves now go through
+    # normalize_claude_model (see NORMALIZERS), which also accepts full
+    # claude-* IDs typed in, so this is a suggestion list, not a closed one.
+    # Keep in step with claude_code_tools._CLAUDE_MODEL_ALIASES.
+    SettingSpec(
+        key="claude_code_model", type="string", label="Claude Code model",
+        help=("Model for delegated Claude Code runs: an alias (opus, sonnet, haiku, fable, best, "
+              "opusplan) or a Claude model ID such as claude-opus-5-5; append [1m] for the "
+              "1M-token context. Empty uses the signed-in account's default."),
+        group="Agents", placeholder="Account default",
+        suggestions=("opus", "sonnet", "haiku", "fable", "best", "opusplan"),
+    ),
+    SettingSpec(
+        key="claude_code_backend", type="choice", label="Claude Code runs on",
+        help=("Where a delegation that names no backend runs. The cloud runner needs at least one "
+              "repository under Settings › Tools › Claude Code › Cloud runner; without one every "
+              "delegation still runs locally."),
+        group="Agents", choices=("local", "cloud"),
+        choice_labels=("This machine", "Cloud runner (GitHub Actions)"), advanced=True,
+    ),
+    SettingSpec(
+        key="claude_code_max_concurrent_tasks", type="int", label="Claude Code task slots",
+        help="Delegated Claude Code runs that may execute at once. 0 uses CLAUDE_CODE_MAX_CONCURRENT_TASKS or the built-in default.",
+        group="Agents", min_value=0, max_value=16, unit="tasks", advanced=True,
+    ),
+    SettingSpec(
+        key="chatgpt_reasoning_effort", type="choice", label="ChatGPT reasoning effort",
+        help="Reasoning depth for ChatGPT-subscription chats whose agent profile sets none.",
+        group="Models", choices=("", "minimal", "low", "medium", "high"),
+        choice_labels=("Provider default", "Minimal", "Low", "Medium", "High"),
+    ),
+    # ── Voice output and Teacher: dormant features ──
+    # Declared so saves still validate and the backend keeps reading them, but
+    # hidden from the generic panel (2026-09-28): speech output ships with the
+    # provider "disabled" and Teacher is off, so nine controls for features
+    # nobody has switched on crowded out the ones that do something.
+    SettingSpec(
+        key="tts_enabled", type="bool", label="Speech output",
+        help="Read assistant replies aloud.", group="Voice", hidden=True,
+    ),
+    SettingSpec(
+        key="teacher_model", type="string", label="Teacher model",
+        help="Model used for teacher and critique calls.", group="Teacher",
+        options_source="models", hidden=True,
+    ),
+    SettingSpec(
+        key="teacher_enabled", type="bool", label="Teacher",
+        help="Critique and correct agent answers with the teacher model.", group="Teacher", hidden=True,
+    ),
+    SettingSpec(
+        key="teacher_tier2_enabled", type="bool", label="Teacher second tier",
+        help="Escalate to the teacher's second review tier.", group="Teacher", hidden=True,
+    ),
     SettingSpec(
         key="tts_provider", type="string", label="Text-to-speech provider",
         help="Speech provider or compatible configured endpoint.", group="Voice",
-        options_source="tts_providers",
+        options_source="tts_providers", hidden=True,
     ),
     SettingSpec(
         key="stt_provider", type="string", label="Speech-to-text provider",
@@ -360,7 +715,7 @@ register_all([
     SettingSpec(
         key="tts_model", type="string", label="Text-to-speech model",
         help="Speech model exposed by the selected provider.", group="Voice",
-        options_source="tts_models",
+        options_source="tts_models", hidden=True,
     ),
     SettingSpec(
         key="stt_model", type="string", label="Speech-to-text model",
@@ -371,6 +726,7 @@ register_all([
         key="tts_voice", type="string", label="Text-to-speech voice",
         help="Provider voice name. Choose a common voice or enter a provider-specific one.", group="Voice",
         suggestions=("alloy", "ash", "ballad", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse", "af_heart"),
+        hidden=True,
     ),
     SettingSpec(
         key="stt_language", type="string", label="Speech recognition language",
@@ -380,8 +736,11 @@ register_all([
     SettingSpec(
         key="tts_speed", type="choice", label="Speech speed",
         help="Playback speed for generated speech.", group="Voice",
-        choices=("0.75", "1", "1.25", "1.5", "2"),
-        choice_labels=("0.75× — slower", "1× — normal", "1.25×", "1.5×", "2× — faster"),
+        # 0.5 is what the Voice tab offers; without it here a save from that
+        # tab would be refused now that both routes check the choice list.
+        choices=("0.5", "0.75", "1", "1.25", "1.5", "2"),
+        choice_labels=("0.5× — slowest", "0.75× — slower", "1× — normal", "1.25×", "1.5×", "2× — faster"),
+        hidden=True,
     ),
     # ── Knowledge: one store for notes and vault documents ──
     SettingSpec(
@@ -513,6 +872,21 @@ register_all([
         max_value=64,
         unit="messages",
     ),
+    SettingSpec(
+        key="agent_max_worker_depth",
+        type="int",
+        label="Worker nesting depth",
+        help=(
+            "How many levels of workers may sit below a chat you started: 1 means "
+            "workers never start workers of their own, 2 lets a worker start one "
+            "more level. Each level multiplies what a single request can spend."
+        ),
+        group="Agents",
+        min_value=1,
+        max_value=4,
+        unit="levels",
+        advanced=True,
+    ),
 
     SettingSpec(
         key="agent_approval_mode", type="choice", label="Approval prompts",
@@ -581,19 +955,20 @@ register_all([
         key="agent_input_token_hard_max", type="int", label="Agent context cap",
         help=("Most context the agent sends the model per step when the context budget is automatic: "
               "85% of the model's window, up to this cap. Explicit custom budgets can exceed it."),
-        group="Agents", min_value=16_000, max_value=2_000_000, step=1000, unit="tokens",
+        # 1,000,000, the ceiling the Agents tab offers; this said 2,000,000
+        # while that route clamped to 1,000,000 (2026-09-28).
+        group="Agents", min_value=16_000, max_value=1_000_000, step=1000, unit="tokens",
         advanced=True,
-    ),
-    SettingSpec(
-        key="agent_max_rounds", type="int", label="Round budget (advisory)",
-        help=("Advisory round budget per message. It does not stop a run; \"Maximum tool calls\", "
-              "stall detection, timeouts and Stop are the real limits."),
-        group="Agents", min_value=1, max_value=500, unit="rounds", advanced=True,
     ),
     SettingSpec(
         key="agent_max_tool_calls", type="int", label="Maximum tool calls",
         help="Safety limit per turn. Use 0 for no fixed ceiling; stall detection still applies.",
         group="Agents", min_value=0, max_value=2000, unit="calls", advanced=True,
+    ),
+    SettingSpec(
+        key="chat_tool_fold_after", type="int", label="Fold tool timeline after",
+        help="Collapse an agent's tool timeline in chat after this many calls in one turn. 0 never folds.",
+        group="Chat", min_value=0, max_value=500, unit="calls", advanced=True,
     ),
     SettingSpec(
         key="agent_workflow_launch_stagger_seconds", type="float", label="Specialist launch spacing",
@@ -693,25 +1068,76 @@ register_all([
         group="Search",
         choices=("searxng", "duckduckgo", "brave", "google_pse", "tavily", "serper", "disabled"),
         choice_labels=("SearXNG — self-hosted", "DuckDuckGo — no key", "Brave Search", "Google PSE", "Tavily", "Serper.dev", "Disabled"),
-        per_user=True,
+    ),
+    SettingSpec(
+        key="search_fallback_chain", type="list", label="Search fallback providers",
+        help=("Providers tried in order when the primary fails or is rate-limited, one per line. "
+              "Leave empty for the default fallback (DuckDuckGo); enter none for no fallback at all."),
+        group="Search", advanced=True,
     ),
     SettingSpec(
         key="search_safesearch", type="choice", label="SafeSearch",
         help="Adult-content filtering level translated to the equivalent supported by each search provider.",
         group="Search", choices=("strict", "moderate", "off"),
-        choice_labels=("Strict", "Moderate", "Off"), per_user=True,
+        choice_labels=("Strict", "Moderate", "Off"),
     ),
     SettingSpec(
         key="research_search_provider", type="choice", label="Research search provider",
         help="Provider used only for Deep Research. ‘Same as web search’ follows the primary choice above.",
-        group="Research", choices=("", "searxng", "duckduckgo", "tavily", "brave", "google", "serper"),
-        choice_labels=("Same as web search", "SearXNG", "DuckDuckGo", "Tavily", "Brave", "Google", "Serper"),
+        # google_pse is the dispatcher's name; "google" matched no provider and
+        # Deep Research silently used the fallback engine (2026-09-28). A
+        # stored "google" is read as google_pse (CHOICE_ALIASES).
+        group="Research", choices=("", "searxng", "duckduckgo", "tavily", "brave", "google_pse", "serper"),
+        choice_labels=("Same as web search", "SearXNG", "DuckDuckGo", "Tavily", "Brave", "Google PSE", "Serper"),
     ),
+    # Deep Research limits, together under Research › advanced. The ranges are
+    # the ones src/research_handler.py clamps to when it reads them; the
+    # planning and query timeouts have no control in the Research tab, so this
+    # is their only one.
+    *[
+        SettingSpec(key=key, type="int", label=label, help=help_text, group="Research",
+                    min_value=low, max_value=high, unit=unit, advanced=True)
+        for key, label, help_text, low, high, unit in (
+            ("research_max_tokens", "Report length limit",
+             "Most tokens the final research report may use.", 1024, None, "tokens"),
+            ("research_run_timeout_seconds", "Research time limit",
+             "Wall-clock cap on one research run. 0 = no limit; otherwise at least 60 seconds.",
+             0, 86400, "seconds"),
+            ("research_planning_timeout_seconds", "Planning call timeout",
+             "How long one research-planning model call may take before it is abandoned.",
+             15, 3600, "seconds"),
+            ("research_query_timeout_seconds", "Query-writing call timeout",
+             "How long one search-query model call may take before it is abandoned.",
+             15, 3600, "seconds"),
+            ("research_extraction_timeout_seconds", "Page extraction timeout",
+             "How long reading one source page may take.", 15, 3600, "seconds"),
+            ("research_extraction_concurrency", "Pages read at once",
+             "Source pages extracted in parallel during one research run.", 1, 12, "pages"),
+        )
+    ],
     SettingSpec(
         key="reminder_channel", type="choice", label="Default reminder delivery",
         help="Where reminders are sent unless a particular reminder chooses a different channel.",
         group="Reminders", choices=("browser", "email", "ntfy", "webhook"),
-        choice_labels=("Browser notification", "Email", "ntfy", "Webhook"), per_user=True,
+        choice_labels=("Browser notification", "Email", "ntfy", "Webhook"),
+    ),
+    SettingSpec(
+        key="reminder_email_account_id", type="string", label="Reminder email account",
+        help="ID of the configured email account that sends email reminders. Empty uses the default account.",
+        group="Reminders", advanced=True,
+    ),
+    # Edited through the fallback-chain widgets of the Models and Images tabs.
+    # Lists of {endpoint_id, model} objects, so a one-name-per-line list
+    # control would have saved "[object Object]" (2026-09-28).
+    SettingSpec(
+        key="utility_model_fallbacks", type="json", label="Utility model fallbacks",
+        help="Ordered [{\"endpoint_id\": ..., \"model\": ...}] tried when the utility model fails.",
+        group="Models", advanced=True,
+    ),
+    SettingSpec(
+        key="vision_model_fallbacks", type="json", label="Vision model fallbacks",
+        help="Ordered [{\"endpoint_id\": ..., \"model\": ...}] tried when the vision model fails.",
+        group="Images", advanced=True,
     ),
 
     SettingSpec(
@@ -729,12 +1155,6 @@ register_all([
         help="Reduce repeat-request latency by keeping local models loaded. This uses memory or VRAM while idle.",
         group="System", env_override="ODYSSEUS_MODEL_KEEPALIVE",
     ),
-    SettingSpec(
-        key="slow_request_log_seconds", type="float", label="Slow request warning",
-        help="Log requests that take longer than this threshold. Use 0 to log every request as slow.",
-        group="System", min_value=0, max_value=3600, step=0.05, unit="seconds",
-        env_override="ODYSSEUS_SLOW_REQUEST_LOG_SECONDS", advanced=True,
-    ),
 
     SettingSpec(
         key="stt_beam_size", type="int", label="Speech recognition beam size",
@@ -751,7 +1171,7 @@ register_all([
         key="tts_cache_max_bytes", type="int", label="Speech cache size",
         help="Disk budget for generated speech audio. Older cached files are removed when this limit is exceeded.",
         group="Voice", min_value=1, max_value=10**12, unit="MiB", scale=1_048_576,
-        env_override="ODYSSEUS_TTS_CACHE_MAX_BYTES", advanced=True,
+        env_override="ODYSSEUS_TTS_CACHE_MAX_BYTES", advanced=True, hidden=True,
     ),
     SettingSpec(
         key="imap_timeout_seconds", type="int", label="Mail server timeout",
@@ -778,21 +1198,6 @@ register_all([
             ("ics_import_max_bytes", "Calendar imports", "Maximum .ics calendar file size accepted for import.", "ODYSSEUS_ICS_MAX_BYTES"),
         )
     ],
-
-    # ── Remote hosts: one inventory instead of scattered ssh calls ──
-    SettingSpec(
-        key="remote_hosts",
-        type="json",
-        label="Remote hosts",
-        help=(
-            "Machines Odysseus may reach over SSH, each with what it is allowed "
-            "to do. One inventory replaces relying on whatever ~/.ssh/config "
-            "happens to contain on the host."
-        ),
-        group="Remote hosts",
-        capability="remote_hosts",
-        advanced=True,
-    ),
 ])
 
 
@@ -808,7 +1213,7 @@ def register_existing_defaults() -> None:
     This exists so ``missing_specs()`` can be empty today, which is what makes
     the completeness test meaningful for *new* settings from here on.
     """
-    from src.settings import DEFAULT_SETTINGS, _PER_USER_KEYS
+    from src.settings import DEFAULT_SETTINGS, RETIRED_SETTING_KEYS
 
     def infer_type(value: Any) -> str:
         if isinstance(value, bool):
@@ -848,7 +1253,10 @@ def register_existing_defaults() -> None:
         "claude_code_odysseus_token_file",
     }
     for key, value in DEFAULT_SETTINGS.items():
-        if key in EXEMPT or key in _SPECS:
+        # A retired key is kept in the store only for rollback; declaring it
+        # would put it back in the panel and make it savable again, which is
+        # what happened to default_model_fallbacks until 2026-09-28.
+        if key in EXEMPT or key in _SPECS or key in RETIRED_SETTING_KEYS:
             continue
         sensitive = key in sensitive_keys
         register(SettingSpec(
@@ -856,7 +1264,6 @@ def register_existing_defaults() -> None:
             type="secret" if sensitive else infer_type(value),
             label=key.replace("_", " ").strip().capitalize(),
             group=infer_group(key),
-            per_user=key in _PER_USER_KEYS,
             sensitive=sensitive,
             env_override=_MIGRATED_ENV_OVERRIDES.get(key, ""),
             advanced=True,

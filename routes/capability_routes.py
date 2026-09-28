@@ -66,6 +66,7 @@ def _coerce(spec, raw: Any) -> Any:
             raise HTTPException(400, f"{spec.key} must be a number")
     if kind == "choice":
         value = str(raw).strip()
+        value = settings_schema.CHOICE_ALIASES.get(spec.key, {}).get(value, value)
         if spec.choices and value not in spec.choices:
             raise HTTPException(400, f"{spec.key} must be one of: {', '.join(spec.choices)}")
         return value
@@ -192,12 +193,15 @@ def setup_capability_routes() -> APIRouter:
                 locked.append(key)
                 continue
             value = _coerce(spec, raw)
-            # Security-policy settings have fail-closed readers, so a bad value
-            # degrades quietly rather than erroring. Catch it here, where we can
-            # name the offending entry, instead of letting the operator discover
-            # it as "retrieval stopped working".
+            # The same per-key rules the Settings tabs' route applies
+            # (settings_schema.normalize_value): absolute paths, repository
+            # slugs, Claude model names, and the security-policy validators
+            # whose fail-closed readers would otherwise degrade quietly. Catch
+            # a bad value here, where we can name the offending entry, instead
+            # of letting the operator discover it as "retrieval stopped
+            # working" or a delegation that fails with invalid_model.
             try:
-                settings_schema.validate_value(key, value)
+                value = settings_schema.normalize_value(key, value)
             except ValueError as exc:
                 raise HTTPException(400, f"{key}: {exc}")
             updates[key] = value

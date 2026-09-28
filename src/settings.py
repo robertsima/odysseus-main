@@ -59,8 +59,11 @@ DEFAULT_SETTINGS = {
     "delegation_mcp_default_arguments": {},
     "agent_peer_messaging": True,
     "agent_peer_message_budget": 8,
-    # ── Remote hosts ──
-    "remote_hosts": [],
+    # Worker hops below a chat a person started: chat (0) -> worker (1) ->
+    # sub-worker (2). src/headless_agent.max_worker_depth reads it (clamped
+    # 1..4) and its refusal tells the user to raise it, but until 2026-09-28 it
+    # was missing here, so /api/auth/settings dropped every save of it.
+    "agent_max_worker_depth": 2,
 
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the
@@ -104,7 +107,6 @@ DEFAULT_SETTINGS = {
     "ics_import_max_bytes": 10 * 1024 * 1024,
     "tts_cache_max_bytes": 500 * 1024 * 1024,
     "imap_timeout_seconds": 30,
-    "slow_request_log_seconds": 0.75,
     "startup_warmups_enabled": False,
     "model_keepalive_enabled": False,
     "mistral_reasoning_effort": "high",
@@ -123,10 +125,11 @@ DEFAULT_SETTINGS = {
     "agent_approval_ttl_seconds": 900,
     "agent_base_branch": "dev",
     "search_provider": "searxng",
-    # Default fallback chain — when the primary provider fails or
-    # rate-limits, we try DuckDuckGo next. Free, no API key required, so
-    # safe to ship on by default for every user.
-    "search_fallback_chain": ["duckduckgo"],
+    # Providers tried when the primary fails or rate-limits. Empty means the
+    # built-in default chain (DuckDuckGo: free, no API key, safe to ship on for
+    # every user); ["none"] means no fallback at all. See
+    # services/search/core._build_provider_chain.
+    "search_fallback_chain": [],
     "search_url": "",
     "search_result_count": 5,
     # SafeSearch level applied to every provider that exposes one.
@@ -184,7 +187,6 @@ DEFAULT_SETTINGS = {
     # long build→test→fix or multi-repository delegation turn is not cut off;
     # the repeat/stall detectors still catch a genuinely stuck loop.
     "agent_max_tool_calls": 500,
-    "agent_max_rounds": 100,  # advisory per-message round budget (clamped 1..500); never ends a run
     # When a session's own policy (a loadout's `tool_access="selected"`, a
     # restricted owner) leaves this many tools allowed or fewer, the harness
     # binds that whole set for the turn instead of re-deriving a subset of it
@@ -342,6 +344,11 @@ DEFAULT_SETTINGS = {
     "reminder_llm_persona": "",
     "reminder_ntfy_topic": "Reminders",
     "reminder_email_to": "",
+    # Which configured email account sends email reminders ("" = the default
+    # account). routes/note/note_routes.py reads it and the Reminders tab
+    # writes it, but until 2026-09-28 it was missing here, so every save was
+    # dropped by /api/auth/settings and reminders always used the default.
+    "reminder_email_account_id": "",
     # Generic outbound webhook channel: pick any saved Integration as the
     # target and supply a JSON payload template. Use {{title}} and {{message}}
     # as placeholders — they are JSON-escaped before substitution, so the

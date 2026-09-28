@@ -732,180 +732,26 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
         body = await request.json()
         current = _load_settings()
         _profile_edits = None
-        # Per-key validation for numeric settings: coerce to int and clamp to a
-        # sane range so a bad value can't disable the agent or let it run away.
-        _INT_RANGES = {
-            "agent_max_rounds": (1, 500),
-            "agent_max_tool_calls": (0, 2000),  # 0 = unlimited
-            # Worker hops below a chat a person started (1 = workers never nest).
-            "agent_max_worker_depth": (1, 4),
-            # Ceiling on the agent's per-round prompt when the budget scales to
-            # the model's window (src/context_budget.py).
-            "agent_input_token_hard_max": (16_000, 1_000_000),
-            "chat_tool_fold_after": (0, 500),  # 0 = never fold
-            "claude_code_max_concurrent_tasks": (0, 16),  # 0 = env default
-            "agent_approval_ttl_seconds": (60, 3600),
-            "stt_beam_size": (1, 64),
-            "stt_max_audio_seconds": (1, 86400),
-            "chat_upload_max_bytes": (1, 10**12),
-            "gallery_upload_max_bytes": (1, 10**12),
-            "gallery_transform_upload_max_bytes": (1, 10**12),
-            "memory_import_max_bytes": (1, 10**12),
-            "personal_upload_max_bytes": (1, 10**12),
-            "email_compose_upload_max_bytes": (1, 10**12),
-            "stt_max_audio_bytes": (1, 10**12),
-            "ics_import_max_bytes": (1, 10**12),
-            "tts_cache_max_bytes": (1, 10**12),
-            "imap_timeout_seconds": (5, 300),
-            "rag_max_chunks_per_doc": (0, 50),
-            "rag_focused_cap_multiplier": (1, 10),
-            "vault_scan_seconds": (0, 86400),
-        }
-        _FLOAT_RANGES = {
-            "slow_request_log_seconds": (0.0, 3600.0),
-            "rag_recency_halflife_days": (1.0, 36500.0),
-            "rag_temporal_weight": (0.0, 0.9),
-            "rag_temporal_intent_weight": (0.0, 0.9),
-            "rag_tag_credit": (0.0, 1.0),
-        }
-        # Filesystem-path settings: absolute paths only (or empty = unset),
-        # so a settings write can't point the delegation at a relative or
-        # shell-expanded location.
-        _ABS_PATH_KEYS = {
-            "claude_code_binary", "claude_code_home", "claude_code_default_repository",
-            "claude_code_odysseus_token_file",
-        }
+        # One set of write rules for this route and POST /api/settings/schema
+        # (settings_schema.normalize_value): absolute paths, repository slugs,
+        # Claude model names, enums and choice lists, the schema's validators
+        # (vault_folder_sensitivity), and the declared numeric ranges. Numbers
+        # outside the range are clamped rather than refused here, as this route
+        # always has, so a bad value can't disable the agent or let it run away.
+        from src import settings_schema
+
         for key in DEFAULT_SETTINGS:
             if key in RETIRED_SETTING_KEYS:
                 continue
             if key not in body:
                 continue
-            val = body[key]
-            if key == "claude_code_repository_roots":
-                if not isinstance(val, list):
-                    raise HTTPException(400, f"{key} must be a list of absolute paths")
-                cleaned = []
-                for item in val:
-                    item = str(item or "").strip()
-                    if not item:
-                        continue
-                    if not os.path.isabs(item):
-                        raise HTTPException(400, f"{key}: {item!r} is not an absolute path")
-                    cleaned.append(os.path.normpath(item))
-                current[key] = cleaned
-                continue
-            if key in _ABS_PATH_KEYS:
-                val = str(val or "").strip()
-                if val and not os.path.isabs(os.path.expanduser(val)):
-                    raise HTTPException(400, f"{key} must be an absolute path (or empty)")
-                current[key] = val
-                continue
-            if key == "claude_code_odysseus_url":
-                val = str(val or "").strip()
-                if val and not val.lower().startswith(("http://", "https://")):
-                    raise HTTPException(400, f"{key} must be an http(s) URL (or empty)")
-                current[key] = val.rstrip("/")
-                continue
-            if key == "claude_code_model":
-                val = str(val or "").strip()
-                if val:
-                    # Same rules the delegation applies, so a saved model
-                    # never fails later at run time (e.g. "Opus 5.5" is
-                    # stored as claude-opus-5-5; "default" as unset).
-                    from src.agent_tools.claude_code_tools import normalize_claude_model
-                    normalized, error = normalize_claude_model(val)
-                    if error:
-                        raise HTTPException(400, f"{key}: {error}")
-                    val = normalized or ""
-                current[key] = val
-                continue
-            if key == "claude_code_restricted":
-                current[key] = bool(val) if not isinstance(val, str) else val.strip().lower() in ("1", "true", "yes", "on")
-                continue
-            if key == "chatgpt_reasoning_effort":
-                val = str(val or "").strip().lower()
-                if val and val not in ("minimal", "low", "medium", "high"):
-                    raise HTTPException(400, f"{key} must be minimal, low, medium or high (or empty)")
-                current[key] = val
-                continue
-            if key == "claude_code_backend":
-                val = str(val or "local").strip().lower()
-                if val not in ("local", "cloud"):
-                    raise HTTPException(400, f"{key} must be local or cloud")
-                current[key] = val
-                continue
-            if key == "claude_cloud_repositories":
-                items = val if isinstance(val, list) else re.split(r"[\s,]+", str(val or ""))
-                cleaned = []
-                for item in items:
-                    slug = str(item or "").strip().strip("/")
-                    if slug == "*":  # any repository the GitHub credential can see
-                        if slug not in cleaned:
-                            cleaned.append(slug)
-                        continue
-                    if slug.lower().startswith("https://github.com/"):
-                        slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
-                    if not slug:
-                        continue
-                    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", slug):
-                        raise HTTPException(400, f"{key}: {slug!r} is not an owner/repo slug")
-                    if slug.lower() not in {c.lower() for c in cleaned}:
-                        cleaned.append(slug)
-                current[key] = cleaned[:50]
-                continue
-            if key == "claude_cloud_hub_repository":
-                slug = str(val or "").strip().strip("/")
-                if slug.lower().startswith("https://github.com/"):
-                    slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
-                if slug and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", slug):
-                    raise HTTPException(400, f"{key}: {slug!r} is not an owner/repo slug")
-                current[key] = slug
-                continue
-            if key == "claude_cloud_workflow":
-                val = str(val or "").strip() or "odysseus-claude.yml"
-                if not re.fullmatch(r"[A-Za-z0-9._-]{1,100}\.ya?ml", val):
-                    raise HTTPException(400, f"{key} must be a workflow file name like odysseus-claude.yml")
-                current[key] = val
-                continue
+            try:
+                val = settings_schema.normalize_value(key, body[key], clamp=True)
+            except ValueError as exc:
+                raise HTTPException(400, f"{key}: {exc}")
             if key == "agent_profiles":
-                from src.agent_profiles import validate_profiles
-
-                try:
-                    _old_profiles = current.get(key) or []
-                    current[key] = validate_profiles(val)
-                except ValueError as exc:
-                    raise HTTPException(400, f"agent_profiles: {exc}")
-                _profile_edits = (_old_profiles, current[key])
-                continue
-            if key == "agent_approval_mode":
-                from src.approval_modes import MODES as _APPROVAL_MODES
-
-                if val not in _APPROVAL_MODES:
-                    raise HTTPException(400, f"agent_approval_mode must be one of {', '.join(_APPROVAL_MODES)}")
-                current[key] = val
-                continue
-            if key == "context_profiles":
-                # A preferences blob, not a scalar: clamp what is out of range
-                # and drop what is unknown rather than 400ing the whole save
-                # and costing the user every other field on the form.
-                from src.context_profiles import sanitize as _sanitize_profiles
-
-                current[key] = _sanitize_profiles(val)
-                continue
-            if key in _INT_RANGES:
-                lo, hi = _INT_RANGES[key]
-                try:
-                    val = int(val)
-                except (TypeError, ValueError):
-                    raise HTTPException(400, f"{key} must be an integer")
-                val = max(lo, min(val, hi))
-            elif key in _FLOAT_RANGES:
-                lo, hi = _FLOAT_RANGES[key]
-                try:
-                    val = float(val)
-                except (TypeError, ValueError):
-                    raise HTTPException(400, f"{key} must be a number")
-                val = max(lo, min(val, hi))
+                # A chat switched to a loadout holds a copy of its policy.
+                _profile_edits = (current.get(key) or [], val)
             current[key] = val
         _save_settings(current)
         if _profile_edits is not None:

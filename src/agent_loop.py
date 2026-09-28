@@ -7410,11 +7410,6 @@ async def stream_agent_loop(
     _doc_stream_create_completed = False
     _ody_doc_tool_completed = False
 
-    # Set when the loop runs out of rounds while the agent was still actively
-    # using tools — i.e. it was cut off, not finished. Drives a "Continue" event
-    # so the user can resume instead of the turn silently stalling.
-    _exhausted_rounds = False
-
     def _filter_route_tool_schemas(schemas):
         # Keep candidate actions visible after taint so the model can propose
         # the exact call that the server will seal for user approval.  Schema
@@ -7718,15 +7713,16 @@ async def stream_agent_loop(
     # repeated past the runaway threshold) forces a tool-free final round, and
     # the per-run tool-call ceiling, the request timeout, tool policy and the
     # user's stop control all stay live. `max_rounds` is still accepted so
-    # callers and stored loadouts keep working, and is reported, but it is
-    # advisory. The fork's `MAX_AGENT_ROUNDS` is 0 for that reason; iterating
-    # `range(1, max_rounds + 1)` over it would run no rounds at all.
+    # callers and stored loadouts keep working, but the loop does not read it.
+    # The fork's `MAX_AGENT_ROUNDS` is 0 for that reason; iterating
+    # `range(1, max_rounds + 1)` over it would run no rounds at all. (The
+    # global `agent_max_rounds` setting fed only a debug line here, and the
+    # rounds_exhausted branch below the loop could never run; both were
+    # removed on 2026-09-28.)
     # The one thing a round count can do is `wrap_up_round`: a budget someone
     # set on an agent profile on purpose. It still does not cut the run off --
     # it turns that round into the same tool-free answer round the
     # loop-breaker forces, so the worker hands back what it has.
-    if max_rounds and max_rounds > 0:
-        logger.debug("[agent] max_rounds=%s is advisory; rounds do not end a run", max_rounds)
     from src import agent_control
 
     _offload_profile = None  # context profile for tool-output offload, resolved on first use
@@ -9594,12 +9590,6 @@ async def stream_agent_loop(
 
         # Separator in accumulated response
         full_response += "\n\n"
-    else:
-        # Unreachable while the round loop is unbounded (it can only end
-        # through a `break`). Kept, with its original meaning, so that
-        # reintroducing a ceiling restores the Continue affordance rather than
-        # silently truncating a turn.
-        _exhausted_rounds = True
 
     # The turn is over, so nothing will drain the steer queue again. A steer
     # that raced the last round must not surface inside a later, unrelated
@@ -9621,12 +9611,6 @@ async def stream_agent_loop(
                 for rec in _dropped_steer
             ],
         }) + "\n\n"
-
-    # If the loop hit the round cap while still working, tell the client so it
-    # can show a "Continue" affordance instead of the turn just stopping.
-    if _exhausted_rounds:
-        logger.info("[agent] round cap (%d) reached mid-task — emitting rounds_exhausted", max_rounds)
-        yield f'data: {json.dumps({"type": "rounds_exhausted", "rounds": max_rounds})}\n\n'
 
     # If the response is completely empty and no tools were executed,
     # yield a fallback message so the user is not left hanging.
