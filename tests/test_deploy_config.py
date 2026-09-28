@@ -50,6 +50,29 @@ def _env(path: Path) -> dict:
     return out
 
 
+# ── shell sandbox security options ───────────────────────────────
+
+
+@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
+def test_compose_security_opt_lets_bubblewrap_mount_its_own_proc(path):
+    security_opt = _odysseus(path)["security_opt"]
+    # User namespaces (seccomp/apparmor) AND an unmasked /proc (systempaths):
+    # without the latter the sandbox cannot mount a fresh procfs on kernels
+    # that enforce the fully-visible-procfs rule.
+    for option in ("seccomp=unconfined", "apparmor=unconfined", "systempaths=unconfined"):
+        assert option in security_opt, (path.name, option)
+    # Paired with systempaths: nothing inside may regain root via setuid.
+    assert "no-new-privileges:true" in security_opt, path.name
+
+
+@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
+def test_compose_security_opt_documents_the_verification(path):
+    text = path.read_text(encoding="utf-8")
+    assert "{{json .HostConfig.MaskedPaths}} {{json .HostConfig.ReadonlyPaths}}" in text
+    assert "[shell-sandbox] available" in text
+    assert "kernel.core_pattern" in text, "the systempaths trade-off must be stated"
+
+
 # ── no hidden .env inside the image ──────────────────────────────
 
 

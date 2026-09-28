@@ -118,14 +118,36 @@ services:
       chromadb:
         condition: service_started
     # The agent's bash/python run in a bubblewrap sandbox that sees only the
-    # chat's workspace (src/shell_sandbox.py). bubblewrap needs unprivileged
-    # user namespaces, and Docker's default seccomp and AppArmor profiles block
-    # the calls that create them. Without these two lines the sandbox reports
-    # itself unavailable and the shell keeps requiring the private-vault grant.
-    # The container still runs as a non-root user with no added capabilities.
+    # chat's workspace (src/shell_sandbox.py). bubblewrap needs what Docker
+    # withholds by default:
+    #   seccomp/apparmor=unconfined -- the default profiles block the calls
+    #     that create unprivileged user namespaces. Without them there is no
+    #     sandbox and the shell keeps requiring the private-vault grant.
+    #   systempaths=unconfined -- Docker masks /proc paths (kcore, keys,
+    #     timer_list, ...; /proc/sys and /proc/sysrq-trigger read-only), and
+    #     kernels that enforce the "procfs must be fully visible" rule then
+    #     refuse the sandbox its own /proc: "Can't mount proc on /proc:
+    #     Operation not permitted". (Docker Desktop's WSL2 kernel did not
+    #     enforce it in testing.) Without this line the app falls back to a
+    #     degraded sandbox that has no /proc.
+    # Trade-off of systempaths=unconfined: /proc/sys, /proc/sysrq-trigger,
+    # /proc/kcore etc. are no longer masked in this container. The app process
+    # (uid PUID) gains little beyond reading a few kernel-info files: writing
+    # them, or reading kcore, needs root. Container ROOT, however, could write
+    # host-wide sysctls such as kernel.core_pattern, a known route from
+    # container root to host root. Root in here is the entrypoint (before gosu
+    # drops to PUID) and any plain `docker exec`, so use `docker exec -u 1000`
+    # (your PUID) for routine work. no-new-privileges blocks regaining root via setuid
+    # binaries; gosu only drops privileges, which it permits. No capabilities
+    # are added.
+    # Verify after recreating:
+    #   docker inspect <container> --format '{{json .HostConfig.MaskedPaths}} {{json .HostConfig.ReadonlyPaths}}'
+    # prints `[] []`, and the app log shows `[shell-sandbox] available`.
     security_opt:
       - seccomp=unconfined
       - apparmor=unconfined
+      - systempaths=unconfined
+      - no-new-privileges:true
     restart: unless-stopped
     # AMD ROCm overlay (from docker/gpu.amd.yml).
     devices:
