@@ -98,6 +98,13 @@ function onSettingsPanelActivated(tab) {
   document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
   syncAppearanceOpacity(tab === 'appearance');
 
+  // Users may be hidden from the nav on a single-user install; once it is
+  // opened (search, link) its nav item shows so the sidebar has a selection.
+  if (tab === 'users' && modalEl) {
+    const usersBtn = modalEl.querySelector('[data-settings-tab="users"]');
+    if (usersBtn) usersBtn.style.display = '';
+  }
+
   // The Models tab's endpoint pickers are refreshed by admin.js, which fetches
   // /api/model-endpoints for the Providers list on every visit and hands the
   // same list to refreshAiModelEndpoints(); a second fetch here would be a
@@ -1859,6 +1866,44 @@ async function initShortcuts() {
 /* ═══════════════════════════════════════════
    INIT & REFRESH
    ═══════════════════════════════════════════ */
+
+// localStorage keys that hold how this browser looks, not whose data it is.
+// Everything else is treated as account/session state on logout.
+const _UI_PREFERENCE_KEYS = new Set([
+  'odysseus-last-user',          // login form's remembered username
+  'odysseus-auth-user',          // lets init.js detect an account switch
+  'odysseus-ui-visibility',
+  'odysseus-toolbar-visibility',
+  'odysseus-sensitive-blur',
+  'odysseus-theme',
+  'odysseus-custom-themes',
+  'odysseus-custom-themes-updated',
+  'odysseus-ui-scale',
+  'odysseus-nav-order-v1',
+  'odysseus-sidebar-mode',
+  'odysseus-settings-sidebar-width',
+  'odysseus-settings-sidebar-collapsed',
+  'odysseus-settings-group',
+  'odysseus-edge-dock-width',
+  'odysseus-email-doc-split-width',
+  'odysseus.mobileDockState.v1',
+  'odysseus-doc-fontsize',
+  'odysseus-thinking-expanded',
+  'odysseus-model-sort',
+  'odysseus-session-sort',
+  'odysseus-agents-fleet-density',
+  'odysseus-agents-fleet-width',
+  'odysseus-hint-drag-to-snap-seen',
+  'odysseus-notes-first-open-hint-v1',
+  'ody-swipe-hint-shown',
+  'ge-right-panel-width',
+  'cal-week-start',
+  'cal-wk-hour-px',
+]);
+function _isUiPreferenceKey(key) {
+  return _UI_PREFERENCE_KEYS.has(key);
+}
+
 function initAccount() {
   // Populate user info
   fetch('/api/auth/status', { credentials: 'same-origin' })
@@ -2023,19 +2068,22 @@ function initAccount() {
     logoutBtn.addEventListener('mouseleave', () => { logoutBtn.style.opacity = ''; logoutBtn.style.borderColor = ''; logoutBtn.style.color = ''; });
     logoutBtn.addEventListener('click', async () => {
       try { await fetch('/api/auth/logout', { method: 'POST' }); } catch (_) {}
-      // SECURITY: wipe all client-side state on logout so the next user that
-      // signs in on this browser doesn't inherit the previous account's
-      // session id, last-used model, draft chat input, or any cached lists.
-      // Keep "odysseus-last-user" so the login form remembers the username
-      // (if "Remember me" was on). Without this the chat composer pre-loaded
-      // the previous user's last model into a fresh session, which read as
-      // cross-account leakage.
+      // SECURITY: wipe account state on logout so the next user that signs
+      // in on this browser doesn't inherit the previous account's session
+      // id, last-used model, draft chat input, or any cached lists. Without
+      // this the chat composer pre-loaded the previous user's last model
+      // into a fresh session, which read as cross-account leakage.
+      //
+      // Appearance preferences are not account data and survive, so logging
+      // out and back in no longer resets theme, sidebar layout, hidden UI
+      // and blur. "odysseus-auth-user" stays too: when a DIFFERENT account
+      // signs in next, init.js sees the mismatch and clears everything,
+      // these preferences included.
       try {
-        const _keepKeys = new Set(['odysseus-last-user']);
         const _toRemove = [];
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (k && !_keepKeys.has(k)) _toRemove.push(k);
+          if (k && !_isUiPreferenceKey(k)) _toRemove.push(k);
         }
         _toRemove.forEach(k => localStorage.removeItem(k));
         sessionStorage.clear();
@@ -6140,6 +6188,27 @@ function syncAdminVisibility() {
   modalEl.querySelectorAll('.admin-only').forEach(el => {
     el.style.display = isAdmin ? '' : 'none';
   });
+  if (isAdmin) _syncUsersNavVisibility();
+}
+
+// A single-user install with open signup off has nothing to manage in Users,
+// so its nav item is hidden then. The tab stays reachable: settings search,
+// open('users') and the Account tab's "Users" link still open it.
+async function _syncUsersNavVisibility() {
+  const button = modalEl && modalEl.querySelector('[data-settings-tab="users"]');
+  if (!button) return;
+  try {
+    const [usersRes, statusRes] = await Promise.all([
+      fetch('/api/auth/users', { credentials: 'same-origin' }),
+      fetch('/api/auth/status', { credentials: 'same-origin' }),
+    ]);
+    if (!usersRes.ok || !statusRes.ok) return;
+    const users = ((await usersRes.json()) || {}).users || [];
+    const status = (await statusRes.json()) || {};
+    const onlyMe = users.length === 1 && !status.signup_enabled;
+    const active = button.classList.contains('active');
+    button.style.display = onlyMe && !active ? 'none' : '';
+  } catch (_) { /* keep it visible */ }
 }
 
 /* ═══════════════════════════════════════════

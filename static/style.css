@@ -43189,3 +43189,4 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
   .settings-labels-wide .settings-row > .settings-label { min-width: 0; flex-basis: 100%; }
 }
 #settings-modal a.btn { text-decoration: none; display: inline-flex; align-items: center; }
+.admin-badge.admin-rag-public { opacity: 0.6; }

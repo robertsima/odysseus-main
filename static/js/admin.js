@@ -2462,36 +2462,13 @@ async function loadRag() {
       : labels;
     if (dirs.length === 0) { dirList.innerHTML = '<div class="admin-empty">No directories indexed</div>'; }
     else {
+      // The label is read-only here. A per-directory switch wrote a label
+      // that bypassed the folder privacy policy, so the policy is the one
+      // place to change it: Settings › Advanced › Knowledge.
       dirList.innerHTML = dirs.map(d => {
         const label = labelFor[d] === 'private' ? 'private' : 'public';
-        const sel = ['public', 'private']
-          .map(v => `<option value="${v}"${label === v ? ' selected' : ''}>${v}</option>`)
-          .join('');
-        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><select class="admin-select-sm" data-adm-rag-sens="${esc(d)}" title="Private content is hidden unless the current chat is explicitly granted private-vault reads.">${sel}</select><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
+        return `<div class="admin-rag-item"><span class="admin-rag-item-name" title="${esc(d)}">${esc(d)}</span><span class="admin-badge${label === 'private' ? '' : ' admin-rag-public'}" title="Set by the folder privacy policy (Advanced › Knowledge). Private content is hidden unless a chat is granted private-vault reads.">${label}</span><button class="admin-btn-delete" data-adm-rag-dir="${esc(d)}">Remove</button></div>`;
       }).join('');
-      dirList.querySelectorAll('[data-adm-rag-sens]').forEach(sel => {
-        const previous = sel.value;
-        sel.addEventListener('change', async () => {
-          const next = sel.value;
-          sel.disabled = true;
-          try {
-            const res = await fetch('/api/personal/directory_sensitivity', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              credentials: 'same-origin',
-              body: JSON.stringify({ directory: sel.dataset.admRagSens, sensitivity: next }),
-            });
-            const d = await res.json();
-            if (!res.ok) throw new Error(d.detail || 'Failed');
-            ragMsg(d.message || `Marked ${next}`);
-            loadRag();
-          } catch (e) {
-            sel.value = previous;
-            sel.disabled = false;
-            ragMsg('Could not change label: ' + e.message, true);
-          }
-        });
-      });
       dirList.querySelectorAll('[data-adm-rag-dir]').forEach(btn => {
         btn.addEventListener('click', async () => {
           if (!await uiModule.styledConfirm(`Remove directory "${btn.dataset.admRagDir}" from RAG?`, { confirmText: 'Remove', danger: true })) return;
@@ -2574,16 +2551,15 @@ function initRag() {
     const btn = el('adm-ragAddDirBtn');
     btn.disabled = true; btn.textContent = 'Indexing...';
     try {
-      const sensEl = el('adm-ragDirSensitivity');
-      const sensitivity = sensEl ? sensEl.value : 'public';
+      // No label is sent: the folder privacy policy decides it.
       const res = await fetch('/api/personal/add_directory', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'same-origin',
-        body: JSON.stringify({ directory: dir, sensitivity }),
+        body: JSON.stringify({ directory: dir }),
       });
       const data = await res.json();
-      if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory (${data.sensitivity || sensitivity})`); el('adm-ragDirInput').value = ''; loadRag(); }
+      if (data.success) { ragMsg(`Indexed ${data.indexed_count} chunks from directory${data.sensitivity ? ` (${data.sensitivity})` : ''}`); el('adm-ragDirInput').value = ''; loadRag(); }
       else ragMsg(data.detail || data.message || 'Failed', true);
     } catch (e) { ragMsg('Error: ' + e.message, true); }
     btn.disabled = false; btn.textContent = 'Add Directory';

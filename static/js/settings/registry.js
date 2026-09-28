@@ -22,19 +22,15 @@ function definePanel(definition) {
 export const SETTINGS_GROUPS = Object.freeze([
   defineGroup({
     id: 'models',
-    label: 'Models & AI',
+    label: 'AI',
   }),
   defineGroup({
     id: 'communications',
     label: 'Communications',
   }),
   defineGroup({
-    id: 'experience',
-    label: 'Experience',
-  }),
-  defineGroup({
-    id: 'account',
-    label: 'Account',
+    id: 'personal',
+    label: 'You',
   }),
   defineGroup({
     id: 'administration',
@@ -125,30 +121,32 @@ export const SETTINGS_PANELS = Object.freeze([
   }),
 
   definePanel({
+    id: 'privacy',
+    label: 'Privacy & data',
+    group: 'personal',
+    controller: 'admin',
+    keywords: [
+      'privacy', 'sensitive', 'blur', 'private', 'vault', 'lotus', 'wellbeing',
+      'personal documents', 'documents', 'rag', 'upload', 'index', 'directory',
+      'folders', 'data',
+    ],
+  }),
+  definePanel({
     id: 'appearance',
     label: 'Appearance',
-    group: 'experience',
-    keywords: ['appearance', 'theme', 'font', 'density', 'peek'],
-  }),
-  definePanel({
-    id: 'shortcuts',
-    label: 'Shortcuts',
-    group: 'experience',
-    keywords: ['shortcuts', 'keyboard', 'hotkeys'],
-  }),
-
-  definePanel({
-    id: 'privacy',
-    label: 'Privacy',
-    group: 'account',
-    controller: 'admin',
-    keywords: ['privacy', 'sensitive', 'blur', 'private', 'vault'],
+    group: 'personal',
+    aliases: ['shortcuts'],
+    keywords: [
+      'appearance', 'theme', 'font', 'density', 'peek', 'sidebar', 'chat area',
+      'chat bar', 'emoji', 'emojis', 'thinking', 'full width', 'fold',
+      'tool timeline', 'shortcuts', 'keyboard', 'hotkeys', 'keybinds',
+    ],
   }),
   definePanel({
     id: 'account',
     label: 'Account',
-    group: 'account',
-    keywords: ['account', 'password', 'logout'],
+    group: 'personal',
+    keywords: ['account', 'password', 'logout', 'log out', 'two-factor', '2fa'],
   }),
 
   definePanel({

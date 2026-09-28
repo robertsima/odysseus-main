@@ -261,9 +261,8 @@ function buildFixture(document) {
     'claude-code',
     'integrations',
     'reminders',
-    'appearance',
-    'shortcuts',
     'privacy',
+    'appearance',
     'account',
     'users',
     'capabilities',
@@ -380,9 +379,8 @@ function moduleSource(relativePath) {
       'claude-code',
       'integrations',
       'reminders',
-      'appearance',
-      'shortcuts',
       'privacy',
+      'appearance',
       'account',
       'users',
       'capabilities',
@@ -395,8 +393,7 @@ function moduleSource(relativePath) {
     registryGroupIds === [
       'models',
       'communications',
-      'experience',
-      'account',
+      'personal',
       'administration',
     ].join(','),
   );
@@ -405,7 +402,7 @@ function moduleSource(relativePath) {
     'Settings registry keeps models, integrations and admin panels on the existing admin controller',
     ['models', 'agents', 'integrations', 'privacy', 'users', 'capabilities', 'system']
       .every(id => context.isAdminManagedSettingsTab(id))
-      && ['search', 'claude-code', 'reminders', 'appearance', 'shortcuts', 'account']
+      && ['search', 'claude-code', 'reminders', 'appearance', 'account']
         .every(id => !context.isAdminManagedSettingsTab(id)),
   );
 
@@ -420,6 +417,8 @@ function moduleSource(relativePath) {
     'Settings registry resolves retired tab ids to the panel that owns them now',
     ['services', 'added-models', 'ai', 'context'].every(id => context.resolveSettingsPanelId(id) === 'models')
       && context.resolveSettingsPanelId('tools') === 'agents'
+      && context.resolveSettingsPanelId('email') === 'integrations'
+      && context.resolveSettingsPanelId('shortcuts') === 'appearance'
       && context.resolveSettingsPanelId('models') === 'models'
       && context.resolveSettingsPanelId('missing') === 'missing'
       && context.isAdminManagedSettingsTab('added-models'),

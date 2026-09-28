@@ -544,7 +544,6 @@ function buildFixture(document) {
     'integrations',
     'reminders',
     'appearance',
-    'shortcuts',
     'account',
     'agents',
     'users',
