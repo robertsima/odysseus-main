@@ -999,10 +999,44 @@ async def diff_summary(
     cfg: Optional[WorktreeConfig] = None,
     repository: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Changed files plus the sensitive-path classification for them."""
+    """Changed files plus the sensitive-path classification for them.
+
+    ``changed_files`` is what the branch has COMMITTED since its base, because
+    that is what a publish would push and what the approval digests cover. A
+    worker that edits, tests and then diffs before committing got
+    ``changed_files: []`` next to ``dirty: true`` and could read that as "no
+    changes" (the 2026-09-28 orchestration e2e run: two edited files, an empty
+    list). The uncommitted paths are listed separately, outside the digests.
+    """
     cfg = cfg or load_config()
     rcfg, resolved, path = await _started(cfg, branch, repository)
-    return await _summary(rcfg, resolved, path)
+    summary = await _summary(rcfg, resolved, path)
+    if summary.get("dirty"):
+        try:
+            pending = _porcelain_paths(await _dirty_entries(rcfg, path))
+        except (GitError, WorktreeError):
+            pending = []
+        summary["uncommitted_files"] = pending
+        summary["note"] = (
+            "changed_files lists committed changes only; uncommitted_files are edits in the "
+            "worktree that are not committed yet. Commit them (action='commit') to include them."
+        )
+    return summary
+
+
+def _porcelain_paths(entries: List[str]) -> List[str]:
+    """Paths from ``git status --porcelain`` lines ("XY path", "XY old -> new")."""
+    paths: List[str] = []
+    for line in entries:
+        rest = line[3:] if len(line) > 3 else ""
+        if " -> " in rest:
+            rest = rest.split(" -> ", 1)[1]
+        rest = rest.strip()
+        if len(rest) >= 2 and rest[0] == rest[-1] == '"':
+            rest = rest[1:-1]
+        if rest and rest not in paths:
+            paths.append(rest)
+    return paths[:MAX_CHANGED_FILES]
 
 
 # ── publishing ───────────────────────────────────────────────────────────────

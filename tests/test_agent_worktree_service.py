@@ -110,6 +110,27 @@ async def test_commit_and_diff_report_the_change(cfg):
     assert summary["dirty"] is False
     assert summary["sensitive"] == {}
     assert len(summary["head_sha"]) in (40, 64)
+    assert "uncommitted_files" not in summary
+
+
+@git_required
+async def test_diff_lists_uncommitted_edits_apart_from_the_committed_change(cfg):
+    # A worker that edits and then diffs before committing must not be told
+    # "changed_files: []" and nothing else.
+    info = await service.ensure_worktree("task", cfg=cfg)
+    path = info["path"]
+    with open(os.path.join(path, "README.md"), "a", encoding="utf-8") as fh:
+        fh.write("more\n")
+    os.makedirs(os.path.join(path, "tests"))
+    with open(os.path.join(path, "tests", "test_new.py"), "w", encoding="utf-8") as fh:
+        fh.write("def test_x():\n    pass\n")
+    summary = await service.diff_summary("task", cfg=cfg)
+    assert summary["dirty"] is True
+    assert summary["changed_files"] == []
+    assert sorted(summary["uncommitted_files"]) == ["README.md", "tests/test_new.py"]
+    assert "commit" in summary["note"]
+    # The digest still covers committed files only: it is what an approval signs.
+    assert summary["files_digest"] == service.files_digest([])
 
 
 @git_required
