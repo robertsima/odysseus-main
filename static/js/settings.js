@@ -55,7 +55,34 @@ async function _postSettings(body) {
     });
   } finally {
     invalidateSettings();
+    _settingsSnapshot = null;
   }
+}
+
+/**
+ * The settings every panel init reads, fetched once per Settings open.
+ *
+ * Opening Settings used to send one GET /api/auth/settings per panel init
+ * (a dozen at once). They all want the same authoritative object, so they
+ * share one request. This is not a cache across opens: open() drops it, and
+ * so does every write through _postSettings(), so a panel that reads after a
+ * save still sees the server's state. Each caller gets its own copy because
+ * several inits keep and mutate what they read.
+ */
+let _settingsSnapshot = null;
+function _loadSettingsSnapshot() {
+  if (!_settingsSnapshot) {
+    const request = fetch('/api/auth/settings', { credentials: 'same-origin' })
+      .then(function(res) {
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return res.json();
+      });
+    _settingsSnapshot = request;
+    request.catch(function() { if (_settingsSnapshot === request) _settingsSnapshot = null; });
+  }
+  return _settingsSnapshot.then(function(value) {
+    return JSON.parse(JSON.stringify(value || {}));
+  });
 }
 
 const el = byId;
@@ -706,8 +733,10 @@ async function initSearchSettings() {
   var keyRow = el('set-searchKeyRow');
   var cxInput = el('set-searchCx');
   var cxRow = el('set-searchCxRow');
+  var safeSel = el('set-searchSafe');
   var hint = el('set-searchHint');
   var msg = el('set-searchMsg');
+  if (!provSel || !countSel || !countCustomInput || !urlInput || !keyInput || !cxInput || !msg) return;
   var _settings = {};
 
   function keyFieldFor(prov) { return _searchKeyFields[prov] || ''; }
@@ -719,10 +748,10 @@ async function initSearchSettings() {
 
   function updateVisibility() {
     var prov = provSel.value;
-    urlRow.style.display = prov === 'searxng' ? 'flex' : 'none';
-    keyRow.style.display = _searchNeedsKey[prov] ? 'flex' : 'none';
-    cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
-    hint.innerHTML = _searchProviderHints[prov] || '';
+    if (urlRow) urlRow.style.display = prov === 'searxng' ? 'flex' : 'none';
+    if (keyRow) keyRow.style.display = _searchNeedsKey[prov] ? 'flex' : 'none';
+    if (cxRow) cxRow.style.display = prov === 'google_pse' ? 'flex' : 'none';
+    if (hint) hint.innerHTML = _searchProviderHints[prov] || '';
     if (prov === 'brave') keyInput.placeholder = 'Brave API key';
     else if (prov === 'google_pse') keyInput.placeholder = 'Google API key';
     else if (prov === 'tavily') keyInput.placeholder = 'Tavily API key';
@@ -745,22 +774,13 @@ async function initSearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    _settings = await res.json();
+    _settings = await _loadSettingsSnapshot();
     if (_settings.search_provider) provSel.value = _settings.search_provider;
     updateCountDisplay();
     if (_settings.search_url) urlInput.value = _settings.search_url;
     if (_settings.google_pse_cx) cxInput.value = _settings.google_pse_cx;
+    if (safeSel && _settings.search_safesearch) safeSel.value = _settings.search_safesearch;
   } catch (e) { console.warn('Failed to load search settings', e); }
-
-  countSel.addEventListener('change', function() {
-    if (this.value === 'custom') {
-      countCustomInput.style.display = 'block';
-      countCustomInput.focus();
-    } else {
-      countCustomInput.style.display = 'none';
-    }
-  });
 
   updateVisibility();
 
@@ -780,49 +800,68 @@ async function initSearchSettings() {
         extra = ' (' + s.search_url + ')';
       }
       var count = s.search_result_count || 5;
-      msg.textContent = 'Active: ' + label + extra + ' \u00b7 ' + count + ' results';
+      msg.textContent = 'Active: ' + label + extra + ' · ' + count + ' results';
       msg.style.color = active === 'disabled' ? 'var(--red)' : (_searchNeedsKey[active] && !hasKey) ? 'var(--red)' : 'var(--fg)';
     } catch (e) { /* ignore */ }
   }
   refreshStatus();
 
+  function currentResultCount() {
+    if (countSel.value !== 'custom') return parseInt(countSel.value, 10);
+    var customVal = parseInt(countCustomInput.value, 10);
+    if (isNaN(customVal) || customVal < 1 || customVal > 100) return null;
+    return customVal;
+  }
+
   async function saveSearch() {
     try {
       var prov = provSel.value;
-      var resultCount;
-      if (countSel.value === 'custom') {
-        var customVal = parseInt(countCustomInput.value, 10);
-        if (isNaN(customVal) || customVal < 1 || customVal > 100) {
-          resultCount = _settings.search_result_count || 5;
-        } else {
-          resultCount = customVal;
-        }
-      } else {
-        resultCount = parseInt(countSel.value, 10);
-      }
+      var resultCount = currentResultCount();
       var payload = {
         search_provider: prov,
-        search_result_count: resultCount,
         search_url: urlInput.value.trim(),
         google_pse_cx: cxInput.value.trim(),
       };
+      // An empty or out-of-range custom count keeps the saved count rather
+      // than silently writing a different one.
+      if (resultCount != null) payload.search_result_count = resultCount;
+      if (safeSel && safeSel.value) payload.search_safesearch = safeSel.value;
       var kf = keyFieldFor(prov);
       if (kf) {
         payload[kf] = keyInput.value.trim();
         _settings[kf] = keyInput.value.trim();
       }
-      await _postSettings(payload);
+      var res = await _postSettings(payload);
+      if (res && res.ok === false) throw new Error('HTTP ' + res.status);
       msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
       setTimeout(refreshStatus, 2000);
       if (searchModule && searchModule.refresh) searchModule.refresh();
     } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
   }
 
+  countSel.addEventListener('change', function() {
+    if (this.value === 'custom') {
+      countCustomInput.style.display = 'block';
+      countCustomInput.focus();
+      // Saved when a number is entered (the input's change event below).
+      if (currentResultCount() == null) return;
+    } else {
+      countCustomInput.style.display = 'none';
+    }
+    saveSearch();
+  });
+  countCustomInput.addEventListener('change', function() {
+    if (currentResultCount() == null) {
+      msg.textContent = 'Enter a number from 1 to 100'; msg.style.color = 'var(--red)';
+      return;
+    }
+    saveSearch();
+  });
   provSel.addEventListener('change', function() { updateVisibility(); saveSearch(); _syncSearchPicker(); });
-  countSel.addEventListener('change', saveSearch);
   urlInput.addEventListener('change', saveSearch);
   keyInput.addEventListener('change', saveSearch);
   cxInput.addEventListener('change', saveSearch);
+  if (safeSel) safeSel.addEventListener('change', saveSearch);
 
   // ── Provider picker with logos (mirrors the hidden <select>) ──
   var picker = el('search-provider-picker');
@@ -872,24 +911,37 @@ async function initSearchSettings() {
 
   // ── Fallback chain ──
   // Stored as an ordered array of provider IDs (primary not included).
-  // When the primary fails or hits rate-limit, the backend walks this
-  // list in order trying each one.
+  // The server contract: [] means "use the default chain" (DuckDuckGo), and
+  // ["none"] means "no fallback — report the failure". Anything else is the
+  // chain to walk, in order, when the primary fails or hits a rate limit.
   var fbWrap = el('set-searchFallbackChain');
-  function _availableFallbackOptions() {
+  var fbMode = el('set-searchFallbackMode');
+  var addBtn = el('set-searchAddFallback');
+  function _chain() {
+    var raw = _settings.search_fallback_chain;
+    return Array.isArray(raw) ? raw.slice() : [];
+  }
+  function _chainMode(chain) {
+    if (!chain.length) return 'default';
+    if (chain.length === 1 && chain[0] === 'none') return 'none';
+    return 'custom';
+  }
+  function _availableFallbackOptions(chain) {
     var primary = provSel.value;
-    var chain = _settings.search_fallback_chain || [];
-    var inChain = new Set(chain.concat([primary, 'disabled']));
+    var inChain = new Set(chain.concat([primary, 'disabled', 'none']));
     return Array.from(provSel.options)
       .map(function(o) { return { value: o.value, label: o.textContent, logo: o.dataset.searchLogo }; })
       .filter(function(o) { return !inChain.has(o.value); });
   }
-  var addBtn = el('set-searchAddFallback');
   var TRASH_SVG = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>';
   function _renderFallbackChain() {
     if (!fbWrap) return;
-    var chain = (_settings.search_fallback_chain || []).slice();
+    var chain = _chain();
+    var mode = _chainMode(chain);
+    if (fbMode) fbMode.value = mode;
     fbWrap.innerHTML = '';
-    chain.forEach(function(p, idx) {
+    fbWrap.style.display = mode === 'custom' ? '' : 'none';
+    if (mode === 'custom') chain.forEach(function(p, idx) {
       var row = document.createElement('div');
       row.className = 'settings-fallback-row';
 
@@ -912,6 +964,7 @@ async function initSearchSettings() {
 
       var sel = document.createElement('select');
       sel.className = 'settings-select';
+      sel.setAttribute('aria-label', 'Fallback ' + (idx + 1));
       // Options: this row's current value + every other provider not yet in the chain (and not the primary or 'disabled').
       var primary = provSel.value;
       var others = new Set(chain.filter(function(x) { return x !== p; }).concat([primary, 'disabled']));
@@ -925,7 +978,7 @@ async function initSearchSettings() {
       sel.value = p;
       sel.addEventListener('change', function() {
         setLogo(sel.value);
-        var next = (_settings.search_fallback_chain || []).slice();
+        var next = _chain();
         next[idx] = sel.value;
         _saveFallbackChain(next);
       });
@@ -937,25 +990,40 @@ async function initSearchSettings() {
       rm.title = 'Remove fallback';
       rm.innerHTML = TRASH_SVG;
       rm.addEventListener('click', function() {
-        var next = (_settings.search_fallback_chain || []).filter(function(x, i) { return i !== idx; });
+        // Removing the last entry leaves [], which means the default chain.
+        var next = _chain().filter(function(x, i) { return i !== idx; });
         _saveFallbackChain(next);
       });
       row.appendChild(rm);
 
       fbWrap.appendChild(row);
     });
-    // Add-fallback button: disabled when there are no remaining providers to add.
+    // Add-fallback button: only in custom mode, and only while there are
+    // providers left to add.
     if (addBtn) {
-      var hasMore = _availableFallbackOptions().length > 0;
+      var hasMore = mode === 'custom' && _availableFallbackOptions(chain).length > 0;
       addBtn.style.display = hasMore ? '' : 'none';
     }
+  }
+  if (fbMode && !fbMode.dataset.wired) {
+    fbMode.dataset.wired = '1';
+    fbMode.addEventListener('change', function() {
+      if (fbMode.value === 'default') { _saveFallbackChain([]); return; }
+      if (fbMode.value === 'none') { _saveFallbackChain(['none']); return; }
+      var current = _chain();
+      if (_chainMode(current) === 'custom') { _renderFallbackChain(); return; }
+      var avail = _availableFallbackOptions([]);
+      if (!avail.length) { _renderFallbackChain(); return; }
+      _saveFallbackChain([avail[0].value]);
+    });
   }
   if (addBtn && !addBtn._wired) {
     addBtn._wired = true;
     addBtn.addEventListener('click', function() {
-      var avail = _availableFallbackOptions();
+      var next = _chain();
+      if (_chainMode(next) !== 'custom') next = [];
+      var avail = _availableFallbackOptions(next);
       if (!avail.length) return;
-      var next = (_settings.search_fallback_chain || []).slice();
       next.push(avail[0].value);
       _saveFallbackChain(next);
     });
@@ -1041,16 +1109,13 @@ var _SEARCH_PROVIDER_LOGOS = {
   disabled:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
 };
 
-/* ── Deep Research Model (AI tab) ── */
+/* ── Deep Research: model role (Models tab) and limits (Search tab) ── */
 async function initResearchSettings() {
   var epSel = el('set-researchEndpoint');
   var modelSel = el('set-researchModel');
-  var tokensInput = el('set-researchMaxTokens');
-  var extractTimeoutInput = el('set-researchExtractTimeout');
-  var extractConcurrencyInput = el('set-researchExtractConcurrency');
-  var runTimeoutInput = el('set-researchRunTimeout');
   var msg = el('set-researchMsg');
   var endpoints = [];
+  if (!epSel || !modelSel) return;
 
   try {
     endpoints = await _fetchModelEndpoints();
@@ -1064,84 +1129,38 @@ async function initResearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
+    var settings = await _loadSettingsSnapshot();
     if (settings.research_endpoint_id) epSel.value = settings.research_endpoint_id;
     refreshModels(settings.research_model || '');
-    if (settings.research_max_tokens) tokensInput.value = settings.research_max_tokens;
-    if (settings.research_extraction_timeout_seconds) extractTimeoutInput.value = settings.research_extraction_timeout_seconds;
-    if (settings.research_extraction_concurrency) extractConcurrencyInput.value = settings.research_extraction_concurrency;
-    if (settings.research_run_timeout_seconds !== undefined && settings.research_run_timeout_seconds !== null) {
-      runTimeoutInput.value = settings.research_run_timeout_seconds;
-    }
   } catch (e) { console.warn('Failed to load research settings', e); }
 
   function showStatus() {
-    var parts = [];
+    if (!msg) return;
     if (epSel.value) {
       var epName = epSel.options[epSel.selectedIndex].textContent;
-      var mName = modelSel.value ? modelSel.value.split('/').pop() : 'auto';
-      parts.push(epName + ' / ' + mName);
-    }
-    if (tokensInput.value) {
-      parts.push('Max tokens: ' + tokensInput.value);
-    }
-    if (extractTimeoutInput.value) {
-      parts.push('Extract: ' + extractTimeoutInput.value + 's');
-    }
-    if (extractConcurrencyInput.value) {
-      parts.push('Parallel: ' + extractConcurrencyInput.value);
-    }
-    if (runTimeoutInput.value !== '') {
-      var rtv = parseInt(runTimeoutInput.value, 10);
-      if (!isNaN(rtv)) {
-        parts.push(rtv === 0 ? 'Max time: no limit' : 'Max time: ' + rtv + 's');
-      }
-    }
-    if (parts.length) {
-      msg.textContent = parts.join(' · ');
-      msg.style.color = 'var(--fg)';
+      var mName = modelSel.value ? modelSel.value.split('/').pop() : 'first model';
+      msg.textContent = 'Researching with ' + epName + ' / ' + mName;
     } else {
-      msg.textContent = 'Using chat defaults';
-      msg.style.color = 'var(--fg)';
+      msg.textContent = 'Researching with the utility model';
     }
+    msg.style.color = '';
   }
   showStatus();
 
-  async function saveResearch() {
-    var payload = {
-      research_endpoint_id: epSel.value,
-      research_model: modelSel.value,
-    };
-    var tv = parseInt(tokensInput.value, 10);
-    if (tv && tv >= 1024) payload.research_max_tokens = tv;
-    var et = parseInt(extractTimeoutInput.value, 10);
-    if (et && et >= 15 && et <= 3600) payload.research_extraction_timeout_seconds = et;
-    var ec = parseInt(extractConcurrencyInput.value, 10);
-    if (ec && ec >= 1 && ec <= 12) payload.research_extraction_concurrency = ec;
-    if (runTimeoutInput.value !== '') {
-      var rt = parseInt(runTimeoutInput.value, 10);
-      // 0 = no limit (disables the hard timeout); otherwise 60s..86400s (24h)
-      if (!isNaN(rt) && (rt === 0 || (rt >= 60 && rt <= 86400))) {
-        payload.research_run_timeout_seconds = rt;
-      }
-    }
+  async function saveResearchModel() {
     try {
-      await _postSettings(payload);
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      var res = await _postSettings({ research_endpoint_id: epSel.value, research_model: modelSel.value });
+      if (res && res.ok === false) throw new Error('HTTP ' + res.status);
+      if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; }
       setTimeout(showStatus, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
 
-  epSel.addEventListener('change', async function() {
+  epSel.addEventListener('change', function() {
     refreshModels('');
-    saveResearch();
+    saveResearchModel();
   });
-  modelSel.addEventListener('change', saveResearch);
-  tokensInput.addEventListener('change', saveResearch);
-  extractTimeoutInput.addEventListener('change', saveResearch);
-  extractConcurrencyInput.addEventListener('change', saveResearch);
-  runTimeoutInput.addEventListener('change', saveResearch);
+  modelSel.addEventListener('change', saveResearchModel);
 
   _registerAiEndpointRefresh(function(nextEndpoints) {
     endpoints = nextEndpoints;
@@ -1150,11 +1169,67 @@ async function initResearchSettings() {
   });
 }
 
+// Research limits live under Search & Research › Deep Research › Advanced and
+// report into that card's own status line.
+async function initResearchLimits() {
+  var msg = el('set-researchLimitsMsg');
+  // [input id, settings key, min, max, allowZero, unit shown in the status]
+  var FIELDS = [
+    ['set-researchMaxTokens', 'research_max_tokens', 1024, 1000000, false, 'Max tokens'],
+    ['set-researchExtractTimeout', 'research_extraction_timeout_seconds', 15, 3600, false, 'Page timeout'],
+    ['set-researchExtractConcurrency', 'research_extraction_concurrency', 1, 12, false, 'Parallel pages'],
+    ['set-researchPlanningTimeout', 'research_planning_timeout_seconds', 15, 3600, false, 'Planning timeout'],
+    ['set-researchQueryTimeout', 'research_query_timeout_seconds', 15, 3600, false, 'Query timeout'],
+    ['set-researchRunTimeout', 'research_run_timeout_seconds', 60, 86400, true, 'Run timeout'],
+  ];
+  var inputs = FIELDS.map(function(f) { return el(f[0]); });
+  if (!inputs.some(Boolean)) return;
+
+  try {
+    var settings = await _loadSettingsSnapshot();
+    FIELDS.forEach(function(f, i) {
+      var v = settings[f[1]];
+      if (inputs[i] && v !== undefined && v !== null && v !== '') inputs[i].value = v;
+    });
+  } catch (e) { console.warn('Failed to load research limits', e); }
+
+  function say(text, bad) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.style.color = bad ? 'var(--red)' : 'var(--fg)';
+  }
+
+  async function saveField(i) {
+    var f = FIELDS[i];
+    var input = inputs[i];
+    var raw = String(input.value || '').trim();
+    if (!raw) return;                       // blank = keep the saved value
+    var n = parseInt(raw, 10);
+    var ok = !isNaN(n) && ((f[4] && n === 0) || (n >= f[2] && n <= f[3]));
+    if (!ok) {
+      say(f[5] + ' must be ' + (f[4] ? '0 or ' : '') + f[2] + '–' + f[3], true);
+      return;
+    }
+    var body = {};
+    body[f[1]] = n;
+    try {
+      var res = await _postSettings(body);
+      if (res && res.ok === false) throw new Error('HTTP ' + res.status);
+      say('Saved ' + f[5].toLowerCase() + (f[4] && n === 0 ? ': no limit' : ': ' + n));
+    } catch (e) { say('Failed to save', true); }
+  }
+
+  inputs.forEach(function(input, i) {
+    if (input) input.addEventListener('change', function() { saveField(i); });
+  });
+}
+
 /* ── Deep Research Search (Search tab) ── */
 async function initResearchSearchSettings() {
   var searchSel = el('set-researchSearch');
   var msg = el('set-researchSearchMsg');
   var logoEl = el('set-researchSearch-logo');
+  if (!searchSel) return;
 
   function updateSearchLogo() {
     if (!logoEl) return;
@@ -1182,19 +1257,22 @@ async function initResearchSearchSettings() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
-    if (settings.research_search_provider) searchSel.value = settings.research_search_provider;
+    var settings = await _loadSettingsSnapshot();
+    // 'google' was this select's old value for Google PSE; the search
+    // providers only know 'google_pse', so a saved 'google' shows as that.
+    var saved = settings.research_search_provider === 'google' ? 'google_pse' : settings.research_search_provider;
+    if (saved) searchSel.value = saved;
     updateSearchOptions(settings);
     updateSearchLogo();
   } catch (e) { console.warn('Failed to load research search settings', e); }
 
   async function saveResearchSearch() {
     try {
-      await _postSettings({ research_search_provider: searchSel.value });
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
-      setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      var res = await _postSettings({ research_search_provider: searchSel.value });
+      if (res && res.ok === false) throw new Error('HTTP ' + res.status);
+      if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; }
+      setTimeout(function() { if (msg) msg.textContent = ''; }, 2000);
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
 
   searchSel.addEventListener('change', function() { updateSearchLogo(); saveResearchSearch(); });
@@ -2992,6 +3070,7 @@ function initAll() {
   initSttSettingsV2();
   initSearchSettings();
   initResearchSettings();
+  initResearchLimits();
   initResearchSearchSettings();
   initAgentSettings();
   initClaudeCodeSettings();
@@ -6685,6 +6764,8 @@ function syncAdminVisibility() {
    PUBLIC API
    ═══════════════════════════════════════════ */
 export function open(tab) {
+  // A fresh open reads fresh settings (see _loadSettingsSnapshot).
+  _settingsSnapshot = null;
   if (!initialized) initAll();
 
   syncAppearanceCheckboxes();

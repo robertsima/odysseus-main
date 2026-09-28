@@ -65,9 +65,13 @@ export const SETTINGS_PANELS = Object.freeze([
   }),
   definePanel({
     id: 'search',
-    label: 'Search',
+    label: 'Search & Research',
     group: 'models',
-    keywords: ['search', 'research', 'provider'],
+    keywords: [
+      'search', 'web search', 'research', 'deep research', 'provider', 'searxng',
+      'duckduckgo', 'brave', 'google', 'tavily', 'serper', 'safesearch',
+      'safe search', 'results', 'fallback', 'timeout', 'max tokens',
+    ],
   }),
 
   definePanel({

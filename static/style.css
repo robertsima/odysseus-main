@@ -43182,3 +43182,9 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 }
 #settings-modal details h3.settings-subhead { color: var(--fg); font-size: 12px; font-weight: 600; margin: 14px 0 4px; }
 #settings-modal details.settings-advanced > h3.settings-subhead:first-of-type { margin-top: 2px; }
+/* Cards whose labels are phrases, not single words: align the controls. */
+.settings-labels-wide .settings-row > .settings-label { min-width: 150px; flex-shrink: 0; }
+@media (max-width: 620px) {
+  .settings-labels-wide .settings-row { flex-wrap: wrap; }
+  .settings-labels-wide .settings-row > .settings-label { min-width: 0; flex-basis: 100%; }
+}
