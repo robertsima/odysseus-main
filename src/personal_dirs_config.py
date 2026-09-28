@@ -145,10 +145,19 @@ def reconcile(manager, raw: Optional[str] = None, *, owner: Optional[str] = None
 
     Never raises: a bad variable must not stop the app from booting, so every
     failure is logged and reported in the returned summary instead.
+
+    The labels land in the legacy state file, beneath the
+    ``vault_folder_sensitivity`` setting. A "public" entry for a folder the
+    setting declares private cannot publish it — the vector store holds every
+    chunk to the policy floor — but before 2026-09-28 this re-apply rewrote
+    such a folder's chunks public at every boot, so the disagreement is now
+    reported under ``conflicts`` instead of passing silently. A "private"
+    entry needs no such check: ``rag_sensitivity`` reads private entries from
+    the environment directly, and they win over the setting at equal depth.
     """
     if raw is None:
         raw = os.environ.get(ENV_VAR)
-    summary = {"added": [], "relabelled": [], "unchanged": [], "errors": []}
+    summary = {"added": [], "relabelled": [], "unchanged": [], "errors": [], "conflicts": []}
     if not (raw or "").strip():
         return summary
 
@@ -209,4 +218,30 @@ def reconcile(manager, raw: Optional[str] = None, *, owner: Optional[str] = None
             logger.error("%s: failed to apply — %s", ENV_VAR, message)
             summary["errors"].append(message)
 
+        if entry.sensitivity != "private":
+            conflict = _stricter_policy(resolved)
+            if conflict:
+                logger.warning(
+                    "%s declares %s public, but %s declares it private; it stays private. "
+                    "Remove one of the two declarations.", ENV_VAR, resolved, conflict,
+                )
+                summary["conflicts"].append(
+                    {"directory": resolved, "declared": entry.sensitivity,
+                     "effective": "private", "policy": conflict}
+                )
+
     return summary
+
+
+def _stricter_policy(path: str) -> Optional[str]:
+    """Where a private folder rule covering ``path`` is set, or None."""
+    try:
+        from src.rag_sensitivity import SENSITIVITY_PRIVATE, declared_folder_policy
+
+        declaration = declared_folder_policy(path)
+    except Exception:
+        logger.debug("folder policy lookup failed for %s", path, exc_info=True)
+        return None
+    if declaration is not None and declaration.sensitivity == SENSITIVITY_PRIVATE:
+        return declaration.detail
+    return None

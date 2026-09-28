@@ -315,5 +315,6 @@ def test_unset_variable_is_a_no_op(personal, tmp_path, monkeypatch):
         "relabelled": [],
         "unchanged": [],
         "errors": [],
+        "conflicts": [],
     }
     assert rag.indexed == []

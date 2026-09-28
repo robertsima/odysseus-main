@@ -200,6 +200,45 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(403, "Directory must be inside personal documents")
         return resolved
 
+    def _label_within_policy(directory: str, requested: str, *, explicit: bool) -> str:
+        """The label to record for ``directory``, never more public than policy.
+
+        On 2026-09-28 relabelling "Journal" public here rewrote its stored
+        chunks public although the ``vault_folder_sensitivity`` setting keeps
+        it private: they passed the public-only retrieval filter until
+        re-indexed, while the UI (which resolves the policy) snapped back to
+        private. The authoritative rules are the setting and
+        ``ODYSSEUS_PERSONAL_DIRS``; this route only writes the legacy label
+        beneath them, so an explicit request to publish a folder they declare
+        private is refused with where to change it, and an omitted label
+        takes the policy's. Making a folder more private is always allowed.
+        """
+        from src.rag_sensitivity import SENSITIVITY_PRIVATE, declared_folder_policy
+
+        if requested == SENSITIVITY_PRIVATE:
+            return requested
+        declaration = declared_folder_policy(directory)
+        if declaration is None or declaration.sensitivity != SENSITIVITY_PRIVATE:
+            return requested
+        if not explicit:
+            return SENSITIVITY_PRIVATE
+        restart = " and restart Odysseus" if declaration.source == "ODYSSEUS_PERSONAL_DIRS" else ""
+        raise HTTPException(
+            400,
+            f"{directory} cannot be made public: it is declared private by "
+            f"{declaration.detail}. Change it there{restart} to make this folder public.",
+        )
+
+    def _effective_directory_label(directory: str, fallback: str) -> str:
+        """The label retrieval now applies to ``directory`` (as the UI shows it)."""
+        sensitivity_for = getattr(personal_docs_manager, "sensitivity_for", None)
+        if callable(sensitivity_for):
+            try:
+                return normalize_sensitivity(sensitivity_for(directory))
+            except Exception:
+                logger.debug("sensitivity_for(%s) failed", directory, exc_info=True)
+        return fallback
+
     def _vault_root() -> str:
         # Use the exact same configured root as sensitivity/readonly policy.
         # App initialization points PersonalDocsManager here as well, but
@@ -484,7 +523,10 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
         sensitivity = normalize_sensitivity(directory_request.sensitivity)
         try:
             directory = _resolve_allowed_personal_dir(directory)
-            
+            sensitivity = _label_within_policy(
+                directory, sensitivity, explicit=directory_request.sensitivity is not None
+            )
+
             # Security check - ensure directory exists and is accessible
             if not os.path.exists(directory):
                 raise HTTPException(404, f"Directory not found: {directory}")
@@ -575,31 +617,52 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
 
         Also rewrites the label on chunks already in the vector store, so
         marking a directory private takes effect for content indexed earlier.
+        A folder the authoritative policy declares private cannot be made
+        public here (400, naming where the policy is set), and chunks are
+        never stored more public than their effective label.
         """
         if directory_request.sensitivity is None:
             raise HTTPException(400, "sensitivity is required ('public' or 'private')")
 
         directory = _resolve_allowed_personal_dir(directory_request.directory)
         sensitivity = normalize_sensitivity(directory_request.sensitivity)
+        _label_within_policy(directory, sensitivity, explicit=True)
 
         if not hasattr(personal_docs_manager, "set_directory_sensitivity"):
             raise HTTPException(503, "Sensitivity labelling is not available")
 
         try:
-            result = personal_docs_manager.set_directory_sensitivity(directory, sensitivity)
+            # Relabelling reads every chunk's metadata, re-reads note headers
+            # and refreshes the keyword index: blocking work, and it mutates the
+            # same tracker state an add/remove job does. Same lock, off the loop.
+            async with _index_job_lock:
+                result = await run_in_threadpool(
+                    personal_docs_manager.set_directory_sensitivity, directory, sensitivity
+                )
         except Exception as e:
             logger.error(f"Error relabelling directory {directory}: {e}")
             raise HTTPException(500, f"Failed to set sensitivity: {str(e)}")
 
+        updated = (result or {}).get("updated_count", 0)
+        effective = _effective_directory_label(directory, sensitivity)
+        message = f"{directory} is now {effective}; {updated} indexed chunk(s) relabelled"
+        if effective != sensitivity:
+            from src.rag_sensitivity import declared_folder_policy
+
+            declaration = declared_folder_policy(directory)
+            where = declaration.detail if declaration is not None else "a folder rule"
+            message = (
+                f"{directory} stays {effective}: {where} declares it {effective}, which "
+                f"outranks this label. Its {updated} indexed chunk(s) were relabelled "
+                f"{sensitivity}, but re-indexing restores {effective} unless the rule "
+                "is changed there."
+            )
         return {
             "success": True,
             "directory": directory,
-            "sensitivity": result.get("sensitivity", sensitivity),
-            "updated_count": result.get("updated_count", 0),
-            "message": (
-                f"{directory} is now {result.get('sensitivity', sensitivity)}; "
-                f"{result.get('updated_count', 0)} indexed chunk(s) relabelled"
-            ),
+            "sensitivity": effective,
+            "updated_count": updated,
+            "message": message,
         }
 
     @router.delete("/remove_directory")

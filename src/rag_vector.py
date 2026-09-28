@@ -20,9 +20,12 @@ from src.rag_sensitivity import (
     SENSITIVITY_PRIVATE,
     SENSITIVITY_PUBLIC,
     apply_sensitivity,
+    declared_folder_policy,
+    folder_policy_is_valid,
     metadata_is_private,
     normalize_sensitivity,
     resolve_sensitivity,
+    stored_label_floor,
 )
 from pathlib import Path
 
@@ -291,6 +294,12 @@ class VectorRAG:
                 # works for local sessions, and the label is re-attempted next
                 # start.
                 logger.warning("sensitivity backfill skipped: %s", e)
+            try:
+                self.enforce_sensitivity_policy()
+            except Exception as e:
+                # Same reasoning: the heal is retried next start, and every
+                # new write is already held to the policy floor.
+                logger.warning("sensitivity policy heal skipped: %s", e)
             logger.info(
                 "VectorRAG ready (lanes=%s docs=%s)",
                 [lane.name for lane in self._lanes],
@@ -992,16 +1001,24 @@ class VectorRAG:
             if not content or not content.strip():
                 return (0, 0)
 
-            resolved_sensitivity = sensitivity
-            if resolved_sensitivity is None:
-                frontmatter = None
-                if ext in MARKDOWN_EXTENSIONS:
-                    try:
-                        from src.vault_markdown import split_frontmatter
-                        frontmatter, _ = split_frontmatter(content)
-                    except Exception:
-                        logger.debug("sensitivity frontmatter parse failed for %s", path, exc_info=True)
+            frontmatter = None
+            if ext in MARKDOWN_EXTENSIONS:
+                try:
+                    from src.vault_markdown import split_frontmatter
+                    frontmatter, _ = split_frontmatter(content)
+                except Exception:
+                    logger.debug("sensitivity frontmatter parse failed for %s", path, exc_info=True)
+            if sensitivity is None:
                 resolved_sensitivity = resolve_sensitivity(path, frontmatter=frontmatter)
+            else:
+                resolved_sensitivity = normalize_sensitivity(sensitivity)
+                if resolved_sensitivity == SENSITIVITY_PUBLIC:
+                    # A caller's label may tighten the policy, never loosen it.
+                    # Callers pass a folder-level label (the vault scan, an
+                    # admin or agent add_directory), which on its own would
+                    # stamp a note that says `sensitivity: private`, or a
+                    # subfolder declared private, public (2026-09-28).
+                    resolved_sensitivity = stored_label_floor(path, frontmatter=frontmatter)
 
             meta = apply_sensitivity({
                 'source': path,
@@ -1130,6 +1147,16 @@ class VectorRAG:
         ``source`` as ``remove_directory``, and for the same reason: no Chroma
         metadata operator selects a scalar string by path prefix, and a plain
         substring would catch ``/docs2`` when relabelling ``/docs``.
+
+        Relabelling to ``private`` restamps every chunk. Relabelling to
+        ``public`` stamps each chunk with its source's effective label
+        instead (``stored_label_floor``, reading the note's own frontmatter):
+        on 2026-09-28 marking "Journal" public rewrote every chunk under it
+        public although the folder policy kept it private, and a public parent
+        would likewise have published a private subfolder or a note marked
+        private in its frontmatter. Callers record the new folder label
+        before relabelling, so the floor already reflects it.
+        ``held_private_count`` counts the chunks the policy kept private.
         """
         if not self.healthy:
             return {"success": False, "updated_count": 0, "message": "Collection not initialized"}
@@ -1138,6 +1165,19 @@ class VectorRAG:
         label = normalize_sensitivity(sensitivity)
         updated = 0
         failed = 0
+        held_private = 0
+        floors: Dict[str, str] = {}
+
+        def _target(source: str) -> str:
+            if label == SENSITIVITY_PRIVATE:
+                return SENSITIVITY_PRIVATE
+            if source not in floors:
+                try:
+                    floors[source] = stored_label_floor(source, read_frontmatter=True)
+                except Exception as e:  # a policy lookup must not publish on error
+                    logger.warning("sensitivity floor failed for %s (%s); keeping it private", source, e)
+                    floors[source] = SENSITIVITY_PRIVATE
+            return floors[source]
 
         for lane_name, collection in self._collections_for_delete():
             try:
@@ -1150,10 +1190,13 @@ class VectorRAG:
                     source = meta["source"]
                     if source != directory and not source.startswith(directory + os.sep):
                         continue
-                    if meta.get(SENSITIVITY_KEY) == label:
+                    target = _target(source)
+                    if target != label:
+                        held_private += 1
+                    if meta.get(SENSITIVITY_KEY) == target:
                         continue
                     selected_ids.append(results["ids"][i])
-                    selected_metas.append(apply_sensitivity(meta, label))
+                    selected_metas.append(apply_sensitivity(meta, target))
 
                 for i in range(0, len(selected_ids), 200):
                     collection.update(
@@ -1165,12 +1208,86 @@ class VectorRAG:
                 logger.warning("set_directory_sensitivity failed in %s lane: %s", lane_name, e)
                 failed += 1
 
+        message = f"Relabelled {updated} chunk(s) under {directory} as {label}"
+        if held_private:
+            message += f"; {held_private} chunk(s) stay private under a stricter rule"
         return {
             "success": failed == 0,
             "updated_count": updated,
+            "held_private_count": held_private,
             "sensitivity": label,
-            "message": f"Relabelled {updated} chunk(s) under {directory} as {label}",
+            "message": message,
         }
+
+    def enforce_sensitivity_policy(self) -> Dict[str, Any]:
+        """Make private any public chunk the folder policy declares private.
+
+        Heals the store once at startup. Before 2026-09-28 relabelling a
+        policy-private folder public (the admin route, or the boot re-apply
+        of an ``ODYSSEUS_PERSONAL_DIRS`` "public" entry over a folder the
+        setting declares private) rewrote its chunks public, and they stayed
+        that way until each file happened to be re-indexed.
+
+        Only the authoritative folder rules take part (the
+        ``vault_folder_sensitivity`` setting and ``ODYSSEUS_PERSONAL_DIRS``;
+        see ``declared_folder_policy``), and a malformed setting skips the
+        heal: nothing ever demotes a chunk again, so a transient fail-closed
+        answer here would strand the whole index as private. A note whose own
+        frontmatter says public keeps its label, as re-indexing would. File
+        headers are read only for candidates, so a store with nothing to heal
+        costs one metadata read per lane.
+        """
+        promoted = 0
+        verdicts: Dict[str, bool] = {}
+
+        def _should_promote(source: str) -> bool:
+            if source in verdicts:
+                return verdicts[source]
+            verdict = False
+            declaration = declared_folder_policy(source)
+            if declaration is not None and declaration.sensitivity == SENSITIVITY_PRIVATE:
+                verdict = stored_label_floor(source, read_frontmatter=True) == SENSITIVITY_PRIVATE
+            verdicts[source] = verdict
+            return verdict
+
+        try:
+            if not folder_policy_is_valid():
+                logger.warning("sensitivity policy heal skipped: vault_folder_sensitivity is malformed")
+                return {"updated_count": 0, "skipped": "malformed vault_folder_sensitivity"}
+        except Exception as e:
+            logger.warning("sensitivity policy heal skipped: %s", e)
+            return {"updated_count": 0, "skipped": str(e)}
+
+        for lane_name, collection in self._active_collections():
+            try:
+                if collection.count() == 0:
+                    continue
+                existing = collection.get(include=["metadatas"])
+                pending_ids = []
+                pending_metas = []
+                for doc_id, meta in zip(existing.get("ids") or [], existing.get("metadatas") or []):
+                    if not isinstance(meta, dict) or metadata_is_private(meta):
+                        continue
+                    source = meta.get("source")
+                    if not isinstance(source, str) or not source or not _should_promote(source):
+                        continue
+                    pending_ids.append(doc_id)
+                    pending_metas.append(apply_sensitivity(meta, SENSITIVITY_PRIVATE))
+                for i in range(0, len(pending_ids), 200):
+                    collection.update(
+                        ids=pending_ids[i:i + 200],
+                        metadatas=pending_metas[i:i + 200],
+                    )
+                    promoted += len(pending_ids[i:i + 200])
+            except Exception as e:
+                logger.warning("sensitivity policy heal failed in %s lane: %s", lane_name, e)
+
+        if promoted:
+            logger.warning(
+                "Relabelled %s public RAG chunk(s) private: their folder is declared private "
+                "(vault_folder_sensitivity / ODYSSEUS_PERSONAL_DIRS)", promoted,
+            )
+        return {"updated_count": promoted}
 
     def remove_directory(self, directory: str) -> Dict[str, Any]:
         """Remove all chunks under ``directory`` (recursively), and nothing else.

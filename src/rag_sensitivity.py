@@ -19,8 +19,10 @@ an existing index. ``private`` is never inferred — a user has to ask for it.
 ``resolve_sensitivity`` (below) is the store-agnostic entry point: it lets any vault-backed store — not just PersonalDocsManager's own
 directory tracking — answer "public or private?" for a path via one
 precedence chain (per-file frontmatter, then the ``vault_folder_sensitivity``
-setting, then the legacy per-directory state file, then the configured
-default). The file-tool deny-list calls the same resolver for paths inside the
+setting together with the private entries of ``ODYSSEUS_PERSONAL_DIRS``, then
+the legacy per-directory state file, then the configured default). The
+vector store never stores a chunk more public than that chain allows
+(``stored_label_floor``). The file-tool deny-list calls the same resolver for paths inside the
 vault, so a folder cannot be private to search while remaining readable by an
 agent through ``read_file``.
 """
@@ -150,29 +152,44 @@ def path_is_under_private_directory(path: str, vault_real: Optional[str] = None)
     except ValueError:
         inside_vault = False
     if inside_vault:
-        frontmatter = None
-        if os.path.isfile(candidate) and candidate.lower().endswith((".md", ".markdown")):
-            try:
-                from src.vault_markdown import split_frontmatter
-
-                with open(candidate, "r", encoding="utf-8") as handle:
-                    # Frontmatter is bounded and appears first; do not read a whole
-                    # large document merely to decide whether file tools may see it.
-                    header = handle.read(65537)
-                    frontmatter, _ = split_frontmatter(header)
-                # An opening header that cannot be parsed within the bound is
-                # security metadata we cannot trust. Fail closed instead of
-                # silently falling through to a public folder default.
-                if header.lstrip("\ufeff").startswith("---") and not frontmatter:
-                    return True
-            except Exception as exc:
-                logger.warning("Could not read vault frontmatter for %s (%s); denying access", candidate, exc)
-                return True
+        frontmatter, trusted = _read_policy_frontmatter(candidate)
+        if not trusted:
+            return True
         return resolve_sensitivity(candidate, frontmatter=frontmatter) == SENSITIVITY_PRIVATE
     for directory in private_directories():
         if abs_path == directory or abs_path.startswith(directory + os.sep):
             return True
     return False
+
+
+# Frontmatter is bounded and appears first; a policy check must not read a
+# whole large document merely to learn one key.
+_FRONTMATTER_READ_LIMIT = 65537
+
+
+def _read_policy_frontmatter(candidate: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+    """``(frontmatter, trusted)`` for a file on disk.
+
+    ``trusted`` is False when a Markdown file opens a frontmatter block that
+    cannot be parsed within the bound, or cannot be read at all: that header
+    is security metadata we cannot trust, so the caller fails closed instead
+    of silently falling through to a public folder default. Anything that is
+    not a Markdown file has no frontmatter and is trusted as such.
+    """
+    if not (os.path.isfile(candidate) and candidate.lower().endswith((".md", ".markdown"))):
+        return None, True
+    try:
+        from src.vault_markdown import split_frontmatter
+
+        with open(candidate, "r", encoding="utf-8") as handle:
+            header = handle.read(_FRONTMATTER_READ_LIMIT)
+        frontmatter, _ = split_frontmatter(header)
+        if header.lstrip("\ufeff").startswith("---") and not frontmatter:
+            return None, False
+        return frontmatter, True
+    except Exception as exc:
+        logger.warning("Could not read vault frontmatter for %s (%s); denying access", candidate, exc)
+        return None, False
 
 
 def apply_sensitivity(metadata: Dict[str, Any], sensitivity: Any = None) -> Dict[str, Any]:
@@ -311,12 +328,13 @@ class FolderPolicy:
     readonly: Optional[bool] = None
 
 
-def _deepest_policy_value(
+def _deepest_policy_match(
     folder_map: Dict[str, FolderPolicy], vault_rel: str, attribute: str
-) -> Any:
-    """Deepest explicitly declared value for one folder-policy property."""
+) -> Optional[Tuple[str, Any]]:
+    """``(folder, value)`` of the deepest declaration of one folder-policy
+    property covering ``vault_rel``, or ``None`` when nothing declares it."""
     target = vault_rel.casefold()
-    best_value: Any = None
+    best: Optional[Tuple[str, Any]] = None
     best_len = -1
     for folder, policy in folder_map.items():
         value = getattr(policy, attribute)
@@ -326,8 +344,21 @@ def _deepest_policy_value(
         matches = folder_cf == "" or target == folder_cf or target.startswith(folder_cf + "/")
         if matches and len(folder_cf) > best_len:
             best_len = len(folder_cf)
-            best_value = value
-    return best_value
+            best = (folder, value)
+    return best
+
+
+def _deepest_policy_value(
+    folder_map: Dict[str, FolderPolicy], vault_rel: str, attribute: str
+) -> Any:
+    """Deepest explicitly declared value for one folder-policy property."""
+    match = _deepest_policy_match(folder_map, vault_rel, attribute)
+    return match[1] if match else None
+
+
+def _folder_depth(vault_rel_folder: str) -> int:
+    """Segments in a vault-relative folder; the vault root ``""`` is 0."""
+    return 0 if not vault_rel_folder else vault_rel_folder.count("/") + 1
 
 
 def _safe_folder_policy_map() -> Tuple[Dict[str, FolderPolicy], bool]:
@@ -540,6 +571,168 @@ def _frontmatter_sensitivity(frontmatter: Optional[Dict[str, Any]]) -> Optional[
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Deployment-declared labels: ODYSSEUS_PERSONAL_DIRS
+# --------------------------------------------------------------------------- #
+#
+# ``personal_dirs_config.reconcile`` copies each declared label into the legacy
+# state file at boot — layer 3, the same file the admin UI's relabel route and
+# the agent's ``add_directory`` write. On 2026-09-28 a review found that either
+# could overwrite a declared ``Journal:private`` with "public" and have it
+# stand until the next restart re-applied the variable, so a *private*
+# declaration is also read here, straight from the environment, where nothing
+# the app writes can reach it. Only the private direction takes part: a
+# declared "public" stays an ordinary layer-3 seed, so an operator can still
+# make such a folder MORE private from the UI.
+
+_ENV_SOURCE = "ODYSSEUS_PERSONAL_DIRS"
+_SETTING_SOURCE = "vault_folder_sensitivity"
+
+_env_cache: Dict[str, Any] = {"key": None, "entries": ()}
+
+
+def _env_declarations() -> Tuple[Tuple[str, str, str], ...]:
+    """Valid ODYSSEUS_PERSONAL_DIRS entries as ``(vault-relative folder, label,
+    entry as written)``.
+
+    Resolved against `vault_root`, the base `reconcile` resolves against (app
+    startup gives the manager ``vault_root()`` as its personal_dir). An entry
+    that is malformed or escapes the vault is skipped here exactly as
+    reconcile skips it — reconcile is what logs it.
+    """
+    raw = os.environ.get(_ENV_SOURCE) or ""
+    if not raw.strip():
+        return ()
+    root = vault_root()
+    key = (raw, root)
+    if _env_cache["key"] == key:
+        return _env_cache["entries"]
+
+    from src.personal_dirs_config import parse_declarations, resolve_declared_path
+
+    entries, _errors = parse_declarations(raw)
+    out = []
+    for entry in entries:
+        resolved = resolve_declared_path(entry.path, root)
+        rel = _to_vault_relative(resolved, root) if resolved else None
+        if rel is None:
+            continue
+        out.append((rel, entry.sensitivity, f"{entry.path}:{entry.sensitivity}"))
+    _env_cache["key"] = key
+    _env_cache["entries"] = tuple(out)
+    return _env_cache["entries"]
+
+
+def _env_match(vault_rel: str) -> Optional[Tuple[str, str, str]]:
+    """Deepest ODYSSEUS_PERSONAL_DIRS entry covering ``vault_rel``, matched
+    the way `_deepest_policy_match` matches setting keys."""
+    target = vault_rel.casefold()
+    best: Optional[Tuple[str, str, str]] = None
+    best_len = -1
+    for folder, label, entry in _env_declarations():
+        folder_cf = folder.casefold()
+        matches = folder_cf == "" or target == folder_cf or target.startswith(folder_cf + "/")
+        if matches and len(folder_cf) > best_len:
+            best_len = len(folder_cf)
+            best = (folder, label, entry)
+    return best
+
+
+@dataclass(frozen=True)
+class PolicyDeclaration:
+    """The admin or deployment rule that governs a path's folder label.
+
+    ``source`` names where it is set (``vault_folder_sensitivity`` or
+    ``ODYSSEUS_PERSONAL_DIRS``), ``folder`` the vault-relative folder the rule
+    names (``""`` is the vault root) and ``detail`` says it in words, for a
+    message that has to tell the operator where to change it.
+    """
+
+    sensitivity: str
+    source: str
+    folder: str
+    detail: str
+
+
+def _governing_declaration(
+    folder_map: Dict[str, FolderPolicy], vault_rel: str
+) -> Optional[PolicyDeclaration]:
+    """Layer 2: the deepest folder rule from the setting or the environment.
+
+    Deepest wins across both, as it does within the setting, so a setting can
+    still carve a public subfolder out of a declared private tree. A private
+    environment entry at least as deep as the setting's match wins the tie:
+    two admin declarations that disagree about one folder resolve to the
+    safe answer.
+    """
+    setting = _deepest_policy_match(folder_map, vault_rel, "sensitivity")
+    env = _env_match(vault_rel)
+    if env is not None and env[1] == SENSITIVITY_PRIVATE and (
+        setting is None or _folder_depth(env[0]) >= _folder_depth(setting[0])
+    ):
+        return PolicyDeclaration(
+            SENSITIVITY_PRIVATE, _ENV_SOURCE, env[0],
+            f"the {_ENV_SOURCE} entry '{env[2]}' in the deployment environment",
+        )
+    if setting is not None:
+        folder = setting[0]
+        where = f'folder "{folder}"' if folder else "the vault root"
+        return PolicyDeclaration(
+            normalize_sensitivity(setting[1]), _SETTING_SOURCE, folder,
+            f"the {_SETTING_SOURCE} setting ({where}; Settings > Knowledge > "
+            "Folder privacy & access)",
+        )
+    return None
+
+
+def folder_policy_is_valid() -> bool:
+    """Whether the ``vault_folder_sensitivity`` setting passes validation."""
+    return _safe_folder_policy_map()[1]
+
+
+def declared_folder_policy(path: str) -> Optional[PolicyDeclaration]:
+    """The admin/deployment folder rule governing ``path``, or ``None``.
+
+    Only the authoritative layers take part — the ``vault_folder_sensitivity``
+    setting and ``ODYSSEUS_PERSONAL_DIRS`` — not the legacy state file the UI
+    itself writes, and not a note's frontmatter. A malformed setting governs
+    everything, as private, the same way `resolve_sensitivity` fails closed.
+    """
+    folder_map, config_is_valid = _safe_folder_policy_map()
+    if not config_is_valid:
+        return PolicyDeclaration(
+            SENSITIVITY_PRIVATE, _SETTING_SOURCE, "",
+            f"the {_SETTING_SOURCE} setting, which is malformed, so the whole "
+            "vault is treated as private until it is fixed (Settings > Knowledge > "
+            "Folder privacy & access)",
+        )
+    vault_rel = _to_vault_relative(path, vault_root())
+    if vault_rel is None:
+        return None
+    return _governing_declaration(folder_map, vault_rel)
+
+
+def declared_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """`resolve_sensitivity` without its last layer: the label something
+    explicitly declares for ``path``, or ``None`` when only
+    ``vault_default_sensitivity`` would answer."""
+    explicit = _frontmatter_sensitivity(frontmatter)
+    if explicit is not None:
+        return explicit
+
+    folder_map, config_is_valid = _safe_folder_policy_map()
+    if not config_is_valid:
+        return SENSITIVITY_PRIVATE
+
+    vault_rel = _to_vault_relative(path, vault_root())
+    if vault_rel is not None:
+        declaration = _governing_declaration(folder_map, vault_rel)
+        if declaration is not None:
+            return declaration.sensitivity
+
+    return _legacy_sensitivity_for(path)
+
+
 def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = None) -> str:
     """Resolve the sensitivity label that applies to ``path``.
 
@@ -554,8 +747,10 @@ def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = No
          either direction — a public note inside a private tree, or a
          private note inside a public one.
       2. The deepest ancestor folder declared in the ``vault_folder_sensitivity``
-         setting. Deepest match wins so a subfolder can carve out an
-         exception without re-declaring every sibling.
+         setting, or declared private in ``ODYSSEUS_PERSONAL_DIRS``. Deepest
+         match wins so a subfolder can carve out an exception without
+         re-declaring every sibling; a tie between the two goes to private
+         (see `_governing_declaration`).
       3. The legacy ``directory_sensitivity.json`` state file inside
          PERSONAL_DIR — deployments that labelled directories before
          ``vault_folder_sensitivity`` existed (PersonalDocsManager still
@@ -571,24 +766,41 @@ def resolve_sensitivity(path: str, *, frontmatter: Optional[Dict[str, Any]] = No
     override, rather than risk silently falling through to a public default
     on a corrupted admin setting.
     """
-    explicit = _frontmatter_sensitivity(frontmatter)
-    if explicit is not None:
-        return explicit
-
-    folder_map, config_is_valid = _safe_folder_policy_map()
-    if not config_is_valid:
-        return SENSITIVITY_PRIVATE
-
-    vault_rel = _to_vault_relative(path, vault_root())
-    if vault_rel is not None:
-        folder_label = _deepest_policy_value(folder_map, vault_rel, "sensitivity")
-        if folder_label is not None:
-            return folder_label
-
-    legacy_label = _legacy_sensitivity_for(path)
-    if legacy_label is not None:
-        return legacy_label
+    declared = declared_sensitivity(path, frontmatter=frontmatter)
+    if declared is not None:
+        return declared
 
     from src.settings import get_setting
 
     return normalize_sensitivity(get_setting("vault_default_sensitivity", SENSITIVITY_PUBLIC))
+
+
+def stored_label_floor(
+    path: str,
+    *,
+    frontmatter: Optional[Dict[str, Any]] = None,
+    read_frontmatter: bool = False,
+) -> str:
+    """The least private label a chunk indexed from ``path`` may carry.
+
+    A label a caller supplies — a relabel request, an explicit index label —
+    may make a chunk MORE private than the policy, never less. On 2026-09-28
+    relabelling a policy-private folder ("Journal") public rewrote every
+    stored chunk to public, so it passed the public-only retrieval filter
+    until re-indexed, while the UI (which resolves the policy) still showed
+    the folder private. The vector store asks this before writing a public
+    label.
+
+    ``vault_default_sensitivity`` is deliberately not part of the floor: an
+    explicit label outranks the default, which only answers for a folder
+    nobody declared. With ``read_frontmatter`` the file's own header is read
+    from disk (bounded), and an unreadable or unparseable one fails closed,
+    as it does for the file tools.
+    """
+    if read_frontmatter and frontmatter is None:
+        frontmatter, trusted = _read_policy_frontmatter(os.path.realpath(path))
+        if not trusted:
+            return SENSITIVITY_PRIVATE
+    if declared_sensitivity(path, frontmatter=frontmatter) == SENSITIVITY_PRIVATE:
+        return SENSITIVITY_PRIVATE
+    return SENSITIVITY_PUBLIC
