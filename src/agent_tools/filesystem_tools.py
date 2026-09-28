@@ -186,6 +186,85 @@ def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
         "file": os.path.basename(path) or (path or "file"),
     }
 
+# Upper bound on files visited when looking for same-named vault notes, so a
+# huge vault costs a bounded walk rather than an unbounded one per edit.
+_SAME_NAME_SCAN_MAX_FILES = 20_000
+_SAME_NAME_MAX_LISTED = 5
+
+
+def _vault_roots() -> List[str]:
+    roots: List[str] = []
+    try:
+        from src.rag_sensitivity import vault_root
+
+        roots.append(os.path.realpath(vault_root()))
+    except Exception:
+        pass
+    try:
+        from src.constants import PERSONAL_DIR
+
+        roots.append(os.path.realpath(PERSONAL_DIR))
+    except Exception:
+        pass
+    return [r for i, r in enumerate(roots) if r and r not in roots[:i]]
+
+
+def _same_name_vault_warning(path: str) -> str:
+    """Warn when a vault note shares its file name with another vault note.
+
+    On 2026-09-28 two notes of the same name, one at the vault root and one
+    under ``AI Mind/Business Ideas``, were both edited three minutes apart;
+    the model picked a path by name and nothing told it there were two. The
+    edit itself is fine — the model named a path — but it has to know the
+    other file exists. Empty when *path* is outside the vault or unique.
+    Blocking I/O: call from a worker thread.
+    """
+    try:
+        target = os.path.realpath(path)
+    except (OSError, ValueError):
+        return ""
+    root = next(
+        (r for r in _vault_roots()
+         if target != r and os.path.normcase(target).startswith(os.path.normcase(r) + os.sep)),
+        None,
+    )
+    if not root:
+        return ""
+    name = os.path.basename(target).casefold()
+    if not name:
+        return ""
+    others: List[str] = []
+    visited = 0
+    try:
+        for directory, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames[:] = [
+                d for d in dirnames
+                if not d.startswith(".") and d not in _CODENAV_SKIP_DIRS
+            ]
+            for fname in filenames:
+                visited += 1
+                if fname.casefold() != name:
+                    continue
+                full = os.path.realpath(os.path.join(directory, fname))
+                if os.path.normcase(full) != os.path.normcase(target):
+                    others.append(os.path.relpath(full, root).replace(os.sep, "/"))
+            if visited >= _SAME_NAME_SCAN_MAX_FILES:
+                break
+    except OSError:
+        return ""
+    if not others:
+        return ""
+    others.sort()
+    shown = others[:_SAME_NAME_MAX_LISTED]
+    more = f" (+{len(others) - len(shown)} more)" if len(others) > len(shown) else ""
+    this = os.path.relpath(target, root).replace(os.sep, "/")
+    return (
+        f"[warning] Another vault note has the same file name: "
+        f"{', '.join(shown)}{more}. This call changed {this} only. If the user meant "
+        "the other note, edit that one by its full path."
+    )
+
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -245,6 +324,9 @@ class EditFileTool:
 
         n = original.count(old)
         result = {"output": f"Edited {path} ({n} replacement{'s' if n != 1 else ''})", "exit_code": 0}
+        warning = await asyncio.to_thread(_same_name_vault_warning, path)
+        if warning:
+            result["output"] += "\n" + warning
         diff = _unified_diff(original, updated, path)
         if diff:
             result["diff"] = diff
@@ -387,6 +469,9 @@ class WriteFileTool:
             return {"error": f"write_file: {path}: {e}", "exit_code": 1}
         diff = _unified_diff(old_content, body, path)
         result = {"output": f"Wrote {size} bytes to {path}", "exit_code": 0}
+        warning = await asyncio.to_thread(_same_name_vault_warning, path)
+        if warning:
+            result["output"] += "\n" + warning
         if diff:
             result["diff"] = diff
         return result

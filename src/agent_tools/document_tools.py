@@ -167,6 +167,12 @@ def _document_candidates(db, Document, owner: Optional[str], limit: int = _CANDI
         return []
 
 
+# Editor documents and vault notes are different stores. A model that tries
+# update_document/edit_document on a vault note's title gets "not found" and,
+# before this hint, had no pointer to the tool that edits the note.
+VAULT_NOTE_HINT = "Vault notes are files — edit them by path with edit_file."
+
+
 def _target_error(message: str, candidates: List[Dict[str, str]], **extra) -> Dict:
     lines = [message]
     if candidates:
@@ -228,7 +234,7 @@ def _lookup_document_ref(db, Document, ref: str, owner: Optional[str]):
     except Exception:
         logger.debug("document reference lookup failed for %r", ref, exc_info=True)
     return None, _target_error(
-        f"Document '{ref}' was not found among your documents.",
+        f"Document '{ref}' was not found among your documents. {VAULT_NOTE_HINT}",
         _document_candidates(db, Document, owner),
     )
 
@@ -254,7 +260,7 @@ def _resolve_target_document(db, Document, ctx: dict, explicit_ref: Optional[str
             if ctx.get("expected_document_version") is not None:
                 return None, _approved_document_version_error(None, ctx)
             return None, _target_error(
-                f"Document '{sealed_id}' was not found among your documents.",
+                f"Document '{sealed_id}' was not found among your documents. {VAULT_NOTE_HINT}",
                 _document_candidates(db, Document, owner),
             )
         if explicit_ref:
