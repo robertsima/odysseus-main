@@ -24,6 +24,7 @@ import re
 import html
 import logging
 import inspect
+from dataclasses import dataclass
 from datetime import datetime
 
 from email.mime.text import MIMEText
@@ -401,6 +402,55 @@ async def _emit_progress(progress_cb, message: str):
         logger.debug("Email task progress callback failed", exc_info=True)
 
 
+@dataclass(frozen=True)
+class ScanOps:
+    """The operations one requested email scan performs.
+
+    Passed down to the pass instead of being written into settings.json:
+    until 2026-09-28 ``_run_auto_summarize_once`` rewrote the global
+    ``email_auto_*`` flags for the whole scan (minutes, with model calls) and
+    restored them afterwards, so the background poller acted on the scheduled
+    task's flags meanwhile, a settings save from the UI in that window was
+    reverted by the restore, and its ``_email_auto_reply_draft_only`` marker
+    was never removed (the restore wrote ``False`` back instead).
+    ``reply_draft`` drafts replies; a requested scan never sends away replies.
+    """
+
+    summary: bool = False
+    reply_draft: bool = False
+    tag: bool = False
+    spam: bool = False
+    calendar: bool = False
+
+
+# The marker the old flag-flipping scan left behind in settings.json.
+_LEFTOVER_SCAN_KEY = "_email_auto_reply_draft_only"
+_leftover_scan_key_checked = False
+
+
+def _drop_leftover_scan_key() -> None:
+    """Remove ``_email_auto_reply_draft_only`` from settings.json, once per process.
+
+    Nothing reads it any more; left at ``true`` by a scan that died mid-run it
+    used to turn the background poller's away replies into drafts.
+    """
+    global _leftover_scan_key_checked
+    if _leftover_scan_key_checked:
+        return
+    try:
+        from src.settings import is_setting_overridden, save_settings
+
+        if is_setting_overridden(_LEFTOVER_SCAN_KEY):
+            saved = _load_settings()
+            if isinstance(saved, dict) and _LEFTOVER_SCAN_KEY in saved:
+                saved.pop(_LEFTOVER_SCAN_KEY, None)
+                save_settings(saved)
+                logger.info("Removed the leftover %s key from settings", _LEFTOVER_SCAN_KEY)
+        _leftover_scan_key_checked = True
+    except Exception:
+        logger.warning("Could not remove the leftover %s settings key", _LEFTOVER_SCAN_KEY, exc_info=True)
+
+
 async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = True,
                                    do_tag: bool = False, do_spam: bool = False,
                                    do_calendar: bool = False,
@@ -408,34 +458,22 @@ async def _run_auto_summarize_once(do_summary: bool = True, do_reply: bool = Tru
                                    account_id: str | None = None,
                                    max_process: int | None = None,
                                    progress_cb=None) -> str:
-    """One iteration of the email scan. Temporarily flips settings flags
-    so the existing background-loop logic runs exactly once for the requested ops."""
-    settings = _load_settings()
-    prev = {k: settings.get(k, False) for k in
-            ("email_auto_summarize", "email_auto_reply", "email_auto_tag",
-             "email_auto_spam", "email_auto_calendar", "_email_auto_reply_draft_only")}
-    settings["email_auto_summarize"] = bool(do_summary)
-    settings["email_auto_reply"] = bool(do_reply)
-    settings["_email_auto_reply_draft_only"] = bool(do_reply)
-    settings["email_auto_tag"] = bool(do_tag)
-    settings["email_auto_spam"] = bool(do_spam)
-    settings["email_auto_calendar"] = bool(do_calendar)
-    _save_settings(settings)
-    try:
-        return await _auto_summarize_pass(
-            days_back=days_back,
-            account_id=account_id,
-            max_process=max_process,
-            progress_cb=progress_cb,
-        )
-    finally:
-        s2 = _load_settings()
-        for k, v in prev.items():
-            if v is None and k.startswith("_"):
-                s2.pop(k, None)
-            else:
-                s2[k] = v
-        _save_settings(s2)
+    """One iteration of the email scan for exactly the requested operations,
+    whatever the ``email_auto_*`` settings say (see ``ScanOps``)."""
+    _drop_leftover_scan_key()
+    return await _auto_summarize_pass(
+        days_back=days_back,
+        account_id=account_id,
+        max_process=max_process,
+        progress_cb=progress_cb,
+        ops=ScanOps(
+            summary=bool(do_summary),
+            reply_draft=bool(do_reply),
+            tag=bool(do_tag),
+            spam=bool(do_spam),
+            calendar=bool(do_calendar),
+        ),
+    )
 
 
 def _latest_inbox_fallback_uids(conn, reconnect):
@@ -555,11 +593,12 @@ def _load_cached_message_ids(account_owner, account_id, *, away_only: bool,
     return _sum_existing, _reply_existing, _tag_existing, _cal_existing, _urgent_existing
 
 
-async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
+async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, ops: ScanOps | None = None) -> str:
     """Single pass of the auto-summarize/reply scan.
 
     When account_id is None, iterates over every enabled account in
     email_accounts and runs one pass per account, concatenating the results.
+    ``ops`` (a requested scan) replaces the ``email_auto_*`` settings flags.
     """
     # Multi-account fan-out: if the caller didn't pick an account, hit them all.
     if account_id is None:
@@ -588,6 +627,7 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                 max_process=max_process,
                 progress_cb=progress_cb,
                 away_only=away_only,
+                ops=ops,
             )
         outs = []
         for idx, aid in enumerate(ids, start=1):
@@ -599,6 +639,7 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
                     max_process=max_process,
                     progress_cb=progress_cb,
                     away_only=away_only,
+                    ops=ops,
                 )
                 outs.append(f"[{names.get(aid, aid[:8])}] {result}")
             except Exception as e:
@@ -611,24 +652,40 @@ async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None
         max_process=max_process,
         progress_cb=progress_cb,
         away_only=away_only,
+        ops=ops,
     )
 
 
-async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
+def _scan_flags(settings: dict, account_id: str | None, ops: ScanOps | None) -> tuple:
+    """``(summary, reply_draft, reply_away, tag, spam, calendar)`` for one pass.
+
+    The background poller follows the settings (``settings`` already carries
+    this account's auto-reply overlay): away replies when auto-reply is on
+    and active, never drafts. A requested scan does exactly ``ops``.
+    """
+    if ops is not None:
+        return (ops.summary, ops.reply_draft, False, ops.tag, ops.spam, ops.calendar)
+    auto_reply = settings.get("email_auto_reply", False)
+    return (
+        bool(settings.get("email_auto_summarize", False)),
+        False,
+        bool(auto_reply and _away_reply_active(settings, account_id)),
+        bool(settings.get("email_auto_tag", False)),
+        bool(settings.get("email_auto_spam", False)),
+        bool(settings.get("email_auto_calendar", False)),
+    )
+
+
+async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False, ops: ScanOps | None = None) -> str:
     """Single pass of the auto-summarize/reply scan for ONE account.
-    Reads current settings flags."""
+    Reads current settings flags, unless ``ops`` names the operations."""
     import asyncio
     import sqlite3 as _sql3
     from src.llm_core import _uses_max_completion_tokens
 
     settings = _effective_settings_for_email_account(_load_settings(), account_id)
-    auto_sum = settings.get("email_auto_summarize", False)
-    auto_reply = settings.get("email_auto_reply", False)
-    auto_reply_draft = bool(auto_reply and settings.get("_email_auto_reply_draft_only", False))
-    auto_reply_away = bool(auto_reply and not auto_reply_draft and _away_reply_active(settings, account_id))
-    auto_tag = settings.get("email_auto_tag", False)
-    auto_spam = settings.get("email_auto_spam", False)
-    auto_cal = settings.get("email_auto_calendar", False)
+    (auto_sum, auto_reply_draft, auto_reply_away,
+     auto_tag, auto_spam, auto_cal) = _scan_flags(settings, account_id, ops)
     if away_only:
         auto_sum = False
         auto_reply_draft = False
@@ -796,7 +853,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                     and not _away_reply_already_sent(settings, account_owner, account_id, message_id, _from_addr_only)
                 )
                 need_class = (auto_tag or auto_spam) and message_id not in _tag_existing
-                need_cal = bool(settings.get("email_auto_calendar", False)) and message_id not in _cal_existing
+                need_cal = bool(auto_cal) and message_id not in _cal_existing
                 # Bulk/list/no-reply senders and promotional blasts are not
                 # appointments: "Up to 50% Off Ends TONIGHT" became a calendar
                 # event ("G FUEL Labor Day sale ends") because the extractor
