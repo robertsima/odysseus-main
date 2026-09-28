@@ -333,9 +333,11 @@ def main() -> int:
     blocked = [ln for ln in log_text.splitlines() if "BLOCKED" in ln and "bash" in ln]
     rep.check("app log: bash was not BLOCKED", not blocked, " | ".join(blocked)[:600])
     bash_out = str((outcomes.get("pytest") or {}).get("result") or "")
-    rep.check("bash result shows the sandbox (no app data dir visible, ran as the sandbox)",
-              "passed" in bash_out and "Private-vault" not in bash_out and "private vault" not in bash_out.lower(),
-              bash_out[:300].replace("\n", " | "))
+    # The bash step ends with a probe: the worktree lives under the data dir,
+    # but the app database next to it must not be visible from the sandbox.
+    rep.check("bash ran inside the sandbox (the app database is not visible from it)",
+              "E2E-SANDBOX-OK" in bash_out and "E2E-SANDBOX-LEAK" not in bash_out,
+              bash_out[-300:].replace("\n", " | "))
 
     # ── the hand-back and the parent's reply ─────────────────────────────
     parent_final = None

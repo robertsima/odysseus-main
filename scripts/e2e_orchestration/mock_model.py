@@ -42,6 +42,9 @@ MODEL_ID = os.environ.get("MOCK_MODEL_ID", "e2e-mock")
 ADMIN_MARKER = "(ref E2E-ADMIN)"
 TASK_MARKER = "add a function double(x)"
 CLONE = os.environ.get("E2E_CLONE", "/home/user/e2e/development/umni")
+# The app's data dir. The bash step also checks that its database is NOT
+# visible from inside the sandbox, although the worktree under it is.
+DATA_DIR = os.environ.get("E2E_DATA_DIR", "/home/user/e2e/data")
 WORKTREE_NAME = os.environ.get("E2E_WORKTREE_NAME", "e2e-double")
 LOADOUT = os.environ.get("E2E_WORKER_LOADOUT", "Lead Engineer")
 # main: pytest runs in the worktree (the real flow). workaround: pytest runs in
@@ -317,7 +320,9 @@ def worker_turn(calls: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, 
         }, "write_test"), outcome
     if nxt == "pytest":
         where = wt if VARIANT == "main" else CLONE
-        return _tool("bash", {"command": f"cd {where} && python -m pytest -q"}, "pytest"), outcome
+        probe = (f"{{ test -e {DATA_DIR}/app.db && echo E2E-SANDBOX-LEAK: the app database is visible "
+                 "|| echo E2E-SANDBOX-OK: the app database is not visible; }")
+        return _tool("bash", {"command": f"cd {where} && python -m pytest -q && {probe}"}, "pytest"), outcome
     if nxt == "diff":
         return _tool("manage_agent_worktree", {"action": "diff", "repository": CLONE,
                                                "name": WORKTREE_NAME}, "diff"), outcome

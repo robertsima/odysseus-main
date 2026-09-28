@@ -112,7 +112,7 @@ echo "   clone $CLONE  origin=$(git -C "$CLONE" remote get-url origin)"
 
 # ── mock model ─────────────────────────────────────────────────────────────
 echo "== starting mock model on :$MOCK_PORT (variant $VARIANT)"
-MOCK_LOG="$LOGS/mock_requests.jsonl" MOCK_DUMP_DIR="$LOGS/requests" E2E_CLONE="$CLONE" E2E_VARIANT="$VARIANT" \
+MOCK_LOG="$LOGS/mock_requests.jsonl" MOCK_DUMP_DIR="$LOGS/requests" E2E_CLONE="$CLONE" E2E_DATA_DIR="$E2E_ROOT/data" E2E_VARIANT="$VARIANT" \
   "$PY" "$HERE/mock_model.py" --port "$MOCK_PORT" > "$LOGS/mock.log" 2>&1 &
 PIDS+=($!); echo "${PIDS[-1]}" > "$E2E_ROOT/run/mock.pid"
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$MOCK_PORT/v1/models" >/dev/null && break; sleep 0.25; done
