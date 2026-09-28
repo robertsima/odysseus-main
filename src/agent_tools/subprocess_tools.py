@@ -49,7 +49,18 @@ def _tmux_session_name(session_id: Optional[str], sandbox_workspace: Optional[st
         # an unsandboxed run after the grant is switched on) gets its own pane.
         import hashlib
 
-        name += "-sbx-" + hashlib.sha256(sandbox_workspace.encode("utf-8")).hexdigest()[:8]
+        # The pane's bwrap binds are fixed when it starts, so the managed
+        # worktrees bound next to the workspace (shell_sandbox.workspace_worktrees)
+        # are part of its identity: a worktree created after the pane opened
+        # gets a new pane that can see it, instead of "No such file or directory".
+        try:
+            from src.shell_sandbox import workspace_worktrees
+
+            bound = "|".join(sorted(workspace_worktrees(sandbox_workspace)))
+        except Exception:
+            bound = ""
+        key = sandbox_workspace + ("|" + bound if bound else "")
+        name += "-sbx-" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
     return name
 
 
