@@ -3080,11 +3080,37 @@ _PRIVATE_SHELL_NOTE = (
 
 _SANDBOXED_SHELL_NOTE = (
     "bash and python run in a sandbox that contains only the workspace ({workspace}, "
-    "read-write) and the read-only system tools. Nothing else from this server exists "
+    "read-write){worktrees} and the read-only system tools. Nothing else from this server exists "
     "there: not the app's data, the vault, other checkouts, or the app's environment "
-    "variables. Network access is {network}. Work inside the workspace; to reach "
-    "anything outside it, use the dedicated tools."
+    "variables. Network access is {network}. Work inside the workspace{inside}; to reach "
+    "anything else, use the dedicated tools."
 )
+
+
+def _sandbox_worktree_clause(workspace: str) -> str:
+    """The part of the sandbox note that names the managed worktrees it binds.
+
+    src.shell_sandbox binds the worktrees ``manage_agent_worktree start`` makes
+    of the workspace's own repository (``workspace_worktrees``). The note said
+    only the workspace exists in the sandbox, so a worker that had just made
+    its worktree was told it could not run the tests there (the 2026-09-28
+    orchestration e2e run). The note is written when the turn starts, usually
+    before that worktree exists, so it states the rule and the root rather than
+    a list. Only for a workspace that is a checkout, the only case with binds.
+    """
+    try:
+        from pathlib import Path
+
+        from src.agent_worktree import ownership
+        from src.agent_worktree.config import load_config
+
+        if ownership.git_common_dir(Path(os.path.realpath(workspace))) is None:
+            return ""
+        root = os.path.realpath(load_config().worktree_root)
+    except Exception:  # noqa: BLE001 - no worktree config: the plain note is still true
+        return ""
+    return (", the worktrees manage_agent_worktree makes of this workspace's repository "
+            f"(under {root}, read-write, at the same paths)")
 
 
 def _prepend_agent_directive(messages: List[Dict], directive: str) -> List[Dict]:
@@ -5723,9 +5749,12 @@ async def stream_agent_loop(
         if _private_shell_note and not _shell_sandboxed:
             _private_shell_text = _PRIVATE_SHELL_NOTE + f" They cannot run in the workspace sandbox either: {_why}."
         elif _private_shell_note:
+            _worktree_clause = _sandbox_worktree_clause(workspace)
             _private_shell_text = _SANDBOXED_SHELL_NOTE.format(
                 workspace=os.path.realpath(workspace),
                 network=("on" if _shell_sandbox.network_enabled() else "off"),
+                worktrees=_worktree_clause,
+                inside=" or those worktrees" if _worktree_clause else "",
             )
     else:
         _private_shell_note = False

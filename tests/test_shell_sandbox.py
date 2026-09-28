@@ -205,6 +205,46 @@ async def test_loop_offers_sandboxed_shell_and_says_where_it_runs(tmp_path, monk
     )]
     assert "bash" in sent["tools"]
     assert any("sandbox that contains only the workspace" in str(m.get("content")) for m in sent["messages"])
+    # Not a checkout, so no worktrees are bound and the note names none.
+    assert not any("manage_agent_worktree makes" in str(m.get("content")) for m in sent["messages"])
+
+
+async def test_sandbox_note_names_the_worktrees_it_binds_for_a_checkout(tmp_path, monkeypatch):
+    # The sandbox binds the managed worktrees of the workspace's repository;
+    # a note saying only the workspace exists there told a worker that had
+    # just made its worktree that it could not run the tests in it.
+    import dataclasses
+
+    import src.agent_loop as al
+    from src.agent_worktree import config as wt_config
+
+    ws = tmp_path / "umni"
+    (ws / ".git").mkdir(parents=True)
+    root = tmp_path / "data" / "agent_worktrees"  # not created yet, as on a first run
+    real_load = wt_config.load_config
+    monkeypatch.setattr(wt_config, "load_config",
+                        lambda: dataclasses.replace(real_load(), worktree_root=str(root)))
+    sent = {}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        sent["messages"] = messages
+        yield f'data: {json.dumps({"delta": "ok"})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(sb, "unavailable_reason", lambda ws: "")
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    [e async for e in al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "run the tests with bash"}],
+        relevant_tools={"bash", "read_file"}, max_rounds=1, allow_private=False, workspace=str(ws),
+    )]
+    note = next(str(m.get("content")) for m in sent["messages"]
+                if "sandbox that contains only the workspace" in str(m.get("content")))
+    assert "the worktrees manage_agent_worktree makes of this workspace's repository" in note
+    assert os.path.realpath(str(root)) in note
+    assert "Work inside the workspace or those worktrees" in note
 
 
 # ── the real thing, where it can run ─────────────────────────────────────
