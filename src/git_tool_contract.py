@@ -177,6 +177,9 @@ def _prune_unused(args, accepted, declared):
     }
 
 
+_ORIGIN_ONLY_ACTIONS = frozenset({"fetch", "pull", "pull_with_restore"})
+
+
 def normalize_git_arguments(args):
     if not isinstance(args, dict):
         return args
@@ -193,6 +196,12 @@ def normalize_git_arguments(args):
         accepted = {"action", "repository"} | fields
     else:
         return dict(args)
+    if action in _ORIGIN_ONLY_ACTIONS and args.get("remote") == "origin":
+        # `fetch`/`pull` always use origin; a worker that spelled that out was
+        # refused as sending an unsupported argument on 2026-09-28 and spent a
+        # round finding out. Only the redundant value is dropped: any other
+        # remote, or `remote` on an unrelated action, still fails closed.
+        args = {name: value for name, value in args.items() if name != "remote"}
     return _prune_unused(
         args, accepted - DEFAULTABLE_FIELDS.get(action, set()), GIT_FIELDS
     )

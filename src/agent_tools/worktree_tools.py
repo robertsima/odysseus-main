@@ -148,6 +148,9 @@ class AgentWorktreeTool:
             return _err(f"manage_agent_worktree: invalid JSON arguments ({exc})")
 
         action = str(args.get("action") or "status").strip().lower()
+        # "list" is what a model reaches for to see existing worktrees
+        # (2026-09-28: refused as an unknown action mid-run); status lists them.
+        action = {"list": "status", "ls": "status"}.get(action, action)
         if action in _FORBIDDEN_ACTIONS:
             return _err(
                 f"manage_agent_worktree: action {action!r} is not permitted by policy: "

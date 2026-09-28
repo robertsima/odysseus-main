@@ -89,6 +89,15 @@ async def test_status_reports_publishing_disabled_by_default(monkeypatch, tmp_pa
     assert result["status"]["publish_blockers"]
 
 
+async def test_list_is_an_alias_for_status(monkeypatch, tmp_path):
+    """2026-09-28: a worker asked for action "list" to see existing worktrees
+    and was refused as unknown mid-run."""
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKTREE_ROOT", str(tmp_path / "wt"))
+    monkeypatch.setenv("ODYSSEUS_AGENT_STATE_DIR", str(tmp_path / "state"))
+    result = await TOOL_HANDLERS["manage_agent_worktree"]('{"action": "list"}', {})
+    assert result["exit_code"] == 0 and "status" in result
+
+
 async def test_log_tool_lists_and_tails(monkeypatch, tmp_path):
     from src import agent_logs
 
