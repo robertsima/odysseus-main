@@ -193,6 +193,14 @@ _RECALL_CHUNK_CHARS = 1400
 # every such recall was re-offloaded. Kept at/below the widest inline budget so
 # the ceiling honours the same rule the default does.
 _RECALL_MAX_SLICE_CHARS = 8000
+# A read of a stored output with no `limit` returns the WHOLE output when it
+# fits this, else pages of this size. Handing back 3k slices or five 1.4k
+# search chunks of a 20k result is what sent a turn round twelve recalls of the
+# same thing: each answer looked partial, so the model asked again. A recall is
+# never offloaded (tool_output_store._NEVER_OFFLOAD_TOOLS) and 20k matches
+# read_file's own ceiling, so a full read costs what the original call did.
+# An explicit `limit` still clamps to _RECALL_MAX_SLICE_CHARS.
+_RECALL_FULL_CHARS = 20_000
 
 
 class RecallToolOutputTool:
@@ -241,9 +249,24 @@ class RecallToolOutputTool:
         if ref and not query:
             return await self._read_slice(store, ref, args)
 
+        if ref and query:
+            # A query against one output that fits in a single read gets the
+            # whole output: the answer is certainly in it, and a handful of
+            # matching chunks is what made the model keep asking.
+            text = await asyncio.to_thread(store.load, ref)
+            if text is not None and len(text) <= _RECALL_FULL_CHARS:
+                return await self._read_slice(store, ref, {}, text=text)
+
         results = await asyncio.to_thread(
             store.search, query, ref=ref or None, session_id=session_id, k=_clamp_k(args.get("k"))
         )
+        if not results and ref:
+            # Nothing matched: read it in order rather than inviting another
+            # guess at the wording.
+            page = await self._read_slice(store, ref, {})
+            if "results" in page:
+                page["results"] = f'Nothing matched "{query}"; here is the output in order.\n\n' + page["results"]
+            return page
         if not results:
             hint = f" in `{ref}`" if ref else " in this chat's stored outputs"
             return {
@@ -265,8 +288,10 @@ class RecallToolOutputTool:
             )
         return {"results": "\n\n".join(blocks)}
 
-    async def _read_slice(self, store, ref: str, args: Dict[str, Any]) -> Dict[str, Any]:
-        text = await asyncio.to_thread(store.load, ref)
+    async def _read_slice(self, store, ref: str, args: Dict[str, Any],
+                          text: Optional[str] = None) -> Dict[str, Any]:
+        if text is None:
+            text = await asyncio.to_thread(store.load, ref)
         if text is None:
             return {
                 "error": (
@@ -279,11 +304,14 @@ class RecallToolOutputTool:
             offset = max(0, int(args.get("offset") or 0))
         except (TypeError, ValueError):
             offset = 0
-        try:
-            limit = int(args.get("limit") or _RECALL_SLICE_CHARS)
-        except (TypeError, ValueError):
-            limit = _RECALL_SLICE_CHARS
-        limit = max(200, min(limit, _RECALL_MAX_SLICE_CHARS))
+        if args.get("limit") in (None, ""):
+            limit = _RECALL_FULL_CHARS
+        else:
+            try:
+                limit = int(args.get("limit"))
+            except (TypeError, ValueError):
+                limit = _RECALL_SLICE_CHARS
+            limit = max(200, min(limit, _RECALL_MAX_SLICE_CHARS))
 
         slice_text = text[offset:offset + limit]
         if not slice_text:
@@ -293,11 +321,22 @@ class RecallToolOutputTool:
                 )
             }
         end = offset + len(slice_text)
+        record = await asyncio.to_thread(store.load_record, ref) or {}
+        tool = record.get("tool") or "the tool"
+        if offset == 0 and end >= len(text):
+            header = (f"`{ref}`: the complete stored output of {tool} "
+                      f"({len(text):,} characters)")
+            footer = ("\n\n[End of output. This is all of it: do not recall this ref again "
+                      f"or re-run {tool}; answer from what is above.]")
+            return {"results": f"{header}\n\n{slice_text}{footer}"}
         header = f"`{ref}` characters {offset:,}-{end:,} of {len(text):,}"
         footer = ""
         if end < len(text):
             footer = (
                 f"\n\n[{len(text) - end:,} characters remain — continue with "
-                f'{{"ref": "{ref}", "offset": {end}}}]'
+                f'{{"ref": "{ref}", "offset": {end}}}. Page forward like this; '
+                f"do not re-run {tool}.]"
             )
+        else:
+            footer = f"\n\n[End of `{ref}`.]"
         return {"results": f"{header}\n\n{slice_text}{footer}"}
