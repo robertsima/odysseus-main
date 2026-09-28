@@ -146,7 +146,7 @@ class TestBuiltinDeclarations:
         import src.capabilities_builtin  # noqa: F401  (registers)
         from src import capabilities
 
-        for name in ("host_docker", "remote_hosts", "model_serving"):
+        for name in ("host_docker", "model_serving"):
             cap = capabilities.get(name)
             assert cap is not None, name
             assert cap.default_enabled is False, f"{name} must be opt-in"
@@ -167,6 +167,34 @@ class TestBuiltinDeclarations:
         assert "manage_agent_worktree" in cap.tools
         # And the old over-broad capability must be gone, not merely unused.
         assert capabilities.get("worktree_publish") is None
+
+    def test_model_serving_owns_the_real_cookbook_tools(self):
+        """It declared ("cookbook",), the tool *domain*, which is no tool, so
+        switching Cookbook off withheld nothing (2026-09-28)."""
+        import src.capabilities_builtin  # noqa: F401
+        from src import capabilities
+        from src.agent_loop import _DOMAIN_TOOL_MAP
+
+        cap = capabilities.get("model_serving")
+        assert set(cap.tools) == set(_DOMAIN_TOOL_MAP["cookbook"])
+        assert "cookbook" not in cap.tools
+
+    def test_a_remote_cookbook_server_satisfies_model_serving(self, tmp_path, monkeypatch):
+        """Serving normally happens on a GPU box over SSH, not in the container,
+        so a local vLLM binary cannot be the only way to meet the requirement."""
+        import json
+
+        import src.capabilities_builtin as builtin
+        from src import constants
+
+        state = tmp_path / "cookbook_state.json"
+        monkeypatch.setattr(constants, "COOKBOOK_STATE_FILE", str(state))
+        assert builtin._cookbook_server_configured()[0] is False
+        state.write_text(json.dumps({"env": {"servers": [{"name": "Local", "host": ""}]}}), encoding="utf-8")
+        assert builtin._cookbook_server_configured()[0] is False, "Local is this machine"
+        state.write_text(json.dumps({"env": {"servers": [{"name": "gpu", "host": "me@gpu-box"}]}}), encoding="utf-8")
+        ok, detail = builtin._cookbook_server_configured()
+        assert ok and "1 Cookbook server" in detail
 
     def test_image_runners_live_with_model_serving(self):
         """DDColor / inpaint / MLX image generation are serve targets for image

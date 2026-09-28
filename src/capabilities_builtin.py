@@ -21,13 +21,29 @@ def _git_library_available() -> tuple[bool, str]:
     return available, "Dulwich installed" if available else "Rebuild the image to install Git support"
 
 
-def _has_configured_remote_hosts() -> tuple[bool, str]:
-    from src.settings import get_setting
+def _cookbook_server_configured() -> tuple[bool, str]:
+    """A remote Cookbook server (Cookbook › Servers) can serve models, too.
 
-    hosts = get_setting("remote_hosts", []) or []
-    if isinstance(hosts, (list, tuple)) and len(hosts):
-        return True, f"{len(hosts)} host(s) configured"
-    return False, "no remote hosts configured"
+    Serving usually happens on a GPU box over SSH, not in the Odysseus
+    container, so a runtime binary on this host's PATH is not the only way to
+    satisfy the capability. Read from the saved Cookbook state without a
+    request; an unreadable file counts as no server.
+    """
+    import json
+    from pathlib import Path
+
+    from src.constants import COOKBOOK_STATE_FILE
+
+    try:
+        state = json.loads(Path(COOKBOOK_STATE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False, "no Cookbook server configured"
+    env = state.get("env") if isinstance(state, dict) else None
+    servers = env.get("servers") if isinstance(env, dict) else None
+    remote = [s for s in servers or [] if isinstance(s, dict) and str(s.get("host") or "").strip()]
+    if remote:
+        return True, f"{len(remote)} Cookbook server(s) configured"
+    return False, "no Cookbook server configured"
 
 
 def _delegation_provider_available() -> tuple[bool, str]:
@@ -86,29 +102,10 @@ register(Capability(
     tools=("delegate_to_agent", "delegate_to_claude_code"),
 ))
 
-# ── remote hosts ──────────────────────────────────────────────────────────
-
-register(Capability(
-    name="remote_hosts",
-    title="Remote hosts",
-    summary=(
-        "Machines Odysseus may reach over SSH, each with what it is allowed to "
-        "do. Replaces depending on whatever the host's ~/.ssh/config contains."
-    ),
-    requirements=(
-        Requirement(
-            name="ssh client",
-            check=binary_on_path("ssh"),
-            hint="Install an SSH client on the machine running Odysseus.",
-        ),
-        Requirement(
-            name="at least one host",
-            check=_has_configured_remote_hosts,
-            hint="Add a host under Settings › Remote hosts.",
-        ),
-    ),
-    settings=("remote_hosts",),
-))
+# A "remote hosts" capability used to sit here, backed by a `remote_hosts`
+# setting. No tool belonged to it and nothing read the inventory except its own
+# "at least one host" probe, so its switch changed nothing; both were removed on
+# 2026-09-28. Cookbook servers (below) are the host inventory that is used.
 
 # ── model serving (Cookbook) ──────────────────────────────────────────────
 # Includes the MLX image-model runners (DDColor colorization, inpainting,
@@ -130,14 +127,25 @@ register(Capability(
                 binary_on_path("sglang"),
                 binary_on_path("llama-server"),
                 binary_on_path("mlx_lm.server"),
+                _cookbook_server_configured,
             ),
             hint=(
                 "Install a serving runtime (vLLM, SGLang, llama.cpp or MLX) on "
-                "this machine, or add a remote host that has one."
+                "this machine, or add a server that has one under Cookbook › Servers."
             ),
         ),
     ),
-    tools=("cookbook",),
+    # The agent's Cookbook tools (src/tools/cookbook.py; the "cookbook" tool
+    # domain in src/agent_loop.py). This declared the domain name "cookbook"
+    # until 2026-09-28, which is not a tool, so switching the capability off
+    # withheld nothing.
+    tools=(
+        "download_model", "cancel_download", "list_downloads",
+        "serve_model", "serve_preset", "list_serve_presets",
+        "list_served_models", "stop_served_model", "tail_serve_output",
+        "adopt_served_model", "list_cached_models", "list_cookbook_servers",
+        "search_hf_models",
+    ),
 ))
 
 # ── host control ──────────────────────────────────────────────────────────
