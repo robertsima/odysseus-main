@@ -11,7 +11,7 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260819approvalcontrol1';
+import chatModule from './js/chat.js?v=20260928subagentui1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260815approvalsave1';
 import searchChatModule from './js/search-chat.js';
@@ -23,16 +23,16 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260819approvalcontrol1';
+import chatRenderer from './js/chatRenderer.js?v=20260928subagentui1';
 import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 // Versioned like the other modules: this one was imported bare, so a browser
 // that had it cached kept the old strip logic across three rounds of fixes.
-import workbenchModule from './js/workbench.js?v=20260923wrapup1';
+import workbenchModule from './js/workbench.js?v=20260928subagentui1';
 // Per-chat settings + the status line under the composer (self-initialising).
 import './js/chatSettings.js?v=20260918approvals1';
 // Agents dashboard: fleet view, approvals hub, steer/stop/launch (self-initialising).
-import './js/agentsDashboard.js?v=20260923crewrole1';
+import './js/agentsDashboard.js?v=20260928subagentui1';
 // User-customizable tool order shared by the icon rail and sidebar Tools list.
 import './js/navOrder.js?v=20260916accountprefs1';
 import voiceRecorderModule from './js/voiceRecorder.js';

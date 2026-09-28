@@ -1,6 +1,7 @@
 """Task- and chat-scoped approval continuation coverage for issue #6112."""
 
 import asyncio
+import re
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -347,9 +348,10 @@ def test_route_context_agent_frontend_and_cache_bust_wire_the_contract():
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in capabilities
     assert "CHAT_SESSION_APPROVAL_CONTEXT_MARKER" in models
 
-    version = "20260819approvalcontrol1"
-    assert f"chat.js?v={version}" in app
-    assert f"chat.js?v={version}" in index
-    assert f"chatRenderer.js?v={version}" in frontend
-    assert f"chatRenderer.js?v={version}" in app
-    assert f"chatRenderer.js?v={version}" in index
+    # Cache-busting tags move with each release; what matters is that every
+    # importer uses the same tag, so the browser loads one module instance.
+    chat_tag = re.search(r"/chat\.js\?v=([\w.-]+)", app).group(1)
+    renderer_tag = re.search(r"chatRenderer\.js\?v=([\w.-]+)", app).group(1)
+    assert f"chat.js?v={chat_tag}" in index
+    assert f"chatRenderer.js?v={renderer_tag}" in frontend
+    assert f"chatRenderer.js?v={renderer_tag}" in index

@@ -12,8 +12,8 @@ import spinnerModule from './spinner.js';
 import { bindMenuDismiss } from './escMenuStack.js';
 import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
-import agentThread from './agentThread.js';
-import { isCardOpen, setCardOpen } from './cardState.js';
+import agentThread from './agentThread.js?v=20260928subagentui1';
+import { isCardOpen, setCardOpen } from './cardState.js?v=20260928subagentui1';
 
 // A worker's result handed back to this chat is a long "[Worker X finished]
 // Task: … Result: …" message. It renders as one collapsed line; opening it is

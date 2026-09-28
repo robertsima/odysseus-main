@@ -31,7 +31,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { applyRightDock } from './modalSnap.js';
 import { renderDiffText, renderFileTable, parseUnifiedDiff, diffStats } from './diffView.js';
-import { isCardOpen, setCardOpen } from './cardState.js';
+import { isCardOpen, setCardOpen } from './cardState.js?v=20260928subagentui1';
 
 const PREFS_KEY = 'odysseus-workbench-prefs';
 const MAX_EVENTS = 1500;

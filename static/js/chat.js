@@ -8,10 +8,10 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260819approvalcontrol1';
+import chatRenderer from './chatRenderer.js?v=20260928subagentui1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { renderDiffCard } from './diffView.js';
-import agentThread from './agentThread.js';
+import agentThread from './agentThread.js?v=20260928subagentui1';
 import { addAITTSButton } from './tts-ai.js';
 import markdownModule from './markdown.js';
 import spinnerModule from './spinner.js';

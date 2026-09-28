@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -99,5 +100,16 @@ def test_every_changed_approval_module_is_cache_busted_together():
     assert f"chatStream.js?v={version}" in chat
     assert f"compare/index.js?v={version}" in app
     assert f"stream.js?v={version}" in compare_index
-    # One chatRenderer instance, so the ask_user keydown listener binds once.
-    assert f"chatRenderer.js?v={version}" in compare_stream
+    # One chatRenderer instance, so the ask_user keydown listener binds once:
+    # every importer must use the exact tag app.js uses (the tag itself moves
+    # with each release).
+    renderer_tag = re.search(r"chatRenderer\.js\?v=([\w.-]+)", app).group(1)
+    assert f"chatRenderer.js?v={renderer_tag}" in compare_stream
+    importers = sorted((root / "static").rglob("*.js"))
+    stray = [
+        str(p.relative_to(root)) for p in importers
+        if "/lib/" not in p.as_posix()
+        and re.search(r"""from\s+['"][./]*chatRenderer\.js(?!\?v=%s)""" % re.escape(renderer_tag),
+                      p.read_text(encoding="utf-8"))
+    ]
+    assert not stray, f"chatRenderer imported with a different tag (a second module instance): {stray}"

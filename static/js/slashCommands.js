@@ -13,7 +13,7 @@ import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
 import modelsModule from './models.js';
-import chatRenderer from './chatRenderer.js';
+import chatRenderer from './chatRenderer.js?v=20260928subagentui1';
 import spinnerModule from './spinner.js';
 import themeModule from './theme.js';
 import documentModule from './document.js?v=20260815approvalsave1';
