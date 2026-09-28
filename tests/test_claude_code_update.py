@@ -392,8 +392,24 @@ async def test_auto_update_is_off_by_default(monkeypatch, tmp_path):
     assert result["error_kind"] == cct.OUTDATED_ERROR_KIND and runs == ["opus"]
 
 
-async def test_auto_update_updates_once_and_retries(monkeypatch, tmp_path):
+def _enable_auto_update(monkeypatch):
+    """Settings > Tools > Claude Code > auto-update on (the only switch)."""
+    monkeypatch.setattr(cct, "_setting",
+                        lambda key, default=None: True if key == "claude_code_auto_update" else default)
+
+
+async def test_the_environment_variable_does_not_enable_auto_update(monkeypatch, tmp_path):
+    """CLAUDE_CODE_AUTO_UPDATE was never consulted in practice (the setting
+    always has a default) and was removed on 2026-09-28; it must not start
+    switching updates on now."""
     monkeypatch.setenv("CLAUDE_CODE_AUTO_UPDATE", "1")
+    assert cct._auto_update_enabled() is False
+    _enable_auto_update(monkeypatch)
+    assert cct._auto_update_enabled() is True
+
+
+async def test_auto_update_updates_once_and_retries(monkeypatch, tmp_path):
+    _enable_auto_update(monkeypatch)
     runs = _script_runs(monkeypatch, [_outdated_result(), {"result": "done", "exit_code": 0}])
     updates = []
 
@@ -410,7 +426,7 @@ async def test_auto_update_updates_once_and_retries(monkeypatch, tmp_path):
 
 
 async def test_auto_update_does_not_retry_when_the_update_falls_short(monkeypatch, tmp_path):
-    monkeypatch.setenv("CLAUDE_CODE_AUTO_UPDATE", "1")
+    _enable_auto_update(monkeypatch)
     runs = _script_runs(monkeypatch, [_outdated_result()])
 
     async def fake_update(target=None, *, timeout=cct.UPDATE_TIMEOUT_S):
@@ -422,7 +438,7 @@ async def test_auto_update_does_not_retry_when_the_update_falls_short(monkeypatc
 
 
 async def test_auto_update_skips_a_run_that_changed_the_checkout(monkeypatch, tmp_path):
-    monkeypatch.setenv("CLAUDE_CODE_AUTO_UPDATE", "1")
+    _enable_auto_update(monkeypatch)
     dirty = _outdated_result()
     dirty["changes"] = [{"path": "a.py"}]
     _script_runs(monkeypatch, [dirty])

@@ -650,3 +650,34 @@ async def test_status_flags_bad_callback_token_file(roots, settings, monkeypatch
     out = await cct.status_report()
     assert out["ready"] is False
     assert any("not a regular file" in h for h in out["hints"])
+
+
+async def test_status_says_when_the_cloud_backend_falls_back_to_local(roots, settings, monkeypatch, tmp_path):
+    """claude_code_backend="cloud" with no cloud repository ran every
+    delegation locally without a word (2026-09-28); status now says so."""
+    async def fake_info(binary=None):
+        return {"path": "/x/claude", "available": True, "version": "2.1.290",
+                "flags": list(cct._OPTIONAL_FLAGS), "error": ""}
+
+    async def fake_auth(binary=None):
+        return {"checked": True, "logged_in": True, "auth_method": "oauth_token", "api_provider": "firstParty"}
+
+    monkeypatch.setattr(cct, "binary_info", fake_info)
+    monkeypatch.setattr(cct, "auth_status", fake_auth)
+    monkeypatch.setattr(cct, "get_task_runner", lambda: ClaudeCodeTaskRunner(store_path=str(tmp_path / "t.json")))
+    configured = {"value": False}
+    monkeypatch.setattr(cct, "_cloud_configured", lambda: configured["value"])
+
+    out = await cct.status_report()
+    assert out["backend_warning"] is None, "local is the default and needs no warning"
+
+    settings["claude_code_backend"] = "cloud"
+    out = await cct.status_report()
+    assert "run locally" in out["backend_warning"]
+    assert out["backend_warning"] in out["hints"]
+    assert cct._wants_cloud({}) is False, "the warning describes what really happens"
+
+    configured["value"] = True
+    out = await cct.status_report()
+    assert out["backend_warning"] is None
+    assert cct._wants_cloud({}) is True

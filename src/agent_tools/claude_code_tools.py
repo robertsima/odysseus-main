@@ -794,6 +794,23 @@ def _wants_cloud(args: dict) -> bool:
     return _cloud_configured() and str(_setting("claude_code_backend", "local") or "local").lower() == "cloud"
 
 
+def backend_warning() -> Optional[str]:
+    """Why the ``claude_code_backend`` setting is not being followed, or None.
+
+    "cloud" with no cloud repository configured falls through to the local
+    runner in ``_wants_cloud`` without a word. On 2026-09-28 that looked like
+    the setting did nothing, so the status report now says it out loud.
+    """
+    if str(_setting("claude_code_backend", "local") or "local").strip().lower() != "cloud":
+        return None
+    if _cloud_configured():
+        return None
+    return ("Claude Code is set to run on the cloud runner, but the cloud runner has no repository "
+            "configured, so delegations run locally on this machine. Add the repositories Claude may "
+            "work on (or * with a hub repository) under Settings > Tools > Claude Code > Cloud runner, "
+            "or set it back to run on this machine.")
+
+
 async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name: str) -> Optional[dict]:
     """Handle the action on the cloud runner, or return None for the local one."""
     task_id = str(args.get("task_id") or "").strip()
@@ -1110,8 +1127,12 @@ def _version_tuple(text: Any) -> Optional[tuple[int, int, int]]:
 
 
 def _auto_update_enabled() -> bool:
-    env_default = (os.environ.get("CLAUDE_CODE_AUTO_UPDATE") or "").strip().lower() in ("1", "true", "yes", "on")
-    return _flag_setting("claude_code_auto_update", env_default)
+    # Settings > Tools > Claude Code only. A CLAUDE_CODE_AUTO_UPDATE fallback
+    # used to sit here, but `claude_code_auto_update` always has a default
+    # (False) in DEFAULT_SETTINGS, so the environment variable was never
+    # consulted; it was removed on 2026-09-28 rather than documented as a
+    # switch that does nothing.
+    return _flag_setting("claude_code_auto_update", False)
 
 
 def update_in_progress() -> bool:
@@ -1626,6 +1647,9 @@ async def status_report() -> dict:
         else:
             _VERSION_REQUIREMENT.clear()
     available_slots = max(0, _PROCESS_LIMIT_SIZE - len(active))
+    cloud_fallback = backend_warning()
+    if cloud_fallback:
+        hints.append(cloud_fallback)
     return {
         "response": (
             f"Claude Code is {'ready' if ready else 'not ready'}; "
@@ -1643,6 +1667,9 @@ async def status_report() -> dict:
         "default_repository_source": how if default_repo else None,
         "default_tools": default_tools(),
         "default_model": str(_setting("claude_code_model", "") or "") or None,
+        # Set when the configured backend is not the one delegations use
+        # (cloud chosen, no cloud repository); None when they agree.
+        "backend_warning": cloud_fallback,
         "callback": callback_status,
         "max_concurrent_tasks": _PROCESS_LIMIT_SIZE,
         "active_tasks": len(active),
@@ -1986,7 +2013,7 @@ async def _run_claude(
 
 async def _run_with_auto_update(repository: Path, prompt: str, timeout: int, tools: list[str], **kwargs) -> dict:
     """``_run_claude``, plus one update-and-retry when the CLI is too old for
-    the model and ``claude_code_auto_update`` (CLAUDE_CODE_AUTO_UPDATE) is on.
+    the model and the ``claude_code_auto_update`` setting is on.
 
     Off by default: an update replaces the binary every delegation uses. Only
     retried when the failed run left the checkout untouched (the refusal
