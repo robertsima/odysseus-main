@@ -222,7 +222,149 @@ def _operating_roots() -> tuple:
     return tuple(roots)
 
 
-def _validate_path(raw) -> Path:
+def _same_path(a, b) -> bool:
+    return os.path.normcase(str(a)) == os.path.normcase(str(b))
+
+
+def _read_pointer(path: Path, prefix: str | None = None) -> str:
+    """One line of Git pointer metadata (`.git`, `commondir`, `gitdir`).
+
+    Only a small, single-line, regular, singly-linked file is read: a
+    symlinked or hard-linked pointer could be swapped for one aimed anywhere.
+    """
+    info = path.lstat()
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_size > 4096
+        or info.st_nlink > 1
+    ):
+        _fail("unsafe_metadata", "linked worktree pointers must be small regular files")
+    text = path.read_bytes().decode("utf-8").strip()
+    if not text or "\n" in text or "\r" in text or "\0" in text:
+        _fail("unsupported_checkout", "linked worktree pointer is malformed")
+    if prefix is not None:
+        if not text.startswith(prefix):
+            _fail("unsupported_checkout", "linked worktree pointer is malformed")
+        text = text[len(prefix):].strip()
+        if not text:
+            _fail("unsupported_checkout", "linked worktree pointer is malformed")
+    return text
+
+
+def _resolve_pointer(base: Path, text: str) -> Path:
+    target = Path(text)
+    if not target.is_absolute():
+        target = base / target
+    return Path(os.path.abspath(target)).resolve(strict=True)
+
+
+def _configured_source_repository() -> Path | None:
+    """The checkout manage_agent_worktree is configured to work from.
+
+    Its managed worktrees live under the approved worktree root while their
+    common Git directory is this checkout's; the operator configured it, so
+    it is admitted as the main repository of a linked worktree even when it
+    sits outside the repository roots.
+    """
+    try:
+        from src.agent_worktree.config import load_config
+
+        return Path(load_config().source_repo).resolve(strict=False)
+    except Exception:
+        return None
+
+
+def linked_worktree_main(worktree) -> Path:
+    """The main repository a linked worktree belongs to, verified end to end.
+
+    A linked worktree's `.git` is a FILE (`gitdir: <main>/.git/worktrees/<n>`).
+    Every hop is checked rather than trusted, so a hand-written pointer cannot
+    borrow a repository it does not belong to:
+
+    * the `.git` pointer, `commondir` and the back-pointer `gitdir` are small
+      regular files;
+    * the gitdir sits directly in `<common>/worktrees/`, and its `commondir`
+      names exactly that `<common>`;
+    * `<common>` is the physical `.git` DIRECTORY of `<main>`;
+    * the back-pointer names this worktree's own `.git` file, so a pointer
+      copied into another directory is refused;
+    * per-worktree config (`config.worktree`) and sparse checkout are refused
+      as they are for physical checkouts.
+
+    Raises RepositorySyncError; the caller still has to approve `<main>`.
+    """
+    worktree = Path(worktree)
+    try:
+        gitdir = _resolve_pointer(worktree, _read_pointer(worktree / ".git", "gitdir:"))
+        if not gitdir.is_dir() or gitdir.parent.name.casefold() != "worktrees":
+            _fail("unsupported_checkout", "linked worktree gitdir is not a registered worktree")
+        common = _resolve_pointer(gitdir, _read_pointer(gitdir / "commondir"))
+        if not _same_path(common, gitdir.parent.parent):
+            _fail("unsafe_metadata", "linked worktree commondir does not match its gitdir")
+        main = common.parent
+        main_git = main / ".git"
+        if (
+            common.name.casefold() != ".git"
+            or main_git.is_symlink()
+            or (hasattr(os.path, "isjunction") and os.path.isjunction(main_git))
+            or not main_git.is_dir()
+            or not _same_path(main_git.resolve(strict=True), common)
+        ):
+            _fail("unsupported_checkout",
+                  "linked worktree must belong to a physical checkout's .git directory")
+        back = _resolve_pointer(gitdir, _read_pointer(gitdir / "gitdir"))
+        if not _same_path(back, (worktree / ".git").resolve(strict=True)):
+            _fail("unsafe_metadata", "linked worktree gitdir does not point back at this worktree")
+        if (gitdir / "config.worktree").exists() or (gitdir / "info" / "sparse-checkout").exists():
+            _fail("unsafe_metadata", "per-worktree config and sparse checkout are not supported")
+    except RepositorySyncError:
+        raise
+    except (OSError, ValueError, UnicodeError):
+        _fail("unsupported_checkout", "linked worktree metadata could not be resolved")
+    return main
+
+
+def _approve_main_repository(main: Path) -> None:
+    """A linked worktree's main repository must pass the physical-checkout checks.
+
+    Inside the approved roots it is validated exactly like a checkout the tool
+    was pointed at; the configured agent source repository is admitted by
+    identity (see _configured_source_repository) but its Git metadata is held
+    to the same rules.
+    """
+    source = _configured_source_repository()
+    if source is not None and _same_path(main, source):
+        _private_check(main)
+        _validate_gitdir(main / ".git")
+        return
+    try:
+        _validate_path(main)
+    except RepositorySyncError as exc:
+        raise RepositorySyncError(
+            exc.code, f"linked worktree's main repository {main} was refused: {exc}"
+        ) from None
+
+
+def _private_check(resolved: Path) -> None:
+    personal = Path(PERSONAL_DIR).resolve(strict=False)
+    configured_vault = Path(vault_root()).expanduser().resolve(strict=False)
+    if (
+        resolved == Path(DATA_DIR).resolve(strict=False)
+        or _inside(resolved, personal)
+        or resolved == configured_vault
+        or _inside(resolved, configured_vault)
+    ):
+        _fail("private_path", "data, vault, and private paths cannot be synchronized")
+
+
+# Read-only manage_git actions that accept a linked worktree. Everything that
+# writes (index, refs, objects, worktree files, remote traffic) still requires
+# a physical checkout: the write paths assume `<checkout>/.git/...` layout.
+LINKED_READ_ONLY_ACTIONS = frozenset({"status", "log", "diff", "branches", "remotes"})
+
+
+def _validate_path(raw, *, allow_linked: bool = False) -> Path:
     if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
         _fail("invalid_path", "repository is required")
     given = Path(raw).expanduser()
@@ -255,16 +397,27 @@ def _validate_path(raw) -> Path:
         _fail("invalid_path", "repository path does not exist or cannot be inspected")
     if not _inside(resolved, lexical_root):
         _fail("outside_roots", "repository resolves outside its configured root")
-    personal = Path(PERSONAL_DIR).resolve(strict=False)
-    configured_vault = Path(vault_root()).expanduser().resolve(strict=False)
-    if (
-        resolved == Path(DATA_DIR).resolve(strict=False)
-        or _inside(resolved, personal)
-        or resolved == configured_vault
-        or _inside(resolved, configured_vault)
-    ):
-        _fail("private_path", "data, vault, and private paths cannot be synchronized")
+    _private_check(resolved)
     gitdir = resolved / ".git"
+    if not gitdir.is_dir() and gitdir.is_file() and not gitdir.is_symlink():
+        # A linked worktree (`git worktree add`): `.git` is a pointer file.
+        try:
+            main = linked_worktree_main(resolved)
+        except RepositorySyncError:
+            if allow_linked:
+                raise
+            main = None
+        if main is not None:
+            _approve_main_repository(main)
+            if allow_linked:
+                return resolved
+            _fail(
+                "linked_worktree_read_only",
+                f"{resolved} is a linked worktree of {main}. Linked worktrees support only "
+                "read-only actions (" + ", ".join(sorted(LINKED_READ_ONLY_ACTIONS)) + "); run "
+                f"this action in {main} itself, or use manage_agent_worktree with "
+                f"repository={main} for an isolated worktree it can commit and publish.",
+            )
     if not gitdir.is_dir():
         enclosing = workspace_repository()
         hint = (
@@ -274,8 +427,15 @@ def _validate_path(raw) -> Path:
         )
         _fail(
             "unsupported_checkout",
-            "only physical checkouts with a .git directory are supported" + hint,
+            "only physical checkouts with a .git directory (or verified linked worktrees "
+            "of one, for read-only actions) are supported" + hint,
         )
+    _validate_gitdir(gitdir)
+    return resolved
+
+
+def _validate_gitdir(gitdir: Path) -> None:
+    """Metadata rules for a physical checkout's `.git` directory."""
     if gitdir.is_symlink() or (
         hasattr(os.path, "isjunction") and os.path.isjunction(gitdir)
     ):
@@ -331,7 +491,6 @@ def _validate_path(raw) -> Path:
             "unsafe_config",
             "includes, alternate worktrees, sparse checkout, hooks, and filters are not supported",
         )
-    return resolved
 
 
 def _validate_new_path(raw, *, allow_empty_directory: bool = False) -> Path:
@@ -557,6 +716,9 @@ def _status(repo: Repo):
         dirs[:] = kept_dirs
         for name in files:
             relative = os.path.relpath(os.path.join(base, name), repo.path)
+            if relative == ".git":
+                # A linked worktree's pointer file, not content.
+                continue
             visited += 1
             if visited > 100_000:
                 _fail(
@@ -611,8 +773,9 @@ def _validate_tree(repo: Repo, commit_id: bytes) -> None:
                 )
 
 
-def _status_sync(path):
-    path = _validate_path(path)
+def _status_sync(path, *, allow_linked: bool = False):
+    path = _validate_path(path, allow_linked=allow_linked)
+    linked_main = linked_worktree_main(path) if (path / ".git").is_file() else None
     with Repo(str(path)) as repo:
         raw_head = repo.refs.read_ref(b"HEAD")
         if not raw_head or not raw_head.startswith(b"ref: refs/heads/"):
@@ -636,6 +799,11 @@ def _status_sync(path):
             "dirty": _status(repo),
             "unborn": head is None,
         }
+        if linked_main is not None:
+            # Which repository this checkout's branches, objects and remotes
+            # actually live in: write actions have to be run there.
+            result["linked_worktree"] = True
+            result["main_repository"] = str(linked_main)
         try:
             _, _, remote, merge_ref, remote_url = _branch_upstream(repo)
             result.update(
@@ -662,6 +830,20 @@ async def list_repositories():
         ]
         if enclosing is not None:
             scans.append([enclosing])
+        # manage_agent_worktree namespaces worktrees of other repositories one
+        # level deeper (<worktree root>/_repos/<repository>/<name>).
+        from src.agent_worktree.config import REPOSITORY_WORKTREE_DIR
+
+        for root in map(Path, _operating_roots()):
+            nested = root / REPOSITORY_WORKTREE_DIR
+            if nested.is_dir() and not nested.is_symlink():
+                scans.append([
+                    leaf
+                    for group in sorted(nested.iterdir())[:50]
+                    if group.is_dir() and not group.is_symlink()
+                    for leaf in sorted(group.iterdir())[:50]
+                    if leaf.is_dir()
+                ])
         for candidates in scans:
             for candidate in candidates[: 100 - len(out)]:
                 marker = candidate / ".git"
@@ -669,7 +851,7 @@ async def list_repositories():
                     continue
                 seen.add(candidate)
                 try:
-                    out.append(_status_sync(candidate))
+                    out.append(_status_sync(candidate, allow_linked=True))
                 except RepositorySyncError as exc:
                     out.append({"repository": str(candidate), **exc.as_dict()})
                 except Exception:
@@ -688,7 +870,9 @@ async def list_repositories():
 
 async def repository_status(repository):
     try:
-        return await asyncio.to_thread(_status_sync, repository)
+        return await asyncio.to_thread(
+            lambda: _status_sync(repository, allow_linked=True)
+        )
     except RepositorySyncError:
         raise
     except Exception:
@@ -697,14 +881,20 @@ async def repository_status(repository):
         ) from None
 
 
-async def run_repository_operation(repository, callback: Callable[[Path], Any]) -> Any:
+async def run_repository_operation(
+    repository, callback: Callable[[Path], Any], *, allow_linked: bool = False
+) -> Any:
     """Run one validated repository operation under its canonical lock.
 
     Cancellation is delivered only after the non-cancellable worker thread
     exits, so a second operation can never overlap a cancelled caller's work.
+    ``allow_linked`` admits a verified linked worktree; only read-only
+    callers may pass it.
     """
     try:
-        path = await asyncio.to_thread(_validate_path, repository)
+        path = await asyncio.to_thread(
+            lambda: _validate_path(repository, allow_linked=allow_linked)
+        )
     except RepositorySyncError:
         raise
     except Exception:

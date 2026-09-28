@@ -46,16 +46,33 @@ Confirmations include `expected_head` and/or `expected_target` as appropriate;
 stale commit IDs refuse the operation. The tool is withheld entirely in plan
 mode because it also exposes write actions.
 
-The initial supported scope is ordinary physical checkouts with a `.git`
+The supported scope is ordinary physical checkouts with a `.git`
 directory; network operations require a configured `https://github.com/owner/repo`
 remote. Standard
 `git@github.com:owner/repo.git` URLs are normalized in memory; saved config is
-unchanged. Linked worktrees, vault directories, symlinks, submodules,
+unchanged. Vault directories, symlinks, submodules,
 filter-dependent checkouts and other remote hosts are refused. This is **not**
 a general Git/test sandbox. It does not execute hooks or credential helpers.
 Arbitrary commands, unconditional force-push, interactive rebase, remote URL
 changes, and conflict-resolving merges remain unavailable; they cannot be
 smuggled through arbitrary arguments.
+
+**Linked worktrees** (created with `git worktree add`; their `.git` is a file
+reading `gitdir: <main>/.git/worktrees/<name>`) support the read-only actions
+`status`, `log`, `diff`, `branches` and `remotes`, plus
+`manage_agent_worktree repo_status`/`repo_list`, which report
+`linked_worktree: true` and the `main_repository`. Every hop is verified before
+anything is read: the pointer, `commondir` and back-pointer `gitdir` must be
+small regular files; the gitdir must sit directly in `<main>/.git/worktrees/`
+and its `commondir` must name exactly that `.git` directory; the back-pointer
+must name this worktree's own `.git` (a copied pointer is refused);
+`config.worktree` and sparse checkout are refused; and the main repository must
+itself pass every physical-checkout check above, inside the approved roots (or
+be the configured `ODYSSEUS_AGENT_SOURCE_REPO`, whose managed worktrees live
+under the worktree root). Write actions, `fetch` and `pull` on a linked worktree
+are refused with `linked_worktree_read_only`, naming the main repository to run
+them in: the write paths assume a physical `.git` directory, and refs and
+objects are shared with the main checkout anyway.
 
 Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
 current chat permits the `github_read` integration; sessionless calls are
@@ -126,7 +143,8 @@ create a worktree, edit, run tests and commit — it simply cannot push.
 
 ## How the flow runs
 
-1. **Agent** starts or reuses a worktree on a branch under `agent/odysseus/`.
+1. **Agent** starts or reuses a worktree on a branch under `agent/odysseus/`
+   (or `agent/<repo>/` for another repository, see below).
 2. **Agent** edits and tests there, then commits.
 3. **Agent** calls `request_publish`. This freezes the change and records the
    repository, branch, head commit, changed-file list and which of those files
@@ -139,6 +157,71 @@ create a worktree, edit, run tests and commit — it simply cannot push.
 
 The agent has no action that grants an approval. The code exists only in your
 terminal and in the agent's message from you.
+
+## Worktrees of other repositories
+
+Without `repository`, `manage_agent_worktree` works on the configured source
+checkout (`ODYSSEUS_AGENT_SOURCE_REPO`), exactly as before: branches under
+`agent/odysseus/`, worktrees at `<data>/agent_worktrees/<name>`, publishing to
+`ODYSSEUS_AGENT_REPO`. For any other project pass `repository`, an absolute
+path from `repo_list`:
+
+```json
+{"action": "start", "repository": "/app/data/development/dog-trainer",
+ "name": "checkin-slice", "base": "origin/main",
+ "expected_base": "0025d3e…full 40-character sha…"}
+```
+
+| Argument | Meaning |
+|---|---|
+| `repository` | Any checkout that passes the scoped-Git checks (approved roots, no symlinks, no hooks/includes/filters in its config). A linked worktree path resolves to its main repository. |
+| `name` | The task name. The branch becomes `agent/<repo>/<name>`, where `<repo>` is the GitHub repository name of its `origin` (else the directory name), e.g. `agent/umni/checkin-slice`. |
+| `base` | Where a new branch starts: a remote ref (`origin/main`), a local branch, or a commit. Default: the configured base branch for the source checkout, `origin/HEAD` for others. The branch starts at the resolved **commit** and tracks nothing. |
+| `expected_base` | Optional full SHA. `start` refuses (`BASE_MISMATCH`) and creates nothing unless `base` resolves to exactly it. |
+| `branch` | Optional explicit branch name inside the namespace. A value that names an existing ref (`origin/main`, `refs/...`, a commit) is **used as the base**, never as a branch name. |
+
+Worktrees of other repositories live at
+`<data>/agent_worktrees/_repos/<repo>-<hash>/<name>`, so equal task names in
+two repositories never collide, and `status` lists each worktree with the
+`repository` it belongs to. Later calls (`commit`, `diff`, `request_publish`,
+`cleanup`) take the same `repository`, or just the name when it is unique
+across repositories. Base and PR-target metadata is kept in the approval state
+directory, which the agent's file tools cannot write.
+
+`request_publish`/`publish` for such a worktree push to **that** repository's
+own `origin` (it must be an `https://github.com/owner/name` or
+`git@github.com:` remote; the push URL is derived from it) and open the draft PR
+against the base branch it was started from, still behind the same human
+approval code. The publishing credential (the GitHub App installation or the
+fallback token) must have access to that repository. Because the push runs from
+that repository's checkout, publishing is refused while its `.git/config`
+contains `[url]`, `[http]`, `[include]`, `[protocol]`, `[filter]` sections or
+`core.sshCommand`/`askPass`/`gitProxy`/`hooksPath`/`worktree`, and the push
+itself runs with hooks, fsmonitor, credential helpers and non-https transports
+switched off.
+
+A worker whose workspace is in another checkout gets `REPOSITORY_REQUIRED`
+(nothing created) if it calls `start` without `repository`; the 2026-09-28
+failure was exactly that call silently making a worktree of Odysseus.
+
+## Cleaning up a worktree
+
+`remove` stays refused. `cleanup` removes a worktree only when nothing would be
+lost:
+
+- any modified or untracked file refuses it (`WORKTREE_DIRTY`); nothing is removed;
+- the directory is detached with a plain `git worktree remove` (no `--force`);
+- the agent branch is deleted only when another ref (a remote-tracking branch,
+  another branch or a tag) still contains its tip; otherwise it is kept and the
+  result says why.
+
+The stray worktree created on 2026-09-28 (branch `agent/odysseus/origin/main`
+at `/app/data/agent_worktrees/origin__main`, made from the Odysseus base
+branch) is removed with:
+
+```json
+{"action": "cleanup", "branch": "agent/odysseus/origin/main"}
+```
 
 ## If it says "unauthorized" or "cannot authenticate"
 
@@ -382,7 +465,9 @@ exactly what plan mode is for.
   where that matters, disable `bash` and `python` for the agent. With shell
   enabled, treat this flow as a workflow and an audit trail rather than a
   security boundary.
-- The push runs from the operator's checkout, not from the worktree, and pins
-  TLS verification and an empty proxy through environment config. That stops a
-  `.git/config` written inside the worktree from redirecting the credentialed
-  request.
+- The push runs from the repository's own checkout, not from the worktree, and
+  pins TLS verification and an empty proxy through environment config. That
+  stops a `.git/config` written inside the worktree from redirecting the
+  credentialed request. Every git call also pins `core.hooksPath` to an empty
+  directory and `core.fsmonitor=false`, and each worktree's `.git` pointer is
+  verified to lead back to its repository before git runs in it.

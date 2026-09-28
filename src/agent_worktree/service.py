@@ -3,9 +3,11 @@
 The shape of the flow, and why each step exists:
 
 1. ``ensure_worktree`` gives the agent one persistent checkout it owns. It is a
-   real ``git worktree`` of the operator's repository, on a branch inside the
-   ``agent/odysseus/`` namespace, living under a configured root that every path
-   is re-checked against.
+   real ``git worktree`` of a repository, on a branch inside that repository's
+   agent namespace (``agent/odysseus/`` for the configured source repository,
+   ``agent/<repository>/`` for any other approved checkout), living under a
+   configured root that every path is re-checked against. The new branch
+   starts at an explicit base commit and never tracks anything.
 2. The agent edits and tests there with its normal tools, and commits through
    ``commit`` (fixed bot identity, argv-only git).
 3. ``request_publish`` freezes the change: it records the exact repo, branch,
@@ -14,30 +16,49 @@ The shape of the flow, and why each step exists:
 4. A human runs the CLI, sees the file list, and grants a short-lived single-use
    approval code.
 5. ``publish`` spends that code — re-verifying every bound fact against the live
-   worktree, not against what the request claimed — then pushes and opens a
-   **draft** PR.
+   worktree, not against what the request claimed — then pushes to THAT
+   repository's GitHub remote and opens a **draft** PR.
+6. ``cleanup`` detaches a worktree only when nothing would be lost: the tree is
+   clean, and the branch is deleted only when another ref still holds its tip.
 
 Every step re-derives state from git rather than trusting a stored value, so a
 tampered state file cannot substitute a different change for the approved one.
+
+Repositories. Without ``repository`` every operation works on the configured
+source repository (``ODYSSEUS_AGENT_SOURCE_REPO``), exactly as before. With
+it, the path must be an approved checkout (repository_sync's roots and
+metadata checks); its worktrees live under ``<root>/_repos/<key>/`` and its
+publish target is derived from its own ``origin`` remote.
 """
 
 from __future__ import annotations
 
+import asyncio
+import dataclasses
 import hashlib
+import json
 import logging
 import os
+import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.agent_worktree import approval as approval_mod
-from src.agent_worktree.config import BRANCH_PREFIX, WorktreeConfig, load_config, publish_blockers
+from src.agent_worktree.config import (
+    REPOSITORY_WORKTREE_DIR,
+    WorktreeConfig,
+    load_config,
+    publish_blockers,
+)
 from src.agent_worktree.gitcmd import GitError, auth_env, git_path, run_git
 from src.agent_worktree.locking import LockBusy, file_lock
 from src.agent_worktree import sensitive as sensitive_mod
 from src.agent_worktree.validation import (
     branch_leaf_from_name,
     is_inside,
+    is_valid_repo_slug,
     is_valid_sha,
+    normalize_branch,
     safe_worktree_path,
     validate_agent_branch,
 )
@@ -45,6 +66,11 @@ from src.agent_worktree.validation import (
 logger = logging.getLogger(__name__)
 
 MAX_CHANGED_FILES = 500
+
+__all__ = [
+    "WorktreeError", "ensure_worktree", "status", "commit", "diff_summary",
+    "request_publish", "publish", "cleanup", "remove_worktree", "repository_config",
+]
 
 
 class WorktreeError(RuntimeError):
@@ -70,43 +96,487 @@ def files_digest(paths: List[str]) -> str:
     return hasher.hexdigest()
 
 
-async def _head_sha(worktree: str) -> str:
-    res = await run_git(["rev-parse", "HEAD"], cwd=worktree)
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.realpath(a)) == os.path.normcase(os.path.realpath(b))
+
+
+# ── git with repository-controlled execution switched off ───────────────────
+
+
+def _no_hooks_dir(cfg: WorktreeConfig) -> str:
+    path = os.path.join(cfg.state_dir, "no-hooks")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _hardened_env(
+    cfg: WorktreeConfig, extra: Optional[Dict[str, str]] = None, *, foreign: bool = False
+) -> Dict[str, str]:
+    """``extra`` plus config that outranks anything in the repository.
+
+    GIT_CONFIG_COUNT entries are command-line scope, so a hook directory or
+    fsmonitor command in a repository's (or a worktree's) config cannot run
+    inside this process. Appended after ``extra`` so the auth header keeps
+    index 0. For repositories other than the configured one, pushes also drop
+    every credential helper and every transport except https, so repository
+    config cannot hand the publishing credential to a command.
+    """
+    env = dict(extra or {})
+    count = int(env.get("GIT_CONFIG_COUNT") or 0)
+    pairs = [("core.hooksPath", _no_hooks_dir(cfg)), ("core.fsmonitor", "false")]
+    if foreign:
+        pairs += [
+            ("credential.helper", ""),
+            ("protocol.allow", "never"),
+            ("protocol.https.allow", "always"),
+            # Signing runs gpg.program; the bot identity does not sign.
+            ("commit.gpgSign", "false"),
+            ("tag.gpgSign", "false"),
+            ("push.gpgSign", "false"),
+        ]
+    for offset, (key, value) in enumerate(pairs):
+        env[f"GIT_CONFIG_KEY_{count + offset}"] = key
+        env[f"GIT_CONFIG_VALUE_{count + offset}"] = value
+    env["GIT_CONFIG_COUNT"] = str(count + len(pairs))
+    return env
+
+
+async def _git(cfg: WorktreeConfig, args: List[str], *, cwd: str,
+               extra_env: Optional[Dict[str, str]] = None, **kwargs):
+    return await run_git(
+        args, cwd=cwd,
+        extra_env=_hardened_env(cfg, extra_env, foreign=bool(cfg.repository_key)),
+        **kwargs,
+    )
+
+
+async def _head_sha(cfg: WorktreeConfig, worktree: str) -> str:
+    res = await _git(cfg, ["rev-parse", "HEAD"], cwd=worktree)
     sha = res.stdout.strip()
     if not is_valid_sha(sha):
         raise WorktreeError("could not read a valid HEAD commit")
     return sha
 
 
-async def _current_branch(worktree: str) -> str:
-    res = await run_git(["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=worktree, check=False)
+async def _current_branch(cfg: WorktreeConfig, worktree: str) -> str:
+    res = await _git(cfg, ["symbolic-ref", "--quiet", "--short", "HEAD"], cwd=worktree, check=False)
     return res.stdout.strip() if res.ok else ""
 
 
-async def _is_dirty(worktree: str) -> bool:
-    res = await run_git(["status", "--porcelain"], cwd=worktree)
-    return bool(res.stdout.strip())
+async def _dirty_entries(cfg: WorktreeConfig, worktree: str) -> List[str]:
+    res = await _git(cfg, ["status", "--porcelain", "--untracked-files=all"], cwd=worktree)
+    return [line for line in res.stdout.splitlines() if line.strip()]
 
 
-async def _base_ref(cfg: WorktreeConfig, worktree: str) -> str:
-    """Ref to diff against: the tracked remote base if present, else local."""
-    for candidate in (f"origin/{cfg.base_branch}", cfg.base_branch):
-        res = await run_git(
-            ["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
-            cwd=worktree,
-            check=False,
+async def _is_dirty(cfg: WorktreeConfig, worktree: str) -> bool:
+    return bool(await _dirty_entries(cfg, worktree))
+
+
+# ── which repository ─────────────────────────────────────────────────────────
+
+
+def _repo_label(slug: str, path: str) -> str:
+    raw = (slug.split("/", 1)[1] if slug else os.path.basename(path.rstrip("/\\"))).lower()
+    label = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-._")[:40].rstrip("-._")
+    if label.endswith(".lock"):
+        label = label[: -len(".lock")]
+    if not label or not label[0].isalnum():
+        label = "repo" + (("-" + label) if label else "")
+    return label
+
+
+def _repo_key(label: str, path: str) -> str:
+    digest = hashlib.sha256(
+        os.path.normcase(os.path.realpath(path)).encode("utf-8")
+    ).hexdigest()[:8]
+    return f"{label}-{digest}"
+
+
+def _origin_slug(repository: str) -> str:
+    """owner/name of the checkout's github.com ``origin``, or "".
+
+    Read from the config file, never by running git in it, and only a
+    credential-free https (or scp-style) github.com remote qualifies: the
+    publish target is https://github.com/<slug>.git, derived, not configured.
+    """
+    try:
+        from dulwich.repo import Repo
+
+        from src.agent_worktree.repository_sync import RepositorySyncError, _https_url
+
+        with Repo(repository) as repo:
+            raw = repo.get_config().get((b"remote", b"origin"), b"url").decode("utf-8")
+        url = _https_url(raw)
+    except (KeyError, RepositorySyncError, OSError, UnicodeError, ValueError, ImportError):
+        return ""
+    except Exception:  # noqa: BLE001 - any unreadable config means "no target"
+        return ""
+    prefix = "https://github.com/"
+    if not url.lower().startswith(prefix):
+        return ""
+    slug = url[len(prefix):]
+    if slug.lower().endswith(".git"):
+        slug = slug[:-4]
+    return slug if is_valid_repo_slug(slug) else ""
+
+
+async def repository_config(
+    cfg: WorktreeConfig, repository: Optional[str]
+) -> WorktreeConfig:
+    """The configuration for one repository's worktrees.
+
+    ``None``/empty or the configured source repository returns ``cfg``
+    unchanged. Anything else must pass repository_sync's approved-root and
+    metadata checks; a verified linked worktree is resolved to the repository
+    it belongs to.
+    """
+    raw = str(repository or "").strip()
+    if not raw:
+        return cfg
+    if not os.path.isabs(raw):
+        raise WorktreeError(
+            f"repository must be an absolute local checkout path, not {raw!r}",
+            code="INVALID_REPOSITORY",
+        )
+    if _same_path(raw, cfg.source_repo):
+        return cfg
+    try:
+        from src.agent_worktree import repository_sync as sync
+    except ImportError as exc:  # pragma: no cover - environment problem
+        raise WorktreeError(f"repository support is unavailable: {exc}")
+
+    def _validate() -> str:
+        path = sync._validate_path(raw, allow_linked=True)
+        if (path / ".git").is_file():
+            path = sync.linked_worktree_main(path)
+        return os.path.realpath(str(path))
+
+    try:
+        main = await asyncio.to_thread(_validate)
+    except sync.RepositorySyncError as exc:
+        raise WorktreeError(f"repository {raw} was refused: {exc}", code="INVALID_REPOSITORY")
+    if _same_path(main, cfg.source_repo):
+        return cfg
+    if is_inside(main, cfg.worktree_root):
+        raise WorktreeError(
+            f"{main} is inside the agent worktree root; pass the repository it was "
+            "created from instead", code="INVALID_REPOSITORY",
+        )
+    slug = await asyncio.to_thread(_origin_slug, main)
+    label = _repo_label(slug, main)
+    return dataclasses.replace(
+        cfg,
+        source_repo=main,
+        repo_slug=slug,
+        base_branch="",
+        branch_prefix=f"agent/{label}/",
+        repository_key=_repo_key(label, main),
+    )
+
+
+def _repository_root(cfg: WorktreeConfig) -> str:
+    if not cfg.repository_key:
+        return cfg.worktree_root
+    return os.path.join(cfg.worktree_root, REPOSITORY_WORKTREE_DIR, cfg.repository_key)
+
+
+def _worktree_dir(cfg: WorktreeConfig, branch: str) -> str:
+    path = safe_worktree_path(_repository_root(cfg), branch, cfg.branch_prefix)
+    if not path or not is_inside(path, cfg.worktree_root):
+        raise WorktreeError(f"branch {branch!r} is not a valid agent branch", code="INVALID_BRANCH")
+    return path
+
+
+# ── per-worktree metadata (state dir: agent file tools cannot write it) ─────
+
+
+def _meta_dir(cfg: WorktreeConfig) -> str:
+    return os.path.join(cfg.state_dir, "worktrees", cfg.repository_key or "_default")
+
+
+def _meta_path(cfg: WorktreeConfig, branch: str) -> str:
+    leaf = branch[len(cfg.branch_prefix):].replace("/", "__")
+    return os.path.join(_meta_dir(cfg), f"{leaf}.json")
+
+
+def _load_meta(cfg: WorktreeConfig, branch: str) -> Dict[str, Any]:
+    try:
+        with open(_meta_path(cfg, branch), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) and data.get("branch") == branch else {}
+
+
+def _save_meta(cfg: WorktreeConfig, branch: str, data: Dict[str, Any]) -> None:
+    from core.atomic_io import atomic_write_json
+
+    os.makedirs(_meta_dir(cfg), exist_ok=True)
+    atomic_write_json(_meta_path(cfg, branch), data, indent=2)
+
+
+def _drop_meta(cfg: WorktreeConfig, branch: str) -> None:
+    try:
+        os.remove(_meta_path(cfg, branch))
+    except OSError:
+        pass
+
+
+def _all_meta(cfg: WorktreeConfig) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    base = os.path.join(cfg.state_dir, "worktrees")
+    try:
+        groups = sorted(os.listdir(base))
+    except OSError:
+        return out
+    for group in groups:
+        directory = os.path.join(base, group)
+        try:
+            names = sorted(os.listdir(directory))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(directory, name), "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and isinstance(data.get("branch"), str):
+                data["_group"] = group
+                out.append(data)
+    return out
+
+
+# ── base refs ────────────────────────────────────────────────────────────────
+
+
+async def _remote_names(cfg: WorktreeConfig) -> List[str]:
+    res = await _git(cfg, ["remote"], cwd=cfg.source_repo, check=False)
+    return [line.strip() for line in res.stdout.splitlines() if line.strip()] if res.ok else []
+
+
+async def _looks_like_base(cfg: WorktreeConfig, value: str) -> bool:
+    """True when ``value`` names an existing ref or commit rather than a new branch.
+
+    ``{"branch": "origin/main"}`` meant "start from origin/main"; taken as a
+    branch name it produced ``agent/odysseus/origin/main`` (2026-09-28).
+    """
+    text = value.strip().strip("/")
+    if not text:
+        return False
+    first = text.split("/", 1)[0]
+    if text == "HEAD" or first in {"refs", "remotes"}:
+        return True
+    # origin/upstream count even where no such remote is configured: a branch
+    # named agent/<repo>/origin/main is wrong in every repository.
+    if "/" in text and first in {"origin", "upstream", *await _remote_names(cfg)}:
+        return True
+    if re.fullmatch(r"[0-9a-fA-F]{7,64}", text):
+        res = await _git(cfg, ["rev-parse", "--verify", "--quiet", f"{text}^{{commit}}"],
+                         cwd=cfg.source_repo, check=False)
+        return res.ok and bool(res.stdout.strip())
+    return False
+
+
+async def _origin_default_branch(cfg: WorktreeConfig) -> str:
+    res = await _git(cfg, ["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"],
+                     cwd=cfg.source_repo, check=False)
+    ref = res.stdout.strip() if res.ok else ""
+    prefix = "refs/remotes/origin/"
+    return normalize_branch(ref[len(prefix):]) if ref.startswith(prefix) else ""
+
+
+async def _resolve_base(cfg: WorktreeConfig, base: str) -> Dict[str, str]:
+    """{"ref", "sha", "pr_base"} for an explicit base (ref name or commit)."""
+    text = (base or "").strip()
+    if not normalize_branch(text):
+        raise WorktreeError(
+            f"base {text!r} is not a usable ref: pass a branch such as origin/main, "
+            "a local branch, or a commit SHA", code="INVALID_BASE",
+        )
+    res = await _git(cfg, ["rev-parse", "--verify", "--quiet", f"{text}^{{commit}}"],
+                     cwd=cfg.source_repo, check=False)
+    sha = res.stdout.strip() if res.ok else ""
+    if not is_valid_sha(sha):
+        raise WorktreeError(
+            f"base {text!r} does not resolve to a commit in {cfg.source_repo}; fetch it "
+            f"first (manage_git fetch with repository={cfg.source_repo}) or check the name",
+            code="BASE_NOT_FOUND",
+        )
+    full = (await _git(cfg, ["rev-parse", "--symbolic-full-name", text],
+                       cwd=cfg.source_repo, check=False)).stdout.strip()
+    pr_base = ""
+    if full.startswith("refs/remotes/"):
+        pr_base = full[len("refs/remotes/"):].partition("/")[2]
+        if pr_base == "HEAD":
+            pr_base = ""
+    elif full.startswith("refs/heads/"):
+        pr_base = full[len("refs/heads/"):]
+    if not pr_base:
+        pr_base = await _origin_default_branch(cfg) or cfg.base_branch
+    return {"ref": text, "sha": sha, "pr_base": normalize_branch(pr_base)}
+
+
+async def _default_base(cfg: WorktreeConfig) -> Dict[str, str]:
+    """The base used when none is given."""
+    if not cfg.repository_key:
+        # The configured source repository keeps its configured base branch.
+        for candidate in (f"origin/{cfg.base_branch}", cfg.base_branch):
+            res = await _git(cfg, ["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+                             cwd=cfg.source_repo, check=False)
+            if res.ok and is_valid_sha(res.stdout.strip()):
+                return {"ref": candidate, "sha": res.stdout.strip(), "pr_base": cfg.base_branch}
+        raise WorktreeError(
+            f"base branch {cfg.base_branch!r} not found in {cfg.source_repo}; fetch it first",
+            code="BASE_NOT_FOUND",
+        )
+    default = await _origin_default_branch(cfg)
+    if not default:
+        raise WorktreeError(
+            f"{cfg.source_repo} has no origin/HEAD to default to; pass base explicitly "
+            "(for example base='origin/main')", code="BASE_REQUIRED",
+        )
+    return await _resolve_base(cfg, f"origin/{default}")
+
+
+async def _is_ancestor(cfg: WorktreeConfig, ancestor: str, descendant: str) -> bool:
+    res = await _git(cfg, ["merge-base", "--is-ancestor", ancestor, descendant],
+                     cwd=cfg.source_repo, check=False)
+    return res.ok
+
+
+def _check_expected(expected_base: Optional[str], resolved: Dict[str, str]) -> None:
+    if not expected_base:
+        return
+    if resolved["sha"] != expected_base:
+        raise WorktreeError(
+            f"base {resolved['ref']!r} is at {resolved['sha']}, not the expected "
+            f"{expected_base}; nothing was created. Fetch, re-check the base, or drop "
+            "expected_base if the newer commit is intended.", code="BASE_MISMATCH",
+        )
+
+
+# ── locating a worktree ──────────────────────────────────────────────────────
+
+
+def _branch_in(cfg: WorktreeConfig, name: str) -> str:
+    return validate_agent_branch(name, cfg.branch_prefix) or branch_leaf_from_name(
+        name, cfg.branch_prefix
+    )
+
+
+def _worktree_exists(path: str) -> bool:
+    return os.path.exists(os.path.join(path, ".git"))
+
+
+async def _locate(
+    cfg: WorktreeConfig, name: str, repository: Optional[str]
+) -> Tuple[WorktreeConfig, str, str]:
+    """(repository config, branch, path) for a worktree name.
+
+    With ``repository`` the name is resolved in that repository. Without it
+    the configured source repository is tried first, then the worktrees
+    started in other repositories (recorded in the state directory), so a
+    name unique across repositories needs no ``repository`` on later calls.
+    """
+    if str(repository or "").strip():
+        rcfg = await repository_config(cfg, repository)
+        branch = _branch_in(rcfg, name)
+        if not branch:
+            raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
+        return rcfg, branch, _worktree_dir(rcfg, branch)
+
+    branch = _branch_in(cfg, name)
+    default_path = _worktree_dir(cfg, branch) if branch else ""
+    if default_path and _worktree_exists(default_path):
+        return cfg, branch, default_path
+    wanted = name.strip().strip("/")
+    matches = [
+        meta for meta in _all_meta(cfg)
+        if meta.get("_group") != "_default"
+        and (
+            meta.get("branch") == wanted
+            or str(meta.get("branch") or "").split("/", 2)[-1] == wanted
+        )
+    ]
+    if len(matches) > 1:
+        repos = ", ".join(sorted({str(m.get("repository")) for m in matches}))
+        raise WorktreeError(
+            f"worktree {wanted!r} exists in several repositories ({repos}); pass repository",
+            code="AMBIGUOUS_WORKTREE",
+        )
+    if matches:
+        rcfg = await repository_config(cfg, str(matches[0].get("repository") or ""))
+        found = validate_agent_branch(matches[0]["branch"], rcfg.branch_prefix)
+        if rcfg.repository_key == matches[0].get("_group") and found:
+            return rcfg, found, _worktree_dir(rcfg, found)
+    if not branch:
+        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
+    return cfg, branch, default_path
+
+
+def _verify_membership(cfg: WorktreeConfig, path: str) -> None:
+    """The worktree's `.git` pointer must lead back to this repository.
+
+    The agent can write inside its worktree, `.git` pointer file included; a
+    pointer to a hand-made gitdir would make every git call here read config
+    the agent chose.
+    """
+    from src.agent_worktree.repository_sync import RepositorySyncError, linked_worktree_main
+
+    try:
+        main = str(linked_worktree_main(path))
+        source = cfg.source_repo
+        if os.path.isfile(os.path.join(source, ".git")):
+            # The configured checkout is itself a linked worktree; its
+            # worktrees share the main repository's common directory.
+            source = str(linked_worktree_main(source))
+    except RepositorySyncError as exc:
+        raise WorktreeError(f"worktree {path} failed its metadata check: {exc}")
+    if not _same_path(main, source):
+        raise WorktreeError(f"worktree {path} does not belong to {cfg.source_repo}")
+
+
+def _verify_ok(cfg: WorktreeConfig, path: str) -> bool:
+    try:
+        _verify_membership(cfg, path)
+        return True
+    except WorktreeError:
+        return False
+
+
+def _publish_cfg(cfg: WorktreeConfig, branch: str) -> WorktreeConfig:
+    """cfg with base_branch set to the branch the PR targets for this worktree."""
+    meta = _load_meta(cfg, branch)
+    pr_base = normalize_branch(str(meta.get("pr_base") or "")) or cfg.base_branch
+    return dataclasses.replace(cfg, base_branch=pr_base) if pr_base != cfg.base_branch else cfg
+
+
+async def _base_ref(cfg: WorktreeConfig, worktree: str, branch: str) -> str:
+    """Ref to diff against: the PR base (remote first), else the recorded base commit."""
+    meta = _load_meta(cfg, branch)
+    pr_base = normalize_branch(str(meta.get("pr_base") or "")) or cfg.base_branch
+    candidates = [f"origin/{pr_base}", pr_base] if pr_base else []
+    if is_valid_sha(meta.get("base_sha")):
+        candidates.append(meta["base_sha"])
+    for candidate in candidates:
+        res = await _git(
+            cfg, ["rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}"],
+            cwd=worktree, check=False,
         )
         if res.ok and res.stdout.strip():
             return candidate
     raise WorktreeError(
-        f"base branch {cfg.base_branch!r} not found in the worktree; fetch it first"
+        f"base branch {pr_base or '(none recorded)'!r} not found in the worktree; fetch it first"
     )
 
 
-async def _changed_files(cfg: WorktreeConfig, worktree: str) -> List[str]:
+async def _changed_files(cfg: WorktreeConfig, worktree: str, branch: str) -> List[str]:
     """Files the branch changes relative to its merge base with the base branch."""
-    base = await _base_ref(cfg, worktree)
-    res = await run_git(["diff", "--name-only", f"{base}...HEAD"], cwd=worktree)
+    base = await _base_ref(cfg, worktree, branch)
+    res = await _git(cfg, ["diff", "--name-only", f"{base}...HEAD"], cwd=worktree)
     files = [line.strip() for line in res.stdout.splitlines() if line.strip()]
     if len(files) > MAX_CHANGED_FILES:
         raise WorktreeError(
@@ -116,17 +586,26 @@ async def _changed_files(cfg: WorktreeConfig, worktree: str) -> List[str]:
     return files
 
 
-def _worktree_dir(cfg: WorktreeConfig, branch: str) -> str:
-    path = safe_worktree_path(cfg.worktree_root, branch, BRANCH_PREFIX)
-    if not path:
-        raise WorktreeError(f"branch {branch!r} is not a valid agent branch")
-    return path
+# ── start ────────────────────────────────────────────────────────────────────
 
 
 async def ensure_worktree(
-    name: str, *, cfg: Optional[WorktreeConfig] = None
+    name: str = "",
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
+    base: Optional[str] = None,
+    expected_base: Optional[str] = None,
+    branch: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Create or reuse the persistent worktree for one agent branch.
+
+    ``name`` is the task name; ``branch`` optionally names the new branch
+    (inside the repository's agent namespace). ``base`` is where a NEW branch
+    starts — a ref such as origin/main, a local branch, or a commit — and
+    ``expected_base`` (a full SHA) makes the call refuse unless ``base``
+    resolves to exactly that commit. A ``branch`` that names an existing ref
+    (origin/main, refs/..., a commit) is taken as the base, never as a branch.
 
     Editing and testing do not require publishing to be enabled — the isolation
     is useful on its own — so this deliberately does not check the publish flag.
@@ -134,193 +613,376 @@ async def ensure_worktree(
     cfg = cfg or load_config()
     if not git_path():
         raise WorktreeError("git is not installed or not on PATH")
-    branch = branch_leaf_from_name(name, BRANCH_PREFIX)
-    if not branch:
-        raise WorktreeError(
-            "worktree name must form a valid branch under " + BRANCH_PREFIX
-        )
-    if not os.path.exists(os.path.join(cfg.source_repo, ".git")):
-        raise WorktreeError(f"source repository {cfg.source_repo} is not a git checkout")
+    rcfg = await repository_config(cfg, repository)
+    if not os.path.exists(os.path.join(rcfg.source_repo, ".git")):
+        raise WorktreeError(f"source repository {rcfg.source_repo} is not a git checkout")
+    notes: List[str] = []
+    base = str(base or "").strip() or None
+    expected = str(expected_base or "").strip().lower() or None
+    if expected and not is_valid_sha(expected):
+        raise WorktreeError("expected_base must be a full 40- or 64-character commit SHA",
+                            code="INVALID_BASE")
 
-    path = _worktree_dir(cfg, branch)
-    os.makedirs(cfg.worktree_root, exist_ok=True)
+    requested = str(branch or "").strip()
+    name = str(name or "").strip()
+    for field, value in (("branch", requested), ("name", name)):
+        if value and await _looks_like_base(rcfg, value):
+            if base and base != value:
+                raise WorktreeError(
+                    f"{field} {value!r} names an existing ref or commit, not a new branch, "
+                    f"and base {base!r} was also given; pass the task name as 'name' and "
+                    "the starting point as 'base'", code="BRANCH_IS_BASE",
+                )
+            base = value
+            notes.append(
+                f"{field} {value!r} names an existing ref, so it was used as the base; "
+                "branches are never named after a base ref."
+            )
+            if field == "branch":
+                requested = ""
+            else:
+                name = ""
+    target = requested or name
+    if not target:
+        raise WorktreeError(
+            "a task name is required ('name', e.g. 'checkin-fix'); pass the starting "
+            "point separately as 'base'", code="MISSING_BRANCH",
+        )
+    new_branch = _branch_in(rcfg, target)
+    if not new_branch:
+        raise WorktreeError(
+            "worktree name must form a valid branch under " + rcfg.branch_prefix,
+            code="INVALID_BRANCH",
+        )
+    leaf = new_branch[len(rcfg.branch_prefix):]
+    if await _looks_like_base(rcfg, leaf):
+        raise WorktreeError(
+            f"branch {new_branch!r} would be named after the ref {leaf!r}; use a task name "
+            f"and pass base={leaf!r}", code="BRANCH_IS_BASE",
+        )
+
+    path = _worktree_dir(rcfg, new_branch)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    resolved_base: Optional[Dict[str, str]] = None
 
     try:
         with file_lock(_lock_path(cfg)):
             # Reuse an existing, healthy worktree.
-            if os.path.isdir(os.path.join(path, ".git")) or os.path.isfile(
-                os.path.join(path, ".git")
-            ):
-                current = await _current_branch(path)
-                if current != branch:
+            if _worktree_exists(path):
+                _verify_membership(rcfg, path)
+                current = await _current_branch(rcfg, path)
+                if current != new_branch:
                     raise WorktreeError(
                         f"worktree {path} is on {current or 'a detached HEAD'}, "
-                        f"expected {branch}"
+                        f"expected {new_branch}"
                     )
-                return await status(branch, cfg=cfg)
-
-            # Stale registration from a deleted directory would block `add`.
-            await run_git(["worktree", "prune"], cwd=cfg.source_repo, check=False)
+                if base or expected:
+                    # Reusing is only right when the worktree started where the
+                    # caller wants to start. A worktree recorded before bases
+                    # were tracked passes when it contains the wanted commit.
+                    recorded = _load_meta(rcfg, new_branch).get("base_sha")
+                    if base:
+                        resolved_base = await _resolve_base(rcfg, base)
+                        _check_expected(expected, resolved_base)
+                        wanted_sha, wanted = resolved_base["sha"], f"{resolved_base['ref']} ({resolved_base['sha']})"
+                    else:
+                        wanted_sha, wanted = expected, str(expected)
+                    if recorded != wanted_sha and not (
+                        not recorded and await _is_ancestor(rcfg, wanted_sha, new_branch)
+                    ):
+                        raise WorktreeError(
+                            f"worktree {new_branch} already exists and started from "
+                            f"{recorded or 'another base'}, not {wanted}; pick a new name "
+                            "for work on that base", code="BASE_MISMATCH",
+                        )
+                out = await status(new_branch, cfg=cfg, repository=rcfg.source_repo if rcfg.repository_key else None)
+                if notes:
+                    out["notes"] = notes
+                return out
 
             branch_exists = (
-                await run_git(
-                    ["rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-                    cwd=cfg.source_repo,
-                    check=False,
+                await _git(
+                    rcfg, ["rev-parse", "--verify", "--quiet", f"refs/heads/{new_branch}"],
+                    cwd=rcfg.source_repo, check=False,
                 )
             ).stdout.strip()
 
+            if base:
+                resolved_base = await _resolve_base(rcfg, base)
+            elif not branch_exists:
+                resolved_base = await _default_base(rcfg)
+            if resolved_base is not None:
+                _check_expected(expected, resolved_base)
+            elif expected:
+                # Existing branch, no base named: the expectation is about where
+                # the branch starts, so it must contain the expected commit.
+                if not await _is_ancestor(rcfg, expected, new_branch):
+                    raise WorktreeError(
+                        f"branch {new_branch} does not contain the expected base {expected}",
+                        code="BASE_MISMATCH",
+                    )
+
+            # A stale registration of THIS path (directory deleted) blocks `add`.
+            # Pruning only removes registrations whose directory is gone.
+            listing = await _git(rcfg, ["worktree", "list", "--porcelain"],
+                                 cwd=rcfg.source_repo, check=False)
+            if any(
+                line.startswith("worktree ") and _same_path(line[len("worktree "):], path)
+                for line in listing.stdout.splitlines()
+            ):
+                await _git(rcfg, ["worktree", "prune"], cwd=rcfg.source_repo, check=False)
+
             if branch_exists:
-                args = ["worktree", "add", path, branch]
+                if resolved_base is not None and not await _is_ancestor(
+                    rcfg, resolved_base["sha"], new_branch
+                ):
+                    raise WorktreeError(
+                        f"branch {new_branch} already exists and is not based on "
+                        f"{resolved_base['ref']} ({resolved_base['sha']}); pick a new name",
+                        code="BASE_MISMATCH",
+                    )
+                args = ["worktree", "add", path, new_branch]
             else:
-                start_point = (
-                    f"origin/{cfg.base_branch}"
-                    if (
-                        await run_git(
-                            [
-                                "rev-parse",
-                                "--verify",
-                                "--quiet",
-                                f"refs/remotes/origin/{cfg.base_branch}^{{commit}}",
-                            ],
-                            cwd=cfg.source_repo,
-                            check=False,
-                        )
-                    ).stdout.strip()
-                    else cfg.base_branch
-                )
-                args = ["worktree", "add", "-b", branch, path, start_point]
-            await run_git(args, cwd=cfg.source_repo, timeout_s=300)
+                # The start point is the resolved commit, not the ref name: the
+                # ref could move between the check and the add, and a remote ref
+                # as start point would make the branch track (and later pull
+                # from or push to) that remote branch.
+                args = ["worktree", "add", "-b", new_branch, path, resolved_base["sha"]]
+            await _git(rcfg, args, cwd=rcfg.source_repo, timeout_s=300)
+            previous = _load_meta(rcfg, new_branch)
+            _save_meta(rcfg, new_branch, {
+                "repository": rcfg.source_repo,
+                "repo_slug": rcfg.repo_slug or None,
+                "branch": new_branch,
+                "path": path,
+                "base": (resolved_base or {}).get("ref") or previous.get("base"),
+                "base_sha": (resolved_base or {}).get("sha") or previous.get("base_sha"),
+                "pr_base": (resolved_base or {}).get("pr_base") or previous.get("pr_base")
+                or rcfg.base_branch or None,
+                "created_at": previous.get("created_at") or time.time(),
+            })
     except LockBusy as exc:
         raise WorktreeError(str(exc))
     except GitError as exc:
         raise WorktreeError(str(exc))
 
-    logger.info("agent worktree: ready branch=%s path=%s", branch, path)
-    return await status(branch, cfg=cfg)
+    logger.info(
+        "agent worktree: ready repo=%s branch=%s base=%s@%s path=%s",
+        rcfg.source_repo, new_branch, (resolved_base or {}).get("ref"),
+        ((resolved_base or {}).get("sha") or "")[:12], path,
+    )
+    out = await status(new_branch, cfg=cfg, repository=rcfg.source_repo if rcfg.repository_key else None)
+    if notes:
+        out["notes"] = notes
+    return out
 
 
-async def status(
-    branch: Optional[str] = None, *, cfg: Optional[WorktreeConfig] = None
-) -> Dict[str, Any]:
-    """Configuration and worktree state. Contains no credential material."""
-    cfg = cfg or load_config()
-    out: Dict[str, Any] = {
-        "publish_enabled": cfg.publish_enabled,
-        "repo": cfg.repo_slug or None,
-        # Which checkout this tool operates on. Without it the agent could not
-        # tell that a worktree it just started belongs to Odysseus rather than
-        # to the third-party project it was actually working in.
-        "source_repo": cfg.source_repo,
-        "base_branch": cfg.base_branch,
-        "branch_prefix": BRANCH_PREFIX,
-        "worktree_root": cfg.worktree_root,
-        "approval_ttl_seconds": cfg.approval_ttl_s,
-        "credential": (
-            "github_app" if cfg.has_github_app
-            else ("fallback_token" if cfg.has_any_credential else None)
-        ),
-        "publish_blockers": publish_blockers(cfg),
-        "worktrees": [],
-    }
+# ── status ───────────────────────────────────────────────────────────────────
+
+
+def _worktree_dirs(cfg: WorktreeConfig) -> List[str]:
+    """Every worktree directory: the source repository's at the root, other
+    repositories' under _repos/<key>/."""
+    out: List[str] = []
     try:
         names = sorted(os.listdir(cfg.worktree_root))
     except OSError:
         names = []
     for entry in names:
         path = os.path.join(cfg.worktree_root, entry)
-        if not os.path.isdir(path) or not is_inside(path, cfg.worktree_root):
+        if entry == REPOSITORY_WORKTREE_DIR:
+            try:
+                groups = sorted(os.listdir(path))
+            except OSError:
+                continue
+            for group in groups:
+                group_path = os.path.join(path, group)
+                if not os.path.isdir(group_path) or os.path.islink(group_path):
+                    continue
+                try:
+                    leaves = sorted(os.listdir(group_path))
+                except OSError:
+                    continue
+                out.extend(os.path.join(group_path, leaf) for leaf in leaves)
             continue
+        out.append(path)
+    return [p for p in out if os.path.isdir(p) and is_inside(p, cfg.worktree_root)]
+
+
+def _main_repository_of(path: str) -> Optional[str]:
+    try:
+        from src.agent_worktree.repository_sync import linked_worktree_main
+
+        return str(linked_worktree_main(path))
+    except Exception:  # noqa: BLE001 - reported as unknown
+        return None
+
+
+async def status(
+    branch: Optional[str] = None,
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Configuration and worktree state. Contains no credential material."""
+    cfg = cfg or load_config()
+    rcfg = await repository_config(cfg, repository)
+    out: Dict[str, Any] = {
+        "publish_enabled": cfg.publish_enabled,
+        "repo": rcfg.repo_slug or None,
+        # Which checkout this tool operates on. Without it the agent could not
+        # tell that a worktree it just started belongs to Odysseus rather than
+        # to the third-party project it was actually working in.
+        "source_repo": cfg.source_repo,
+        "repository": rcfg.source_repo,
+        "base_branch": rcfg.base_branch or None,
+        "branch_prefix": rcfg.branch_prefix,
+        "worktree_root": cfg.worktree_root,
+        "approval_ttl_seconds": cfg.approval_ttl_s,
+        "credential": (
+            "github_app" if cfg.has_github_app
+            else ("fallback_token" if cfg.has_any_credential else None)
+        ),
+        "publish_blockers": publish_blockers(rcfg),
+        "worktrees": [],
+        "hint": (
+            "Without 'repository' this tool works on " + cfg.source_repo + ". For any other "
+            "project pass repository=<absolute checkout path> (and base=<ref> on start)."
+        ),
+    }
+    metas = {
+        os.path.normcase(os.path.realpath(str(m.get("path") or ""))): m
+        for m in _all_meta(cfg) if m.get("path")
+    }
+    for path in _worktree_dirs(cfg):
+        main = _main_repository_of(path)
+        if rcfg.repository_key and (main is None or not _same_path(main, rcfg.source_repo)):
+            continue
+        meta = metas.get(os.path.normcase(os.path.realpath(path)), {})
+        # git runs in a worktree only when its pointer leads to a repository
+        # this tool created it from: the agent can rewrite a worktree's `.git`
+        # file, and git would read whatever config the new target holds.
+        known = main is not None and (
+            _verify_ok(cfg, path)
+            or (meta.get("repository") and _same_path(main, str(meta["repository"])))
+        )
+        if not known:
+            out["worktrees"].append({"path": path, "repository": main, "branch": None,
+                                     "head_sha": None, "dirty": None,
+                                     "error": "worktree metadata could not be verified"})
+            continue
+        gcfg = cfg if _verify_ok(cfg, path) else dataclasses.replace(
+            cfg, repository_key=str(meta.get("_group") or "other"))
         try:
-            entry_branch = await _current_branch(path)
+            entry_branch = await _current_branch(gcfg, path)
             info = {
                 "path": path,
+                "repository": main,
                 "branch": entry_branch,
-                "head_sha": await _head_sha(path) if entry_branch else None,
-                "dirty": await _is_dirty(path),
+                "head_sha": await _head_sha(gcfg, path) if entry_branch else None,
+                "dirty": await _is_dirty(gcfg, path),
             }
         except (GitError, WorktreeError):
-            info = {"path": path, "branch": None, "head_sha": None, "dirty": None}
+            info = {"path": path, "repository": main, "branch": None, "head_sha": None, "dirty": None}
+        if meta.get("base"):
+            info["base"] = meta.get("base")
+            info["base_sha"] = meta.get("base_sha")
         out["worktrees"].append(info)
 
     if branch:
-        resolved = validate_agent_branch(branch, BRANCH_PREFIX) or branch_leaf_from_name(
-            branch, BRANCH_PREFIX
-        )
+        try:
+            lcfg, resolved, path = await _locate(cfg, branch, repository)
+        except WorktreeError:
+            lcfg, resolved, path = rcfg, "", ""
         if resolved:
-            path = _worktree_dir(cfg, resolved)
+            meta = _load_meta(lcfg, resolved)
+            out["repository"] = lcfg.source_repo
+            out["repo"] = lcfg.repo_slug or None
             out["branch"] = resolved
             out["path"] = path
-            out["exists"] = os.path.exists(os.path.join(path, ".git"))
-            if out["exists"]:
-                out["head_sha"] = await _head_sha(path)
-                out["dirty"] = await _is_dirty(path)
+            out["exists"] = _worktree_exists(path)
+            out["base"] = meta.get("base")
+            out["base_sha"] = meta.get("base_sha")
+            out["pr_base"] = meta.get("pr_base") or lcfg.base_branch or None
+            if out["exists"] and not _verify_ok(lcfg, path):
+                out["error"] = "worktree metadata could not be verified"
+            elif out["exists"]:
+                out["head_sha"] = await _head_sha(lcfg, path)
+                out["dirty"] = await _is_dirty(lcfg, path)
     return out
 
 
+# ── commit / diff ────────────────────────────────────────────────────────────
+
+
+async def _started(
+    cfg: WorktreeConfig, branch: str, repository: Optional[str]
+) -> Tuple[WorktreeConfig, str, str]:
+    rcfg, resolved, path = await _locate(cfg, branch, repository)
+    if not _worktree_exists(path):
+        raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
+    _verify_membership(rcfg, path)
+    return rcfg, resolved, path
+
+
 async def commit(
-    branch: str, message: str, *, cfg: Optional[WorktreeConfig] = None
+    branch: str,
+    message: str,
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Stage everything in the worktree and commit it under the bot identity."""
     cfg = cfg or load_config()
-    resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
-    if not resolved:
-        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
     text = (message or "").strip()
+    rcfg, resolved, path = await _locate(cfg, branch, repository)
     if not text:
         raise WorktreeError("a commit message is required")
-    path = _worktree_dir(cfg, resolved)
-    if not os.path.exists(os.path.join(path, ".git")):
+    if not _worktree_exists(path):
         raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
+    _verify_membership(rcfg, path)
 
     try:
         with file_lock(_lock_path(cfg)):
-            current = await _current_branch(path)
+            current = await _current_branch(rcfg, path)
             if current != resolved:
                 raise WorktreeError(
                     f"worktree is on {current or 'a detached HEAD'}, expected {resolved}"
                 )
-            if not await _is_dirty(path):
+            if not await _is_dirty(rcfg, path):
                 return {"committed": False, "reason": "nothing to commit",
-                        "head_sha": await _head_sha(path)}
-            await run_git(["add", "-A", "--", "."], cwd=path)
+                        "head_sha": await _head_sha(rcfg, path)}
+            await _git(rcfg, ["add", "-A", "--", "."], cwd=path)
             # -- separates the message from anything that could look like a flag.
-            await run_git(["commit", "-m", text[:4000], "--no-verify"], cwd=path,
-                          timeout_s=300)
-            return {"committed": True, "head_sha": await _head_sha(path)}
+            await _git(rcfg, ["commit", "-m", text[:4000], "--no-verify"], cwd=path,
+                       timeout_s=300)
+            return {"committed": True, "head_sha": await _head_sha(rcfg, path),
+                    "repository": rcfg.source_repo, "branch": resolved}
     except LockBusy as exc:
         raise WorktreeError(str(exc))
     except GitError as exc:
         raise WorktreeError(str(exc))
 
 
-async def diff_summary(
-    branch: str, *, cfg: Optional[WorktreeConfig] = None
-) -> Dict[str, Any]:
-    """Changed files plus the sensitive-path classification for them."""
-    cfg = cfg or load_config()
-    resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
-    if not resolved:
-        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
-    path = _worktree_dir(cfg, resolved)
-    if not os.path.exists(os.path.join(path, ".git")):
-        raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
+async def _summary(rcfg: WorktreeConfig, resolved: str, path: str) -> Dict[str, Any]:
     try:
         # The summary reports HEAD, and publish pushes the branch. If those two
         # have been separated — a detached HEAD parked on the reviewed commit
         # while the branch ref points at something else — the operator would
         # approve one commit and a different one would be published.
-        current = await _current_branch(path)
+        current = await _current_branch(rcfg, path)
         if current != resolved:
             raise WorktreeError(
                 f"worktree is on {current or 'a detached HEAD'}, expected {resolved}"
             )
-        files = await _changed_files(cfg, path)
+        files = await _changed_files(rcfg, path, resolved)
         findings = sensitive_mod.classify(files)
         return {
+            "repository": rcfg.source_repo,
             "branch": resolved,
-            "head_sha": await _head_sha(path),
-            "dirty": await _is_dirty(path),
+            "base": await _base_ref(rcfg, path, resolved),
+            "head_sha": await _head_sha(rcfg, path),
+            "dirty": await _is_dirty(rcfg, path),
             "changed_files": files,
             "files_digest": files_digest(files),
             "sensitive": findings,
@@ -331,13 +993,63 @@ async def diff_summary(
         raise WorktreeError(str(exc))
 
 
+async def diff_summary(
+    branch: str,
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Changed files plus the sensitive-path classification for them."""
+    cfg = cfg or load_config()
+    rcfg, resolved, path = await _started(cfg, branch, repository)
+    return await _summary(rcfg, resolved, path)
+
+
+# ── publishing ───────────────────────────────────────────────────────────────
+
+# Config a repository other than the configured one may not carry when the
+# publishing credential is about to be used from inside it: each can rewrite
+# where the push goes or make git run a command that inherits the credential.
+# (Hooks, fsmonitor, credential helpers and non-https transports are also
+# switched off by _hardened_env.)
+_FOREIGN_REFUSED_SECTIONS = frozenset({"url", "http", "include", "includeif", "protocol", "filter"})
+_FOREIGN_REFUSED_CORE_KEYS = frozenset({"sshcommand", "askpass", "gitproxy", "hookspath", "worktree"})
+
+
+def _foreign_publish_blockers(cfg: WorktreeConfig) -> List[str]:
+    if not cfg.repository_key:
+        return []
+    try:
+        from dulwich.config import ConfigFile
+
+        config = ConfigFile.from_path(os.path.join(cfg.source_repo, ".git", "config"))
+    except Exception:  # noqa: BLE001
+        return [f"{cfg.source_repo}/.git/config could not be read safely"]
+    refused = set()
+    for section in config.sections():
+        head = section[0].decode("utf-8", "replace").lower()
+        if head in _FOREIGN_REFUSED_SECTIONS:
+            refused.add(f"[{head}]")
+        elif head == "core":
+            for key, _value in config.items(section):
+                if key.decode("utf-8", "replace").lower() in _FOREIGN_REFUSED_CORE_KEYS:
+                    refused.add(f"core.{key.decode('utf-8', 'replace')}")
+    if not refused:
+        return []
+    return [
+        f"{cfg.source_repo}/.git/config sets {', '.join(sorted(refused))}, which could redirect "
+        "the push or run a command holding the publishing credential; the operator must remove it"
+    ]
+
+
 async def _remote_head(cfg: WorktreeConfig, branch: str, token: Optional[str]) -> Optional[str]:
     """Current SHA of the branch on the remote, or None when it is absent.
 
     Raises on a lookup failure so the caller can record "unknown" explicitly
     rather than mistaking a network error for an absent branch.
     """
-    res = await run_git(
+    res = await _git(
+        cfg,
         ["ls-remote", "--heads", cfg.remote_url, f"refs/heads/{branch}"],
         cwd=cfg.source_repo,
         extra_env=auth_env(token, cfg.remote_url),
@@ -358,14 +1070,20 @@ async def request_publish(
     body: str = "",
     requested_by: Optional[str] = None,
     cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Freeze the change and record an approval request. Publishes nothing."""
     cfg = cfg or load_config()
-    blockers = publish_blockers(cfg)
+    rcfg, resolved, path = await _started(cfg, branch, repository)
+    pcfg = _publish_cfg(rcfg, resolved)
+    blockers = publish_blockers(pcfg) + _foreign_publish_blockers(pcfg)
+    if not pcfg.base_branch:
+        blockers.append("no base branch is recorded for this worktree to open the PR against; "
+                        "start a new worktree with base=origin/<branch>")
     if blockers:
         raise WorktreeError("publishing is not available: " + "; ".join(blockers))
 
-    summary = await diff_summary(branch, cfg=cfg)
+    summary = await _summary(pcfg, resolved, path)
     if summary["dirty"]:
         raise WorktreeError(
             "worktree has uncommitted changes; commit them so the approval "
@@ -377,8 +1095,8 @@ async def request_publish(
     from src.agent_worktree.github import GitHubError, resolve_token
 
     try:
-        token = await resolve_token(cfg)
-        remote_head = await _remote_head(cfg, summary["branch"], token)
+        token = await resolve_token(pcfg)
+        remote_head = await _remote_head(pcfg, summary["branch"], token)
         remote_state = remote_head or "absent"
     except (GitHubError, GitError) as exc:
         # Recorded as unknown: publish then refuses a force-push and does a
@@ -389,10 +1107,11 @@ async def request_publish(
         token = None
 
     record = approval_mod.create_request(
-        repo=cfg.repo_slug,
+        repo=pcfg.repo_slug,
+        repository=pcfg.source_repo if pcfg.repository_key else None,
         branch=summary["branch"],
         head_sha=summary["head_sha"],
-        base_branch=cfg.base_branch,
+        base_branch=pcfg.base_branch,
         title=(title or summary["branch"])[:250],
         body=(body or "")[:60000],
         changed_files=summary["changed_files"],
@@ -422,15 +1141,19 @@ async def publish(
 ) -> Dict[str, Any]:
     """Spend an approval, push the branch, and open a draft PR."""
     cfg = cfg or load_config()
-    blockers = publish_blockers(cfg)
-    if blockers:
-        raise WorktreeError("publishing is not available: " + "; ".join(blockers))
-
     stored = approval_mod.get_request(request_id, cfg=cfg)
-    branch = validate_agent_branch(stored.get("branch") or "", BRANCH_PREFIX)
+    # The repository comes from the request record (state dir, which the
+    # agent's file tools cannot write) and is re-validated like any other
+    # argument; the push target is still bound by the approval to `repo`.
+    rcfg = await repository_config(cfg, stored.get("repository"))
+    branch = validate_agent_branch(stored.get("branch") or "", rcfg.branch_prefix)
     if not branch:
         raise WorktreeError("stored request does not name a valid agent branch")
-    if stored.get("repo") != cfg.repo_slug:
+    pcfg = _publish_cfg(rcfg, branch)
+    blockers = publish_blockers(pcfg) + _foreign_publish_blockers(pcfg)
+    if blockers:
+        raise WorktreeError("publishing is not available: " + "; ".join(blockers))
+    if stored.get("repo") != pcfg.repo_slug:
         raise WorktreeError(
             "request targets a different repository than the configured one"
         )
@@ -443,7 +1166,7 @@ async def publish(
     except LockBusy as exc:
         raise WorktreeError(str(exc))
     try:
-        return await _publish_locked(cfg, request_id, approval_code, stored, branch)
+        return await _publish_locked(pcfg, request_id, approval_code, stored, branch)
     finally:
         lock.__exit__(None, None, None)
 
@@ -457,7 +1180,11 @@ async def _publish_locked(
 ) -> Dict[str, Any]:
     # Re-derive the change from git. The approval is checked against what is on
     # disk right now, never against the numbers the request recorded earlier.
-    live = await diff_summary(branch, cfg=cfg)
+    path = _worktree_dir(cfg, branch)
+    if not _worktree_exists(path):
+        raise WorktreeError("worktree does not exist yet; start it first", code="WORKTREE_NOT_STARTED")
+    _verify_membership(cfg, path)
+    live = await _summary(cfg, branch, path)
     if live["dirty"]:
         raise WorktreeError("worktree has uncommitted changes; commit or discard them")
 
@@ -494,7 +1221,7 @@ async def _publish_locked(
                 "request a new approval"
             )
 
-        push_args = ["push"]
+        push_args = ["push", "--no-verify"]
         if expected_remote not in ("unknown", "absent"):
             # Bound to the exact remote SHA the operator approved against, so a
             # concurrent push cannot be silently overwritten.
@@ -504,11 +1231,12 @@ async def _publish_locked(
         # approved cannot.
         push_args += [cfg.remote_url, f"{approved_sha}:refs/heads/{branch}"]
 
-        await run_git(
+        await _git(
+            cfg,
             push_args,
-            # Run from the operator's checkout, never from the worktree the
-            # agent writes to: git reads repository-local config from the cwd's
-            # gitdir, and this command carries a credential.
+            # Run from the repository's own checkout, never from the worktree
+            # the agent writes to: git reads repository-local config from the
+            # cwd's gitdir, and this command carries a credential.
             cwd=cfg.source_repo,
             extra_env=auth_env(token, cfg.remote_url),
             secrets=(token,),
@@ -539,34 +1267,133 @@ async def _publish_locked(
 
     details = {
         "pushed_at": time.time(),
+        "repository": cfg.source_repo,
+        "repo": cfg.repo_slug,
         "branch": branch,
         "head_sha": live["head_sha"],
         "pull_request": pr,
     }
     approval_mod.mark_published(request_id, details, cfg=cfg)
     logger.info(
-        "agent worktree: published branch=%s sha=%s pr=%s",
-        branch, live["head_sha"][:12], pr.get("number"),
+        "agent worktree: published repo=%s branch=%s sha=%s pr=%s",
+        cfg.repo_slug, branch, live["head_sha"][:12], pr.get("number"),
     )
     return {"request_id": request_id, **details}
 
 
-async def remove_worktree(
-    branch: str, *, cfg: Optional[WorktreeConfig] = None
+# ── cleanup ──────────────────────────────────────────────────────────────────
+
+
+async def cleanup(
+    branch: str,
+    *,
+    cfg: Optional[WorktreeConfig] = None,
+    repository: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Detach a worktree directory. The branch itself is left alone."""
+    """Detach a worktree and drop its branch, only when nothing would be lost.
+
+    Unlike the removed ``remove`` action (``git worktree remove --force``),
+    this refuses a worktree with any modified or untracked file, runs a plain
+    ``git worktree remove``, and deletes the agent branch only when another
+    ref (a remote-tracking branch, another branch, a tag) still contains its
+    tip — so the commits stay reachable. A branch with commits found nowhere
+    else is kept and reported.
+    """
     cfg = cfg or load_config()
-    resolved = branch_leaf_from_name(branch, BRANCH_PREFIX)
-    if not resolved:
-        raise WorktreeError("invalid agent branch", code="INVALID_BRANCH")
-    path = _worktree_dir(cfg, resolved)
+    rcfg, resolved, path = await _locate(cfg, branch, repository)
+    if not is_inside(path, cfg.worktree_root):
+        raise WorktreeError("refusing to remove a path outside the worktree root")
+    result: Dict[str, Any] = {
+        "repository": rcfg.source_repo, "branch": resolved, "path": path,
+        "worktree_removed": False, "branch_deleted": False,
+    }
+    try:
+        with file_lock(_lock_path(cfg)):
+            if os.path.lexists(path):
+                if not _worktree_exists(path):
+                    raise WorktreeError(
+                        f"{path} exists but is not a git worktree; ask the operator to inspect it",
+                        code="NOT_A_WORKTREE",
+                    )
+                _verify_membership(rcfg, path)
+                current = await _current_branch(rcfg, path)
+                if current and current != resolved:
+                    raise WorktreeError(f"worktree is on {current}, expected {resolved}")
+                dirty = await _dirty_entries(rcfg, path)
+                if dirty:
+                    shown = "; ".join(dirty[:20]) + (" ..." if len(dirty) > 20 else "")
+                    raise WorktreeError(
+                        f"worktree {path} has {len(dirty)} uncommitted or untracked path(s) "
+                        f"({shown}); commit them or ask the user. Nothing was removed.",
+                        code="WORKTREE_DIRTY",
+                    )
+                # No --force: git itself refuses a dirty or locked worktree too.
+                await _git(rcfg, ["worktree", "remove", path], cwd=rcfg.source_repo, timeout_s=120)
+                result["worktree_removed"] = not os.path.lexists(path)
+            else:
+                listing = await _git(rcfg, ["worktree", "list", "--porcelain"],
+                                     cwd=rcfg.source_repo, check=False)
+                if any(
+                    line.startswith("worktree ") and _same_path(line[len("worktree "):], path)
+                    for line in listing.stdout.splitlines()
+                ):
+                    # Registered but the directory is gone: prune removes only
+                    # registrations like this one.
+                    await _git(rcfg, ["worktree", "prune"], cwd=rcfg.source_repo, check=False)
+                    result["worktree_removed"] = True
+
+            ref = f"refs/heads/{resolved}"
+            tip = (await _git(rcfg, ["rev-parse", "--verify", "--quiet", ref],
+                              cwd=rcfg.source_repo, check=False)).stdout.strip()
+            if is_valid_sha(tip):
+                checked_out = await _git(rcfg, ["worktree", "list", "--porcelain"],
+                                         cwd=rcfg.source_repo, check=False)
+                holders = (await _git(
+                    rcfg, ["for-each-ref", "--format=%(refname)", "--contains", tip],
+                    cwd=rcfg.source_repo, check=False,
+                )).stdout.split()
+                holders = [h for h in holders if h != ref and h != "refs/stash"]
+                if f"branch {ref}" in checked_out.stdout.splitlines():
+                    result["branch_kept"] = "the branch is still checked out in another worktree"
+                elif not holders:
+                    result["branch_kept"] = (
+                        "its commits are on no other ref; publish them (request_publish) or "
+                        "ask the user before discarding them"
+                    )
+                else:
+                    await _git(rcfg, ["update-ref", "-d", ref, tip], cwd=rcfg.source_repo)
+                    result["branch_deleted"] = True
+                    result["branch_tip"] = tip
+                    result["tip_still_on"] = holders[:5]
+            _drop_meta(rcfg, resolved)
+    except LockBusy as exc:
+        raise WorktreeError(str(exc))
+    except GitError as exc:
+        raise WorktreeError(str(exc))
+    logger.info(
+        "agent worktree: cleanup repo=%s branch=%s worktree_removed=%s branch_deleted=%s",
+        rcfg.source_repo, resolved, result["worktree_removed"], result["branch_deleted"],
+    )
+    return result
+
+
+async def remove_worktree(
+    branch: str, *, cfg: Optional[WorktreeConfig] = None, repository: Optional[str] = None
+) -> Dict[str, Any]:
+    """Force-detach a worktree directory (operator use only; not an agent action).
+
+    The branch itself is left alone. Discards uncommitted work — the agent
+    tool refuses `remove` and offers `cleanup` instead.
+    """
+    cfg = cfg or load_config()
+    rcfg, resolved, path = await _locate(cfg, branch, repository)
     if not is_inside(path, cfg.worktree_root):
         raise WorktreeError("refusing to remove a path outside the worktree root")
     try:
         with file_lock(_lock_path(cfg)):
-            await run_git(["worktree", "remove", "--force", path],
-                          cwd=cfg.source_repo, check=False, timeout_s=120)
-            await run_git(["worktree", "prune"], cwd=cfg.source_repo, check=False)
+            await _git(rcfg, ["worktree", "remove", "--force", path],
+                       cwd=rcfg.source_repo, check=False, timeout_s=120)
+            await _git(rcfg, ["worktree", "prune"], cwd=rcfg.source_repo, check=False)
     except LockBusy as exc:
         raise WorktreeError(str(exc))
     return {"removed": not os.path.exists(path), "path": path}

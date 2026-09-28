@@ -145,6 +145,8 @@ WORKTREE_FIELDS = {
     "repository",
     "name",
     "branch",
+    "base",
+    "expected_base",
     "message",
     "title",
     "body",

@@ -102,6 +102,8 @@ def cmd_show(args) -> None:
     print(f"request   {record['id']}")
     print(f"status    {record['status']}")
     print(f"repo      {record['repo']}")
+    if record.get("repository"):
+        print(f"checkout  {record['repository']}")
     print(f"branch    {record['branch']}  ->  {record['base_branch']}")
     print(f"commit    {record['head_sha']}")
     print(f"title     {record['title']}")
@@ -118,7 +120,19 @@ def cmd_show(args) -> None:
 
 def cmd_approve(args) -> None:
     cfg = load_config()
-    blockers = publish_blockers(cfg)
+    try:
+        repository = approval_mod.get_request(args.request_id).get("repository")
+    except approval_mod.ApprovalError as exc:
+        fail(str(exc))
+        return
+    try:
+        # A request made in another repository is checked against that
+        # repository's publish target, not ODYSSEUS_AGENT_REPO.
+        target = asyncio.run(service.repository_config(cfg, repository))
+    except service.WorktreeError as exc:
+        fail(str(exc))
+        return
+    blockers = publish_blockers(target)
     if blockers:
         fail("publishing is not available: " + "; ".join(blockers))
         return

@@ -312,6 +312,7 @@ def guidance(kind: str) -> str:
         "credential, and it opens a draft pull request after a human approves:",
         "",
         '  1. manage_agent_worktree {"action": "start", "name": "<short-task-name>"}',
+        "     (add \"repository\" and \"base\" for a checkout other than Odysseus).",
         "     Work inside the worktree path it returns, not in any other checkout.",
         '  2. manage_agent_worktree {"action": "commit", "message": "..."}',
         '  3. manage_agent_worktree {"action": "request_publish", "title": "...", "body": "..."}',
@@ -373,8 +374,10 @@ def foreign_repository_guidance(kind: str, repo: str) -> str:
         first,
         "",
         f"This is NOT the Odysseus checkout, so manage_agent_worktree cannot publish it — "
-        f"that tool only ever pushes {slug}. Do not start an Odysseus worktree for this "
-        "work; it would create a branch in the wrong repository.",
+        f"without a repository argument that tool pushes {slug}. Do not start an Odysseus "
+        "worktree for this work; it would create a branch in the wrong repository. (A "
+        "human-approved publish of this project is possible only from a worktree started "
+        f"with repository={repo!r}, if the operator's publishing credential can reach it.)",
         "",
         "What you can still do here:",
         "  - Everything local: status, diff, add, commit, branch, tag. Commit the work "

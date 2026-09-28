@@ -229,6 +229,9 @@ def public_view(record: Dict, cfg: Optional[WorktreeConfig] = None) -> Dict:
         "id": record.get("id"),
         "status": _effective_status(record, cfg=cfg),
         "repo": record.get("repo"),
+        # Local checkout the change was made in (absent on requests recorded
+        # before repositories other than the configured one were supported).
+        "repository": record.get("repository"),
         "branch": record.get("branch"),
         "head_sha": record.get("head_sha"),
         "base_branch": record.get("base_branch"),
@@ -268,6 +271,7 @@ def create_request(
     sensitive_digest: str,
     remote_state: str = "unknown",
     requested_by: Optional[str] = None,
+    repository: Optional[str] = None,
     cfg: Optional[WorktreeConfig] = None,
 ) -> Dict:
     cfg = cfg or load_config()
@@ -278,6 +282,7 @@ def create_request(
         "created_at": now,
         "expires_at": now + REQUEST_TTL_S,
         "repo": repo,
+        "repository": repository,
         "branch": branch,
         "head_sha": head_sha,
         "base_branch": base_branch,

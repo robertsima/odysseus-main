@@ -309,6 +309,8 @@ FUNCTION_TOOL_SCHEMAS = [
                 "Push/merge/history rewrites require fresh confirmation bound to exact revisions. "
                 "Policy refuses every delete (branches, remote branches, stashes), force push and discard of work; no approval re-enables them. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
                 "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
+                "Linked worktrees (.git is a file) support only status, log, diff, branches and remotes; "
+                "run other actions in the main_repository status reports. "
                 "Odysseus self-publishing still uses manage_agent_worktree."
             ),
             "parameters": {
@@ -346,18 +348,25 @@ FUNCTION_TOOL_SCHEMAS = [
             "description": (
                 "Choose an action and omit unused fields; repo_list needs only action, repo_status/repo_pull also need repository. "
                 "List/status/fast-forward pull approved local Git repositories (repo_list, "
-                "repo_status, repo_pull), or manage a human-gated publishing worktree. "
+                "repo_status, repo_pull; linked worktrees are listed with their main_repository), "
+                "or manage a human-gated publishing worktree. "
                 "repo_status/repo_pull require an absolute repository path from repo_list; "
                 "repo_pull uses ONLY its configured GitHub upstream and refuses dirty or "
                 "diverged checkouts. No shell or private-vault grant is needed. "
-                "For publishing, work in an isolated persistent worktree on an agent/odysseus/* branch, "
-                "and publish it only with explicit human approval. Actions: 'start' (create or "
-                "reuse the worktree for a task name), 'status', 'diff' (changed files plus which "
-                "of them are sensitive), 'commit', 'request_publish' (freeze the change and ask a "
-                "human to approve it — this pushes NOTHING), 'publish' (needs request_id plus an "
-                "approval_code a human generated on the host), 'list_requests', 'show_request', "
-                "'remove'. You cannot approve your own change: ask the operator to run the "
-                "approval command and paste the code back to you."
+                "Isolated worktrees: WITHOUT 'repository' they are made of the Odysseus source "
+                "checkout (branches agent/odysseus/*); for ANY other project pass repository=<absolute "
+                "checkout path from repo_list> (branches agent/<repo>/*, worktree under "
+                "agent_worktrees/_repos/). 'start' takes name (the new task name), base (where it "
+                "starts: origin/main, a branch or a SHA; never pass a base as name/branch) and "
+                "optionally expected_base (full SHA; start refuses if base resolves elsewhere). "
+                "Other actions: 'status', 'diff' (changed files plus which are sensitive), 'commit', "
+                "'request_publish' (freeze the change and ask a human to approve it; pushes NOTHING), "
+                "'publish' (needs request_id plus an approval_code a human generated on the host; "
+                "pushes to that repository's own GitHub origin), 'list_requests', 'show_request', "
+                "'cleanup' (remove a clean worktree; its branch is deleted only if another ref still "
+                "holds its commits). Pass the same repository on later calls, or a name unique "
+                "across repositories. You cannot approve your own change: ask the operator to run "
+                "the approval command and paste the code back to you."
             ),
             "parameters": {
                 "type": "object",
@@ -365,13 +374,15 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {
                         "type": "string",
                         "enum": ["status", "start", "commit", "diff", "request_publish",
-                                 "publish", "list_requests", "show_request",
+                                 "publish", "list_requests", "show_request", "cleanup",
                                  "repo_list", "repo_status", "repo_pull"],
                         "description": "Operation to perform (default: status)"
                     },
-                    "repository": {"type": "string", "description": "Absolute local checkout path from repo_list (repo_status/repo_pull only); not a URL"},
-                    "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>"},
-                    "branch": {"type": "string", "description": "Full agent branch, when it already exists"},
+                    "repository": {"type": "string", "description": "Absolute local checkout path from repo_list; not a URL. repo_status/repo_pull: the checkout. Worktree actions: the project the worktree belongs to (omit only for the Odysseus source checkout)"},
+                    "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>, or agent/<repo>/<name> with repository"},
+                    "branch": {"type": "string", "description": "Full agent branch, when it already exists. Never a base such as origin/main"},
+                    "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Odysseus) or origin/HEAD"},
+                    "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
                     "title": {"type": "string", "description": "Draft PR title (action=request_publish)"},
                     "body": {"type": "string", "description": "Draft PR body (action=request_publish)"},

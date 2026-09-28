@@ -20,12 +20,13 @@ from src.tool_utils import _parse_tool_args
 logger = logging.getLogger(__name__)
 
 _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
-            "publish", "list_requests", "show_request",
+            "publish", "list_requests", "show_request", "cleanup",
             "repo_list", "repo_status", "repo_pull")
 
 # Refused by policy rather than merely unknown: `remove` runs
 # `git worktree remove --force` and then prunes, which discards uncommitted
-# work. Agents may create and publish worktrees but never delete them.
+# work. `cleanup` is the loss-free alternative: it refuses a dirty worktree
+# and deletes the branch only while another ref still holds its commits.
 _FORBIDDEN_ACTIONS = ("remove",)
 
 
@@ -34,13 +35,29 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
 
 
 # Actions that work on one named worktree, in the order an agent needs them.
-_BRANCH_ACTIONS = ("commit", "diff", "request_publish")
+_BRANCH_ACTIONS = ("commit", "diff", "request_publish", "cleanup")
 
 
-def _next_step(code: str, action: str, branch: str) -> Dict[str, Any]:
+def _next_step(code: str, action: str, branch: str, repository: str = "") -> Dict[str, Any]:
     """The call that fixes a failure the agent caused, so it doesn't spend
     rounds guessing the publish sequence (start → edit → commit →
     request_publish)."""
+    where = {"repository": repository} if repository else {}
+    if code in ("BRANCH_IS_BASE", "BASE_MISMATCH", "BASE_NOT_FOUND", "BASE_REQUIRED", "INVALID_BASE"):
+        return {"code": code, "required_fields": ["name", "base"],
+                "next_action": {"action": "start", "name": "<task-name>", "base": "origin/main", **where},
+                "hint": ("'name' is the new task/branch name; 'base' is the existing ref or commit "
+                         "it starts from (origin/main, a branch, or a SHA), and expected_base "
+                         "(full SHA) makes start refuse if the base moved. Fetch first if the base "
+                         "is missing (manage_git fetch on the repository).")}
+    if code in ("INVALID_REPOSITORY", "AMBIGUOUS_WORKTREE", "REPOSITORY_REQUIRED"):
+        return {"code": code, "required_fields": ["repository"],
+                "next_action": {"action": "repo_list"},
+                "hint": ("Pass repository=<absolute checkout path> from repo_list (the project's "
+                         "main checkout; a linked worktree resolves to it).")}
+    if code == "WORKTREE_DIRTY":
+        return {"code": code, "next_action": {"action": "diff", "name": branch, **where},
+                "hint": "Commit the work (or ask the user what to do with it); cleanup never discards changes."}
     if code == "MISSING_BRANCH":
         return {"code": code, "required_fields": ["name"],
                 "next_action": {"action": "status"},
@@ -48,7 +65,7 @@ def _next_step(code: str, action: str, branch: str) -> Dict[str, Any]:
                          "agent worktrees, or start one with {\"action\": \"start\", \"name\": \"...\"}.")}
     if code == "WORKTREE_NOT_STARTED":
         return {"code": code, "required_fields": ["name"],
-                "next_action": {"action": "start", "name": branch},
+                "next_action": {"action": "start", "name": branch, **where},
                 "hint": ("Start the worktree first, make and commit the changes in it, "
                          f"then call {action} again with the same name.")}
     if code == "INVALID_BRANCH":
@@ -84,6 +101,43 @@ def _repository_read_token(ctx: dict) -> str | None:
     return github_token_from_env()
 
 
+def _text_arg(args: dict, key: str) -> str:
+    value = args.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _default_repository_refusal(cfg) -> Dict[str, Any] | None:
+    """Refuse a repository-less start when the run is bound to another project.
+
+    Without ``repository`` a worktree is made of the configured source
+    repository. On 2026-09-28 a worker working on the Umni checkout called
+    start with only a name and a base and got a worktree of Odysseus instead.
+    When this run's workspace sits in a different checkout, say so and create
+    nothing; passing ``repository`` (either one) is the explicit choice.
+    """
+    try:
+        from src.agent_worktree.repository_sync import workspace_repository
+        from src.agent_worktree.validation import is_inside
+
+        workspace = workspace_repository()
+    except Exception:  # noqa: BLE001 - no workspace information: keep the default
+        return None
+    if workspace is None:
+        return None
+    here = str(workspace)
+    if is_inside(here, cfg.source_repo) or is_inside(here, cfg.worktree_root):
+        return None
+    return _err(
+        "manage_agent_worktree start: no 'repository' was given, which means the configured "
+        f"source repository {cfg.source_repo}, but this run works in {here}. Nothing was "
+        f"created. Pass repository={here!r} (plus base, e.g. 'origin/main') for a worktree of "
+        f"that project, or repository={cfg.source_repo!r} if you really mean the source repository.",
+        code="REPOSITORY_REQUIRED",
+        next_action={"action": "start", "repository": here, "name": "<task-name>",
+                     "base": "origin/main"},
+    )
+
+
 class AgentWorktreeTool:
     """manage_agent_worktree — isolated worktree plus human-gated publishing."""
 
@@ -97,8 +151,9 @@ class AgentWorktreeTool:
         if action in _FORBIDDEN_ACTIONS:
             return _err(
                 f"manage_agent_worktree: action {action!r} is not permitted by policy: "
-                "removing a worktree discards its uncommitted work. Commit and "
-                "request_publish instead, or ask the user to remove it.",
+                "force-removing a worktree discards its uncommitted work. Use 'cleanup', "
+                "which removes only a clean worktree and keeps any branch whose commits "
+                "exist nowhere else, or ask the user to remove it.",
                 code="forbidden_by_policy",
             )
         if action not in _ACTIONS:
@@ -116,30 +171,53 @@ class AgentWorktreeTool:
 
         cfg = load_config()
         branch = str(args.get("branch") or args.get("name") or "").strip()
+        repository = _text_arg(args, "repository")
 
         if action in _BRANCH_ACTIONS and not branch:
             return _err(f"manage_agent_worktree {action}: 'name' is required",
-                        **_next_step("MISSING_BRANCH", action, branch))
+                        **_next_step("MISSING_BRANCH", action, branch, repository))
 
         try:
             if action == "status":
-                return {"exit_code": 0, "status": await service.status(branch or None, cfg=cfg)}
+                return {"exit_code": 0, "status": await service.status(
+                    branch or None, cfg=cfg, repository=repository or None)}
 
             if action == "start":
-                if not branch:
-                    return _err("manage_agent_worktree: 'name' is required to start a worktree")
-                return {"exit_code": 0, "worktree": await service.ensure_worktree(branch, cfg=cfg)}
+                name = _text_arg(args, "name")
+                requested = _text_arg(args, "branch")
+                if not (name or requested):
+                    return _err("manage_agent_worktree: 'name' is required to start a worktree",
+                                **_next_step("MISSING_BRANCH", action, "", repository))
+                if not repository:
+                    refusal = _default_repository_refusal(cfg)
+                    if refusal:
+                        return refusal
+                worktree = await service.ensure_worktree(
+                    name,
+                    branch=requested or None,
+                    cfg=cfg,
+                    repository=repository or None,
+                    base=_text_arg(args, "base") or None,
+                    expected_base=_text_arg(args, "expected_base") or None,
+                )
+                return {"exit_code": 0, "worktree": worktree}
 
             if action == "commit":
                 return {
                     "exit_code": 0,
                     "result": await service.commit(
-                        branch, str(args.get("message") or ""), cfg=cfg
+                        branch, str(args.get("message") or ""), cfg=cfg,
+                        repository=repository or None,
                     ),
                 }
 
             if action == "diff":
-                return {"exit_code": 0, "diff": await service.diff_summary(branch, cfg=cfg)}
+                return {"exit_code": 0, "diff": await service.diff_summary(
+                    branch, cfg=cfg, repository=repository or None)}
+
+            if action == "cleanup":
+                return {"exit_code": 0, "cleanup": await service.cleanup(
+                    branch, cfg=cfg, repository=repository or None)}
 
             if action == "request_publish":
                 view = await service.request_publish(
@@ -148,6 +226,7 @@ class AgentWorktreeTool:
                     body=str(args.get("body") or ""),
                     requested_by=str(ctx.get("owner") or "") or None,
                     cfg=cfg,
+                    repository=repository or None,
                 )
                 return {
                     "exit_code": 0,
@@ -184,7 +263,7 @@ class AgentWorktreeTool:
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)
             code = getattr(exc, "code", None)
             return _err(f"manage_agent_worktree {action}: {exc}",
-                        **(_next_step(code, action, branch) if code else {}))
+                        **(_next_step(code, action, branch, repository) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")
 

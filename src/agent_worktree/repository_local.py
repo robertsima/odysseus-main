@@ -643,7 +643,11 @@ async def execute_local(action: str, repository: str, **args: Any) -> dict[str, 
         _fail("unsupported_action", "unsupported local repository action")
     try:
         return await sync.run_repository_operation(
-            repository, lambda path: _operate(path, action, args)
+            repository,
+            lambda path: _operate(path, action, args),
+            # Inspection works in a verified linked worktree; stage, commit,
+            # branch and tag still require a physical checkout.
+            allow_linked=action in sync.LINKED_READ_ONLY_ACTIONS,
         )
     except sync.RepositorySyncError:
         raise

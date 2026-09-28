@@ -27,6 +27,12 @@ from src.agent_worktree.validation import (
 # reason for the agent to publish outside its own namespace.
 BRANCH_PREFIX = "agent/odysseus/"
 
+# Worktrees of repositories other than the configured source repository live
+# one level deeper, at <worktree root>/_repos/<repository key>/<name>. A
+# branch-derived leaf always starts alphanumeric, so this directory can never
+# collide with a worktree of the source repository at the root.
+REPOSITORY_WORKTREE_DIR = "_repos"
+
 # Approval lifetime bounds. A very long TTL turns a one-time approval into a
 # standing grant, so the configured value is clamped rather than trusted.
 MIN_APPROVAL_TTL_S = 60
@@ -75,6 +81,13 @@ class WorktreeConfig:
     private_key_path: str
     fallback_token_env: str
     _fallback_token_present: bool = field(default=False, repr=False)
+    # Branch namespace for this repository. BRANCH_PREFIX for the configured
+    # source repository; `agent/<repository label>/` for any other approved
+    # checkout (service.repository_config derives it, never an env var).
+    branch_prefix: str = BRANCH_PREFIX
+    # Empty for the configured source repository (legacy worktree layout);
+    # otherwise the per-repository directory under REPOSITORY_WORKTREE_DIR.
+    repository_key: str = ""
 
     @property
     def remote_url(self) -> str:
@@ -157,7 +170,9 @@ def publish_blockers(cfg: Optional[WorktreeConfig] = None) -> List[str]:
         )
     if not cfg.repo_slug:
         blockers.append(
-            "ODYSSEUS_AGENT_REPO is unset or not a valid owner/name slug"
+            f"repository {cfg.source_repo} has no https://github.com origin remote to publish to"
+            if cfg.repository_key
+            else "ODYSSEUS_AGENT_REPO is unset or not a valid owner/name slug"
         )
     if not cfg.has_any_credential:
         blockers.append(
