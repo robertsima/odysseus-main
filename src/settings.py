@@ -221,8 +221,12 @@ DEFAULT_SETTINGS = {
     # ChatGPT-subscription reasoning effort for chats whose loadout sets none
     # ("" = provider default; minimal/low/medium/high).
     "chatgpt_reasoning_effort": "",
+    # owner/repo slugs, or "*" for any repository the GitHub credential can see.
     "claude_cloud_repositories": [],
     "claude_cloud_workflow": "odysseus-claude.yml",
+    # One repository whose workflow serves every target (hub mode); "" = each
+    # repository carries its own copy of the workflow.
+    "claude_cloud_hub_repository": "",
     "claude_code_odysseus_url": "",
     "claude_code_odysseus_token_file": "",
     # Ask a stream-json-capable Claude Code for its transcript as it runs, so

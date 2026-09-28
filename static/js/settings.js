@@ -2851,6 +2851,7 @@ async function initClaudeCodeSettings() {
     defaultRepo: el('set-ccDefaultRepo'), concurrency: el('set-ccConcurrency'),
     model: el('set-ccModel'), restricted: el('set-ccRestricted'),
     backend: el('set-ccBackend'), cloudRepos: el('set-ccCloudRepos'), cloudWorkflow: el('set-ccCloudWorkflow'),
+    cloudHub: el('set-ccCloudHub'),
     callbackUrl: el('set-ccCallbackUrl'), tokenFile: el('set-ccTokenFile'),
   };
   var msg = el('set-ccMsg');
@@ -2870,6 +2871,7 @@ async function initClaudeCodeSettings() {
     if (f.backend) f.backend.value = settings.claude_code_backend === 'cloud' ? 'cloud' : 'local';
     if (f.cloudRepos) f.cloudRepos.value = Array.isArray(settings.claude_cloud_repositories) ? settings.claude_cloud_repositories.join('\n') : '';
     if (f.cloudWorkflow) f.cloudWorkflow.value = settings.claude_cloud_workflow || '';
+    if (f.cloudHub) f.cloudHub.value = settings.claude_cloud_hub_repository || '';
     if (f.callbackUrl) f.callbackUrl.value = settings.claude_code_odysseus_url || '';
     if (f.tokenFile) f.tokenFile.value = settings.claude_code_odysseus_token_file || '';
   }
@@ -2893,6 +2895,7 @@ async function initClaudeCodeSettings() {
       claude_code_backend: (f.backend && f.backend.value) || 'local',
       claude_cloud_repositories: f.cloudRepos ? f.cloudRepos.value.split(/[\r\n,]+/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
       claude_cloud_workflow: (f.cloudWorkflow && f.cloudWorkflow.value.trim()) || 'odysseus-claude.yml',
+      claude_cloud_hub_repository: (f.cloudHub && f.cloudHub.value.trim()) || '',
       claude_code_odysseus_url: (f.callbackUrl && f.callbackUrl.value.trim()) || '',
       claude_code_odysseus_token_file: (f.tokenFile && f.tokenFile.value.trim()) || '',
     };
@@ -2991,8 +2994,17 @@ async function initClaudeCodeSettings() {
       if (!r.ok) throw new Error(s.detail || r.status);
       var rows = ['<div class="cc-status-line"><span class="cc-pill ' + (s.ready ? 'ok' : 'bad') + '">' + (s.ready ? 'ready' : 'not ready') + '</span> '
         + 'GitHub credential: ' + _e(s.credential === 'github_app' ? 'GitHub App' : s.credential === 'token' ? 'token' : 'none') + '</div>'];
+      if (s.hub) {
+        rows.push('<div class="cc-status-line">' + (s.hub.workflow ? '<span class="cc-pill ok">hub workflow found</span> ' : '<span class="cc-pill bad">hub not set up</span> ')
+          + '<code>' + _e(s.hub.repository) + '</code>' + (s.hub.error ? ' <span class="cc-hint">' + _e(s.hub.error) + '</span>' : '') + '</div>');
+      }
+      if (s.any_repository) {
+        rows.push('<div class="cc-status-line"><span class="cc-pill ' + (s.hub ? 'ok' : 'bad') + '">any repository</span> '
+          + '<span class="cc-hint">' + _e(s.hub ? 'every repository the GitHub App can reach, through the hub' : 'needs a hub repository') + '</span></div>');
+      }
       (s.repositories || []).forEach(function (row) {
-        rows.push('<div class="cc-status-line">' + (row.workflow ? '<span class="cc-pill ok">workflow found</span> ' : '<span class="cc-pill bad">not set up</span> ')
+        var okLabel = row.via_hub ? 'reachable' : 'workflow found';
+        rows.push('<div class="cc-status-line">' + (row.workflow ? '<span class="cc-pill ok">' + okLabel + '</span> ' : '<span class="cc-pill bad">not set up</span> ')
           + '<code>' + _e(row.repository) + '</code>' + (row.error ? ' <span class="cc-hint">' + _e(row.error) + '</span>' : '') + '</div>');
       });
       (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });

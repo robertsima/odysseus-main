@@ -522,8 +522,7 @@ def _worker_scope(action: str, args: dict, session_id: Optional[str], tool_name:
             "started you (or the user) to run action='update'.", tool_name), "exit_code": 1}
     via = str(args.get("via") or "").strip().lower()
     requested = str(args.get("repository") or "").strip()
-    if via in ("cloud", "github", "actions") or (
-            requested and any(requested.lower() == r.lower() for r in _cloud_repositories())):
+    if via in ("cloud", "github", "actions") or (requested and _is_cloud_repository(requested)):
         return {"error": _tool_error(
             "a worker runs Claude Code locally, in its own workspace; the cloud runner is for the chat "
             "that started it.", tool_name), "exit_code": 1}
@@ -761,6 +760,43 @@ def _cloud_repositories() -> list[str]:
         return []
 
 
+def _cloud_configured() -> bool:
+    try:
+        from src import claude_cloud
+        return claude_cloud.configured()
+    except Exception:
+        return False
+
+
+def _is_cloud_repository(value: str) -> bool:
+    """An allowlisted ``owner/repo`` (or any slug, with ``*``). A local
+    checkout path never matches: slugs have exactly one slash and no root."""
+    try:
+        from src import claude_cloud
+        return claude_cloud.is_cloud_repository(value)
+    except Exception:
+        return False
+
+
+def _workspace_cloud_repository() -> str:
+    """The github.com ``origin`` of this chat's workspace, when the cloud
+    runner accepts it; "" otherwise. Lets "run it in the cloud" follow the
+    repository the chat is already working in."""
+    try:
+        from src.tool_execution import get_active_workspace
+        workspace = get_active_workspace()
+    except Exception:
+        workspace = None
+    if not workspace:
+        return ""
+    try:
+        from src.agent_worktree.service import _origin_slug
+        slug = _origin_slug(str(workspace))
+    except Exception:
+        return ""
+    return slug if slug and _is_cloud_repository(slug) else ""
+
+
 def _wants_cloud(args: dict) -> bool:
     """Whether this delegation goes to the GitHub Actions cloud runner.
 
@@ -774,11 +810,10 @@ def _wants_cloud(args: dict) -> bool:
         return True
     if via == "local":
         return False
-    repos = _cloud_repositories()
     requested = str(args.get("repository") or "").strip()
-    if requested and any(requested.lower() == r.lower() for r in repos):
+    if requested and _is_cloud_repository(requested):
         return True
-    return bool(repos) and str(_setting("claude_code_backend", "local") or "local").lower() == "cloud"
+    return _cloud_configured() and str(_setting("claude_code_backend", "local") or "local").lower() == "cloud"
 
 
 async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name: str) -> Optional[dict]:
@@ -811,10 +846,14 @@ async def _cloud_action(action: str, args: dict, *, owner, session_id, tool_name
     repos = claude_cloud.repositories()
     repository = str(args.get("repository") or "").strip()
     if not repository or repository.lower() == "auto":
-        if len(repos) != 1:
-            return {"error": _tool_error("repository is required for the cloud runner; one of: "
-                                         + (", ".join(repos) or "none configured"), tool_name), "exit_code": 1}
-        repository = repos[0]
+        if len(repos) == 1 and not claude_cloud.allows_any_repository():
+            repository = repos[0]
+        else:
+            repository = _workspace_cloud_repository()
+        if not repository:
+            allowed = ", ".join(repos + (["* (any owner/repo)"] if claude_cloud.allows_any_repository() else []))
+            return {"error": _tool_error("repository (owner/repo) is required for the cloud runner; one of: "
+                                         + (allowed or "none configured"), tool_name), "exit_code": 1}
     label = str(args.get("label") or "").strip()[:120] or None
     try:
         record = await claude_cloud.dispatch(repository, str(args.get("prompt") or ""),
@@ -2205,7 +2244,7 @@ class ClaudeCodeTool:
         session_id = (ctx or {}).get("session_id") if isinstance(ctx, dict) else None
         if action == "status":
             report = await status_report()
-            if _cloud_repositories():
+            if _cloud_configured():
                 try:
                     from src import claude_cloud
                     report["cloud"] = await claude_cloud.status()
@@ -2273,7 +2312,7 @@ class ClaudeCodeTool:
             return {**record, "exit_code": record.get("exit_code", 1)}
         if action == "list":
             tasks = runner.summaries(owner=owner)
-            if _cloud_repositories():
+            if _cloud_configured():
                 from src import claude_cloud
                 tasks = tasks + claude_cloud.summaries(owner=owner)
             return {"tasks": tasks, "exit_code": 0}

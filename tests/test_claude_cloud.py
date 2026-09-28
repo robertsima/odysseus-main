@@ -6,6 +6,7 @@ Claude's credential lives only in that repository's secrets.
 import asyncio
 import io
 import json
+import re
 import zipfile
 from pathlib import Path
 
@@ -33,6 +34,16 @@ class FakeGitHub:
         self.calls.append((method, path, params, json_body))
         if method == "GET" and path == "/repos/acme/app":
             return {"default_branch": "main"}
+        if method == "GET" and path == "/repos/acme/hub":
+            return {"default_branch": "dev"}
+        if method == "GET" and path == "/repos/zeta/new":
+            return {"default_branch": "trunk"}
+        if method == "GET" and path == "/repos/zeta/secret":
+            return {"default_branch": "main", "private": True}
+        if method == "GET" and path == "/repos/acme/public-hub":
+            return {"default_branch": "main", "private": False}
+        if method == "GET" and path == "/repos/zeta/new/pulls":
+            return [self.pr] if self.pr else []
         if method == "POST" and path.endswith("/dispatches"):
             short = json_body["inputs"]["task_id"]
             self.run = {"id": 77, "status": "queued", "conclusion": None,
@@ -191,10 +202,136 @@ def test_the_workflow_never_interpolates_dispatch_inputs_into_shell():
     for step in steps:
         assert "${{" not in str(step.get("run") or ""), step.get("name")
     claude = next(s for s in steps if s.get("uses", "").startswith("anthropics/claude-code-action@"))
-    assert claude["uses"].endswith("@v1")
+    # Every action is pinned to a full commit SHA: the hub holds the Claude
+    # credential and a GitHub App key, so a moved tag must not run with them.
+    for step in steps:
+        if step.get("uses"):
+            assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
+    # Claude runs in the checkout; the token must not be left in .git/config.
+    checkout = next(s for s in steps if s.get("uses", "").startswith("actions/checkout@"))
+    assert checkout["with"]["persist-credentials"] is False
     assert claude["with"]["prompt"] == "${{ inputs.prompt }}"
     assert "CLAUDE_CODE_OAUTH_TOKEN" in claude["with"]["claude_code_oauth_token"]
     # Claude gets no push/PR ability; the workflow does the git plumbing.
     assert "git push" not in claude["with"]["claude_args"] and "gh " not in claude["with"]["claude_args"]
     on = wf.get("on") or wf.get(True)
     assert list(on) == ["workflow_dispatch"]
+
+
+# ── hub mode: one workflow serves every repository ───────────────────────
+def test_hub_mode_dispatches_in_the_hub_for_the_target_repository(cloud):
+    """2026-09-28: every repository showed "not set up" because each needed
+    its own workflow copy and secret. With a hub, only the hub has them."""
+    gh, _, settings = cloud
+    settings["claude_cloud_hub_repository"] = "acme/hub"
+    record = _run(cc.dispatch("acme/app", "Fix the parser"))
+    method, path, _, body = [c for c in gh.calls if c[0] == "POST"][0]
+    assert path == "/repos/acme/hub/actions/workflows/odysseus-claude.yml/dispatches"
+    assert body["ref"] == "dev"  # the hub's default branch
+    # The target and its branch are spelled out: the hub checks it out itself.
+    assert body["inputs"]["repository"] == "acme/app"
+    assert body["inputs"]["base_branch"] == "main"
+    assert record["repository"] == "acme/app" and record["workflow_repository"] == "acme/hub"
+
+    # The run and its artifact are read from the hub, the PR from the target.
+    gh.run.update(status="completed", conclusion="success")
+    gh.pr = {"html_url": "https://github.com/acme/app/pull/3", "number": 3}
+    done = _run(cc.refresh(record["task_id"]))
+    assert done["status"] == "completed" and done["pr_url"].endswith("/acme/app/pull/3")
+    assert done["result"] == "Fixed the parser and added a test."
+    run_paths = [c[1] for c in gh.calls if c[1].endswith("/runs") or "/artifacts" in c[1]]
+    assert run_paths and all(p.startswith("/repos/acme/hub/") for p in run_paths)
+    assert ("GET", "/repos/acme/app/pulls") == [c[:2] for c in gh.calls if c[1].endswith("/pulls")][0]
+
+
+def test_per_repository_dispatch_never_sends_the_repository_input(cloud):
+    """A per-repository workflow without the `repository` input rejects a
+    dispatch that carries it (HTTP 422), so only hub dispatches send it."""
+    gh, _, _ = cloud
+    _run(cc.dispatch("acme/app", "Fix it"))
+    body = [c for c in gh.calls if c[0] == "POST"][0][3]
+    assert "repository" not in body["inputs"]
+
+
+def test_star_allows_any_repository_and_cancel_goes_to_the_hub(cloud):
+    gh, _, settings = cloud
+    settings["claude_cloud_repositories"] = ["*"]
+    settings["claude_cloud_hub_repository"] = "https://github.com/acme/hub.git"
+    assert cc.allows_any_repository() and cc.configured() and cc.repositories() == []
+    assert cc.hub_repository() == "acme/hub"
+    assert cc.is_cloud_repository("zeta/new")
+    assert not cc.is_cloud_repository("/app/data/development/dog-trainer")
+    assert not cc.is_cloud_repository("not a slug")
+    record = _run(cc.dispatch("zeta/new", "Add a check-in form"))
+    body = [c for c in gh.calls if c[0] == "POST"][0][3]
+    assert body["inputs"]["repository"] == "zeta/new" and body["inputs"]["base_branch"] == "trunk"
+    gh.run.update(status="in_progress")
+    _run(cc.cancel(record["task_id"]))
+    assert any(c[0] == "POST" and c[1] == "/repos/acme/hub/actions/runs/77/cancel" for c in gh.calls)
+
+
+def test_status_in_hub_mode_checks_the_hub_workflow_and_target_visibility(cloud, monkeypatch):
+    gh, _, settings = cloud
+    settings["claude_cloud_repositories"] = ["acme/app", "*"]
+    settings["claude_cloud_hub_repository"] = "acme/hub"
+
+    class Cfg:
+        has_any_credential = True
+        has_github_app = True
+        private_key_path = __file__
+        fallback_token_env = "ODYSSEUS_AGENT_GITHUB_TOKEN"
+
+    monkeypatch.setattr(cc, "_github_config", lambda: Cfg())
+    out = _run(cc.status())
+    assert out["ready"] is True and out["any_repository"] is True
+    assert out["hub"] == {"repository": "acme/hub", "workflow": True}
+    assert out["repositories"] == [{"repository": "acme/app", "via_hub": True, "workflow": True}]
+    # Only the hub is asked for the workflow; targets only need to be visible.
+    workflow_checks = [c[1] for c in gh.calls if "/actions/workflows/" in c[1]]
+    assert workflow_checks == ["/repos/acme/hub/actions/workflows/odysseus-claude.yml"]
+
+    settings["claude_cloud_hub_repository"] = ""
+    settings["claude_cloud_repositories"] = ["*"]
+    out = _run(cc.status())
+    assert out["ready"] is False and any("hub" in h for h in out["hints"])
+
+
+def test_the_tool_defaults_a_cloud_run_to_the_workspace_origin(cloud, monkeypatch, tmp_path):
+    """With * and no repository named, "run it in the cloud" works on the
+    repository the chat's workspace is a checkout of."""
+    from src.agent_tools import claude_code_tools as cct
+    from src.agent_worktree import service
+
+    gh, _, settings = cloud
+    settings["claude_cloud_repositories"] = ["*"]
+    settings["claude_cloud_hub_repository"] = "acme/hub"
+    monkeypatch.setattr(cct, "_setting", lambda key, default=None: default)
+    monkeypatch.setattr("src.tool_execution.get_active_workspace", lambda: str(tmp_path))
+    monkeypatch.setattr(service, "_origin_slug", lambda path: "zeta/new" if path == str(tmp_path) else "")
+    out = _run(cct.ClaudeCodeTool().execute(json.dumps({"action": "start", "via": "cloud",
+                                                         "prompt": "Fix it"}), {"owner": "alice"}))
+    assert out["exit_code"] == 0 and out["repository"] == "zeta/new", out
+    assert cct._wants_cloud({"repository": "zeta/new"})
+    assert not cct._wants_cloud({"repository": "/app/data/development/dog-trainer"})
+
+
+def test_a_public_hub_never_runs_a_private_repository(cloud, monkeypatch):
+    """A public repository's Actions logs are public; the run would expose
+    the private target's code and the prompt."""
+    gh, _, settings = cloud
+    settings["claude_cloud_repositories"] = ["*"]
+    settings["claude_cloud_hub_repository"] = "acme/public-hub"
+    with pytest.raises(cc.CloudError, match="public"):
+        _run(cc.dispatch("zeta/secret", "Fix it"))
+    assert not [c for c in gh.calls if c[0] == "POST"]
+    _run(cc.dispatch("zeta/new", "Fix it"))  # a public target is fine
+
+    class Cfg:
+        has_any_credential = True
+        has_github_app = True
+        private_key_path = __file__
+        fallback_token_env = "ODYSSEUS_AGENT_GITHUB_TOKEN"
+
+    monkeypatch.setattr(cc, "_github_config", lambda: Cfg())
+    out = _run(cc.status())
+    assert out["hub"]["public"] is True and any("public" in h for h in out["hints"])

@@ -79,8 +79,13 @@ judgment.
   secrets, on a `claude/odysseus-<id>` branch. The workflow itself commits,
   pushes and opens a draft PR, and Odysseus follows the run and reports the
   result, branch and PR. Delegate with `repository: "owner/repo"` or
-  `via: "cloud"`; `start` + `poll` as usual, and `status` includes a `cloud`
-  section.
+  `via: "cloud"` (no repository: the workspace's github.com `origin`);
+  `start` + `poll` as usual, and `status` includes a `cloud` section.
+  **Hub mode** (`claude_cloud_hub_repository`) keeps the workflow, the Claude
+  secret and the GitHub App key in one repository: each run checks the target
+  out with an App token scoped to that repository and opens the PR there, so
+  targets need no setup. `*` in `claude_cloud_repositories` then means any
+  repository the GitHub App can reach.
 - Configuration lives in Settings > Agent Tools > Claude Code (`claude_code_*`
   settings, admin-only) with `CLAUDE_CODE_*` environment variables as the
   fallback. The bundled `claude-code-delegation` skill carries the full

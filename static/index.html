@@ -2740,18 +2740,22 @@
                 <select id="set-ccBackend" class="settings-select" style="width:220px;"><option value="local">This container (local)</option><option value="cloud">GitHub Actions (cloud)</option></select>
               </div>
               <div class="settings-row" style="align-items:flex-start;">
-                <label class="settings-label" title="owner/repo slugs Claude may be dispatched to. Each needs the workflow file and a Claude secret.">Cloud repositories<br><span style="font-weight:normal;opacity:.7">owner/repo, one per line</span></label>
+                <label class="settings-label" title="owner/repo slugs Claude may be dispatched to, or * for any repository the GitHub credential can see. Without a hub repository each needs the workflow file and a Claude secret.">Cloud repositories<br><span style="font-weight:normal;opacity:.7">owner/repo, one per line; * = any</span></label>
                 <textarea id="set-ccCloudRepos" rows="3" placeholder="robertsima/odysseus-main" class="settings-select" style="width:320px;font-family:var(--mono, ui-monospace, monospace);font-size:12px;"></textarea>
               </div>
               <div class="settings-row">
-                <label class="settings-label" title="File name under .github/workflows/ in each repository.">Workflow file</label>
+                <label class="settings-label" title="One repository whose workflow runs every task: it checks the target repository out with a GitHub App token and opens the pull request there, so the targets need no setup. Empty = each repository has its own workflow.">Hub repository<br><span style="font-weight:normal;opacity:.7">optional, owner/repo</span></label>
+                <input id="set-ccCloudHub" type="text" placeholder="robertsima/odysseus-main" class="settings-select" style="width:320px;font-family:var(--mono, ui-monospace, monospace);font-size:12px;">
+              </div>
+              <div class="settings-row">
+                <label class="settings-label" title="File name under .github/workflows/ in the hub, or in each repository.">Workflow file</label>
                 <input id="set-ccCloudWorkflow" type="text" placeholder="odysseus-claude.yml" class="settings-select" style="width:220px;">
               </div>
               <div class="settings-row" style="gap:8px;">
                 <a class="btn btn-secondary" href="/api/claude-code/cloud/workflow.yml" download>Download workflow</a>
                 <button type="button" id="set-ccCloudCheck" class="btn btn-secondary">Check cloud setup</button>
               </div>
-              <div class="admin-toggle-sub">Per repository: commit the workflow to <code>.github/workflows/</code>, add the Claude secret (or run <code>/install-github-app</code> in Claude Code), and under Actions › General allow read/write and "Allow GitHub Actions to create and approve pull requests".</div>
+              <div class="admin-toggle-sub">Hub (any repository, set up once; use a <b>private</b> repository, its Actions logs show the work): commit the workflow to the hub's <code>.github/workflows/</code>; in the hub add the secrets <code>CLAUDE_CODE_OAUTH_TOKEN</code> and <code>ODYSSEUS_APP_PRIVATE_KEY</code> (the GitHub App's .pem) and the variable <code>ODYSSEUS_APP_ID</code>; give the GitHub App Contents and Pull requests write access on the target repositories. Without a hub, per repository: commit the workflow, add the Claude secret (or run <code>/install-github-app</code> in Claude Code), and under Actions › General allow read/write and "Allow GitHub Actions to create and approve pull requests".</div>
               <div id="set-ccCloudStatus" class="cc-status"></div>
             </div>
             <div class="admin-toggle-sub" style="margin:12px 0 6px">Recent delegations (chat and API). Prompts are never stored; each row is what git reported afterwards.</div>
@@ -3034,7 +3038,7 @@
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260927settingsfix1"></script>
+<script type="module" src="/static/js/settings.js?v=20260928cloudhub1"></script>
 <script type="module" src="/static/js/capabilitiesPanel.js?v=20260916workspace2"></script>
 <script type="module" src="/static/js/assistant.js"></script>
 <script type="module" src="/static/app.js?v=20260815toolapproval4"></script>  <!-- app.js must be LAST -->

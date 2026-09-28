@@ -11,6 +11,14 @@ up with Anthropic's own ``claude setup-token`` or ``/install-github-app``).
 Odysseus never sees, stores or forwards it; see
 skills/dev/claude-code-delegation/references/terms-and-boundaries.md.
 
+Hub mode (``claude_cloud_hub_repository``) serves every repository from one
+workflow: Odysseus dispatches it in the hub with ``repository`` set to the
+target, and the run checks the target out with a GitHub App token minted for
+that repository alone, then pushes the branch and opens the pull request
+there. Claude's credential and the App key live once, in the hub's secrets;
+nothing is installed in the target repositories. ``*`` in
+``claude_cloud_repositories`` allows any repository the credential can see.
+
 The workflow, not Claude, does the git plumbing: it runs Claude on a prepared
 ``claude/odysseus-<id>`` branch with file tools and read-only git, then commits,
 pushes and opens a draft pull request, and uploads Claude's closing summary as
@@ -60,6 +68,9 @@ _WORKFLOW_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}\.ya?ml$")
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9._/-]{1,200}$")
 _TERMINAL = {"completed", "failed", "cancelled"}
 
+# In claude_cloud_repositories: any repository the GitHub credential can see.
+ANY_REPOSITORY = "*"
+
 _tasks: Dict[str, Dict[str, Any]] = {}
 _watchers: Dict[str, asyncio.Task] = {}
 _loaded = False
@@ -79,19 +90,54 @@ def _setting(key: str, default=None):
         return default
 
 
-def repositories() -> List[str]:
-    """Allowlisted ``owner/repo`` slugs Claude may be dispatched to."""
+def _normalize_slug(value: Any) -> str:
+    slug = str(value or "").strip().strip("/")
+    if slug.lower().startswith("https://github.com/"):
+        slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
+    return slug if _SLUG_RE.fullmatch(slug) else ""
+
+
+def _allowlist() -> List[str]:
     raw = _setting("claude_cloud_repositories", []) or []
     if isinstance(raw, str):
         raw = re.split(r"[\s,]+", raw)
+    return [str(item or "").strip() for item in raw] if isinstance(raw, list) else []
+
+
+def repositories() -> List[str]:
+    """Explicitly allowlisted ``owner/repo`` slugs Claude may be dispatched to
+    (``*`` is reported by allows_any_repository, not listed here)."""
     out: List[str] = []
-    for item in raw if isinstance(raw, list) else []:
-        slug = str(item or "").strip().strip("/")
-        if slug.lower().startswith("https://github.com/"):
-            slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
-        if _SLUG_RE.fullmatch(slug) and slug.lower() not in {s.lower() for s in out}:
+    for item in _allowlist():
+        slug = _normalize_slug(item)
+        if slug and slug.lower() not in {s.lower() for s in out}:
             out.append(slug)
     return out
+
+
+def allows_any_repository() -> bool:
+    return ANY_REPOSITORY in _allowlist()
+
+
+def configured() -> bool:
+    """Whether the cloud runner has any repository to work on."""
+    return bool(repositories()) or allows_any_repository()
+
+
+def hub_repository() -> str:
+    """The repository whose workflow serves every target, or "" (per repository)."""
+    return _normalize_slug(_setting("claude_cloud_hub_repository", ""))
+
+
+def resolve_repository(value: str) -> Optional[str]:
+    """The allowlisted slug *value* names (in its configured spelling), or None."""
+    slug = _normalize_slug(value)
+    if not slug:
+        return None
+    listed = next((r for r in repositories() if r.lower() == slug.lower()), None)
+    if listed:
+        return listed
+    return slug if allows_any_repository() else None
 
 
 def workflow_file() -> str:
@@ -100,8 +146,7 @@ def workflow_file() -> str:
 
 
 def is_cloud_repository(value: str) -> bool:
-    slug = str(value or "").strip()
-    return any(slug.lower() == repo.lower() for repo in repositories())
+    return resolve_repository(value) is not None
 
 
 def workflow_template() -> str:
@@ -236,22 +281,40 @@ async def dispatch(repository: str, prompt: str, *, base_branch: str = "", owner
                    session_id: Optional[str] = None, label: Optional[str] = None) -> Dict[str, Any]:
     """Start the workflow for one task; returns the task record at once."""
     _load()
-    repo = next((r for r in repositories() if r.lower() == str(repository or "").strip().lower()), None)
+    repo = resolve_repository(repository)
     if repo is None:
         allowed = ", ".join(repositories()) or "none configured"
         raise CloudError(f"{repository!r} is not an allowlisted cloud repository ({allowed}). "
-                         "Add it under Settings › Tools › Claude Code › Cloud runner.")
+                         "Add it (or * for any repository) under Settings › Tools › Claude Code › "
+                         "Cloud runner.")
     prompt = str(prompt or "").strip()
     if not prompt or len(prompt) > MAX_PROMPT_CHARS:
         raise CloudError(f"prompt is required and must be <= {MAX_PROMPT_CHARS} characters")
     base_branch = str(base_branch or "").strip()
     if base_branch and not _BRANCH_RE.fullmatch(base_branch):
         raise CloudError("base_branch is not a valid branch name")
+    hub = hub_repository()
     info = await _gh("GET", f"/repos/{repo}")
     ref = str((info or {}).get("default_branch") or "main")
     short = uuid.uuid4().hex[:12]
-    await _gh("POST", f"/repos/{repo}/actions/workflows/{workflow_file()}/dispatches",
-              json_body={"ref": ref, "inputs": {"task_id": short, "prompt": prompt, "base_branch": base_branch}})
+    inputs = {"task_id": short, "prompt": prompt, "base_branch": base_branch}
+    workflow_repo, dispatch_ref = repo, ref
+    if hub and hub.lower() != repo.lower():
+        # The hub's workflow checks the target out itself, so it needs the
+        # target's branch spelled out; the hub's own default branch is the ref.
+        # Only hub dispatches carry `repository`: a per-repository workflow
+        # without that input would reject it (HTTP 422).
+        workflow_repo = hub
+        inputs = {**inputs, "repository": repo, "base_branch": base_branch or ref}
+        hub_info = await _gh("GET", f"/repos/{hub}")
+        if (info or {}).get("private") and (hub_info or {}).get("private") is False:
+            # Actions logs of a public repository are public: Claude's run
+            # would show the private target's code and the prompt to anyone.
+            raise CloudError(f"hub repository {hub} is public, so its Actions logs are too; it cannot "
+                             f"run tasks on the private repository {repo}. Use a private hub repository.")
+        dispatch_ref = str((hub_info or {}).get("default_branch") or "main")
+    await _gh("POST", f"/repos/{workflow_repo}/actions/workflows/{workflow_file()}/dispatches",
+              json_body={"ref": dispatch_ref, "inputs": inputs})
     task_id = TASK_PREFIX + short
     title = f"Claude Code (cloud) · {repo}: {' '.join(prompt.split())[:80]}"
     run_id = activity.run_started(
@@ -261,7 +324,8 @@ async def dispatch(repository: str, prompt: str, *, base_branch: str = "", owner
         detail=prompt[:1500],
     )
     record = {
-        "task_id": task_id, "short_id": short, "repository": repo, "status": "queued",
+        "task_id": task_id, "short_id": short, "repository": repo, "workflow_repository": workflow_repo,
+        "status": "queued",
         "created_at": time.time(), "finished_at": None, "owner": owner, "session_id": session_id,
         "label": label, "prompt": prompt[:2000], "base_branch": base_branch or ref,
         "branch": BRANCH_PREFIX + short, "workflow_run_id": None, "run_url": None,
@@ -274,8 +338,13 @@ async def dispatch(repository: str, prompt: str, *, base_branch: str = "", owner
     return record
 
 
+def _workflow_repo(record: Dict[str, Any]) -> str:
+    """Where the record's workflow run lives: the hub, or the repository itself."""
+    return record.get("workflow_repository") or record["repository"]
+
+
 async def _find_run(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    data = await _gh("GET", f"/repos/{record['repository']}/actions/workflows/{workflow_file()}/runs",
+    data = await _gh("GET", f"/repos/{_workflow_repo(record)}/actions/workflows/{workflow_file()}/runs",
                      params={"event": "workflow_dispatch", "per_page": 30})
     wanted = f"Odysseus task {record['short_id']}"
     for run in (data or {}).get("workflow_runs") or []:
@@ -314,7 +383,7 @@ async def _read_outputs(record: Dict[str, Any]) -> None:
         record["branch_url"] = None
     if record.get("workflow_run_id"):
         try:
-            record["result"] = await _read_result(repo, int(record["workflow_run_id"]))
+            record["result"] = await _read_result(_workflow_repo(record), int(record["workflow_run_id"]))
         except (CloudError, zipfile.BadZipFile, OSError) as exc:
             logger.info("claude cloud: result artifact unavailable for %s: %s", record["task_id"], exc)
 
@@ -330,7 +399,7 @@ async def refresh(task_id: str) -> Optional[Dict[str, Any]]:
         # seconds); give up if it never appears.
         if time.time() - (record.get("created_at") or 0) > 600:
             _finish(record, "failed", error="GitHub never started the workflow run. Is "
-                    f".github/workflows/{workflow_file()} on the default branch?")
+                    f".github/workflows/{workflow_file()} on the default branch of {_workflow_repo(record)}?")
         return record
     record["workflow_run_id"] = run.get("id")
     record["run_url"] = run.get("html_url")
@@ -418,7 +487,7 @@ async def cancel(task_id: str, owner: Optional[str] = None) -> Optional[Dict[str
         return record
     run = await _find_run(record)
     if run is not None and run.get("status") != "completed":
-        await _gh("POST", f"/repos/{record['repository']}/actions/runs/{run.get('id')}/cancel")
+        await _gh("POST", f"/repos/{_workflow_repo(record)}/actions/runs/{run.get('id')}/cancel")
         record["workflow_run_id"] = run.get("id")
         record["run_url"] = run.get("html_url")
     _finish(record, "cancelled")
@@ -447,35 +516,84 @@ def report(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 # ── status ────────────────────────────────────────────────────────────────
+async def _workflow_row(repo: str) -> Dict[str, Any]:
+    row: Dict[str, Any] = {"repository": repo}
+    try:
+        await _gh("GET", f"/repos/{repo}/actions/workflows/{workflow_file()}")
+        row["workflow"] = True
+    except CloudError as exc:
+        row["workflow"] = False
+        row["error"] = str(exc)
+        if "(404)" in str(exc):
+            row["error"] = (f".github/workflows/{workflow_file()} is not on the default branch, or the "
+                            "GitHub credential cannot see this repository.")
+    return row
+
+
+async def _visible_row(repo: str) -> Dict[str, Any]:
+    """Hub mode: a target only has to be visible to the GitHub credential."""
+    row: Dict[str, Any] = {"repository": repo, "via_hub": True}
+    try:
+        await _gh("GET", f"/repos/{repo}")
+        row["workflow"] = True
+    except CloudError as exc:
+        row["workflow"] = False
+        row["error"] = ("The GitHub credential cannot see this repository; install the GitHub App "
+                        "there (or on all repositories)." if "(404)" in str(exc) else str(exc))
+    return row
+
+
 async def status() -> Dict[str, Any]:
     cfg = _github_config()
     repos = repositories()
+    hub = hub_repository()
     hints = list(_credential_blockers(cfg))
-    rows = []
-    if not repos:
-        hints.append("Add the repositories Claude may work on under Settings › Tools › Claude Code › Cloud runner.")
-    for repo in repos:
-        row: Dict[str, Any] = {"repository": repo}
-        if not _credential_blockers(cfg):
+    rows: List[Dict[str, Any]] = []
+    hub_row: Optional[Dict[str, Any]] = None
+    if not configured():
+        hints.append("Add the repositories Claude may work on (or * for any repository) under "
+                     "Settings › Tools › Claude Code › Cloud runner.")
+    if allows_any_repository() and not hub:
+        hints.append("* (any repository) needs a hub repository; without one, each repository "
+                     "needs its own copy of the workflow.")
+    if not _credential_blockers(cfg):
+        if hub:
+            hub_row = await _workflow_row(hub)
             try:
-                await _gh("GET", f"/repos/{repo}/actions/workflows/{workflow_file()}")
-                row["workflow"] = True
-            except CloudError as exc:
-                row["workflow"] = False
-                row["error"] = str(exc)
-                if "(404)" in str(exc):
-                    row["error"] = (f".github/workflows/{workflow_file()} is not on the default branch, or the "
-                                    "GitHub credential cannot see this repository.")
-        rows.append(row)
-    ready = bool(repos) and not _credential_blockers(cfg) and all(r.get("workflow") for r in rows)
+                if ((await _gh("GET", f"/repos/{hub}")) or {}).get("private") is False:
+                    hub_row["public"] = True
+                    hints.append(f"The hub {hub} is public, so its Actions logs are public: it will refuse "
+                                 "tasks on private repositories. Use a private hub repository.")
+            except CloudError:
+                pass
+        for repo in repos:
+            rows.append(await (_visible_row(repo) if hub else _workflow_row(repo)))
+    else:
+        rows = [{"repository": repo} for repo in repos]
+    ready = (configured() and not _credential_blockers(cfg)
+             and (hub_row.get("workflow") if hub_row is not None else not allows_any_repository())
+             and all(r.get("workflow") for r in rows))
+    if hub:
+        setup = (f"Hub mode: {hub} runs every task. Copy the workflow (GET /api/claude-code/cloud/workflow.yml) "
+                 f"to .github/workflows/{workflow_file()} on its default branch; there, add the "
+                 "CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or ANTHROPIC_API_KEY secret, the "
+                 "ODYSSEUS_APP_PRIVATE_KEY secret and the ODYSSEUS_APP_ID variable; give the GitHub App "
+                 "Contents and Pull requests write access on the target repositories. Nothing is installed "
+                 "in the targets.")
+    else:
+        setup = ("Copy the workflow (GET /api/claude-code/cloud/workflow.yml) to .github/workflows/"
+                 f"{workflow_file()} and add a CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or "
+                 "ANTHROPIC_API_KEY repository secret. Claude's credential stays in GitHub. Or set a hub "
+                 "repository to serve every repository from one copy of the workflow.")
     return {
         "backend": "cloud",
-        "ready": ready,
+        "ready": bool(ready),
         "workflow_file": workflow_file(),
+        "hub_repository": hub or None,
+        "hub": hub_row,
+        "any_repository": allows_any_repository(),
         "repositories": rows,
         "credential": "github_app" if cfg.has_github_app else ("token" if cfg.has_any_credential else None),
         "hints": hints,
-        "setup": ("Copy the workflow (GET /api/claude-code/cloud/workflow.yml) to .github/workflows/"
-                  f"{workflow_file()} and add a CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) or "
-                  "ANTHROPIC_API_KEY repository secret. Claude's credential stays in GitHub."),
+        "setup": setup,
     }

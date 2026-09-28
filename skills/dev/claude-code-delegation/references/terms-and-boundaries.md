@@ -30,6 +30,12 @@ It never receives, stores or forwards the Claude credential, and it does not
 host a Claude login. This is the route to use when nobody should sign in
 inside the container.
 
+In hub mode (`claude_cloud_hub_repository`) the same holds for one hub
+repository instead of each target: the Claude credential and the GitHub App
+key are the hub's secrets, and the run checks the target repository out with
+an App token scoped to it alone. Odysseus still sends only the task text, the
+target and the base branch.
+
 ## Why that stays inside the published terms
 
 - Running Claude Code "in your products or services (e.g. in hosted sandboxes

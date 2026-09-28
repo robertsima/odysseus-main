@@ -839,6 +839,10 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                 cleaned = []
                 for item in items:
                     slug = str(item or "").strip().strip("/")
+                    if slug == "*":  # any repository the GitHub credential can see
+                        if slug not in cleaned:
+                            cleaned.append(slug)
+                        continue
                     if slug.lower().startswith("https://github.com/"):
                         slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
                     if not slug:
@@ -848,6 +852,14 @@ def setup_auth_routes(auth_manager: AuthManager) -> APIRouter:
                     if slug.lower() not in {c.lower() for c in cleaned}:
                         cleaned.append(slug)
                 current[key] = cleaned[:50]
+                continue
+            if key == "claude_cloud_hub_repository":
+                slug = str(val or "").strip().strip("/")
+                if slug.lower().startswith("https://github.com/"):
+                    slug = slug[len("https://github.com/"):].removesuffix(".git").strip("/")
+                if slug and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}", slug):
+                    raise HTTPException(400, f"{key}: {slug!r} is not an owner/repo slug")
+                current[key] = slug
                 continue
             if key == "claude_cloud_workflow":
                 val = str(val or "").strip() or "odysseus-claude.yml"

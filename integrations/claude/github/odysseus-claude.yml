@@ -4,23 +4,46 @@
 # Anthropic's official Claude Code GitHub Action. Claude runs in GitHub's cloud
 # with YOUR credential from this repository's secrets; Odysseus never sees it.
 #
-# Setup (once per repository):
+# Two ways to set it up:
+#
+# A. Hub (one repository serves every repository). Recommended.
 #   1. Copy this file to .github/workflows/odysseus-claude.yml on the default
-#      branch.
-#   2. Add ONE repository secret:
-#        CLAUDE_CODE_OAUTH_TOKEN  from `claude setup-token` (your Pro/Max plan)
-#        or ANTHROPIC_API_KEY     (billed per token)
+#      branch of ONE PRIVATE repository you own (the hub). A public
+#      repository's Actions logs are public, so Odysseus refuses to run a
+#      private repository's task through a public hub.
+#   2. In the hub, add the secrets
+#        CLAUDE_CODE_OAUTH_TOKEN      from `claude setup-token` (your Pro/Max plan)
+#                                     (or ANTHROPIC_API_KEY, billed per token)
+#        ODYSSEUS_APP_PRIVATE_KEY     the GitHub App private key (.pem) Odysseus uses
+#      and the repository variable
+#        ODYSSEUS_APP_ID              that GitHub App's id.
+#   3. Give the GitHub App Contents: write and Pull requests: write, installed
+#      on every repository Claude may work on ("All repositories" = any repo).
+#   4. In Odysseus: Settings › Tools › Claude Code › Cloud runner, set the hub
+#      repository, and list the target repositories (or * for any repository
+#      the GitHub App can reach).
+#   Odysseus then dispatches here with `repository` = the target. The run checks
+#   the target out with a GitHub App token scoped to that one repository, and
+#   pushes the branch and opens the draft pull request THERE. Nothing needs
+#   installing in the target repositories.
+#
+# B. Per repository (no `repository` input).
+#   1. Copy this file to .github/workflows/odysseus-claude.yml on the default
+#      branch of each repository.
+#   2. Add ONE repository secret: CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY.
 #      Running `/install-github-app` inside Claude Code sets this up for you.
 #   3. Settings › Actions › General › Workflow permissions: allow "Read and
 #      write" and tick "Allow GitHub Actions to create and approve pull
 #      requests" (otherwise the run pushes a branch but cannot open the PR).
-#   4. The GitHub credential Odysseus uses needs Actions: write, Contents:
-#      read and Pull requests: read on this repository.
+#
+# Either way, the GitHub credential Odysseus uses needs Actions: write,
+# Contents: read and Pull requests: read on the repository it dispatches to.
 #
 # Security: dispatch inputs are untrusted text. They reach shell steps only
 # through environment variables, never through ${{ }} interpolation inside a
 # `run:` script. Claude gets file tools and read-only git; the commit, push and
-# draft PR are done by the steps below, never by Claude.
+# draft PR are done by the steps below, never by Claude. In hub mode the App
+# token is minted for the target repository only.
 
 name: Odysseus → Claude Code
 run-name: "Odysseus task ${{ inputs.task_id }}"
@@ -37,7 +60,12 @@ on:
         required: true
         type: string
       base_branch:
-        description: "Branch to start from (empty = default branch)"
+        description: "Branch to start from (empty = default branch; required with repository)"
+        required: false
+        type: string
+        default: ""
+      repository:
+        description: "Hub mode: owner/name of the repository to work on (empty = this one)"
         required: false
         type: string
         default: ""
@@ -56,18 +84,66 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - name: Check task id
+      - name: Check inputs
+        id: target
         env:
           TASK_ID: ${{ inputs.task_id }}
+          REPOSITORY: ${{ inputs.repository }}
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          THIS_REPOSITORY: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           case "$TASK_ID" in
             ''|*[!A-Za-z0-9-]*) echo "::error::invalid task id"; exit 1 ;;
           esac
+          case "$BASE_BRANCH" in
+            *[!A-Za-z0-9._/-]*) echo "::error::invalid base branch"; exit 1 ;;
+          esac
+          if [ -n "$REPOSITORY" ]; then
+            if ! printf '%s' "$REPOSITORY" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$'; then
+              echo "::error::invalid repository"; exit 1
+            fi
+            if [ -z "$BASE_BRANCH" ]; then
+              echo "::error::base_branch is required with repository"; exit 1
+            fi
+            {
+              echo "hub=true"
+              echo "repository=$REPOSITORY"
+              echo "owner=${REPOSITORY%%/*}"
+              echo "name=${REPOSITORY#*/}"
+              echo "base=$BASE_BRANCH"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "hub=false"
+              echo "repository=$THIS_REPOSITORY"
+              echo "base=${BASE_BRANCH:-$DEFAULT_BRANCH}"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
-      - uses: actions/checkout@v4
+      # Hub mode only: a token for the target repository alone.
+      - name: GitHub App token for the target repository
+        id: app
+        if: steps.target.outputs.hub == 'true'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.2.0
         with:
-          ref: ${{ inputs.base_branch || github.event.repository.default_branch }}
+          app-id: ${{ vars.ODYSSEUS_APP_ID }}
+          private-key: ${{ secrets.ODYSSEUS_APP_PRIVATE_KEY }}
+          owner: ${{ steps.target.outputs.owner }}
+          repositories: ${{ steps.target.outputs.name }}
+          # Only what the run needs: push the branch, open the draft PR.
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ steps.target.outputs.repository }}
+          ref: ${{ steps.target.outputs.base }}
+          token: ${{ steps.app.outputs.token || github.token }}
           fetch-depth: 0
+          # Claude runs in this checkout; keep the token out of .git/config.
+          # The push step below authenticates explicitly.
+          persist-credentials: false
 
       - name: Create work branch
         env:
@@ -76,10 +152,13 @@ jobs:
 
       - name: Run Claude Code
         id: claude
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@756cc22e19660d20e8cc9496b4f242475a7f7790  # v1.0.235
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Hub mode: the target repository's App token, so the action does not
+          # need the Claude GitHub App installed there. Empty per repository.
+          github_token: ${{ steps.app.outputs.token }}
           prompt: ${{ inputs.prompt }}
           # A GitHub App dispatch runs as "<app>[bot]", which the action refuses
           # unless listed. Only workflow_dispatch starts this workflow, and
@@ -119,9 +198,10 @@ jobs:
       - name: Commit, push and open draft PR
         if: always()
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
           TASK_ID: ${{ inputs.task_id }}
-          BASE_BRANCH: ${{ inputs.base_branch || github.event.repository.default_branch }}
+          REPOSITORY: ${{ steps.target.outputs.repository }}
+          BASE_BRANCH: ${{ steps.target.outputs.base }}
         run: |
           git add -A -- . ':!claude-result.md'
           if git diff --cached --quiet; then
@@ -130,14 +210,14 @@ jobs:
           fi
           git -c user.name="claude[bot]" -c user.email="41898282+claude[bot]@users.noreply.github.com" \
             commit -m "Odysseus task $TASK_ID (Claude Code)"
-          git push origin "claude/odysseus-$TASK_ID"
-          gh pr create --draft --base "$BASE_BRANCH" --head "claude/odysseus-$TASK_ID" \
+          git push "https://x-access-token:${GH_TOKEN}@github.com/${REPOSITORY}.git" "claude/odysseus-$TASK_ID"
+          gh pr create --repo "$REPOSITORY" --draft --base "$BASE_BRANCH" --head "claude/odysseus-$TASK_ID" \
             --title "Odysseus task $TASK_ID (Claude Code)" --body-file claude-result.md \
-            || echo "::warning::Branch pushed, but the draft PR could not be opened (check 'Allow GitHub Actions to create and approve pull requests')."
+            || echo "::warning::Branch pushed, but the draft PR could not be opened (per repository: check 'Allow GitHub Actions to create and approve pull requests'; hub: the GitHub App needs Pull requests: write)."
 
       - name: Upload result for Odysseus
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: odysseus-result
           path: claude-result.md
