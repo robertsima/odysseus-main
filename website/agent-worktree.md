@@ -188,6 +188,15 @@ two repositories never collide, and `status` lists each worktree with the
 across repositories. Base and PR-target metadata is kept in the approval state
 directory, which the agent's file tools cannot write.
 
+A chat or worker bound to a checkout can read and edit its own worktrees with
+the ordinary file tools (`read_file`, `edit_file`, `write_file`, `grep`,
+`glob`, `ls`) by absolute path, though they sit outside the workspace: a path
+counts when it is under the worktree root, in a linked worktree whose shared
+`.git` is the workspace's (`src/agent_worktree/ownership.py`). Worktrees of
+other repositories stay out of reach, and the sensitive-path and app-state
+deny lists apply inside the worktree as they do in the workspace. bash/python
+still run in the workspace itself.
+
 `request_publish`/`publish` for such a worktree push to **that** repository's
 own `origin` (it must be an `https://github.com/owner/name` or
 `git@github.com:` remote; the push URL is derived from it) and open the draft PR

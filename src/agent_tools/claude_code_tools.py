@@ -257,12 +257,8 @@ def repository_roots() -> tuple[Path, ...]:
 
 def _managed_worktree_root() -> Optional[Path]:
     """The agent worktree root (``agent_worktree.config``), when it exists."""
-    try:
-        from src.agent_worktree.config import load_config
-        root = Path(load_config().worktree_root).expanduser().resolve()
-    except Exception:
-        return None
-    return root if root.is_dir() else None
+    from src.agent_worktree.ownership import managed_worktree_root
+    return managed_worktree_root()
 
 
 def configured_concurrency() -> int:
@@ -445,26 +441,8 @@ def _caller_worker_settings(session_id: Optional[str]) -> Optional[dict]:
 
 def _git_common_dir(path: Path) -> Optional[Path]:
     """The shared ``.git`` directory of a checkout or linked worktree."""
-    git = path / ".git"
-    try:
-        if git.is_dir():
-            return git.resolve()
-        if not git.is_file():
-            return None
-        pointer = git.read_text(encoding="utf-8", errors="replace").strip()
-        if not pointer.startswith("gitdir:"):
-            return None
-        gitdir = Path(pointer.split(":", 1)[1].strip())
-        if not gitdir.is_absolute():
-            gitdir = (path / gitdir)
-        gitdir = gitdir.resolve()
-        common = gitdir / "commondir"
-        if common.is_file():
-            target = Path(common.read_text(encoding="utf-8", errors="replace").strip())
-            return (target if target.is_absolute() else gitdir / target).resolve()
-        return gitdir
-    except OSError:
-        return None
+    from src.agent_worktree.ownership import git_common_dir
+    return git_common_dir(path)
 
 
 def _within(path: Path, root: Path) -> bool:

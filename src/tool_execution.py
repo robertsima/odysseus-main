@@ -711,6 +711,13 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
             # different file of the same name.
             if "is outside the workspace" not in str(workspace_error):
                 raise
+            # A managed worktree of the workspace's own repository
+            # (manage_agent_worktree start) lives under the worktree root,
+            # not inside the checkout. On 2026-09-28 a worker created one of
+            # the Umni checkout and then could not read or edit a file in it.
+            worktree_path = _resolve_workspace_worktree_path(ws, raw_path, allow_private=allow_private)
+            if worktree_path is not None:
+                return worktree_path
             # The knowledge base is not "somewhere else on the host" — it is
             # the user's own indexed notes, reachable by these same tools when
             # no workspace is bound, and the paths `search_documents` cites.
@@ -750,6 +757,44 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
     raise ValueError(
         f"path '{raw_path}' is outside the allowed roots" + _personal_docs_suggestion(raw_path)
     )
+
+
+def _resolve_workspace_worktree_path(workspace: str, raw_path: str,
+                                     allow_private: bool = False) -> Optional[str]:
+    """Resolve an absolute path inside a managed worktree of the workspace's
+    repository, or return None when it is not in one.
+
+    Only worktrees ``src.agent_worktree.ownership`` says belong to the
+    workspace qualify: under the configured worktree root, linked to the same
+    repository. The same deny lists as inside the workspace apply; a denial
+    raises rather than returning None.
+    """
+    if raw_path is None or not str(raw_path).strip():
+        return None
+    expanded = os.path.expanduser(str(raw_path).strip())
+    if not os.path.isabs(expanded):
+        return None  # relative paths are workspace-relative, never a worktree's
+    resolved = os.path.realpath(expanded)
+    try:
+        from src.agent_worktree.ownership import workspace_worktree_for
+
+        worktree = workspace_worktree_for(resolved, workspace)
+    except Exception:  # noqa: BLE001 - no ownership information: not reachable
+        return None
+    if worktree is None:
+        return None
+    if _is_sensitive_path(resolved, allow_private=allow_private):
+        raise ValueError(
+            f"path '{raw_path}' is inside a sensitive directory "
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+        )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
+    return resolved
 
 
 def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> str:
