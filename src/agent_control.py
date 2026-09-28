@@ -978,6 +978,8 @@ _HANDOFF_MAX_ROUNDS = 12
 _HANDOFF_IDLE_POLL_S = 2.0
 _HANDOFF_IDLE_WAIT_S = 30 * 60
 _PENDING_HANDOFFS: set = set()
+# Parent chats with a follow-up already waiting for the current turn to end.
+_WAITING_PARENTS: set = set()
 
 
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
@@ -1007,8 +1009,13 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
               + "Report this result to the user in one reply. Don't repeat work the worker already did, "
               "and do not start new workers or delegate further: the user did not ask for more. "
               "If more work is needed, say what it is and let the user decide.")
+    # Whether a turn was already running when this result arrived: that turn
+    # built its context before the result existed, so its reply (saved after
+    # this message) does not show it was read -- see _replied_after_worker_result.
+    arrived_mid_turn = bool(agent_runs.is_busy(parent_id))
     inject_msg = ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
-                                              "from_session_name": worker.name, "direction": "inbound"})
+                                              "from_session_name": worker.name, "direction": "inbound",
+                                              "arrived_mid_turn": arrived_mid_turn})
     parent.add_message(inject_msg)
     manager.save_sessions()
     if _running_workers(parent_id):
@@ -1030,9 +1037,17 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
         activity.publish(parent_id, "note",
                          f"Worker {worker.name} finished; this chat continues with its result when the current turn ends",
                          source="session", owner=owner)
+        if parent_id in _WAITING_PARENTS:
+            # One follow-up is already waiting for this chat to go idle; it
+            # reads every result in history, including this one. On
+            # 2026-09-28 three separate waits ran three back-to-back
+            # follow-ups on the same context.
+            return
+        _WAITING_PARENTS.add(parent_id)
         task = asyncio.create_task(_continue_when_idle(manager, parent_id, parent, worker, inject_msg, owner))
         _PENDING_HANDOFFS.add(task)
         task.add_done_callback(_PENDING_HANDOFFS.discard)
+        task.add_done_callback(lambda _t, pid=parent_id: _WAITING_PARENTS.discard(pid))
         return
     await _continue_parent(manager, parent_id, parent, worker, owner)
 
@@ -1054,26 +1069,36 @@ def _running_workers(parent_id: str) -> int:
 
 
 _NO_UPDATE_MARKER = "[[no-update]]"
+# Worded without mail-like verbs ("reply", "send", "shown"): the intent
+# router read the old wording as an email request and offered email tools.
 _ALREADY_ANSWERED_NOTE = (
-    "[Harness note, not from the user] You replied after the worker result above arrived. "
-    "If that reply already reported this result to the user (or acted on it), answer with exactly "
-    f"{_NO_UPDATE_MARKER} and nothing else, and it will not be shown. Otherwise report only what "
-    "your reply did not cover, briefly."
+    "[Harness note, not from the user] Your last answer above was written after the worker "
+    "result(s) above arrived. If that answer already covered them, output exactly "
+    f"{_NO_UPDATE_MARKER} and nothing else. Otherwise state briefly only what it left out."
 )
 
 
 def _replied_after_worker_result(parent) -> bool:
-    """Whether an assistant reply follows the latest worker result in history,
-    i.e. the chat answered after the result arrived (a turn that was running
-    when the worker finished)."""
+    """Whether a turn that could have seen the latest worker result answered
+    after it.
+
+    Position alone is not enough: a result that arrived while a turn was
+    running (``arrived_mid_turn``) sits before that turn's reply in history,
+    but the turn built its context before the result existed. On 2026-09-28
+    that made the judgement call answer "already covered" for two results the
+    chat had never seen. Such a reply only counts if a later one follows it.
+    """
     history = list(getattr(parent, "history", None) or [])
     last_worker = max((i for i, m in enumerate(history)
                        if getattr(m, "role", None) == "user"
                        and (getattr(m, "metadata", None) or {}).get("source") == "worker"), default=None)
     if last_worker is None:
         return False
-    return any(getattr(m, "role", None) == "assistant" and str(getattr(m, "content", "") or "").strip()
-               for m in history[last_worker + 1:])
+    replies = [i for i, m in enumerate(history[last_worker + 1:], start=last_worker + 1)
+               if getattr(m, "role", None) == "assistant" and str(getattr(m, "content", "") or "").strip()]
+    if (getattr(history[last_worker], "metadata", None) or {}).get("arrived_mid_turn"):
+        replies = replies[1:]
+    return bool(replies)
 
 
 # Tools that return a worker's actual content. A status poll or a message to
@@ -1110,7 +1135,15 @@ def _results_consulted_by_later_turn(parent) -> bool:
             if getattr(m, "role", None) != "assistant":
                 continue
             for ev in (getattr(m, "metadata", None) or {}).get("tool_events") or []:
-                if (isinstance(ev, dict) and ev.get("tool") in _WORKER_READ_TOOLS
+                if not isinstance(ev, dict):
+                    continue
+                if (ev.get("tool") == "manage_agent_loadout" and "result_ref" in str(ev.get("output") or "")
+                        and wid in str(ev.get("output") or "")[:20000]):
+                    # status on a finished worker hands back its stored result
+                    # (0d6cf27b); the turn then reads it with recall_tool_output.
+                    consulted = True
+                    break
+                if (ev.get("tool") in _WORKER_READ_TOOLS
                         and len(str(ev.get("output") or "")) >= _MIN_CONSULTED_OUTPUT
                         and (wid in str(ev.get("command") or "")
                              or wid in str(ev.get("output") or "")[:20000])):
@@ -1121,6 +1154,30 @@ def _results_consulted_by_later_turn(parent) -> bool:
         if not consulted:
             return False
     return True
+
+
+def _judgement_context(parent) -> List[Dict[str, Any]]:
+    """The minimum the coverage judgement needs: the user's last request, the
+    worker results since, and the chat's last answer."""
+    history = list(getattr(parent, "history", None) or [])
+    since = max((i for i, m in enumerate(history)
+                 if getattr(m, "role", None) == "user"
+                 and (getattr(m, "metadata", None) or {}).get("source") not in ("worker", "steer")),
+                default=-1)
+    picked = []
+    if since >= 0:
+        picked.append(history[since])
+    picked += [m for m in history[since + 1:]
+               if getattr(m, "role", None) == "user"
+               and (getattr(m, "metadata", None) or {}).get("source") == "worker"]
+    last_answer = next((m for m in reversed(history)
+                        if getattr(m, "role", None) == "assistant"
+                        and str(getattr(m, "content", "") or "").strip()), None)
+    if last_answer is not None:
+        picked.append(last_answer)
+    position = {id(m): i for i, m in enumerate(history)}
+    picked = sorted({id(m): m for m in picked}.values(), key=lambda m: position[id(m)])
+    return [{"role": m.role, "content": str(getattr(m, "content", "") or "")} for m in picked]
 
 
 def _is_no_update(reply: str) -> bool:
@@ -1200,8 +1257,10 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
         # updated the note and reported, and this follow-up then posted a
         # second, shorter summary of the same thing. Let the model judge
         # whether its reply covered the result; a covered result posts
-        # nothing. Only this run sees the note; history is unchanged.
-        context = context + [{"role": "user", "content": _ALREADY_ANSWERED_NOTE}]
+        # nothing. Only this run sees the note; history is unchanged. The
+        # judgement needs the last answer and the results, not the whole chat:
+        # sending the full history cost ~156k tokens per call on 2026-09-28.
+        context = _judgement_context(parent) + [{"role": "user", "content": _ALREADY_ANSWERED_NOTE}]
     reply, events = "", []
     # The continuation is itself a bounded agent run, so it can be cut off the
     # same way the worker was — report that rather than closing the run green.

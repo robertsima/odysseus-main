@@ -241,3 +241,68 @@ async def test_one_unconsulted_result_still_gets_the_follow_up(monkeypatch):
     await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker("w-b", "B"), "alice")
     assert calls == [1]
     assert "missed" in parent.history[-1].content
+
+
+def test_a_reply_from_the_turn_that_was_running_does_not_count_as_covering():
+    """2026-09-28 08:06: both results arrived mid-turn; that turn's reply (about
+    something else) was saved after them. It never saw them."""
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "fix the lead engineer"))
+    parent.add_message(_Msg("user", "[Worker A finished]", {"source": "worker", "from_session": "w-a",
+                                                           "arrived_mid_turn": True}))
+    parent.add_message(_Msg("assistant", "Lead Engineer preset updated."))
+    assert agent_control._replied_after_worker_result(parent) is False
+    # A later answer (a turn that started after the result) does count.
+    parent.add_message(_Msg("assistant", "Worker A found X."))
+    assert agent_control._replied_after_worker_result(parent) is True
+
+
+def test_status_with_a_stored_result_counts_as_consulting_the_worker():
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "research"))
+    parent.add_message(_Msg("user", "[Worker A finished]", {"source": "worker", "from_session": "w-a"}))
+    parent.add_message(_Msg("assistant", "A found X.", {"tool_events": [
+        {"tool": "manage_agent_loadout", "command": '{"action": "status", "worker_session": "session-a5"}',
+         "output": '{"runs": [{"worker_session": "w-a", "result_ref": "toolout-1", "result_chars": 9000}]}'},
+    ]}))
+    assert agent_control._results_consulted_by_later_turn(parent) is True
+
+
+async def test_judgement_uses_a_small_context(monkeypatch):
+    seen = {}
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen["messages"] = messages
+        return agent_control._NO_UPDATE_MARKER, []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    for i in range(50):
+        parent.add_message(_Msg("user", f"old question {i}"))
+        parent.add_message(_Msg("assistant", f"old answer {i}"))
+    parent.add_message(_Msg("user", "research X"))
+    parent.add_message(_Msg("user", "[Worker A finished]\nResult: X", {"source": "worker", "from_session": "w-a"}))
+    parent.add_message(_Msg("assistant", "Reported X."))
+    await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker("w-a", "A"), "alice")
+    contents = [m["content"] for m in seen["messages"]]
+    assert contents == ["research X", "[Worker A finished]\nResult: X", "Reported X.",
+                        agent_control._ALREADY_ANSWERED_NOTE]
+    assert "reply" not in agent_control._ALREADY_ANSWERED_NOTE.lower()
+
+
+async def test_results_waiting_on_a_busy_chat_share_one_follow_up(monkeypatch, followups):
+    import asyncio
+    busy = {"v": True}
+    monkeypatch.setattr(agent_runs, "is_busy", lambda sid: busy["v"])
+    parent = _Chat("parent")
+    manager = _Manager(parent)
+    for wid in ("w-1", "w-2", "w-3"):
+        await agent_control._hand_off(manager, "parent", _Worker(wid, wid), "part", f"result {wid}",
+                                      "completed", "alice")
+    assert len(agent_control._WAITING_PARENTS) == 1
+    busy["v"] = False
+    for _ in range(50):
+        if not agent_control._PENDING_HANDOFFS:
+            break
+        await asyncio.sleep(0.05)
+    assert len(followups) == 1
