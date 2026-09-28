@@ -193,3 +193,51 @@ async def test_no_coverage_note_when_the_chat_has_not_replied_since(followups, m
                                   "Found issue #50.", "completed", "alice")
     assert all(m["content"] != agent_control._ALREADY_ANSWERED_NOTE for m in seen["messages"])
     assert parent.history[-1].content == "Summary."
+
+
+async def test_results_the_turn_fetched_from_the_workers_skip_the_follow_up(monkeypatch):
+    """Deterministic path: the chat's turn messaged each worker and got its
+    full answer back, so no follow-up turn (and no model call) runs."""
+    calls = []
+
+    async def fake_headless(sess, messages, **kwargs):
+        calls.append(1)
+        return "duplicate", []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "research X"))
+    for wid in ("w-a", "w-b"):
+        parent.add_message(_Msg("user", f"[Worker {wid} finished]\nResult: ...",
+                                {"source": "worker", "from_session": wid}))
+    parent.add_message(_Msg("assistant", "Here is what both workers found.", {"tool_events": [
+        {"tool": "send_to_session", "command": '{"session_id": "w-a", "message": "full result?"}',
+         "output": "A" * 800},
+        {"tool": "send_to_session", "command": '{"session_id": "w-b", "message": "full result?"}',
+         "output": "B" * 800},
+    ]}))
+    await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker("w-b", "B"), "alice")
+    assert calls == []
+    assert parent.history[-1].content == "Here is what both workers found."
+
+
+async def test_one_unconsulted_result_still_gets_the_follow_up(monkeypatch):
+    calls = []
+
+    async def fake_headless(sess, messages, **kwargs):
+        calls.append(1)
+        return "B found something the reply missed.", []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "research X"))
+    for wid in ("w-a", "w-b"):
+        parent.add_message(_Msg("user", f"[Worker {wid} finished]", {"source": "worker", "from_session": wid}))
+    parent.add_message(_Msg("assistant", "A's findings.", {"tool_events": [
+        {"tool": "send_to_session", "command": '{"session_id": "w-a"}', "output": "A" * 800},
+        # A status poll on B proves nothing about its content.
+        {"tool": "manage_agent_loadout", "command": '{"action": "status", "run_id": "w-b"}', "output": "B" * 800},
+    ]}))
+    await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker("w-b", "B"), "alice")
+    assert calls == [1]
+    assert "missed" in parent.history[-1].content

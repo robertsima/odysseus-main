@@ -1076,6 +1076,53 @@ def _replied_after_worker_result(parent) -> bool:
                for m in history[last_worker + 1:])
 
 
+# Tools that return a worker's actual content. A status poll or a message to
+# a still-running worker proves nothing, so a call only counts when it came
+# back with a substantial answer (_MIN_CONSULTED_OUTPUT chars).
+_WORKER_READ_TOOLS = frozenset({"send_to_session", "message_agent", "recall_tool_output"})
+_MIN_CONSULTED_OUTPUT = 400
+
+
+def _results_consulted_by_later_turn(parent) -> bool:
+    """Whether every worker result since the user's last message was used by
+    a reply written after it -- that turn messaged the worker, read its status
+    or recalled its output. Then the results are already in the conversation
+    and a follow-up would only repeat them, so it is skipped without a model
+    call (on 2026-09-28 that call was ~125k uncached tokens to post a
+    duplicate). A result with no worker id (a workflow's) or one nobody
+    consulted leaves the decision to the follow-up."""
+    history = list(getattr(parent, "history", None) or [])
+    since = max((i for i, m in enumerate(history)
+                 if getattr(m, "role", None) == "user"
+                 and (getattr(m, "metadata", None) or {}).get("source") not in ("worker", "steer")),
+                default=-1)
+    results = [(i, str((getattr(m, "metadata", None) or {}).get("from_session") or ""))
+               for i, m in enumerate(history) if i > since
+               and getattr(m, "role", None) == "user"
+               and (getattr(m, "metadata", None) or {}).get("source") == "worker"]
+    if not results:
+        return False
+    for idx, wid in results:
+        if not wid:
+            return False
+        consulted = False
+        for m in history[idx + 1:]:
+            if getattr(m, "role", None) != "assistant":
+                continue
+            for ev in (getattr(m, "metadata", None) or {}).get("tool_events") or []:
+                if (isinstance(ev, dict) and ev.get("tool") in _WORKER_READ_TOOLS
+                        and len(str(ev.get("output") or "")) >= _MIN_CONSULTED_OUTPUT
+                        and (wid in str(ev.get("command") or "")
+                             or wid in str(ev.get("output") or "")[:20000])):
+                    consulted = True
+                    break
+            if consulted:
+                break
+        if not consulted:
+            return False
+    return True
+
+
 def _is_no_update(reply: str) -> bool:
     text = str(reply or "").strip()
     return bool(text) and _NO_UPDATE_MARKER in text and len(text) <= len(_NO_UPDATE_MARKER) + 40
@@ -1131,6 +1178,16 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
     from src import agent_runs
     from src.headless_agent import SUBAGENT_BLOCKED_TOOLS, run_headless
 
+    if _results_consulted_by_later_turn(parent):
+        activity.publish(parent_id, "note",
+                         f"Worker {worker.name}'s result was already used in the reply above; no follow-up needed",
+                         source="session", owner=owner)
+        logger.info("[worker-handoff] %s: results already consulted by the chat's turn; follow-up skipped",
+                    parent_id)
+        last_reply = next((str(getattr(m, "content", "") or "") for m in reversed(parent.history or [])
+                           if getattr(m, "role", None) == "assistant"), "")
+        await _hand_up_when_done(manager, parent_id, parent, last_reply, "completed", owner)
+        return
     run_id = activity.run_started(parent_id, "session", f"Continuing after worker {worker.name}", owner=owner,
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})
