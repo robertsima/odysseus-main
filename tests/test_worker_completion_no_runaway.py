@@ -140,3 +140,56 @@ async def test_siblings_finishing_produce_one_summary_not_one_each(followups):
                                   "result 3", "completed", "alice")
     assert len(followups) == 1
     assert [m.metadata.get("source") for m in parent.history] == ["worker"] * 3 + ["worker_followup"]
+
+
+def _answered_parent():
+    """The 2026-09-28 shape: the chat's own turn was running when the worker
+    finished, read the result itself, and replied after it arrived."""
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "[Worker Scout finished]\nResult:\nFound issue #50.", {"source": "worker"}))
+    parent.add_message(_Msg("assistant", "Updated the note with issue #50 and reported it."))
+    return parent
+
+
+async def test_a_result_the_chat_already_reported_posts_no_second_summary(monkeypatch):
+    seen = {}
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen["messages"] = messages
+        return agent_control._NO_UPDATE_MARKER, []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _answered_parent()
+    await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker(), "alice")
+
+    # The follow-up was asked to judge coverage (a one-off note, not saved) ...
+    assert seen["messages"][-1]["content"] == agent_control._ALREADY_ANSWERED_NOTE
+    # ... and a covered result adds nothing to the chat.
+    assert [m.role for m in parent.history] == ["user", "assistant"]
+    assert all(agent_control._NO_UPDATE_MARKER not in m.content for m in parent.history)
+
+
+async def test_an_uncovered_result_still_gets_its_follow_up(monkeypatch):
+    async def fake_headless(sess, messages, **kwargs):
+        return "One thing the reply above missed: issue #51.", []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _answered_parent()
+    await agent_control._continue_parent(_Manager(parent), "parent", parent, _Worker(), "alice")
+    assert parent.history[-1].metadata.get("source") == "worker_followup"
+    assert "issue #51" in parent.history[-1].content
+
+
+async def test_no_coverage_note_when_the_chat_has_not_replied_since(followups, monkeypatch):
+    seen = {}
+
+    async def fake_headless(sess, messages, **kwargs):
+        seen["messages"] = messages
+        return "Summary.", []
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "scout it",
+                                  "Found issue #50.", "completed", "alice")
+    assert all(m["content"] != agent_control._ALREADY_ANSWERED_NOTE for m in seen["messages"])
+    assert parent.history[-1].content == "Summary."

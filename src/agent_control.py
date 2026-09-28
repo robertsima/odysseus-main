@@ -1053,6 +1053,34 @@ def _running_workers(parent_id: str) -> int:
         return 0
 
 
+_NO_UPDATE_MARKER = "[[no-update]]"
+_ALREADY_ANSWERED_NOTE = (
+    "[Harness note, not from the user] You replied after the worker result above arrived. "
+    "If that reply already reported this result to the user (or acted on it), answer with exactly "
+    f"{_NO_UPDATE_MARKER} and nothing else, and it will not be shown. Otherwise report only what "
+    "your reply did not cover, briefly."
+)
+
+
+def _replied_after_worker_result(parent) -> bool:
+    """Whether an assistant reply follows the latest worker result in history,
+    i.e. the chat answered after the result arrived (a turn that was running
+    when the worker finished)."""
+    history = list(getattr(parent, "history", None) or [])
+    last_worker = max((i for i, m in enumerate(history)
+                       if getattr(m, "role", None) == "user"
+                       and (getattr(m, "metadata", None) or {}).get("source") == "worker"), default=None)
+    if last_worker is None:
+        return False
+    return any(getattr(m, "role", None) == "assistant" and str(getattr(m, "content", "") or "").strip()
+               for m in history[last_worker + 1:])
+
+
+def _is_no_update(reply: str) -> bool:
+    text = str(reply or "").strip()
+    return bool(text) and _NO_UPDATE_MARKER in text and len(text) <= len(_NO_UPDATE_MARKER) + 40
+
+
 def _result_already_read(parent, inject_msg) -> bool:
     """Whether a turn after the hand-off already had the result in context:
     a message the user (not a worker) sent after it started that turn."""
@@ -1106,6 +1134,17 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
     run_id = activity.run_started(parent_id, "session", f"Continuing after worker {worker.name}", owner=owner,
                                   data={"target_session": worker.id, "target_session_name": worker.name,
                                         "mode": "agent"})
+    context = parent.get_context_messages()
+    already_answered = _replied_after_worker_result(parent)
+    if already_answered:
+        # The chat's own turn was still running when this result arrived and
+        # has replied since -- often having read the result itself (it can
+        # message the worker or recall its output). On 2026-09-28 that turn
+        # updated the note and reported, and this follow-up then posted a
+        # second, shorter summary of the same thing. Let the model judge
+        # whether its reply covered the result; a covered result posts
+        # nothing. Only this run sees the note; history is unchanged.
+        context = context + [{"role": "user", "content": _ALREADY_ANSWERED_NOTE}]
     reply, events = "", []
     # The continuation is itself a bounded agent run, so it can be cut off the
     # same way the worker was — report that rather than closing the run green.
@@ -1113,7 +1152,7 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
     try:
         with agent_runs.track_external(parent_id, source="worker", owner=owner):
             reply, events = await run_headless(
-                parent, parent.get_context_messages(), max_rounds=_HANDOFF_MAX_ROUNDS,
+                parent, context, max_rounds=_HANDOFF_MAX_ROUNDS,
                 # Not a sub-agent: this is the parent's own chat continuing
                 # itself, so `run_headless` runs it under that chat's own
                 # stored policy — the tools it has switched off and its
@@ -1128,6 +1167,18 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
         status = "incomplete" if followup.get("rounds_exhausted") else "completed"
     except Exception as exc:
         reply, status = f"Could not continue after the worker: {exc}", "failed"
+    if already_answered and status == "completed" and _is_no_update(reply):
+        activity.publish(parent_id, "note",
+                         f"Worker {worker.name}'s result was already covered by the reply above; no follow-up posted",
+                         source="session", owner=owner)
+        activity.run_finished(parent_id, "session", run_id, f"Continued after worker {worker.name}",
+                              status="completed", owner=owner,
+                              data={"target_session": worker.id, "steps": len(events),
+                                    "result_excerpt": "Already covered by the previous reply; nothing posted."})
+        last_reply = next((str(getattr(m, "content", "") or "") for m in reversed(parent.history or [])
+                           if getattr(m, "role", None) == "assistant"), "")
+        await _hand_up_when_done(manager, parent_id, parent, last_reply, "completed", owner)
+        return
     meta: Dict[str, Any] = {"model": parent.model, "source": "worker_followup", "worker_session": worker.id}
     if events:
         meta["tool_events"] = events
