@@ -74,7 +74,9 @@ def test_pinned_engines_are_sent_without_a_category(monkeypatch):
     monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
     seen = _capture_searxng(monkeypatch)
     providers.searxng_search_api("pgvector hybrid search", count=5)
-    assert seen[0]["engines"] == "bing,yahoo"
+    # Bing answered in the 2026-09-27 22:55 bundle but its rows were junk.
+    assert seen[0]["engines"] == "yahoo,qwant,wikipedia"
+    assert "bing" not in seen[0]["engines"].split(",")
     assert "categories" not in seen[0], (
         "categories=general would make SearXNG add every default general engine to the pin"
     )
@@ -89,6 +91,37 @@ def test_engine_pin_is_configurable_and_can_be_turned_off(monkeypatch):
     monkeypatch.setenv("SEARXNG_GENERAL_ENGINES", "")
     providers.searxng_search_api("pgvector hybrid search", count=5)
     assert "engines" not in seen[-1] and seen[-1]["categories"] == "general"
+
+
+def test_inactive_or_removed_engines_are_dropped_from_the_pin(monkeypatch, caplog):
+    monkeypatch.setattr(providers, "_warned_unavailable", set())
+    monkeypatch.setenv("SEARXNG_GENERAL_ENGINES", "startpage,yahoo,mojeek,presearch,qwant")
+    seen = _capture_searxng(monkeypatch)
+    with caplog.at_level(logging.WARNING, logger="services.search.providers"):
+        providers.searxng_search_api("pgvector hybrid search", count=5)
+        providers.searxng_search_api("pgvector hybrid search again", count=5)
+    assert seen[0]["engines"] == "yahoo,qwant"
+    warned = [r.getMessage() for r in caplog.records if "inactive or removed" in r.getMessage()]
+    assert len(warned) == 3, "one warning per engine name, not per request"
+
+
+def test_news_fallback_to_general_uses_the_new_pin(monkeypatch):
+    monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
+    seen = _capture_searxng(monkeypatch, {"results": []})
+    providers.searxng_search_api("canada election news", count=5)
+    assert seen[0]["categories"] == "news"
+    assert seen[1]["engines"] == "yahoo,qwant,wikipedia" and "categories" not in seen[1]
+
+
+def test_rate_limited_engines_cool_down_one_by_one(monkeypatch, clock):
+    monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
+    seen = _capture_searxng(monkeypatch, {
+        "results": [{"title": "t", "url": "https://x.test/", "content": "", "engines": ["wikipedia"]}],
+        "unresponsive_engines": [["yahoo", "HTTP error 429"], ["qwant", "too many requests"]],
+    })
+    providers.searxng_search_api("q one", count=5)
+    providers.searxng_search_api("q two", count=5)
+    assert seen[1]["engines"] == "wikipedia"
 
 
 def test_news_queries_keep_the_news_category(monkeypatch):
@@ -121,32 +154,32 @@ def test_suspended_pinned_engine_is_left_out_for_a_cooldown(monkeypatch, clock):
     payload = {
         "results": [{"title": "t", "url": "https://x.test/", "content": "", "engines": ["yahoo"]}],
         "unresponsive_engines": [
-            ["bing", "Suspended: too many requests"],
+            ["qwant", "Suspended: CAPTCHA"],
             ["brave", "Suspended: too many requests"],  # not pinned: ignored
         ],
     }
     seen = _capture_searxng(monkeypatch, payload)
     providers.searxng_search_api("first query", count=5)
     providers.searxng_search_api("second query", count=5)
-    assert seen[0]["engines"] == "bing,yahoo"
-    assert seen[1]["engines"] == "yahoo"
+    assert seen[0]["engines"] == "yahoo,qwant,wikipedia"
+    assert seen[1]["engines"] == "yahoo,wikipedia"
     assert not resilience.cooldowns.is_cooling("searxng engine brave")
 
     clock.t += providers._engine_cooldown_seconds() + 1
     providers.searxng_search_api("third query", count=5)
-    assert seen[2]["engines"] == "bing,yahoo"
+    assert seen[2]["engines"] == "yahoo,qwant,wikipedia"
 
 
 def test_a_plain_timeout_does_not_cool_an_engine(monkeypatch, clock):
     monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
     payload = {
         "results": [{"title": "t", "url": "https://x.test/", "content": ""}],
-        "unresponsive_engines": [["bing", "timeout"]],
+        "unresponsive_engines": [["qwant", "timeout"]],
     }
     seen = _capture_searxng(monkeypatch, payload)
     providers.searxng_search_api("q one", count=5)
     providers.searxng_search_api("q two", count=5)
-    assert seen[1]["engines"] == "bing,yahoo"
+    assert seen[1]["engines"] == "yahoo,qwant,wikipedia"
 
 
 def test_when_every_pinned_engine_cools_searxng_defaults_are_used(monkeypatch, clock):

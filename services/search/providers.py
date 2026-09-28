@@ -13,6 +13,7 @@ from bs4 import BeautifulSoup
 from src.constants import SEARXNG_INSTANCE, REQUEST_TIMEOUT, WEB_FETCH_USER_AGENT
 from .analytics import RateLimitError, error_logger
 from .query import build_enhanced_query
+from .resilience import DeadlineExceeded, out_of_time, request_timeout
 
 logger = logging.getLogger(__name__)
 
@@ -134,13 +135,50 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 # SEARXNG_GENERAL_ENGINES (comma-separated SearXNG engine names; an empty value
 # sends no pin and lets SearXNG use its enabled general engines).
 #
+# Default pin: yahoo, qwant, wikipedia. Checked against searx/settings.yml and
+# searx/engines/ at searxng 12f8b6515 (the 2026.9.25 image the NAS runs):
+#
+# * yahoo  -- ``disabled: true`` (answers when named), scrapes search.yahoo.com
+#   with no key. It already answered from the NAS in the 2026-09-27 bundle.
+# * qwant  -- ``disabled: true``, uses Qwant's keyless JSON API
+#   (api.qwant.com/v3/search/web) and has its own index and ranking on top
+#   of Bing's, so its rows differ from yahoo's. When Qwant answers with a
+#   CAPTCHA or error 24 SearXNG reports it as suspended or "too many
+#   requests", and the cooldown below drops it from the pin.
+# * wikipedia -- enabled by default. It makes one REST summary lookup by
+#   exact title, so it adds an authoritative row for entity queries ("pgvector",
+#   "LlamaIndex"). An unknown title is an HTTP 404 that the engine treats as
+#   "no result", not as an error.
+#
+# Left out, and why:
+# * bing -- answered, but in the 2026-09-27 22:55 bundle its rows were
+#   off-topic. The relevance gate dropped most of them (host[bing]:0/1).
+# * brave, duckduckgo, google cse -- rate-limited, timing out or suspended
+#   from the NAS (see above). google (``disabled: true``) serves CAPTCHAs to
+#   scrapers from a residential IP under parallel load.
+# * startpage, mojeek, dogpile, marginalia, yahoo news -- ``inactive: true``
+#   on this image, so SearXNG does not load them. presearch no longer exists.
+#   See _UNAVAILABLE_ENGINES.
+# * mwmbl, yep, wiby -- small indexes. baidu, naver, seznam, yandex, sogou,
+#   360search, quark -- regional engines.
+#
 # The pin only works without a ``categories`` parameter: SearXNG *adds* every
 # enabled engine of a requested category to an explicit ``engines`` list
 # (searx/webadapter.py parse_generic), which is how the old
 # ``engines=bing,mojeek,presearch&categories=general`` request reached all of
 # the rate-limited defaults on every query. mojeek is inactive and presearch
 # no longer exists on current images, so that pin was really "bing + defaults".
-_DEFAULT_GENERAL_ENGINES = "bing,yahoo"
+_DEFAULT_GENERAL_ENGINES = "yahoo,qwant,wikipedia"
+
+# Engine names that cannot answer on searxng 2026.9.25: ``inactive: true``
+# engines are not loaded at all and presearch was removed. Naming one in the
+# pin changes nothing except hiding that the pin is shorter than it looks, so
+# it is dropped with a warning (once per name).
+_UNAVAILABLE_ENGINES = frozenset({
+    "mojeek", "presearch", "startpage", "startpage news", "dogpile",
+    "marginalia", "yahoo news",
+})
+_warned_unavailable: set = set()
 
 # Engines that SearXNG reports as blocked are left out of the pin for this
 # long (SEARXNG_ENGINE_COOLDOWN_SECONDS). SearXNG suspends them itself, but a
@@ -160,8 +198,17 @@ def _general_engines() -> List[str]:
     names: List[str] = []
     for name in raw.split(","):
         name = name.strip()
-        if name and name not in names:
-            names.append(name)
+        if not name or name in names:
+            continue
+        if name.casefold() in _UNAVAILABLE_ENGINES:
+            if name.casefold() not in _warned_unavailable:
+                _warned_unavailable.add(name.casefold())
+                logger.warning(
+                    "SEARXNG_GENERAL_ENGINES names %r, which is inactive or removed on "
+                    "searxng 2026.9.25; leaving it out of the pin", name,
+                )
+            continue
+        names.append(name)
     return names
 
 
@@ -302,11 +349,14 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             return parsed
 
         def _run(search_params):
+            # Every attempt below (news -> general -> no language -> SearXNG
+            # defaults) takes its timeout from the caller's search deadline;
+            # once too little is left, DeadlineExceeded stops the retries.
             response = httpx.get(
                 f"{instance}/search",
                 params=search_params,
                 headers=headers or None,
-                timeout=15,
+                timeout=request_timeout(15, "SearXNG"),
             )
             response.raise_for_status()
             data = response.json()
@@ -367,8 +417,15 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         if unresponsive:
             logger.info(f"SearXNG unresponsive engines for {query!r}: {unresponsive}")
         return parsed
+    except DeadlineExceeded as e:
+        # Out of time between attempts: hand back what the last attempt got
+        # (usually nothing) instead of starting another request.
+        logger.info("SearXNG: %s for %r; stopping retries", e, query)
+        return []
     except Exception as e:
         logger.warning(f"SearXNG JSON API search failed: {e}")
+        if out_of_time():
+            return []
         html_results = searxng_search(query, max_results=count)
         if html_results:
             logger.info(f"SearXNG HTML fallback returned {len(html_results)} results for: {query}")
@@ -387,7 +444,7 @@ def searxng_search(query, max_results=10):
             f"{instance}/search",
             params={"q": query, "safesearch": _safesearch_for("searxng")},
             headers=req_headers,
-            timeout=10,
+            timeout=request_timeout(10, "SearXNG HTML"),
         )
         if response.is_success:
             soup = BeautifulSoup(response.text, "html.parser")
@@ -460,11 +517,115 @@ def _github_rate_limit_wait(response) -> Optional[float]:
     return None
 
 
-def _github_issue_rows(items, count: int) -> List[dict]:
+# GitHub's "best match" order weighs text matches in comments and labels as
+# much as the title and ignores state and age, so the top rows for "stale
+# vectors after delete" were often long-closed issues that mention both words
+# somewhere in a 200-comment thread. Rows are re-ranked here (the chain keeps
+# this order; see core._rank_rows): title matches count most, then body
+# matches, then open over closed, recent over old and discussed over
+# ignored. GitHub's own position only breaks near-ties.
+_GH_WEIGHTS = {
+    "title": 3.0,          # share of query terms in the title
+    "title_phrase": 0.75,  # the terms appear in the title in query order
+    "body": 1.0,           # share of query terms in the body
+    "open": 0.5,
+    "closed_completed": 0.25,  # closed as fixed often holds the answer
+    "recency": 0.75,       # decays with a ~6 month half-life
+    "engagement": 0.5,     # reactions + comments, log-scaled
+    "position": 0.15,      # GitHub's best-match order (tie-breaker)
+}
+_GH_RECENCY_HALF_LIFE_DAYS = 180.0
+_GH_ENGAGEMENT_SATURATION = 50  # this many reactions+comments count as "a lot"
+_GH_BODY_SCAN_CHARS = 4000
+
+
+def _gh_stem(term: str) -> str:
+    """Drop a plural/verb ending so "delete" also finds "deleting"/"deleted"."""
+    for suffix in ("ing", "ies", "es", "ed", "s", "e"):
+        if len(term) - len(suffix) >= 4 and term.endswith(suffix):
+            return term[: -len(suffix)]
+    return term
+
+
+def _gh_term_hits(stems: List[str], text: str) -> int:
+    """How many *stems* start a word in *text*."""
+    return sum(1 for t in stems if re.search(r"\b" + re.escape(t), text))
+
+
+def _gh_age_days(stamp, now) -> Optional[float]:
+    from datetime import datetime, timezone
+
+    if not stamp:
+        return None
+    try:
+        when = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - when).total_seconds() / 86400.0)
+
+
+def _github_issue_score(item: dict, terms: List[str], position: int, total: int, now) -> float:
+    """Relevance of one GitHub search item to the query *terms* (higher first)."""
+    import math
+
+    w = _GH_WEIGHTS
+    terms = [_gh_stem(t.casefold()) for t in terms if t]
+    title = str(item.get("title") or "").casefold()
+    body = str(item.get("body") or "")[:_GH_BODY_SCAN_CHARS].casefold()
+    score = 0.0
+    if terms:
+        score += w["title"] * _gh_term_hits(terms, title) / len(terms)
+        score += w["body"] * _gh_term_hits(terms, body) / len(terms)
+        if len(terms) > 1 and re.search(
+            r"\b" + r"\w*\W+(?:\w+\W+){0,2}".join(re.escape(t) for t in terms), title
+        ):
+            score += w["title_phrase"]
+    state = str(item.get("state") or "").casefold()
+    if state == "open":
+        score += w["open"]
+    elif state == "closed" and str(item.get("state_reason") or "").casefold() == "completed":
+        score += w["closed_completed"]
+    age = _gh_age_days(item.get("updated_at") or item.get("created_at"), now)
+    if age is not None:
+        score += w["recency"] * 0.5 ** (age / _GH_RECENCY_HALF_LIFE_DAYS)
+    reactions = item.get("reactions") if isinstance(item.get("reactions"), dict) else {}
+    try:
+        activity = int(reactions.get("total_count") or 0) + int(item.get("comments") or 0)
+    except (TypeError, ValueError):
+        activity = 0
+    if activity > 0:
+        score += w["engagement"] * min(
+            1.0, math.log1p(activity) / math.log1p(_GH_ENGAGEMENT_SATURATION)
+        )
+    if total > 1:
+        score += w["position"] * (1.0 - position / (total - 1))
+    elif total == 1:
+        score += w["position"]
+    return score
+
+
+def rank_github_issues(items, terms: List[str], now=None) -> List[dict]:
+    """GitHub search *items* ordered by :func:`_github_issue_score`.
+
+    Ties keep GitHub's order (the sort is stable).
+    """
+    from datetime import datetime, timezone
+
+    now = now or datetime.now(timezone.utc)
+    usable = [it for it in (items or []) if isinstance(it, dict) and it.get("html_url")]
+    scored = [
+        (_github_issue_score(it, terms, i, len(usable), now), it)
+        for i, it in enumerate(usable)
+    ]
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [it for _, it in scored]
+
+
+def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now=None) -> List[dict]:
     rows = []
-    for item in items or []:
-        if not isinstance(item, dict) or not item.get("html_url"):
-            continue
+    for item in rank_github_issues(items, list(terms or []), now=now):
         repo = ""
         repo_url = item.get("repository_url") or ""
         if "/repos/" in repo_url:
@@ -528,9 +689,12 @@ def github_issue_search(query: str, count: Optional[int] = None, time_filter: Op
         try:
             response = httpx.get(
                 f"{_GITHUB_API}/search/issues",
-                params={"q": q, "per_page": max(1, min(int(count) * 2, 30))},
+                # Ask for more than *count*: the rows are re-ranked locally
+                # (rank_github_issues) and GitHub's top few are often not
+                # the best matches.
+                params={"q": q, "per_page": max(1, min(max(int(count) * 3, 20), 50))},
                 headers=headers,
-                timeout=REQUEST_TIMEOUT,
+                timeout=request_timeout(REQUEST_TIMEOUT, "GitHub issue search"),
             )
         except httpx.HTTPError as e:
             logger.warning("GitHub issue search failed for %r: %s", q, e)
@@ -549,7 +713,7 @@ def github_issue_search(query: str, count: Optional[int] = None, time_filter: Op
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("GitHub issue search failed for %r: %s", q, e)
             return []
-        rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count)
+        rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count, attempt)
         logger.info("GitHub issue search %r returned %d row(s)", q, len(rows))
         if rows:
             return rows
@@ -595,7 +759,7 @@ def _brave_search_impl(query: str, count: int, time_filter: Optional[str] = None
             "https://api.search.brave.com/res/v1/web/search",
             headers=headers,
             params=params,
-            timeout=REQUEST_TIMEOUT,
+            timeout=request_timeout(REQUEST_TIMEOUT, "Brave"),
         )
         if response.status_code == 429:
             raise RateLimitError("Brave rate limit hit")
@@ -699,6 +863,8 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
         return results
 
     def _html_fallback() -> List[dict]:
+        if out_of_time():
+            return []
         results, failure = _html_fallback_raw()
         return _settle(results, failure)
 
@@ -708,7 +874,7 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                 "https://html.duckduckgo.com/html/",
                 params={"q": query, "kp": _safesearch_for("duckduckgo_html")},
                 headers={"User-Agent": WEB_FETCH_USER_AGENT},
-                timeout=REQUEST_TIMEOUT,
+                timeout=request_timeout(REQUEST_TIMEOUT, "DuckDuckGo HTML"),
             )
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "html.parser")
@@ -744,7 +910,13 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
         timelimit = time_map.get(time_filter)
 
     try:
-        ddgs = DDGS()
+        # ddgs has its own per-request timeout (5 s by default); keep it
+        # inside the search deadline.
+        ddg_timeout = max(1, int(request_timeout(REQUEST_TIMEOUT, "DuckDuckGo")))
+        try:
+            ddgs = DDGS(timeout=ddg_timeout)
+        except TypeError:
+            ddgs = DDGS()
         raw = ddgs.text(
             query,
             max_results=count,
@@ -762,6 +934,8 @@ def duckduckgo_search(query: str, count: Optional[int] = None, time_filter: Opti
                 "snippet": item.get("body", ""),
             })
         logger.info(f"DuckDuckGo search returned {len(results)} results")
+    except DeadlineExceeded:
+        raise
     except Exception as e:
         logger.warning(f"DuckDuckGo search failed: {e}")
         if _is_transport_error(e):
@@ -810,7 +984,7 @@ def google_pse_search(query: str, count: Optional[int] = None, time_filter: Opti
         response = httpx.get(
             "https://www.googleapis.com/customsearch/v1",
             params=params,
-            timeout=REQUEST_TIMEOUT,
+            timeout=request_timeout(REQUEST_TIMEOUT, "Google PSE"),
         )
         if response.status_code == 429:
             raise RateLimitError("Google PSE rate limit hit")
@@ -868,7 +1042,7 @@ def tavily_search(query: str, count: Optional[int] = None, time_filter: Optional
             "https://api.tavily.com/search",
             json=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
+            timeout=request_timeout(REQUEST_TIMEOUT, "Tavily"),
         )
         if response.status_code == 429:
             raise RateLimitError("Tavily rate limit hit")
@@ -929,7 +1103,7 @@ def serper_search(query: str, count: Optional[int] = None, time_filter: Optional
             "https://google.serper.dev/search",
             json=payload,
             headers={"X-API-KEY": api_key, "Content-Type": "application/json"},
-            timeout=REQUEST_TIMEOUT,
+            timeout=request_timeout(REQUEST_TIMEOUT, "Serper"),
         )
         if response.status_code == 429:
             raise RateLimitError("Serper rate limit hit")

@@ -4,7 +4,7 @@ import json
 import logging
 import re
 import unicodedata
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List, Set, Tuple
 from urllib.parse import urlparse
@@ -55,6 +55,15 @@ logger = logging.getLogger(__name__)
 
 # Chain step for GitHub-issue-scoped queries (not a user-selectable provider).
 GITHUB_ISSUES = "github_issues"
+
+# Attempt outcome for a provider skipped or cut short by the search deadline.
+OUT_OF_TIME = "out of time"
+
+# Share of a comprehensive search's budget kept back for page fetches, so a
+# slow provider chain still leaves time to read the pages it found.
+_FETCH_RESERVE_SHARE = 0.3
+_FETCH_RESERVE_MAX = 8.0
+_PAGE_FETCH_TIMEOUT = 8
 
 # Search engines occasionally return a perfectly valid-looking result set for
 # the wrong intent (for example, travel pages for a repository/poller query).
@@ -473,6 +482,12 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
         return kept
     repo = _repo_hint(query)
     alt_query = " ".join(part for part in (rest, repo, domain) if part).strip()
+    if resilience.out_of_time():
+        logger.info(
+            "%s ignored the site: operator for %r; no time left to retry with %r",
+            provider_name, query, alt_query,
+        )
+        return []
     logger.info(
         "%s ignored the site: operator for %r (%d off-domain results dropped: %s); "
         "retrying with %r",
@@ -542,10 +557,18 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
     empty SearXNG answer followed by a DuckDuckGo fallback costs one call
     each. A provider whose circuit breaker is open is skipped without
     waiting. At most *count* rows are returned.
+
+    Under a search deadline (``resilience.deadline_scope``) providers are not
+    started once too little time is left (``"out of time"``), and a provider
+    that runs out mid-call is reported the same way.
     """
     attempts: Dict[str, str] = {}
     for provider_name in chain:
         key = f"{provider_name}{label}"
+        if resilience.out_of_time():
+            attempts[key] = OUT_OF_TIME
+            logger.info("Search time limit reached; not asking %s for %r", provider_name, query)
+            continue
         breaker = resilience.get_breaker(provider_name)
         if not breaker.allow():
             attempts[key] = "cooling down"
@@ -555,6 +578,10 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
         try:
             logger.info(f"Attempting {provider_name} search")
             results = _call_provider(provider_name, query, _pool_size(provider_name, count), time_filter)
+        except resilience.DeadlineExceeded as e:
+            attempts[key] = OUT_OF_TIME
+            logger.info("%s stopped for %r: %s", provider_name, query, e)
+            continue
         except resilience.ProviderBusy as e:
             attempts[key] = "busy"
             # The GitHub step is an optional shortcut; being busy is normal.
@@ -591,6 +618,19 @@ def _is_empty_attempt(outcome: str) -> bool:
     return outcome == "empty" or outcome.startswith("irrelevant")
 
 
+def _rank_rows(query: str, results: List[dict]) -> List[dict]:
+    """Generic ranking, except for GitHub issue rows.
+
+    Those arrive already ordered by ``providers.rank_github_issues`` (title and
+    body match, state, recency, engagement); the generic title/domain/age
+    ranking would undo that, since every row shares a domain and its title
+    carries the "· Issue #N · owner/repo (state)" label.
+    """
+    if results and all(isinstance(r, dict) and r.get("engine") == "github" for r in results):
+        return results
+    return rank_search_results(query, results)
+
+
 def _with_github_step(query: str, chain: List[str]) -> List[str]:
     """Put the GitHub issue search in front of the chain when it applies."""
     if GITHUB_ISSUES in chain or not github_issue_search_enabled():
@@ -620,7 +660,12 @@ def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
         used = query
         if not results:
             simplified = simplify_query(query)
-            if simplified and simplified.casefold() != (query or "").strip().casefold():
+            if not simplified or simplified.casefold() == (query or "").strip().casefold():
+                pass  # nothing shorter to try
+            elif resilience.out_of_time():
+                attempts["[simplified]"] = OUT_OF_TIME
+                logger.info("Search time limit reached; not retrying %r as %r", query, simplified)
+            else:
                 logger.info(
                     "No relevant results for %r; retrying with simplified query %r",
                     query, simplified,
@@ -644,7 +689,13 @@ def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
         return 0.0
 
     key = ((query or "").strip(), count, time_filter, tuple(chain))
-    (results, attempts, used), hit = resilience.search_results_cache.get_or_compute(key, compute, ttl_for)
+    try:
+        (results, attempts, used), hit = resilience.search_results_cache.get_or_compute(key, compute, ttl_for)
+    except resilience.DeadlineExceeded as e:
+        # Another worker is still running this exact search and our own
+        # budget ran out waiting for it.
+        logger.info("Search for %r: %s", query, e)
+        return [], {"search": OUT_OF_TIME}, query
     if hit:
         logger.info("Search result cache hit for %r (%d results)", query, len(results))
     # Callers rank/annotate rows in place; never hand out the cached dicts.
@@ -654,8 +705,21 @@ def _search_with_fallbacks(query: str, count: int, time_filter: Optional[str],
 # ----------------------------------------------------------------------
 # Unified search with caching and retry
 # ----------------------------------------------------------------------
-def searxng_search_results(query: str, count: int = 10, time_filter: str = None) -> list[dict]:
-    """Perform a web search using configured provider with caching and retry."""
+def searxng_search_results(query: str, count: int = 10, time_filter: str = None,
+                           deadline_seconds: Optional[float] = None) -> list[dict]:
+    """Perform a web search using configured provider with caching and retry.
+
+    The whole call runs under one search deadline (``deadline_seconds``,
+    default ``ODYSSEUS_SEARCH_DEADLINE_SECONDS`` = 30 s).
+    """
+    with resilience.deadline_scope(deadline_seconds) as deadline:
+        return resilience.run_within_deadline(
+            lambda: _searxng_search_results(query, count, time_filter), deadline, [],
+            what=f"search for {query!r}",
+        )
+
+
+def _searxng_search_results(query: str, count: int, time_filter: Optional[str]) -> list[dict]:
     settings = _get_search_settings()
     search_provider = settings.get("search_provider", "searxng")
     result_count = _get_result_count()
@@ -700,7 +764,7 @@ def searxng_search_results(query: str, count: int = 10, time_filter: str = None)
     _record_query(query, success, cache_hit=False)
 
     if success:
-        results = rank_search_results(query, results)
+        results = _rank_rows(query, results)
         try:
             expiry = datetime.now() + _cache_duration_for_query(query)
             cache_data = {
@@ -765,8 +829,28 @@ def comprehensive_web_search(
     language: Optional[str] = None,
     min_content_length: int = 0,
     return_sources: bool = False,
+    deadline_seconds: Optional[float] = None,
 ):
-    """Perform comprehensive web search with content fetching and advanced filtering."""
+    """Perform comprehensive web search with content fetching and advanced filtering.
+
+    The whole call -- provider chain with its fallbacks, retries and the
+    simplified re-query, then the page fetches -- shares one deadline:
+    ``deadline_seconds``, default ``ODYSSEUS_SEARCH_DEADLINE_SECONDS`` (30 s).
+    The provider chain may use all but a reserve kept for fetching pages
+    (30% of the budget, at most 8 s). When the time runs out the search
+    returns what it has: rows found so far with the pages fetched so far,
+    or a message saying the time limit was reached.
+    """
+    with resilience.deadline_scope(deadline_seconds) as deadline:
+        return _comprehensive_web_search(
+            query, max_pages, max_workers, time_filter, domain_whitelist, domain_blacklist,
+            content_type, language, min_content_length, return_sources, deadline,
+        )
+
+
+def _comprehensive_web_search(query, max_pages, max_workers, time_filter, domain_whitelist,
+                              domain_blacklist, content_type, language, min_content_length,
+                              return_sources, deadline):
     logger.info(f"Starting comprehensive search for: {query}")
     if time_filter:
         logger.info(f"Applying time filter: {time_filter}")
@@ -785,9 +869,14 @@ def comprehensive_web_search(
 
     provider_chain = _build_provider_chain(search_provider)
 
-    search_results, provider_attempts, _used_query = _search_with_fallbacks(
-        query, fetch_count, time_filter, provider_chain
-    )
+    reserve = min(_FETCH_RESERVE_MAX, deadline.seconds * _FETCH_RESERVE_SHARE)
+    with resilience.deadline_scope(max(0.0, deadline.remaining() - reserve)) as search_deadline:
+        search_results, provider_attempts, _used_query = resilience.run_within_deadline(
+            lambda: _search_with_fallbacks(query, fetch_count, time_filter, provider_chain),
+            search_deadline,
+            lambda: ([], {"search": OUT_OF_TIME}, query),
+            what=f"provider chain for {query!r}",
+        )
 
     if not search_results:
         tally = ", ".join(f"{p}:{r}" for p, r in provider_attempts.items()) or "no providers configured"
@@ -799,7 +888,14 @@ def comprehensive_web_search(
             if not p.startswith(GITHUB_ISSUES)
         )
         any_irrelevant = any(r.startswith("irrelevant") for r in provider_attempts.values())
-        if any_errors:
+        timed_out = any(r == OUT_OF_TIME for r in provider_attempts.values())
+        if timed_out:
+            msg = (
+                f"Web search stopped at its {deadline.seconds:.0f}s time limit before any provider "
+                f"returned relevant results. Tried: {tally}. The search providers are slow or "
+                "rate-limited right now; try again shortly, with fewer and more specific terms"
+            )
+        elif any_errors:
             msg = f"Web search failed — all providers errored or returned empty. Tried: {tally}"
             if any(r == "cooling down" for r in provider_attempts.values()):
                 msg += (
@@ -831,7 +927,7 @@ def comprehensive_web_search(
         logger.warning(msg)
         return (msg, []) if return_sources else msg
 
-    search_results = rank_search_results(query, search_results)
+    search_results = _rank_rows(query, search_results)
 
     # URL filter helper
     def url_passes_filters(url: str) -> bool:
@@ -878,25 +974,43 @@ def comprehensive_web_search(
         r["url"]: i for i, r in enumerate(search_results, 1) if r.get("url")
     }
 
-    # Fetch content in parallel
+    # Fetch content in parallel, within what is left of the deadline. Pages
+    # still loading when it runs out are left out (the search rows stay).
     fetched_content = []
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    unfetched = 0
+    fetch_budget = deadline.remaining()
+    if fetch_budget < resilience.MIN_ATTEMPT_SECONDS:
+        unfetched = len(filtered_urls)
+        logger.info("Search time limit reached; not fetching %d page(s) for %r", unfetched, query)
+    else:
+        page_timeout = max(1, int(min(_PAGE_FETCH_TIMEOUT, fetch_budget)))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
         future_to_url = {
-            executor.submit(fetch_webpage_content, url, 8, retry_attempt=0): url
+            executor.submit(fetch_webpage_content, url, page_timeout, retry_attempt=0): url
             for url in filtered_urls
         }
-        for future in as_completed(future_to_url):
-            url = future_to_url[future]
-            try:
-                result = future.result()
-                if result["success"] and result["content"] and len(result["content"]) >= min_content_length:
-                    # Remember which source this fetch belongs to: redirects
-                    # can change result["url"] and completion order is
-                    # arbitrary, so the block label cannot be recomputed later.
-                    result["source_index"] = _url_index.get(url)
-                    fetched_content.append(result)
-            except Exception as e:
-                logger.error(f"Exception while fetching {url}: {str(e)}")
+        try:
+            for future in as_completed(future_to_url, timeout=fetch_budget):
+                url = future_to_url[future]
+                try:
+                    result = future.result()
+                    if result["success"] and result["content"] and len(result["content"]) >= min_content_length:
+                        # Remember which source this fetch belongs to: redirects
+                        # can change result["url"] and completion order is
+                        # arbitrary, so the block label cannot be recomputed later.
+                        result["source_index"] = _url_index.get(url)
+                        fetched_content.append(result)
+                except Exception as e:
+                    logger.error(f"Exception while fetching {url}: {str(e)}")
+        except FuturesTimeout:
+            unfetched = sum(1 for f in future_to_url if not f.done())
+            logger.info(
+                "Search time limit reached with %d page fetch(es) still running for %r; "
+                "returning without them", unfetched, query,
+            )
+        finally:
+            # Do not wait for stragglers; each is bounded by its own timeout.
+            executor.shutdown(wait=False, cancel_futures=True)
 
     logger.info(f"Successfully fetched content from {len(fetched_content)} pages")
 
@@ -917,6 +1031,11 @@ def comprehensive_web_search(
     output_parts.append("WEB SEARCH RESULTS AND FETCHED CONTENT")
     output_parts.append(f"Query: {query}")
     output_parts.append(f"Searched {len(search_results)} results, fetched {len(fetched_content)} pages")
+    if unfetched:
+        output_parts.append(
+            f"Note: the {deadline.seconds:.0f}s search time limit was reached; "
+            f"{unfetched} page(s) were not fetched. Use web_fetch on a source URL to read it."
+        )
     output_parts.append("=" * 70)
     output_parts.append("")
 
