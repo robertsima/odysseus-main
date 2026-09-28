@@ -1103,7 +1103,13 @@ def _assemble_prompt(tool_names: set, disabled_tools: set = None, compact: bool 
             "You are an AI assistant with native tool/function calling. "
             "Only the tool schemas provided by the API are available for this turn. "
             "Use native tool calls when action is needed; do not write tool syntax or tool instructions in chat.",
-            "## Available tools\n" + ("\n".join(tool_lines) if tool_lines else "none"),
+            # Only tools with a TOOL_SECTIONS entry can be named here, so this
+            # is never the whole list. Headed "Available tools", it told the
+            # 2026-09-28 end-to-end worker it had 6 tools while its schemas
+            # carried 12 (manage_git, manage_agent_worktree, grep, ...).
+            "## Some of your tools\n" + ("\n".join(tool_lines) if tool_lines else "(see the function schemas)")
+            + "\nYour complete tool list is the function schemas sent with this request; a tool not "
+              "listed above is just as available.",
             _API_AGENT_RULES,
         ]
         parts.extend(_domain_rules_for_tools(included))
