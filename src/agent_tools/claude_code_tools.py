@@ -420,6 +420,126 @@ def default_repository() -> tuple[Optional[Path], str]:
                   + ", ".join(repo["path"] for repo in repos))
 
 
+# ── Runs started by a worker ──
+#
+# A worker (a chat with a `parent_session`) gets this tool only when its
+# loadout names it (headless_agent.EXPLICIT_GRANT_LAUNCH_TOOLS). Its file tools
+# are confined to its workspace, and a Claude Code run it starts is held to the
+# same place: its workspace, or a managed worktree of the same repository
+# (manage_agent_worktree creates those under the harness's worktree root, and
+# a lead engineer implements there rather than in the main checkout). It never
+# falls back to the configured default repository, never uses the cloud
+# runner, and may not update the shared binary.
+
+def _caller_worker_settings(session_id: Optional[str]) -> Optional[dict]:
+    """The calling chat's stored settings when it is a worker, else None."""
+    if not session_id:
+        return None
+    try:
+        from core.database import get_session_settings
+        settings = get_session_settings(str(session_id)) or {}
+    except Exception:
+        return None
+    return settings if settings.get("parent_session") else None
+
+
+def _git_common_dir(path: Path) -> Optional[Path]:
+    """The shared ``.git`` directory of a checkout or linked worktree."""
+    git = path / ".git"
+    try:
+        if git.is_dir():
+            return git.resolve()
+        if not git.is_file():
+            return None
+        pointer = git.read_text(encoding="utf-8", errors="replace").strip()
+        if not pointer.startswith("gitdir:"):
+            return None
+        gitdir = Path(pointer.split(":", 1)[1].strip())
+        if not gitdir.is_absolute():
+            gitdir = (path / gitdir)
+        gitdir = gitdir.resolve()
+        common = gitdir / "commondir"
+        if common.is_file():
+            target = Path(common.read_text(encoding="utf-8", errors="replace").strip())
+            return (target if target.is_absolute() else gitdir / target).resolve()
+        return gitdir
+    except OSError:
+        return None
+
+
+def _within(path: Path, root: Path) -> bool:
+    return path == root or root in path.parents
+
+
+def _worker_repository(requested: str, workspace: Optional[str], tool_name: str) -> "Path | dict":
+    """The checkout a worker's Claude Code run may use, or an error result."""
+    if not workspace:
+        return {"error": _tool_error(
+            "this worker has no workspace, and a worker's Claude Code run goes only to its own checkout. "
+            "Report that to the chat that started you; it can start you again with workspace set to the "
+            "repository (or a managed worktree of it).", tool_name), "blocked_reason": "worker_no_workspace",
+            "exit_code": 1}
+    base = Path(workspace).expanduser().resolve()
+    raw = (requested or "").strip()
+    if not raw or raw.lower() == "auto":
+        try:
+            return _approved_repository(str(base))
+        except ValueError as exc:
+            return {"error": _tool_error(
+                f"this worker's workspace {str(base)!r} is not a Git checkout Claude Code may use ({exc}). "
+                "Pass repository: a checkout inside the workspace, or a managed worktree of it.", tool_name),
+                "exit_code": 1}
+    try:
+        repository = _approved_repository(raw)
+    except ValueError as exc:
+        return {"error": _tool_error(str(exc), tool_name), "exit_code": 1}
+    if _within(repository, base):
+        return repository
+    worktree_root = _managed_worktree_root()
+    common = _git_common_dir(repository)
+    if worktree_root is not None and _within(repository, worktree_root) and common is not None:
+        # A managed worktree belongs to the workspace when its repository does:
+        # the shared .git lives in (or is) the workspace's checkout.
+        owner_repo = common.parent if common.name == ".git" else common
+        base_common = _git_common_dir(base)
+        if _within(owner_repo, base) or (base_common is not None and base_common == common):
+            return repository
+    return {"error": _tool_error(
+        f"repository {raw!r} is outside this worker's workspace {str(base)!r}. A worker's Claude Code run "
+        "goes to its own workspace, or to a managed worktree of that repository (manage_agent_worktree); "
+        "omit repository to use the workspace.", tool_name),
+        "blocked_reason": "worker_repository_outside_workspace", "workspace": str(base), "exit_code": 1}
+
+
+def _worker_scope(action: str, args: dict, session_id: Optional[str], tool_name: str) -> Optional[dict]:
+    """``None`` for a person's chat; for a worker, its scoped arguments or an error."""
+    worker = _caller_worker_settings(session_id)
+    if worker is None:
+        return None
+    if action in ("update", "upgrade"):
+        return {"error": _tool_error(
+            "a worker may not update the Claude Code binary every delegation shares; ask the chat that "
+            "started you (or the user) to run action='update'.", tool_name), "exit_code": 1}
+    via = str(args.get("via") or "").strip().lower()
+    requested = str(args.get("repository") or "").strip()
+    if via in ("cloud", "github", "actions") or (
+            requested and any(requested.lower() == r.lower() for r in _cloud_repositories())):
+        return {"error": _tool_error(
+            "a worker runs Claude Code locally, in its own workspace; the cloud runner is for the chat "
+            "that started it.", tool_name), "exit_code": 1}
+    try:
+        from src.tool_execution import get_active_workspace
+        workspace = get_active_workspace()
+    except Exception:
+        workspace = None
+    if not workspace:
+        workspace = str(worker.get("workspace") or "").strip() or None
+    repository = _worker_repository(requested, workspace, tool_name)
+    if isinstance(repository, dict):
+        return repository
+    return {**args, "repository": str(repository), "via": "local"}
+
+
 def _callback_config() -> dict:
     """Odysseus callback settings for the child, without the token itself."""
     url = str(_setting("claude_code_odysseus_url", os.environ.get("CLAUDE_CODE_ODYSSEUS_URL", "")) or "").strip()
@@ -2092,6 +2212,12 @@ class ClaudeCodeTool:
                 except Exception as exc:
                     report["cloud"] = {"ready": False, "hints": [str(exc)]}
             return report
+        if action in ("run", "start", "update", "upgrade"):
+            scoped = _worker_scope(action, args, session_id, invoked_tool)
+            if scoped is not None:
+                if "error" in scoped:
+                    return scoped
+                args = scoped
         if action in ("update", "upgrade"):
             # The tool is admin-only (tool_security), so this is too.
             try:

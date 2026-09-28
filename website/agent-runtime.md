@@ -574,9 +574,16 @@ mode of the chat it happens in.
 implementors) down to `agent_max_worker_depth` hops below the chat a person
 started (default 2: chat → lead → implementors). Above the limit a worker keeps
 `manage_agent_loadout` and `orchestrate_agents` if its loadout grants them and
-its delegation policy is not `never`; every other entry in
-`SUBAGENT_BLOCKED_TOOLS` (other chats, coding CLIs) stays off at every depth,
-and at the limit all of it does. `manage_agent_worktree` is not in that set: it
+its delegation policy is not `never`. `delegate_to_claude_code` follows the same
+depth and policy rule, but only when the loadout names it outright
+(`tool_access: "selected"`, never through `"all"`) and the chat that started the
+worker may use it itself: a Claude Code run is a bounded leaf (restricted mode,
+fixed tool allowlist, one run per checkout, the instance-wide concurrency gate,
+counted against the worker's own child limit, and no way to start an Odysseus
+agent), and from a worker it runs only in that worker's workspace or a managed
+worktree of the same repository. Every other entry in `SUBAGENT_BLOCKED_TOOLS`
+(other chats, other agents, pipelines) stays off at every depth, and at the
+limit all of it does. `manage_agent_worktree` is not in that set: it
 starts no agent, so a worker gets it when its loadout grants it, and publishing
 still needs the human approval code. `launch_worker` refuses a launch past the limit as well. A worker that
 ends its turn with sub-workers still running does not hand off; it hands up

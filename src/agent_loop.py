@@ -2987,6 +2987,67 @@ def _recent_context_for_retrieval(messages: List[Dict], max_user: int = 3, max_c
             break
     return "\n".join(collected)[:max_chars]
 
+# The chat route's static preface (the chat's persona prompt, if any, then the
+# prompt-safety policy) as last sent for each chat, so a turn started by another
+# caller (a worker's hand-back, a background job's continuation) sends the same
+# head. Bounded; a chat missing from it gets the policy alone, which is what
+# the route sends for a chat without a persona (every loadout chat).
+_CHAT_PREFACES: "collections.OrderedDict[str, Tuple[Dict, ...]]" = collections.OrderedDict()
+_CHAT_PREFACES_MAX = 512
+
+
+def _chat_preface_end(messages: List[Dict]) -> int:
+    """Index just past a leading chat-route preface, or 0 when there is none."""
+    from src.prompt_security import UNTRUSTED_CONTEXT_POLICY
+
+    for i, message in enumerate(messages or []):
+        if not isinstance(message, dict) or message.get("role") != "system" or message.get("_agent_injected"):
+            return 0
+        if message.get("content") == UNTRUSTED_CONTEXT_POLICY:
+            return i + 1
+    return 0
+
+
+def _with_chat_preface(messages: List[Dict], session_id: Optional[str]) -> List[Dict]:
+    """Give a turn the chat route's prompt head when its caller left it out.
+
+    On a Responses route every system message is merged, in order, into
+    `instructions`, the first bytes of the cached prefix. The chat route sends
+    [persona?, prompt-safety policy, history...]; `_continue_parent` and the
+    background-job monitor sent the bare history, so every follow-up differed
+    from the chat's own turns at byte 0 (`instr_diff_at=0` on 2026-09-28, at
+    each switch between them). A request that already carries the policy is
+    left alone and, when it leads with the preface, remembered for its chat.
+    """
+    from src.prompt_security import UNTRUSTED_CONTEXT_POLICY
+
+    key = str(session_id or "")
+    if not key:
+        return messages  # no chat, no cached prefix to share
+    end = _chat_preface_end(messages)
+    if end:
+        # Only the chat's own head (persona, policy): a one-off system note the
+        # route put in front of them for this turn is not part of it.
+        _CHAT_PREFACES[key] = tuple(
+            dict(m) for m in messages[:end]
+            if m.get("_persona") or m.get("content") == UNTRUSTED_CONTEXT_POLICY
+        )
+        _CHAT_PREFACES.move_to_end(key)
+        while len(_CHAT_PREFACES) > _CHAT_PREFACES_MAX:
+            _CHAT_PREFACES.popitem(last=False)
+        return messages
+    if any(
+        isinstance(m, dict) and m.get("role") == "system" and m.get("content") == UNTRUSTED_CONTEXT_POLICY
+        for m in messages or []
+    ):
+        return messages
+    remembered = _CHAT_PREFACES.get(key)
+    head = [dict(m) for m in remembered] if remembered else [
+        {"role": "system", "content": UNTRUSTED_CONTEXT_POLICY}
+    ]
+    return head + list(messages or [])
+
+
 def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
     """Remove route-specific prompt/context before building another route."""
 
@@ -3387,7 +3448,15 @@ def _sticky_order_schemas(session_id, schemas: List[Dict]) -> List[Dict]:
     return [schema for _i, schema in indexed]
 
 
-def _sticky_trim(dropped_by_route: Dict[tuple, Set[int]], key, route_messages, trim):
+def _system_trim_digest(message: Dict) -> str:
+    """A system message's identity for _sticky_trim: its text (the prompt is
+    rebuilt by route and fallback, so the object is not stable)."""
+    content = message.get("content")
+    text = content if isinstance(content, str) else json.dumps(content, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:16]
+
+
+def _sticky_trim(dropped_by_route: Dict[tuple, Set[Any]], key, route_messages, trim):
     """Keep a trim's cut in place across rounds instead of re-cutting.
 
     The loop's history only grows, and each round's request was trimmed
@@ -3399,16 +3468,50 @@ def _sticky_trim(dropped_by_route: Dict[tuple, Set[int]], key, route_messages, t
     appending (a cacheable prefix), and a new, deeper cut happens only when
     that window outgrows the budget again.
 
-    Only drops of ordinary history are remembered. The trimmer may shorten
-    rather than remove the system prompt, protected messages (the open
-    document), the latest user request and the newest message; a shortened
-    copy must not make the original look dropped.
+    Drops of ordinary history are remembered by identity. The trimmer may
+    shorten rather than remove protected messages (the open document), the
+    latest user request and the newest message; a shortened copy must not
+    make the original look dropped.
+
+    A system-prompt cut is its last resort (the history was already at its
+    minimum), and it is remembered too, by content: once a round had to cut
+    the system prompt or drop an extra system message, every later round of
+    the turn sends the same cut. Otherwise the next round, which fits again
+    because the history cut stuck, restored the full prompt, and on a
+    Responses route (all system messages merge into `instructions`) each flip
+    re-billed the whole request.
     """
+    from src.context_compactor import is_truncated_system_message, truncate_system_message
+
+    system_key = ("system-trim",) + tuple(key if isinstance(key, tuple) else (key,))
+    system_plan = dropped_by_route.get(system_key) or set()
     dropped = dropped_by_route.get(key)
     source = [m for m in route_messages if id(m) not in dropped] if dropped else route_messages
+    if system_plan:
+        applied = []
+        for m in source:
+            if isinstance(m, dict) and m.get("role") == "system" and not m.get("_protected"):
+                digest = _system_trim_digest(m)
+                if ("drop", digest) in system_plan:
+                    continue
+                if ("truncate", digest) in system_plan:
+                    m = truncate_system_message(m)
+            applied.append(m)
+        source = applied
     trimmed = trim(source)
     if trimmed is source or not source:
         return trimmed
+    kept_system = {id(m) for m in trimmed}
+    for m in source:
+        if not isinstance(m, dict) or m.get("role") != "system" or m.get("_protected") or id(m) in kept_system:
+            continue
+        cut = truncate_system_message(m)
+        action = "truncate" if (
+            cut is not m and any(
+                is_truncated_system_message(t) and t.get("content") == cut.get("content") for t in trimmed
+            )
+        ) else "drop"
+        dropped_by_route.setdefault(system_key, set()).add((action, _system_trim_digest(m)))
     from src.intent_assessment import human_user_text
 
     exempt = {id(source[-1])}
@@ -5642,6 +5745,12 @@ async def stream_agent_loop(
         # filtered to read-only tools below (after the disabled map is loaded).
         disabled_tools.update(plan_mode_disabled_tools())
 
+    # The same chat's prompt must start the same way whichever caller runs the
+    # turn: a worker follow-up or a background-job continuation used to arrive
+    # without the chat route's preface, so its `instructions` differed from
+    # byte 0 and both it and the next user turn re-billed the whole chat.
+    messages = _with_chat_preface(messages, session_id)
+
     uploaded_files = uploaded_files or []
     _upload_msg = _uploaded_files_context_message(uploaded_files)
     if _upload_msg:
@@ -6900,7 +7009,7 @@ async def stream_agent_loop(
     _ledger_route: Dict[str, int] = {}
     # Messages a route's trim removed, by identity, per (url, model), for the
     # rest of this turn. See _sticky_trim below.
-    _route_trim_dropped: Dict[tuple, Set[int]] = {}
+    _route_trim_dropped: Dict[tuple, Set[Any]] = {}
 
     def _trim_route_request_messages(candidate_url, candidate_model, route_messages):
         """Apply the candidate route's own context budget to its request."""
@@ -7182,6 +7291,11 @@ async def stream_agent_loop(
     # something new (a polled job's fresh activity) counts as progress.
     _last_call_digest: Dict[str, str] = {}
     _last_round_progressed = False
+    # Results a tool flagged `repeat`: the same refused call again with no new
+    # word from the user (manage_agent_loadout's saved-loadout widening). Its
+    # arguments may differ each time, so the signature check below misses it.
+    _repeat_refusals = 0
+    _repeat_refused_calls: Set[Tuple[str, str]] = set()
     # Frequency of each exact call signature (tool + args), for the runaway
     # backstop. Counting identical repeats — not distinct same-tool calls —
     # lets a legit batch (e.g. 18 calendar events at once) through.
@@ -8543,9 +8657,17 @@ async def stream_agent_loop(
         # Distinct calls to one tool (a real batch) are legitimate work, so we
         # count identical call signatures, not raw per-tool-type totals.
         _runaway = _detect_runaway_call(_call_freq)
-        if _stuck_rounds >= 4 or _runaway:
+        # A refused call already came back flagged `repeat`, and this round goes
+        # back to the same tool and action (rather than, say, ask_user, or a
+        # start with extra_tools): stop the tool loop.
+        _refused_again = bool(_repeat_refusals) and any(
+            (b.tool_type, _dedupe_action(b.content or "")) in _repeat_refused_calls for b in tool_blocks)
+        if _stuck_rounds >= 4 or _runaway or _refused_again or _repeat_refusals >= 2:
             reason = (f"calling {_runaway} with identical arguments over and over" if _runaway
+                      else "retrying a call that was already refused this turn"
+                      if (_refused_again or _repeat_refusals >= 2)
                       else "repeating the same tool calls without new progress")
+            _repeat_refusals = 0
             logger.warning(f"[agent] loop-breaker tripped on round {round_num} ({reason}); sig={_sig[:80]!r}")
             yield (
                 "data: "
@@ -8871,6 +8993,11 @@ async def stream_agent_loop(
                     # stall streak nor the runaway count should hold it.
                     _last_round_progressed = True
                     _call_freq[_call_key] = 1
+                if result.get("repeat") is True:
+                    # The tool says this is a call it already refused this
+                    # turn; never progress, whatever the arguments.
+                    _repeat_refusals += 1
+                    _repeat_refused_calls.add((block.tool_type, _dedupe_action(block.content or "")))
 
             # A skill the model just loaded can prescribe tools that weren't
             # RAG-selected this turn (declared via requires_toolsets in its

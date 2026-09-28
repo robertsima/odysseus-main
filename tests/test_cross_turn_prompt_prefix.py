@@ -214,3 +214,54 @@ def test_the_next_turn_rewrites_only_the_previous_turns_tail(monkeypatch, caplog
     # whole prior history -- never at the front of the conversation.
     assert int(fields["first_diff_item"]) >= len(prior)
     assert second[0]["input"][: len(prior)] == first[-1]["input"][: len(prior)]
+
+
+def test_a_worker_follow_up_sends_the_chat_turns_instructions(monkeypatch):
+    """A worker's hand-back continues the chat through `run_headless` with the
+    bare history (`parent.get_context_messages()`): no persona, no prompt-safety
+    policy. Its `instructions` then differed from the chat's own turns at byte
+    0 (`instr_diff_at=0` at every switch between the two on 2026-09-28), so the
+    follow-up and the user's next turn both re-billed the whole chat."""
+    prior = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi, what can I do?"},
+    ]
+    al._CHAT_PREFACES.clear()
+    chat_turn = _first_round_payload(
+        monkeypatch, _chat_request(prior, "launch the researcher", "one"),
+        relevant_tools={"read_file", "grep"},
+    )
+    history = prior + [
+        {"role": "user", "content": "launch the researcher"},
+        {"role": "assistant", "content": "Launched."},
+        {"role": "user", "content": "[Worker result] researcher finished: 3 findings",
+         "metadata": {"source": "worker"}},
+    ]
+    follow_up = _first_round_payload(monkeypatch, [dict(m) for m in history], relevant_tools={"read_file", "grep"})
+    assert follow_up["instructions"] == chat_turn["instructions"]
+    assert follow_up["instructions"].startswith("You are Odysseus.")
+    assert follow_up["input"][: len(prior)] == chat_turn["input"][: len(prior)]
+
+
+def test_a_loadout_chats_follow_up_matches_without_a_remembered_preface(monkeypatch):
+    """A loadout chat has no persona prompt (the loadout's voice replaces it),
+    so the route sends the policy alone -- which is also what a follow-up gets
+    after a restart, when nothing is remembered for the chat."""
+    prior = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "Hi."},
+    ]
+    route_turn = [
+        {"role": "system", "content": UNTRUSTED_CONTEXT_POLICY},
+        *[dict(m) for m in prior],
+        {"role": "user", "content": "check the presets"},
+    ]
+    chat_turn = _first_round_payload(monkeypatch, route_turn, relevant_tools={"read_file"})
+    al._CHAT_PREFACES.clear()
+    follow_up = _first_round_payload(
+        monkeypatch,
+        [*[dict(m) for m in prior], {"role": "user", "content": "check the presets"}],
+        relevant_tools={"read_file"},
+    )
+    assert follow_up["instructions"] == chat_turn["instructions"]
+    assert follow_up["instructions"].startswith("Prompt-safety policy")

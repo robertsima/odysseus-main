@@ -281,6 +281,9 @@ DEFAULT_SETTINGS = {
     # the stream timeout above so a request the server accepted and sat on
     # costs two minutes, not five. 0 = off; local endpoints are never bounded.
     "agent_stream_headers_timeout_seconds": 120,
+    # Pause between two specialist launches of one orchestrate_agents
+    # workflow (src.agent_workflows); 0 = launch them together.
+    "agent_workflow_launch_stagger_seconds": 1.5,
     # How much MCP may stay bound on every turn without winning tool retrieval.
     # A connected server small enough to fit these caps is attached to every
     # round, so a vague follow-up ("continue") can never make it vanish; a

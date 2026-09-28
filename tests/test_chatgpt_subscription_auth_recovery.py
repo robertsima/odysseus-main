@@ -374,3 +374,283 @@ async def test_llm_call_async_recovers_too(store, codex):
 def test_formatter_no_longer_blames_credentials_for_a_401():
     text = llm_core._format_chatgpt_subscription_error(401, '{"detail":"Unauthorized"}')
     assert "Reconnect" not in text and "expired" not in text
+
+
+# ── 2026-09-28: workflow children sent their first request with no bearer ──
+# A metadata refresh (`get_session` on the child chat) replaced the child's
+# request-local bearer with the row's empty headers; the 401 recovery then
+# returned silently because there was no bearer to look up. Zero
+# `[chatgpt-auth]` lines for three dead workers.
+
+
+async def _stream_with(headers, session_id=None):
+    return [c async for c in llm_core.stream_llm(
+        CODEX_URL, "gpt-6-sol", [{"role": "user", "content": "research"}],
+        headers=headers, session_id=session_id,
+    )]
+
+
+@pytest.fixture
+def owner_ref(monkeypatch, store):
+    """The child chat's endpoint resolves to the stored credential."""
+    seen = []
+
+    def ref(session_id):
+        seen.append(session_id)
+        return (store.auth_id, "robert") if session_id == "child-1" else None
+
+    monkeypatch.setattr(cs, "_session_credential_ref", ref)
+    return seen
+
+
+async def test_bearerless_request_gets_the_chat_owners_token_before_sending(store, codex, owner_ref, caplog):
+    caplog.set_level(logging.INFO)
+    fake = codex(FakeCodex(reject={""}))
+
+    chunks = await _stream_with(cs.chatgpt_headers(None), session_id="child-1")
+
+    assert _errors(chunks) == []
+    assert fake.bearers == [store.initial_access]  # no 401 round trip at all
+    assert "[chatgpt-auth] request for session=child-1 carries no bearer token" in caplog.text
+    assert "missing bearer session=child-1: resolved the chat owner's stored credential" in caplog.text
+    assert store.initial_access not in caplog.text
+
+
+async def test_bearerless_401_recovers_through_the_session_owner(store, codex, owner_ref, monkeypatch, caplog):
+    """The recovery path itself, when the pre-send resolution did not help."""
+    caplog.set_level(logging.INFO)
+
+    async def no_presend(headers, session_id=None):
+        return headers, None
+
+    monkeypatch.setattr(llm_core, "_chatgpt_presend_headers", no_presend)
+    fake = codex(FakeCodex(reject={""}))
+
+    chunks = await _stream_with({}, session_id="child-1")
+
+    assert _errors(chunks) == []
+    assert fake.bearers == ["", store.initial_access]
+    assert "401 model=gpt-6-sol session=child-1: the request carried no bearer token" in caplog.text
+    assert "retrying once with the owner's stored token" in caplog.text
+
+
+async def test_bearerless_401_with_no_owner_credential_is_logged_and_reported(store, codex, owner_ref, caplog):
+    caplog.set_level(logging.INFO)
+    fake = codex(FakeCodex(reject_all=True))
+
+    chunks = await _stream_with({}, session_id="someone-else")
+
+    [error] = _errors(chunks)
+    assert error["status"] == 401
+    assert error["text"] == llm_core._CHATGPT_401_NO_BEARER
+    assert fake.bearers == [""]
+    for line in ("carries no bearer token",
+                 "missing bearer session=someone-: no enabled ChatGPT Subscription endpoint",
+                 "the request carried no bearer token",
+                 "no credential to retry with; reporting the 401"):
+        assert line in caplog.text
+
+
+async def test_unmatched_token_401_retries_with_the_session_owners_token(store, codex, owner_ref, caplog):
+    caplog.set_level(logging.INFO)
+    foreign = _jwt(account="acct-somebody-else")
+    fake = codex(FakeCodex(reject={foreign}))
+
+    chunks = await _stream_with({"Authorization": f"Bearer {foreign}"}, session_id="child-1")
+
+    assert _errors(chunks) == []
+    assert fake.bearers == [foreign, store.initial_access]
+    assert "401 recovery: no stored credential matches the rejected token" in caplog.text
+    assert "the rejected token matches no stored credential; resolving the chat owner's current one" in caplog.text
+    assert store.oauth.calls == 0  # the owner's token was fine; nothing to refresh
+
+
+async def test_unmatched_token_without_a_session_logs_every_branch(store, codex, caplog):
+    caplog.set_level(logging.INFO)
+    foreign = _jwt(account="acct-somebody-else")
+    fake = codex(FakeCodex(reject_all=True))
+
+    chunks = await _stream_with({"Authorization": f"Bearer {foreign}"})
+
+    [error] = _errors(chunks)
+    assert error["text"] == llm_core._CHATGPT_401_UNMATCHED
+    assert len(fake.bearers) == 1
+    for line in ("no stored credential matches the rejected token",
+                 "unmatched bearer: no chat session on the request",
+                 "no credential to retry with; reporting the 401"):
+        assert line in caplog.text
+
+
+async def test_owner_token_that_is_the_rejected_one_is_not_replayed(store, codex, monkeypatch):
+    """Nothing newer to send: one request, and the 401 is reported."""
+    monkeypatch.setattr(cs, "_find_auth_for_token", lambda token: None)
+    monkeypatch.setattr(cs, "_session_credential_ref", lambda sid: (store.auth_id, "robert"))
+    fake = codex(FakeCodex(reject_all=True))
+
+    chunks = await _stream_with({"Authorization": f"Bearer {store.initial_access}"}, session_id="child-1")
+
+    [error] = _errors(chunks)
+    assert error["status"] == 401 and len(fake.bearers) == 1
+
+
+def test_session_credential_ref_uses_the_chats_owner_and_endpoint(monkeypatch, tmp_path):
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+    import core.database as database
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'app.db'}", connect_args={"check_same_thread": False})
+    database.Base.metadata.create_all(engine, tables=[database.Session.__table__,
+                                                      database.ModelEndpoint.__table__])
+    factory = _sessionmaker(bind=engine)
+    monkeypatch.setattr(database, "SessionLocal", factory)
+    codex_base = cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL
+    with factory() as db:
+        db.add_all([
+            database.Session(id="child-1", name="child", endpoint_url=codex_base, model="gpt-6-sol",
+                             owner="robert", headers={}),
+            database.Session(id="child-2", name="child", endpoint_url="https://api.openai.com/v1",
+                             model="gpt-5", owner="robert", headers={}),
+            database.ModelEndpoint(id="ep-other", name="Theirs", base_url=codex_base, is_enabled=True,
+                                   owner="alice", provider_auth_id="auth-alice"),
+            database.ModelEndpoint(id="ep-off", name="Old", base_url=codex_base, is_enabled=False,
+                                   owner="robert", provider_auth_id="auth-old"),
+            database.ModelEndpoint(id="ep-mine", name="Mine", base_url=codex_base, is_enabled=True,
+                                   owner="robert", provider_auth_id="auth-robert"),
+        ])
+        db.commit()
+
+    assert cs._session_credential_ref("child-1") == ("auth-robert", "robert")
+    assert cs._session_credential_ref("child-2") is None  # not a ChatGPT chat
+    assert cs._session_credential_ref("missing") is None
+    engine.dispose()
+
+
+# ── the metadata refresh that wiped the bearer ───────────────────────────
+
+
+def _manager(monkeypatch, tmp_path):
+    from sqlalchemy.orm import sessionmaker as _sessionmaker
+
+    import core.database as database
+    from core import session_manager as sm
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'sessions.db'}", connect_args={"check_same_thread": False})
+    database.Base.metadata.create_all(engine, tables=[database.Session.__table__,
+                                                      database.ChatMessage.__table__])
+    monkeypatch.setattr(sm, "SessionLocal", _sessionmaker(bind=engine))
+    manager = sm.SessionManager.__new__(sm.SessionManager)
+    manager.sessions = {}
+    return manager, engine
+
+
+@pytest.mark.parametrize("endpoint,kept", [
+    (cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL, True),
+    ("https://api.openai.com/v1", False),  # static keys live in the row: it stays authoritative
+])
+def test_get_session_keeps_a_request_local_chatgpt_bearer(monkeypatch, tmp_path, endpoint, kept):
+    manager, engine = _manager(monkeypatch, tmp_path)
+    sess = manager.create_session("child-1", "child", endpoint, "gpt-6-sol", owner="robert")
+    sess.headers = cs.chatgpt_headers("tok-123")  # what resolve_session_auth does for a worker
+
+    manager.get_session("child-1")  # what orchestrate_agents does right after launching
+
+    assert ("Authorization" in sess.headers) is kept
+    engine.dispose()
+
+
+def test_get_session_drops_the_bearer_when_the_chat_moved_endpoint(monkeypatch, tmp_path):
+    from core import session_manager as sm
+    import core.database as database
+
+    manager, engine = _manager(monkeypatch, tmp_path)
+    sess = manager.create_session("child-1", "child", cs.DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL,
+                                  "gpt-6-sol", owner="robert")
+    sess.headers = cs.chatgpt_headers("tok-123")
+    with sm.SessionLocal() as db:
+        db.query(database.Session).filter(database.Session.id == "child-1").update(
+            {"endpoint_url": "https://api.openai.com/v1"})
+        db.commit()
+
+    manager.get_session("child-1")
+
+    assert sess.headers == {}
+    engine.dispose()
+
+
+# ── 502/503 before any output ────────────────────────────────────────────
+
+
+class FlakyGateway(FakeCodex):
+    """Answers the first ``failures`` requests with an Envoy-style 503."""
+
+    def __init__(self, failures=1, status=503):
+        super().__init__()
+        self.failures, self.status = failures, status
+
+    def stream(self, method, url, headers=None, **kwargs):
+        ctx = super().stream(method, url, headers=headers, **kwargs)
+        if len(self.bearers) > self.failures:
+            return ctx
+        status = self.status
+
+        class _Resp:
+            status_code = status
+
+            async def aread(self):
+                return (b"upstream connect error or disconnect/reset before headers. "
+                        b"reset reason: connection termination")
+
+        class _Ctx:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Ctx()
+
+
+@pytest.fixture
+def no_status_delay(monkeypatch):
+    monkeypatch.setattr(llm_core, "_STREAM_STATUS_RETRY_DELAY", (0, 0))
+
+
+@pytest.mark.parametrize("status", [502, 503])
+async def test_gateway_error_before_output_is_replayed_once(store, codex, no_status_delay, caplog, status):
+    caplog.set_level(logging.WARNING)
+    fake = codex(FlakyGateway(failures=1, status=status))
+
+    chunks = await _stream(store.initial_access)
+
+    assert _errors(chunks) == []
+    assert any('"delta": "hello"' in c for c in chunks)
+    assert len(fake.bearers) == 2
+    assert f"HTTP {status} from" in caplog.text and "retrying once" in caplog.text
+
+
+async def test_second_gateway_error_is_reported_not_replayed_again(store, codex, no_status_delay):
+    fake = codex(FlakyGateway(failures=5))
+
+    [error] = _errors(await _stream(store.initial_access))
+
+    assert error["status"] == 503 and "upstream connect error" in error["raw"]
+    assert len(fake.bearers) == 2
+
+
+def test_status_retry_classification():
+    def chunk(**data):
+        return f"event: error\ndata: {json.dumps(data)}\n\n"
+
+    assert llm_core._is_retryable_upstream_status_chunk(chunk(status=503, text="upstream connect error"))
+    assert llm_core._is_retryable_upstream_status_chunk(chunk(status=502, text="Bad gateway"))
+    # Its own budget, not this one.
+    assert not llm_core._is_retryable_upstream_status_chunk(chunk(status=503, retryable=True, error="Cannot reach"))
+    # Never reached the upstream.
+    assert not llm_core._is_retryable_upstream_status_chunk(
+        chunk(status=503, error="Upstream chatgpt.com unreachable (cooldown active)"))
+    # Local transport failures the stream code already chose not to replay.
+    assert not llm_core._is_retryable_upstream_status_chunk(
+        chunk(status=502, error="Network error", fallback_eligible=False))
+    for status in (400, 401, 429, 500, 504):
+        assert not llm_core._is_retryable_upstream_status_chunk(chunk(status=status, text="x"))
+    assert not llm_core._is_retryable_upstream_status_chunk('data: {"delta": "503"}\n\n')

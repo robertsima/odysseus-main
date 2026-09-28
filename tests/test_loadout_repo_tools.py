@@ -155,20 +155,26 @@ async def test_preflight_flags_a_file_writing_loadout_without_git(store):
 
 
 async def test_preflight_names_granted_tools_a_worker_cannot_have(store):
+    # send_to_session hands work to another chat: no loadout setting gives a
+    # worker that. (delegate_to_claude_code, named outright, now is given:
+    # tests/test_worker_claude_code_grant.py.)
     await manage_agent_loadout(
         '{"action": "create", "name": "Lead Engineer", "tool_access": "selected",'
-        ' "enabled_tools": ["read_file", "manage_git", "delegate_to_claude_code"]}', "c", owner="u")
+        ' "enabled_tools": ["read_file", "manage_git", "send_to_session"]}', "c", owner="u")
     result = await manage_agent_loadout('{"action": "preflight", "name": "Lead Engineer"}', "c", owner="u")
     readiness = result["readiness"]
     assert readiness["status"] == "DEGRADED"
     denied = {row["tool"]: row for row in readiness["capabilities"]["denied"]}
-    assert denied["delegate_to_claude_code"]["reason"] == "worker_policy"
+    assert denied["send_to_session"]["reason"] == "worker_policy"
     assert "manage_git" not in denied
-    assert "delegate_to_claude_code" in result["response"]
+    assert "send_to_session" in result["response"]
+    # The repair never tells the agent to edit what the user granted.
+    row = next(r for r in readiness["checks"] if r["check"] == "tool send_to_session")
+    assert "drop it" not in row["repair"]
 
     # Required and withheld from workers: BLOCKED, not READY.
     required = await manage_agent_loadout(
-        '{"action": "preflight", "name": "Lead Engineer", "required_tools": ["delegate_to_claude_code"]}',
+        '{"action": "preflight", "name": "Lead Engineer", "required_tools": ["send_to_session"]}',
         "c", owner="u")
     assert required["readiness"]["status"] == "BLOCKED"
 

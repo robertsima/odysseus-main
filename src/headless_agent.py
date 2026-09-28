@@ -195,9 +195,38 @@ SUBAGENT_BLOCKED_TOOLS: frozenset = frozenset({
 
 
 # The two launchers a worker may keep when nesting is allowed. A lead engineer
-# starting implementors needs exactly these; the rest of SUBAGENT_BLOCKED_TOOLS
-# (other chats, coding CLIs) stays off at every depth.
+# starting implementors needs exactly these.
 NESTABLE_LAUNCH_TOOLS: frozenset = frozenset({"manage_agent_loadout", "orchestrate_agents"})
+
+# Launchers a worker keeps under the same depth/policy rule as
+# NESTABLE_LAUNCH_TOOLS, but only when its loadout names them outright
+# (`tool_access: "selected"` with the name in `enabled_tools`) — never through
+# `tool_access: "all"`, and never when the chat that started the worker may not
+# use them itself.
+#
+# `delegate_to_claude_code` is here because a Lead Engineer whose job is to hand
+# implementation to Claude Code could not do it: the tool was withheld from
+# every worker at every depth, preflight read DEGRADED, and on 2026-09-28 the
+# admin chat "repaired" the preset by dropping the tool the user had granted.
+# A Claude Code run is a bounded leaf, not a fan-out:
+#   - it runs `--restricted` with a fixed tool allowlist (read/edit/commit plus
+#     named test runners; no push, fetch, remote, curl, env or arbitrary shell)
+#     and a deny list that closes the prefix-match gaps (claude_code_tools);
+#   - one run per checkout at a time (the per-repository lock) and at most
+#     `claude_code_max_concurrent_tasks` across the instance (the process gate);
+#   - each run or queued task counts against the worker's own child limit
+#     (`agent_control.live_children`, checked by tool_execution's capacity gate);
+#   - from a worker it runs only in that worker's workspace or a managed
+#     worktree of the same repository (claude_code_tools._worker_repository);
+#   - it cannot start an Odysseus agent: its only way back in is the callback
+#     helper, whose /api/codex/* scopes cover todos, email, memory, calendar,
+#     documents, vault and Cookbook — no chats, sessions or workers.
+# It still counts as one more hop, which is why the depth rule applies: a
+# worker at the depth limit, or with delegation "never", does not get it.
+#
+# The rest of SUBAGENT_BLOCKED_TOOLS (other chats, other agents, pipelines)
+# stays off at every depth: each of those can start more Odysseus agents.
+EXPLICIT_GRANT_LAUNCH_TOOLS: frozenset = frozenset({"delegate_to_claude_code"})
 #: user chat (0) -> worker (1) -> sub-worker (2). Deeper is refused.
 DEFAULT_MAX_WORKER_DEPTH = 2
 
@@ -244,32 +273,117 @@ def child_blocked_tools(session_id: Optional[str], settings: Optional[Dict[str, 
     per loadout (a lead engineer's grants manage_agent_loadout; an
     implementor's does not) and the parent chat's worker limit
     (``max_parallel_workers``) bounds the fan-out at each level.
+
+    ``EXPLICIT_GRANT_LAUNCH_TOOLS`` follow the same rule, and additionally
+    need the worker chat's stored allowlist to name them and the chat that
+    started the worker to be allowed them itself.
     """
     settings = settings or {}
-    return blocked_at_depth(max(1, worker_depth(session_id)), settings.get("delegation_policy"))
+    blocked = blocked_at_depth(max(1, worker_depth(session_id)), settings.get("delegation_policy"),
+                               tool_access=settings.get("tool_access"),
+                               enabled_tools=settings.get("enabled_tools"))
+    released = EXPLICIT_GRANT_LAUNCH_TOOLS - blocked
+    if released:
+        parent = settings.get("parent_session")
+        if not parent and session_id:
+            try:
+                from core.database import get_session_settings
+
+                parent = (get_session_settings(str(session_id)) or {}).get("parent_session")
+            except Exception:
+                parent = None
+        blocked |= _denied_to_parent(parent, released)
+    return blocked
 
 
-def blocked_at_depth(depth: int, delegation_policy: Optional[str] = None) -> Set[str]:
+def _denied_to_parent(parent_session: Optional[str], tools: Set[str]) -> Set[str]:
+    """Which of ``tools`` the worker's parent chat may not use itself.
+
+    The authoring clamp already refuses a loadout wider than the chat that
+    writes it, but a saved loadout can be started by a different chat later.
+    A worker must not hold a coding CLI its own parent is denied, so the
+    parent's stored policy is read again here. Fails closed.
+    """
+    if not parent_session:
+        return set(tools)
+    try:
+        from core.database import get_session_settings
+        from src.session_settings import stored_disabled_tools
+
+        denied = stored_disabled_tools(get_session_settings(str(parent_session)) or {})
+    except Exception:
+        logger.debug("worker launcher check: parent policy unreadable for %s", parent_session, exc_info=True)
+        return set(tools)
+    return {tool for tool in tools if tool in denied}
+
+
+def explicitly_granted(tool_access: Optional[str], enabled_tools: Any) -> Set[str]:
+    """The ``EXPLICIT_GRANT_LAUNCH_TOOLS`` a stored allowlist names outright."""
+    if str(tool_access or "all").lower() != "selected":
+        return set()
+    names = {str(name).strip() for name in (enabled_tools or []) if str(name).strip()}
+    return set(EXPLICIT_GRANT_LAUNCH_TOOLS & names)
+
+
+def blocked_at_depth(depth: int, delegation_policy: Optional[str] = None, *,
+                     tool_access: Optional[str] = None, enabled_tools: Any = None) -> Set[str]:
     """What a worker ``depth`` hops below a person's chat may never call.
 
     The rule :func:`child_blocked_tools` applies to a running worker, exposed
     so a loadout's preflight can say, before anything starts, which of the
-    tools it grants its worker will not get.
+    tools it grants its worker will not get. ``tool_access``/``enabled_tools``
+    are the worker's own allowlist; without them no explicit-grant launcher is
+    released.
     """
-    policy = str(delegation_policy or "explicit").lower()
-    if policy == "never" or max(1, int(depth)) >= max_worker_depth():
+    if not may_nest(depth, delegation_policy):
         return set(SUBAGENT_BLOCKED_TOOLS)
-    return set(SUBAGENT_BLOCKED_TOOLS) - NESTABLE_LAUNCH_TOOLS
+    return (set(SUBAGENT_BLOCKED_TOOLS) - NESTABLE_LAUNCH_TOOLS
+            - explicitly_granted(tool_access, enabled_tools))
+
+
+def may_nest(depth: int, delegation_policy: Optional[str] = None) -> bool:
+    """Whether a worker ``depth`` hops down may start one more hop of work."""
+    policy = str(delegation_policy or "explicit").lower()
+    return policy != "never" and max(1, int(depth)) < max_worker_depth()
 
 
 # Why each worker-withheld tool is withheld, for a preflight or start message
 # the model can act on instead of "the tool policy denies it".
-def withheld_reason(tool: str) -> str:
+def withheld_reason(tool: str, depth: Optional[int] = None, delegation_policy: Optional[str] = None) -> str:
+    limit = max_worker_depth()
+    policy = str(delegation_policy or "explicit").lower()
+    if tool in EXPLICIT_GRANT_LAUNCH_TOOLS:
+        if policy == "never":
+            return ("the loadout's delegation_policy is 'never', and a Claude Code run is one more hop of "
+                    "delegated work")
+        if depth is not None and max(1, int(depth)) >= limit:
+            return (f"the worker would run {max(1, int(depth))} level(s) below a person's chat, the limit "
+                    f"(agent_max_worker_depth {limit}), and a Claude Code run is one more hop")
+        return ("a worker gets it only when its loadout lists it in enabled_tools (tool_access 'selected'), "
+                "above the depth limit, with delegation not 'never'")
     if tool in NESTABLE_LAUNCH_TOOLS:
         return ("it starts other workers, and a worker at this depth (or with delegation 'never') may not; "
-                f"agent_max_worker_depth is {max_worker_depth()}")
-    return ("it hands work to another chat or coding agent, which a worker may never do; "
+                f"agent_max_worker_depth is {limit}")
+    return ("it hands work to another chat or Odysseus agent, which a worker may never do; "
             "do that part from the chat that starts the worker")
+
+
+def withheld_repair(tool: str, depth: Optional[int] = None, delegation_policy: Optional[str] = None) -> str:
+    """The one change that would give a worker ``tool``, or why none will.
+
+    Never "drop it from enabled_tools": that edits what the user granted and
+    changes nothing the worker can do.
+    """
+    policy = str(delegation_policy or "explicit").lower()
+    if tool in EXPLICIT_GRANT_LAUNCH_TOOLS or tool in NESTABLE_LAUNCH_TOOLS:
+        if policy == "never":
+            return ("set the loadout's delegation_policy to 'explicit' or 'auto' (a widening: ask the user "
+                    "first), or run that step from the chat that starts the worker")
+        return ("start this loadout from a person's chat rather than from a worker, or have the user raise "
+                f"agent_max_worker_depth (now {max_worker_depth()}); otherwise run that step from the chat "
+                "that starts the worker. Leave the loadout as the user saved it")
+    return ("run that step from the chat that starts the worker; no loadout setting gives a worker this "
+            "tool. Leave the loadout as the user saved it")
 
 
 def worker_tool_budget() -> int:

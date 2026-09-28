@@ -165,13 +165,18 @@ def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
     matrix = agent_loadouts.capability_matrix(
         wanted, list(required_tools or []), profile, policy, owner, as_worker=True)
     for row in matrix["denied"]:
+        # A row can carry its own repair (a worker-withheld launcher names the
+        # exact setting that would give it back). The generic worker_policy one
+        # used to say "drop it from enabled_tools", and on 2026-09-28 the admin
+        # chat did exactly that to the user's Lead Engineer preset.
         checks.append(_check(f"tool {row['tool']}", False, f"{row['reason']}: {row['detail']}",
+                             row.get("repair") or
                              {"mcp_server": "reconnect the MCP server or allow it for this profile",
                               "parent_policy": "grant it to the calling chat first",
                               "owner_policy": "an admin must allow it for this user",
                               "profile_disabled": "remove it from the loadout's disabled_tools",
-                              "worker_policy": ("drop it from enabled_tools, or do that step from the chat "
-                                                "that starts the worker"),
+                              "worker_policy": ("do that step from the chat that starts the worker; leave the "
+                                                "loadout as the user saved it"),
                               "not_requested": "add it to enabled_tools",
                               "unknown": "use an exact tool name from action=capabilities"}.get(row["reason"])))
     for row in matrix["conditional"]:

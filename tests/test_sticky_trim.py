@@ -46,10 +46,21 @@ def _cache_breaks(requests):
     return breaks
 
 
-def test_sticky_trim_breaks_the_cached_prefix_far_less_often():
-    plain, sticky = _run(False), _run(True)
-    assert _cache_breaks(plain) >= 20        # every round once over budget
+def test_sticky_trim_breaks_the_cached_prefix_far_less_often(monkeypatch):
+    import src.context_compactor as compactor
+
+    # A cut that stops at the smallest removal (no grains): every round once
+    # over budget moves it.
+    monkeypatch.setattr(compactor, "TRIM_GRAIN_RATIO", 1e-9)
+    plain = _run(False)
+    assert _cache_breaks(plain) >= 20
+    monkeypatch.undo()
+    # From-scratch trims cut in whole grains, so they already move the cut
+    # only every few rounds; remembering the cut does better still.
+    grained, sticky = _run(False), _run(True)
+    assert _cache_breaks(grained) <= _cache_breaks(plain) // 2
     assert _cache_breaks(sticky) <= _cache_breaks(plain) // 4
+    assert _cache_breaks(sticky) < _cache_breaks(grained)
 
 
 def test_every_request_still_fits_and_keeps_the_system_prompt_and_request():

@@ -595,6 +595,12 @@ register_all([
         help="Safety limit per turn. Use 0 for no fixed ceiling; stall detection still applies.",
         group="Agents", min_value=0, max_value=2000, unit="calls", advanced=True,
     ),
+    SettingSpec(
+        key="agent_workflow_launch_stagger_seconds", type="float", label="Specialist launch spacing",
+        help=("Pause between starting two specialists of one research workflow, so their first "
+              "requests do not reach the model provider in a single burst. Use 0 to start them together."),
+        group="Agents", min_value=0, max_value=10, step=0.5, unit="seconds", advanced=True,
+    ),
 
     # ── Human-readable choices and the phase-five settings migration ──
     SettingSpec(

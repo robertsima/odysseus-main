@@ -380,6 +380,14 @@ _AFFIRMATIVE_RE = re.compile(
 _NEGATIVE_RE = re.compile(r"\b(?:no|not|don'?t|never|deny|refuse|cancel)\b", re.IGNORECASE)
 
 
+# "the preset", "this loadout": the user pointing at the loadout the chat has
+# just been talking about instead of naming it. 2026-09-28 18: "grant the
+# preset delegate_to_claude_code", right after a reply about Lead Engineer.
+_LOADOUT_REFERENCE_RE = re.compile(
+    r"\b(?:the|this|that|its|it'?s)\s+(?:preset|loadout|profile|agent|worker)\b", re.IGNORECASE)
+_GRANT_VERB_RE = re.compile(r"\b(?:add|grant|give|allow|enable|let)\b", re.IGNORECASE)
+
+
 def _is_human_message(message: Any) -> bool:
     if _field(message, "role") != "user":
         return False
@@ -387,16 +395,36 @@ def _is_human_message(message: Any) -> bool:
     return str(meta.get("source") or "") in _HUMAN_SOURCES and meta.get("kind") != "peer"
 
 
-def _user_authorized_widening(session_id: Optional[str], owner: Optional[str], loadout_name: str,
-                              added_tools: List[str]) -> bool:
-    """Whether the person in this chat asked for this loadout to be widened."""
+def _names_tool(tool: str, lowered: str) -> bool:
+    return bool(re.search(r"(?<![\w])" + re.escape(tool.casefold()) + r"(?![\w])", lowered))
+
+
+def _assistant_text(message: Any) -> str:
+    """What an assistant message said, including the questions it asked."""
+    parts = [str(_field(message, "content") or "")]
+    for event in (_field(message, "metadata") or {}).get("tool_events") or []:
+        if isinstance(event, dict) and event.get("tool") == "ask_user":
+            parts.append(f"{event.get('command') or ''} {event.get('output') or ''}")
+    return " ".join(parts)
+
+
+class _Authorization:
+    """Whether the person in this chat asked for this widening, and if not, why."""
+
+    def __init__(self, ok: bool, *, worker: bool = False, unnamed: Optional[List[str]] = None,
+                 marker: Any = None):
+        self.ok, self.worker, self.unnamed, self.marker = ok, worker, list(unnamed or []), marker
+
+
+def _chat_history(session_id: Optional[str], owner: Optional[str]) -> Tuple[bool, Optional[List[Any]]]:
+    """``(is_worker, history)`` for the calling chat; history None when unreadable."""
     if not session_id:
-        return False
+        return False, None
     try:
         from core.database import get_session_settings
 
         if (get_session_settings(session_id) or {}).get("parent_session"):
-            return False  # a worker has no user of its own to ask
+            return True, None  # a worker has no user of its own to ask
     except Exception:
         pass
     try:
@@ -405,58 +433,165 @@ def _user_authorized_widening(session_id: Optional[str], owner: Optional[str], l
         manager = get_session_manager()
         sess = manager.get_session(session_id) if manager else None
     except Exception:
-        return False
+        return False, None
     if sess is None or (owner and getattr(sess, "owner", None) != owner):
-        return False
-    history = list(getattr(sess, "history", None) or [])
+        return False, None
+    return False, list(getattr(sess, "history", None) or [])
+
+
+def _widening_authorization(session_id: Optional[str], owner: Optional[str], loadout_name: str,
+                            added_tools: List[str]) -> _Authorization:
+    """Did the person in this chat ask for this loadout to gain ``added_tools``?
+
+    Yes when their latest message (typed by them, not a worker result):
+
+    - names the loadout and every added tool ("Giving you explicit
+      authorization to add manage_git to the Lead Engineer preset"), or names
+      the loadout and asks to widen it in general words without naming tools;
+    - says "the preset"/"this loadout", names every added tool with a grant
+      verb, and the chat's reply just before it named the loadout ("grant the
+      preset delegate_to_claude_code");
+    - answers yes to an ask_user that named the loadout, or to a reply that
+      named the loadout and every added tool.
+
+    Naming some tools is consent to those only: an update that also adds
+    tools the user did not name is refused, naming them (``unnamed``).
+    """
+    is_worker, history = _chat_history(session_id, owner)
+    if is_worker:
+        return _Authorization(False, worker=True)
+    if history is None:
+        return _Authorization(False)
     index = next((i for i in range(len(history) - 1, -1, -1) if _is_human_message(history[i])), None)
     if index is None:
-        return False
+        return _Authorization(False)
     text = str(_field(history[index], "content") or "")
+    marker = (index, hash(text))
     lowered, name = text.casefold(), loadout_name.casefold()
-    if name and name in lowered:
-        named_tool = any(re.search(r"(?<![\w])" + re.escape(t.casefold()) + r"(?![\w])", lowered)
-                         for t in added_tools)
-        if named_tool or _WIDEN_INTENT_RE.search(text):
-            return True
-    if not _AFFIRMATIVE_RE.search(text) or _NEGATIVE_RE.search(text):
-        return False
+    added = [str(t) for t in added_tools or []]
+    named = [t for t in added if _names_tool(t, lowered)]
+    unnamed = [t for t in added if t not in named]
+    previous = next((m for m in reversed(history[:index]) if _field(m, "role") == "assistant"), None)
+    previous_text = _assistant_text(previous).casefold() if previous is not None else ""
+
+    def grant(names_loadout: bool, generic_ok: bool) -> Optional[_Authorization]:
+        if not names_loadout:
+            return None
+        if named:
+            return _Authorization(not unnamed, unnamed=unnamed, marker=marker)
+        if generic_ok and _WIDEN_INTENT_RE.search(text):
+            return _Authorization(True, marker=marker)
+        return None
+
+    # Named outright.
+    decided = grant(bool(name) and name in lowered, generic_ok=True)
+    if decided is None and added and _LOADOUT_REFERENCE_RE.search(text) and _GRANT_VERB_RE.search(text):
+        # "the preset", resolved to the loadout the chat's last reply was about.
+        decided = grant(bool(name) and name in previous_text, generic_ok=False)
+    if decided is not None:
+        return decided
+    if not _AFFIRMATIVE_RE.search(text) or _NEGATIVE_RE.search(text) or previous is None:
+        return _Authorization(False, marker=marker)
     # "yes" to the question the agent just asked about this loadout.
-    for message in reversed(history[:index]):
-        if _field(message, "role") != "assistant":
-            continue
-        for event in (_field(message, "metadata") or {}).get("tool_events") or []:
-            if isinstance(event, dict) and event.get("tool") == "ask_user":
-                asked = f"{event.get('command') or ''} {event.get('output') or ''}".casefold()
-                if name and name in asked:
-                    return True
-        break
-    return False
+    for event in (_field(previous, "metadata") or {}).get("tool_events") or []:
+        if isinstance(event, dict) and event.get("tool") == "ask_user":
+            asked = f"{event.get('command') or ''} {event.get('output') or ''}".casefold()
+            if name and name in asked:
+                return _Authorization(True, marker=marker)
+    reply = str(_field(previous, "content") or "").casefold()
+    if name and name in reply and all(_names_tool(t, reply) for t in added):
+        return _Authorization(True, marker=marker)
+    return _Authorization(False, marker=marker)
 
 
-def _widening_refusal(name: str, widened: Dict[str, Any]) -> Dict[str, Any]:
+def _user_authorized_widening(session_id: Optional[str], owner: Optional[str], loadout_name: str,
+                              added_tools: List[str]) -> bool:
+    """Whether the person in this chat asked for this loadout to be widened."""
+    return _widening_authorization(session_id, owner, loadout_name, added_tools).ok
+
+
+# {(chat, loadout): the user message a widening of it was last refused under}.
+# A second widening of the same loadout under the same user message is the
+# model retrying instead of asking: on 2026-09-28 the admin chat re-sent a
+# refused Lead Engineer update six times in a row, each answered with the
+# full refusal. Process-local and bounded; a restart only means the next
+# repeat gets the full text once more.
+_WIDENING_REFUSALS: Dict[Tuple[str, str], Tuple[Any, List[str]]] = {}
+_WIDENING_REFUSALS_MAX = 256
+
+
+def _refuse_widening(session_id: Optional[str], name: str, widened: Dict[str, Any],
+                     auth: _Authorization) -> Dict[str, Any]:
+    key = (str(session_id or ""), name.casefold())
+    previous = _WIDENING_REFUSALS.get(key) if session_id and auth.marker is not None else None
+    if previous is not None and previous[0] == auth.marker:
+        refused = sorted(set(previous[1]) | set(widened["tools"]))
+        _WIDENING_REFUSALS[key] = (auth.marker, refused)
+        return _repeat_widening_refusal(name, widened, auth)
+    if session_id and auth.marker is not None:
+        if len(_WIDENING_REFUSALS) >= _WIDENING_REFUSALS_MAX:
+            _WIDENING_REFUSALS.pop(next(iter(_WIDENING_REFUSALS)))
+        _WIDENING_REFUSALS[key] = (auth.marker, list(widened["tools"]))
+    return _widening_refusal(name, widened, auth)
+
+
+def _what_it_gains(widened: Dict[str, Any]) -> str:
     tools = widened["tools"]
-    options = []
-    if tools:
-        options.append(
-            "for the task at hand, leave the loadout as it is and start the worker with "
-            f"extra_tools={json.dumps(tools[:12])} — those apply to that one run only")
-    options.append(
-        "if the user wants this loadout itself changed for good, ask them (ask_user, naming the loadout "
-        "and exactly what it would gain) and repeat this update after they say yes, or they can edit it "
-        "in Settings > Agent loadouts")
+    return ", ".join(tools[:12]) if tools else "; ".join(widened["notes"])
+
+
+def _widening_refusal(name: str, widened: Dict[str, Any],
+                      auth: Optional[_Authorization] = None) -> Dict[str, Any]:
+    auth = auth or _Authorization(False)
+    tools = widened["tools"]
+    gains = _what_it_gains(widened)
+    if auth.worker:
+        next_step = ("You are a worker: you cannot change a saved loadout. Say in your result that "
+                     f"{name!r} would need {gains}, and let the chat that started you ask the user.")
+    else:
+        next_step = (f"Next step, once: ask the user with ask_user whether {name!r} should permanently gain "
+                     f"{gains}. Do not retry this update until they answer; after a yes, send it once.")
+    why = (f"the user named {', '.join(t for t in tools if t not in auth.unnamed)} but not "
+           f"{', '.join(auth.unnamed)}" if auth.unnamed else "the user has not asked for that in this chat")
+    extra = (f" For the task at hand you do not need the change: start the worker with "
+             f"extra_tools={json.dumps(tools[:12])}, which applies to that one run only." if tools else "")
     return {
         "error": (
-            f"update: {name!r} was not saved. This update widens a saved loadout ("
-            + "; ".join(widened["notes"]) + "), and the user has not asked for that in this chat. "
-            "A loadout is the user's standing decision about what that worker may do; one task needing "
-            "more is not a reason to change it for every later run. Instead: " + "; or ".join(options)
-            + ". Narrowing a loadout, or changing its wording, model or round budget, needs no approval."
+            f"update: {name!r} was not saved. It widens a saved loadout (" + "; ".join(widened["notes"])
+            + f"), and {why}. " + next_step + extra
+            + " Narrowing it, or changing its wording, model or round budget, needs no approval."
         ),
         "blocked": True,
         "blocked_reason": "update_would_widen_loadout",
         "would_widen": widened["notes"],
+        **({"not_named_by_user": auth.unnamed} if auth.unnamed else {}),
+        "next_action": ({"report_to_parent": True} if auth.worker else
+                        {"ask_user": f"May I permanently give the {name} loadout {gains}?",
+                         "then": "stop; do not retry the update until the user answers"}),
         **({"suggested_start": {"action": "start", "name": name, "extra_tools": tools}} if tools else {}),
+        "exit_code": 1,
+    }
+
+
+def _repeat_widening_refusal(name: str, widened: Dict[str, Any], auth: _Authorization) -> Dict[str, Any]:
+    """The same widening, again, with no new word from the user since the refusal.
+
+    Short on purpose, and flagged ``repeat`` with a fixed ``progress_key`` so
+    the agent loop's stall detector reads the retry as no progress and ends the
+    tool loop instead of letting it spin.
+    """
+    gains = _what_it_gains(widened)
+    step = ("report it to the chat that started you" if auth.worker else
+            f"ask the user with ask_user (naming {name!r} and {gains}) or end your turn and say what needs "
+            "their approval")
+    return {
+        "error": (f"update: {name!r} not saved — already refused this turn and the user has not answered. "
+                  f"Do not send it again; {step}."),
+        "blocked": True,
+        "blocked_reason": "update_would_widen_loadout",
+        "repeat": True,
+        "would_widen": widened["notes"],
+        "progress_key": f"widening-refused:{name.casefold()}",
         "exit_code": 1,
     }
 
@@ -1032,11 +1167,16 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                     "exit_code": 1,
                 }
             widened = agent_loadouts.widenings(base, profile)
-            if widened["notes"] and not _user_authorized_widening(
-                    session_id, owner, base["name"], widened["tools"]):
-                logger.info("[agent-loadout] refused widening update of %s from %s: %s",
-                            base["name"], session_id, "; ".join(widened["notes"]))
-                return _widening_refusal(base["name"], widened)
+            if widened["notes"]:
+                auth = _widening_authorization(session_id, owner, base["name"], widened["tools"])
+                if not auth.ok:
+                    refusal = _refuse_widening(session_id, base["name"], widened, auth)
+                    logger.info("[agent-loadout] refused widening update of %s from %s%s: %s",
+                                base["name"], session_id, " (repeat)" if refusal.get("repeat") else "",
+                                "; ".join(widened["notes"]))
+                    return refusal
+                logger.info("[agent-loadout] widening update of %s from %s authorised by the user's "
+                            "message: %s", base["name"], session_id, "; ".join(widened["notes"]))
         matrix = agent_loadouts.capability_matrix(requested_tools, required_tools, profile, policy, owner)
         if matrix["mission_critical_missing"]:
             # A profile that saves without what its mission needs is the
@@ -1272,7 +1412,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     # Say before the worker runs what it will not have, rather than letting it
     # discover that mid-task and hand back "blocked" (2026-09-26: a repository
     # task started on a loadout with no git tool).
-    withheld = (agent_loadouts.worker_withheld_tools(effective, policy.get("worker_depth", 0))
+    withheld = (agent_loadouts.worker_withheld_tools(effective, policy.get("worker_depth", 0), policy)
                 if effective else {})
     missing_repo: List[str] = []
     document_warning: Optional[str] = None

@@ -42,6 +42,16 @@ COMPACT_THRESHOLD = 0.85  # Trigger compaction at 85% of context window
 # When a trim is unavoidable, cut to this fraction of the budget rather than to
 # the budget itself. See the anchor/hysteresis note in trim_for_context.
 TRIM_TARGET_RATIO = 0.8
+# How much history a trim removes is rounded up to whole grains of this share
+# of the budget, measured from the start of the conversation. The persisted
+# history only grows at its end, so the next turn's fresh trim lands on the
+# same cut until the conversation has grown by a whole grain.
+TRIM_GRAIN_RATIO = 0.2
+# Last resort only (the history is already at its minimum): the system prompt
+# is cut to this many characters, deterministically, so every round that needs
+# it sends byte-identical text.
+SYSTEM_TRUNCATE_CHARS = 2000
+SYSTEM_TRUNCATION_MARKER = "\n[System prompt truncated for context limits]"
 SUMMARY_MAX_TOKENS = 1024
 SUMMARY_INPUT_MAX_TOKENS = 4096
 SMALL_CONTEXT_LIMIT = 8192  # Models with context <= this get aggressive trimming
@@ -287,14 +297,60 @@ def _truncate_message_to_token_budget(msg: Dict[str, Any], token_budget: int) ->
     return _truncate_tool_call_args(out, token_budget)
 
 
+def _is_research_primer(message: Dict) -> bool:
+    """A research-spinoff primer (the seeded report that grounds a "Discuss"
+    chat) is the conversation's whole knowledge base: never dropped."""
+    return bool((message.get("metadata") or {}).get("research_spinoff_from"))
+
+
+def truncate_system_message(message: Dict) -> Dict:
+    """The system prompt's last-resort cut, identical every time it is applied.
+
+    Returns ``message`` itself when it is already short enough (or not text),
+    else a copy cut to SYSTEM_TRUNCATE_CHARS plus a visible marker. Internal
+    route metadata (``_agent_injected`` and friends) is kept on the copy.
+    """
+    text = message.get("content")
+    if not isinstance(text, str) or len(text) <= SYSTEM_TRUNCATE_CHARS:
+        return message
+    if is_truncated_system_message(message) and len(text) == SYSTEM_TRUNCATE_CHARS + len(SYSTEM_TRUNCATION_MARKER):
+        return message  # already cut: the same text, the same object
+    out = dict(message)
+    out["content"] = text[:SYSTEM_TRUNCATE_CHARS] + SYSTEM_TRUNCATION_MARKER
+    return out
+
+
+def is_truncated_system_message(message: Dict) -> bool:
+    text = message.get("content")
+    return (
+        message.get("role") == "system"
+        and isinstance(text, str)
+        and text.endswith(SYSTEM_TRUNCATION_MARKER)
+    )
+
+
 def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: int = 512,
                      target_ratio: Optional[float] = None) -> List[Dict]:
-    """Trim system messages to fit within context_length.
+    """Fit ``messages`` into ``context_length`` minus ``reserve_tokens``.
 
-    For small-context models, progressively strips:
-    1. RAG/memory system messages (keep preset system prompt)
-    2. Older conversation turns
-    Reserves space for the response.
+    In order, each step only when the previous one was not enough:
+
+    1. Drop old conversation turns, to TRIM_TARGET_RATIO (or ``target_ratio``)
+       of the budget, in grains (see TRIM_GRAIN_RATIO) and never inside a tool
+       round. The latest user request and the message that started the current
+       work are kept, as are the newest messages.
+    2. Drop extra system messages (not the leading prompt, not a research
+       primer), newest first.
+    3. Cut the leading system prompt to SYSTEM_TRUNCATE_CHARS.
+    4. Shorten the anchor request, then the current message.
+
+    The system prompt comes last on purpose. On a Responses (Codex) route every
+    system message is merged into ``instructions``, the first thing in the
+    cached prefix: cutting it for a 1% overshoot threw away the model's
+    operating rules (loadout instructions, tool rules, safety policy) and
+    re-billed the whole prompt, and the next round, trimmed by history instead,
+    put it back and re-billed it again. What survives keeps its original order,
+    so the system messages merge into the same text they did before the trim.
     """
     # The reserve (output room + tool schemas) must never eat the whole budget.
     # An agent with ~6K of tool schemas against a 6K budget got a NEGATIVE
@@ -309,65 +365,22 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
 
     logger.info(f"Trimming messages: {used} tokens > {budget} budget (ctx={context_length})")
 
-    # Separate system messages from conversation.
-    # Messages marked _protected (e.g. active document) are never trimmed.
-    system_msgs = []
-    protected_msgs = []
-    convo_msgs = []
-    for msg in messages:
-        if msg.get("_protected"):
-            protected_msgs.append(msg)
-        elif msg.get("role") == "system":
-            system_msgs.append(msg)
-        else:
-            convo_msgs.append(msg)
+    sizes: Dict[int, int] = {}
 
-    # Protected messages count toward budget but are never dropped
-    protected_tokens = estimate_tokens(protected_msgs)
-    budget -= protected_tokens
+    def _size(msg: Dict) -> int:
+        key = id(msg)
+        if key not in sizes:
+            sizes[key] = estimate_tokens([msg])
+        return sizes[key]
 
-    # Priority: keep first system msg (preset prompt), drop others (memory, RAG, memo).
-    # Exception: a research-spinoff primer (the seeded report that grounds a
-    # "Discuss" chat) must never be dropped — it is the conversation's whole
-    # knowledge base. Treat any system message carrying research_spinoff_from
-    # metadata as essential alongside the leading system prompt.
-    def _is_research_primer(m):
-        return bool((m.get("metadata") or {}).get("research_spinoff_from"))
-    _primers = [m for m in system_msgs if _is_research_primer(m)]
-    _non_primer = [m for m in system_msgs if not _is_research_primer(m)]
-    essential_system = (_non_primer[:1] if _non_primer else []) + _primers
-    extra_system = _non_primer[1:]
+    def _total(msgs) -> int:
+        return sum(_size(m) for m in msgs)
 
-    # Try dropping extra system messages one by one (from the end)
-    trimmed = essential_system + convo_msgs
-    if estimate_tokens(trimmed) <= budget:
-        # Dropping extras was enough — try adding back some
-        result = list(essential_system)
-        for msg in extra_system:
-            candidate = result + [msg] + convo_msgs
-            if estimate_tokens(candidate) <= budget:
-                result.append(msg)
-            else:
-                break
-        return _sanitize_tool_messages(result + protected_msgs + convo_msgs)
+    # Messages marked _protected (e.g. the active document) are never trimmed.
+    protected_msgs = [m for m in messages if m.get("_protected")]
+    system_msgs = [m for m in messages if not m.get("_protected") and m.get("role") == "system"]
+    convo_msgs = [m for m in messages if not m.get("_protected") and m.get("role") != "system"]
 
-    # Still too big — truncate the first system message (but keep more than 500 chars)
-    if essential_system:
-        sys_text = essential_system[0].get("content", "")
-        if len(sys_text) > 2000:
-            truncated_system = dict(essential_system[0])
-            truncated_system["content"] = sys_text[:2000] + "\n[System prompt truncated for context limits]"
-            essential_system[0] = truncated_system
-            trimmed = essential_system + convo_msgs
-            if estimate_tokens(trimmed) <= budget:
-                return _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
-
-    # Still too big — drop older conversation turns BUT always keep the current
-    # turn AND the request that started the conversation. If a pasted message
-    # alone exceeds the model context, truncate that message with a visible
-    # notice instead of dropping it; otherwise the model appears to "ignore"
-    # large pastes because it never receives them.
-    #
     # Recency alone is the wrong rule inside an agent run. "Keep the current
     # turn" protects convo_msgs[-1], but mid-run that is a TOOL RESULT — the
     # user's actual request is further back, and front-trimming reaches it
@@ -377,60 +390,134 @@ def trim_for_context(messages: List[Dict], context_length: int, reserve_tokens: 
     #
     # The anchor is the LAST user message, not the first: in a long chat the
     # first one is a stale topic from 200 turns ago, while the last one is the
-    # request the current work actually serves.
+    # request the current work actually serves. Runtime envelopes (harness
+    # directives, tool-result transcripts) are user-role too, so the last
+    # human-authored request is kept as well. Both stay where they are: moving
+    # the anchor to the front of what survived put a different message at the
+    # head of the conversation on every turn, and the cached prefix with it.
     PROTECT_RECENT = 10
-    current_msg = convo_msgs[-1:] if convo_msgs else []
-    prior_convo = convo_msgs[:-1] if convo_msgs else []
-
-    anchor = []
-    for i in range(len(prior_convo) - 1, -1, -1):
-        if prior_convo[i].get("role") == "user":
-            anchor = [prior_convo.pop(i)]
+    current_msg = convo_msgs[-1:]
+    prior_convo = convo_msgs[:-1]
+    anchor_msg: Optional[Dict] = None
+    pinned: set = set()
+    for msg in reversed(prior_convo):
+        if msg.get("role") == "user":
+            anchor_msg = msg
+            pinned.add(id(msg))
             break
+    try:
+        from src.intent_assessment import human_user_text
+
+        for msg in reversed(prior_convo):
+            if human_user_text(msg) is not None:
+                pinned.add(id(msg))
+                break
+    except Exception:
+        pass
+
+    unpinned = [m for m in prior_convo if id(m) not in pinned]
+    if len(unpinned) >= PROTECT_RECENT:
+        droppable = unpinned[:-(PROTECT_RECENT - 1)]
+    else:
+        droppable = unpinned
 
     # Trim to a target BELOW the budget, not just to the edge of it. Trimming
     # rewrites the front of the prompt, which invalidates the provider's prefix
     # cache from that point on; stopping exactly at the budget means the next
     # round is over again and re-trims, paying a full re-prefill every single
     # round. One deeper cut buys many cheap rounds.
-    trim_target = int(budget * (target_ratio or TRIM_TARGET_RATIO))
+    msg_budget = budget - _total(protected_msgs)
+    trim_target = int(msg_budget * (target_ratio or TRIM_TARGET_RATIO))
+    need = _total(system_msgs) + _total(convo_msgs) - trim_target
+    dropped: set = set()
+    dropped_tokens = 0
+    if need > 0 and droppable:
+        # Rounded up to whole grains counted from the conversation's start, so
+        # a later turn (whose history only grew at the end) cuts at the same
+        # message until it has grown by a grain, and its first request reuses
+        # the cached prefix instead of shifting the cut by a message or two.
+        grain = max(1, int(msg_budget * TRIM_GRAIN_RATIO))
+        goal = -(-need // grain) * grain
+        cut = 0
+        while cut < len(droppable) and dropped_tokens < goal:
+            dropped_tokens += _size(droppable[cut])
+            cut += 1
+        # Never split a tool round: its results go with the call that made them.
+        while cut < len(droppable) and droppable[cut].get("role") == "tool":
+            dropped_tokens += _size(droppable[cut])
+            cut += 1
+        dropped = {id(m) for m in droppable[:cut]}
 
-    def _fits(msgs, limit):
-        return estimate_tokens(essential_system + anchor + msgs) <= limit
+    kept_convo = [m for m in convo_msgs if id(m) not in dropped]
+    kept_system = list(system_msgs)
+    replaced: Dict[int, Dict] = {}
+    notes: List[str] = []
+    if dropped:
+        notes.append(f"history_dropped={len(dropped)}msgs/{dropped_tokens}tok")
 
-    if len(prior_convo) >= PROTECT_RECENT:
-        old_msgs = prior_convo[:-(PROTECT_RECENT - 1)]
-        recent_msgs = prior_convo[-(PROTECT_RECENT - 1):] + current_msg
-        while old_msgs and not _fits(old_msgs + recent_msgs, trim_target):
-            old_msgs.pop(0)
-        convo_msgs = anchor + old_msgs + recent_msgs
-    else:
-        while prior_convo and not _fits(prior_convo + current_msg, trim_target):
-            prior_convo.pop(0)
-        convo_msgs = anchor + prior_convo + current_msg
+    def _over() -> bool:
+        return _total(kept_system) + _total(kept_convo) > msg_budget
 
-    # The anchor is re-inserted ahead of what survived, so a batch of tool
-    # messages can no longer be separated from the assistant turn that called
-    # them — _sanitize_tool_messages at the end repairs any pairing this broke.
+    # Last resorts, only once the history is at its minimum and still over.
+    if _over():
+        essential = next((m for m in kept_system if not _is_research_primer(m)), None)
+        extras = [m for m in kept_system if m is not essential and not _is_research_primer(m)]
+        extra_dropped, extra_tokens = 0, 0
+        for msg in reversed(extras):
+            if not _over():
+                break
+            kept_system = [m for m in kept_system if m is not msg]
+            extra_dropped += 1
+            extra_tokens += _size(msg)
+        if extra_dropped:
+            notes.append(f"system_dropped={extra_dropped}msgs/{extra_tokens}tok")
+        if essential is not None and _over():
+            cut_system = truncate_system_message(essential)
+            if cut_system is not essential:
+                replaced[id(essential)] = cut_system
+                kept_system = [cut_system if m is essential else m for m in kept_system]
+                notes.append(
+                    f"system_truncated={len(essential.get('content') or '')}->{SYSTEM_TRUNCATE_CHARS}chars"
+                )
 
     # The anchor is protected from being DROPPED, not from being shortened. A
     # 50k-character paste as the opening message would otherwise consume the
     # whole window and starve the work that followed it.
-    if anchor and estimate_tokens(essential_system + protected_msgs + convo_msgs) > budget:
-        rest = [m for m in convo_msgs if m is not anchor[0]]
-        room = max(256, budget - estimate_tokens(essential_system + protected_msgs + rest))
-        if estimate_tokens(anchor) > room:
-            trimmed_anchor = _truncate_message_to_token_budget(anchor[0], room)
-            convo_msgs = [trimmed_anchor] + rest
+    if anchor_msg is not None and _over():
+        rest = _total(kept_system) + _total(kept_convo) - _size(anchor_msg)
+        room = max(256, msg_budget - rest)
+        if _size(anchor_msg) > room:
+            short = _truncate_message_to_token_budget(anchor_msg, room)
+            replaced[id(anchor_msg)] = short
+            kept_convo = [short if m is anchor_msg else m for m in kept_convo]
+            notes.append("anchor_shortened")
 
     # If the current message itself is too large, shrink only that message.
-    if current_msg and estimate_tokens(essential_system + protected_msgs + convo_msgs) > budget:
-        prefix = essential_system + protected_msgs + convo_msgs[:-1]
-        available_for_current = max(64, budget - estimate_tokens(prefix))
-        convo_msgs[-1] = _truncate_message_to_token_budget(convo_msgs[-1], available_for_current)
+    if current_msg and _over():
+        current = kept_convo[-1]
+        rest = _total(kept_system) + _total(kept_convo) - _size(current)
+        available_for_current = max(64, msg_budget - rest)
+        short = _truncate_message_to_token_budget(current, available_for_current)
+        replaced[id(current_msg[0])] = short
+        kept_convo[-1] = short
+        notes.append("current_shortened")
 
-    result = _sanitize_tool_messages(essential_system + protected_msgs + convo_msgs)
-    logger.info(f"Trimmed to {estimate_tokens(result)} tokens ({len(result)} messages)")
+    # Survivors in their original order, shortened copies in place.
+    kept_ids = {id(m) for m in protected_msgs}
+    kept_ids |= {id(m) for m in convo_msgs if id(m) not in dropped}
+    surviving_system = {id(m) for m in kept_system}
+    kept_ids |= {
+        id(m) for m in system_msgs
+        if id(m) in surviving_system or id(replaced.get(id(m))) in surviving_system
+    }
+    ordered = [replaced.get(id(m), m) for m in messages if id(m) in kept_ids]
+    result = _sanitize_tool_messages(ordered)
+    # Counts and sizes only; never content.
+    logger.info(
+        "[context-trim] %s -> %s tokens (budget=%s target=%s ctx=%s) %s kept=%s/%s msgs",
+        used, estimate_tokens(result), budget, trim_target, context_length,
+        " ".join(notes) or "nothing_removable", len(result), len(messages),
+    )
     return result
 
 

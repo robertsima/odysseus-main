@@ -30,6 +30,7 @@ def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(workflows, "_FIRST_PASS", {})
     monkeypatch.setattr(workflows, "_WAITERS", {})
     monkeypatch.setattr(workflows, "_CONTINUATIONS", {})
+    monkeypatch.setattr(workflows, "_launch_stagger_seconds", lambda: 0.0)
     continued = []
 
     async def continue_parent(manager, parent_id, parent, worker, owner):
@@ -973,3 +974,159 @@ async def test_a_completed_or_running_workflow_cannot_be_resumed(runtime):
     done = await start_and_wait()
     with pytest.raises(ValueError, match="only a finished workflow that did not complete"):
         await workflows.resume(session_id="parent", owner="alice", args={"workflow_id": done["workflow_id"]})
+
+
+# ── 2026-09-28: first-round 401s, launch bursts, failure accounting, notes ────
+
+_UNMATCHED_401 = (
+    "Upstream model request failed with HTTP 401: ChatGPT Subscription rejected the access token "
+    "(HTTP 401), and the token does not belong to any stored ChatGPT Subscription credential, so it "
+    "could not be refreshed. If the account was disconnected, reconnect the provider."
+)
+
+
+def _failures_for(result, name):
+    return [row for row in result["failures"] if row.get("name") == name]
+
+
+async def test_first_round_401_is_relaunched_once_while_siblings_run(runtime, monkeypatch):
+    """The production shape: one child 401s on round 1, its siblings are fine."""
+    from src import headless_agent
+    counts = {}
+    release = asyncio.Event()
+
+    async def headless(sess, messages, **kwargs):
+        counts[sess.name] = counts.get(sess.name, 0) + 1
+        if sess.name == "Buyers" and counts[sess.name] == 1:
+            raise RuntimeError(_UNMATCHED_401)
+        if sess.name != "Buyers":
+            await release.wait()  # still running when Buyers' failure is reconciled
+        return "Findings", [{"tool": name, "exit_code": 0}
+                            for name in runtime.settings[sess.id]["enabled_tools"] if name != "manage_skills"]
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    args = request(synthesis=None)  # retries=0: the auth relaunch does not depend on it
+    started = await workflows.start(session_id="parent", owner="alice", args=args, delegation_authorized=True)
+    for _ in range(100):
+        if counts.get("Buyers", 0) >= 2:
+            break
+        await asyncio.sleep(0.02)
+    release.set()
+    result = await workflows.inspect(workflow_id=started["workflow_id"], session_id="parent", owner="alice",
+                                     action="wait", wait_seconds=3)
+    assert result["status"] == "completed", result["failures"]
+    buyers = result["children"][0]
+    assert counts["Buyers"] == 2 and buyers["attempt"] == 2
+    assert [row["status"] for row in buyers["attempts"]] == ["failed", "completed"]
+    [failure] = _failures_for(result, "Buyers")  # one attempt failed: one entry
+    assert failure["retry"].startswith("relaunching once")
+
+
+async def test_401_after_the_relaunch_is_not_relaunched_again(runtime, monkeypatch):
+    from src import headless_agent
+    attempts = []
+
+    async def headless(sess, *args, **kwargs):
+        attempts.append(sess.id)
+        raise RuntimeError(_UNMATCHED_401)
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    args = request(specialists=[{"name": "Buyers", "task": "Map buyers", "tools": ["web_search"]}],
+                   synthesis=None)
+    result = await start_and_wait(args)
+    assert result["status"] == "failed"
+    assert len(attempts) == 2
+    first, second = _failures_for(result, "Buyers")
+    assert "retry" in first and "Not retried" in second["error"]
+    assert "already relaunched once" in second["error"]
+
+
+async def test_every_sibling_failing_auth_is_not_relaunched_and_counted_once(runtime, monkeypatch):
+    """All children 401 together: the account is the problem, not the request."""
+    from src import headless_agent
+    attempts = []
+
+    async def headless(sess, *args, **kwargs):
+        attempts.append(sess.name)
+        raise RuntimeError(_UNMATCHED_401)
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    result = await start_and_wait(request(synthesis=None))
+    assert result["status"] == "failed"
+    assert sorted(attempts) == ["Buyers", "Competitors", "Content"]
+    # Exactly one failure entry per failed attempt: `failures=` was 2x before.
+    assert len(result["failures"]) == 3
+    assert all("Not retried" in row["error"] for row in result["failures"])
+
+
+async def test_definitive_auth_failure_is_counted_once(runtime, monkeypatch):
+    from src import headless_agent
+
+    async def headless(sess, *args, **kwargs):
+        raise RuntimeError("Upstream model request failed with HTTP 401: ChatGPT Subscription token refresh "
+                           "failed: Your refresh token has already been used. Reconnect the provider.")
+
+    monkeypatch.setattr(headless_agent, "run_headless", headless)
+    args = request(specialists=[{"name": "Buyers", "task": "Map buyers", "tools": ["web_search"]}],
+                   synthesis=None, retries=1)
+    result = await start_and_wait(args)
+    [failure] = result["failures"]
+    assert failure["name"] == "Buyers" and "refused the credential" in failure["error"]
+    assert result["children"][0]["attempt"] == 1
+
+
+async def test_child_launches_are_staggered(runtime, monkeypatch):
+    launched_at = []
+    real_launch = agent_control.launch_worker
+
+    async def spy(**kwargs):
+        launched_at.append(asyncio.get_running_loop().time())
+        return await real_launch(**kwargs)
+
+    monkeypatch.setattr(agent_control, "launch_worker", spy)
+    monkeypatch.setattr(workflows, "_launch_stagger_seconds", lambda: 0.05)
+    result = await start_and_wait(request(synthesis=None))
+    assert result["status"] == "completed"
+    gaps = [later - earlier for earlier, later in zip(launched_at, launched_at[1:])]
+    assert len(gaps) == 2 and min(gaps) >= 0.05
+
+
+def test_launch_stagger_setting_is_bounded(monkeypatch):
+    from src import settings
+    for saved, expected in ((2, 2.0), (-1, 0.0), (99, 10.0), ("junk", workflows.LAUNCH_STAGGER_SECONDS)):
+        monkeypatch.setattr(settings, "get_setting", lambda key, default=None, value=saved: value)
+        assert workflows._launch_stagger_seconds() == expected
+    assert settings.DEFAULT_SETTINGS["agent_workflow_launch_stagger_seconds"] == workflows.LAUNCH_STAGGER_SECONDS
+
+
+async def test_objective_naming_a_note_gives_web_specialists_search_documents(runtime):
+    args = request(task="Validate demand for the two concepts in the AI Mind note", synthesis=None,
+                   specialists=[{"name": "Buyers", "task": "Map buyer problems", "tools": ["web_search"]},
+                                {"name": "Reader", "task": "Summarise it", "tools": ["search_documents"]}])
+    started = await OrchestrateAgentsTool().execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True})
+    assert started.get("error") is None, started
+    rows = {row["name"]: row for row in started["preflight"]}
+    assert sorted(rows["Buyers"]["tools"]) == ["search_documents", "web_search"]
+    assert "search_documents added" in rows["Buyers"]["notes"][0]
+    assert "notes" not in rows["Reader"] and rows["Reader"]["tools"] == ["search_documents"]
+    assert "Added read-only search_documents to Buyers" in started["response"]
+    saved = runtime.settings[started["children"][0]["session_id"]]
+    assert "search_documents" in saved["enabled_tools"]
+    await workflows._TASKS[started["workflow_id"]]
+
+
+async def test_note_the_parent_cannot_grant_is_a_start_warning(runtime):
+    runtime.policy["allowed_tools"] = set(runtime.policy["allowed_tools"]) - {"search_documents"}
+    args = request(task="Reconcile the findings against my vault note on pricing", synthesis=None,
+                   specialists=[{"name": "Buyers", "task": "Map buyer problems", "tools": ["web_search"]}])
+    started = await OrchestrateAgentsTool().execute(json.dumps(args), {
+        "session_id": "parent", "owner": "alice", "delegation_authorized": True})
+    assert started.get("error") is None, started
+    [row] = started["preflight"]
+    assert row["tools"] == ["web_search"] and row["ready"] is True
+    assert "has no tool that reads documents" in row["warnings"][0]
+    assert "Preflight warnings: Buyers:" in started["response"]
+    await workflows._TASKS[started["workflow_id"]]
+    final = await workflows.inspect(workflow_id=started["workflow_id"], session_id="parent", owner="alice")
+    assert "Preflight warnings:" in workflows.render_result(final)

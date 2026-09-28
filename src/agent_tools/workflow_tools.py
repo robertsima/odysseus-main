@@ -33,11 +33,17 @@ class OrchestrateAgentsTool:
                 )
                 blocked = result.get("preflight_blocked") or []
                 launch_failed = [row for row in result.get("children") or [] if row.get("launch_error")]
+                preflight = result.get("preflight") or []
+                granted = [row["name"] for row in preflight if row.get("notes")]
+                warned = [f"{row['name']}: {'; '.join(row['warnings'])}" for row in preflight if row.get("warnings")]
                 return {**result, "action": "start", "response": (
                     f"Workflow {result['workflow_id']}: {result['launched_agents']} of "
                     f"{result['requested_agents']} child runs launched; status {result['status']}. "
                     + (f"Preflight blockers on {', '.join(blocked)} — see preflight for the reason; "
                        "do not report their branches as researched. " if blocked else "")
+                    + (f"Added read-only search_documents to {', '.join(granted)}: the objective names a "
+                       "note or document. " if granted else "")
+                    + ("Preflight warnings: " + " | ".join(warned) + ". " if warned else "")
                     + ("Launch failed for " + "; ".join(f"{row['name']} ({row['launch_error']})"
                                                          for row in launch_failed)
                        + " — those branches will not run; do not report them as researched. "

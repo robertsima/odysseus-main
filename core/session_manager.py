@@ -28,6 +28,45 @@ from .models import set_session_manager_instance, get_session_manager_instance
 logger = logging.getLogger(__name__)
 
 
+def _has_auth_header(headers) -> bool:
+    return isinstance(headers, dict) and any(
+        str(key).lower() in ("authorization", "x-api-key") for key in headers
+    )
+
+
+def _synced_headers(session, stored_endpoint_url: str, stored_headers: dict) -> dict:
+    """The headers a cached session keeps after a metadata refresh.
+
+    A ChatGPT Subscription bearer is request-local by design: it is resolved
+    onto the in-memory session (``resolve_session_auth``) and never written to
+    the ``sessions.headers`` column, so the row always reads ``{}``. Copying
+    that row over the cached object wiped the bearer a worker had just
+    resolved whenever anything called ``get_session`` on the worker's chat
+    before its first request -- ``orchestrate_agents`` reads every child's
+    chat right after launching them -- and the request went out with no
+    Authorization header at all (2026-09-28: three workflow children 401'd on
+    round 1 while siblings launched in the same second succeeded). Keep the
+    in-memory headers in exactly that case: same endpoint, a ChatGPT
+    Subscription URL, and a row that carries no credential of its own.
+    Endpoint deletion clears the cached headers itself, so nothing stale is
+    kept alive by this.
+    """
+    current = getattr(session, "headers", None)
+    if (
+        not _has_auth_header(stored_headers)
+        and _has_auth_header(current)
+        and (getattr(session, "endpoint_url", "") or "") == stored_endpoint_url
+    ):
+        try:
+            from src.chatgpt_subscription import is_chatgpt_subscription_base
+
+            if is_chatgpt_subscription_base(stored_endpoint_url):
+                return current
+        except Exception:
+            pass
+    return stored_headers
+
+
 def _message_timestamp_iso(value: Optional[datetime]) -> Optional[str]:
     """Return a stable ISO timestamp for chat message metadata."""
     if not value:
@@ -478,10 +517,11 @@ class SessionManager:
                     headers = json.loads(headers)
                 except json.JSONDecodeError:
                     headers = {}
+            endpoint_url = db_session.endpoint_url or ""
+            session.headers = _synced_headers(session, endpoint_url, headers or {})
             session.name = db_session.name
-            session.endpoint_url = db_session.endpoint_url or ""
+            session.endpoint_url = endpoint_url
             session.model = db_session.model or ""
-            session.headers = headers or {}
             session.rag = db_session.rag
             session.archived = db_session.archived
             session.owner = getattr(db_session, "owner", None)

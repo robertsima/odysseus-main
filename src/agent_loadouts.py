@@ -307,21 +307,64 @@ def stale_mcp_grants(profile: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, L
     return {server: b for server, b in out.items() if b["missing"]}
 
 
-def worker_withheld_tools(profile: Dict[str, Any], caller_depth: int = 0) -> Dict[str, str]:
+def worker_withheld_tools(profile: Dict[str, Any], caller_depth: int = 0,
+                          policy: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """Tools this loadout grants that a worker started from the caller won't get.
 
     ``{tool: why}``. A worker runs one level below the chat that starts it and
     loses the launchers :func:`src.headless_agent.blocked_at_depth` names for
     that depth. The loadout's allowlist still says it has them, so without
     this preflight read READY for a worker that would be denied them.
+
+    With the caller's ``policy``, an explicit-grant launcher
+    (``delegate_to_claude_code``) the calling chat may not use itself is
+    withheld too, as :func:`src.headless_agent.child_blocked_tools` does at run
+    time.
     """
-    from src.headless_agent import blocked_at_depth, withheld_reason
+    return {tool: row["reason"] for tool, row in worker_withheld_rows(profile, caller_depth, policy).items()}
+
+
+def worker_withheld_rows(profile: Dict[str, Any], caller_depth: int = 0,
+                         policy: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, str]]:
+    """:func:`worker_withheld_tools` with the repair for each: ``{tool: {reason, repair}}``."""
+    from src.headless_agent import (
+        EXPLICIT_GRANT_LAUNCH_TOOLS,
+        blocked_at_depth,
+        withheld_reason,
+        withheld_repair,
+    )
 
     if profile.get("tool_access") != "selected":
         return {}
-    blocked = blocked_at_depth(int(caller_depth or 0) + 1, profile.get("delegation_policy"))
-    return {tool: withheld_reason(tool)
-            for tool in sorted(set(profile.get("enabled_tools") or []) & blocked)}
+    depth = int(caller_depth or 0) + 1
+    delegation = profile.get("delegation_policy")
+    enabled = set(profile.get("enabled_tools") or [])
+    blocked = blocked_at_depth(depth, delegation, tool_access="selected", enabled_tools=enabled)
+    rows = {tool: {"reason": withheld_reason(tool, depth, delegation),
+                   "repair": withheld_repair(tool, depth, delegation)}
+            for tool in sorted(enabled & blocked)}
+    try:
+        child_limit = int(profile.get("max_parallel_workers", 1))
+    except (TypeError, ValueError):
+        child_limit = 1
+    if child_limit <= 0:
+        # tool_execution's capacity gate counts each Claude Code run or queued
+        # task as one of the worker's children, so a limit of 0 refuses them all.
+        for tool in sorted((enabled & EXPLICIT_GRANT_LAUNCH_TOOLS) - blocked):
+            rows[tool] = {
+                "reason": "the loadout's max_parallel_workers is 0, and each Claude Code run counts as one "
+                          "of the worker's children",
+                "repair": "set max_parallel_workers to 1 or more (a widening: ask the user first)",
+            }
+    if policy is not None:
+        allowed = agent_profiles.expand_tool_aliases(policy.get("allowed_tools") or ())
+        for tool in sorted((enabled & EXPLICIT_GRANT_LAUNCH_TOOLS) - blocked - allowed):
+            rows[tool] = {
+                "reason": "the chat starting the worker may not use it itself, so its worker does not get it",
+                "repair": "grant it to the calling chat first (its Loadout in the Agents panel), or start the "
+                          "worker from a chat that has it",
+            }
+    return rows
 
 
 # What a worker needs to do repository work end to end: see status, diffs and
@@ -390,7 +433,7 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
         return None
 
     expand_disabled = agent_profiles.expand_tool_aliases(profile.get("disabled_tools") or [])
-    withheld = worker_withheld_tools(profile, policy.get("worker_depth", 0)) if as_worker else {}
+    withheld = worker_withheld_rows(profile, policy.get("worker_depth", 0), policy) if as_worker else {}
 
     def mcp_group(entry, server_key):
         """What an `mcp__*` / `mcp__<server>__*` grant reaches right now."""
@@ -457,7 +500,8 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
             continue
         if tool in selected and tool in withheld:
             denied.append({"tool": tool, "reason": "worker_policy",
-                           "detail": f"a worker started from this chat does not get it: {withheld[tool]}"})
+                           "detail": f"a worker started from this chat does not get it: {withheld[tool]['reason']}",
+                           "repair": withheld[tool]["repair"]})
             continue
         if tool in selected and not mcp_problem(tool):
             effective.append(tool)

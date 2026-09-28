@@ -535,13 +535,99 @@ def recover_rejected_access_token(access_token: str) -> Optional[str]:
     """
     found = _find_auth_for_token(access_token)
     if not found:
-        logger.warning("[chatgpt-auth] 401 recovery: no stored credential matches the rejected token")
+        logger.warning("[chatgpt-auth] 401 recovery: no stored credential matches the rejected token "
+                       "(token_expires_in=%s)", _expires_in(access_token))
         return None
     auth_id, owner = found
     creds = resolve_runtime_credentials(
         auth_id, owner, rejected_access_token=access_token, reason="unauthorized",
     )
-    return creds.get("api_key") or None
+    fresh = creds.get("api_key") or None
+    if not fresh:
+        logger.warning("[chatgpt-auth] 401 recovery auth=%s: the stored credential has no access token",
+                       _auth_ref(auth_id))
+    return fresh
+
+
+def _session_credential_ref(session_id: str) -> Optional[tuple]:
+    """``(auth_id, owner)`` of the ChatGPT credential behind a chat's endpoint.
+
+    The same lookup ``routes.chat_helpers.resolve_session_auth`` uses to give
+    a chat its bearer in the first place: the chat row's owner and endpoint
+    URL, then that owner's enabled, session-backed endpoint serving the URL.
+    It never crosses owners, so a request is only ever recovered onto the
+    credential its own chat was configured with.
+    """
+    if not session_id:
+        return None
+    from core.database import ModelEndpoint, Session as DbSession, SessionLocal
+    from src.auth_helpers import owner_filter
+
+    try:
+        from routes.chat_helpers import _session_url_matches_endpoint as _matches
+    except Exception:  # pragma: no cover - routes always import in the app
+        def _matches(session_url, base):
+            return is_chatgpt_subscription_base(session_url) and is_chatgpt_subscription_base(base)
+
+    db = SessionLocal()
+    try:
+        row = db.query(DbSession).filter(DbSession.id == str(session_id)).first()
+        if row is None:
+            return None
+        owner = getattr(row, "owner", None)
+        session_url = getattr(row, "endpoint_url", "") or ""
+        query = db.query(ModelEndpoint).filter(
+            ModelEndpoint.is_enabled == True,  # noqa: E712
+            ModelEndpoint.provider_auth_id.isnot(None),
+        )
+        if owner:
+            query = owner_filter(query, ModelEndpoint, owner)
+        for endpoint in query.all():
+            base = getattr(endpoint, "base_url", "") or ""
+            if not is_chatgpt_subscription_base(base) or not _matches(session_url, base):
+                continue
+            auth_owner = owner if owner is not None else getattr(endpoint, "owner", None)
+            return endpoint.provider_auth_id, auth_owner
+        return None
+    finally:
+        db.close()
+
+
+def access_token_for_session(session_id: Optional[str], *, rejected_access_token: Optional[str] = None,
+                             reason: str = "missing") -> Optional[str]:
+    """The chat owner's current ChatGPT bearer, resolved from the store.
+
+    For a request whose headers carry no usable bearer (``reason="missing"``)
+    or one that matches no stored credential (``reason="unmatched"``). Returns
+    ``None`` -- and says why in the log -- when the chat has no ChatGPT
+    credential or the store only holds the very token upstream just rejected.
+    Raises what :func:`resolve_runtime_credentials` raises when a needed
+    refresh is refused.
+    """
+    sref = str(session_id or "-")[:8]
+    if not session_id:
+        logger.warning("[chatgpt-auth] %s bearer: no chat session on the request, so no owner "
+                       "credential to resolve", reason)
+        return None
+    ref = _session_credential_ref(session_id)
+    if not ref:
+        logger.warning("[chatgpt-auth] %s bearer session=%s: no enabled ChatGPT Subscription endpoint "
+                       "with a stored credential serves this chat", reason, sref)
+        return None
+    auth_id, owner = ref
+    creds = resolve_runtime_credentials(auth_id, owner)
+    token = creds.get("api_key") or ""
+    if not token:
+        logger.warning("[chatgpt-auth] %s bearer session=%s auth=%s: the stored credential has no "
+                       "access token", reason, sref, _auth_ref(auth_id))
+        return None
+    if rejected_access_token and token == rejected_access_token:
+        logger.warning("[chatgpt-auth] %s bearer session=%s auth=%s: the stored token is the one "
+                       "upstream rejected; nothing newer to retry with", reason, sref, _auth_ref(auth_id))
+        return None
+    logger.info("[chatgpt-auth] %s bearer session=%s: resolved the chat owner's stored credential "
+                "auth=%s token_expires_in=%s", reason, sref, _auth_ref(auth_id), _expires_in(token))
+    return token
 
 
 def token_needs_presend_refresh(access_token: Optional[str]) -> bool:
