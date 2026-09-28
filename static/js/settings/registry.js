@@ -159,11 +159,17 @@ export const SETTINGS_PANELS = Object.freeze([
   }),
   definePanel({
     id: 'capabilities',
-    label: 'Configuration',
+    label: 'Advanced',
     group: 'administration',
     controller: 'admin',
     adminOnly: true,
-    keywords: ['configuration', 'capabilities', 'skills', 'plugins'],
+    aliases: ['advanced', 'configuration'],
+    keywords: [
+      'advanced', 'configuration', 'capabilities', 'skills', 'plugins', 'schema',
+      'knowledge', 'folder privacy', 'vault', 'notes', 'rag', 'retrieval',
+      'limits', 'uploads', 'upload size', 'tasks', 'teacher', 'text to speech',
+      'tts', 'keepalive', 'warmup', 'timeouts', 'delegation',
+    ],
   }),
   definePanel({
     id: 'system',

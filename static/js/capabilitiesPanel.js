@@ -1,4 +1,5 @@
-/* capabilitiesPanel.js — Settings › Capabilities.
+/* capabilitiesPanel.js — Settings › Advanced, plus the capability list on
+ * Settings › Agents.
  *
  * The half of in-app configuration that an API alone does not deliver: a place
  * to see what this install can do, what it cannot do yet, and why.
@@ -14,12 +15,28 @@
  * Settings are rendered from the declared schema (/api/settings/schema) rather
  * than hand-built here, so a newly declared setting gets a control without this
  * file changing. That drift is why 17 of 83 settings keys previously had none.
+ *
+ * The opposite drift matters too: a setting that already has a hand-built
+ * control on another tab must not get a second one here (two controls for one
+ * value, one of them stale after the other saves). Every dedicated control in
+ * the Settings modal carries data-setting-key="<key> [<key>…]", and this panel
+ * skips every spec named by one — so the Advanced tab is exactly "everything
+ * without a better home".
  */
 
 const API = '';
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+// Main host (Advanced tab) and the capability list's host (Agents tab). When
+// the Agents host is absent the list renders at the top of Advanced instead.
+const SCHEMA_HOST = 'capabilities-panel-body';
+const STATUS_HOST = 'capabilities-status-body';
+
+// Keys the server still declares but that no longer do anything. The backend
+// is removing them; until it does they must not look like working controls.
+const RETIRED_KEYS = new Set(['agent_max_rounds']);
 
 const state = {
   capabilities: [], groups: [], isAdmin: false, loaded: false, busy: false,
@@ -49,6 +66,25 @@ function toast(msg, kind) {
     if (window.uiModule?.showToast) window.uiModule.showToast(msg, kind);
     else if (kind === 'error') console.error(msg);
   } catch (_) {}
+}
+
+// ── keys owned by a dedicated control elsewhere in Settings ───────────────
+function dedicatedKeys() {
+  const keys = new Set(RETIRED_KEYS);
+  const modal = document.getElementById('settings-modal') || document;
+  modal.querySelectorAll('[data-setting-key]').forEach((node) => {
+    if (node.closest(`#${SCHEMA_HOST}, #${STATUS_HOST}`)) return;
+    String(node.getAttribute('data-setting-key') || '').split(/\s+/).forEach((key) => {
+      if (key) keys.add(key);
+    });
+  });
+  return keys;
+}
+
+// The settings of one group this panel should offer, before the advanced /
+// search filters apply.
+function ownSettings(group, skip) {
+  return (group.settings || []).filter((s) => !skip.has(s.key));
 }
 
 // ── capability cards ──────────────────────────────────────────────────────
@@ -121,6 +157,13 @@ function defaultLabel(s) {
   return value === '' || value == null ? 'Empty' : String(value);
 }
 
+// A list whose items are objects (e.g. [{endpoint_id, model}]) has no
+// one-entry-per-line text form: joining it printed "[object Object]" and
+// saving that text replaced the list with those strings.
+function listHasObjects(value) {
+  return Array.isArray(value) && value.some((item) => item !== null && typeof item === 'object');
+}
+
 function sourcedOptions(s, value) {
   const endpoints = state.endpoints.filter((endpoint) => endpoint.is_enabled !== false);
   const allModels = state.models || [];
@@ -156,12 +199,17 @@ function sourcedOptions(s, value) {
 
 function controlHtml(s) {
   const id = `set-${s.key}`;
-  const locked = s.locked ? ' disabled' : '';
   const value = currentValue(s);
+  const readOnly = s.type === 'list' && listHasObjects(value);
+  const locked = s.locked || readOnly ? ' disabled' : '';
   const lockNote = s.locked
-    ? '<span class="set-locked">Pinned by this deployment’s environment</span>' : '';
+    ? '<span class="set-locked">Pinned by this deployment’s environment</span>'
+    : readOnly ? '<span class="set-locked">Read-only here: its entries are structured</span>' : '';
   let input;
-  if (s.type === 'bool') {
+  if (readOnly) {
+    // Shown for reference only; there is no text form that round-trips.
+    input = `<pre id="${id}" class="set-input set-textarea set-readonly" aria-readonly="true">${esc(JSON.stringify(value, null, 2))}</pre>`;
+  } else if (s.type === 'bool') {
     input = `<label class="set-switch"><input type="checkbox" id="${id}" data-set-key="${esc(s.key)}"
       ${value ? 'checked' : ''}${locked}><span></span></label>`;
   } else if (s.options_source) {
@@ -182,7 +230,7 @@ function controlHtml(s) {
     const text = s.type === 'json' ? JSON.stringify(value ?? null, null, 2)
       : Array.isArray(value) ? value.join('\n') : (value ?? '');
     input = `<textarea id="${id}" class="set-input set-textarea" rows="4"
-      data-set-key="${esc(s.key)}"${locked}>${esc(text)}</textarea>`;
+      data-set-key="${esc(s.key)}" data-set-type="${esc(s.type)}"${locked}>${esc(text)}</textarea>`;
   } else if (s.type === 'int' || s.type === 'float') {
     const scale = Number(s.scale) || 1;
     const min = s.min == null || (scale > 1 && Number(s.min) < scale) ? '' : ` min="${esc(Number(s.min) / scale)}"`;
@@ -199,22 +247,22 @@ function controlHtml(s) {
       ${s.type === 'secret' ? 'autocomplete="off"' : ''}>`;
   }
   return `
-    <div class="set-row${s.locked ? ' set-row-locked' : ''}" data-setting-row="${esc(s.key)}">
+    <div class="set-row${s.locked || readOnly ? ' set-row-locked' : ''}" data-setting-row="${esc(s.key)}">
       <div class="set-label"><label for="${id}">${esc(s.label)}</label>
         ${s.advanced ? '<span class="set-advanced-badge">Advanced</span>' : ''}${lockNote}</div>
       ${s.help ? `<p class="set-help">${esc(s.help)}</p>` : ''}
       <div class="set-control">${input}
-        <button type="button" class="set-reset" data-reset-setting="${esc(s.key)}"${locked}
-          title="Restore the built-in default">Reset</button>
+        ${readOnly ? '' : `<button type="button" class="set-reset" data-reset-setting="${esc(s.key)}"${locked}
+          title="Restore the built-in default">Reset</button>`}
       </div>
       <span class="set-default">Default: ${esc(defaultLabel(s))}</span>
     </div>`;
 }
 
-function settingsForView() {
+function settingsForView(skip) {
   const query = state.query.trim().toLowerCase();
   return state.groups.map((group) => {
-    const settings = (group.settings || []).filter((s) => {
+    const settings = ownSettings(group, skip).filter((s) => {
       if (s.advanced && !state.showAdvanced) return false;
       if (!query) return group.group === state.activeGroup;
       return `${s.label} ${s.key} ${s.help || ''} ${group.group}`.toLowerCase().includes(query);
@@ -223,36 +271,13 @@ function settingsForView() {
   }).filter((group) => group.settings.length);
 }
 
-function render() {
-  const host = $('capabilities-panel-body');
-  if (!host) return;
-  if (!state.loaded) { host.innerHTML = '<p class="set-help">Loading…</p>'; return; }
-
+function capabilitiesHtml() {
   const caps = state.capabilities.length
     ? state.capabilities.map(capabilityHtml).join('')
     : '<p class="set-help">No capabilities are registered in this build.</p>';
-
-  const availableGroups = state.groups.filter((g) =>
-    (g.settings || []).some((s) => state.showAdvanced || !s.advanced));
-  if (!availableGroups.some((g) => g.group === state.activeGroup)) {
-    state.activeGroup = (availableGroups[0] || {}).group || '';
-  }
-  const groupOptions = availableGroups.map((g) => {
-    const count = (g.settings || []).filter((s) => state.showAdvanced || !s.advanced).length;
-    return `<option value="${esc(g.group)}"${g.group === state.activeGroup ? ' selected' : ''}>${esc(g.group)} (${count})</option>`;
-  }).join('');
-  const groups = settingsForView().map((g) => `
-    <section class="set-group">
-      <h4 class="set-group-title">${esc(g.group)}</h4>
-      ${g.help ? `<p class="set-group-help">${esc(g.help)}</p>` : ''}
-      ${g.settings.map(controlHtml).join('')}
-    </section>`).join('');
-
   const activeCaps = state.capabilities.filter((cap) => cap.available).length;
   const attentionCaps = state.capabilities.filter((cap) => cap.enabled && !cap.satisfied).length;
-  const advancedCount = state.groups.reduce((n, g) => n + (g.settings || []).filter((s) => s.advanced).length, 0);
-
-  host.innerHTML = `
+  return `
     <details class="cap-section"${state.capabilitiesOpen ? ' open' : ''}>
       <summary><span>Capabilities</span><span class="cap-summary-count">${activeCaps} active${attentionCaps ? ` · ${attentionCaps} need setup` : ''}</span></summary>
       <div class="cap-intro">
@@ -261,11 +286,50 @@ function render() {
         <button type="button" class="btn-secondary cap-recheck" data-cap-action="recheck">Re-check requirements</button>
       </div>
       <div class="cap-list">${caps}</div>
-    </details>
+    </details>`;
+}
+
+function render() {
+  const host = $(SCHEMA_HOST);
+  const statusHost = $(STATUS_HOST);
+  if (!host && !statusHost) return;
+  if (!state.loaded) {
+    if (host) host.innerHTML = '<p class="set-help">Loading…</p>';
+    if (statusHost) statusHost.innerHTML = '';
+    return;
+  }
+
+  // Capability status lives on the Agents tab; without that host it falls
+  // back to the top of this one. A non-admin sees no capabilities at all.
+  const showCaps = state.isAdmin || state.capabilities.length;
+  if (statusHost) statusHost.innerHTML = showCaps ? capabilitiesHtml() : '';
+  if (!host) return;
+
+  const skip = dedicatedKeys();
+  const availableGroups = state.groups.filter((g) =>
+    ownSettings(g, skip).some((s) => state.showAdvanced || !s.advanced));
+  if (!availableGroups.some((g) => g.group === state.activeGroup)) {
+    state.activeGroup = (availableGroups[0] || {}).group || '';
+  }
+  const groupOptions = availableGroups.map((g) => {
+    const count = ownSettings(g, skip).filter((s) => state.showAdvanced || !s.advanced).length;
+    return `<option value="${esc(g.group)}"${g.group === state.activeGroup ? ' selected' : ''}>${esc(g.group)} (${count})</option>`;
+  }).join('');
+  const groups = settingsForView(skip).map((g) => `
+    <section class="set-group">
+      <h4 class="set-group-title">${esc(g.group)}</h4>
+      ${g.help ? `<p class="set-group-help">${esc(g.help)}</p>` : ''}
+      ${g.settings.map(controlHtml).join('')}
+    </section>`).join('');
+
+  const advancedCount = state.groups.reduce((n, g) => n + ownSettings(g, skip).filter((s) => s.advanced).length, 0);
+
+  host.innerHTML = `
+    ${statusHost ? '' : (showCaps ? capabilitiesHtml() : '')}
     <div class="set-schema">
-      <h3 class="set-section-title">Configuration</h3>
-      <p class="set-help">Choose a category or search by name. Common choices are shown first;
-        advanced controls include safe defaults and can stay untouched on most installations.</p>
+      <h3 class="set-section-title">Advanced settings</h3>
+      <p class="set-help">Everything without its own control on another tab. Choose a category or
+        search by name; advanced controls have safe defaults and can stay untouched on most installations.</p>
       <div class="set-toolbar">
         <label class="set-toolbar-field"><span>Category</span>
           <select id="settings-group-filter" class="set-input">${groupOptions}</select></label>
@@ -284,9 +348,16 @@ function render() {
     </div>`;
 }
 
+// Compare what a control holds with the saved value in the value's own shape.
+// A JSON textarea reads as text; comparing that string with the stored object
+// marked the setting changed the moment the field was focused.
+function sameValue(setting, value) {
+  return JSON.stringify(value) === JSON.stringify(setting.value);
+}
+
 function markDirty(key, value) {
   const setting = findSetting(key);
-  if (setting && JSON.stringify(value) === JSON.stringify(setting.value)) state.dirty.delete(key);
+  if (setting && sameValue(setting, value)) state.dirty.delete(key);
   else state.dirty.set(key, value);
   const saveButton = document.querySelector('[data-cap-action="save"]');
   if (saveButton && state.isAdmin) {
@@ -300,11 +371,20 @@ function markDirty(key, value) {
 
 function readControl(el) {
   if (el.type === 'checkbox') return el.checked;
+  const kind = el.dataset.setType;
   const scale = Number(el.dataset.setScale || 1);
-  if (el.dataset.setType === 'int' || el.dataset.setType === 'float') {
+  if (kind === 'int' || kind === 'float') {
     const value = Number(el.value) * scale;
     if (!Number.isFinite(value)) return el.value;
-    return el.dataset.setType === 'int' ? Math.round(value) : value;
+    return kind === 'int' ? Math.round(value) : value;
+  }
+  if (kind === 'json') {
+    // Text that does not parse yet stays text: it is a real, unsaved edit,
+    // and the server reports what is wrong with it on save.
+    try { return JSON.parse(el.value || 'null'); } catch (_) { return el.value; }
+  }
+  if (kind === 'list') {
+    return String(el.value || '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   }
   return el.value;
 }
@@ -340,7 +420,7 @@ async function load() {
         state.capabilities = [];
       } catch (_) { /* fall through to the error below */ }
     } else {
-      const host = $('capabilities-panel-body');
+      const host = $(SCHEMA_HOST);
       if (host) host.innerHTML = `<p class="set-help">Could not load configuration: ${esc(e.message)}</p>`;
       return;
     }
@@ -402,7 +482,10 @@ async function toggleCapability(name, enabled) {
   }
 }
 
-function onEvent(e) {
+// Buttons act on click. Form controls act on change/input only: a click on a
+// checkbox is followed by its change event, and handling both posted each
+// capability toggle twice; a click into a textarea is not an edit at all.
+function onClick(e) {
   const btn = e.target.closest?.('[data-cap-action]');
   if (btn) {
     const act = btn.dataset.capAction;
@@ -410,9 +493,10 @@ function onEvent(e) {
     if (act === 'advanced') {
       state.showAdvanced = !state.showAdvanced;
       if (state.showAdvanced) {
+        const skip = dedicatedKeys();
         const current = state.groups.find((group) => group.group === state.activeGroup);
-        if (!current || !(current.settings || []).some((setting) => setting.advanced)) {
-          state.activeGroup = (state.groups.find((group) => (group.settings || []).some((setting) => setting.advanced)) || current || {}).group || state.activeGroup;
+        if (!current || !ownSettings(current, skip).some((setting) => setting.advanced)) {
+          state.activeGroup = (state.groups.find((group) => ownSettings(group, skip).some((setting) => setting.advanced)) || current || {}).group || state.activeGroup;
         }
       }
       render();
@@ -433,6 +517,15 @@ function onEvent(e) {
       markDirty(setting.key, setting.default);
       render();
     }
+  }
+}
+
+function onChange(e) {
+  if (e.target.id === 'settings-group-filter') {
+    state.activeGroup = e.target.value;
+    state.query = '';
+    try { localStorage.setItem('odysseus-settings-group', state.activeGroup); } catch (_) {}
+    render();
     return;
   }
   const toggle = e.target.closest?.('[data-cap-toggle]');
@@ -441,44 +534,57 @@ function onEvent(e) {
   if (setting) markDirty(setting.dataset.setKey, readControl(setting));
 }
 
-export function mount() {
-  const host = $('capabilities-panel-body');
+function onInput(e) {
+  if (e.target.id === 'settings-schema-search') {
+    state.query = e.target.value;
+    render();
+    const search = $('settings-schema-search');
+    if (search) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+    return;
+  }
+  const setting = e.target.closest?.('[data-set-key]');
+  if (setting && setting.type !== 'checkbox') markDirty(setting.dataset.setKey, readControl(setting));
+}
+
+function wire(host) {
   if (!host || host.dataset.wired) return;
   host.dataset.wired = '1';
-  host.addEventListener('click', onEvent);
-  host.addEventListener('change', onEvent);
+  host.addEventListener('click', onClick);
+  host.addEventListener('change', onChange);
+  host.addEventListener('input', onInput);
   host.addEventListener('toggle', (e) => {
     if (e.target.matches?.('.cap-section')) state.capabilitiesOpen = e.target.open;
   }, true);
-  host.addEventListener('input', (e) => {
-    if (e.target.id === 'settings-schema-search') {
-      state.query = e.target.value;
-      render();
-      const search = $('settings-schema-search');
-      if (search) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
-      return;
-    }
-    const setting = e.target.closest?.('[data-set-key]');
-    if (setting && setting.type !== 'checkbox') markDirty(setting.dataset.setKey, readControl(setting));
-  });
-  host.addEventListener('change', (e) => {
-    if (e.target.id !== 'settings-group-filter') return;
-    state.activeGroup = e.target.value;
-    state.query = '';
-    try { localStorage.setItem('odysseus-settings-group', state.activeGroup); } catch (_) {}
-    render();
-  });
-  load();
 }
 
-// The settings modal builds its panels lazily, so mount when this tab is opened
-// as well as on first load — whichever happens first.
+let _loading = null;
+export function mount(tab) {
+  wire($(SCHEMA_HOST));
+  wire($(STATUS_HOST));
+  // Re-read the schema each time Advanced is shown (another tab, a second
+  // browser or the manage_settings tool may have changed a value), unless an
+  // unsaved edit here would be thrown away.
+  const refresh = !state.loaded || (tab === 'capabilities' && !state.dirty.size);
+  if (!refresh) { render(); return; }
+  if (!_loading) _loading = load().finally(() => { _loading = null; });
+}
+
+// Jump to one category, e.g. a "folder privacy is under Advanced › Knowledge"
+// link: <a data-go-settings-tab="capabilities" data-cap-group="Knowledge">.
 document.addEventListener('click', (e) => {
-  const tab = e.target.closest?.('[data-settings-tab="capabilities"]');
-  if (tab) setTimeout(mount, 0);
+  const link = e.target.closest?.('[data-cap-group]');
+  if (!link) return;
+  state.activeGroup = link.getAttribute('data-cap-group') || state.activeGroup;
+  state.query = '';
+  if (state.loaded) render();
 });
-document.addEventListener('DOMContentLoaded', () => {
-  if ($('capabilities-panel-body')) mount();
+
+// Load when one of the two tabs that show this panel is shown, however it was
+// opened (nav click, search, open('advanced')): not at page load, where it
+// fetched capabilities, the schema and every endpoint for a hidden panel.
+document.addEventListener('settings:panel-activated', (e) => {
+  const tab = e.detail && e.detail.tab;
+  if (tab === 'capabilities' || tab === 'agents') mount(tab);
 });
 
 export default { mount, reload: load };

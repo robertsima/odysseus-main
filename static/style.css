@@ -43190,3 +43190,7 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 }
 #settings-modal a.btn { text-decoration: none; display: inline-flex; align-items: center; }
 .admin-badge.admin-rag-public { opacity: 0.6; }
+#settings-modal .cap-section > summary { background: none; border-bottom: 0; }
+#settings-modal .cap-section > summary:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
+#settings-modal .cap-section[open] > summary { border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+.set-readonly { margin: 0; white-space: pre-wrap; overflow: auto; max-height: 180px; opacity: 0.8; }
