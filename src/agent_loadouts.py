@@ -711,6 +711,132 @@ def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, 
     return agent_profiles.validate_profiles([prof])[0], notes
 
 
+def _effective_tools(profile: Dict[str, Any]) -> Optional[Set[str]]:
+    """The tool names a stored loadout grants, or None for ``tool_access: all``."""
+    access = profile.get("tool_access") or "all"
+    if access == "none":
+        return set()
+    if access != "selected":
+        return None
+    return (agent_profiles.expand_tool_aliases(set(profile.get("enabled_tools") or []))
+            - agent_profiles.expand_tool_aliases(set(profile.get("disabled_tools") or [])))
+
+
+def widenings(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    """What ``after`` grants that ``before`` did not.
+
+    ``{"tools": [added tool names], "notes": [one line per widened field]}``;
+    both empty when ``after`` is the same or narrower. Tools, access levels,
+    skills, MCP servers, models, the private vault, delegation, worker limit
+    and approval mode count. The round budget, instructions and the model the
+    worker runs on do not: they change how it works, not what it may do.
+
+    2026-09-28: a parent whose worker was refused for missing read_file
+    rewrote the saved "Memory Data Structure Innovator" loadout from
+    [web_search] to eleven tools to get past one task. The loadout is the
+    user's; one task is not a reason to change what it may do for good.
+    """
+    notes: List[str] = []
+    added_tools: List[str] = []
+    old_tools, new_tools = _effective_tools(before), _effective_tools(after)
+    if old_tools is not None:
+        if new_tools is None:
+            notes.append("tools: selected → all")
+        else:
+            added_tools = sorted(new_tools - old_tools)
+            if added_tools:
+                notes.append("tools: adds " + ", ".join(added_tools[:12])
+                             + (f" (+{len(added_tools) - 12} more)" if len(added_tools) > 12 else ""))
+
+    def ranked(field: str, ranks: Dict[str, int], default: str) -> None:
+        old, new = str(before.get(field) or default), str(after.get(field) or default)
+        if ranks.get(new, 0) > ranks.get(old, 0):
+            notes.append(f"{field}: {old} → {new}")
+
+    ranked("memory_access", _MEMORY_RANK, "none")
+    ranked("skill_access", _SELECTION_RANK, "none")
+    ranked("model_access", _MODEL_RANK, "current")
+    ranked("mcp_access", _SELECTION_RANK, "none")
+    ranked("delegation_policy", _DELEGATION_RANK, "never")
+
+    def added(field: str) -> None:
+        old = {str(v) for v in before.get(field) or []}
+        new = {str(v) for v in after.get(field) or []}
+        extra = sorted(new - old)
+        if old and extra:
+            notes.append(f"{field}: adds {', '.join(extra[:8])}")
+
+    if before.get("skill_access") == "selected" and after.get("skill_access") == "selected":
+        added("skill_names")
+    if before.get("mcp_access") == "selected" and after.get("mcp_access") == "selected":
+        added("allowed_mcp_servers")
+    added("allowed_models")
+    if after.get("private_vault_access") and not before.get("private_vault_access"):
+        notes.append("private_vault_access: off → on")
+    try:
+        old_workers = int(before.get("max_parallel_workers") or 0)
+        new_workers = int(after.get("max_parallel_workers") or 0)
+    except (TypeError, ValueError):
+        old_workers = new_workers = 0
+    if new_workers > old_workers:
+        notes.append(f"max_parallel_workers: {old_workers} → {new_workers}")
+    old_mode, new_mode = str(before.get("approval_mode") or ""), str(after.get("approval_mode") or "")
+    if (old_mode in _APPROVAL_STRICTNESS and new_mode in _APPROVAL_STRICTNESS
+            and _APPROVAL_STRICTNESS[new_mode] < _APPROVAL_STRICTNESS[old_mode]):
+        notes.append(f"approval_mode: {old_mode} → {new_mode}")
+    return {"tools": added_tools, "notes": notes}
+
+
+def _model_key(spec: str) -> str:
+    """``gpt-5.6-sol@My endpoint`` and ``gpt-5.6-sol`` name the same model id."""
+    return str(spec or "").strip().split("@", 1)[0].strip().casefold()
+
+
+def model_permitted(model: Optional[str], allowed: Any) -> bool:
+    """Whether ``model`` is one of a loadout's ``allowed_models`` (an empty list allows any)."""
+    names = [str(m) for m in (allowed or []) if str(m).strip()]
+    if not names:
+        return True
+    key = _model_key(model or "")
+    return bool(key) and key in {_model_key(m) for m in names}
+
+
+def model_problem(profile: Dict[str, Any], *, start_model: Optional[str] = None,
+                  inherited_model: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Why the worker this loadout would start runs a model outside its
+    ``allowed_models``, or None.
+
+    The worker runs the start call's ``model``, else the loadout's own, else
+    (when the loadout names none) the calling chat's, ``inherited_model``.
+    2026-09-28: worker ac361483 ran gpt-6-sol although its loadout allowed only
+    gpt-5.6-sol — the loadout named no model, so the worker inherited the
+    parent chat's, and nothing compared the two.
+    """
+    allowed = [str(m) for m in (profile.get("allowed_models") or []) if str(m).strip()]
+    if not allowed:
+        return None
+    own = str(profile.get("model") or "").strip()
+    start = str(start_model or "").strip()
+    if start:
+        model, source = start, "the start call's model"
+    elif own:
+        model, source = own, "the loadout's model"
+    else:
+        model = str(inherited_model or "").strip()
+        source = "the calling chat's model (the loadout names none, so the worker inherits it)"
+    if not model or model_permitted(model, allowed):
+        return None
+    return {
+        "model": model,
+        "source": source,
+        "allowed_models": allowed,
+        "detail": f"the worker would run {model!r} ({source}), which is not in allowed_models "
+                  f"[{', '.join(allowed)}]",
+        "repair": (f"start with model={allowed[0]!r}, or set the loadout's model to one of "
+                   f"{', '.join(repr(m) for m in allowed)} (action='update', model=...)"),
+    }
+
+
 def _write(profiles: List[Dict[str, Any]]) -> None:
     from src.settings import load_settings, save_settings
 

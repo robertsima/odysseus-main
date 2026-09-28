@@ -472,6 +472,34 @@ def _session_display_name(session_manager, session_id: Optional[str]) -> str:
     return str(getattr(source, "name", "") or "") if source else ""
 
 
+def _point_to_stored_worker_result(out: Dict, target_sid: str, caller: Optional[str],
+                                   owner: Optional[str]) -> None:
+    """When the target is a worker this chat started and it has finished,
+    name its stored result. 2026-09-28: a parent asked two finished workers
+    to repeat their results twice; each rewrote ~17k characters from memory,
+    with no tools, for minutes, while the real result sat in the worker's
+    chat. The message is still sent (the parent may want a follow-up); this
+    says where the original is."""
+    try:
+        from src.agent_tools.loadout_tools import finished_worker_result
+
+        stored = finished_worker_result(target_sid, caller_session=caller, owner=owner)
+    except Exception:
+        logger.debug("send_to_session: stored worker result lookup failed", exc_info=True)
+        return
+    if not stored:
+        return
+    from src.tool_output_store import recall_call
+
+    out["stored_worker_result"] = {"run_id": stored["run_id"], "ref": stored["ref"],
+                                   "chars": stored["chars"], "read_with": recall_call(stored["ref"])}
+    out["note"] = (
+        f"This worker already finished run {stored['run_id']}; its whole original result "
+        f"({stored['chars']:,} chars) is stored as `{stored['ref']}` — read it with "
+        f"`{recall_call(stored['ref'])}`. The reply above was written from memory without the "
+        "worker's tools; do not ask a finished worker to repeat or resend its result.")
+
+
 async def send_to_session(content: str, session_id: Optional[str] = None, owner: Optional[str] = None) -> Dict:
     """Send a message to an existing session and get a response.
 
@@ -765,6 +793,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
             }
         if tool_events:
             out["tool_calls"] = len(tool_events)
+        if mode == "chat" and not extras.get("_child_created"):
+            _point_to_stored_worker_result(out, target_sid, session_id, owner)
         return out
     except Exception as e:
         logger.error(f"send_to_session failed: {e}")

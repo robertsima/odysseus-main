@@ -103,7 +103,13 @@ async def test_a_detached_worker_is_not_denied_the_worktree_tool(monkeypatch):
 
 # ── 2. an update that grants a tool actually grants it ───────────────────────
 
-async def test_update_adding_repo_tools_is_not_undone_by_the_stored_complement(store):
+class _Chat:
+    def __init__(self, text):
+        self.owner, self.model = "u", "m"
+        self.history = [{"role": "user", "content": text, "metadata": None}]
+
+
+async def test_update_adding_repo_tools_is_not_undone_by_the_stored_complement(store, monkeypatch):
     created = await manage_agent_loadout(
         '{"action": "create", "name": "Lead Engineer", "tool_access": "selected",'
         ' "enabled_tools": ["read_file", "grep", "write_file", "manage_agent_loadout"]}', "c", owner="u")
@@ -111,6 +117,10 @@ async def test_update_adding_repo_tools_is_not_undone_by_the_stored_complement(s
     # The create stored a complement snapshot that names the git tools.
     assert "manage_git" in _stored(store)["disabled_tools"]
 
+    # Adding tools to a saved loadout is the user's call: here they asked.
+    chat = _Chat("Repair Lead Engineer: add manage_git and manage_agent_worktree")
+    monkeypatch.setattr("src.ai_interaction.get_session_manager",
+                        lambda: type("M", (), {"get_session": lambda self, sid: chat})())
     updated = await manage_agent_loadout(
         '{"action": "update", "name": "Lead Engineer", "tool_access": "selected",'
         ' "enabled_tools": ["read_file", "grep", "write_file", "manage_agent_loadout",'

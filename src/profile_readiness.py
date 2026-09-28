@@ -104,8 +104,10 @@ def _repository_row(profile: Dict[str, Any], tools: set, policy: Dict[str, Any])
     if not missing:
         return None
     grantable = [t for t in missing if t in (policy.get("allowed_tools") or ())]
-    repair = (f"add {' and '.join(grantable)} to enabled_tools (action='update', enabled_tools=[...existing, "
-              + ", ".join(f"'{t}'" for t in grantable) + "])" if grantable else "")
+    repair = (f"for one run, start with extra_tools={grantable!r}; to keep them, add {' and '.join(grantable)} "
+              "to enabled_tools (action='update', enabled_tools=[...existing, "
+              + ", ".join(f"'{t}'" for t in grantable) + "]) once the user has asked for it"
+              if grantable else "")
     ungrantable = [t for t in missing if t not in grantable]
     if ungrantable:
         repair = ((repair + "; ") if repair else "") + (
@@ -118,13 +120,41 @@ def _repository_row(profile: Dict[str, Any], tools: set, policy: Dict[str, Any])
                   repair)
 
 
+def _model_rows(profile: Dict[str, Any], inherited_model: Optional[str]) -> List[Dict[str, Any]]:
+    """The worker's model against the loadout's ``allowed_models``.
+
+    Start refuses a worker whose model is outside that list, so preflight has
+    to say so first rather than read READY.
+    """
+    allowed = [str(m) for m in (profile.get("allowed_models") or []) if str(m).strip()]
+    if not allowed:
+        return []
+    rows = []
+    problem = agent_loadouts.model_problem(profile, inherited_model=inherited_model)
+    if problem:
+        rows.append(_check("model", False, problem["detail"], problem["repair"]))
+    elif profile.get("model") or inherited_model:
+        rows.append(_check("model", True, f"{profile.get('model') or inherited_model} is in allowed_models"))
+    else:
+        rows.append(_check("model", True, "inherits the calling chat's model; start checks it against "
+                                          f"allowed_models [{', '.join(allowed)}]"))
+    stray = [m for m in (profile.get("model_fallbacks") or []) if not agent_loadouts.model_permitted(m, allowed)]
+    if stray:
+        rows.append(_check("model fallbacks", False,
+                           f"{', '.join(stray)} not in allowed_models [{', '.join(allowed)}]",
+                           "drop them from model_fallbacks or add them to allowed_models"))
+    return rows
+
+
 def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
-                      owner: Optional[str] = None, *, required_tools=(), requested_tools=None) -> Dict[str, Any]:
+                      owner: Optional[str] = None, *, required_tools=(), requested_tools=None,
+                      inherited_model: Optional[str] = None) -> Dict[str, Any]:
     """Readiness of ``profile`` as the worker the calling chat would start.
 
     ``requested_tools`` (a create/update's request) adds tools the author
     asked for to the check, so one the save dropped reads as a failure rather
-    than disappearing from the report.
+    than disappearing from the report. ``inherited_model`` is the calling
+    chat's model, which a worker of a loadout that names none runs on.
     """
     from src.tool_security import owner_baseline_disabled_tools
 
@@ -159,6 +189,7 @@ def profile_readiness(profile: Dict[str, Any], policy: Dict[str, Any],
                                 + ", ".join(sorted(wildcards)) if groups else "")))
 
     checks.extend(_skill_rows(profile, owner_baseline_disabled_tools(owner)))
+    checks.extend(_model_rows(profile, inherited_model))
 
     tools = set(matrix["selected_for_profile"])
     repository = _repository_row(profile, tools, policy)

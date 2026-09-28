@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -174,6 +175,31 @@ def _scope_tools(requested: Dict[str, Any], policy: Dict[str, Any], *, action: s
     return None, notes
 
 
+def _one_off_profile(profile: Dict[str, Any], extra: List[str],
+                     policy: Dict[str, Any]) -> Tuple[Optional[Dict[str, Any]], List[str], List[str]]:
+    """``profile`` plus ``extra`` tools, for one worker run.
+
+    Returns ``(one_off, granted, refused)``. Each extra tool goes through the
+    same clamp ``create`` uses, so a run can get only tools this chat may use
+    itself; the rest of the loadout is exactly as the user saved it. ``one_off``
+    is None when the loadout already grants every tool (``tool_access: all``).
+    """
+    probe, _notes = agent_loadouts.clamp(
+        {"name": profile["name"], "tool_access": "selected", "enabled_tools": list(extra)}, policy)
+    kept = set(probe.get("enabled_tools") or [])
+    granted = [t for t in extra if t in kept]
+    refused = [t for t in extra if t not in kept]
+    if (profile.get("tool_access") or "all") == "all" or not granted:
+        return None, granted, refused
+    released = agent_profiles.expand_tool_aliases(set(granted))
+    one_off = dict(profile)
+    one_off["tool_access"] = "selected"
+    one_off["enabled_tools"] = sorted(set(profile.get("enabled_tools") or []
+                                          if profile.get("tool_access") == "selected" else []) | set(granted))
+    one_off["disabled_tools"] = [t for t in profile.get("disabled_tools") or [] if t not in released]
+    return agent_profiles.validate_profiles([one_off])[0], granted, refused
+
+
 def _model_problem(spec: str, owner: Optional[str]) -> Optional[str]:
     """Why ``spec`` cannot be started with right now, or None.
 
@@ -327,6 +353,128 @@ def _release_stale_denials(requested: Dict[str, Any], base: Dict[str, Any], supp
             "which the stored disabled_tools had denied"]
 
 
+# ── widening a saved loadout needs the user ─────────────────────────────────
+#
+# An agent may narrow a saved loadout, or fix its wording, as part of a task.
+# It may not widen one — more tools, more access — just because one task
+# needed more: the loadout is the user's standing decision about what that
+# worker may do. The Settings editor (routes/auth_routes.py, agent_profiles)
+# is the user's own path and is not affected; this tool is only ever called
+# by an agent. A widening goes through when the user asked for it in this
+# chat: their latest message names the loadout and the tools (or says to
+# add/grant access), or it answers "yes" to an ask_user that named the loadout.
+
+# Messages a person typed: no source (the chat composer) or a steer from the
+# Agents panel. Worker results, peer agents and dashboard tasks are not.
+_HUMAN_SOURCES = frozenset({"", "user", "steer"})
+_WIDEN_INTENT_RE = re.compile(
+    r"\b(?:add|grant|give|allow|enable|widen|expand|extend|let)\b[^.\n]{0,80}"
+    r"\b(?:tools?|access|permissions?|capabilit\w+)\b",
+    re.IGNORECASE,
+)
+_AFFIRMATIVE_RE = re.compile(
+    r"^\W*(?:yes|yep|yeah|y|sure|ok(?:ay)?|approved?|go ahead|do it|confirm(?:ed)?|allow(?: it)?|"
+    r"grant(?: it)?|please do)\b",
+    re.IGNORECASE,
+)
+_NEGATIVE_RE = re.compile(r"\b(?:no|not|don'?t|never|deny|refuse|cancel)\b", re.IGNORECASE)
+
+
+def _is_human_message(message: Any) -> bool:
+    if _field(message, "role") != "user":
+        return False
+    meta = _field(message, "metadata") or {}
+    return str(meta.get("source") or "") in _HUMAN_SOURCES and meta.get("kind") != "peer"
+
+
+def _user_authorized_widening(session_id: Optional[str], owner: Optional[str], loadout_name: str,
+                              added_tools: List[str]) -> bool:
+    """Whether the person in this chat asked for this loadout to be widened."""
+    if not session_id:
+        return False
+    try:
+        from core.database import get_session_settings
+
+        if (get_session_settings(session_id) or {}).get("parent_session"):
+            return False  # a worker has no user of its own to ask
+    except Exception:
+        pass
+    try:
+        from src.ai_interaction import get_session_manager
+
+        manager = get_session_manager()
+        sess = manager.get_session(session_id) if manager else None
+    except Exception:
+        return False
+    if sess is None or (owner and getattr(sess, "owner", None) != owner):
+        return False
+    history = list(getattr(sess, "history", None) or [])
+    index = next((i for i in range(len(history) - 1, -1, -1) if _is_human_message(history[i])), None)
+    if index is None:
+        return False
+    text = str(_field(history[index], "content") or "")
+    lowered, name = text.casefold(), loadout_name.casefold()
+    if name and name in lowered:
+        named_tool = any(re.search(r"(?<![\w])" + re.escape(t.casefold()) + r"(?![\w])", lowered)
+                         for t in added_tools)
+        if named_tool or _WIDEN_INTENT_RE.search(text):
+            return True
+    if not _AFFIRMATIVE_RE.search(text) or _NEGATIVE_RE.search(text):
+        return False
+    # "yes" to the question the agent just asked about this loadout.
+    for message in reversed(history[:index]):
+        if _field(message, "role") != "assistant":
+            continue
+        for event in (_field(message, "metadata") or {}).get("tool_events") or []:
+            if isinstance(event, dict) and event.get("tool") == "ask_user":
+                asked = f"{event.get('command') or ''} {event.get('output') or ''}".casefold()
+                if name and name in asked:
+                    return True
+        break
+    return False
+
+
+def _widening_refusal(name: str, widened: Dict[str, Any]) -> Dict[str, Any]:
+    tools = widened["tools"]
+    options = []
+    if tools:
+        options.append(
+            "for the task at hand, leave the loadout as it is and start the worker with "
+            f"extra_tools={json.dumps(tools[:12])} — those apply to that one run only")
+    options.append(
+        "if the user wants this loadout itself changed for good, ask them (ask_user, naming the loadout "
+        "and exactly what it would gain) and repeat this update after they say yes, or they can edit it "
+        "in Settings > Agent loadouts")
+    return {
+        "error": (
+            f"update: {name!r} was not saved. This update widens a saved loadout ("
+            + "; ".join(widened["notes"]) + "), and the user has not asked for that in this chat. "
+            "A loadout is the user's standing decision about what that worker may do; one task needing "
+            "more is not a reason to change it for every later run. Instead: " + "; or ".join(options)
+            + ". Narrowing a loadout, or changing its wording, model or round budget, needs no approval."
+        ),
+        "blocked": True,
+        "blocked_reason": "update_would_widen_loadout",
+        "would_widen": widened["notes"],
+        **({"suggested_start": {"action": "start", "name": name, "extra_tools": tools}} if tools else {}),
+        "exit_code": 1,
+    }
+
+
+def _caller_model(session_id: Optional[str]) -> str:
+    """The calling chat's model: what a worker of a loadout naming none runs on."""
+    if not session_id:
+        return ""
+    try:
+        from src.ai_interaction import get_session_manager
+
+        manager = get_session_manager()
+        sess = manager.get_session(session_id) if manager else None
+        return str(getattr(sess, "model", "") or "")
+    except Exception:
+        return ""
+
+
 def _status_wait(key: str, requested: float) -> float:
     """Seconds this status check should wait: the caller's request, or the
     backoff floor when it re-checks the same runs soon after the last check."""
@@ -352,6 +500,102 @@ def _requested_wait(args: Dict[str, Any]) -> float:
         return 0.0
 
 
+def _field(message: Any, key: str) -> Any:
+    return message.get(key) if isinstance(message, dict) else getattr(message, key, None)
+
+
+# Run statuses whose worker has written its last word. A "blocked" run never
+# started, so it has no result to store.
+_FINISHED_STATUSES = frozenset({"completed", "incomplete", "failed", "cancelled", "waiting_approval"})
+# How many finished runs one status call stores a full result for. Each is a
+# disk write plus a background embedding; the rest keep their excerpt.
+_MAX_STORED_RESULTS_PER_CALL = 5
+# run_id -> {"ref", "chars", "status"}, so re-checking a finished run does not
+# store its result again.
+_RESULT_REFS: Dict[str, Dict[str, Any]] = {}
+
+
+def _full_worker_text(worker_session: str, run_id: str) -> Optional[str]:
+    """The worker's final message for ``run_id``, uncapped."""
+    try:
+        from src.ai_interaction import get_session_manager
+
+        manager = get_session_manager()
+        sess = manager.get_session(worker_session) if manager else None
+    except Exception:
+        return None
+    for message in reversed(list(getattr(sess, "history", None) or [])):
+        meta = _field(message, "metadata") or {}
+        if _field(message, "role") == "assistant" and meta.get("run_id") == run_id:
+            text = str(_field(message, "content") or "")
+            return "" if text == "(no reply)" else text
+    return None
+
+
+def stored_worker_result(run_id: str, *, owner: Optional[str],
+                         caller_session: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Put a finished worker's whole result in the tool-output store.
+
+    ``{"ref", "chars", "status"}``, or None when the run has no result to
+    store. 2026-09-28: the parent could not get a finished worker's result
+    mid-turn — status gave a 400-character excerpt and the hand-off message
+    was not in the running turn's context — so it asked both workers to
+    repeat themselves with send_to_session, and they regenerated ~17k
+    characters from memory, without tools, for five minutes. The result was
+    in the worker's chat the whole time; this hands it over as a ref that
+    recall_tool_output reads back.
+    """
+    from src import tool_output_store
+
+    cached = _RESULT_REFS.get(run_id)
+    if cached:
+        if tool_output_store.load_record(cached["ref"]):
+            return dict(cached)
+        _RESULT_REFS.pop(run_id, None)  # pruned from the store: store it again
+    try:
+        from src import agent_control
+
+        collected = agent_control.collect_worker_result(run_id, owner=owner)
+    except Exception:
+        return None
+    text = str(collected.get("result") or "")
+    if collected.get("result_truncated"):
+        text = _full_worker_text(str(collected.get("session_id") or ""), run_id) or text
+    if not text.strip():
+        return None
+    status = str(collected.get("status") or "")
+    header = (f"[Worker result · run {run_id} · worker chat {collected.get('session_id')} · {status}. "
+              "This is the worker's own report, not verified work.]\n\n")
+    record = tool_output_store.store(header + text, tool="manage_agent_loadout",
+                                     command=f"worker result {run_id}", session_id=caller_session)
+    if not record:
+        return None
+    stored = {"ref": record["ref"], "chars": len(text), "status": status}
+    _RESULT_REFS[run_id] = stored
+    while len(_RESULT_REFS) > 500:
+        _RESULT_REFS.pop(next(iter(_RESULT_REFS)))
+    return dict(stored)
+
+
+def finished_worker_result(worker_session: str, *, caller_session: Optional[str],
+                           owner: Optional[str]) -> Optional[Dict[str, Any]]:
+    """The stored result of the latest finished run of ``worker_session``
+    that ``caller_session`` started, or None. For send_to_session's hint."""
+    if not worker_session or not caller_session:
+        return None
+    from src import agent_activity
+
+    for run in agent_activity.list_runs(session_id=caller_session, limit=100, include_descendants=True):
+        summary = run.get("summary") or {}
+        if (summary.get("target_session") == worker_session and run.get("session_id") == worker_session
+                and run.get("status") in _FINISHED_STATUSES):
+            stored = stored_worker_result(run["run_id"], owner=owner, caller_session=caller_session)
+            if stored:
+                return {"run_id": run["run_id"], **stored}
+            return None
+    return None
+
+
 def _status_rows(session_id: Optional[str], limit: int, run_id: str,
                  loadout: str = "") -> List[Dict[str, Any]]:
     from src import agent_activity
@@ -374,9 +618,14 @@ def _status_rows(session_id: Optional[str], limit: int, run_id: str,
             continue
         if len(rows) >= limit:
             break
+        # A launch refused by preflight is filed under the chat that asked for
+        # it and never had a chat of its own. Falling back to the run's
+        # session_id reported the PARENT's id as the worker (2026-09-28).
+        blocked = run["status"] == "blocked"
         row = {
             "run_id": run["run_id"], "status": run["status"], "title": run["title"],
-            "worker_session": summary.get("target_session") or run.get("session_id"),
+            "worker_session": None if blocked else (summary.get("target_session") or run.get("session_id")),
+            "note": "refused before start; no worker chat was created" if blocked else None,
             "loadout": summary.get("profile"), "model": summary.get("model"),
             "started_at": run.get("started_at"), "finished_at": run.get("finished_at"),
             "tool_calls": summary.get("steps") or (progress.get("tool_calls") if run["status"] == "running" else None),
@@ -391,7 +640,35 @@ def _status_rows(session_id: Optional[str], limit: int, run_id: str,
     return rows
 
 
-async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, Any]:
+def _attach_stored_results(rows: List[Dict[str, Any]], session_id: Optional[str],
+                           owner: Optional[str]) -> int:
+    """Give each finished worker row a ``result_ref`` to its whole stored
+    result. Returns how many rows got one."""
+    attached = tried = 0
+    for row in rows:
+        if attached >= _MAX_STORED_RESULTS_PER_CALL or tried >= 2 * _MAX_STORED_RESULTS_PER_CALL:
+            break
+        if row.get("status") not in _FINISHED_STATUSES or not row.get("worker_session"):
+            continue
+        tried += 1
+        try:
+            stored = stored_worker_result(row["run_id"], owner=owner, caller_session=session_id)
+        except Exception:
+            logger.debug("status: could not store the result of %s", row["run_id"], exc_info=True)
+            stored = None
+        if not stored:
+            continue
+        from src.tool_output_store import recall_call
+
+        row["result_ref"] = stored["ref"]
+        row["result_chars"] = stored["chars"]
+        row["read_result"] = recall_call(stored["ref"])
+        attached += 1
+    return attached
+
+
+async def _status(args: Dict[str, Any], session_id: Optional[str],
+                  owner: Optional[str] = None) -> Dict[str, Any]:
     """``status`` (alias ``poll``/``wait``/``check``), optionally for one run
     and optionally waiting, bounded, until a running worker finishes."""
     run_id = str(args.get("run_id") or "").strip()
@@ -435,6 +712,7 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
     if not running:
         _last_status_checks.pop(f"{session_id}|{run_id or '*'}", None)
     cut_off = [row["run_id"] for row in rows if row.get("ran_out_of_rounds")]
+    stored = _attach_stored_results(rows, session_id, owner)
     response = (
         f"{len(rows)} worker run(s) for this chat"
         + (f" with loadout {loadout!r}" if loadout else "")
@@ -444,6 +722,12 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
            if cut_off else "")
         + " A result_excerpt is the worker's own claim, not verified work."
     )
+    if stored:
+        response += (
+            " Each finished worker's WHOLE result is stored: read it with recall_tool_output and the "
+            "row's result_ref (read_result is the exact call). Do not send_to_session the worker to "
+            "repeat its result — it would rewrite it from memory, without its tools."
+        )
     if running:
         response += (
             f" Still running{f' after waiting {waited:g}s' if waited else ''}. Its result is handed back to "
@@ -463,12 +747,15 @@ async def _status(args: Dict[str, Any], session_id: Optional[str]) -> Dict[str, 
     return out
 
 
-def _import_prepare(policy: Dict[str, Any]):
+def _import_prepare(policy: Dict[str, Any], *, overwrites: bool = True,
+                    session_id: Optional[str] = None, owner: Optional[str] = None):
     """The ``create`` rule for each imported profile, as a transfer ``prepare``.
 
     An imported file is agent-supplied input like any other: the same
     tool-policy refusal, clamp to this chat's policy and starved-loadout check
     apply, so a file cannot carry in a wider loadout than ``create`` would store.
+    A profile that would overwrite a saved one of the same name is held to the
+    ``update`` rule too: it may not widen it without the user.
     """
     def prepare(profile: Dict[str, Any]) -> Tuple[Dict[str, Any], List[str]]:
         requested = dict(profile)
@@ -480,6 +767,15 @@ def _import_prepare(policy: Dict[str, Any]):
         narrowed = [*scope_notes, *narrowed]
         if agent_loadouts.tool_starved(narrowed):
             raise ValueError("none of its tools are available to this chat: " + "; ".join(narrowed))
+        existing = agent_profiles.get_profile(clamped["name"]) if overwrites else None
+        if existing is not None:
+            widened = agent_loadouts.widenings(existing, clamped)
+            if widened["notes"] and not _user_authorized_widening(
+                    session_id, owner, existing["name"], widened["tools"]):
+                raise ValueError(
+                    f"would widen the saved loadout {existing['name']!r} ({'; '.join(widened['notes'])}) "
+                    "without the user asking for it; import with rename_conflicts=true to keep both, or "
+                    "ask the user first")
         return clamped, narrowed
     return prepare
 
@@ -498,8 +794,6 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     if action not in _ACTIONS:
         return {"error": f"action must be one of {', '.join(_ACTIONS)}", "exit_code": 1}
 
-    policy = agent_loadouts.caller_policy(session_id, owner)
-
     if action == "list":
         rows = [agent_loadouts.discovery_summary(p) for p in agent_profiles.load_profiles()]
         return {
@@ -516,7 +810,12 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         # way to find out was to grep the activity JSONL by hand -- which is
         # exactly what the 2026-09-17 transcript spent twenty rounds doing,
         # while the answer sat in the run registry the whole time.
-        return await _status(args, session_id)
+        return await _status(args, session_id, owner)
+
+    # Read after the two read-only actions, which grant nothing and so need
+    # no policy: a status poll no longer costs a policy read (a DB query plus
+    # the MCP inventory), and cannot fail on one.
+    policy = agent_loadouts.caller_policy(session_id, owner)
 
     if action == "stop":
         # Actually stop a worker this chat started. Without it, "stop the
@@ -624,7 +923,10 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             report = agent_profile_transfer.import_profiles(
                 document, mode=str(args.get("mode") or "merge"),
                 rename_conflicts=bool(args.get("rename_conflicts")),
-                prepare=_import_prepare(policy),
+                prepare=_import_prepare(policy,
+                                        overwrites=(str(args.get("mode") or "merge").strip().lower() == "replace"
+                                                    or not bool(args.get("rename_conflicts"))),
+                                        session_id=session_id, owner=owner),
                 check_model=lambda spec: _model_problem(spec, owner),
             )
         except ValueError as exc:
@@ -648,7 +950,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         from src.profile_readiness import profile_readiness, render
 
         readiness = profile_readiness(profile, policy, owner,
-                                      required_tools=args.get("required_tools") or [])
+                                      required_tools=args.get("required_tools") or [],
+                                      inherited_model=_caller_model(session_id) if profile.get("allowed_models")
+                                      else None)
         return {"response": f"Loadout {profile['name']}: {render(readiness)}",
                 "readiness": readiness, "exit_code": 0}
 
@@ -727,6 +1031,12 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                     "would_narrow": unrequested,
                     "exit_code": 1,
                 }
+            widened = agent_loadouts.widenings(base, profile)
+            if widened["notes"] and not _user_authorized_widening(
+                    session_id, owner, base["name"], widened["tools"]):
+                logger.info("[agent-loadout] refused widening update of %s from %s: %s",
+                            base["name"], session_id, "; ".join(widened["notes"]))
+                return _widening_refusal(base["name"], widened)
         matrix = agent_loadouts.capability_matrix(requested_tools, required_tools, profile, policy, owner)
         if matrix["mission_critical_missing"]:
             # A profile that saves without what its mission needs is the
@@ -775,7 +1085,9 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             # a requested tool the save dropped is a failed check, so the
             # readiness line cannot say READY for a loadout missing it.
             readiness = profile_readiness(saved, policy, owner, required_tools=required_tools,
-                                          requested_tools=requested_tools)
+                                          requested_tools=requested_tools,
+                                          inherited_model=_caller_model(session_id) if saved.get("allowed_models")
+                                          else None)
             response += ". Readiness " + render(readiness)
         except Exception as exc:
             logger.warning("loadout: readiness check failed for %s", saved["name"], exc_info=True)
@@ -872,16 +1184,57 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "exit_code": 1,
             }
 
+    # One-off tools for this run only. A parent whose worker lacks a tool for
+    # the task at hand used to widen the SAVED loadout to get past it
+    # (2026-09-28: "Memory Data Structure Innovator" went from [web_search] to
+    # eleven tools, for good, without the user). `extra_tools` gives this one
+    # worker the extra tools, clamped to what this chat may grant exactly as
+    # create is, and leaves the loadout as the user saved it.
+    extra_raw = args.get("extra_tools")
+    if isinstance(extra_raw, str):
+        extra_raw = [extra_raw]
+    if extra_raw is not None and not isinstance(extra_raw, list):
+        return {"error": "start: extra_tools must be a list of exact tool names", "exit_code": 1}
+    extra = sorted({str(t).strip() for t in (extra_raw or []) if str(t).strip()})
+    one_off: Optional[Dict[str, Any]] = None
+    extra_note = ""
+    extra_report: Dict[str, Any] = {}
+    if extra:
+        if started_profile is None:
+            return {"error": "start: extra_tools adds tools to a named loadout for one run; pass name too",
+                    "exit_code": 1}
+        one_off, granted_extra, refused_extra = _one_off_profile(started_profile, extra, policy)
+        if refused_extra and not granted_extra:
+            return {
+                "error": (
+                    f"start: none of extra_tools ({', '.join(refused_extra)}) can be granted from this chat: "
+                    f"it may not use them itself. This chat can grant: {_tool_examples(policy)}."
+                ),
+                "blocked": True,
+                "blocked_reason": "extra_tools_not_grantable",
+                "exit_code": 1,
+            }
+        extra_report = {"granted": granted_extra, **({"refused": refused_extra} if refused_extra else {})}
+        if one_off is None:
+            extra_note = (f" extra_tools ignored: loadout {started_profile['name']!r} already grants every tool "
+                          "this chat's workers may use.")
+        else:
+            extra_note = (f" For this run only it also has {', '.join(granted_extra)} (extra_tools); the saved "
+                          "loadout is unchanged."
+                          + (f" Not granted (this chat may not use them): {', '.join(refused_extra)}."
+                             if refused_extra else ""))
+    effective = one_off or started_profile
+
     # A worker that cannot read, search or run anything will spend its whole
     # round budget explaining that. Refuse at launch rather than produce one.
-    unusable = agent_loadouts.unusable_reason(started_profile) if started_profile else None
+    unusable = agent_loadouts.unusable_reason(effective) if effective else None
     if unusable:
         usable = [p["name"] for p in agent_profiles.load_profiles()
                   if agent_loadouts.unusable_reason(p) is None]
         return {
             "error": (
-                f"start: {unusable}. Fix it with action='update' (set tool_access and enabled_tools "
-                "from this chat's own tools), or start one of: "
+                f"start: {unusable}. Start it with extra_tools=[...] naming the tools this task needs "
+                "(for this run only), ask the user to give the loadout tools, or start one of: "
                 + (", ".join(usable) if usable else "none — every stored loadout has this problem")
             ),
             "blocked": True,
@@ -894,7 +1247,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     # worker without them, and the worker can only report that its job is
     # impossible. When every named tool on a connected server is gone, that
     # server's part of the role is gone too: refuse and say which names.
-    stale = agent_loadouts.stale_mcp_grants(started_profile) if started_profile else {}
+    stale = agent_loadouts.stale_mcp_grants(effective) if effective else {}
     dead_servers = {s: b["missing"] for s, b in stale.items() if not b["present"]}
     if dead_servers:
         listed = "; ".join(f"server {s}: {', '.join(names)}" for s, names in sorted(dead_servers.items()))
@@ -915,17 +1268,20 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     if stale:
         stale_note = " Note: these granted MCP tools do not exist on their server and will not be available: " + \
             ", ".join(sorted(n for b in stale.values() for n in b["missing"])) + "."
+
     # Say before the worker runs what it will not have, rather than letting it
     # discover that mid-task and hand back "blocked" (2026-09-26: a repository
     # task started on a loadout with no git tool).
-    withheld = (agent_loadouts.worker_withheld_tools(started_profile, policy.get("worker_depth", 0))
-                if started_profile else {})
+    withheld = (agent_loadouts.worker_withheld_tools(effective, policy.get("worker_depth", 0))
+                if effective else {})
     missing_repo: List[str] = []
-    if started_profile is not None:
-        from src.worker_preflight import task_needs_workspace
+    document_warning: Optional[str] = None
+    if effective is not None:
+        from src.worker_preflight import document_access_warning, task_needs_workspace
 
         if task_needs_workspace(task):
-            missing_repo = agent_loadouts.missing_repository_tools(started_profile)
+            missing_repo = agent_loadouts.missing_repository_tools(effective)
+        document_warning = document_access_warning(task, effective)
     gap_note = ""
     if withheld:
         gap_note += (" This worker will NOT get " + ", ".join(sorted(withheld))
@@ -935,8 +1291,11 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         gap_note += (f" The task is repository work but loadout {started_profile['name']!r} does not grant "
                      f"{' or '.join(missing_repo)}, so the worker cannot see git status, diffs or history"
                      + (" or commit on a branch" if "manage_agent_worktree" in missing_repo else "")
-                     + ". If the task needs that, stop it and add "
-                     + " and ".join(missing_repo) + " to the loadout's enabled_tools (action='update').")
+                     + ". If the task needs that, stop it and start it again with extra_tools="
+                     + json.dumps(missing_repo) + " (this run only; adding them to the saved loadout "
+                     "needs the user).")
+    if document_warning:
+        gap_note += " Warning: " + document_warning
 
     # A worker always reports to the chat that started it. `parent_session`
     # used to accept "" (standalone) or any chat the user owns, and a model
@@ -970,27 +1329,64 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             return error
         if target is None or (owner and getattr(target, "owner", None) != owner):
             return error
+    # The model the worker will run on has to be one its loadout allows.
+    # 2026-09-28: a loadout with allowed_models=['gpt-5.6-sol'] and no model of
+    # its own started a worker on the parent chat's gpt-6-sol.
+    start_model = str(args.get("model") or "").strip()
+    if effective is not None and effective.get("allowed_models"):
+        # A worker of a loadout naming no model gets the model of the chat it reports to.
+        inherited = "" if (start_model or effective.get("model")) else _caller_model(parent)
+        problem = agent_loadouts.model_problem(effective, start_model=start_model or None,
+                                               inherited_model=inherited or None)
+        if problem:
+            return {
+                "error": f"start: loadout {name!r}: {problem['detail']}. Repair: {problem['repair']}.",
+                "blocked": True,
+                "blocked_reason": "model_not_allowed",
+                "model": problem["model"],
+                "allowed_models": problem["allowed_models"],
+                "next_action": {"retry_with": {"model": problem["allowed_models"][0]}},
+                "exit_code": 1,
+            }
+
     requires = args.get("requires") or []
     if isinstance(requires, str):
         requires = [requires]
+    launch: Dict[str, Any] = {
+        "owner": owner, "task": task, "parent_session": parent,
+        "workspace": str(args.get("workspace") or "").strip() or None,
+        "requires": [str(r) for r in requires] if isinstance(requires, list) else [],
+    }
+    if one_off is not None:
+        # The saved loadout plus this run's extra tools, carried as the
+        # worker's own policy; launch_worker persists it on the worker chat.
+        launch["inline_profile"] = {**one_off, **({"model": start_model} if start_model else {})}
+    else:
+        launch.update(profile_name=name or None, model=start_model or None)
     try:
-        result = await agent_control.launch_worker(
-            owner=owner, task=task, profile_name=name or None,
-            parent_session=parent, model=str(args.get("model") or "").strip() or None,
-            workspace=str(args.get("workspace") or "").strip() or None,
-            requires=[str(r) for r in requires] if isinstance(requires, list) else [],
-        )
+        result = await agent_control.launch_worker(**launch)
     except WorkerBlocked as exc:
-        return exc.payload
+        payload = dict(exc.payload)
+        needed = list((payload.get("next_action") or {}).get("enable_tools") or [])
+        if started_profile is not None and needed and payload.get("code") in ("TOOLS_UNAVAILABLE",
+                                                                              "WRITE_NOT_ALLOWED"):
+            wanted = sorted(set(extra) | set(needed))
+            payload["hint"] = (
+                f"If this task really needs {', '.join(needed)}, start {started_profile['name']!r} again with "
+                f"extra_tools={json.dumps(wanted)} — for this run only. Do not widen the saved loadout "
+                "for one task: that needs the user.")
+            payload["suggested_start"] = {"action": "start", "name": started_profile["name"],
+                                          "extra_tools": wanted}
+        return payload
     except (ValueError, RuntimeError) as exc:
         return {"error": f"start: {exc}", "exit_code": 1}
     # What it is actually going to run with. The model has to be able to see a
     # wrong-fit loadout without waiting for the worker to report that it could
     # not do the job, and the round budget is the number an "it ran out of
     # rounds" result has to be read against.
-    granted = (started_profile["enabled_tools"] if started_profile
-               and started_profile["tool_access"] == "selected" else
-               (started_profile["tool_access"] if started_profile else "all"))
+    granted = (effective["enabled_tools"] if effective
+               and effective["tool_access"] == "selected" else
+               (effective["tool_access"] if effective else "all"))
     # The full inventory stays out of both the log and the model's context: a
     # preview and a count say what was granted; `get` has the whole list.
     preflight = {
@@ -1003,14 +1399,20 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
         **({"withheld_from_worker": withheld} if withheld else {}),
         **({"missing_repository_tools": missing_repo} if missing_repo else {}),
+        **({"extra_tools": extra_report} if extra_report else {}),
+        **({"document_access_warning": document_warning} if document_warning else {}),
         **(result.get("preflight") or {}),
     }
     tool_note = _tool_list_note(granted)
-    logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s",
+    logger.info("[agent-loadout] start loadout=%s run=%s child=%s model=%s rounds=%s tools=%s%s",
                 preflight["loadout"], result.get("run_id"), result.get("session_id"),
-                preflight["model"], preflight["max_rounds"], tool_note)
+                preflight["model"], preflight["max_rounds"], tool_note,
+                f" extra={','.join(extra_report.get('granted') or [])}" if one_off is not None else "")
     try:
-        wrap_up = int(result.get("max_rounds") or 0) if name else 0
+        # The wrap-up round is asked for on a saved loadout's own run; a
+        # one-off run (extra_tools) starts from an inline copy, where the
+        # budget stays advisory.
+        wrap_up = int(result.get("max_rounds") or 0) if name and one_off is None else 0
     except (TypeError, ValueError):
         wrap_up = 0
     wrap_note = (f"; at round {wrap_up} it is asked to wrap up and hand back what it has, "
@@ -1021,7 +1423,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             f"with these tools: {tool_note}. It runs until the task is done — a round count never "
             f"cuts it off{wrap_note} — and it runs detached, so its progress appears on this chat's activity feed "
             "and in action='status'. If those tools cannot do the task you just described, stop it "
-            "and fix the loadout instead of waiting for the result." + stale_note + gap_note
+            "and fix the loadout instead of waiting for the result." + extra_note + stale_note + gap_note
             + " Its result is handed back to this chat automatically when it finishes, so there is no need "
             "to poll: end your turn, or use action='status' with wait_seconds to block until it is done."
         ),
@@ -1029,7 +1431,6 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         **{key: value for key, value in result.items() if key != "preflight"},
         "exit_code": 0,
     }
-
 
 class ManageAgentLoadoutTool:
     async def execute(self, content: str, ctx: dict) -> Dict[str, Any]:

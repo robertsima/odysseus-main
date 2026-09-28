@@ -25,21 +25,68 @@ READ_TOOLS = ("get_workspace", "read_file", "grep", "glob", "ls")
 WRITE_TOOLS = ("write_file", "edit_file", "apply_patch")
 REQUIREMENTS = ("workspace", "write", "read_only")
 
-# Unmistakable repository work: files, code, tests, git.
+# Unmistakable LOCAL repository work: code, tests, git, paths, file names.
+#
+# The bare words "repo"/"repository"/"repositories" are deliberately not in
+# here. 2026-09-28: a web-research task ("... recent technical sources,
+# repositories, issue trackers ...") matched "repositories", so preflight
+# treated it as repository work and refused to start a web_search-only worker
+# with "the worker cannot use read_file, grep, ls, which reading the
+# repository needs". Research about repositories on GitHub is web research;
+# only a repository the task places HERE (see _LOCAL_REPO_RE) needs a
+# workspace.
 _REPO_RE = re.compile(
-    r"\b(?:repo|repos|repository|repositories|codebase|source code|source files?|source tree|"
-    r"(?:the|this|our) code|in the code|git|pull requests?|"
+    r"\b(?:codebase|source code|source files?|source tree|"
+    r"(?:the|this|our) code|in the code|git(?![-\u2010\u2011]|\s*like\b)|"
     r"pytest|unit tests?|test suite|run (?:the )?tests|grep|working tree|worktree|"
     r"read[- ]only audit of the (?:code|source|repo\w*)|source[- ]inspection)\b"
-    r"|\b(?:src|tests|static|routes|services|core)/[\w./-]+"
-    r"|\b[\w-]+\.(?:py|js|mjs|ts|tsx|jsx|go|rs|java|rb|php|css|html|toml|ya?ml|json)\b",
+    r"|\b(?:src|tests|static|routes|services|core)/[\w./-]+",
     re.IGNORECASE,
 )
+# A file name. Checked separately so a URL's last segment (".../page.html")
+# and framework names ("Node.js") do not count as files in a checkout.
+_FILE_NAME_RE = re.compile(
+    r"(?<![/\w.])[\w-]+\.(?:py|js|mjs|ts|tsx|jsx|go|rs|java|rb|php|css|html|toml|ya?ml|json)\b",
+    re.IGNORECASE,
+)
+_NOT_A_FILE_RE = re.compile(
+    r"^(?:node|next|nuxt|vue|react|three|d3|express|chart|ember|backbone|angular|alpine|p5|tensorflow|"
+    r"brain|ml5|socket|deno|bun|solid|svelte)\.js$",
+    re.IGNORECASE,
+)
+# A path on this machine: /app/data/..., ./src/x, C:\dev\repo. At least two
+# segments, and not the path part of a URL (preceded by a host name or "//").
+_LOCAL_PATH_RE = re.compile(
+    r"(?<![\w:/.])(?:\.{0,2}/)(?:[\w.-]+/)+[\w.-]*"
+    r"|\b[A-Za-z]:[\\/][\w .\\/-]+",
+)
+# "repo"/"repository" words, and pull requests. Each counts as local
+# repository work only when the task places it here (_is_local_repo_mention).
+# "checkout" is not here: "the checkout flow" is as likely a shop as a clone,
+# and a checkout on this machine is named by its path.
+_REPO_WORD_RE = re.compile(
+    r"\b(?:repo|repos|repository|repositories|pull requests?)\b",
+    re.IGNORECASE,
+)
+# Determiners that put a repository in THIS workspace. "the"/"that" only for a
+# singular repository: "the repositories behind these papers" is not a local
+# checkout, "the repository" usually is.
+_LOCAL_DETERMINER_RE = re.compile(
+    r"\b(?:this|our|my|your|local|same|odysseus(?:'s)?)\s+(?:[\w-]+\s+)?$", re.IGNORECASE)
+_SINGULAR_DETERMINER_RE = re.compile(r"\b(?:the|that|its)\s+(?:[\w-]+\s+)?$", re.IGNORECASE)
+# Wording that puts a repository on the web rather than in a workspace.
+_WEB_CONTEXT_RE = re.compile(
+    r"\b(?:github|gitlab|bitbucket|codeberg|sourceforge|hugging\s?face|arxiv|online|internet|"
+    r"on the web|the web|web (?:research|search|sources?)|open[- ]source|public|third[- ]party|"
+    r"external|issue trackers?|papers?|blogs?|articles?|websites?)\b",
+    re.IGNORECASE,
+)
+_WEB_WINDOW = 80
 # Asks for changes to files. Read-only phrasing wins over it.
 _WRITE_RE = re.compile(
     r"\b(?:fix|implement|refactor|edit|modify|change|patch|rewrite|update|add|remove|delete|rename|"
     r"create|write)\b[^.\n]{0,60}\b(?:code|files?|function|class|module|tests?|bug|script|config|"
-    r"repo\w*|source|endpoint|feature|handler)\b",
+    r"(?P<repo>repo\w*)|source|endpoint|feature|handler)\b",
     re.IGNORECASE,
 )
 _READ_ONLY_RE = re.compile(
@@ -49,13 +96,108 @@ _READ_ONLY_RE = re.compile(
 )
 
 
+def _web_context(text: str, start: int, end: int) -> bool:
+    """Whether the words around ``text[start:end]`` place it on the web."""
+    window = text[max(0, start - _WEB_WINDOW):end + _WEB_WINDOW]
+    return bool(_WEB_CONTEXT_RE.search(window))
+
+
+def _is_local_repo_mention(text: str, match: "re.Match[str]") -> bool:
+    """A repo/repository/pull-request word that means one here.
+
+    Local when a determiner puts it in this workspace ("this repo", "our
+    repositories", "the repository") or a path follows it ("repository
+    /app/data/..."); never when the surrounding words put it on the web
+    ("GitHub repositories", "repositories, issue trackers").
+    """
+    word = match.group(0).casefold()
+    if _web_context(text, match.start(), match.end()):
+        return False
+    if word.startswith("pull request"):
+        return True
+    before = text[max(0, match.start() - 40):match.start()]
+    if _LOCAL_DETERMINER_RE.search(before):
+        return True
+    plural = word in ("repos", "repositories")
+    if not plural and _SINGULAR_DETERMINER_RE.search(before):
+        return True
+    after = text[match.end():match.end() + 60]
+    return bool(re.match(r"\s+(?:at\s+|in\s+|root\s+)?(?:`|\.{0,2}/|[A-Za-z]:[\\/])", after))
+
+
+def _local_repo_signal(text: str) -> bool:
+    if _REPO_RE.search(text) or _LOCAL_PATH_RE.search(text):
+        return True
+    for match in _FILE_NAME_RE.finditer(text):
+        if not _NOT_A_FILE_RE.match(match.group(0)):
+            return True
+    return any(_is_local_repo_mention(text, m) for m in _REPO_WORD_RE.finditer(text))
+
+
 def task_needs_workspace(task: str) -> bool:
-    return bool(_REPO_RE.search(task or ""))
+    """Whether the task is repository work on a checkout here.
+
+    Signals: code/test/git wording, a path on this machine, a file name, or a
+    repository the task places here ("this repo", "the repository", "our
+    repositories"). Repositories and issue trackers named as web sources are
+    research, not a workspace.
+    """
+    return _local_repo_signal(task or "")
 
 
 def task_needs_write(task: str) -> bool:
     text = task or ""
-    return bool(_WRITE_RE.search(text)) and not _READ_ONLY_RE.search(text)
+    if _READ_ONLY_RE.search(text):
+        return False
+    for match in _WRITE_RE.finditer(text):
+        # "write a summary of the repositories on GitHub" asks for prose, not
+        # a change to a checkout: a repository as the object counts only when
+        # the task has a local repository in it.
+        if match.group("repo") and not _local_repo_signal(text):
+            continue
+        return True
+    return False
+
+
+# Tools a worker can read a note or document with.
+DOCUMENT_READ_TOOLS = ("search_documents", "read_file", "manage_documents", "manage_notes",
+                       "vault_search", "vault_get")
+# A task that names a note, document or vault file the worker is meant to read.
+_DOCUMENT_RE = re.compile(
+    r"\b(?:the|this|that|my|our|your)\s+(?:[\w'’&-]+\s+){0,5}?"
+    r"(?<!release )(?<!patch )(?:note|notes|document|documents)\b"
+    r"|\b(?:in|from)\s+(?:my|the|our)\s+(?:vault|notes|documents)\b"
+    r"|\bvault\b|\bobsidian\b"
+    r"|(?<![/\w.])[\w-]+\.md\b",
+    re.IGNORECASE,
+)
+
+
+def task_names_document(task: str) -> bool:
+    return bool(_DOCUMENT_RE.search(task or ""))
+
+
+def document_access_warning(task: str, profile: Optional[Dict[str, Any]]) -> Optional[str]:
+    """A warning when the task names a note/document the worker cannot read.
+
+    2026-09-28: "Creative Agent Memory Researcher" (tools=[web_search]) was
+    asked to "reconcile against the AI Mind note" and could only say it had
+    no way to read it. Not a hard block: the parent may have pasted the
+    content into the task.
+    """
+    if not profile or not task_names_document(task):
+        return None
+    access = profile.get("tool_access") or "all"
+    if access == "all":
+        return None
+    enabled = set(profile.get("enabled_tools") or []) - set(profile.get("disabled_tools") or [])
+    if access == "selected" and enabled & set(DOCUMENT_READ_TOOLS):
+        return None
+    return (
+        f"the task names a note or document, but loadout {profile.get('name', '?')!r} has no tool that "
+        "reads documents (" + ", ".join(DOCUMENT_READ_TOOLS[:3]) + "). Put the relevant content in the "
+        "task itself, or start it with extra_tools=[\"search_documents\"] for this run."
+    )
 
 
 def known_checkouts() -> List[str]:
