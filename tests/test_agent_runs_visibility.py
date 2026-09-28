@@ -387,7 +387,7 @@ async def test_the_parent_is_told_the_worker_was_cut_off(monkeypatch):
 
     inject = parent.messages[-1].content
     assert "[Worker Runner ran out of rounds]" in inject
-    assert "partial" in inject and "pick the task up from where it stopped" in inject
+    assert "partial" in inject and "tell the user where it stopped" in inject
 
 
 async def test_a_finished_worker_hand_off_is_unchanged(monkeypatch):
@@ -465,9 +465,10 @@ async def test_a_worker_hand_off_keeps_the_parent_chats_own_policy(monkeypatch):
     # ... and so is its approval mode, which was previously never passed at all,
     # so a chat that asks before every change executed without asking.
     assert seen["approval_mode"] == "ask_all"
-    # But this is the parent, not a child: the anti-fan-out set is for children,
-    # and a chat that delegated once may delegate again.
-    assert not (headless_agent.SUBAGENT_BLOCKED_TOOLS & set(seen["disabled_tools"]))
+    # No one asked for this turn, so it may not launch anything: a follow-up
+    # that could start workers is how finished workers kept the chat running
+    # on its own (tests/test_worker_completion_no_runaway.py).
+    assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= set(seen["disabled_tools"])
     # It really did run — an assertion on kwargs alone would pass on a no-op.
     assert parent.messages[-1].content == "continued"
 

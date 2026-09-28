@@ -70,6 +70,9 @@ const state = {
   bucket: 'all',
   fleetPage: 0,
   detailTab: 'overview',
+  // A sub-agent's own transcript for the Conversation tab, by session id:
+  // { messages, total, loading, error, fetchedAt }.
+  conversations: new Map(),
   archiveView: false,
   detailDrafts: new Map(),
   // Parent session ids whose worker chats are unfolded under them in Recent.
@@ -691,8 +694,12 @@ function renderDetail() {
   const running = r.status === 'running' || r.status === 'waiting_approval';
   const events = (state.events.get(r.session_id) || []).slice(-200).reverse();
   const children = r.children || [];
-  const tab = ['overview', 'activity', 'steering'].includes(state.detailTab) ? state.detailTab : 'overview';
-  const tabs = [['overview', 'Overview'], ['activity', 'Activity'], ['steering', 'Steering']]
+  // A sub-agent's chat is not one the user has open, so its conversation
+  // (what it was told, what it said, every tool call) gets a tab here.
+  const isSubAgent = !!r.parent_session;
+  const tabKeys = ['overview', 'activity', ...(isSubAgent ? ['conversation'] : []), 'steering'];
+  const tab = tabKeys.includes(state.detailTab) ? state.detailTab : 'overview';
+  const tabs = [['overview', 'Overview'], ['activity', 'Activity'], ...(isSubAgent ? [['conversation', 'Conversation']] : []), ['steering', 'Steering']]
     .map(([key, label]) => `<button type="button" id="ag-tab-${key}" class="ag-detail-tab${tab === key ? ' active' : ''}" data-ag="detail-tab" data-tab="${key}" role="tab" aria-label="${label} for ${esc(r.name)}" aria-controls="ag-panel-${key}" aria-selected="${tab === key}" tabindex="${tab === key ? '0' : '-1'}">${label}</button>`).join('');
   const overview = `
     ${loadoutSummaryHtml(r)}
@@ -729,7 +736,7 @@ function renderDetail() {
       </div>
     </div>
     <div class="ag-detail-tabs" role="tablist" aria-label="${esc(r.name)} details">${tabs}</div>
-    <div class="ag-detail-tab-panel" id="ag-panel-${tab}" role="tabpanel" aria-labelledby="ag-tab-${tab}" data-wb-scroll="detail-tab">${tab === 'overview' ? overview : tab === 'activity' ? activity : steering}</div>`;
+    <div class="ag-detail-tab-panel" id="ag-panel-${tab}" role="tabpanel" aria-labelledby="ag-tab-${tab}" data-wb-scroll="detail-tab">${tab === 'overview' ? overview : tab === 'activity' ? activity : tab === 'conversation' ? conversationHtml(r) : steering}</div>`;
   if (keep != null) { const s2 = box.querySelector('[data-wb-scroll="detail-tab"]'); if (s2) s2.scrollTop = keep; }
   Object.entries(draft).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
   Object.entries(state.detailDrafts.get(r.session_id) || {}).forEach(([id, value]) => { const el = $(id); if (el) el.value = value; });
@@ -741,6 +748,63 @@ function renderDetail() {
     }
   }
   if (!state.events.has(r.session_id)) loadHistory(r.session_id).then(() => { if (state.selected === r.session_id) renderDetail(); });
+  if (tab === 'conversation') loadConversation(r);
+}
+
+// ── sub-agent conversation ────────────────────────────────────────────────
+// Read from the chat's own saved history (/api/history, owner-checked), the
+// same messages the chat view renders, including each reply's tool events.
+const CONVERSATION_LIMIT = 100;
+// A running sub-agent's transcript is re-read on refresh, at most this often.
+const CONVERSATION_STALE_MS = 4000;
+async function loadConversation(r, { force = false } = {}) {
+  const sid = r.session_id;
+  const cur = state.conversations.get(sid);
+  const running = r.status === 'running' || r.status === 'waiting_approval';
+  if (cur && (cur.loading || (!force && (!running || Date.now() - cur.fetchedAt < CONVERSATION_STALE_MS)))) return;
+  state.conversations.set(sid, Object.assign({ messages: [], total: 0 }, cur, { loading: true }));
+  let next;
+  try {
+    const h = await api(`/api/history/${encodeURIComponent(sid)}?limit=${CONVERSATION_LIMIT}`);
+    next = { messages: h.history || [], total: h.total || 0, error: '' };
+  } catch (e) {
+    next = Object.assign({ messages: [], total: 0 }, cur, { error: e.message || 'Could not load the conversation' });
+  }
+  state.conversations.set(sid, Object.assign(next, { loading: false, fetchedAt: Date.now() }));
+  if (state.selected === sid && state.detailTab === 'conversation') renderDetail();
+}
+function conversationToolHtml(ev) {
+  const ok = ev.exit_code === 0 || ev.exit_code == null;
+  const body = [
+    ev.command ? `<pre class="ag-convo-cmd">${esc(String(ev.command).slice(0, 4000))}</pre>` : '',
+    ev.output ? `<pre class="ag-convo-out">${esc(String(ev.output).slice(0, 8000))}</pre>` : '',
+    ev.error ? `<pre class="ag-convo-out wb-text-bad">${esc(String(ev.error).slice(0, 2000))}</pre>` : '',
+  ].join('');
+  const head = `<span class="ag-convo-tool-icon${ok ? '' : ' bad'}">${ok ? '✓' : '✗'}</span><code>${esc(ev.tool || 'tool')}</code>${ev.round ? `<span class="wb-meta-item">round ${Number(ev.round)}</span>` : ''}`;
+  return body ? `<details class="ag-convo-tool"><summary>${head}</summary>${body}</details>` : `<div class="ag-convo-tool">${head}</div>`;
+}
+function conversationMessageHtml(m) {
+  const meta = m.metadata || {};
+  const role = m.role === 'user' ? (meta.source === 'worker' ? `Worker · ${meta.from_session_name || 'result'}` : meta.source === 'agent' ? `Agent · ${meta.from_session_name || 'another chat'}` : 'Task')
+    : m.role === 'assistant' ? (meta.model || 'Agent') : (m.role || 'system');
+  const text = typeof m.content === 'string' ? m.content
+    : Array.isArray(m.content) ? m.content.map((p) => (p && p.text) || '').join('\n') : '';
+  const tools = (Array.isArray(meta.tool_events) ? meta.tool_events : []).filter((ev) => ev && typeof ev === 'object');
+  return `<div class="ag-convo-msg ag-convo-${m.role === 'user' ? 'user' : 'ai'}">
+    <div class="ag-convo-role">${esc(role)}${meta.status && m.role === 'assistant' ? ` ${pill(meta.status === 'completed' ? 'finished' : meta.status)}` : ''}</div>
+    ${tools.length ? `<details class="ag-convo-tools"><summary>${tools.length} tool call${tools.length === 1 ? '' : 's'}</summary>${tools.map(conversationToolHtml).join('')}</details>` : ''}
+    ${text.trim() ? `<div class="ag-convo-text">${esc(text)}</div>` : ''}
+  </div>`;
+}
+function conversationHtml(r) {
+  const c = state.conversations.get(r.session_id);
+  const msgs = c ? c.messages : [];
+  const head = `<div class="wb-group-h"><span class="wb-group-title">Conversation</span><span class="wb-count">${c ? (c.total || msgs.length) : ''}</span><span class="wb-spacer"></span><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="convo-refresh" data-sid="${esc(r.session_id)}"${c && c.loading ? ' disabled' : ''}>${c && c.loading ? 'Loading…' : 'Refresh'}</button></div>`;
+  const older = c && c.total > msgs.length ? `<div class="wb-empty">Showing the last ${msgs.length} of ${c.total} messages — open the chat for the rest.</div>` : '';
+  const body = !c || (c.loading && !msgs.length) ? '<div class="wb-empty">Loading conversation…</div>'
+    : c.error && !msgs.length ? `<div class="wb-empty wb-text-bad">${esc(c.error)}</div>`
+    : msgs.length ? older + msgs.map(conversationMessageHtml).join('') : '<div class="wb-empty">No messages yet.</div>';
+  return `<div class="ag-section ag-convo">${head}<div class="ag-convo-list">${body}</div></div>`;
 }
 /** The steering log for the selected chat: one row per message, newest first.
  *
@@ -1034,6 +1098,10 @@ async function onClick(e) {
     else if (act === 'detail-tab') {
       state.detailTab = b.dataset.tab || 'overview';
       renderDetail();
+    }
+    else if (act === 'convo-refresh') {
+      const r = state.rows.find((x) => x.session_id === b.dataset.sid);
+      if (r) await loadConversation(r, { force: true });
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'config-toggle') {

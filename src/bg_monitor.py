@@ -58,9 +58,10 @@ async def _drain_agent(sess, messages, *, run_id=None):
         # A continuation of the user's own chat, not a sub-agent: the
         # anti-fan-out set does not apply, and the chat's own policy does —
         # the tools it has switched off and its approval mode, which
-        # `run_headless` resolves from the chat itself. This is the same
-        # hand-off shape as a finished worker's continuation
-        # (`agent_control._hand_off`), and it gets the same answer.
+        # `run_headless` resolves from the chat itself. A finished worker's
+        # continuation (`agent_control._continue_parent`) has the same shape
+        # but additionally denies every launcher, so a worker's completion
+        # can never start more workers.
         subagent=False,
         activity_session_id=getattr(sess, "id", None) if run_id else None,
         run_id=run_id,

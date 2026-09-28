@@ -31,6 +31,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { applyRightDock } from './modalSnap.js';
 import { renderDiffText, renderFileTable, parseUnifiedDiff, diffStats } from './diffView.js';
+import { isCardOpen, setCardOpen } from './cardState.js';
 
 const PREFS_KEY = 'odysseus-workbench-prefs';
 const MAX_EVENTS = 1500;
@@ -1255,9 +1256,12 @@ function updateChatCard(ev) {
   let card = state.chatCards.get(ev.run_id);
   if (!card) {
     card = document.createElement('div');
-    card.className = 'agent-run-card';
+    // Collapsed unless the user opened this run's card before (kept across
+    // a refresh by cardState).
+    const wasOpen = isCardOpen(`run:${ev.run_id}`);
+    card.className = 'agent-run-card' + (wasOpen ? ' open' : '');
     card.dataset.run = ev.run_id;
-    card.innerHTML = '<div class="agent-run-head" role="button" tabindex="0" aria-expanded="false"></div><div class="agent-run-steps"></div><div class="agent-run-foot"></div>';
+    card.innerHTML = `<div class="agent-run-head" role="button" tabindex="0" aria-expanded="${wasOpen}"></div><div class="agent-run-steps"></div><div class="agent-run-foot"></div>`;
     state.chatCards.set(ev.run_id, card);
     // Attach inside the assistant turn that is streaming (so the card sits with
     // the conversation), else at the end of the history.
@@ -1267,8 +1271,9 @@ function updateChatCard(ev) {
       const b = e.target.closest('[data-wb-act]');
       if (!b) {
         if (e.target.closest('.agent-run-head')) {
-          card.classList.toggle('open');
-          card.querySelector('.agent-run-head').setAttribute('aria-expanded', String(card.classList.contains('open')));
+          const opened = card.classList.toggle('open');
+          card.querySelector('.agent-run-head').setAttribute('aria-expanded', String(opened));
+          setCardOpen(`run:${ev.run_id}`, opened);
         }
         return;
       }
@@ -1276,6 +1281,9 @@ function updateChatCard(ev) {
       const act = b.dataset.wbAct;
       if (act === 'open-wb') { open(); state.focusRun = ev.run_id; setTab('activity'); }
       if (act === 'open-changes' && run.data.task_id) { open(); loadTask(run.data.task_id); }
+    });
+    card.addEventListener('keydown', (e) => {
+      if ((e.key === 'Enter' || e.key === ' ') && e.target.classList.contains('agent-run-head')) { e.preventDefault(); e.target.click(); }
     });
     const near = hist.scrollHeight - hist.scrollTop - hist.clientHeight < 160;
     if (near) hist.scrollTop = hist.scrollHeight;
