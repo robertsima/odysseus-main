@@ -3380,7 +3380,6 @@ function initAll() {
     initSignupToggle, initShareDefaultsToggle, initAddUser, initEndpointForm, initMcpForm,
     initCalDAV, initBackup, initDangerZone, initTokenForm, initLogsView, initRouteLatencyView,
     initDiagnosticsBundle, initRag,
-    () => settingsModule.initIntegrations()
   ];
   for (const fn of inits) {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }

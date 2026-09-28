@@ -542,7 +542,6 @@ function buildFixture(document) {
     'models',
     'search',
     'integrations',
-    'email',
     'reminders',
     'appearance',
     'shortcuts',

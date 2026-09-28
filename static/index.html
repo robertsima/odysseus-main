@@ -1589,20 +1589,16 @@
             <span>Claude Code</span>
           </button>
           <div class="settings-sidebar-divider"></div>
-          <!-- Section 2: Comms (Integrations → Email → Reminders).
-               Integrations leads here because it's where the underlying
-               accounts the other two tabs depend on actually live. -->
+          <!-- Section 2: Comms (Connections → Notifications).
+               Connections leads because it holds the accounts that
+               notification channels deliver through. -->
           <button class="settings-nav-item" data-settings-tab="integrations">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
-            <span>Integrations</span>
-          </button>
-          <button class="settings-nav-item" data-settings-tab="email">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
-            <span>Email</span>
+            <span>Connections</span>
           </button>
           <button class="settings-nav-item" data-settings-tab="reminders">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            <span>Reminders</span>
+            <span>Notifications</span>
           </button>
           <div class="settings-sidebar-divider"></div>
           <!-- Section 3: UX (Appearance → Shortcuts) -->
@@ -2635,42 +2631,15 @@
           </div>
         </div>
 
-        <!-- ═══ EMAIL TAB ═══ -->
-        <div data-settings-panel="email" class="hidden">
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5Z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06A2 2 0 1 1 7.04 4.3l.06.06A1.65 1.65 0 0 0 8.92 4a1.65 1.65 0 0 0 1-1.51V2a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82 1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z"/></svg>Email Settings</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Auto reply, newsletter unsubscribe, and writing style live in the Email window.</div>
-              <button class="admin-btn-add" id="set-email-open-library-settings" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><path d="M9 18l6-6-6-6"/></svg>Open Email Settings</button>
-            </div>
-          </div>
-
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>Email Accounts</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Add, edit, delete, and test accounts in Integrations.</div>
-              <button class="admin-btn-add" id="set-email-open-integrations" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Open Integrations</button>
-            </div>
-          </div>
-
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Email Tasks</h2>
-            <div class="settings-row" style="align-items:center;">
-              <div class="admin-toggle-sub" style="margin:0;flex:1;">Manage email background tasks in Tasks.</div>
-              <button class="admin-btn-add" id="set-email-open-tasks" style="display:inline-flex;align-items:center;gap:6px;"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="opacity:0.7"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M9 16l2 2 4-4"/></svg>Open Tasks</button>
-            </div>
-          </div>
-
-        </div>
 
         <!-- ═══ REMINDERS TAB ═══ -->
         <div data-settings-panel="reminders" class="hidden">
           <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>How you're reminded<span style="flex:1"></span><span id="set-reminder-test-msg" style="font-size:11px;font-weight:normal;"></span><button class="admin-btn-sm" id="set-reminder-test-btn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test</button></h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Controls how fired note reminders are delivered.</div>
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>How you're notified<span style="flex:1"></span><span id="set-reminder-test-msg" style="font-size:11px;font-weight:normal;"></span><button class="admin-btn-sm" id="set-reminder-test-btn" style="font-size:11px;font-weight:normal;display:inline-flex;align-items:center;gap:4px;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>Test</button></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Where fired note reminders are delivered. Every reminder also shows as a browser notification inside Odysseus.</div>
             <div class="settings-col">
-              <div class="settings-row">
-                <label class="settings-label">Channel</label>
+              <div class="settings-row" data-setting-key="reminder_channel">
+                <label class="settings-label" for="set-reminder-channel">Channel</label>
                 <select id="set-reminder-channel" class="settings-select">
                   <option value="browser">Browser notification (default)</option>
                   <option value="email" id="set-reminder-channel-email-opt">Email</option>
@@ -2678,57 +2647,58 @@
                   <option value="webhook" id="set-reminder-channel-webhook-opt">Webhook</option>
                 </select>
               </div>
-              <div id="set-reminder-email-from-row" class="settings-row" style="display:none">
-                <label class="settings-label">Send from</label>
+              <div id="set-reminder-email-from-row" class="settings-row" style="display:none" data-setting-key="reminder_email_account_id">
+                <label class="settings-label" for="set-reminder-email-account">Send from</label>
                 <select id="set-reminder-email-account" class="settings-select"></select>
               </div>
-              <div id="set-reminder-email-to-row" class="settings-row" style="display:none">
-                <label class="settings-label">Send to</label>
+              <div id="set-reminder-email-to-row" class="settings-row" style="display:none" data-setting-key="reminder_email_to">
+                <label class="settings-label" for="set-reminder-email-to">Send to</label>
                 <input id="set-reminder-email-to" class="settings-select" type="email" placeholder="you@example.com" />
               </div>
-              <div id="set-reminder-ntfy-topic-row" class="settings-row" style="display:none">
-                <label class="settings-label">ntfy topic</label>
+              <div id="set-reminder-ntfy-topic-row" class="settings-row" style="display:none" data-setting-key="reminder_ntfy_topic">
+                <label class="settings-label" for="set-reminder-ntfy-topic">ntfy topic</label>
                 <input id="set-reminder-ntfy-topic" class="settings-select" type="text" placeholder="reminders" />
               </div>
-              <div id="set-reminder-webhook-intg-row" class="settings-row" style="display:none">
-                <label class="settings-label">Integration</label>
+              <div id="set-reminder-webhook-intg-row" class="settings-row" style="display:none" data-setting-key="reminder_webhook_integration_id">
+                <label class="settings-label" for="set-reminder-webhook-intg">Integration</label>
                 <select id="set-reminder-webhook-intg" class="settings-select"></select>
               </div>
-              <div id="set-reminder-webhook-template-row" class="settings-row" style="display:none;align-items:flex-start">
-                <label class="settings-label" style="padding-top:6px">Payload</label>
+              <div id="set-reminder-webhook-template-row" class="settings-row" style="display:none;align-items:flex-start" data-setting-key="reminder_webhook_payload_template">
+                <label class="settings-label" for="set-reminder-webhook-template" style="padding-top:6px">Payload</label>
                 <textarea id="set-reminder-webhook-template" class="settings-select" rows="3" style="font-family:inherit;resize:vertical;flex:1" placeholder='{"content": "{{title}}: {{message}}"}'></textarea>
               </div>
               <div id="set-reminder-channel-hint" style="font-size:11px;opacity:0.6;"></div>
-              <div style="font-size:11px;opacity:0.6;margin-top:4px;">Configure email account, ntfy server, etc. in <a href="#" id="set-reminders-open-integrations" style="color:var(--accent, var(--red));text-decoration:none;font-weight:600;">Integrations</a>.</div>
+              <div style="font-size:11px;opacity:0.6;margin-top:4px;">Email accounts, the ntfy server and webhooks are set up under <a href="#" id="set-reminders-open-integrations" style="color:var(--accent, var(--red));text-decoration:none;font-weight:600;">Connections</a>.</div>
             </div>
           </div>
           <div class="admin-card">
-            <h2 style="display:flex;align-items:center;gap:6px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:1px;opacity:0.6;flex-shrink:0"><path d="M12 0L14.59 8.41L23 12L14.59 15.59L12 24L9.41 15.59L1 12L9.41 8.41Z"/></svg>AI Synthesis<span style="flex:1"></span><label class="admin-switch" title="Use the utility model to write reminder messages"><input type="checkbox" id="set-reminder-llm-toggle"><span class="admin-slider"></span></label></h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">When on, the utility model writes a short, warm one-line reminder for browser, email, ntfy, and webhook reminders instead of just the raw note content.</div>
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Public app URL</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Used to build clickable links back to Odysseus in outgoing reminder and urgent-email messages (e.g. <code>https://chat.yourdomain.com</code>). Leave blank to omit links.</div>
             <div class="settings-col">
-              <div class="settings-row">
-                <label class="settings-label" title="Optional — write the reminder in the voice of a saved character">Persona</label>
-                <select id="set-reminder-llm-persona" class="settings-select" style="flex:1;">
-                  <option value="">Default (warm, neutral)</option>
-                </select>
-              </div>
-              <div style="font-size:11px;opacity:0.7;margin-top:2px;">
-                <a href="#" data-open-prompt-modal style="color:var(--accent, var(--red));text-decoration:underline;font-weight:600;">Edit persona settings here →</a>
-              </div>
-              <div id="set-reminder-llm-persona-msg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 55%, transparent);"></div>
-            </div>
-          </div>
-          <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Public App URL</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Used to build clickable links back to Odysseus inside outgoing reminder / urgent-email emails (e.g. <code>https://chat.yourdomain.com</code>). Leave blank to omit links.</div>
-            <div class="settings-col">
-              <div class="settings-row">
-                <label class="settings-label">URL</label>
+              <div class="settings-row" data-setting-key="app_public_url">
+                <label class="settings-label" for="set-app-public-url">URL</label>
                 <input id="set-app-public-url" class="settings-select" type="url" placeholder="https://chat.example.com" style="flex:1;" />
               </div>
               <div id="set-app-public-url-msg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 55%, transparent);"></div>
             </div>
           </div>
+          <details class="admin-card settings-advanced" id="set-reminderAdvanced">
+            <summary>Advanced <span class="settings-advanced-hint">AI phrasing</span></summary>
+            <div class="settings-col" id="set-reminder-llm-wrap">
+              <div class="settings-row" data-setting-key="reminder_llm_synthesis">
+                <label class="settings-label" for="set-reminder-llm-toggle" style="flex:1;">Let the utility model phrase reminders</label>
+                <label class="admin-switch" title="Use the utility model to write reminder messages"><input type="checkbox" id="set-reminder-llm-toggle"><span class="admin-slider"></span></label>
+              </div>
+              <div class="admin-toggle-sub">Writes a short, warm one-line reminder for browser, email, ntfy and webhook reminders instead of the raw note text.</div>
+              <div class="settings-row" data-setting-key="reminder_llm_persona">
+                <label class="settings-label" for="set-reminder-llm-persona" title="Optional — write the reminder in the voice of one of the built-in characters">Voice</label>
+                <select id="set-reminder-llm-persona" class="settings-select" style="flex:1;">
+                  <option value="">Default (warm, neutral)</option>
+                </select>
+              </div>
+              <div id="set-reminder-llm-persona-msg" style="font-size:11px;color:color-mix(in srgb, var(--fg) 55%, transparent);"></div>
+            </div>
+          </details>
         </div>
 
         <!-- ═══ ADMIN: USERS TAB ═══ -->
@@ -2778,8 +2748,8 @@
         <!-- ═══ INTEGRATIONS TAB ═══ -->
         <div data-settings-panel="integrations" class="hidden">
           <div class="admin-card">
-            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Integrations</h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">All external service connections in one place.</div>
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>Connections</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Email and calendar accounts, contacts, MCP servers, API services and agent tokens. Click one to edit it.</div>
             <div id="unified-integrations-list"></div>
             <div id="unified-intg-form" style="display:none"></div>
             <div style="text-align:right;padding:8px 0;">

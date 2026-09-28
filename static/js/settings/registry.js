@@ -102,22 +102,26 @@ export const SETTINGS_PANELS = Object.freeze([
 
   definePanel({
     id: 'integrations',
-    label: 'Integrations',
+    label: 'Connections',
     group: 'communications',
     controller: 'admin',
-    keywords: ['integrations', 'connections', 'services'],
-  }),
-  definePanel({
-    id: 'email',
-    label: 'Email',
-    group: 'communications',
-    keywords: ['email', 'imap', 'smtp', 'oauth'],
+    aliases: ['email'],
+    keywords: [
+      'connections', 'integrations', 'services', 'email', 'email accounts',
+      'imap', 'smtp', 'oauth', 'gmail', 'calendar', 'caldav', 'google calendar',
+      'contacts', 'carddav', 'mcp', 'mcp servers', 'api', 'webhook', 'ntfy server',
+      'tokens', 'codex', 'claude agent', 'writing style', 'auto reply',
+    ],
   }),
   definePanel({
     id: 'reminders',
-    label: 'Reminders',
+    label: 'Notifications',
     group: 'communications',
-    keywords: ['reminders', 'notifications', 'alerts'],
+    keywords: [
+      'notifications', 'reminders', 'alerts', 'ntfy', 'ntfy topic', 'webhook',
+      'email reminders', 'public url', 'public app url', 'app url', 'links',
+      'ai phrasing', 'synthesis',
+    ],
   }),
 
   definePanel({
@@ -161,7 +165,7 @@ export const SETTINGS_PANELS = Object.freeze([
     group: 'administration',
     controller: 'admin',
     adminOnly: true,
-    keywords: ['configuration', 'capabilities', 'skills', 'plugins', 'mcp'],
+    keywords: ['configuration', 'capabilities', 'skills', 'plugins'],
   }),
   definePanel({
     id: 'system',
