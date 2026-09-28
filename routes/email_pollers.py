@@ -468,6 +468,93 @@ def _latest_inbox_fallback_uids(conn, reconnect):
         return [], reconnect()
 
 
+# Blocking pieces of _auto_summarize_pass_single, kept synchronous so the pass
+# can hand each one to asyncio.to_thread (see the note in that function).
+
+def _scan_recent_uids(conn, since: str, include_sent: bool) -> list:
+    """(folder, uid) pairs received since ``since`` in INBOX (and Sent)."""
+    uid_list = []
+    folders_to_scan = ["INBOX"]
+    if include_sent:
+        for sent_name in ("Sent", "INBOX/Sent", "Sent Items", "[Gmail]/Sent Mail"):
+            try:
+                st, _ = conn.select(_q(sent_name), readonly=True)
+                if st == "OK":
+                    folders_to_scan.append(sent_name)
+                    break
+            except Exception:
+                continue
+    for folder in folders_to_scan:
+        try:
+            conn.select(_q(folder), readonly=True)
+            status, data = conn.uid("SEARCH", None, f'(SINCE {since})')
+            if status == "OK" and data[0]:
+                for u in reversed(data[0].split()[-30:]):
+                    uid_list.append((folder, u))
+        except Exception as _e:
+            logger.warning(f"Folder {folder} scan failed: {_e}")
+    return uid_list
+
+
+def _fetch_rfc822(conn, uid):
+    """FETCH one message (already-selected folder) → (status, parsed message)."""
+    st, msg_data = conn.uid("FETCH", uid if isinstance(uid, bytes) else str(uid).encode(), "(RFC822)")
+    if st != "OK":
+        return st, None
+    return st, email_mod.message_from_bytes(msg_data[0][1])
+
+
+def _cache_write(sql: str, params) -> None:
+    import sqlite3 as _sql3
+    _c = _sql3.connect(SCHEDULED_DB)
+    try:
+        _c.execute(sql, params)
+        _c.commit()
+    finally:
+        _c.close()
+
+
+def _load_cached_message_ids(account_owner, account_id, *, away_only: bool,
+                             want_tags: bool, want_cal: bool, want_urgent: bool):
+    """Message ids already summarized / replied / tagged / calendar-scanned."""
+    import sqlite3 as _sql3
+    _c = _sql3.connect(SCHEDULED_DB)
+    try:
+        _cache_owner_clause, _cache_owner_params = _email_cache_owner_clause(account_owner)
+        _sum_existing = set() if away_only else {r[0] for r in _c.execute(
+            f"SELECT message_id FROM email_summaries WHERE {_cache_owner_clause}",
+            _cache_owner_params,
+        ).fetchall()}
+        _reply_existing = set() if away_only else {r[0] for r in _c.execute(
+            f"SELECT message_id FROM email_ai_replies WHERE {_cache_owner_clause}",
+            _cache_owner_params,
+        ).fetchall()}
+        if want_tags:
+            if account_owner:
+                _tag_existing = {r[0] for r in _c.execute(
+                    "SELECT message_id FROM email_tags WHERE owner=? AND (account_id=? OR account_id='' OR account_id IS NULL)",
+                    (account_owner, account_id or ""),
+                ).fetchall()}
+            else:
+                _tag_existing = {r[0] for r in _c.execute(
+                    "SELECT message_id FROM email_tags WHERE (owner='' OR owner IS NULL) AND (account_id=? OR account_id='' OR account_id IS NULL)",
+                    (account_id or "",),
+                ).fetchall()}
+        else:
+            _tag_existing = set()
+        _cal_existing = set() if away_only else {r[0] for r in _c.execute(
+            f"SELECT message_id FROM email_calendar_extractions WHERE {_cache_owner_clause}",
+            _cache_owner_params,
+        ).fetchall()} if want_cal else set()
+        _urgent_existing = {r[0] for r in _c.execute(
+            f"SELECT message_id FROM email_urgency_alerts WHERE {_cache_owner_clause}",
+            _cache_owner_params,
+        ).fetchall()} if want_urgent else set()
+    finally:
+        _c.close()
+    return _sum_existing, _reply_existing, _tag_existing, _cal_existing, _urgent_existing
+
+
 async def _auto_summarize_pass(days_back: int = 1, account_id: str | None = None, max_process: int | None = None, progress_cb=None, away_only: bool = False) -> str:
     """Single pass of the auto-summarize/reply scan.
 
@@ -551,112 +638,79 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     if not auto_sum and not auto_reply_draft and not auto_reply_away and not auto_tag and not auto_spam and not auto_cal:
         return "Nothing to do"
 
+    # Everything below that talks to the IMAP/SMTP server, parses a message or
+    # attachment, or opens SQLite runs in a worker thread (asyncio.to_thread).
+    # This pass is async only so it can await the model; its mail I/O is plain
+    # blocking imaplib/smtplib. Run inline, an SSL read of one large RFC822
+    # FETCH held the event loop for 1.5-1.8 s at every hourly email task
+    # ([loop-lag] ... ssl.py read <- _auto_summarize_pass_single), freezing
+    # every open tab. The connection is used by one thread at a time, in order.
+
     # Owner of the account being processed. All calendar + mailbox reads/writes
     # below are scoped to this user: the multi-account fan-out runs every user's
     # mailbox, so an unscoped pass would disclose/mutate other tenants' data.
     # One resolution feeds both the mailbox path (account_owner) and upstream's
     # calendar path (_acct_owner, which expects None rather than "").
-    account_owner = _owner_for_email_account(account_id)
+    account_owner = await asyncio.to_thread(_owner_for_email_account, account_id)
     _acct_owner = account_owner or None
 
     conn = None
     try:
         await _emit_progress(progress_cb, "Connecting to mail…")
-        conn = _imap_connect(account_id, owner=account_owner)
+        conn = await asyncio.to_thread(_imap_connect, account_id, owner=account_owner)
         from datetime import timedelta as _td
         since = (datetime.utcnow() - _td(days=max(1, days_back))).strftime("%d-%b-%Y")
         # uid_list carries real IMAP UIDs, matching the email UI/read routes.
         # Using sequence numbers here made background-cached replies miss when
         # the user clicked the same visible message in the UI.
-        uid_list = []
-        folders_to_scan = ["INBOX"]
-        if auto_cal:
-            for sent_name in ("Sent", "INBOX/Sent", "Sent Items", "[Gmail]/Sent Mail"):
-                try:
-                    st, _ = conn.select(_q(sent_name), readonly=True)
-                    if st == "OK":
-                        folders_to_scan.append(sent_name)
-                        break
-                except Exception:
-                    continue
-        for folder in folders_to_scan:
-            try:
-                conn.select(_q(folder), readonly=True)
-                status, data = conn.uid("SEARCH", None, f'(SINCE {since})')
-                if status == "OK" and data[0]:
-                    for u in reversed(data[0].split()[-30:]):
-                        uid_list.append((folder, u))
-            except Exception as _e:
-                logger.warning(f"Folder {folder} scan failed: {_e}")
+        uid_list = await asyncio.to_thread(_scan_recent_uids, conn, since, auto_cal)
         # Some IMAP servers/accounts give unreliable results for SINCE
         # because of INTERNALDATE/date-header quirks. If the user manually
         # runs a cacheable email task and SINCE finds nothing, fall back to
         # the latest visible inbox messages so Clear cache -> Run again can
         # actually repopulate AI reply/summary/tag caches.
         if not uid_list:
-            _fb_uids, conn = _latest_inbox_fallback_uids(
-                conn, lambda: _imap_connect(account_id, owner=account_owner)
+            _fb_uids, conn = await asyncio.to_thread(
+                _latest_inbox_fallback_uids,
+                conn, lambda: _imap_connect(account_id, owner=account_owner),
             )
             uid_list.extend(_fb_uids)
         # Re-select INBOX as default for downstream code (on a clean socket even
         # if the SEARCH ALL fallback above failed — see #1613).
-        conn.select("INBOX", readonly=True)
+        await asyncio.to_thread(conn.select, "INBOX", readonly=True)
         if not uid_list:
             return "No recent emails"
         await _emit_progress(progress_cb, f"Found {len(uid_list)} recent email(s); checking cache…")
 
-        _c = _sql3.connect(SCHEDULED_DB)
-        _cache_owner_clause, _cache_owner_params = _email_cache_owner_clause(account_owner)
-        _sum_existing = set() if away_only else {r[0] for r in _c.execute(
-            f"SELECT message_id FROM email_summaries WHERE {_cache_owner_clause}",
-            _cache_owner_params,
-        ).fetchall()}
-        _reply_existing = set() if away_only else {r[0] for r in _c.execute(
-            f"SELECT message_id FROM email_ai_replies WHERE {_cache_owner_clause}",
-            _cache_owner_params,
-        ).fetchall()}
-        if auto_tag or auto_spam:
-            if account_owner:
-                _tag_existing = {r[0] for r in _c.execute(
-                    "SELECT message_id FROM email_tags WHERE owner=? AND (account_id=? OR account_id='' OR account_id IS NULL)",
-                    (account_owner, account_id or ""),
-                ).fetchall()}
-            else:
-                _tag_existing = {r[0] for r in _c.execute(
-                    "SELECT message_id FROM email_tags WHERE (owner='' OR owner IS NULL) AND (account_id=? OR account_id='' OR account_id IS NULL)",
-                    (account_id or "",),
-                ).fetchall()}
-        else:
-            _tag_existing = set()
-        _cal_existing = set() if away_only else {r[0] for r in _c.execute(
-            f"SELECT message_id FROM email_calendar_extractions WHERE {_cache_owner_clause}",
-            _cache_owner_params,
-        ).fetchall()} if auto_cal else set()
         # Urgency is handled by the built-in `check_email_urgency` task. Keep
         # this legacy poller path disabled so users don't get two independent
         # urgent-email systems.
         auto_urgent = False
-        _urgent_existing = {r[0] for r in _c.execute(
-            f"SELECT message_id FROM email_urgency_alerts WHERE {_cache_owner_clause}",
-            _cache_owner_params,
-        ).fetchall()} if auto_urgent else set()
-        _c.close()
+        (_sum_existing, _reply_existing, _tag_existing, _cal_existing,
+         _urgent_existing) = await asyncio.to_thread(
+            _load_cached_message_ids,
+            account_owner, account_id,
+            away_only=away_only, want_tags=bool(auto_tag or auto_spam),
+            want_cal=bool(auto_cal), want_urgent=auto_urgent,
+        )
 
         # Hoist the self-address lookup OUT of the per-email loop — fetching
         # this per-iteration was making big inbox scans crawl. Used by the
         # urgency self-loop check below.
         try:
-            _self_self_addr = (_get_email_config(account_id, owner=account_owner).get("from_address") or "").strip().lower()
+            _self_self_addr = ((await asyncio.to_thread(
+                _get_email_config, account_id, owner=account_owner
+            )).get("from_address") or "").strip().lower()
         except Exception:
             _self_self_addr = ""
 
-        spam_folder = _detect_spam_folder(conn) if auto_spam else None
+        spam_folder = (await asyncio.to_thread(_detect_spam_folder, conn)) if auto_spam else None
         if auto_spam and not spam_folder:
             logger.warning("Auto-spam enabled but no Junk/Spam folder detected — will classify but not move")
 
         needs_llm = bool(auto_sum or auto_reply_draft or auto_tag or auto_spam or auto_cal)
         if needs_llm:
-            task_candidates = resolve_task_candidates(owner=account_owner)
+            task_candidates = await asyncio.to_thread(resolve_task_candidates, owner=account_owner)
             if not task_candidates:
                 return "No model configured"
             url, model, headers = task_candidates[0]
@@ -702,14 +756,12 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 _folder, uid = "INBOX", _entry
             try:
                 if _folder != _current_folder:
-                    conn.select(_q(_folder), readonly=True)
+                    await asyncio.to_thread(conn.select, _q(_folder), readonly=True)
                     _current_folder = _folder
-                st, msg_data = conn.uid("FETCH", uid if isinstance(uid, bytes) else str(uid).encode(), "(RFC822)")
+                st, msg = await asyncio.to_thread(_fetch_rfc822, conn, uid)
                 if st != "OK":
                     continue
                 examined += 1
-                raw = msg_data[0][1]
-                msg = email_mod.message_from_bytes(raw)
                 message_id = msg.get("Message-ID", "").strip()
                 if not message_id:
                     # Include folder+UID so each message gets a unique synth ID
@@ -764,8 +816,9 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 sender = _decode_header(msg.get("From", ""))
                 if need_away_reply:
                     try:
-                        sent_away, away_detail = _send_away_reply(
-                            settings, account_owner, account_id, msg, message_id, sender, subject
+                        sent_away, away_detail = await asyncio.to_thread(
+                            _send_away_reply,
+                            settings, account_owner, account_id, msg, message_id, sender, subject,
                         )
                         if sent_away:
                             _away_replies_sent += 1
@@ -779,7 +832,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
                         _detail_lines.append(f"away reply failed · {_folder}#{_uid_text} · {subject or '(no subject)'}")
                         logger.warning(f"Away reply {uid} failed: {e}")
-                body = _extract_text(msg)
+                body = await asyncio.to_thread(_extract_text, msg)
                 # Pull text out of any PDFs / text attachments and append to
                 # the body so summaries / replies can actually reason about
                 # the contents (e.g. "your invoice arrived" produces a
@@ -787,7 +840,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                 att_text = ""
                 if need_sum or need_reply:
                     try:
-                        att_text = _extract_attachment_text(msg, max_chars=6000)
+                        att_text = await asyncio.to_thread(_extract_attachment_text, msg, max_chars=6000)
                     except Exception as _ae:
                         logger.debug(f"attachment text extraction failed for uid={uid}: {_ae}")
                 # No threshold for calendar or reply drafting — even "can you
@@ -826,14 +879,11 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             timeout=240,
                         )
                         if summary:
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
+                            await asyncio.to_thread(_cache_write, """
                                 INSERT OR REPLACE INTO email_summaries
                                 (message_id, owner, uid, folder, subject, sender, summary, model_used, created_at)
                                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                             """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender, summary, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
                             _sum_existing.add(message_id)
                             _summaries_created += 1
                             _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
@@ -878,14 +928,11 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         )
                         reply = _apply_email_style_mechanics(_extract_reply(reply or ""))
                         if reply:
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
+                            await asyncio.to_thread(_cache_write, """
                                 INSERT OR REPLACE INTO email_ai_replies
                                 (message_id, owner, uid, folder, reply, model_used, created_at)
                                 VALUES (?, ?, ?, ?, ?, ?, ?)
                             """, (message_id, account_owner or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, reply, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
                             _reply_existing.add(message_id)
                             _replies_drafted += 1
                             _uid_text = uid.decode() if isinstance(uid, bytes) else str(uid)
@@ -908,7 +955,9 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         # create vs update vs cancel based on what already exists.
                         from core.database import get_upcoming_events
                         # Owner-scoped so the LLM never sees other tenants' events.
-                        _existing_summary = get_upcoming_events(_acct_owner, horizon_days=60, limit=40)
+                        _existing_summary = await asyncio.to_thread(
+                            get_upcoming_events, _acct_owner, horizon_days=60, limit=40
+                        )
                         existing_json = json.dumps(_existing_summary)
                         is_sent = _folder.lower().startswith("sent") or "sent" in _folder.lower()
                         cal_extract = await task_llm_call_async(
@@ -1108,8 +1157,8 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                         # the next poll run.
                         try:
                             if _cal_parse_ok:
-                                _cc = _sql3.connect(SCHEDULED_DB)
-                                _cc.execute(
+                                await asyncio.to_thread(
+                                    _cache_write,
                                     "INSERT OR REPLACE INTO email_calendar_extractions "
                                     "(message_id, owner, uid, event_uids, events_created, created_at) VALUES (?, ?, ?, ?, ?, ?)",
                                     (
@@ -1121,8 +1170,6 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                                         datetime.utcnow().isoformat(),
                                     ),
                                 )
-                                _cc.commit()
-                                _cc.close()
                                 _cal_existing.add(message_id)
                         except Exception as ce:
                             logger.debug(f"Could not cache calendar extraction: {ce}")
@@ -1318,12 +1365,11 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
 
                             moved_to = ""
                             if is_spam and auto_spam and spam_folder:
-                                if _imap_move(uid, spam_folder, account_id=account_id, owner=account_owner):
+                                if await asyncio.to_thread(_imap_move, uid, spam_folder, account_id=account_id, owner=account_owner):
                                     moved_to = spam_folder
                                     logger.info(f"Auto-spam moved uid={uid.decode() if isinstance(uid, bytes) else str(uid)} to {spam_folder}: {spam_reason}")
 
-                            _c = _sql3.connect(SCHEDULED_DB)
-                            _c.execute("""
+                            await asyncio.to_thread(_cache_write, """
                                 INSERT OR REPLACE INTO email_tags
                                 (message_id, owner, account_id, uid, folder, subject, sender, tags, spam_verdict,
                                  spam_reason, moved_to, model_used, created_at)
@@ -1331,8 +1377,6 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
                             """, (message_id, account_owner or "", account_id or "", uid.decode() if isinstance(uid, bytes) else str(uid), _folder, subject, sender,
                                   json.dumps(tags), 1 if is_spam else 0,
                                   spam_reason, moved_to, model, datetime.utcnow().isoformat()))
-                            _c.commit()
-                            _c.close()
                             _tag_existing.add(message_id)
                     except Exception as e:
                         logger.warning(f"Auto-classify {uid} failed: {e}")
@@ -1389,7 +1433,7 @@ async def _auto_summarize_pass_single(days_back: int = 1, account_id: str | None
     finally:
         if conn:
             try:
-                conn.logout()
+                await asyncio.to_thread(conn.logout)
             except Exception:
                 pass
 

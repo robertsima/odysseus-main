@@ -1494,7 +1494,19 @@ def _is_session_stream_active(session_id: str) -> bool:
     a circular import (chat_routes imports this module at load time)."""
     try:
         from routes import chat_routes as _cr
-        return session_id in getattr(_cr, "_active_streams", {})
+        if session_id in getattr(_cr, "_active_streams", {}):
+            return True
+    except Exception:
+        pass
+    # A turn with no stream — the chat continuing itself after a worker
+    # reports (agent_control's follow-up, run via agent_runs.track_external) —
+    # is this session's own model work too. Without this the skill extractor
+    # queued by the user's turn ran alongside that follow-up (2026-09-28
+    # 02:56:20-31), which made the log read as if the follow-up had been
+    # learned from.
+    try:
+        from src import agent_runs as _runs
+        return session_id in getattr(_runs, "_EXTERNAL", {})
     except Exception:
         return False
 
@@ -1532,6 +1544,40 @@ async def _run_extraction_jobs_sequentially(session_id: str, jobs: list, max_wai
             await job
         except Exception:
             logger.warning("[bg-extract] %s extraction job failed for session %s", name, session_id, exc_info=True)
+
+
+def _turn_is_learnable(session_id: str, message) -> bool:
+    """Whether memory/skill extraction may learn from this turn.
+
+    No: a turn with no human message, a turn whose message is a runtime
+    envelope ("[Worker ↳ … finished]", "[Message from agent session …]" — the
+    same prefixes extraction_context drops), and any turn in a worker chat
+    (a session with a ``parent_session``), which is one agent's working space
+    and not a conversation with the owner. The worker follow-up itself runs
+    headless and never reaches run_post_response_tasks; this closes the other
+    doors to the same thing.
+    """
+    text = message if isinstance(message, str) else ""
+    if isinstance(message, list):
+        text = " ".join(str(b.get("text") or "") for b in message
+                        if isinstance(b, dict) and b.get("type") == "text")
+    text = text.strip()
+    if not text:
+        return False
+    try:
+        from services.memory.extraction_context import _SYNTHETIC_PREFIXES
+        if text.startswith(_SYNTHETIC_PREFIXES):
+            return False
+    except Exception:
+        pass
+    try:
+        from core.database import get_session_settings
+        if (get_session_settings(session_id) or {}).get("parent_session"):
+            return False
+    except Exception:
+        # Unknown is not "worker": keep the long-standing behaviour.
+        pass
+    return True
 
 
 def _session_allows_memory_writes(session_id: str) -> bool:
@@ -1622,19 +1668,30 @@ def run_post_response_tasks(
     _should_extract = (_msg_count >= 4) and (_msg_count % 4 == 0)
     _memory_candidate = (allow_background_extraction and not incognito and not compare_mode
                          and _should_extract and uprefs.get("auto_memory", True))
-    # Resolve session permissions only when memory extraction would otherwise
-    # dispatch; ordinary turns pay neither a DB lookup nor a snapshot cost.
-    _memory_eligible = bool(
-        _memory_candidate and _session_allows_memory_writes(session_id)
-    )
 
     auto_skills_enabled = bool(uprefs.get("auto_skills", True))
-    _skill_eligible = bool(
+    _skill_candidate = bool(
         extract_skills and allow_background_extraction and auto_skills_enabled
         and not incognito and not compare_mode
         and (agent_rounds >= 2 or agent_tool_calls >= 2)
         and skills_manager is not None
     )
+
+    # Learn only from turns a person started, in a person's chat. A turn whose
+    # message is a runtime envelope (a worker's report, an agent-to-agent
+    # message) or that runs in a worker chat is the agents talking among
+    # themselves; a memory or skill drawn from it is not the owner's. Checked
+    # only when an extractor would otherwise dispatch.
+    if (_memory_candidate or _skill_candidate) and not _turn_is_learnable(session_id, message):
+        logger.debug("[bg-extract] turn in %s is not a person's turn; no extraction", session_id)
+        _memory_candidate = _skill_candidate = False
+
+    # Resolve session permissions only when memory extraction would otherwise
+    # dispatch; ordinary turns pay neither a DB lookup nor a snapshot cost.
+    _memory_eligible = bool(
+        _memory_candidate and _session_allows_memory_writes(session_id)
+    )
+    _skill_eligible = _skill_candidate
 
     # Extraction runs later. Snapshot only when at least one extractor will
     # actually dispatch, and only after filtering so trailing runtime/tool

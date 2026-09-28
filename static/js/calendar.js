@@ -112,7 +112,15 @@ function _filterPool(start, end) {
   }).sort((a, b) => a.dtstart < b.dtstart ? -1 : 1);
 }
 
-async function _fetchEvents(start, end, force) {
+// Refetches nobody asked for (page boot, tab regaining focus/visibility, the
+// chat's calendar-refresh event, adjacent-month prefetch) are tagged as polls.
+// Otherwise the server's foreground gate reads them as the user doing
+// something and cancels whatever scheduled task is running; a person coming
+// back to the tab is already reported by the interactive activity heartbeat
+// (static/app.js), so this loses no real signal.
+const _CAL_PASSIVE_HEADERS = { 'X-Odysseus-Poll': '1' };
+
+async function _fetchEvents(start, end, force, passive) {
   if (!force && _rangeIsCached(start, end)) {
     _events = _filterPool(start, end);
     return;
@@ -120,7 +128,9 @@ async function _fetchEvents(start, end, force) {
   // Render from pool immediately if we have any cached data
   const hasCache = Object.keys(_allEvents).length > 0;
   if (hasCache) _events = _filterPool(start, end);
-  const fetchPromise = fetch(`${API_BASE}/api/calendar/events?start=${start}&end=${end}`, { credentials: 'same-origin' })
+  const fetchOpts = { credentials: 'same-origin' };
+  if (passive) fetchOpts.headers = _CAL_PASSIVE_HEADERS;
+  const fetchPromise = fetch(`${API_BASE}/api/calendar/events?start=${start}&end=${end}`, fetchOpts)
     .then(r => {
       if (!r.ok) throw new Error('HTTP ' + r.status);
       return r.json();
@@ -161,7 +171,7 @@ function _prefetchAdjacent() {
   // Fire all prefetches in parallel, ignore failures
   for (const [s, e] of ranges) {
     if (_rangeIsCached(s, e)) continue;
-    fetch(`${API_BASE}/api/calendar/events?start=${s}&end=${e}`, { credentials: 'same-origin' })
+    fetch(`${API_BASE}/api/calendar/events?start=${s}&end=${e}`, { credentials: 'same-origin', headers: _CAL_PASSIVE_HEADERS })
       .then(r => {
         if (!r.ok) throw new Error('HTTP ' + r.status);
         return r.json();
@@ -3747,7 +3757,7 @@ function _loadCache() {
     await _fetchCalendars();
     _saveCache();
     const [s, e] = _monthRange(new Date());
-    await _fetchEvents(s, e);
+    await _fetchEvents(s, e, false, /*passive*/ true);
     _saveCache();
     _updateBadge();
   } catch (e) {}
@@ -3763,7 +3773,7 @@ window.addEventListener('calendar-refresh', () => {
   const range = (_view === 'year')
     ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
     : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
-  _fetchEvents(range[0], range[1], /*force*/ true)
+  _fetchEvents(range[0], range[1], /*force*/ true, /*passive*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});
 });
@@ -3786,7 +3796,7 @@ document.addEventListener('visibilitychange', () => {
   const range = (_view === 'year')
     ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
     : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
-  _fetchEvents(range[0], range[1], /*force*/ true)
+  _fetchEvents(range[0], range[1], /*force*/ true, /*passive*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});
 });
@@ -3801,7 +3811,7 @@ window.addEventListener('focus', () => {
   const range = (_view === 'year')
     ? [`${_currentDate.getFullYear()}-01-01`, `${_currentDate.getFullYear() + 1}-01-01`]
     : (_view === 'week') ? _weekRange(_currentDate) : _monthRange(_currentDate);
-  _fetchEvents(range[0], range[1], /*force*/ true)
+  _fetchEvents(range[0], range[1], /*force*/ true, /*passive*/ true)
     .then(() => { if (_open) _render(); _updateBadge(); })
     .catch(() => {});
 });

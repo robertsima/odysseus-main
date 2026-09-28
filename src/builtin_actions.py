@@ -462,7 +462,15 @@ async def action_tidy_documents(owner: str, **kwargs) -> Tuple[str, bool]:
 
 
 async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
-    """Consolidate/deduplicate memories for the owner."""
+    """Consolidate/deduplicate memories for the owner.
+
+    The blocking steps — reading and saving the memory store, resolving the
+    task endpoint (SQL), the pairwise SequenceMatcher dedupe and the Chroma
+    index sync — run in worker threads. Inline, the endpoint lookup alone held
+    the event loop for 1.15 s at 00:27 ([loop-lag] ... resolve_endpoint <-
+    _try_ai_tidy_group <- action_consolidate_memory).
+    """
+    import asyncio
     try:
         import json
         import re
@@ -472,7 +480,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
         from src.memory import MemoryManager
 
         manager = MemoryManager(DATA_DIR)
-        all_memories = manager.load_all()
+        all_memories = await asyncio.to_thread(manager.load_all)
         _ids_before = {str(m.get("id")) for m in all_memories if m.get("id")}
 
         _owner_clean = (owner or "").strip()
@@ -567,7 +575,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
                 return False
 
             from src.task_endpoint import resolve_task_candidates
-            candidates = resolve_task_candidates(owner=group_owner or None)
+            candidates = await asyncio.to_thread(resolve_task_candidates, owner=group_owner or None)
             if not candidates:
                 return False
 
@@ -686,7 +694,7 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
 
         for group_owner, group_memories in memory_groups.items():
             total_scanned += len(group_memories)
-            deduped_group, group_removed = _dedupe_group(group_memories)
+            deduped_group, group_removed = await asyncio.to_thread(_dedupe_group, group_memories)
             if group_removed:
                 group_ref_ids = {id(m) for m in group_memories}
                 keep_ref_ids = {id(m) for m in deduped_group}
@@ -728,26 +736,31 @@ async def action_consolidate_memory(owner: str, **kwargs) -> Tuple[str, bool]:
             total_removed += group_removed
 
         if total_removed or total_cleaned:
-            manager.save(all_memories)
-            # The JSON store is the source of truth; the vector index must
-            # follow or deleted memories keep surfacing in retrieval.
-            try:
-                import src.ai_interaction as _ai
-                _vec = getattr(_ai, "_memory_vector", None)
-                if _vec is not None and getattr(_vec, "healthy", False):
-                    _ids_after = {str(m.get("id")) for m in all_memories if m.get("id")}
-                    # Batched: one delete and one (paged) existence get per
-                    # collection, not a Chroma round-trip per memory.
-                    _gone = sorted(_ids_before - _ids_after)
-                    if _gone:
-                        _vec.remove_many(_gone)
-                    _vec.add_many(
-                        (str(m["id"]), str(m["text"]))
-                        for m in all_memories
-                        if m.get("id") and m.get("text")
-                    )
-            except Exception:
-                logger.debug("memory tidy: vector index sync skipped", exc_info=True)
+            _final_memories = all_memories
+
+            def _save_and_sync_index() -> None:
+                manager.save(_final_memories)
+                # The JSON store is the source of truth; the vector index must
+                # follow or deleted memories keep surfacing in retrieval.
+                try:
+                    import src.ai_interaction as _ai
+                    _vec = getattr(_ai, "_memory_vector", None)
+                    if _vec is not None and getattr(_vec, "healthy", False):
+                        _ids_after = {str(m.get("id")) for m in _final_memories if m.get("id")}
+                        # Batched: one delete and one (paged) existence get per
+                        # collection, not a Chroma round-trip per memory.
+                        _gone = sorted(_ids_before - _ids_after)
+                        if _gone:
+                            _vec.remove_many(_gone)
+                        _vec.add_many(
+                            (str(m["id"]), str(m["text"]))
+                            for m in _final_memories
+                            if m.get("id") and m.get("text")
+                        )
+                except Exception:
+                    logger.debug("memory tidy: vector index sync skipped", exc_info=True)
+
+            await asyncio.to_thread(_save_and_sync_index)
             if ai_used:
                 reasons = ai_reasons[:3]
                 reason_text = f": {'; '.join(reasons)}" if reasons else ""
@@ -2089,8 +2102,11 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         if existing and existing.get("status") == "running":
             raise TaskNoop("skill audit already running")
 
+        import asyncio
         sm = SkillsManager(DATA_DIR)
-        skills = sm.load(owner=owner)
+        # Disk walk + parse of every SKILL.md, and a /models probe below:
+        # both off the event loop (see routes.skills_routes._off_loop).
+        skills = await asyncio.to_thread(sm.load, owner=owner)
         names = [
             s.get("name") for s in skills
             if s.get("name") and not s.get("audit_verdict")
@@ -2099,7 +2115,7 @@ async def action_audit_skills(owner: str, **kwargs) -> Tuple[str, bool]:
         if not names:
             raise TaskNoop("no unaudited skills")
 
-        url, model, headers, teacher = _resolve_audit_models()
+        url, model, headers, teacher = await asyncio.to_thread(_resolve_audit_models)
         try:
             from src.llm_core import seconds_since_model_activity
             recent = seconds_since_model_activity(url, model)

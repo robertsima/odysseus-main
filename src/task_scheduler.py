@@ -56,15 +56,97 @@ TASK_DEFAULT_SHELL_TOOLS = frozenset({
 })
 
 
-def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools):
+# ── Domain scoping of a scheduled task's tools ─────────────────────────────
+# ASSISTANT_ALWAYS_AVAILABLE is the chat assistant's set, and it carries the
+# whole email suite — archive, bulk, delete included — because a person in a
+# chat can see and stop what the model does. A scheduled task has nobody
+# watching. On 2026-09-28 the nightly "Todoist Inbox Prioritization" task was
+# offered archive_email, bulk_email and delete_email: the always-available set
+# put them there, and "Inbox" made the agent's intent router think the task
+# was about mail. So a task only gets email tools when its own text is about
+# email; a task that names an email tool outright still gets that tool.
+
+# Tools that change a mailbox or send mail.
+TASK_EMAIL_WRITE_TOOLS = frozenset({
+    "archive_email", "bulk_email", "delete_email", "unsubscribe_email",
+    "send_email", "reply_to_email", "mark_email_read",
+})
+# The read-only rest of the email suite.
+TASK_EMAIL_READ_TOOLS = frozenset({
+    "list_email_accounts", "list_emails", "read_email", "audit_emails",
+    "scan_email_unsubscribes",
+})
+TASK_EMAIL_TOOLS = TASK_EMAIL_WRITE_TOOLS | TASK_EMAIL_READ_TOOLS
+
+_TASK_EMAIL_WORDS_RE = re.compile(
+    r"\b(?:e-?mails?|e-?mailing|mail(?:box(?:es)?|s)?|gmail|outlook|imap|smtp|"
+    r"newsletters?|unsubscrib\w*|spam|junk|senders?|recipients?|"
+    r"unread\s+(?:messages?|mail)|reply\s+to\s+\w+'?s?\s+(?:message|mail))\b",
+    re.IGNORECASE,
+)
+_TASK_INBOX_RE = re.compile(r"\binbox(?:es)?\b", re.IGNORECASE)
+# Services with an "Inbox" of their own. "Inbox" alone means the mailbox,
+# unless the task says whose inbox it is.
+_TASK_NON_EMAIL_INBOX_RE = re.compile(
+    r"\b(?:todoist|ticktick|omnifocus|things\s*3|jira|github|gitea|gitlab|slack|"
+    r"discord|notion|trello|asana|clickup|miniflux|linkding|task\s+inbox|"
+    r"todo\s+inbox|to-do\s+inbox)\b",
+    re.IGNORECASE,
+)
+
+
+def task_is_email_scoped(task_text: str) -> bool:
+    """True when a scheduled task's own text is about email."""
+    text = task_text or ""
+    if _TASK_EMAIL_WORDS_RE.search(text):
+        return True
+    if _TASK_INBOX_RE.search(text) and not _TASK_NON_EMAIL_INBOX_RE.search(text):
+        return True
+    return False
+
+
+def task_named_tools(task_text: str, candidates) -> set:
+    """Tool names from ``candidates`` the task text spells out verbatim."""
+    text = task_text or ""
+    return {
+        name for name in candidates
+        if re.search(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])", text)
+    }
+
+
+def task_domain_disabled_tools(task_text: str) -> set:
+    """Mailbox-changing tools a non-email task must not be able to call.
+
+    Returned as *disabled* tools, not merely left out of the offered set: the
+    agent loop's own routing and ``discover_tools`` can otherwise add a tool
+    back mid-run. A task that names one of these tools keeps it.
+    """
+    if task_is_email_scoped(task_text):
+        return set()
+    return set(TASK_EMAIL_WRITE_TOOLS) - task_named_tools(task_text, TASK_EMAIL_WRITE_TOOLS)
+
+
+def compose_task_relevant_tools(rag_tools, assistant_always, disabled_tools,
+                                task_text: str | None = None):
     """Compose the relevant-tools set offered to a scheduled task's agent.
 
     Unions the RAG-retrieved tools, the assistant's always-available set, and
     the default shell/file group, then removes anything the task's crew
     explicitly disabled via its `enabled_tools` allowlist. Per-owner admin
     gating is applied later by stream_agent_loop (blocked_tools_for_owner).
+
+    When ``task_text`` is given and is not about email, the email suite is
+    taken out of the always-available part (retrieval can still pick a
+    read-only email tool it judged relevant), and the mailbox-changing tools
+    are dropped whatever put them there, unless the task names them.
     """
-    tools = set(rag_tools) | set(assistant_always) | set(TASK_DEFAULT_SHELL_TOOLS)
+    always = set(assistant_always)
+    rag = set(rag_tools)
+    if task_text is not None and not task_is_email_scoped(task_text):
+        named = task_named_tools(task_text, TASK_EMAIL_TOOLS)
+        always -= (TASK_EMAIL_TOOLS - named)
+        rag -= (TASK_EMAIL_WRITE_TOOLS - named)
+    tools = rag | always | set(TASK_DEFAULT_SHELL_TOOLS)
     if disabled_tools:
         tools -= set(disabled_tools)
     return tools
@@ -1380,6 +1462,45 @@ class TaskScheduler:
             self._foreground_preempted = marks
         return marks
 
+    def _interrupted_progress(self) -> dict:
+        """task_id -> tool calls made by a run that was preempted.
+
+        A preempted run is retried from its original prompt 15 minutes later,
+        but its tool calls already happened: on 2026-09-28 the nightly Todoist
+        task was cancelled at 03:00:46 after four Todoist calls and restarted
+        from scratch at 03:15:46, with nothing telling it what it had already
+        changed. The retry's prompt now says so (see _interrupted_progress_note).
+        In memory only: after a restart the retry starts cold, as before.
+        """
+        progress = getattr(self, "_interrupted_task_progress", None)
+        if progress is None:
+            progress = {}
+            self._interrupted_task_progress = progress
+        return progress
+
+    _INTERRUPTED_NOTE_MAX_CALLS = 20
+
+    @classmethod
+    def _interrupted_progress_note(cls, calls: list) -> str:
+        shown = calls[-cls._INTERRUPTED_NOTE_MAX_CALLS:]
+        lines = []
+        for c in shown:
+            status = c.get("exit_code")
+            status_text = "" if status is None else (" (ok)" if status == 0 else f" (exit {status})")
+            cmd = (c.get("command") or "").strip().replace("\n", " ")
+            lines.append(f"- {c.get('tool') or '?'}{status_text}: {cmd[:200]}" if cmd
+                         else f"- {c.get('tool') or '?'}{status_text}")
+        omitted = len(calls) - len(shown)
+        if omitted > 0:
+            lines.insert(0, f"- ({omitted} earlier call(s) not shown)")
+        return (
+            "[Scheduler note] An earlier attempt of this run was interrupted because "
+            "Odysseus became active, after it had already made these tool calls:\n"
+            + "\n".join(lines)
+            + "\nTheir effects may already be in place. Check the current state before "
+            "repeating any change, and do not redo work that is already done."
+        )
+
     @classmethod
     def _foreground_pause_message(cls, reason: str | None = None) -> str:
         """Activity text for a preempted run.
@@ -1862,6 +1983,10 @@ class TaskScheduler:
                     else "Stopped by user"
                 )
                 logger.info("Task '%s' %s", task.name, msg)
+                if not preempted:
+                    # A run the user stopped is not resumed, so its next run
+                    # must not be told about this one's tool calls.
+                    self._interrupted_progress().pop(task_id, None)
                 run_obj = db.query(TaskRun).filter(TaskRun.id == run_id).first()
                 if run_obj:
                     run_obj.status = "aborted"
@@ -2710,6 +2835,12 @@ class TaskScheduler:
                 disabled_tools.update(_global_disabled)
         except Exception:
             pass
+        # A task that is not about email cannot touch the mailbox (see
+        # task_domain_disabled_tools). Recorded in the run policy below.
+        _task_text = f"{task.name or ''}\n{task.prompt or ''}"
+        _domain_disabled = task_domain_disabled_tools(_task_text)
+        if _domain_disabled:
+            disabled_tools.update(_domain_disabled)
 
         # Record the policy this run is about to execute under, while every
         # part of it is still in scope. Reconstructing it afterwards is what
@@ -2729,7 +2860,8 @@ class TaskScheduler:
             if tool_idx:
                 rag_tools = tool_idx.get_tools_for_query(task.prompt or "", k=8)
                 relevant_tools = compose_task_relevant_tools(
-                    rag_tools, ASSISTANT_ALWAYS_AVAILABLE, disabled_tools
+                    rag_tools, ASSISTANT_ALWAYS_AVAILABLE, disabled_tools,
+                    task_text=_task_text,
                 )
                 logger.info(f"[assistant] RAG selected {len(rag_tools)} tools + {len(ASSISTANT_ALWAYS_AVAILABLE)} always-available + shell/file defaults = {len(relevant_tools)} total for '{task.name}'")
         except Exception as e:
@@ -3028,10 +3160,36 @@ class TaskScheduler:
                               override_user_message: str | None = None,
                               datetime_context_msg: dict | None = None) -> str:
         """Run the full agent loop with tool access, collecting the final text."""
-        from src.agent_loop import stream_agent_loop
-
         system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
         user_content = override_user_message or task.prompt
+        # Tool calls of this run, kept for its retry if it is cancelled (see
+        # _interrupted_progress). A retry starts from the calls its interrupted
+        # predecessor made, so a second interruption keeps both.
+        _task_key = getattr(task, "id", None)
+        _prior_calls = self._interrupted_progress().pop(_task_key, None) if _task_key else None
+        _calls_log: list = list(_prior_calls or [])
+        if _prior_calls and not override_user_message:
+            user_content = f"{user_content}\n\n{self._interrupted_progress_note(_prior_calls)}"
+        try:
+            return await self._run_agent_loop_inner(
+                endpoint_url, model, task, session_id, system_content, user_content,
+                disabled_tools, relevant_tools, datetime_context_msg, _calls_log,
+            )
+        except asyncio.CancelledError:
+            if _task_key and _calls_log:
+                self._interrupted_progress()[_task_key] = _calls_log
+                logger.info(
+                    "Task %s interrupted after %d tool call(s): %s",
+                    _task_key, len(_calls_log),
+                    ", ".join(str(c.get("tool") or "?") for c in _calls_log[-10:]),
+                )
+            raise
+
+    async def _run_agent_loop_inner(self, endpoint_url, model, task, session_id,
+                                    system_content, user_content, disabled_tools,
+                                    relevant_tools, datetime_context_msg,
+                                    calls_log: list) -> str:
+        from src.agent_loop import stream_agent_loop
         # Build the message list. The datetime context message (user-role) is
         # inserted immediately before the task prompt so the system prefix stays
         # byte-identical and cacheable across runs (see issue #2927).
@@ -3112,6 +3270,11 @@ class TaskScheduler:
                             continue
                         full_text += data["delta"]
                     elif data.get("type") == "tool_output":
+                        calls_log.append({
+                            "tool": str(data.get("tool") or "?"),
+                            "command": str(data.get("command") or "")[:300],
+                            "exit_code": data.get("exit_code"),
+                        })
                         # Tool results — capture summary so we have SOMETHING even
                         # if the model never produces a final text response
                         tool_summary = data.get("stdout") or data.get("output") or data.get("result") or ""

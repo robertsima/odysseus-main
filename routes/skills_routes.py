@@ -7,6 +7,7 @@ The on-disk format is SKILL.md (frontmatter + structured body) under
 (`description`, `when_to_use`, `body_extra`, `procedure`).
 """
 
+import asyncio
 import logging
 import re
 from typing import List, Optional
@@ -871,6 +872,19 @@ async def _improve_skill_md(skill_md: str, verdict: dict, transcript: str, url, 
     return text or None
 
 
+async def _off_loop(fn, /, *args, **kwargs):
+    """Run a blocking skills-store call in a worker thread.
+
+    SkillsManager is disk-backed: load() walks the whole skills tree and parses
+    every SKILL.md, and each set_audit/set_necessity rewrites the usage sidecar.
+    The audit calls these a dozen times per skill from async code, and on the
+    server's NAS volume one walk held the event loop for 2.72 s during the
+    02:00 audit ([loop-lag] ... islink <- _iter_skill_files <- load_all <- load
+    <- _audit_one_skill). Same calls, same order — just not on the loop.
+    """
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
+
 async def _audit_one_skill(skills_manager, skill, url, model, headers,
                            teacher, owner, log) -> dict:
     """Test → judge → self-edit+retry → (teacher edit+retry) → flag. Never deletes;
@@ -881,13 +895,13 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
     # Reflect the audit outcome in the skill's confidence so the main list
     # updates: a clean pass earns high confidence; a pass that needed fixing
     # earns a bit less; a skill that still fails is marked low.
-    def _set_conf(c):
+    async def _set_conf(c):
         try:
-            skills_manager.update_skill(name, {"confidence": c}, owner=owner)
+            await _off_loop(skills_manager.update_skill, name, {"confidence": c}, owner=owner)
         except Exception:
             pass
 
-    md = skills_manager.read_skill_md(name, owner=owner)
+    md = await _off_loop(skills_manager.read_skill_md, name, owner=owner)
     if not md:
         log(f"{name}: no source — skipped")
         return {"skill": name, "result": "skipped"}
@@ -902,31 +916,31 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         sk_owner = skill.get("owner")
         others = [
             {"name": s.get("name"), "description": s.get("description", "")}
-            for s in skills_manager.load(owner=owner)
+            for s in await _off_loop(skills_manager.load, owner=owner)
             if s.get("name") and s.get("name") != name
             and (not sk_owner or not s.get("owner") or s.get("owner") == sk_owner)
         ]
         nec = await _eval_skill_necessity(md, others, url, model, headers)
         if nec is not None:
-            skills_manager.set_necessity(name, nec.get("necessary", True),
-                                         nec.get("redundant_with"), nec.get("reason"),
-                                         owner=owner)
+            await _off_loop(skills_manager.set_necessity, name, nec.get("necessary", True),
+                            nec.get("redundant_with"), nec.get("reason"),
+                            owner=owner)
             if not nec.get("necessary", True):
                 log(f"{name}: possibly unnecessary — {nec.get('reason', '')[:80]}")
     except Exception as e:
         log(f"{name}: necessity check skipped — {e}")
 
     generic_reason = _audit_generic_blocker(skill, nec, None)
-    duplicate_of = _skill_duplicate_blocker(skills_manager, name, owner)
+    duplicate_of = await _off_loop(_skill_duplicate_blocker, skills_manager, name, owner)
     if generic_reason or duplicate_of or (isinstance(nec, dict) and nec.get("necessary") is False):
         reason = generic_reason or (f"Lower-priority duplicate of {duplicate_of}" if duplicate_of else str((nec or {}).get("reason") or "Unnecessary skill"))
         try:
-            skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35}, owner=owner)
-            skills_manager.set_audit(name, "skipped", by_teacher=False, worker_model=model, owner=owner)
+            await _off_loop(skills_manager.update_skill, name, {"status": "draft", "confidence": 0.35}, owner=owner)
+            await _off_loop(skills_manager.set_audit, name, "skipped", by_teacher=False, worker_model=model, owner=owner)
             if duplicate_of:
-                skills_manager.set_necessity(name, False, [duplicate_of], reason, owner=owner)
+                await _off_loop(skills_manager.set_necessity, name, False, [duplicate_of], reason, owner=owner)
             else:
-                skills_manager.set_necessity(name, False, [], reason, owner=owner)
+                await _off_loop(skills_manager.set_necessity, name, False, [], reason, owner=owner)
         except Exception:
             pass
         log(f"{name}: draft — skipped functional test ({reason[:100]})")
@@ -946,9 +960,9 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
                     "summary": rp.get("summary") or "Retrieval metadata is too broad.",
                     "issues": issues,
                 }, "Retrieval audit only: the procedure may work, but matching metadata is too broad.", url, model, headers)
-                if fixed and fixed.strip() != md.strip() and _apply_skill_md(skills_manager, name, fixed, owner):
+                if fixed and fixed.strip() != md.strip() and await _off_loop(_apply_skill_md, skills_manager, name, fixed, owner):
                     md = fixed
-                    refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
+                    refreshed = next((s for s in await _off_loop(skills_manager.load, owner=owner) if s.get("name") == name), None)
                     if refreshed:
                         skill = refreshed
     except Exception as e:
@@ -964,7 +978,8 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         # skill under test. Preserve the skill's current publication/confidence
         # state and route the exact action to the manual test UI instead of
         # letting a safety pause demote, rewrite, or auto-publish the skill.
-        skills_manager.set_audit(
+        await _off_loop(
+            skills_manager.set_audit,
             name,
             "inconclusive",
             by_teacher=False,
@@ -988,32 +1003,32 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
             log(f"{name}: pass, but fixing {len(meta_issues)} metadata issue(s)…")
             fixed = await _improve_skill_md(md, verdict, transcript, url, model, headers)
             if fixed and fixed.strip() != md.strip():
-                _apply_skill_md(skills_manager, name, fixed, owner)
-        _set_conf(0.95)
-        skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model, owner=owner)
-        refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
-        status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.95, (refreshed or {}).get("necessity"), verdict)
+                await _off_loop(_apply_skill_md, skills_manager, name, fixed, owner)
+        await _set_conf(0.95)
+        await _off_loop(skills_manager.set_audit, name, "pass", by_teacher=False, worker_model=model, owner=owner)
+        refreshed = next((s for s in await _off_loop(skills_manager.load, owner=owner) if s.get("name") == name), None)
+        status = await _off_loop(_audit_finalize_status, skills_manager, name, owner, "pass", 0.95, (refreshed or {}).get("necessity"), verdict)
         log(f"{name}: {status} — confidence 95%")
         return {"skill": name, "result": "pass", "verdict": verdict, "confidence": 0.95, "status": status}
     if v in ("unknown", "inconclusive"):
-        skills_manager.set_audit(name, "inconclusive", by_teacher=False, worker_model=model, owner=owner)
-        status = _audit_finalize_status(skills_manager, name, owner, "inconclusive", skill.get("confidence") or 0.0, skill.get("necessity"))
+        await _off_loop(skills_manager.set_audit, name, "inconclusive", by_teacher=False, worker_model=model, owner=owner)
+        status = await _off_loop(_audit_finalize_status, skills_manager, name, owner, "inconclusive", skill.get("confidence") or 0.0, skill.get("necessity"))
         log(f"{name}: {status} — inconclusive")
         return {"skill": name, "result": "inconclusive", "verdict": verdict, "status": status}
 
     # Self-edit + retry.
     log(f"{name}: self-editing to fix issues…")
     new_md = await _improve_skill_md(md, verdict, transcript, url, model, headers)
-    if new_md and new_md.strip() != md.strip() and _apply_skill_md(skills_manager, name, new_md, owner):
+    if new_md and new_md.strip() != md.strip() and await _off_loop(_apply_skill_md, skills_manager, name, new_md, owner):
         md = new_md
         transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
         v = verdict.get("verdict")
         log(f"{name}: retry (self) = {v}")
         if v == "pass":
-            _set_conf(0.85)
-            skills_manager.set_audit(name, "pass", by_teacher=False, worker_model=model, owner=owner)
-            refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
-            status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.85, (refreshed or {}).get("necessity"), verdict)
+            await _set_conf(0.85)
+            await _off_loop(skills_manager.set_audit, name, "pass", by_teacher=False, worker_model=model, owner=owner)
+            refreshed = next((s for s in await _off_loop(skills_manager.load, owner=owner) if s.get("name") == name), None)
+            status = await _off_loop(_audit_finalize_status, skills_manager, name, owner, "pass", 0.85, (refreshed or {}).get("necessity"), verdict)
             log(f"{name}: {status} — confidence 85% after self-edit")
             return {"skill": name, "result": "pass_after_self_edit", "verdict": verdict, "confidence": 0.85, "status": status}
 
@@ -1027,28 +1042,30 @@ async def _audit_one_skill(skills_manager, skill, url, model, headers,
         t_url, t_model, t_headers = teacher
         log(f"{name}: teacher {t_model} rewriting the skill…")
         t_md = await _improve_skill_md(md, verdict, transcript, t_url, t_model, t_headers)
-        if t_md and t_md.strip() != md.strip() and _apply_skill_md(skills_manager, name, t_md, owner):
+        if t_md and t_md.strip() != md.strip() and await _off_loop(_apply_skill_md, skills_manager, name, t_md, owner):
             md = t_md
         # Re-test with the STUDENT model (the model the skill runs under in use).
         transcript, verdict = await _run_skill_test_once(md, task, url, model, headers, owner)
         v = verdict.get("verdict")
         log(f"{name}: retry on student after teacher rewrite = {v}")
         if v == "pass":
-            _set_conf(0.8)
-            skills_manager.set_audit(
+            await _set_conf(0.8)
+            await _off_loop(
+                skills_manager.set_audit,
                 name, "pass", by_teacher=True, worker_model=model, teacher_model=t_model, owner=owner
             )
-            refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == name), None)
-            status = _audit_finalize_status(skills_manager, name, owner, "pass", 0.8, (refreshed or {}).get("necessity"), verdict)
+            refreshed = next((s for s in await _off_loop(skills_manager.load, owner=owner) if s.get("name") == name), None)
+            status = await _off_loop(_audit_finalize_status, skills_manager, name, owner, "pass", 0.8, (refreshed or {}).get("necessity"), verdict)
             log(f"{name}: {status} — confidence 80% after teacher rewrite")
             return {"skill": name, "result": "pass_after_teacher", "verdict": verdict, "confidence": 0.8, "status": status}
 
     # Still failing → demote to draft + low confidence + flag (do NOT delete).
     try:
-        skills_manager.update_skill(name, {"status": "draft", "confidence": 0.35}, owner=owner)
+        await _off_loop(skills_manager.update_skill, name, {"status": "draft", "confidence": 0.35}, owner=owner)
     except Exception:
         pass
-    skills_manager.set_audit(
+    await _off_loop(
+        skills_manager.set_audit,
         name, v or "fail", by_teacher=teacher_ran,
         worker_model=model,
         teacher_model=(teacher[1] if teacher_ran and teacher else ""),
@@ -1080,7 +1097,7 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 log("(cancelled)")
                 break
             job["current"] = nm
-            skills = skills_manager.load(owner=owner)
+            skills = await _off_loop(skills_manager.load, owner=owner)
             sk = next((s for s in skills if s.get("name") == nm), None)
             if not sk:
                 continue
@@ -1095,7 +1112,7 @@ async def _run_audit_all_job(key, skills_manager, names, url, model, headers, te
                 log(f"{nm}: error — {e}")
                 res = {"skill": nm, "result": "error"}
             try:
-                refreshed = next((s for s in skills_manager.load(owner=owner) if s.get("name") == nm), None)
+                refreshed = next((s for s in await _off_loop(skills_manager.load, owner=owner) if s.get("name") == nm), None)
                 if refreshed:
                     res["skill_state"] = {
                         "name": refreshed.get("name"),
@@ -1174,7 +1191,7 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
         return {"status": "running", "skipped": True}
 
     skills = [
-        skill for skill in skills_manager.load(owner=owner)
+        skill for skill in await _off_loop(skills_manager.load, owner=owner)
         if not (skill.get("source") == "imported" and skill.get("status") == "draft")
     ]
     # Oldest-audited first (never-audited sort to the very front via -1), so each
@@ -1185,7 +1202,7 @@ async def run_scheduled_skill_audit(skills_manager: SkillsManager,
         return {"status": "done", "total": 0}
 
     try:
-        url, model, headers, teacher = _resolve_audit_models(owner=owner)
+        url, model, headers, teacher = await _off_loop(_resolve_audit_models, owner=owner)
     except ValueError as e:
         logger.info(f"Scheduled skill audit skipped — {e}")
         return {"status": "skipped", "reason": str(e)}

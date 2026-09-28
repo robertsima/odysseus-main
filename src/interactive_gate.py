@@ -120,7 +120,30 @@ _PASSIVE_PREFIXES = (
     "/api/chat/stream_status",
     "/api/health",
     "/api/prefs",
+    # Static assets are never a person asking for something. The browser fetches
+    # them on its own: a task-completion Notification carries
+    # icon '/static/favicon.ico' (static/js/tasks.js), the service worker
+    # re-checks /static/sw.js, the PWA manifest and its icons are revalidated.
+    # Each of those used to cancel a running scheduled task mid-way — the
+    # nightly Todoist task was killed at 03:00:46 by the favicon fetch of the
+    # notification announcing a *different* task's completion.
+    "/static/",
 )
+
+# Asset paths a browser requests at the site root by convention (the favicon
+# probe, iOS home-screen icons, crawlers). Odysseus serves none of them there,
+# but even the 404 went through the gate and pre-empted background work.
+_PASSIVE_ROOT_ASSETS = {
+    "/favicon.ico",
+    "/manifest.json",
+    "/manifest.webmanifest",
+    "/site.webmanifest",
+    "/sw.js",
+    "/service-worker.js",
+    "/robots.txt",
+    "/browserconfig.xml",
+}
+_PASSIVE_ROOT_ASSET_PREFIXES = ("/apple-touch-icon", "/icons/", "/favicon")
 
 # Clients put this on requests fired by a timer rather than by a person, so a
 # poll that reuses a genuinely interactive endpoint (the inbox unread-count
@@ -157,6 +180,11 @@ def should_track_interactive_request(path: str, method: str = "GET", headers=Non
     if path in _PASSIVE_EXACT_PATHS:
         return False
     if any(path.startswith(prefix) for prefix in _PASSIVE_PREFIXES):
+        return False
+    if verb in {"GET", "HEAD"} and (
+        path in _PASSIVE_ROOT_ASSETS
+        or any(path.startswith(prefix) for prefix in _PASSIVE_ROOT_ASSET_PREFIXES)
+    ):
         return False
     if headers is not None and verb in {"GET", "HEAD"}:
         try:
