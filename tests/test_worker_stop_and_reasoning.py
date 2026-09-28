@@ -34,7 +34,7 @@ def loadout_tool(monkeypatch):
     monkeypatch.setattr(agent_activity, "list_runs", lambda **kw: runs if kw.get("session_id") == "parent" else [])
     stopped = []
 
-    async def fake_stop(run_id):
+    async def fake_stop(run_id, **kwargs):
         stopped.append(run_id)
         return {"stopped": True, "how": "headless"}
 

@@ -155,7 +155,7 @@ def setup_workbench_routes() -> APIRouter:
         from src.agent_control import stop_run
 
         try:
-            return await stop_run(run_id)
+            return await stop_run(run_id, by="from the Workbench")
         except LookupError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:

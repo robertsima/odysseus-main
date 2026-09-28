@@ -149,7 +149,7 @@ async def test_stop_run_dispatches_by_source(env, monkeypatch):
 
     sub = act.run_started("s1", "session", "Sub-agent · worker: look", owner="alice")
     asked = []
-    monkeypatch.setattr(headless, "request_stop", lambda rid: asked.append(rid) or rid == sub)
+    monkeypatch.setattr(headless, "request_stop", lambda rid, **kw: asked.append(rid) or rid == sub)
     assert (await stop(_req(), run_id=sub)) == {"stopped": True, "how": "headless"}
 
     # A background job: killed, which also closes its run.

@@ -390,7 +390,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             raise HTTPException(404, "Run not found")
         _require_owned(request, rec.get("session_id") or "")
         try:
-            return await agent_control.stop_run(run_id)
+            return await agent_control.stop_run(run_id, by="from the Agent Control Room")
         except LookupError as exc:
             raise HTTPException(404, str(exc))
         except ValueError as exc:

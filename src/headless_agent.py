@@ -26,6 +26,13 @@ logger = logging.getLogger(__name__)
 # run returns what it produced so far, which re-enters the parent as the tool
 # result (the partial work is not thrown away).
 _STOP_EVENTS: Dict[str, asyncio.Event] = {}
+# run_id -> where the stop came from ("from the Workbench", ...), for the
+# worker's hand-back and the log. 2026-09-28: a Planning Command Center worker
+# ended "(stopped by the user before finishing)" 23 s after it started, the
+# user did not know they had stopped anything, and nothing recorded which of
+# the three stop routes had been used.
+_STOP_SOURCES: Dict[str, str] = {}
+_DEFAULT_STOP_SOURCE = "by the user"
 # A wrapper run is the stable public steering target for a headless loop.  The
 # loop also creates its own activity telemetry run, which must not replace the
 # wrapper's source/summary merely to make steering work.
@@ -73,11 +80,17 @@ def _sse_error_payload(chunk: str) -> Optional[Dict[str, Any]]:
     return payload if isinstance(payload, dict) else {"error": str(payload)}
 
 
-def request_stop(run_id: str) -> bool:
-    """Ask a running headless run to stop. Returns False if none is running."""
+def request_stop(run_id: str, *, by: str = _DEFAULT_STOP_SOURCE) -> bool:
+    """Ask a running headless run to stop. Returns False if none is running.
+
+    ``by`` says where the stop came from, phrased to follow "stopped"
+    ("from the Workbench"); it is logged and shown in the worker's result.
+    """
     event = _STOP_EVENTS.get(run_id)
     if event is None:
         return False
+    _STOP_SOURCES[run_id] = str(by or _DEFAULT_STOP_SOURCE)
+    logger.info("[agent-stop] run=%s stopped %s", run_id, _STOP_SOURCES[run_id])
     event.set()
     return True
 
@@ -573,7 +586,8 @@ async def run_headless(
                 if outcome is not None:
                     outcome["stopped"] = True
                 if activity_session_id:
-                    activity.publish(activity_session_id, "status", "Stopped by the user",
+                    activity.publish(activity_session_id, "status",
+                                     f"Stopped {_STOP_SOURCES.get(run_id, _DEFAULT_STOP_SOURCE)}",
                                      source=source, run_id=run_id, owner=effective_owner,
                                      data={"status": "cancelled"}, level="warning")
     except asyncio.CancelledError:
@@ -595,8 +609,9 @@ async def run_headless(
                 if not session_runs:
                     _STEER_RUNS.pop(str(getattr(sess, "id", "")), None)
     full = state["full"]
+    stopped_by = _STOP_SOURCES.pop(run_id, _DEFAULT_STOP_SOURCE) if run_id else _DEFAULT_STOP_SOURCE
     if outcome is not None and outcome.get("stopped"):
-        full = (full.rstrip() + "\n\n" if full.strip() else "") + "(stopped by the user before finishing)"
+        full = (full.rstrip() + "\n\n" if full.strip() else "") + f"(stopped {stopped_by} before finishing)"
     elif state.get("exhausted"):
         # A stop wins when both could apply — the user ending a run is the more
         # specific fact, and a cancelled drain never sees the loop's frame anyway.

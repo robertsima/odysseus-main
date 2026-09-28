@@ -567,9 +567,13 @@ def is_steerable(session_id: str) -> bool:
 
 # ── stop ──────────────────────────────────────────────────────────────────
 
-async def stop_run(run_id: str) -> dict:
+async def stop_run(run_id: str, *, by: str = "by the user") -> dict:
     """Stop one run. Returns ``{"stopped": bool, "how": ..., ...}``; raises
-    ``LookupError`` when unknown and ``ValueError`` when not stoppable."""
+    ``LookupError`` when unknown and ``ValueError`` when not stoppable.
+
+    ``by`` names the route that asked ("from the Workbench"); a stopped
+    worker's hand-back and the log say it.
+    """
     rec = activity.get_run(run_id)
     if rec is None:
         raise LookupError("Run not found")
@@ -584,7 +588,7 @@ async def stop_run(run_id: str) -> dict:
         return {"stopped": result["status"] == "cancelled", "how": "workflow", "status": result["status"]}
     from src.headless_agent import request_stop
 
-    if request_stop(run_id):
+    if request_stop(run_id, by=by):
         return {"stopped": True, "how": "headless"}
     if source == "claude_code":
         from src.agent_tools.claude_code_tools import get_task_runner

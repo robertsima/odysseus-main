@@ -803,3 +803,27 @@ async def test_defaults_nobody_chose_stay_advisory(monkeypatch):
         inline_profile={"name": "research-1", "max_rounds": 12, "tool_access": "none"})
     await agent_control._WORKERS[rec["run_id"]]
     assert seen[-1]["max_rounds"] == 12 and seen[-1]["wrap_up_round"] == 0
+
+
+async def test_a_stopped_worker_says_where_the_stop_came_from(monkeypatch):
+    """2026-09-28: a worker ended "(stopped by the user before finishing)"
+    23 s after it started and nothing said which stop route was used."""
+    started = asyncio.Event()
+
+    async def slow_loop(url, model, messages, **kwargs):
+        yield _sse({"delta": "Pulled the calendar"})
+        started.set()
+        await asyncio.sleep(30)
+
+    import src.agent_loop as agent_loop
+    monkeypatch.setattr(agent_loop, "stream_agent_loop", slow_loop)
+    outcome = {}
+    task = asyncio.ensure_future(headless_agent.run_headless(
+        _Sess(), [{"role": "user", "content": "go"}], run_id="session-where",
+        activity_session_id="parent", outcome=outcome))
+    await started.wait()
+    assert headless_agent.request_stop("session-where", by="from the Workbench") is True
+    text, _events = await asyncio.wait_for(task, 5)
+    assert outcome == {"stopped": True}
+    assert "(stopped from the Workbench before finishing)" in text
+    assert "session-where" not in headless_agent._STOP_SOURCES
