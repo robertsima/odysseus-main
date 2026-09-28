@@ -10,3 +10,5 @@
 7f3edbd3412dc3b585a4653d47d4148e4a3fb5a1:tests/test_agent_log_access.py:jwt:106
 # Placeholder "sk-live-abc..." the profile-export redaction test checks is stripped.
 46acaafd6a017b0e1ac90accf079c60be5986bf6:tests/test_agent_profile_transfer.py:generic-api-key:74
+# Fake sk-live-style key the runtime-introspection test uses to prove secret settings are redacted.
+5bfcf94872db6982f9f3e17a4713b01382595ba2:tests/test_runtime_introspection.py:generic-api-key:113
