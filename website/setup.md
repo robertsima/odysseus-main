@@ -708,6 +708,15 @@ Common internal-only ports from the default docs/compose setup:
 ## Configuration
 Most setup is done inside the app with `/setup` or **Settings**. Use `.env`
 for deployment-level defaults and secrets you want present before first boot.
+
+> **Docker:** `docker compose` reads `.env` only to fill the `${...}`
+> placeholders in the compose file. A variable reaches the container only if
+> the compose file's `environment:` block forwards it; there is no `env_file`.
+> `.env.example` tags each block `[Docker: forwarded]`, `[Docker: compose]` or
+> `[native only]`, and [Configuration](configuration.md#docker-how-the-environment-reaches-the-container)
+> explains how to forward one that is not. Once a setting has been saved in
+> **Settings**, it wins over any legacy environment fallback of the same name.
+
 Key settings:
 
 | Variable | Default | Description |
@@ -728,7 +737,6 @@ Key settings:
 | `DATABASE_URL` | `sqlite:///./data/app.db` | Database connection string |
 | `CHROMADB_HOST` | `localhost` | ChromaDB host for vector memory. Docker overrides this to `chromadb`. |
 | `CHROMADB_PORT` | `8100` | ChromaDB port for manual host runs. Docker overrides this to `8000`. |
-| `EMBEDDING_URL` | -- | OpenAI-compatible embeddings endpoint. **Not currently consulted** — retrieval embeds with local FastEmbed only ([details](vault-retrieval.md#embeddings-and-the-vector-store)). |
 | `ODYSSEUS_CHAT_UPLOAD_MAX_BYTES` | `10485760` | Chat/agent attachment cap in bytes. Raise for larger local PDFs or text documents. |
 | `ODYSSEUS_GALLERY_UPLOAD_MAX_BYTES` | `104857600` | Gallery image upload cap in bytes (100 MB). |
 | `ODYSSEUS_GALLERY_TRANSFORM_UPLOAD_MAX_BYTES` | `26214400` | Gallery transform input cap in bytes (25 MB). |
@@ -739,6 +747,9 @@ Key settings:
 | `ODYSSEUS_ICS_MAX_BYTES` | `10485760` | Calendar `.ics` import cap in bytes (10 MB). |
 
 All upload-limit vars are validated (must be a positive integer) and optional; an invalid value fails fast at startup.
+They are Settings choices now: the environment values are only a fallback for
+native installs that already set them, and the compose files do not forward
+them.
 
 Pointing Odysseus at an Obsidian-style Markdown vault needs no configuration —
 frontmatter, headings, tags and `[[wikilinks]]` are used automatically. See

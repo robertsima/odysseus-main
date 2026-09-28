@@ -142,6 +142,54 @@ def test_zimaos_template_passes_optional_feature_variables_through(name):
     assert _env(ZIMAOS_TEMPLATE)[name] == f"${{{name}:-}}"
 
 
+# ── .env.example ─────────────────────────────────────────────────
+
+
+def _env_example() -> str:
+    if not ENV_EXAMPLE.exists():
+        pytest.skip("this checkout does not include the optional .env.example file")
+    return ENV_EXAMPLE.read_text(encoding="utf-8")
+
+
+def test_env_example_explains_that_docker_only_forwards_listed_variables():
+    header = _env_example().split("# LLM Configuration", 1)[0]
+    assert "env_file" in header
+    assert "reaches the container only if" in header
+    for tag in ("[Docker: forwarded]", "[Docker: compose]", "[native only]"):
+        assert tag in header, tag
+
+
+def test_env_example_points_at_docs_that_exist():
+    text = _env_example()
+    assert "docs/configuration.md" not in text.replace("website/configuration.md", "")
+    for ref in set(re.findall(r"website/[a-z0-9_-]+\.md", text)):
+        assert (ROOT / ref).is_file(), ref
+
+
+@pytest.mark.parametrize(
+    "name",
+    DEAD_VARIABLES + (
+        "CLEANUP_ENABLED",
+        "CLEANUP_INTERVAL_HOURS",
+        "ODYSSEUS_STT_ENABLED",
+        "ODYSSEUS_STT_DEFAULT_PROVIDER",
+        "ODYSSEUS_STT_MODEL",
+        "CLAUDE_CODE_AUTO_UPDATE",
+        "CLAUDE_OAUTH_CLIENT_ID",
+        "ODYSSEUS_PERSONAL_DIR",
+    ),
+)
+def test_env_example_does_not_offer_dead_variables(name):
+    assert not re.search(rf"^#?\s*{name}=", _env_example(), re.MULTILINE), name
+
+
+def test_env_example_does_not_claim_rag_threshold_moved_to_settings():
+    text = _env_example()
+    # Still read only from the environment (src/chat_processor.py).
+    assert "# RAG_SIMILARITY_THRESHOLD=" in text
+    assert "RAG_SIMILARITY_THRESHOLD variables" not in text
+
+
 # ── no hidden .env inside the image ──────────────────────────────
 
 

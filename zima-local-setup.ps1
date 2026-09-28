@@ -23,7 +23,10 @@ $dirs = @(
     "$appData/logs"
 )
 
-# Vault side: read-only content, same three trees as ZimaOS.
+# Vault side: the same three trees as ZimaOS. The compose file mounts them
+# WRITABLE (the human vault editor and permitted agent edits write here);
+# what an LLM may read or write is decided inside Odysseus by the folder's
+# public/private label and readonly policy, not by the mount.
 $vault = Join-Path $root 'Vault'
 $dirs += @(
     "$vault/Vault Mind"
@@ -73,9 +76,9 @@ Write-Output ""
 Write-Output "Next:"
 Write-Output "  docker compose -f docker-compose.zimaos-local.yml up --build"
 Write-Output ""
-Write-Output "Then label the trees (needs an admin session cookie or API token):"
-Write-Output '  POST /api/personal/add_directory {"directory":"Vault Mind","sensitivity":"public"}'
-Write-Output '  POST /api/personal/add_directory {"directory":"AI Mind","sensitivity":"public"}'
+Write-Output "The trees are indexed and labelled at boot by ODYSSEUS_PERSONAL_DIRS"
+Write-Output "(compose default: Vault Mind:public, AI Mind:public, Journal:private)."
+Write-Output "Only if you override it, label a tree by hand (admin session or API token):"
 Write-Output '  POST /api/personal/add_directory {"directory":"Journal","sensitivity":"private"}'
 Write-Output ""
 Write-Output "Verify:"

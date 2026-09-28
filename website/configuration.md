@@ -34,16 +34,21 @@ different?" If yes, it's placement. If they'd want it different because *they*
 are different — different taste, different hardware budget for a cache,
 different tolerance for a limit — it's a choice.
 
-A variable can be both, in sequence: `src/settings_schema.py` already declares
-`vault_directory` as a UI setting whose value is *locked* when
-`ODYSSEUS_PERSONAL_DIR` is set, because a container's bind mount fixes that
-path at compose time and letting someone type a different path into the UI
-would silently point the app at a directory that doesn't exist inside the
-container. That pattern — a real setting, overridable/lockable by an
-environment variable for deployments where the value is fixed by the compose
-file — is the template for anything that is a choice in general but placement
-in a specific topology (see `src/agent_worktree/config.py` and
-`src/personal_dirs_config.py` for two more instances of the same idea).
+A variable can be both, in sequence: a real setting, overridable or lockable by
+an environment variable for deployments where the value is fixed by the
+compose file, is the template for anything that is a choice in general but
+placement in a specific topology (`src/agent_worktree/config.py` and
+`src/personal_dirs_config.py` are two working instances).
+
+One cautionary instance: `src/settings_schema.py` declares
+`env_override="ODYSSEUS_PERSONAL_DIR"` on the `vault_directory` setting, but
+**nothing reads that variable's value**. Setting it only makes the UI show the
+Vault folder control as locked (`env_locked()`) and makes
+`src/config_provenance.py` report the environment as the source, while the app
+keeps using the saved `vault_directory` (or `<data>/personal_docs`, which is
+`PERSONAL_DIR` in `src/constants.py` and is not configurable by environment).
+Do not set it. A lock is only honest when the reader consults the same
+variable.
 
 Security/trust escape hatches (`ODYSSEUS_ENABLE_HOST_DOCKER`,
 `ODYSSEUS_ALLOW_PRIVATE_CALDAV`, `ODYSSEUS_MCP_ALLOWED_COMMANDS`, ...) are
@@ -55,6 +60,100 @@ putting a widened attack surface behind a UI toggle in `settings.json` means
 anyone who can edit settings (not just whoever provisioned the box) can widen
 it. Environment variables require host/container access to set, which is the
 right bar for these.
+
+## Docker: how the environment reaches the container
+
+No compose file in this repository uses `env_file`. `docker compose` reads
+`.env` for one purpose only: filling the `${...}` placeholders in the compose
+file. A variable reaches the Odysseus container **only if the odysseus
+service's `environment:` block names it**; anything else in `.env` is
+invisible to the app. Messages elsewhere in the app that say "add it to .env"
+are right for a native install and incomplete for Docker: there, the compose
+file also has to forward the variable.
+
+`.env.example` tags every block accordingly:
+
+- **[Docker: forwarded]**: the stock compose files pass it through.
+- **[Docker: compose]**: used by compose itself (ports, host paths, overlays,
+  the searxng and ntfy services); the app never sees it.
+- **[native only]**: not forwarded by the stock compose files. To use one
+  under Docker, add `- NAME=${NAME:-}` (list style) or `NAME: ${NAME:-}` (the
+  ZimaOS template's map style) and recreate the container. A few variables
+  treat an *empty* value differently from an absent one (the Pi worker's
+  `ODYSSEUS_PI_WORKER_SCRIPT` and `_ROOT` reject an empty path). Forward those
+  as a bare name (`- NAME`, or `NAME:` with no value), which compose passes
+  only when it is actually set.
+
+Inside the image there is no `.env` either. The entrypoint runs `setup.py`
+with `ODYSSEUS_SKIP_ENV_FILE=1`, so it no longer copies `.env.example` to
+`/app/.env`. `app.py`'s `load_dotenv()` used to pick that copy up on every
+start, silently filling in `.env.example`'s values for anything the compose
+file did not set. Native installs still get `.env` created from the example.
+
+## Saved settings win over legacy environment fallbacks
+
+Many choices that used to be environment variables are now settings that still
+accept the old variable as a fallback (`get_setting_or_env()` in
+`src/settings.py`, and the `_MIGRATED_ENV_OVERRIDES` table in
+`src/settings_schema.py`). The fallback is one-way: **once the setting is
+present in `data/settings.json`, which saving it in Settings does, the
+environment variable is ignored**, even if it is still set. The Settings UI
+shows those controls as editable, not locked, for that reason.
+
+So put behaviour in Settings, and use the environment for deployment wiring
+(service hosts, mounts, ports, user ids) and secrets. Changing a migrated
+variable in the compose file after the setting has been saved does nothing.
+`GET /api/workbench/config` (`src/config_provenance.py`) reports which source
+actually won for each value.
+
+## ZimaOS minimal environment
+
+What the odysseus service on the ZimaOS NAS needs, with the model provider set
+to ChatGPT Subscription. `docker-compose.zimaos-local.yml` is the template: it
+lists exactly these, and nothing that equals a code default.
+
+**Required**
+
+| Variable | Value | Why |
+|---|---|---|
+| `PUID`, `PGID` | ids of the host user that owns `/DATA/AppData/odysseus` | The entrypoint drops to this user and repairs ownership of the mounts to match. |
+| `CHROMADB_HOST`, `CHROMADB_PORT` | `chromadb`, `8000` | The code default is `localhost:8100` (a manual host run). |
+| `SEARXNG_INSTANCE` | `http://searxng:8080` | The code default is `http://localhost:8080`. |
+| `ODYSSEUS_PERSONAL_DIRS` | `Vault Mind:public,AI Mind:public,Journal:private` | Indexes and labels the vault trees at boot. An unlabelled tree is public. |
+| `ODYSSEUS_ADMIN_PASSWORD` | a password | **First boot only**: seeds the admin account while `data/auth.json` does not exist, and is ignored afterwards. The username defaults to `admin`. |
+
+**Optional, per feature.** Leave a whole group out if you don't use it.
+
+| Feature | Variables |
+|---|---|
+| Built-in GitHub MCP | `GITHUB_PERSONAL_ACCESS_TOKEN`; `ODYSSEUS_GITHUB_MCP_WRITE=1` for the write server |
+| Agent worktree publishing and the Claude Code cloud runner | `ODYSSEUS_AGENT_PUBLISH_ENABLED`, `ODYSSEUS_AGENT_REPO`, `ODYSSEUS_AGENT_SOURCE_REPO`, `ODYSSEUS_GITHUB_APP_ID`, `ODYSSEUS_GITHUB_APP_INSTALLATION_ID`, `ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH` (key inside `/app/data`) |
+| Todoist MCP | `TODOIST_API_TOKEN` |
+| Windows Pi worker | `ODYSSEUS_PI_WORKER_HOST`, `ODYSSEUS_PI_WORKER_IDENTITY_FILE`, `ODYSSEUS_PI_WORKER_SCRIPT`, `ODYSSEUS_PI_WORKER_ROOT` |
+| Google OAuth (Gmail/Workspace mail, Google Calendar) | `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`; behind HTTPS or a proxy also `GOOGLE_OAUTH_REDIRECT_URI` and `GOOGLE_CALENDAR_OAUTH_REDIRECT_URI` |
+| Retrieval threshold for a vault of short notes | `RAG_SIMILARITY_THRESHOLD` (default `0.35`). Still environment-only, with no Settings control, so it has to be forwarded to take effect. |
+
+**No environment needed**
+
+- **ChatGPT Subscription**: signed in with the device login in Settings.
+- **ntfy reminders**: configured as an integration in the UI. The ntfy
+  service's own `NTFY_BASE_URL` and `NTFY_BIND` are compose-level, not app
+  environment.
+- **Email accounts**: added in the UI (IMAP/SMTP, or Google OAuth above).
+- **Speech-to-text and text-to-speech**: the code defaults (CPU, `int8`, one
+  slot) suit the NAS; everything else is in Settings.
+- **Lotus**: its paths default to `/app/data/lotus/...`.
+- **FastEmbed and ChromaDB tuning**: the embedding model and its cache default
+  in code (`sentence-transformers/all-MiniLM-L6-v2`, `<data>/fastembed_cache`).
+- **Auth and cookies**: auth is on and the loopback bypass off by default.
+  Session cookies are `Secure` exactly when the request arrives over HTTPS
+  (directly or via `X-Forwarded-Proto`), so do **not** set
+  `SECURE_COOKIES=false`: it forces non-Secure cookies over HTTPS.
+
+The same service also needs its `security_opt` block (seccomp, AppArmor and
+system paths unconfined, plus `no-new-privileges:true`) for the shell sandbox.
+The comment above it in the template explains the trade-off and how to verify
+it.
 
 ## Method
 
@@ -84,10 +183,10 @@ not by anything in the grepped directories), which are all PLACEMENT by the
 same reasoning as `ODYSSEUS_PI_WORKER_HOST`. A follow-up pass should re-run
 the inventory over `mcp_servers/` to confirm there's nothing else there.
 
-`CLEANUP_INTERVAL_HOURS` is a known non-prefixed legacy environment variable
-that controls a cadence and therefore belongs with CHOICES. It is deliberately
-not shown in `.env.example`; the settings migration should replace its current
-environment-only read before adding any new deployment documentation for it.
+`CLEANUP_ENABLED` and `CLEANUP_INTERVAL_HOURS` are non-prefixed legacy names
+that are **dead**: `src/constants.py` still defines constants from them, but
+nothing imports those constants, so setting either variable changes nothing.
+Session cleanup is not configured through the environment.
 
 ---
 
@@ -96,7 +195,7 @@ environment-only read before adding any new deployment documentation for it.
 | Variable | Read at | What it controls | Verdict |
 |---|---|---|---|
 | `ODYSSEUS_DATA_DIR` | `src/constants.py:12` | Root of the whole `data/` tree (settings, sessions, db, auth, cache, uploads). The single source of truth for every other path constant. | PLACEMENT |
-| `ODYSSEUS_PERSONAL_DIR` | `src/settings_schema.py:169` (`env_override`) | Root of the Markdown vault. Exposed as the `vault_directory` UI setting, but *locked* to this value when the container's bind mount fixes it — see "The rule" above. | PLACEMENT |
+| `ODYSSEUS_PERSONAL_DIR` | `src/settings_schema.py` (`env_override` only) | **Phantom, do not set.** Nothing reads its value; setting it only shows the `vault_directory` control as locked and misreports the source. The vault root is the `vault_directory` setting, else `<data>/personal_docs`. See "The rule" above. | DEAD |
 | `ODYSSEUS_PERSONAL_DIRS` | `src/personal_dirs_config.py:44` | Declares `path:label` vault trees to auto-register/label at boot, so a compose file's bind mounts are enough to reproduce a working install without a manual `POST /api/personal/add_directory`. | PLACEMENT |
 | `ODYSSEUS_MAIL_ATTACHMENTS_DIR` | `src/constants.py:59` | Where inbound mail attachments are stored on disk. Defaults under `DATA_DIR`; overridden to move it to a different mount. | PLACEMENT |
 | `ODYSSEUS_AGENT_STATE_DIR` | `src/agent_worktree/config.py:114` | Where agent-worktree approval state lives on disk. | PLACEMENT |
@@ -200,8 +299,8 @@ where PLACEMENT and CHOICE overlap.
 | Variable | Read at | What it controls | Why it's ambiguous |
 |---|---|---|---|
 | `ODYSSEUS_LOCAL_MODEL_GATE` | `src/llm_core.py:26` | Whether local-model traffic is serialized (foreground chat takes priority over background workloads on one local-model slot). Default on. | The "right" answer depends on whether this host actually has a scarce, single local GPU/model to protect (a deployment fact) — but an advanced user might also want to force it off as a personal choice on a beefier box. Leaning CHOICE if forced, since flipping it never widens any security surface and only trades latency characteristics. |
-| `ODYSSEUS_FASTEMBED_LANE` | `src/embedding_lanes.py:38` | Historically: whether the local FastEmbed lane was built alongside a working custom embedding endpoint. **Now inert** — `build_embedding_lanes()` returns the single `fastembed` lane regardless, so `fastembed_lane_mode()` is read by nothing that acts on it. | Moot while it has no effect. The open question is not where it belongs but whether the remote lane comes back; until it does, the variable is a stub and this row is a note to whoever resurrects it. |
-| `ODYSSEUS_STT_DEVICE` | `services/stt/stt_service.py:69` | Inference device for local Whisper (`cpu`/`cuda`, default `cpu`). | Directly tied to what accelerator hardware this host has — a placement fact — but a user might deliberately force `cpu` even with a GPU present, for stability or to leave the GPU free for chat. Leaning PLACEMENT if forced. |
+| `ODYSSEUS_FASTEMBED_LANE` | `src/embedding_lanes.py:38` | Historically: whether the local FastEmbed lane was built alongside a working custom embedding endpoint. **Now inert** — `build_embedding_lanes()` returns the single `fastembed` lane regardless, and `fastembed_lane_mode()` has no callers. Removed from every compose file and from `.env.example`. | Moot while it has no effect. The open question is not where it belongs but whether the remote lane comes back; until it does, the variable is a stub and this row is a note to whoever resurrects it. |
+| `ODYSSEUS_STT_DEVICE` | `services/stt/stt_service.py:69` | Inference device for local Whisper (`cpu`/`cuda`, default `cpu`). The generic compose files forward it and the two rows below with the code defaults; the ZimaOS template leaves all three to the code. | Directly tied to what accelerator hardware this host has — a placement fact — but a user might deliberately force `cpu` even with a GPU present, for stability or to leave the GPU free for chat. Leaning PLACEMENT if forced. |
 | `ODYSSEUS_STT_COMPUTE_TYPE` | `services/stt/stt_service.py:70` | Whisper quantization/compute type (default `int8`). | Practical values are constrained by the device above (`int8` on CPU, `float16`/`int8_float16` on GPU) — a hardware fact — layered with a quality/speed preference on top. Leaning PLACEMENT if forced, paired with `STT_DEVICE`. |
 | `ODYSSEUS_STT_CONCURRENCY` | `services/stt/stt_service.py:39` | Max concurrent STT inference slots (default 1). | Bounded by this host's CPU/GPU capacity, not by what the user wants — but framed as a tunable limit like the RAG/upload knobs. Leaning PLACEMENT if forced, since raising it on an underpowered host degrades rather than personalizes. |
 
@@ -288,11 +387,15 @@ this different only because the machine is different?*
   `src/settings.py` (`DEFAULT_SETTINGS`) and `src/settings_schema.py` so it
   gets a UI control. If a container deployment might need to pin the value
   (because it's derived from a bind mount, for instance), give the setting an
-  `env_override` the way `vault_directory` does, rather than making the whole
-  thing an environment variable.
+  `env_override` rather than making the whole thing an environment variable,
+  and make the setting's reader consult that variable too. An `env_override`
+  by itself only greys out the control (see the `ODYSSEUS_PERSONAL_DIR`
+  caution above).
 - Genuinely both, depending on topology → make it a setting with an
-  `env_override`, following the `vault_directory` / `ODYSSEUS_PERSONAL_DIR`
-  pattern.
+  `env_override` whose reader honours it.
+- Either way, a new variable reaches a Docker install only if the compose
+  files forward it. Add it there, and to the ZimaOS template if that
+  deployment needs it, in the same change.
 
 Do not add a plain `ODYSSEUS_*` variable for something a user would tune
 per-taste (a model name, a limit, a cadence) just because that's the fastest
