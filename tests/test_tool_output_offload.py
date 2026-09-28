@@ -174,3 +174,110 @@ def test_github_mcp_json_gets_room_before_it_is_offloaded():
     assert inline_limit("mcp__other__thing") == inline_limit("")
     # A larger profile limit still wins over the per-prefix one.
     assert inline_limit("mcp__github_read__search_issues", {"tool_output_inline_limit": 30_000}) == 30_000
+
+
+# ── Reading a stored result back ends the loop instead of feeding it ──────
+#
+# A turn recalled the same offloaded result about twelve times: every answer
+# (a 3k slice, five 1.4k search chunks) looked partial, so the model asked
+# again or re-ran the tool. A bare-ref read now returns the whole output, paged
+# only when it is huge, and says when it has all been read.
+
+
+def test_a_bare_ref_read_returns_the_whole_output(store):
+    from src.agent_tools.rag_tools import RecallToolOutputTool
+
+    body = "\n".join(f"row {i}: value" for i in range(1000))  # ~15k chars
+    _out, record = store.maybe_offload(body, tool="bash", command="cat rows")
+    assert record is not None
+
+    result = _run(RecallToolOutputTool().execute('{"ref": "%s"}' % record["ref"], {"session_id": "s1"}))
+    assert body in result["results"]
+    assert "complete stored output of bash" in result["results"]
+    assert "do not recall this ref again" in result["results"]
+    assert "remain" not in result["results"]
+
+
+def test_a_huge_output_is_paged_and_each_page_names_the_next_offset(store):
+    from src.agent_tools.rag_tools import RecallToolOutputTool, _RECALL_FULL_CHARS
+
+    body = "".join(f"{i:07d}\n" for i in range(6000))  # 48k chars
+    _out, record = store.maybe_offload(body, tool="bash")
+    ref = record["ref"]
+    tool = RecallToolOutputTool()
+
+    pages, offset = [], 0
+    for _ in range(10):
+        res = _run(tool.execute('{"ref": "%s", "offset": %d}' % (ref, offset), {}))["results"]
+        pages.append(res)
+        if f'"offset": ' not in res:
+            break
+        offset = int(res.rsplit('"offset": ', 1)[1].split("}", 1)[0])
+    assert len(pages) == -(-len(body) // _RECALL_FULL_CHARS)  # ceil
+    assert "Page forward like this; do not re-run bash" in pages[0]
+    assert f"End of `{ref}`" in pages[-1]
+    joined = "".join(p.split("\n\n", 1)[1].rsplit("\n\n[", 1)[0] for p in pages)
+    assert joined == body
+
+
+def test_a_query_on_an_output_that_fits_returns_all_of_it(store):
+    from src.agent_tools.rag_tools import RecallToolOutputTool
+
+    body = "\n".join(["filler"] * 800 + ["needle: the port is 8443"] + ["filler"] * 800)
+    _out, record = store.maybe_offload(body, tool="bash")
+    res = _run(RecallToolOutputTool().execute(
+        '{"ref": "%s", "query": "which port"}' % record["ref"], {}))["results"]
+    assert body in res
+
+
+def test_a_query_that_matches_nothing_in_a_huge_output_reads_it_in_order(store):
+    from src.agent_tools.rag_tools import RecallToolOutputTool
+
+    body = "z" * 50_000
+    _out, record = store.maybe_offload(body, tool="bash")
+    res = _run(RecallToolOutputTool().execute(
+        '{"ref": "%s", "query": "qwerty uiop"}' % record["ref"], {}))["results"]
+    assert res.startswith('Nothing matched "qwerty uiop"; here is the output in order.')
+    assert '"offset": 20000' in res
+
+
+def test_an_explicit_limit_still_clamps(store):
+    from src.agent_tools.rag_tools import RecallToolOutputTool, _RECALL_MAX_SLICE_CHARS
+
+    body = "q" * 30_000
+    _out, record = store.maybe_offload(body, tool="bash")
+    res = _run(RecallToolOutputTool().execute(
+        '{"ref": "%s", "limit": 50000}' % record["ref"], {}))["results"]
+    assert f"characters 0-{_RECALL_MAX_SLICE_CHARS:,} of 30,000" in res
+
+
+def test_the_truncation_note_names_the_tool_and_ref_before_the_head(store):
+    body = "\n".join(f"line {i}" for i in range(5000))
+    out, record = store.maybe_offload(body, tool="web_fetch", command="https://example.com")
+    ref = record["ref"]
+    first_line = out.split("\n", 1)[0]
+    assert first_line.startswith("[Truncated web_fetch output")
+    assert f'recall_tool_output {{"ref": "{ref}"}}' in first_line
+    assert "do not re-run web_fetch" in first_line
+    # The trailing note says the same, and still opens with the boilerplate the
+    # ledger drops when it collapses the exchange.
+    assert "This output was large, so only its head and tail are shown." in out
+    assert f'recall_tool_output {{"ref": "{ref}"}}' in out.rsplit("This output was large", 1)[1]
+    assert "Do NOT re-run web_fetch" in out
+
+
+def test_the_recall_schema_says_to_page_not_rerun():
+    from src.tool_schemas import FUNCTION_TOOL_SCHEMAS
+
+    schema = next(s for s in FUNCTION_TOOL_SCHEMAS if s["function"]["name"] == "recall_tool_output")
+    desc = schema["function"]["description"]
+    assert "whole stored output" in desc
+    assert "offset" in desc and "rather than re-running the tool" in desc
+
+
+def test_the_ledger_pointer_offers_the_bare_ref_read():
+    from src.context_compactor import ledger_entry
+
+    entry = ledger_entry("### bash: cat big.log\nsome facts", ["toolout-0123456789"])
+    assert '{"ref": "toolout-0123456789"}' in entry
+    assert "do NOT re-run the tool" in entry

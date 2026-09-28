@@ -507,10 +507,14 @@ FUNCTION_TOOL_SCHEMAS = [
                 "conversation. When an earlier tool produced a lot of output, "
                 "only its head and tail were kept inline and the full text was "
                 "stored under a `toolout-...` reference named in that excerpt. "
-                "Pass that `ref` with a `query` to pull just the parts that "
-                "answer your question, or with an `offset` to read it in order. "
-                "Use this instead of re-running the command to see the rest — "
-                "the data is already captured. Omit both to list what is stored."
+                "Pass just that `ref` to get the whole stored output back; a "
+                "very large one comes in pages, so call again with the `offset` "
+                "each page names until it says End of output. Add a `query` to "
+                "search a large output for one part instead. Page through the "
+                "stored result rather than re-running the tool or repeating the "
+                "same query — the data is already captured, and once you have "
+                "read it all there is nothing more to fetch. Omit `ref` and "
+                "`query` to list what is stored."
             ),
             "parameters": {
                 "type": "object",
@@ -539,7 +543,7 @@ FUNCTION_TOOL_SCHEMAS = [
                         # is read statically by ast.literal_eval in
                         # test_tool_index_schema_parity. The numbers are tied to
                         # the constants by test instead.
-                        "description": "Characters to return for an ordered read (default 3000, max 8000).",
+                        "description": "Omit to get the whole output (pages of 20000 characters when it is longer). An explicit limit returns that many characters, max 8000 (3000 if not a number).",
                     },
                     "k": {
                         "type": "integer",

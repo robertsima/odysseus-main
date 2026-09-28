@@ -528,6 +528,13 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
 
         run_id = str(args.get("run_id") or "").strip()
         worker = str(args.get("worker_session") or args.get("session_id") or "").strip()
+        if worker:
+            from src.ai_interaction import get_session_manager
+            from src.agent_tools.session_tools import resolve_session_ref
+
+            manager = get_session_manager()
+            if manager is not None:
+                worker = resolve_session_ref(manager, worker, owner=owner)
         mine = agent_activity.list_runs(session_id=session_id, limit=100, include_descendants=True)
         candidates = [
             run for run in mine

@@ -11,6 +11,7 @@ AI_CHAT_TIMEOUT are reused from there too.
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Dict, Optional
 
@@ -98,6 +99,134 @@ def _find_session(manager, session_id: Optional[str]):
         return manager.get_session(session_id)
     except KeyError:
         return None
+
+
+_RUN_ID_RE = re.compile(r"^[a-z][a-z0-9_]*-[0-9a-f]{10}$")
+# `[Name](#session-<id>)`: list_sessions and every UI-convention reply render a
+# chat this way, and models paste the whole link back as the id.
+_SESSION_LINK_RE = re.compile(r"\(\s*#?session-([^)\s]+)\s*\)")
+# Shortest id prefix accepted as "the chat whose id starts with this". Ids are
+# uuids or 8-hex forks, so six characters is already unambiguous in practice;
+# anything shorter is a guess, not an id.
+_MIN_ID_PREFIX = 6
+
+_SESSION_ID_HELP = (
+    "Pass a chat id exactly as list_sessions prints it after 'id:' (a bare id, not the "
+    "'#session-…' link target), a worker's worker_session from manage_agent_loadout "
+    "status (not its run_id), or session_id 'new' for a fresh chat."
+)
+
+
+def _owned_sessions(manager, owner: Optional[str]) -> Dict:
+    """The caller's chats as ``{id: session}``; empty when unknowable."""
+    getter = getattr(manager, "get_sessions_for_user", None)
+    if getter is None:
+        return {}
+    try:
+        return dict(getter(owner) or {})
+    except Exception:
+        return {}
+
+
+def resolve_session_ref(manager, raw, *, owner: Optional[str] = None) -> str:
+    """The chat id a model meant when it passed something close to one.
+
+    The one place every session-addressing tool (send_to_session,
+    manage_session, message_agent, manage_agent_loadout stop) normalises its
+    target, so they all accept and reject the same things.
+
+    On 2026-09-27 a parent called send_to_session three times with
+    ``session-<uuid>``: list_sessions renders each chat as a ``#session-<id>``
+    link, and worker run ids (``session-<10 hex>``) share the prefix. Accepted
+    here, in order: an existing id as given (after trimming quotes/backticks);
+    the id inside a pasted ``[Name](#session-<id>)`` link; that id behind a
+    ``#``/``session-`` link prefix; a run id, which resolves to the worker chat
+    the run talked to; and, when ``owner`` is known, a unique prefix of one of
+    the caller's own chats. Anything else is returned (trimmed) unchanged and
+    fails the caller's usual "not found" check, so ownership is still enforced
+    on whatever this returns.
+    """
+    sid = str(raw or "").strip().rstrip(".,;:").strip("`'\"").strip()
+    if not sid or sid.lower() in ("new", "current") or _find_session(manager, sid) is not None:
+        return sid
+    link = _SESSION_LINK_RE.search(sid)
+    candidates = [link.group(1)] if link else []
+    bare = sid.lstrip("#")
+    candidates.append(bare)
+    if bare.lower().startswith("session-"):
+        candidates.append(bare[len("session-"):])
+    for cand in candidates:
+        if cand and _find_session(manager, cand) is not None:
+            return cand
+    for cand in candidates:
+        if not _RUN_ID_RE.match(cand):
+            continue
+        try:
+            run = activity.get_run(cand) or {}
+        except Exception:
+            run = {}
+        worker = (run.get("summary") or {}).get("target_session") or run.get("session_id")
+        if worker and _find_session(manager, str(worker)) is not None:
+            return str(worker)
+    if owner is not None:
+        prefix = candidates[-1]
+        if len(prefix) >= _MIN_ID_PREFIX:
+            matches = [cid for cid in _owned_sessions(manager, owner) if str(cid).startswith(prefix)]
+            if len(matches) == 1:
+                return str(matches[0])
+    return sid
+
+
+# The WIP name; kept so older call sites and tests keep working.
+_resolve_target_sid = resolve_session_ref
+
+
+def _worker_sessions(caller: Optional[str], limit: int = 8) -> list:
+    """``(worker_chat_id, title)`` for workers the calling chat started."""
+    if not caller:
+        return []
+    try:
+        runs = activity.list_runs(session_id=caller, limit=50, include_descendants=True)
+    except Exception:
+        return []
+    out, seen = [], set()
+    for run in runs:
+        wid = (run.get("summary") or {}).get("target_session")
+        if not wid or wid == caller or wid in seen:
+            continue
+        seen.add(wid)
+        out.append((str(wid), str(run.get("title") or "")))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def session_not_found_error(manager, raw, *, owner: Optional[str] = None,
+                            caller: Optional[str] = None, limit: int = 8) -> str:
+    """A not-found message that names the ids that WOULD work.
+
+    "Not found, use list_sessions" sent models round a loop of guessing; the
+    valid targets are cheap to list, so the error carries them: the workers
+    this chat started first (the usual intended target), then the caller's
+    other chats.
+    """
+    rows, seen = [], {caller} if caller else set()
+    for wid, title in _worker_sessions(caller, limit):
+        seen.add(wid)
+        rows.append(f"`{wid}` (worker: {title[:60]})" if title else f"`{wid}` (worker)")
+    for cid, sess in _owned_sessions(manager, owner).items():
+        if len(rows) >= limit:
+            break
+        if cid in seen:
+            continue
+        seen.add(cid)
+        name = str(getattr(sess, "name", "") or "").strip()
+        rows.append(f"`{cid}` ({name[:60]})" if name else f"`{cid}`")
+    shown = str(raw or "").strip() or "(empty)"
+    msg = f"Session '{shown}' not found. It may have been deleted. {_SESSION_ID_HELP}"
+    if rows:
+        msg += " Valid targets: " + ", ".join(rows) + "."
+    return msg
 
 
 def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
@@ -359,6 +488,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
 
     target_sid, message, mode = _parse_send_args(content)
     extras = _parse_send_extras(content)
+    target_sid = resolve_session_ref(_session_manager, target_sid, owner=owner)
     if not target_sid:
         return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)", "exit_code": 1}
     if mode not in ("chat", "agent"):
@@ -423,7 +553,8 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     else:
         sess = _find_session(_session_manager, target_sid)
     if not sess:
-        return {"error": f"Session '{target_sid}' not found. It may have been deleted; use list_sessions and pass an exact id it returned, or session_id 'new' for a fresh chat.", "exit_code": 1}
+        return {"error": session_not_found_error(_session_manager, target_sid, owner=owner, caller=session_id),
+                "exit_code": 1}
 
     # Owner-scope: reject access to another user's session. When the caller is
     # authenticated, a null-owner (legacy / auth-was-off) session is not theirs
@@ -706,6 +837,17 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     # Allow "current" to refer to the active session
     if target_sid.lower() == "current" and session_id:
         target_sid = session_id
+    else:
+        # Same normalisation as send_to_session. Delete takes exact forms only
+        # (no owner => no prefix guess): a guessed target must never be the one
+        # that gets deleted.
+        target_sid = resolve_session_ref(
+            _session_manager, target_sid, owner=None if action == "delete" else owner)
+
+    def _not_found(prefix: str = "") -> Dict:
+        return {"error": prefix + session_not_found_error(_session_manager, target_sid, owner=owner,
+                                                          caller=session_id),
+                "exit_code": 1}
 
     # `switch` / `open` / `select` / `view` - the agent reaches for
     # these when the user asks to "open" or "switch to" a session.
@@ -725,7 +867,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         try:
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             name = db_sess.name or target_sid
         finally:
             db.close()
@@ -744,7 +886,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             new_name = value
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             db_sess.name = new_name
             db.commit()
             _session_manager.update_session_name(target_sid, new_name)
@@ -754,7 +896,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "archive":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             db_sess.archived = True
             db.commit()
             return {"action": "archive", "session_id": target_sid,
@@ -763,7 +905,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "unarchive":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             db_sess.archived = False
             db.commit()
             return {"action": "unarchive", "session_id": target_sid,
@@ -774,7 +916,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                 return {"error": "Cannot delete the current session while chatting in it. Delete other sessions first.", "exit_code": 1}
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Refusing to delete an unknown chat id; use the exact id from list_sessions.", "exit_code": 1}
+                return _not_found("Refusing to delete an unknown chat id. ")
             if db_sess and db_sess.is_important:
                 return {"error": f"Session '{db_sess.name}' is starred/favorited. Unstar it first before deleting.", "exit_code": 1}
             try:
@@ -790,7 +932,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
             is_important = action == "important"
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             # Prevent AI from unstarring sessions - only the user can do that manually
             if not is_important and db_sess.is_important:
                 return {"error": f"Session '{db_sess.name}' is starred by the user. Only the user can unstar sessions manually.", "exit_code": 1}
@@ -803,7 +945,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "truncate":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             keep_count = 10
             if value:
                 try:
@@ -819,7 +961,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
         elif action == "fork":
             db_sess = _session_query(db).first()
             if not db_sess:
-                return {"error": f"Session '{target_sid}' not found. Use list_sessions and pass the exact id it returned.", "exit_code": 1}
+                return _not_found()
             keep_count = 0  # 0 = all messages
             if value:
                 try:
@@ -829,7 +971,7 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
 
             source = _find_session(_session_manager, target_sid)
             if not source:
-                return {"error": f"Session '{target_sid}' not found", "exit_code": 1}
+                return _not_found()
 
             new_sid = str(uuid.uuid4())[:8]
             _session_manager.create_session(

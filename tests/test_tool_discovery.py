@@ -414,6 +414,43 @@ def test_a_policy_dropped_tool_is_reported_as_policy_not_budget():
     assert "not by the schema budget" not in budget["output"]
 
 
+def test_a_denied_tool_with_an_attached_substitute_points_at_the_substitute():
+    """2026-09-27: 3 of 11 research workers (tool_access=selected, web_search
+    attached) asked discovery for trigger_research, were told policy denies it
+    and "if this blocks you, say so", and refused the task on round 1. A denied
+    name whose need an allowed tool covers must read as "use that instead",
+    never as an invitation to stop."""
+    catalog = CATALOG + [schema("trigger_research", "Start a deep research job"),
+                         schema("web_fetch", "Fetch a web page")]
+    settings = {"tool_access": "selected", "enabled_tools": ["web_search", "discover_tools"]}
+    discovery = TurnToolDiscovery(catalog)
+    discovery.set_attached(["web_search"])
+    result = run(discovery, "trigger_research", settings=settings)
+    assert result["policy_denied_names"] == ["trigger_research"]
+    # web_fetch is not permitted for this worker, so it is not offered.
+    assert result["discovery"]["substitutes"] == {"trigger_research": ["web_search"]}
+    assert result["already_attached_names"] == ["web_search"]
+    assert result["continue_same_turn"] is True
+    out = result["output"]
+    assert "trigger_research isn't available here" in out
+    assert "use web_search (attached) instead" in out
+    assert "If this blocks you" not in out
+    assert "Dropped by this chat's tool policy" not in out
+
+    # A permitted-but-unattached substitute is loaded for the next call.
+    discovery = TurnToolDiscovery(catalog, disabled_tools={"trigger_research"})
+    result = run(discovery, "use trigger_research for this")
+    assert set(result["loaded_names"]) >= {"web_search", "web_fetch"}
+    assert "use web_search / web_fetch (attached) instead" in result["output"]
+
+    # With no substitute the policy explanation stays, but it still tells the
+    # caller to do what it can rather than giving up.
+    discovery = TurnToolDiscovery(catalog, disabled_tools={"manage_memory"})
+    result = run(discovery, "manage_memory")
+    assert "Dropped by this chat's tool policy" in result["output"]
+    assert "Do the parts of the task your attached tools can do" in result["output"]
+
+
 def test_a_denied_tool_the_caller_never_named_is_not_disclosed():
     """The other half: policy honesty must not become a way to enumerate what
     the chat is not allowed to have. Only a name the caller wrote out — which

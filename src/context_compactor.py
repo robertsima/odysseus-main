@@ -976,8 +976,8 @@ def ledger_entry(text: str, refs: Optional[List[str]] = None) -> str:
         joined = ", ".join(f"`{r}`" for r in unique)
         pointer = (
             f"\n[Full verbatim result kept as {joined}. Call `recall_tool_output` "
-            f'with {{"ref": "{unique[0]}", "query": "<what you need>"}} to reopen '
-            f"it — do NOT re-run the tool.]"
+            f'with {{"ref": "{unique[0]}"}} to read it back whole (paged if very large), '
+            f'or add "query": "<what you need>" to search it — do NOT re-run the tool.]'
         )
     return f"{LEDGER_HEADER}\n{facts}{pointer}"
 

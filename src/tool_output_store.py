@@ -499,6 +499,11 @@ def search(
     return rows[:k]
 
 
+def recall_call(ref: str) -> str:
+    """The exact call that reads a stored output back, for every note to quote."""
+    return f'recall_tool_output {{"ref": "{ref}"}}'
+
+
 def excerpt_with_pointer(
     text: str,
     record: Dict[str, Any],
@@ -507,24 +512,37 @@ def excerpt_with_pointer(
     tail: Optional[int] = None,
     profile=None,
 ) -> str:
-    """The inline stand-in for an offloaded result: head + tail + how to get more."""
+    """The inline stand-in for an offloaded result: head + tail + how to get more.
+
+    The tool and the ref are named both before the head and after the tail.
+    With only the trailing note, a model reading the head of an excerpt took the
+    cut for the tool's whole answer and ran the same query again, a dozen times
+    in one turn, instead of reading the stored result.
+    """
     head = head if head is not None else head_chars(profile)
     tail = tail if tail is not None else tail_chars(profile)
     ref = record.get("ref", "")
+    tool = record.get("tool") or "tool"
+    total = record.get("chars", len(text))
     hidden = max(len(text) - head - tail, 0)
     parts = [
+        (
+            f"[Truncated {tool} output: {total:,} characters, stored as `{ref}`. "
+            f"Read all of it with `{recall_call(ref)}`; do not re-run {tool}.]\n"
+        ),
         text[:head].rstrip(),
         (
-            f"\n\n[... {hidden:,} of {record.get('chars', len(text)):,} characters "
+            f"\n\n[... {hidden:,} of {total:,} characters "
             f"held outside the conversation as `{ref}` ...]\n\n"
         ),
         text[-tail:].lstrip() if tail else "",
         (
             f"\n\nThis output was large, so only its head and tail are shown. The full "
-            f"{record.get('lines', 0):,}-line result is stored and searchable: call "
-            f"`recall_tool_output` with {{\"ref\": \"{ref}\", \"query\": \"<what you need>\"}} "
-            f"to pull the relevant part, or {{\"ref\": \"{ref}\", \"offset\": <char>}} to read "
-            f"it in order. Do NOT re-run the tool to see the rest."
+            f"{record.get('lines', 0):,}-line result of {tool} is stored as `{ref}`: call "
+            f"`{recall_call(ref)}` to get the whole output back (a very large one comes in "
+            f'pages; continue with the "offset" each page names), or add '
+            f'"query": "<what you need>" to search it. Do NOT re-run {tool} or repeat the '
+            f"same query to see the rest; the result is already captured."
         ),
     ]
     return "".join(parts)

@@ -323,6 +323,7 @@ async def message_agent(content: str, session_id: Optional[str] = None, owner: O
         return {"error": "message_agent must be called from within a running session", "exit_code": 1}
 
     from_name = ""
+    manager = None
     try:
         from src.ai_interaction import get_session_manager
 
@@ -332,10 +333,21 @@ async def message_agent(content: str, session_id: Optional[str] = None, owner: O
     except Exception:
         logger.debug("message_agent: could not resolve sender name for %s", session_id, exc_info=True)
 
+    # Same id normalisation as send_to_session: a pasted `#session-<id>` link,
+    # a worker's run_id or a short prefix all mean one chat.
+    from src.agent_tools.session_tools import (
+        _find_session, resolve_session_ref, session_not_found_error,
+    )
+    if manager is not None:
+        target_sid = resolve_session_ref(manager, target_sid, owner=owner)
+
     result = agent_mailbox.send(target_sid, message, from_session=session_id, owner=owner,
                                 from_session_name=from_name)
     if not result.get("ok"):
-        return {"error": result.get("reason") or "message_agent failed", "exit_code": 1}
+        reason = result.get("reason") or "message_agent failed"
+        if manager is not None and ("not found" in reason or _find_session(manager, target_sid) is None):
+            reason = session_not_found_error(manager, target_sid, owner=owner, caller=session_id)
+        return {"error": reason, "exit_code": 1}
 
     return {
         "delivered": True,
