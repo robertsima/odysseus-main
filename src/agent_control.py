@@ -1000,16 +1000,28 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
                 "waiting_approval": "is waiting for the user's approval"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
               + ("The worker was cut off by its round budget, so the result above is partial — "
-                 "pick the task up from where it stopped. " if status == "incomplete" else "")
+                 "tell the user where it stopped and what is left. " if status == "incomplete" else "")
               + ("The worker paused on an approval card in its own chat, so the task is not done. "
                  "Tell the user it needs their approval there; do not redo the work. "
                  if status == "waiting_approval" else "")
-              + "Continue the task using this result. Don't repeat work the worker already did. "
-              "If the task is now complete, give the user the final result.")
+              + "Report this result to the user in one reply. Don't repeat work the worker already did, "
+              "and do not start new workers or delegate further: the user did not ask for more. "
+              "If more work is needed, say what it is and let the user decide.")
     inject_msg = ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
                                               "from_session_name": worker.name, "direction": "inbound"})
     parent.add_message(inject_msg)
     manager.save_sessions()
+    if _running_workers(parent_id):
+        # Sibling workers are still running. Each finished worker used to
+        # continue the parent on its own, so N workers meant N autonomous
+        # turns, each free to launch more. The result is recorded above; the
+        # last sibling to finish runs the one summarising turn, which reads
+        # every result already in history.
+        activity.publish(parent_id, "note",
+                         f"Worker {worker.name} finished; its result is saved and summarised when the "
+                         "other workers finish",
+                         source="session", owner=owner)
+        return
     if agent_runs.is_busy(parent_id):
         # Mid-turn. That turn built its context before this message existed,
         # so it will not read the result. Previously the result just sat in
@@ -1023,6 +1035,22 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
         task.add_done_callback(_PENDING_HANDOFFS.discard)
         return
     await _continue_parent(manager, parent_id, parent, worker, owner)
+
+
+def _running_workers(parent_id: str) -> int:
+    """Workers started by ``parent_id`` that are still running.
+
+    Narrower than :func:`live_children`, which also counts the chat's own
+    headless runs (a continuation in progress is one): only a sibling worker
+    whose result is still to come should hold the summary back.
+    """
+    try:
+        return sum(1 for rec in activity.list_runs(limit=400)
+                   if rec.get("status") == "running"
+                   and (rec.get("summary") or {}).get("parent_session") == parent_id
+                   and not (rec.get("summary") or {}).get("workflow_controller"))
+    except Exception:
+        return 0
 
 
 def _result_already_read(parent, inject_msg) -> bool:
@@ -1063,10 +1091,17 @@ async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_ms
 
 async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optional[str]) -> None:
     """Run the parent chat's agent on the worker's result (it is already in
-    the parent's history) and save its reply there."""
+    the parent's history) and save its reply there.
+
+    This turn has no message from the user behind it, so it may summarise the
+    result but never launch anything: every worker-starting tool is denied
+    for it. Without that, a finished worker's follow-up could start new
+    workers, whose completions continued the chat again — a chain of turns
+    nobody asked for.
+    """
     from core.models import ChatMessage
     from src import agent_runs
-    from src.headless_agent import run_headless
+    from src.headless_agent import SUBAGENT_BLOCKED_TOOLS, run_headless
 
     run_id = activity.run_started(parent_id, "session", f"Continuing after worker {worker.name}", owner=owner,
                                   data={"target_session": worker.id, "target_session_name": worker.name,
@@ -1085,6 +1120,9 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
                 # approval mode. A chat does not lose its own restrictions
                 # because a worker happened to finish.
                 subagent=False,
+                # ... but it is not a turn the user started either, so it gets
+                # no launcher at all (see the docstring).
+                disabled_tools=set(SUBAGENT_BLOCKED_TOOLS),
                 activity_session_id=parent_id, run_id=run_id,
                 source="session", owner=owner, outcome=followup)
         status = "incomplete" if followup.get("rounds_exhausted") else "completed"
