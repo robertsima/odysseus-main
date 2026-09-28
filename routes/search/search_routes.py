@@ -100,7 +100,10 @@ def setup_search_routes(config) -> APIRouter:
             return {"results": [], "provider": provider, "error": "Unknown provider"}
         t0 = time.time()
         try:
-            results = _call_provider(provider, query, min(count, 20))
+            # Same overall time limit as every other search path.
+            from services.search.resilience import deadline_scope
+            with deadline_scope():
+                results = _call_provider(provider, query, min(count, 20))
             elapsed = round(time.time() - t0, 2)
             return {"results": results, "provider": provider, "time": elapsed}
         except Exception as e:

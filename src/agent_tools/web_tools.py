@@ -60,6 +60,12 @@ class WebSearchTool:
                 "elapsed_s": 0,
                 "tail": f"Searching web for: {query[:160]}",
             })
+        # The search itself stops at `limit - margin` and returns partial
+        # results (rows found, pages fetched so far); wait_for is only the
+        # backstop, and the search thread stops on its own deadline.
+        from services.search.resilience import search_deadline_seconds
+        limit = search_deadline_seconds()
+        margin = min(2.0, limit / 10)
         try:
             text, sources = await asyncio.wait_for(
                 loop.run_in_executor(
@@ -69,13 +75,14 @@ class WebSearchTool:
                         max_pages=max_pages,
                         time_filter=time_filter,
                         return_sources=True,
+                        deadline_seconds=limit - margin,
                     ),
                 ),
-                timeout=30,
+                timeout=limit,
             )
         except asyncio.TimeoutError:
             return {
-                "error": f"web_search timed out after 30s: {query[:200]}",
+                "error": f"web_search timed out after {limit:.0f}s: {query[:200]}",
                 "exit_code": 1,
             }
         except Exception as e:
@@ -86,7 +93,7 @@ class WebSearchTool:
             }
         if progress_cb:
             await progress_cb({
-                "elapsed_s": 30,
+                "elapsed_s": limit,
                 "tail": "Search completed; preparing sources.",
             })
         output = text[:MAX_OUTPUT_CHARS] if len(text) > MAX_OUTPUT_CHARS else text

@@ -587,21 +587,47 @@ class DeepResearcher:
                 logger.info("Search is disabled for research")
                 return []
 
-            # Try primary provider, then fallbacks
+            from services.search import resilience
+
+            # Try primary provider, then fallbacks -- all within one search
+            # deadline (ODYSSEUS_SEARCH_DEADLINE_SECONDS, 30 s), so a slow
+            # chain cannot hold a research round for providers x retries x
+            # timeouts. asyncio.to_thread copies the context, so each
+            # provider call sees the deadline and cuts its own requests,
+            # `site:` retry and SearXNG fallbacks short; wait_for is the
+            # backstop for a call that blocks past it anyway.
             chain = _build_provider_chain(provider)
             raised = False
-            for prov in chain:
-                try:
-                    results = await asyncio.to_thread(_call_provider, prov, query, 10)
-                    if results:
-                        logger.info(f"Research search: {prov} returned {len(results)} results")
-                        if prov not in self.providers_used:
-                            self.providers_used.append(prov)
-                        return results
-                except Exception as e:
-                    raised = True
-                    logger.warning(f"Research search: {prov} failed: {e}")
-                    self._last_search_error = f"{prov}: {e}"
+            with resilience.deadline_scope() as deadline:
+                for prov in chain:
+                    if deadline.expired(resilience.MIN_ATTEMPT_SECONDS):
+                        logger.info(
+                            "Research search: time limit reached; not asking %s for %r", prov, query,
+                        )
+                        self._last_search_error = (
+                            f"search time limit ({deadline.seconds:.0f}s) reached before {prov} was tried"
+                        )
+                        return []
+                    try:
+                        results = await asyncio.wait_for(
+                            asyncio.to_thread(_call_provider, prov, query, 10),
+                            timeout=deadline.remaining() + resilience.DEADLINE_JOIN_GRACE,
+                        )
+                        if results:
+                            logger.info(f"Research search: {prov} returned {len(results)} results")
+                            if prov not in self.providers_used:
+                                self.providers_used.append(prov)
+                            return results
+                    except asyncio.TimeoutError:
+                        raised = True
+                        logger.warning(f"Research search: {prov} ran past the search time limit")
+                        self._last_search_error = (
+                            f"{prov}: search time limit ({deadline.seconds:.0f}s) reached"
+                        )
+                    except Exception as e:
+                        raised = True
+                        logger.warning(f"Research search: {prov} failed: {e}")
+                        self._last_search_error = f"{prov}: {e}"
             # Every provider ran but none returned results. If none of them
             # raised, record an actionable reason here — otherwise this empty
             # path leaves `_last_search_error` unset and the caller surfaces a

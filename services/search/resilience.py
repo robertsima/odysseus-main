@@ -22,6 +22,7 @@ cache for failed page fetches. It is stdlib-only and thread-safe; call
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 import random
@@ -44,6 +45,152 @@ def _env_int(name: str, default: int) -> int:
         return max(1, int(os.environ.get(name, "") or default))
     except ValueError:
         return default
+
+
+# ----------------------------------------------------------------------
+# One deadline per search call
+# ----------------------------------------------------------------------
+# The agent's web_search tool gives a search 30 s. Before the deadline existed
+# every layer had its own timeout and none knew about the others: SearXNG could
+# be asked four times (news -> general -> no language -> defaults, 15 s each)
+# plus an HTML fallback, a `site:` miss asked again, an empty chain ran again
+# with a simplified query, DuckDuckGo followed, and the page fetches came
+# last. The tool's asyncio.wait_for gave up at 30 s and threw everything away
+# while the worker thread carried on. Now the outermost search call opens a
+# SearchDeadline and every layer below asks it how long it may still take.
+
+SEARCH_DEADLINE_ENV = "ODYSSEUS_SEARCH_DEADLINE_SECONDS"
+DEFAULT_SEARCH_DEADLINE = 30.0
+# Below this much time left a new upstream request is not worth starting.
+MIN_ATTEMPT_SECONDS = 1.0
+
+
+def search_deadline_seconds() -> float:
+    """The overall budget for one search call (``ODYSSEUS_SEARCH_DEADLINE_SECONDS``)."""
+    try:
+        value = float(os.environ.get(SEARCH_DEADLINE_ENV, "") or DEFAULT_SEARCH_DEADLINE)
+    except ValueError:
+        return DEFAULT_SEARCH_DEADLINE
+    return value if value > 0 else DEFAULT_SEARCH_DEADLINE
+
+
+class DeadlineExceeded(TimeoutError):
+    """Raised when a search step would start after the call's deadline."""
+
+
+class SearchDeadline:
+    """An absolute point in time (on :data:`_now`) a search must finish by."""
+
+    def __init__(self, seconds: float):
+        self.seconds = float(seconds)
+        self.expires = _now() + self.seconds
+
+    def remaining(self) -> float:
+        return max(0.0, self.expires - _now())
+
+    def expired(self, margin: float = 0.0) -> bool:
+        return self.remaining() <= margin
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return f"SearchDeadline({self.remaining():.1f}s of {self.seconds:.0f}s left)"
+
+
+_current_deadline: contextvars.ContextVar[Optional[SearchDeadline]] = contextvars.ContextVar(
+    "odysseus_search_deadline", default=None,
+)
+
+
+def current_deadline() -> Optional[SearchDeadline]:
+    return _current_deadline.get()
+
+
+@contextmanager
+def deadline_scope(seconds: Optional[float] = None,
+                   deadline: Optional[SearchDeadline] = None) -> Iterator[SearchDeadline]:
+    """Run the block under a search deadline; nested scopes never extend it.
+
+    Pass *seconds* to open a new budget or *deadline* to carry an existing one
+    into another thread (context variables do not follow ``run_in_executor``
+    or a bare ``ThreadPoolExecutor.submit``). An outer deadline that ends
+    sooner wins.
+    """
+    outer = _current_deadline.get()
+    if deadline is None:
+        deadline = SearchDeadline(search_deadline_seconds() if seconds is None else seconds)
+    if outer is not None and outer.expires < deadline.expires:
+        deadline = outer
+    token = _current_deadline.set(deadline)
+    try:
+        yield deadline
+    finally:
+        _current_deadline.reset(token)
+
+
+def time_left(default: float = float("inf")) -> float:
+    """Seconds left on the current deadline (*default* when there is none)."""
+    deadline = _current_deadline.get()
+    return default if deadline is None else deadline.remaining()
+
+
+def out_of_time(margin: Optional[float] = None) -> bool:
+    """True when the current deadline leaves less than *margin* seconds
+    (default :data:`MIN_ATTEMPT_SECONDS`)."""
+    deadline = _current_deadline.get()
+    if deadline is None:
+        return False
+    return deadline.remaining() < (MIN_ATTEMPT_SECONDS if margin is None else margin)
+
+
+# Extra wait past the deadline before a search stops waiting for its worker
+# thread: the thread's own requests are already cut to the deadline, this only
+# covers a connect + read that each used the full remaining time.
+DEADLINE_JOIN_GRACE = 0.5
+
+
+def run_within_deadline(fn: Callable[[], Any], deadline: SearchDeadline, on_timeout: Any,
+                        what: str = "search") -> Any:
+    """Return ``fn()``, or *on_timeout* once *deadline* (plus a short grace) passes.
+
+    ``fn`` runs in a daemon thread that carries the deadline, so every step
+    inside it still stops on its own; this is the backstop for a step that
+    blocks longer than its timeout says (httpx applies a timeout per connect
+    and per read, not to the whole request). A thread given up on finishes in
+    the background and its outcome is dropped. *on_timeout* may be a callable.
+    """
+    outcome: Dict[str, Any] = {}
+    ctx = contextvars.copy_context()
+
+    def target() -> None:
+        try:
+            outcome["value"] = ctx.run(fn)
+        except BaseException as exc:  # re-raised in the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=target, name="search-deadline", daemon=True)
+    worker.start()
+    worker.join(max(0.0, deadline.remaining()) + DEADLINE_JOIN_GRACE)
+    if worker.is_alive():
+        logger.warning(
+            "%s still running at the %.0fs search time limit; returning without it",
+            what, deadline.seconds,
+        )
+        return on_timeout() if callable(on_timeout) else on_timeout
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def request_timeout(cap: float, what: str = "search request") -> float:
+    """A per-request timeout: *cap*, cut to what the deadline has left.
+
+    Raises :class:`DeadlineExceeded` when too little time is left to start
+    another request, so retries and fallbacks stop instead of running past
+    the budget.
+    """
+    left = time_left()
+    if left < MIN_ATTEMPT_SECONDS:
+        raise DeadlineExceeded(f"{what}: search time limit reached")
+    return max(MIN_ATTEMPT_SECONDS, min(float(cap), left))
 
 
 # ----------------------------------------------------------------------
@@ -88,20 +235,30 @@ class ProviderGate:
 
     @contextmanager
     def slot(self) -> Iterator[None]:
-        if not self._sem.acquire(timeout=self.limits.wait_timeout):
+        # Waiting for a slot counts against the search deadline too: a worker
+        # with 5 s left must not queue 30 s for SearXNG.
+        left = time_left()
+        wait = min(self.limits.wait_timeout, left)
+        if left < MIN_ATTEMPT_SECONDS or not self._sem.acquire(timeout=wait):
             raise ProviderBusy(
-                f"{self.name}: no free search slot after {self.limits.wait_timeout:.0f}s "
+                f"{self.name}: no free search slot after {wait:.0f}s "
                 f"({self.limits.max_concurrent} concurrent)"
             )
         try:
             with self._lock:
                 now = _now()
                 start = max(now, self._next_start)
+                delay = start - now
+                if delay > 0 and delay > time_left() - MIN_ATTEMPT_SECONDS:
+                    # The paced start would land after the deadline; do not
+                    # take the start time from the next caller either.
+                    raise ProviderBusy(
+                        f"{self.name}: next request start is {delay:.1f}s away, past the search deadline"
+                    )
                 spacing = self.limits.min_interval
                 if self.limits.jitter:
                     spacing += random.uniform(0, self.limits.jitter)
                 self._next_start = start + spacing
-            delay = start - now
             if delay > 0:
                 _sleep(delay)
             yield
@@ -269,7 +426,13 @@ class SingleFlightCache:
             if hit:
                 return value, True
             key_lock = self._inflight.setdefault(key, threading.Lock())
-        with key_lock:
+        # Another caller computing the same key may be working to a later
+        # deadline than ours; wait for it only as long as our own budget.
+        wait = time_left()
+        acquired = key_lock.acquire() if wait == float("inf") else key_lock.acquire(timeout=wait)
+        if not acquired:
+            raise DeadlineExceeded("search time limit reached while waiting for an identical search")
+        try:
             with self._lock:
                 hit, value = self._get_fresh(key)
                 if hit:
@@ -289,6 +452,8 @@ class SingleFlightCache:
                 with self._lock:
                     if self._inflight.get(key) is key_lock:
                         self._inflight.pop(key, None)
+        finally:
+            key_lock.release()
 
     def clear(self) -> None:
         with self._lock:
