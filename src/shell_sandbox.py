@@ -6,6 +6,9 @@ Filtering commands is not a boundary (globs, `python -c`, symlinks, base64 all
 get round it), so this uses the operating system instead. The sandbox sees:
 
 * the chat's workspace, read-write, as the working directory;
+* the managed worktrees of the workspace's own repository (the ones
+  ``manage_agent_worktree start`` makes under the worktree root), read-write
+  at the same path;
 * the system (/usr, /etc and the /bin, /lib links), read-only;
 * its own empty /tmp and /var/tmp, a fresh /proc (own PID namespace, so the
   app's environment in /proc/<pid>/environ is out of reach) and a minimal /dev.
@@ -19,10 +22,16 @@ services the container can reach, ChromaDB included (its vectors hold vault
 excerpts, and Chroma 1.x has no built-in auth), so `shell_sandbox_network`
 can turn the network off for the sandbox.
 
-The sandbox needs the `bwrap` binary and permission to create user namespaces,
-which Docker's default seccomp/AppArmor profiles refuse (see the compose
-files). `status()` probes once and says why it is unavailable; callers then
-fall back to requiring the private-vault grant, as before.
+The sandbox needs the `bwrap` binary, permission to create user namespaces
+(which Docker's default seccomp/AppArmor profiles refuse) and permission to
+mount a fresh /proc (which Docker's masked /proc paths refuse); see
+security_opt in the compose files. `status()` probes once and says which is
+missing. Without user namespaces the sandbox is unavailable and callers fall
+back to requiring the private-vault grant, as before. Without /proc it runs
+degraded, with an empty /proc: confinement is unchanged, but ps/top, bash
+process substitution and the /dev/fd and /dev/std{in,out,err} paths (bwrap's
+/dev links them into /proc/self) do not work inside it. Redirects such as
+``>&2``, python, git and pip are unaffected.
 """
 
 from __future__ import annotations
@@ -33,7 +42,7 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +51,18 @@ NETWORK_SETTING = "shell_sandbox_network"   # True (default) | False
 SANDBOX_HOME = "/tmp/home"
 _PROBE_RETRY_S = 600.0
 _PROBE_TIMEOUT_S = 10.0
+
+# What to change, in words an operator can act on. The compose files carry
+# these lines under the odysseus service.
+_USERNS_FIX = ('add "seccomp=unconfined" and "apparmor=unconfined" under security_opt '
+               'of the odysseus service in the compose file')
+_PROC_FIX = 'add "systempaths=unconfined" under security_opt of the odysseus service in the compose file'
+DEGRADED_REASON = "no procfs: ps/top, bash process substitution and /dev/fd may not work"
+
+# bwrap's own wording. "Can't mount proc on /newroot/proc" comes after the
+# namespaces were created, so it is never a seccomp/AppArmor problem.
+_PROC_MOUNT_MARKERS = ("mount proc",)
+_USERNS_MARKERS = ("namespace", "uid map", "gid map", "setgroups", "unshare")
 
 # Variables the sandboxed shell may see. Everything else in the app's
 # environment (API keys, tokens, passwords) stays outside.
@@ -106,13 +127,23 @@ def _system_mounts() -> List[str]:
     return args
 
 
+def _procfs_mode() -> bool:
+    """Whether the probe found a fresh /proc mountable (True until it has run)."""
+    return _probe.get("procfs") is not False
+
+
 def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, str]] = None,
-               extra_ro_binds: Optional[Mapping[str, str]] = None, new_session: bool = True) -> List[str]:
+               extra_ro_binds: Optional[Mapping[str, str]] = None, new_session: bool = True,
+               procfs: Optional[bool] = None, worktrees: bool = True) -> List[str]:
     """``inner`` wrapped in bwrap: runs in ``workspace`` and sees only that,
-    the read-only system and its own scratch space. ``extra_ro_binds`` maps
-    host paths to where they appear inside (a background job's script)."""
+    the workspace repository's managed worktrees, the read-only system and
+    its own scratch space. ``extra_ro_binds`` maps host paths to where they
+    appear inside (a background job's script). ``procfs`` None follows the
+    probe: an empty /proc where Docker refuses a fresh one."""
     bwrap = shutil.which("bwrap") or "bwrap"
     ws = os.path.realpath(workspace)
+    if procfs is None:
+        procfs = _procfs_mode()
     # bwrap is launched through `env -i` with only the allowlist. bwrap is
     # PID 1 of the sandbox's PID namespace, so its own environment is readable
     # inside at /proc/1/environ; --clearenv would clean only the child and
@@ -125,48 +156,121 @@ def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, s
     if new_session:
         args.append("--new-session")
     args += _system_mounts()
-    args += ["--proc", "/proc", "--dev", "/dev",
+    # Degraded mode is an empty /proc directory, never the container's /proc
+    # bound in: the shell runs as the app's uid, so /proc/<app pid>/environ
+    # and /proc/<pid>/root would hand it the app's secrets and its whole
+    # filesystem.
+    args += ["--proc", "/proc"] if procfs else ["--dir", "/proc"]
+    args += ["--dev", "/dev",
              "--tmpfs", "/tmp", "--dir", SANDBOX_HOME,
              "--dir", "/var", "--tmpfs", "/var/tmp",
-             "--bind", ws, ws, "--chdir", ws]
+             "--bind", ws, ws]
+    for tree in (workspace_worktrees(ws) if worktrees else ()):
+        args += ["--bind", tree, tree]
+    args += ["--chdir", ws]
     for host, inside in (extra_ro_binds or {}).items():
         args += ["--ro-bind", host, inside]
     return args + ["--"] + list(inner)
 
 
-def _run_probe() -> Dict[str, object]:
+def _platform_problem() -> Optional[str]:
     if os.name != "posix":
-        return {"available": False, "reason": "the shell sandbox needs Linux"}
+        return "the shell sandbox needs Linux"
     if not shutil.which("bwrap"):
-        return {"available": False, "reason": "bubblewrap (bwrap) is not installed"}
+        return "bubblewrap (bwrap) is not installed"
+    return None
+
+
+def _run_bwrap(argv: List[str]) -> Tuple[int, str]:
+    """Run one probe: ``(returncode, last line of its output)``."""
+    done = subprocess.run(argv, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
+    lines = (done.stderr or done.stdout or "").strip().splitlines()
+    return done.returncode, (lines[-1].strip() if lines else "")
+
+
+def _probe_once(*, procfs: bool) -> Tuple[int, str]:
     import tempfile
 
     # Also checks the point of it: the app's data directory must be absent.
+    # With a procfs it must be the sandbox's own; without one, nothing of
+    # the container's /proc may show through.
     from src.constants import DATA_DIR
 
+    check = f'! test -e "{os.path.realpath(DATA_DIR)}"'
+    check = ("test -d /proc/self && " if procfs else "! test -e /proc/1 && ") + check
     probe_dir = tempfile.mkdtemp(prefix="odysseus-sandbox-probe-")
-    argv = build_argv(["/bin/sh", "-c", f'test -d /proc/self && ! test -e "{os.path.realpath(DATA_DIR)}"'],
-                      workspace=probe_dir)
     try:
-        done = subprocess.run(argv, capture_output=True, text=True, timeout=_PROBE_TIMEOUT_S)
-    except (OSError, subprocess.SubprocessError) as exc:
-        return {"available": False, "reason": f"bwrap could not start: {exc}"}
+        return _run_bwrap(build_argv(["/bin/sh", "-c", check], workspace=probe_dir,
+                                     procfs=procfs, worktrees=False))
     finally:
         shutil.rmtree(probe_dir, ignore_errors=True)
-    if done.returncode != 0:
-        detail = (done.stderr or done.stdout or "").strip().splitlines()
-        return {"available": False,
-                "reason": ("bwrap failed: " + (detail[-1] if detail else f"exit {done.returncode}")
-                           + ". Docker's default seccomp/AppArmor profiles block the user "
-                           "namespaces it needs; see security_opt in the compose file.")}
-    return {"available": True, "reason": ""}
+
+
+def _failure_kind(detail: str) -> str:
+    text = (detail or "").lower()
+    if any(marker in text for marker in _PROC_MOUNT_MARKERS):
+        return "proc"
+    if any(marker in text for marker in _USERNS_MARKERS):
+        return "userns"
+    return "other"
+
+
+def _explain(kind: str, detail: str, code: int) -> str:
+    detail = detail or f"exit {code}"
+    if kind == "userns":
+        return (f"bwrap cannot create a user namespace ({detail}): the container's seccomp or "
+                f"AppArmor profile, or the kernel, forbids it. In Docker, {_USERNS_FIX}; on a "
+                "bare host, allow unprivileged user namespaces "
+                "(sysctl kernel.unprivileged_userns_clone=1).")
+    if kind == "proc":
+        return (f"bwrap cannot mount /proc ({detail}): Docker masks paths under /proc, and a "
+                "new procfs is refused unless the container's /proc is fully visible; "
+                f"{_PROC_FIX}.")
+    return (f"bwrap failed: {detail}. In Docker, check security_opt in the compose file: "
+            f"{_USERNS_FIX}, and {_PROC_FIX}.")
+
+
+def _run_probe() -> Dict[str, object]:
+    problem = _platform_problem()
+    if problem:
+        return {"available": False, "degraded": False, "reason": problem}
+    try:
+        code, detail = _probe_once(procfs=True)
+        if code == 0:
+            return {"available": True, "degraded": False, "procfs": True, "reason": ""}
+        kind = _failure_kind(detail)
+        if kind != "proc":
+            return {"available": False, "degraded": False, "reason": _explain(kind, detail, code)}
+        # On 2026-09-28 the live log read "bwrap: Can't mount proc on /proc:
+        # Operation not permitted" behind a message blaming seccomp/AppArmor,
+        # which were already unconfined: the namespaces had been created.
+        # Docker's masked /proc paths refuse a new procfs, so run with an
+        # empty /proc instead of not at all. Confinement is otherwise the same.
+        code, degraded_detail = _probe_once(procfs=False)
+        if code == 0:
+            return {"available": True, "degraded": True, "procfs": False,
+                    "reason": f"{DEGRADED_REASON}. For a full /proc, {_PROC_FIX}.",
+                    "proc_error": detail}
+        kind = _failure_kind(degraded_detail) if degraded_detail else "other"
+        return {"available": False, "degraded": False,
+                "reason": _explain(kind, degraded_detail, code)}
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": False, "degraded": False, "reason": f"bwrap could not start: {exc}"}
+
+
+def mode() -> str:
+    """The ``shell_sandbox`` setting as stored ("auto" or "off")."""
+    return str(_setting(SETTING, "auto") or "auto").strip().lower()
 
 
 def status(*, refresh: bool = False) -> Dict[str, object]:
-    """``{"enabled", "available", "reason"}``. The probe runs once; a failure
-    is re-probed after a while, so a fixed container is noticed."""
+    """``{"enabled", "available", "degraded", "reason"}``. The probe runs
+    once; a failure is re-probed after a while, so a fixed container is
+    noticed. ``degraded`` means available without a procfs, and ``reason``
+    then says what does not work."""
     if not enabled():
-        return {"enabled": False, "available": False, "reason": "turned off in settings (shell_sandbox)"}
+        return {"enabled": False, "available": False, "degraded": False,
+                "reason": "turned off in settings (shell_sandbox)"}
     with _lock:
         stale = (not _probe or refresh
                  or (not _probe.get("available")
@@ -176,11 +280,15 @@ def status(*, refresh: bool = False) -> Dict[str, object]:
             result["at"] = time.monotonic()
             if not result["available"] and result.get("reason") != _probe.get("reason"):
                 logger.warning("[shell-sandbox] unavailable: %s", result["reason"])
+            elif result.get("degraded") and not _probe.get("degraded"):
+                logger.warning("[shell-sandbox] degraded, running with an empty /proc (%s): %s",
+                               result.get("proc_error"), result["reason"])
             elif result["available"] and not _probe.get("available"):
                 logger.info("[shell-sandbox] available: bash/python run confined to the workspace")
             _probe.clear()
             _probe.update(result)
         return {"enabled": True, "available": bool(_probe.get("available")),
+                "degraded": bool(_probe.get("degraded")),
                 "reason": str(_probe.get("reason") or "")}
 
 
@@ -232,6 +340,70 @@ def workspace_problem(workspace: Optional[str]) -> Optional[str]:
         if _within(socket_path, ws):
             return "the workspace contains the Docker socket"
     return None
+
+
+def _plain_directory(path: str) -> bool:
+    """A directory reached without a symlink anywhere on the way."""
+    try:
+        if not os.path.isdir(path) or os.path.islink(path):
+            return False
+        return (os.path.normcase(os.path.realpath(path))
+                == os.path.normcase(os.path.normpath(os.path.abspath(path))))
+    except (OSError, ValueError):
+        return False
+
+
+def workspace_worktrees(workspace: str) -> List[str]:
+    """Managed worktrees of the workspace's own repository, to bind read-write.
+
+    On 2026-09-28 two Lead Engineer workers made a worktree with
+    ``manage_agent_worktree start`` (under the worktree root, e.g.
+    /app/data/agent_worktrees/_repos/<repo>/<slug>) outside their workspace
+    (/app/data/development/<repo>), and could not run a test in it: the
+    sandbox showed only the workspace. The repository's shared git dir lists
+    each linked worktree (``worktrees/<name>/gitdir`` holds the path of its
+    ``.git`` file). One is bound only when it is a directory reached without
+    symlinks, sits under the managed worktree root, belongs to this
+    workspace's repository (``ownership.belongs_to_workspace``) and passes the
+    same ``workspace_problem`` checks as the workspace. The main checkout's
+    ``.git`` is inside the workspace, so git works in a bound worktree.
+    Worktrees of other repositories are never bound.
+    """
+    try:
+        from pathlib import Path
+
+        from src.agent_worktree import ownership
+
+        root = ownership.managed_worktree_root()
+        if root is None:
+            return []
+        ws = os.path.realpath(workspace)
+        common = ownership.git_common_dir(Path(ws))
+        if common is None:
+            return []
+        entries = sorted((common / "worktrees").iterdir())
+    except (OSError, ValueError, ImportError):
+        return []
+    found: List[str] = []
+    for entry in entries:
+        try:
+            pointer = (entry / "gitdir").read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not pointer or not os.path.isabs(pointer):
+            continue
+        tree = os.path.normpath(os.path.dirname(pointer))
+        if tree in found or _within(tree, ws) or not _plain_directory(tree):
+            continue
+        try:
+            if not ownership.belongs_to_workspace(Path(tree), Path(ws), root):
+                continue
+        except (OSError, ValueError):
+            continue
+        if workspace_problem(tree) is not None:
+            continue
+        found.append(tree)
+    return found
 
 
 def usable_for(workspace: Optional[str]) -> bool:

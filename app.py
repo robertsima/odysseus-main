@@ -859,6 +859,10 @@ app.include_router(setup_lotus_routes())
 from routes.shell_routes import setup_shell_routes
 app.include_router(setup_shell_routes())
 
+# Whether the agent's workspace shell sandbox can run (admin settings page)
+from routes.shell_sandbox_routes import setup_shell_sandbox_routes
+app.include_router(setup_shell_sandbox_routes())
+
 # Cookbook (model download/serve/cache, cookbook state sync)
 from routes.cookbook_routes import setup_cookbook_routes
 app.include_router(setup_cookbook_routes())
