@@ -1,19 +1,18 @@
 """
 embeddings.py
 
-Embedding clients for RAG and memory vector search.
+Embedding client for RAG and memory vector search.
 
-Runtime embedding implementation:
-  Local fastembed (ONNX). Remote embedding endpoints are unsupported.
-
-Set EMBEDDING_URL in .env, e.g.:
-  EMBEDDING_URL=http://localhost:11434/v1/embeddings   (ollama)
-  EMBEDDING_URL=http://localhost:8000/v1/embeddings    (vllm / llama.cpp)
+Runtime embedding implementation: local fastembed (ONNX). Remote embedding
+endpoints are unsupported. The HTTP client (`EmbeddingClient`,
+`get_http_embedding_client`) that read EMBEDDING_URL / _MODEL / _API_KEY /
+_BATCH_SIZE / _MAX_CHARS had no caller left after retrieval collapsed to the
+one FastEmbed lane, and was removed on 2026-09-28.
 """
 
 import os
 
-from src.constants import FASTEMBED_CACHE_DIR, EMBEDDING_ENDPOINT_FILE
+from src.constants import FASTEMBED_CACHE_DIR
 
 # Windows: force HuggingFace/fastembed to COPY model files rather than symlink
 # them. On a network-share/UNC cache dir Windows can't follow HF's symlinks
@@ -27,105 +26,11 @@ if os.name == "nt":
 
 import logging
 import numpy as np
-import httpx
 from typing import List, Optional
-
-from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "all-minilm:l6-v2"
 _DEFAULT_FASTEMBED_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
-
-
-class EmbeddingClient:
-    """Drop-in replacement for SentenceTransformer.encode() using an HTTP API."""
-
-    def __init__(self, url: Optional[str] = None, model: Optional[str] = None, api_key: Optional[str] = None):
-        self.url = url or os.getenv(
-            "EMBEDDING_URL",
-            f"http://{os.getenv('LLM_HOST', 'localhost')}:11434/v1/embeddings",
-        )
-        self.model = model or os.getenv("EMBEDDING_MODEL", _DEFAULT_MODEL)
-        self.api_key = api_key or os.getenv("EMBEDDING_API_KEY")
-        self._dim: Optional[int] = None
-        # Short connect timeout so a DOWN embedding endpoint (e.g. Ollama not
-        # running on :11434) fast-fails to the local FastEmbed fallback instead
-        # of stalling startup ~30s per probe. Read stays generous for a real
-        # endpoint (embedding a short string returns in well under a second).
-        self._client = httpx.Client(timeout=httpx.Timeout(connect=3.0, read=10.0, write=5.0, pool=3.0))
-        self._batch_size = max(1, int(os.getenv("EMBEDDING_BATCH_SIZE", "8")))
-        self._max_chars = max(200, int(os.getenv("EMBEDDING_MAX_CHARS", "900")))
-
-    def get_sentence_embedding_dimension(self) -> int:
-        """Probe the endpoint for embedding dimension if not yet known."""
-        if self._dim is not None:
-            return self._dim
-        # Embed a single word to discover the dimension
-        vec = self.encode(["hello"])
-        self._dim = vec.shape[1]
-        logger.info(f"Embedding dimension: {self._dim} (model={self.model})")
-        return self._dim
-
-    def encode(
-        self, texts: List[str], normalize_embeddings: bool = True
-    ) -> np.ndarray:
-        """Encode texts via the API. Returns (N, dim) float32 array."""
-        if not texts:
-            return np.array([], dtype="float32")
-
-        all_vecs = []
-        for i in range(0, len(texts), self._batch_size):
-            batch = texts[i : i + self._batch_size]
-            all_vecs.extend(self._embed_batch(batch))
-
-        vecs = np.array(all_vecs, dtype="float32")
-
-        if normalize_embeddings and vecs.size > 0:
-            norms = np.linalg.norm(vecs, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1, norms)
-            vecs = vecs / norms
-
-        if self._dim is None and vecs.size > 0:
-            self._dim = vecs.shape[1]
-
-        return vecs
-
-    def _embed_batch(self, batch: List[str]) -> List[List[float]]:
-        try:
-            return self._post_embeddings(batch)
-        except httpx.HTTPStatusError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status != 400:
-                raise
-            if len(batch) > 1:
-                vecs = []
-                for text in batch:
-                    vecs.extend(self._embed_batch([text]))
-                return vecs
-            text = batch[0]
-            trimmed = text[: self._max_chars]
-            if trimmed != text:
-                logger.warning(
-                    "Embedding input exceeded endpoint context; retrying with %d chars",
-                    len(trimmed),
-                )
-                return self._post_embeddings([trimmed])
-            raise
-
-    def _post_embeddings(self, batch: List[str]) -> List[List[float]]:
-        resp = self._client.post(
-            self.url,
-            headers={"Authorization": f"Bearer {self.api_key}"} if self.api_key else {},
-            json={"input": batch, "model": self.model},
-        )
-        resp.raise_for_status()
-        data = resp.json()
-
-        # OpenAI format: {"data": [{"embedding": [...], "index": 0}, ...]}
-        embeddings = data.get("data", [])
-        embeddings.sort(key=lambda e: e.get("index", 0))
-        return [emb["embedding"] for emb in embeddings]
 
 
 class FastEmbedClient:
@@ -208,77 +113,6 @@ class FastEmbedClient:
             self._dim = vecs.shape[1]
 
         return vecs
-
-
-def _load_persisted_endpoint() -> dict:
-    """Load the custom embedding endpoint saved from the admin panel."""
-    try:
-        endpoint_file = EMBEDDING_ENDPOINT_FILE
-        if os.path.exists(endpoint_file):
-            import json
-            data = json.loads(open(endpoint_file, encoding="utf-8").read())
-            if data.get("url"):
-                return data
-    except Exception:
-        pass
-    return {}
-
-
-_http_embed_down = False  # process-level latch: skip re-probing a dead endpoint
-
-
-def reset_http_embed_state():
-    """Clear the 'HTTP embedding endpoint is down' latch so the next
-    get_embedding_client() re-probes. Call this when the embedding endpoint
-    setting changes (e.g. the user starts Ollama and saves the endpoint) —
-    otherwise a latch tripped at startup would keep us on FastEmbed for the
-    whole process even after the endpoint comes back."""
-    global _http_embed_down
-    _http_embed_down = False
-
-
-def get_http_embedding_client():
-    """The HTTP embedding client, or None. Never falls back to FastEmbed.
-
-    Split out of `get_embedding_client` for callers that want the HTTP lane
-    specifically. Routing those through the fallback-capable factory meant
-    building a FastEmbedClient — an ONNX model load plus a probe encode — only
-    to discard it for being the wrong type, on every offload and every stored-
-    output search.
-
-    Note the default matters: `EmbeddingClient()` has its own default URL, so
-    "nothing persisted and nothing in env" is still a lane worth probing. The
-    `_http_embed_down` latch is set BY that probe, so it can only be consulted
-    after one has been attempted this process.
-    """
-    global _http_embed_down
-
-    # Check for a persisted custom endpoint (saved from admin panel)
-    persisted = _load_persisted_endpoint()
-    if persisted.get("url"):
-        url = persisted["url"]
-        model = persisted.get("model", "")
-        api_key = persisted.get("api_key", "")
-        # Also set in env so other code sees it
-        os.environ["EMBEDDING_URL"] = url
-        if model:
-            os.environ["EMBEDDING_MODEL"] = model
-        if api_key:
-            from src.secret_storage import decrypt
-            os.environ["EMBEDDING_API_KEY"] = decrypt(api_key)
-    # Try the HTTP embedding API — unless we already found it down this process
-    # (avoids paying the connect timeout again on every RAG/memory/tool probe).
-    if _http_embed_down:
-        return None
-    try:
-        client = EmbeddingClient()
-        client.get_sentence_embedding_dimension()  # health check
-        logger.info(f"Using HTTP embedding API: {client.url} model={client.model}")
-        return client
-    except Exception as e:
-        _http_embed_down = True
-        logger.warning(f"HTTP embedding API unavailable ({e}); using local FastEmbed for the rest of this process")
-        return None
 
 
 def get_embedding_client():

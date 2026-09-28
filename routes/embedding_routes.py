@@ -243,13 +243,16 @@ def setup_embedding_routes():
 
     @router.get("/endpoint")
     def get_endpoint():
-        """Get the current custom embedding endpoint config."""
+        """Get the saved custom embedding endpoint config.
+
+        Retrieval embeds with local FastEmbed only; nothing reads the saved
+        endpoint, and EMBEDDING_URL / EMBEDDING_MODEL are no longer read at all.
+        """
         saved = _load_custom_endpoint()
-        current_url = os.environ.get("EMBEDDING_URL", "")
         return {
-            "url": saved.get("url", current_url),
-            "model": saved.get("model", os.environ.get("EMBEDDING_MODEL", "")),
-            "active": bool(saved.get("url") or current_url),
+            "url": saved.get("url", ""),
+            "model": saved.get("model", ""),
+            "active": bool(saved.get("url")),
         }
 
     @router.post("/endpoint")
@@ -292,25 +295,17 @@ def setup_embedding_routes():
             from src.secret_storage import encrypt
             data["api_key"] = encrypt(api_key)
 
+        # Saved (the key encrypted) and nowhere else. Until 2026-09-28 the
+        # decrypted key was also written into os.environ, where every MCP
+        # server and shell the app spawns inherited it, for a value nothing
+        # in the process reads.
         _save_custom_endpoint(data)
-        os.environ["EMBEDDING_URL"] = url
-        if model:
-            os.environ["EMBEDDING_MODEL"] = model
-        if api_key:
-            os.environ["EMBEDDING_API_KEY"] = api_key
 
         # Reset the RAG singleton so it picks up the new endpoint
         import src.rag_singleton as _rs
         _rs.rag_instance = None
         _rs._last_attempt = 0
 
-        # Clear the HTTP-embedding "down" latch so the new endpoint is re-probed
-        # instead of staying on the FastEmbed fallback for the process lifetime.
-        try:
-            from src.embeddings import reset_http_embed_state
-            reset_http_embed_state()
-        except Exception:
-            pass
         try:
             from src.embedding_lanes import reset_embedding_lane_state
             reset_embedding_lane_state()
@@ -338,20 +333,10 @@ def setup_embedding_routes():
         if os.path.exists(_ENDPOINT_FILE):
             os.remove(_ENDPOINT_FILE)
 
-        # Remove from environment
-        os.environ.pop("EMBEDDING_URL", None)
-        os.environ.pop("EMBEDDING_MODEL", None)
-        os.environ.pop("EMBEDDING_API_KEY", None)
-
         # Reset the RAG singleton so it falls back to fastembed
         import src.rag_singleton as _rs
         _rs.rag_instance = None
         _rs._last_attempt = 0
-        try:
-            from src.embeddings import reset_http_embed_state
-            reset_http_embed_state()
-        except Exception:
-            pass
         try:
             from src.embedding_lanes import reset_embedding_lane_state
             reset_embedding_lane_state()

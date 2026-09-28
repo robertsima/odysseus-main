@@ -12,7 +12,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import logging
-import os
 import threading
 import time
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
@@ -22,28 +21,10 @@ logger = logging.getLogger(__name__)
 LANE_FASTEMBED = "fastembed"
 LANE_CUSTOM = "custom"
 
-# Whether the local FastEmbed fallback lane is built alongside a working
-# custom (HTTP) embedding endpoint.
-#
-#   "auto" (default) -- always build it. Both lanes are indexed and both are
-#       searched, so retrieval survives the endpoint going away.
-#   "off"            -- build it ONLY when the custom lane failed to come up.
-#
-# "off" exists because "we run a real embedding model, stop also maintaining a
-# second 384-dimension MiniLM index" was a reasonable thing to want and there
-# was no way to say it: every offload, index and search paid for both lanes,
-# and the FastEmbed model was downloaded and loaded on a box that had no use
-# for it. It deliberately still falls back rather than leaving the app with no
-# lanes at all -- an unreachable endpoint must degrade retrieval, not delete it.
-FASTEMBED_LANE_ENV = "ODYSSEUS_FASTEMBED_LANE"
-
-
-def fastembed_lane_mode() -> str:
-    """Normalized value of ODYSSEUS_FASTEMBED_LANE ("auto" or "off")."""
-    raw = (os.environ.get(FASTEMBED_LANE_ENV) or "").strip().lower()
-    if raw in {"off", "false", "0", "no", "fallback-only", "fallback_only"}:
-        return "off"
-    return "auto"
+# ODYSSEUS_FASTEMBED_LANE chose whether the FastEmbed lane was built beside a
+# custom (HTTP) one. With a single lane there is nothing to choose; its reader,
+# fastembed_lane_mode(), had no caller and was removed on 2026-09-28, along
+# with _load_custom_endpoint() and its EMBEDDING_URL / _MODEL / _API_KEY reads.
 
 
 # `count()` is a network round-trip to ChromaDB, and the retrieval paths ask
@@ -149,11 +130,6 @@ def reset_embedding_lane_state() -> None:
 
     _legacy_missing_until.clear()
 
-    try:
-        from src.embeddings import reset_http_embed_state
-        reset_http_embed_state()
-    except Exception:
-        pass
     # The cached fallback client keys off FASTEMBED_MODEL, read once at
     # construction. Drop it here so this stays the one hook that clears every
     # piece of process-local lane state.
@@ -179,30 +155,6 @@ def _metadata(lane_name: str, url: str, model: str, dimension: int, fingerprint:
         "embedding_dimension": dimension,
         "embedding_fingerprint": fingerprint,
     }
-
-
-def _load_custom_endpoint() -> Dict[str, str]:
-    try:
-        from src.embeddings import _load_persisted_endpoint
-        persisted = _load_persisted_endpoint()
-    except Exception:
-        persisted = {}
-
-    url = persisted.get("url") or os.environ.get("EMBEDDING_URL", "")
-    if not url:
-        return {}
-
-    model = persisted.get("model") or os.environ.get("EMBEDDING_MODEL", "")
-    api_key = persisted.get("api_key") or os.environ.get("EMBEDDING_API_KEY", "")
-    if persisted.get("api_key"):
-        try:
-            from src.secret_storage import decrypt
-            api_key = decrypt(api_key)
-        except Exception:
-            logger.warning("Could not decrypt saved embedding endpoint API key")
-            api_key = ""
-
-    return {"url": url, "model": model, "api_key": api_key}
 
 
 # The FastEmbed fallback client is immutable once built — fixed model name,

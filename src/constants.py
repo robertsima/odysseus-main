@@ -103,10 +103,6 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SEARXNG_INSTANCE = os.getenv("SEARXNG_INSTANCE", "http://localhost:8080")
 
 
-# Cleanup configuration
-CLEANUP_ENABLED = os.getenv("CLEANUP_ENABLED", "True").lower() == "true"
-CLEANUP_INTERVAL_HOURS = int(os.getenv("CLEANUP_INTERVAL_HOURS", "24"))
-
 # Auth policy
 PASSWORD_MIN_LENGTH = 8
 

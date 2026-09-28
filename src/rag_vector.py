@@ -1,9 +1,9 @@
 """
 rag_vector.py
 
-Vector-based RAG using ChromaDB for storage and API-based embeddings.
-Features: persistent storage, hybrid search (vector + keyword), sentence-aware chunking,
-configurable embedding endpoint via EMBEDDING_URL env var.
+Vector-based RAG using ChromaDB for storage and local FastEmbed embeddings
+(see ``embedding_lanes``). Features: persistent storage, hybrid search
+(vector + keyword), sentence-aware chunking.
 """
 
 import os

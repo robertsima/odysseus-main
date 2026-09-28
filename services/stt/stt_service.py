@@ -40,35 +40,23 @@ class STTService:
         )
 
     def _load_settings(self, owner: str = "") -> dict[str, Any]:
-        from src.settings import get_user_setting
-
-        env_enabled = os.getenv("ODYSSEUS_STT_ENABLED", "true").lower() in {
-            "1",
-            "true",
-            "yes",
-        }
-        from src.settings import get_setting_or_env
+        # stt_enabled / stt_provider / stt_model always resolve from settings:
+        # DEFAULT_SETTINGS carries all three, so the ODYSSEUS_STT_ENABLED /
+        # _DEFAULT_PROVIDER / _MODEL fallbacks read here were never reached
+        # and were removed on 2026-09-28. Device, compute type and
+        # concurrency stay in the environment: they describe the hardware.
+        from src.settings import get_setting_or_env, get_user_setting
 
         beam_size = get_setting_or_env("stt_beam_size", "ODYSSEUS_STT_BEAM_SIZE", 1)
         max_audio_seconds = get_setting_or_env(
             "stt_max_audio_seconds", "ODYSSEUS_STT_MAX_AUDIO_SECONDS", 300
         )
         return {
-            "stt_enabled": bool(get_user_setting("stt_enabled", owner, env_enabled)),
+            "stt_enabled": bool(get_user_setting("stt_enabled", owner, True)),
             "stt_provider": str(
-                get_user_setting(
-                    "stt_provider",
-                    owner,
-                    os.getenv("ODYSSEUS_STT_DEFAULT_PROVIDER", "local"),
-                )
-                or "disabled"
+                get_user_setting("stt_provider", owner, "local") or "disabled"
             ),
-            "stt_model": str(
-                get_user_setting(
-                    "stt_model", owner, os.getenv("ODYSSEUS_STT_MODEL", "base")
-                )
-                or "base"
-            ),
+            "stt_model": str(get_user_setting("stt_model", owner, "base") or "base"),
             "stt_language": str(
                 get_user_setting("stt_language", owner, "") or ""
             ).strip(),

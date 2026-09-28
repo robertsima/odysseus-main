@@ -204,19 +204,18 @@ def test_lane_reset_restores_existing_collection_when_rewrite_fails(monkeypatch)
 
 def test_the_fastembed_lane_env_switch_is_inert(monkeypatch):
     """`ODYSSEUS_FASTEMBED_LANE` chose whether the local lane was built beside a
-    custom one. There is no second lane to choose against any more: the value is
-    still parsed, but the single lane is built either way."""
-    from src.embedding_lanes import fastembed_lane_mode
+    custom one. There is no second lane to choose against any more, and its
+    reader was removed (2026-09-28): the single lane is built either way."""
+    import src.embedding_lanes as lanes
 
+    assert not hasattr(lanes, "fastembed_lane_mode")
     patch_chroma(monkeypatch, FakeChroma())
     _fastembed(monkeypatch, FakeEmbedder(384, "mini", "local://fastembed"))
 
     monkeypatch.delenv("ODYSSEUS_FASTEMBED_LANE", raising=False)
-    assert fastembed_lane_mode() == "auto"
     assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_FASTEMBED]
 
     monkeypatch.setenv("ODYSSEUS_FASTEMBED_LANE", "off")
-    assert fastembed_lane_mode() == "off"
     assert [l.name for l in build_embedding_lanes("odysseus_memories")] == [LANE_FASTEMBED]
 
 
