@@ -8,14 +8,19 @@ and resolves a fresh bearer token at request time.
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import logging
 import os
 import threading
 import time
+from collections import OrderedDict
 from typing import Any, Dict, Optional
 
 import httpx
 from fastapi import HTTPException
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CHATGPT_SUBSCRIPTION_BASE_URL = (
     os.getenv("CHATGPT_SUBSCRIPTION_BASE_URL", "").strip().rstrip("/")
@@ -26,9 +31,74 @@ CHATGPT_OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
 CHATGPT_OAUTH_TOKEN_URL = "https://auth.openai.com/oauth/token"
 CHATGPT_OAUTH_ISSUER = "https://auth.openai.com"
 CHATGPT_OAUTH_REDIRECT_URI = f"{CHATGPT_OAUTH_ISSUER}/deviceauth/callback"
-CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 120
+# Refresh this long before ``exp``. A worker resolves its bearer once at launch
+# and then streams for minutes, so a token with only a couple of minutes left
+# at launch can lapse mid-run; five minutes covers a normal round with margin.
+CHATGPT_ACCESS_TOKEN_REFRESH_SKEW_SECONDS = 300
+# After a 401, a refresh this recent means the rejected token is already brand
+# new: minting another one cannot help and only rotates the refresh token again.
+CHATGPT_UNAUTHORIZED_REFRESH_COOLDOWN_SECONDS = 30
 _AUTH_REFRESH_LOCKS: dict[str, threading.Lock] = {}
 _AUTH_REFRESH_LOCKS_GUARD = threading.Lock()
+# auth_id -> time.monotonic() of this process's last successful refresh.
+_LAST_REFRESH_AT: dict[str, float] = {}
+# sha256(old access token) -> replacement access token, recorded on every
+# refresh. Headers snapshotted before a refresh (a worker's session headers, a
+# chat turn's resolved bearer) carry the old token; this lets the request path
+# swap it without a database round trip. Keyed by digest so superseded tokens
+# are never retained; bounded so it cannot grow without limit.
+_SUPERSEDED_TOKENS: "OrderedDict[str, str]" = OrderedDict()
+_SUPERSEDED_TOKENS_MAX = 64
+_SUPERSEDED_GUARD = threading.Lock()
+
+
+def _token_digest(token: str) -> str:
+    return hashlib.sha256((token or "").encode("utf-8")).hexdigest()
+
+
+def _auth_ref(auth_id: str) -> str:
+    """Short, non-secret handle for log lines."""
+    return str(auth_id or "?")[:8]
+
+
+def _expires_in(token: str) -> str:
+    """Seconds until ``token`` expires, for logs; never the token itself."""
+    try:
+        exp = int(_decode_jwt_payload(token).get("exp") or 0)
+    except Exception:
+        return "unknown"
+    if not exp:
+        return "unknown"
+    return str(exp - int(time.time()))
+
+
+def _record_superseded(old_token: str, new_token: str) -> None:
+    if not old_token or not new_token or old_token == new_token:
+        return
+    key = _token_digest(old_token)
+    with _SUPERSEDED_GUARD:
+        _SUPERSEDED_TOKENS[key] = new_token
+        _SUPERSEDED_TOKENS.move_to_end(key)
+        while len(_SUPERSEDED_TOKENS) > _SUPERSEDED_TOKENS_MAX:
+            _SUPERSEDED_TOKENS.popitem(last=False)
+
+
+def superseded_access_token(access_token: Optional[str]) -> Optional[str]:
+    """The newest token that replaced ``access_token`` in this process, if any.
+
+    Follows the chain (a token refreshed twice since it was snapshotted) and
+    returns ``None`` when the token was never superseded.
+    """
+    if not access_token:
+        return None
+    current = access_token
+    with _SUPERSEDED_GUARD:
+        for _ in range(_SUPERSEDED_TOKENS_MAX):
+            nxt = _SUPERSEDED_TOKENS.get(_token_digest(current))
+            if not nxt or nxt == current:
+                break
+            current = nxt
+    return current if current != access_token else None
 
 
 def _database_handles():
@@ -251,8 +321,29 @@ def access_token_is_expiring(access_token: str, skew_seconds: int = CHATGPT_ACCE
     return exp <= int(time.time()) + int(skew_seconds)
 
 
-def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, force_refresh: bool = False) -> Dict[str, Any]:
+def resolve_runtime_credentials(
+    auth_id: str,
+    owner: Optional[str] = None,
+    *,
+    force_refresh: bool = False,
+    rejected_access_token: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return ``{provider, base_url, api_key, auth_mode}`` with a bearer good now.
+
+    Refreshes are single-flight per credential: the check-and-refresh runs
+    under a per-``auth_id`` lock after re-reading the row, so requests that
+    queue behind someone else's refresh use its result instead of spending the
+    (rotating) refresh token a second time.
+
+    ``rejected_access_token`` is the 401 recovery path: refresh only if the
+    stored token is still the one upstream just rejected. If another request
+    already replaced it, that replacement is returned without a refresh; if it
+    was minted within the cooldown, it is returned as-is (a brand-new token
+    that was rejected will not be helped by minting another).
+    """
     ProviderAuthSession, SessionLocal, utcnow_naive = _database_handles()
+    ref = _auth_ref(auth_id)
 
     def _read_stored() -> Dict[str, str]:
         db = SessionLocal()
@@ -277,17 +368,59 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
         finally:
             db.close()
 
+    def _refresh_reason(token: str) -> Optional[str]:
+        """Why this token must be refreshed now, or ``None`` to use it as-is."""
+        if access_token_is_expiring(token):
+            return "expiring"
+        if force_refresh:
+            return reason or "forced"
+        if rejected_access_token is not None:
+            if token != rejected_access_token:
+                logger.info(
+                    "[chatgpt-auth] auth=%s %s: stored token was already replaced "
+                    "by another refresh; reusing it without refreshing again",
+                    ref, reason or "unauthorized",
+                )
+                _record_superseded(rejected_access_token, token)
+                return None
+            last = _LAST_REFRESH_AT.get(auth_id)
+            if last is not None and time.monotonic() - last < CHATGPT_UNAUTHORIZED_REFRESH_COOLDOWN_SECONDS:
+                logger.info(
+                    "[chatgpt-auth] auth=%s %s: token was refreshed %.1fs ago; "
+                    "not refreshing again, retrying with it",
+                    ref, reason or "unauthorized", time.monotonic() - last,
+                )
+                return None
+            return reason or "unauthorized"
+        return None
+
     stored = _read_stored()
     access_token = stored["access_token"]
-    if force_refresh or access_token_is_expiring(access_token):
+    if force_refresh or rejected_access_token is not None or access_token_is_expiring(access_token):
         # Waiting for the per-account refresh lock and calling OAuth can both
         # take seconds. Neither phase may pin a connection from the shared app
         # QueuePool, especially when many agents resolve the same endpoint.
         with _refresh_lock_for(auth_id):
             stored = _read_stored()
             access_token = stored["access_token"]
-            if force_refresh or access_token_is_expiring(access_token):
-                refreshed = refresh_oauth_tokens(access_token, stored["refresh_token"])
+            why = _refresh_reason(access_token)
+            if why:
+                logger.info(
+                    "[chatgpt-auth] refresh start auth=%s reason=%s token_expires_in=%s",
+                    ref, why, _expires_in(access_token),
+                )
+                started = time.monotonic()
+                try:
+                    refreshed = refresh_oauth_tokens(access_token, stored["refresh_token"])
+                except Exception as exc:
+                    # The message is the OAuth server's error text (or ours);
+                    # it never contains a token.
+                    logger.warning(
+                        "[chatgpt-auth] refresh failed auth=%s reason=%s elapsed=%.2fs "
+                        "error=%s: %s",
+                        ref, why, time.monotonic() - started, type(exc).__name__, exc,
+                    )
+                    raise
                 db = SessionLocal()
                 try:
                     q = db.query(ProviderAuthSession).filter(
@@ -314,6 +447,16 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
                     }
                 finally:
                     db.close()
+                _LAST_REFRESH_AT[auth_id] = time.monotonic()
+                _record_superseded(access_token, stored["access_token"])
+                if rejected_access_token and rejected_access_token != access_token:
+                    _record_superseded(rejected_access_token, stored["access_token"])
+                logger.info(
+                    "[chatgpt-auth] refresh ok auth=%s reason=%s elapsed=%.2fs "
+                    "token_expires_in=%s refresh_token_rotated=%s",
+                    ref, why, time.monotonic() - started, _expires_in(stored["access_token"]),
+                    "yes" if refreshed.get("refresh_token") else "no",
+                )
             access_token = stored["access_token"]
 
     return {
@@ -322,6 +465,117 @@ def resolve_runtime_credentials(auth_id: str, owner: Optional[str] = None, *, fo
         "api_key": access_token,
         "auth_mode": stored["auth_mode"],
     }
+
+
+def _jwt_exp(token: str) -> Optional[int]:
+    try:
+        exp = int(_decode_jwt_payload(token).get("exp") or 0)
+    except Exception:
+        return None
+    return exp or None
+
+
+def _token_identity(token: str) -> Optional[tuple]:
+    """The ChatGPT account a JWT was minted for (subject + account id), if readable."""
+    try:
+        claims = _decode_jwt_payload(token)
+    except Exception:
+        return None
+    auth_claims = claims.get("https://api.openai.com/auth")
+    account = auth_claims.get("chatgpt_account_id") if isinstance(auth_claims, dict) else None
+    sub = claims.get("sub")
+    if not sub and not account:
+        return None
+    return (str(sub or ""), str(account or ""))
+
+
+def _find_auth_for_token(access_token: str) -> Optional[tuple]:
+    """``(auth_id, owner)`` of the stored credential ``access_token`` belongs to.
+
+    The request path only has the bearer from its headers, not the auth row it
+    came from. Match on the exact token (or the one that superseded it) first;
+    failing that, on the ChatGPT account the JWT names, but only when exactly
+    one stored credential is for that account, so a request is never recovered
+    onto somebody else's connection.
+    """
+    if not access_token:
+        return None
+    ProviderAuthSession, SessionLocal, _utcnow = _database_handles()
+    db = SessionLocal()
+    try:
+        rows = db.query(ProviderAuthSession).filter(
+            ProviderAuthSession.provider == CHATGPT_SUBSCRIPTION_PROVIDER,
+        ).all()
+        candidates = [(row.id, row.owner, row.access_token or "") for row in rows]
+    finally:
+        db.close()
+    probes = {access_token}
+    replacement = superseded_access_token(access_token)
+    if replacement:
+        probes.add(replacement)
+    for auth_id, owner, token in candidates:
+        if token and token in probes:
+            return auth_id, owner
+    identity = _token_identity(access_token)
+    if identity:
+        matches = [(a, o) for a, o, t in candidates if t and _token_identity(t) == identity]
+        if len(matches) == 1:
+            return matches[0]
+    return None
+
+
+def recover_rejected_access_token(access_token: str) -> Optional[str]:
+    """After a 401 on ``access_token``: a bearer worth exactly one retry.
+
+    Single-flight with every other refresh of the same credential (see
+    :func:`resolve_runtime_credentials`). Returns ``None`` when no stored
+    credential can be identified for the token. Raises
+    :class:`ChatGPTSubscriptionReauthRequired` when the refresh itself is
+    refused -- the one case where reconnecting is the right advice.
+    """
+    found = _find_auth_for_token(access_token)
+    if not found:
+        logger.warning("[chatgpt-auth] 401 recovery: no stored credential matches the rejected token")
+        return None
+    auth_id, owner = found
+    creds = resolve_runtime_credentials(
+        auth_id, owner, rejected_access_token=access_token, reason="unauthorized",
+    )
+    return creds.get("api_key") or None
+
+
+def token_needs_presend_refresh(access_token: Optional[str]) -> bool:
+    """Cheap, local: is this a readable JWT inside the refresh skew?
+
+    Lets the async request path decide whether :func:`current_access_token`
+    (database and possibly network) is worth a thread hop at all.
+    """
+    return bool(access_token) and _jwt_exp(access_token) is not None and access_token_is_expiring(access_token)
+
+
+def current_access_token(access_token: Optional[str]) -> Optional[str]:
+    """Pre-send check for a bearer snapshotted into headers earlier.
+
+    Returns a replacement when the token was superseded by a refresh in this
+    process, or is inside the refresh skew (refreshing it single-flight), and
+    ``None`` when the caller's token is fine as it is. Tokens that are not
+    readable JWTs are left alone: without ``exp`` there is nothing to check.
+    """
+    if not access_token:
+        return None
+    replacement = superseded_access_token(access_token)
+    candidate = replacement or access_token
+    if _jwt_exp(candidate) is None or not access_token_is_expiring(candidate):
+        return replacement
+    found = _find_auth_for_token(candidate)
+    if not found:
+        return replacement
+    auth_id, owner = found
+    fresh = resolve_runtime_credentials(auth_id, owner).get("api_key") or ""
+    if fresh and fresh != access_token:
+        _record_superseded(access_token, fresh)
+        return fresh
+    return replacement
 
 
 def to_http_exception(exc: Exception) -> HTTPException:

@@ -11,6 +11,7 @@ import threading
 import re
 import os
 import math
+import random
 from contextlib import asynccontextmanager
 from fastapi import HTTPException
 from typing import Optional, Dict, List, Sequence, Tuple
@@ -1856,11 +1857,139 @@ def _chatgpt_affinity_headers(h: Dict[str, str], session_id: Optional[str]) -> D
 
 
 def _format_chatgpt_subscription_error(status_code: int, text: str) -> str:
-    if status_code in (401, 403):
-        return "ChatGPT Subscription credentials expired or were rejected. Reconnect the provider."
+    # A 401 here is not proof the account is disconnected: the 2026-09-27 logs
+    # show the same bearer answered 200 and 401 within the same second. The
+    # stream_llm wrapper refreshes and retries once; only a failed *refresh*
+    # tells the user to reconnect (see _chatgpt_recover_after_401).
+    if status_code == 401:
+        return "ChatGPT Subscription rejected the access token (HTTP 401)."
+    if status_code == 403:
+        return "ChatGPT Subscription refused the request (HTTP 403)."
     if status_code == 429:
         return "ChatGPT Subscription quota or rate limit was reached. Retry after the upstream limit resets."
     return _format_upstream_error(status_code, text, "https://chatgpt.com/backend-api/codex")
+
+
+# Pause before replaying a request after a 401. The observed 401s hit bursts of
+# three brand-new worker conversations started within half a second; a short
+# jittered pause steps the replay out of that burst. Tests zero it.
+_CHATGPT_AUTH_RETRY_DELAY = (0.25, 0.75)
+_CHATGPT_401_AFTER_RETRY = (
+    "ChatGPT Subscription rejected the request (HTTP 401) again after the access "
+    "token was refreshed and the request retried once. The stored credentials "
+    "still refresh normally, so this is an upstream rejection, not a "
+    "disconnected account; retry the request."
+)
+_CHATGPT_401_UNMATCHED = (
+    "ChatGPT Subscription rejected the access token (HTTP 401), and the token "
+    "does not belong to any stored ChatGPT Subscription credential, so it could "
+    "not be refreshed. If the account was disconnected, reconnect the provider."
+)
+
+
+def _bearer_from_headers(headers: Optional[Dict]) -> str:
+    if not isinstance(headers, dict):
+        return ""
+    for key, value in headers.items():
+        if str(key).lower() == "authorization" and isinstance(value, str):
+            value = value.strip()
+            return value[7:].strip() if value[:7].lower() == "bearer " else value
+    return ""
+
+
+def _with_bearer(headers: Optional[Dict], token: str) -> Dict:
+    """A copy of ``headers`` carrying ``token``; the caller's dict is untouched."""
+    out = {k: v for k, v in (headers or {}).items() if str(k).lower() != "authorization"}
+    out["Authorization"] = f"Bearer {token}"
+    return out
+
+
+def _sse_error_data(chunk: str) -> Optional[Dict]:
+    if not isinstance(chunk, str) or not chunk.startswith("event: error"):
+        return None
+    for line in chunk.split("\n"):
+        if line.startswith("data: "):
+            try:
+                data = json.loads(line[6:])
+            except Exception:
+                return None
+            return data if isinstance(data, dict) else None
+    return None
+
+
+def _chatgpt_error_chunk(status: int, text: str, **extra) -> str:
+    return f'event: error\ndata: {json.dumps({"status": status, "text": text, **extra})}\n\n'
+
+
+def _chatgpt_refresh_failure_chunk(exc: BaseException) -> str:
+    """The error to show when the token refresh itself failed."""
+    from src import chatgpt_subscription as cs
+
+    if isinstance(exc, cs.ChatGPTSubscriptionRateLimited):
+        return _chatgpt_error_chunk(429, str(exc))
+    if isinstance(exc, (cs.ChatGPTSubscriptionReauthRequired, cs.ChatGPTSubscriptionAuthNotFound)):
+        # The one case where reconnecting is the right advice: the OAuth server
+        # refused the refresh token (invalid_grant, reused, revoked...).
+        text = str(exc)
+        if "reconnect the provider" not in text.lower():
+            text = f"{text} Reconnect the provider."
+        return _chatgpt_error_chunk(401, text, reauth_required=True)
+    return _chatgpt_error_chunk(
+        502,
+        "ChatGPT Subscription rejected the access token (HTTP 401) and the token "
+        f"refresh could not complete ({type(exc).__name__}: {exc}). The login itself "
+        "was not refused; retry shortly.",
+    )
+
+
+async def _chatgpt_presend_headers(headers: Optional[Dict]) -> Tuple[Optional[Dict], Optional[str]]:
+    """Swap a stale snapshotted bearer before the request goes out.
+
+    Session and worker headers carry the bearer resolved when the turn or
+    worker started. If this process has refreshed that token since, or it is
+    now inside the refresh skew, send the current one instead of learning about
+    it from a 401. Returns ``(headers, error_chunk)``.
+    """
+    token = _bearer_from_headers(headers)
+    if not token:
+        return headers, None
+    from src import chatgpt_subscription as cs
+
+    replacement = cs.superseded_access_token(token)
+    if cs.token_needs_presend_refresh(replacement or token):
+        try:
+            replacement = await asyncio.to_thread(cs.current_access_token, token)
+        except (cs.ChatGPTSubscriptionReauthRequired, cs.ChatGPTSubscriptionAuthNotFound) as exc:
+            return headers, _chatgpt_refresh_failure_chunk(exc)
+        except Exception as exc:
+            # Send what we have; a 401 still gets the recovery path.
+            logger.warning("[chatgpt-auth] pre-send refresh failed (%s: %s); sending the current token",
+                           type(exc).__name__, exc)
+    if replacement and replacement != token:
+        return _with_bearer(headers, replacement), None
+    return headers, None
+
+
+async def _chatgpt_recover_after_401(headers: Optional[Dict], model: str) -> Tuple[Optional[Dict], Optional[str]]:
+    """After a 401 on the first chunk: headers worth one retry, or an error chunk.
+
+    ``(None, None)`` means the rejected bearer cannot be tied to a stored
+    credential, so there is nothing to refresh and the 401 stands.
+    """
+    token = _bearer_from_headers(headers)
+    if not token:
+        return None, None
+    from src import chatgpt_subscription as cs
+
+    try:
+        fresh = await asyncio.to_thread(cs.recover_rejected_access_token, token)
+    except Exception as exc:
+        return None, _chatgpt_refresh_failure_chunk(exc)
+    if not fresh:
+        return None, None
+    logger.info("[chatgpt-auth] 401 from ChatGPT Subscription model=%s; retrying once with %s token",
+                model, "a refreshed" if fresh != token else "the current")
+    return _with_bearer(headers, fresh), None
 
 
 def _format_upstream_error(status: int, body: bytes | str, url: str) -> str:
@@ -3383,6 +3512,13 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
                      tool_choice_none: bool = False, workload: str = "foreground"):
     target_url = _stream_target_url(url)
+    chatgpt_subscription = _detect_provider(url) == "chatgpt-subscription"
+    auth_retry_used = False
+    if chatgpt_subscription:
+        headers, presend_error = await _chatgpt_presend_headers(headers)
+        if presend_error:
+            yield presend_error
+            return
     async with _local_model_slot(target_url, model, workload):
         attempt = 0
         headers_attempt = 0
@@ -3390,6 +3526,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
             emitted = False
             retry_delay = None
             headers_retry = False
+            auth_retry = False
             inner = _stream_llm_inner(
                 url,
                 model,
@@ -3428,8 +3565,40 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     retry_delay = LLMConfig.STREAM_CONNECT_RETRY_DELAY * (attempt + 1)
                     await inner.aclose()
                     break
+                elif chatgpt_subscription and not emitted and (_sse_error_data(chunk) or {}).get("status") == 401:
+                    # Nothing has been streamed, so a replay cannot duplicate
+                    # output. Refresh (single-flight, skipped when another
+                    # request already did) and replay exactly once; chat turns,
+                    # headless workers and llm_call all come through here.
+                    if not auth_retry_used:
+                        auth_retry_used = True
+                        await inner.aclose()
+                        new_headers, recover_error = await _chatgpt_recover_after_401(headers, model)
+                        if recover_error:
+                            yield recover_error
+                            return
+                        if new_headers is not None:
+                            headers = new_headers
+                            auth_retry = True
+                            break
+                        data = _sse_error_data(chunk) or {}
+                        chunk = _chatgpt_error_chunk(
+                            401, _CHATGPT_401_UNMATCHED,
+                            **({"raw": data["raw"]} if "raw" in data else {}),
+                        )
+                    else:
+                        data = _sse_error_data(chunk) or {}
+                        chunk = _chatgpt_error_chunk(
+                            401, _CHATGPT_401_AFTER_RETRY,
+                            **({"raw": data["raw"]} if "raw" in data else {}),
+                        )
                 emitted = True
                 yield chunk
+            if auth_retry:
+                lo, hi = _CHATGPT_AUTH_RETRY_DELAY
+                if hi > 0:
+                    await asyncio.sleep(random.uniform(lo, hi))
+                continue
             if headers_retry:
                 headers_attempt += 1
                 logger.warning(
