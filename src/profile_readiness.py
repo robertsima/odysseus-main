@@ -132,7 +132,10 @@ def _model_rows(profile: Dict[str, Any], inherited_model: Optional[str]) -> List
     rows = []
     problem = agent_loadouts.model_problem(profile, inherited_model=inherited_model)
     if problem:
-        rows.append(_check("model", False, problem["detail"], problem["repair"]))
+        # Only an inherited chat model can be outside the list, and start then
+        # runs the first allowed model instead of refusing.
+        rows.append(_check("model", True, f"the calling chat's {problem['model']} is not in allowed_models; "
+                                          f"the worker runs {problem['allowed_models'][0]}"))
     elif profile.get("model") or inherited_model:
         rows.append(_check("model", True, f"{profile.get('model') or inherited_model} is in allowed_models"))
     else:

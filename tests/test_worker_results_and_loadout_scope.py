@@ -412,33 +412,54 @@ async def test_a_preflight_block_suggests_extra_tools_not_an_update(store, monke
 
 # ── 4. the worker's model must be one its loadout allows ─────────────────────
 
-async def test_start_refuses_an_inherited_model_outside_allowed_models(store, launched, monkeypatch):
+async def test_start_runs_an_allowed_model_when_the_inherited_one_is_not(store, launched, monkeypatch):
+    """The loadout names no model and the calling chat's is outside
+    allowed_models: the worker runs the first allowed model instead of the
+    start being refused with a repair the caller then has to apply."""
     await _create("Innovator", ["web_search"], allowed_models=["gpt-5.6-sol"])
     _use_manager(monkeypatch, _Chat("chat-7", model="gpt-6-sol"))
 
     result = await manage_agent_loadout('{"action": "start", "name": "Innovator", "task": "go"}',
                                         "chat-7", owner="u")
+    assert result["exit_code"] == 0, result
+    assert launched[0]["model"] == "gpt-5.6-sol"
+
+
+async def test_start_still_refuses_an_explicit_model_outside_allowed_models(store, launched, monkeypatch):
+    await _create("Innovator", ["web_search"], allowed_models=["gpt-5.6-sol"])
+    _use_manager(monkeypatch, _Chat("chat-7", model="gpt-5.6-sol"))
+
+    result = await manage_agent_loadout(
+        '{"action": "start", "name": "Innovator", "task": "go", "model": "gpt-6-sol"}', "chat-7", owner="u")
     assert result["exit_code"] == 1 and result["blocked_reason"] == "model_not_allowed"
-    assert "gpt-6-sol" in result["error"] and "gpt-5.6-sol" in result["error"]
     assert result["next_action"] == {"retry_with": {"model": "gpt-5.6-sol"}}
     assert not launched
 
+
+async def test_the_loadouts_own_model_is_always_allowed(store, launched, monkeypatch):
+    """2026-09-28: Planning Command Center named gpt-6-sol with
+    allowed_models [gpt-5.6-sol] and every start was refused."""
+    monkeypatch.setattr("src.agent_tools.loadout_tools._model_problem", lambda spec, owner: None)
+    await _create("Planner", ["web_search"], model="gpt-6-sol", allowed_models=["gpt-5.6-sol"])
+    _use_manager(monkeypatch, _Chat("chat-7", model="gpt-6-luna"))
+
+    ready = await manage_agent_loadout('{"action": "preflight", "name": "Planner"}', "chat-7", owner="u")
+    assert ready["readiness"]["status"] == "READY", ready["response"]
+    result = await manage_agent_loadout('{"action": "start", "name": "Planner", "task": "go"}',
+                                        "chat-7", owner="u")
+    assert result["exit_code"] == 0, result
     ok = await manage_agent_loadout(
-        '{"action": "start", "name": "Innovator", "task": "go", "model": "gpt-5.6-sol"}', "chat-7", owner="u")
-    assert ok["exit_code"] == 0 and launched[0]["model"] == "gpt-5.6-sol"
+        '{"action": "start", "name": "Planner", "task": "go", "model": "gpt-6-sol"}', "chat-7", owner="u")
+    assert ok["exit_code"] == 0, ok
 
 
-async def test_readiness_flags_the_model_the_worker_would_inherit(store, monkeypatch):
+async def test_readiness_names_the_model_the_worker_will_run(store, monkeypatch):
     await _create("Innovator", ["web_search"], allowed_models=["gpt-5.6-sol"])
     _use_manager(monkeypatch, _Chat("chat-7", model="gpt-6-sol"))
     result = await manage_agent_loadout('{"action": "preflight", "name": "Innovator"}', "chat-7", owner="u")
-    assert result["readiness"]["status"] == "DEGRADED"
-    failed = {row["check"]: row for row in result["readiness"]["checks"] if not row["ok"]}
-    assert "gpt-6-sol" in failed["model"]["detail"] and "gpt-5.6-sol" in failed["model"]["repair"]
-
-    _use_manager(monkeypatch, _Chat("chat-7", model="gpt-5.6-sol"))
-    ready = await manage_agent_loadout('{"action": "preflight", "name": "Innovator"}', "chat-7", owner="u")
-    assert ready["readiness"]["status"] == "READY", ready["response"]
+    assert result["readiness"]["status"] == "READY", result["response"]
+    row = next(r for r in result["readiness"]["checks"] if r["check"] == "model")
+    assert "gpt-6-sol" in row["detail"] and "runs gpt-5.6-sol" in row["detail"]
 
 
 def test_model_permitted_ignores_the_endpoint_suffix_and_case():

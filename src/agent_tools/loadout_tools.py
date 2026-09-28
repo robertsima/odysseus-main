@@ -987,7 +987,8 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         stopped = []
         for run in candidates:
             try:
-                result = await agent_control.stop_run(run["run_id"])
+                result = await agent_control.stop_run(
+                    run["run_id"], by="by the chat that started it (manage_agent_loadout stop)")
             except (LookupError, ValueError) as exc:
                 result = {"stopped": False, "reason": str(exc)}
             stopped.append({"run_id": run["run_id"], "title": run.get("title"), **result})
@@ -1478,6 +1479,15 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         inherited = "" if (start_model or effective.get("model")) else _caller_model(parent)
         problem = agent_loadouts.model_problem(effective, start_model=start_model or None,
                                                inherited_model=inherited or None)
+        if problem and not start_model:
+            # Only the inherited chat model is outside the list: run the
+            # loadout's first allowed model rather than refuse a start the
+            # caller cannot fix without guessing (the repair is always "pass
+            # model=allowed[0]", so do that).
+            start_model = problem["allowed_models"][0]
+            logger.info("[agent-loadout] %s: the calling chat's model %r is not in allowed_models; "
+                        "starting on %r", name, problem["model"], start_model)
+            problem = None
         if problem:
             return {
                 "error": f"start: loadout {name!r}: {problem['detail']}. Repair: {problem['repair']}.",

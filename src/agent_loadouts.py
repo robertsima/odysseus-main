@@ -855,6 +855,12 @@ def model_problem(profile: Dict[str, Any], *, start_model: Optional[str] = None,
     2026-09-28: worker ac361483 ran gpt-6-sol although its loadout allowed only
     gpt-5.6-sol — the loadout named no model, so the worker inherited the
     parent chat's, and nothing compared the two.
+
+    The loadout's own ``model`` is never a problem: it is the model the user
+    picked for this agent, and ``allowed_models`` limits what else it may
+    reach. Treating it as a violation refused three saved loadouts at start
+    (later on 2026-09-28: Planning Command Center named gpt-6-sol with
+    allowed_models [gpt-5.6-sol]) for a choice the user made on purpose.
     """
     allowed = [str(m) for m in (profile.get("allowed_models") or []) if str(m).strip()]
     if not allowed:
@@ -862,9 +868,11 @@ def model_problem(profile: Dict[str, Any], *, start_model: Optional[str] = None,
     own = str(profile.get("model") or "").strip()
     start = str(start_model or "").strip()
     if start:
+        if own and _model_key(start) == _model_key(own):
+            return None
         model, source = start, "the start call's model"
     elif own:
-        model, source = own, "the loadout's model"
+        return None
     else:
         model = str(inherited_model or "").strip()
         source = "the calling chat's model (the loadout names none, so the worker inherits it)"
