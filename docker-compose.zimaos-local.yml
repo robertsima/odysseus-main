@@ -25,31 +25,23 @@ services:
         condition: service_started
       searxng:
         condition: service_healthy
+    # Only the variables listed here reach the container: there is no
+    # env_file, and `docker compose` reads .env just to fill the ${...}
+    # placeholders. A line is here only if its value is required, differs
+    # from the application default, or feeds an optional feature; the rest (auth on,
+    # loopback bypass off, CORS, sqlite path, FastEmbed model/cache, Lotus
+    # paths, STT on CPU/int8, in-process pollers/tasks) is already the code
+    # default. Session cookies follow the request scheme by themselves, so
+    # SECURE_COOKIES is deliberately absent. Preferences belong in Settings,
+    # not here -- see website/configuration.md ("ZimaOS minimal environment").
     environment:
-      ALLOWED_ORIGINS: http://localhost,http://127.0.0.1
-      AUTH_ENABLED: "true"
+      # ---- required ----
+      # Match the host user that owns the bind-mounted AppData tree.
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
       CHROMADB_HOST: chromadb
       CHROMADB_PORT: "8000"
-      DATABASE_URL: sqlite:///./data/app.db
-      FASTEMBED_CACHE_PATH: /app/data/fastembed_cache
-      FASTEMBED_MODEL: sentence-transformers/all-MiniLM-L6-v2
-      # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
-      # fills it. The lane policy is an optional deployment override; the
-      # application default is used when it is not supplied.
-      ODYSSEUS_FASTEMBED_LANE: ${ODYSSEUS_FASTEMBED_LANE:-}
-      # Directories the agent's file tools may touch beyond /app/data. Declared
-      # here rather than through the settings API so a mount and its permission
-      # arrive together. Left empty by default: the vault is reachable at its
-      # /app/data/personal_docs path below, which is the path retrieval cites.
-      ODYSSEUS_TOOL_EXTRA_ROOTS: ${ODYSSEUS_TOOL_EXTRA_ROOTS:-}
-      LOCALHOST_BYPASS: "false"
-      ODYSSEUS_ADMIN_USER: admin
-      ODYSSEUS_ADMIN_PASSWORD: ${ODYSSEUS_ADMIN_PASSWORD:-}
-      ODYSSEUS_INPROCESS_POLLERS: "1"
-      ODYSSEUS_INPROCESS_TASKS: "1"
-      ODYSSEUS_SCRIPT_HOST: localhost
-      ODYSSEUS_PI_WORKER_HOST: ${ODYSSEUS_PI_WORKER_HOST:-}
-      ODYSSEUS_PI_WORKER_IDENTITY_FILE: ${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
+      SEARXNG_INSTANCE: http://searxng:8080
       # Which vault trees are indexed, and under which sensitivity label.
       # Declared next to the mounts rather than left to post-boot admin state:
       # without it a fresh install came up with the vaults mounted, unindexed
@@ -57,25 +49,44 @@ services:
       # hosted models and agent file tools are then free to read. The label is
       # what closes the Journal to LLMs; it does not restrict the human UI.
       ODYSSEUS_PERSONAL_DIRS: ${ODYSSEUS_PERSONAL_DIRS:-Vault Mind:public,AI Mind:public,Journal:private}
-      TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
+      # First boot only: seeds the admin password when data/auth.json does
+      # not exist yet. Ignored afterwards; change the password in Settings.
+      ODYSSEUS_ADMIN_PASSWORD: ${ODYSSEUS_ADMIN_PASSWORD:-}
+
+      # ---- optional: built-in GitHub MCP (read; write needs ODYSSEUS_GITHUB_MCP_WRITE=1) ----
       GITHUB_PERSONAL_ACCESS_TOKEN: ${GITHUB_PERSONAL_ACCESS_TOKEN:-}
-      GITHUB_HOST: ${GITHUB_HOST:-}
       ODYSSEUS_GITHUB_MCP_WRITE: ${ODYSSEUS_GITHUB_MCP_WRITE:-}
-      LOTUS_LOG_LEVEL: ${LOTUS_LOG_LEVEL:-INFO}
-      LOTUS_CONFIG: /app/data/lotus/config.yaml
-      LOTUS_DATA_DIR: /app/data/lotus/data
-      LOTUS_IMPORT_ROOT: /app/data/lotus/imports
-      LOTUS_TOOL_NAME_STYLE: underscore
-      # Hardware/resource placement only. STT enabled/provider/model/limits
-      # are settings.json choices and are intentionally not injected here.
-      ODYSSEUS_STT_DEVICE: ${ODYSSEUS_STT_DEVICE:-cpu}
-      ODYSSEUS_STT_COMPUTE_TYPE: ${ODYSSEUS_STT_COMPUTE_TYPE:-int8}
-      ODYSSEUS_STT_CONCURRENCY: ${ODYSSEUS_STT_CONCURRENCY:-1}
-      # Match the host user that owns the bind-mounted AppData tree.
-      PUID: ${PUID:-1000}
-      PGID: ${PGID:-1000}
-      SEARXNG_INSTANCE: http://searxng:8080
-      SECURE_COOKIES: "false"
+
+      # ---- optional: agent worktree publishing + Claude Code cloud runner ----
+      # Master switch for pushing agent branches / opening draft PRs.
+      ODYSSEUS_AGENT_PUBLISH_ENABLED: ${ODYSSEUS_AGENT_PUBLISH_ENABLED:-}
+      # The one owner/name repository the agent may push to.
+      ODYSSEUS_AGENT_REPO: ${ODYSSEUS_AGENT_REPO:-}
+      # Checkout the worktrees branch from (the image has no .git), e.g.
+      # /app/data/development/odysseus-main.
+      ODYSSEUS_AGENT_SOURCE_REPO: ${ODYSSEUS_AGENT_SOURCE_REPO:-}
+      # GitHub App credential, also used by the Claude Code cloud runner.
+      # Keep the key inside the data mount, e.g. /app/data/github-app.pem.
+      ODYSSEUS_GITHUB_APP_ID: ${ODYSSEUS_GITHUB_APP_ID:-}
+      ODYSSEUS_GITHUB_APP_INSTALLATION_ID: ${ODYSSEUS_GITHUB_APP_INSTALLATION_ID:-}
+      ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH: ${ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH:-}
+
+      # ---- optional: Todoist MCP ----
+      TODOIST_API_TOKEN: ${TODOIST_API_TOKEN:-}
+
+      # ---- optional: Windows Pi worker over SSH ----
+      ODYSSEUS_PI_WORKER_HOST: ${ODYSSEUS_PI_WORKER_HOST:-}
+      ODYSSEUS_PI_WORKER_IDENTITY_FILE: ${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
+      # No value on purpose: passed only when .env sets it. An EMPTY
+      # script/root is rejected as an invalid path instead of meaning "default".
+      ODYSSEUS_PI_WORKER_SCRIPT:
+      ODYSSEUS_PI_WORKER_ROOT:
+
+      # ---- optional: Google OAuth (Gmail/Workspace mail, Google Calendar) ----
+      # Behind HTTPS or a proxy also set GOOGLE_OAUTH_REDIRECT_URI and
+      # GOOGLE_CALENDAR_OAUTH_REDIRECT_URI; plain LAN HTTP infers them.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
     extra_hosts:
       # Reach a model served on the Docker host, e.g. Ollama at
       # http://host.docker.internal:11434. Classified local by
@@ -146,6 +157,8 @@ services:
       - ${ODY_VAULT:-./zima-local/Vault}/Private/Journal:/app/data/personal_docs/Journal
 
   chromadb:
+    # Unpinned. Pin a tag you have verified (as searxng is below) so a
+    # recreate cannot silently pull an incompatible ChromaDB release.
     image: docker.io/chromadb/chroma:latest
     environment:
       ANONYMIZED_TELEMETRY: "FALSE"
@@ -180,6 +193,10 @@ services:
           fi
           sed "s|__SEARXNG_SECRET__|$$secret|g" /tmp/searxng-settings.yml.template > /etc/searxng/settings.yml
         fi
+        # Advisory: a settings file the migration cannot parse or rewrite must
+        # not be what stops searxng from booting. It explains itself on stderr
+        # and we carry on, letting searxng report anything genuinely wrong.
+        /usr/local/searxng/.venv/bin/python /tmp/migrate-searxng-settings.py /etc/searxng/settings.yml || true
         exec /usr/local/searxng/entrypoint.sh
     environment:
       SEARXNG_BASE_URL: http://localhost:8080/
@@ -196,8 +213,10 @@ services:
     volumes:
       - ${ODY_APPDATA:-./zima-local/AppData/odysseus}/data/searxng:/etc/searxng
       - ./config/searxng/settings.yml:/tmp/searxng-settings.yml.template:ro
+      - ./scripts/migrate_searxng_settings.py:/tmp/migrate-searxng-settings.py:ro
 
   ntfy:
+    # Unpinned (implicit :latest). Pin a tag you have verified.
     image: docker.io/binwiederhier/ntfy
     command: serve
     environment:

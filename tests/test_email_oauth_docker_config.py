@@ -35,6 +35,7 @@ def _odysseus_environment(path):
         "GOOGLE_OAUTH_CLIENT_ID",
         "GOOGLE_OAUTH_CLIENT_SECRET",
         "GOOGLE_OAUTH_REDIRECT_URI",
+        "GOOGLE_CALENDAR_OAUTH_REDIRECT_URI",
     ),
 )
 def test_google_oauth_setting_is_forwarded(key):
@@ -49,6 +50,7 @@ def test_google_oauth_setting_is_forwarded(key):
         "GOOGLE_OAUTH_CLIENT_ID",
         "GOOGLE_OAUTH_CLIENT_SECRET",
         "GOOGLE_OAUTH_REDIRECT_URI",
+        "GOOGLE_CALENDAR_OAUTH_REDIRECT_URI",
     ),
 )
 def test_google_oauth_setting_is_documented(key):

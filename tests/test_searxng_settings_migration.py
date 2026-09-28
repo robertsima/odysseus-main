@@ -1,5 +1,6 @@
 import importlib.util
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -15,6 +16,8 @@ COMPOSE_FILES = (
     ROOT / "docker-compose.yml",
     ROOT / "docker-compose.gpu-amd.yml",
     ROOT / "docker-compose.gpu-nvidia.yml",
+    # The ZimaOS template too: it is what the server's hand-kept copy follows.
+    ROOT / "docker-compose.zimaos-local.yml",
 )
 
 
@@ -317,7 +320,11 @@ def test_compose_runs_migration_for_all_variants(compose_file):
         "/usr/local/searxng/.venv/bin/python /tmp/migrate-searxng-settings.py "
         "/etc/searxng/settings.yml || true" in text
     )
-    assert (
-        "./scripts/migrate_searxng_settings.py:"
-        "/tmp/migrate-searxng-settings.py:ro,z" in text
+    # `,z` (SELinux relabel) is used by the generic files; the ZimaOS template
+    # mounts plain `:ro` like its other bind mounts.
+    assert re.search(
+        r"\./scripts/migrate_searxng_settings\.py:"
+        r"/tmp/migrate-searxng-settings\.py:ro(,z)?$",
+        text,
+        re.MULTILINE,
     )

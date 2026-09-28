@@ -20,6 +20,12 @@ services:
       # Lets the container reach local services on the Docker host, including
       # Ollama at http://host.docker.internal:11434.
       - "host.docker.internal:host-gateway"
+    # Only the variables listed here reach the container. There is no
+    # env_file: `docker compose` reads .env just to fill the ${...}
+    # placeholders below, so a variable that is in .env but not in this list
+    # never reaches Odysseus. Forward it with `- NAME=${NAME:-}` if you need it.
+    # See website/configuration.md ("Docker: how the environment reaches the
+    # container").
     environment:
       - LLM_HOST=${LLM_HOST:-localhost}
       - LLM_HOSTS=${LLM_HOSTS:-}
@@ -42,7 +48,6 @@ services:
       - ODYSSEUS_STT_COMPUTE_TYPE=${ODYSSEUS_STT_COMPUTE_TYPE:-int8}
       - ODYSSEUS_STT_CONCURRENCY=${ODYSSEUS_STT_CONCURRENCY:-1}
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-}
-      - RESEARCH_LLM_ENDPOINT=${RESEARCH_LLM_ENDPOINT:-}
       - HF_TOKEN=${HF_TOKEN:-}
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
       - SEARXNG_INSTANCE=http://searxng:8080
@@ -56,16 +61,10 @@ services:
       - ODYSSEUS_ADMIN_PASSWORD=${ODYSSEUS_ADMIN_PASSWORD:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost,http://127.0.0.1}
       - SECURE_COOKIES=${SECURE_COOKIES:-}
-      - EMBEDDING_URL=${EMBEDDING_URL:-}
-      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-}
-      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-}
+      # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
+      # fills it. Both defaults are the application's own.
       - FASTEMBED_MODEL=${FASTEMBED_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
       - FASTEMBED_CACHE_PATH=${FASTEMBED_CACHE_PATH:-}
-      # ChromaDB is the vector STORE; FastEmbed is the local ONNX EMBEDDER that
-      # fills it. The lane policy is a deployment choice and defaults in the
-      # application; pass ODYSSEUS_FASTEMBED_LANE explicitly when this host's
-      # resource budget requires a different policy.
-      - ODYSSEUS_FASTEMBED_LANE=${ODYSSEUS_FASTEMBED_LANE:-}
       # Extra directories the agent's file tools may touch, beyond /app/data and
       # the temp dirs. Declared next to the mounts so a bind mount and the
       # permission to use it arrive together.
@@ -78,12 +77,18 @@ services:
       - ODYSSEUS_SCRIPT_HOST=${ODYSSEUS_SCRIPT_HOST:-localhost}
       - ODYSSEUS_PI_WORKER_HOST=${ODYSSEUS_PI_WORKER_HOST:-}
       - ODYSSEUS_PI_WORKER_IDENTITY_FILE=${ODYSSEUS_PI_WORKER_IDENTITY_FILE:-}
+      # Bare names on purpose: the Pi worker treats an EMPTY script/root as an
+      # invalid path rather than "use the default", so these are passed only
+      # when .env or the shell actually sets them.
+      - ODYSSEUS_PI_WORKER_SCRIPT
+      - ODYSSEUS_PI_WORKER_ROOT
       - DATA_BRAVE_API_KEY=${DATA_BRAVE_API_KEY:-}
       - GOOGLE_API_KEY=${GOOGLE_API_KEY:-}
       - GOOGLE_PSE_CX=${GOOGLE_PSE_CX:-}
       - GOOGLE_OAUTH_CLIENT_ID=${GOOGLE_OAUTH_CLIENT_ID:-}
       - GOOGLE_OAUTH_CLIENT_SECRET=${GOOGLE_OAUTH_CLIENT_SECRET:-}
       - GOOGLE_OAUTH_REDIRECT_URI=${GOOGLE_OAUTH_REDIRECT_URI:-}
+      - GOOGLE_CALENDAR_OAUTH_REDIRECT_URI=${GOOGLE_CALENDAR_OAUTH_REDIRECT_URI:-}
       # Externally reachable origin for MCP OAuth callbacks. The container
       # always listens on 7000 and cannot see the host port map above, so
       # remote MCP OAuth needs this set whenever the browser reaches
@@ -140,6 +145,8 @@ services:
     restart: unless-stopped
 
   chromadb:
+    # Unpinned. Pin a tag you have verified (as searxng is below) so a
+    # recreate cannot silently pull an incompatible ChromaDB release.
     image: docker.io/chromadb/chroma:latest
     ports:
       - "${CHROMADB_BIND:-127.0.0.1}:8100:8000"
@@ -209,6 +216,7 @@ services:
     restart: unless-stopped
 
   ntfy:
+    # Unpinned (implicit :latest). Pin a tag you have verified.
     image: docker.io/binwiederhier/ntfy
     command: serve
     ports:
@@ -227,4 +235,4 @@ volumes:
 # This base file is the generic install target: no NAS, no app-store, no
 # assumed hostname. ZimaOS/CasaOS app-store manifest metadata (the `x-casaos`
 # block that used to live here) moved to docker-compose.zimaos-local.yml,
-# which is the explicitly-named ZimaOS overlay — see docs/configuration.md.
+# which is the explicitly-named ZimaOS overlay — see website/configuration.md.

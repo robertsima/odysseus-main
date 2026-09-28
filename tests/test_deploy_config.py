@@ -73,6 +73,75 @@ def test_compose_security_opt_documents_the_verification(path):
     assert "kernel.core_pattern" in text, "the systempaths trade-off must be stated"
 
 
+# ── what the compose files forward ───────────────────────────────
+
+
+@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
+def test_compose_files_do_not_forward_dead_variables(path):
+    env = _env(path)
+    for name in DEAD_VARIABLES:
+        assert name not in env, (path.name, name)
+
+
+@pytest.mark.parametrize("path", ALL_COMPOSE, ids=lambda p: p.name)
+def test_pi_worker_script_and_root_are_passed_only_when_set(path):
+    # The Pi worker rejects an EMPTY script/root as an invalid path instead of
+    # falling back to its default, so `${VAR:-}` would break it. A bare name
+    # is omitted from the container when unset.
+    env = _env(path)
+    assert env["ODYSSEUS_PI_WORKER_SCRIPT"] is None, path.name
+    assert env["ODYSSEUS_PI_WORKER_ROOT"] is None, path.name
+
+
+@pytest.mark.parametrize("path", GENERIC_COMPOSE, ids=lambda p: p.name)
+def test_generic_compose_forwards_calendar_redirect_with_mail_redirect(path):
+    env = _env(path)
+    assert env["GOOGLE_CALENDAR_OAUTH_REDIRECT_URI"] == "${GOOGLE_CALENDAR_OAUTH_REDIRECT_URI:-}"
+
+
+def test_zimaos_template_lists_only_required_and_non_default_values():
+    env = _env(ZIMAOS_TEMPLATE)
+    # Equal to code defaults, dead, or (SECURE_COOKIES=false) harmful: it
+    # forced non-Secure cookies over HTTPS, while the code derives the flag
+    # from the request scheme.
+    for name in (
+        "ALLOWED_ORIGINS", "AUTH_ENABLED", "DATABASE_URL", "FASTEMBED_CACHE_PATH",
+        "FASTEMBED_MODEL", "ODYSSEUS_TOOL_EXTRA_ROOTS", "LOCALHOST_BYPASS",
+        "ODYSSEUS_ADMIN_USER", "ODYSSEUS_INPROCESS_POLLERS", "ODYSSEUS_INPROCESS_TASKS",
+        "ODYSSEUS_SCRIPT_HOST", "GITHUB_HOST", "LOTUS_LOG_LEVEL", "LOTUS_CONFIG",
+        "LOTUS_DATA_DIR", "LOTUS_IMPORT_ROOT", "LOTUS_TOOL_NAME_STYLE",
+        "ODYSSEUS_STT_DEVICE", "ODYSSEUS_STT_COMPUTE_TYPE", "ODYSSEUS_STT_CONCURRENCY",
+        "SECURE_COOKIES",
+    ):
+        assert name not in env, name
+    for name in (
+        "PUID", "PGID", "CHROMADB_HOST", "CHROMADB_PORT", "SEARXNG_INSTANCE",
+        "ODYSSEUS_PERSONAL_DIRS", "ODYSSEUS_ADMIN_PASSWORD",
+    ):
+        assert name in env, name
+    assert env["CHROMADB_HOST"] == "chromadb"
+    assert env["SEARXNG_INSTANCE"] == "http://searxng:8080"
+    assert "Journal:private" in env["ODYSSEUS_PERSONAL_DIRS"]
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        # Agent worktree publishing and the Claude Code cloud runner.
+        "ODYSSEUS_AGENT_PUBLISH_ENABLED",
+        "ODYSSEUS_AGENT_REPO",
+        "ODYSSEUS_AGENT_SOURCE_REPO",
+        "ODYSSEUS_GITHUB_APP_ID",
+        "ODYSSEUS_GITHUB_APP_INSTALLATION_ID",
+        "ODYSSEUS_GITHUB_APP_PRIVATE_KEY_PATH",
+        "GOOGLE_OAUTH_CLIENT_ID",
+        "GOOGLE_OAUTH_CLIENT_SECRET",
+    ),
+)
+def test_zimaos_template_passes_optional_feature_variables_through(name):
+    assert _env(ZIMAOS_TEMPLATE)[name] == f"${{{name}:-}}"
+
+
 # ── no hidden .env inside the image ──────────────────────────────
 
 

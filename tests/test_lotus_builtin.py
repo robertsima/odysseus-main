@@ -25,6 +25,16 @@ COMPOSE_FILES = (
     ROOT / "docker-compose.gpu-amd.yml",
     ROOT / "docker-compose.zimaos-local.yml",
 )
+# The ZimaOS template lists only values that differ from the code default, so
+# it leaves the Lotus paths to mcp_servers/lotus_server.py, which derives the
+# same /app/data/lotus/... paths from the app root.
+MINIMAL_COMPOSE_FILES = {ROOT / "docker-compose.zimaos-local.yml"}
+LOTUS_DEFAULTS = {
+    "LOTUS_CONFIG": "/app/data/lotus/config.yaml",
+    "LOTUS_DATA_DIR": "/app/data/lotus/data",
+    "LOTUS_IMPORT_ROOT": "/app/data/lotus/imports",
+    "LOTUS_TOOL_NAME_STYLE": "underscore",
+}
 
 
 def _no_security_context():
@@ -60,10 +70,22 @@ def test_lotus_is_available_for_filtered_chat_function_calling():
 def test_compose_persists_lotus_under_odysseus_data_mount():
     for path in COMPOSE_FILES:
         env = _compose_environment(path)
-        assert env["LOTUS_CONFIG"] == "/app/data/lotus/config.yaml", path.name
-        assert env["LOTUS_DATA_DIR"] == "/app/data/lotus/data", path.name
-        assert env["LOTUS_IMPORT_ROOT"] == "/app/data/lotus/imports", path.name
-        assert env["LOTUS_TOOL_NAME_STYLE"] == "underscore", path.name
+        for key, expected in LOTUS_DEFAULTS.items():
+            if path in MINIMAL_COMPOSE_FILES:
+                # Absent means the code default below; present must agree.
+                assert env.get(key, expected) == expected, (path.name, key)
+            else:
+                assert env[key] == expected, (path.name, key)
+
+
+def test_lotus_code_defaults_match_the_compose_paths():
+    source = (ROOT / "mcp_servers" / "lotus_server.py").read_text(encoding="utf-8")
+    # In the image APP_ROOT is /app, so these resolve to LOTUS_DEFAULTS.
+    assert 'LOTUS_ROOT = Path(os.environ.get("LOTUS_ROOT", APP_ROOT / "data" / "lotus"))' in source
+    assert 'os.environ.setdefault("LOTUS_CONFIG", str(LOTUS_ROOT / "config.yaml"))' in source
+    assert 'os.environ.setdefault("LOTUS_DATA_DIR", str(LOTUS_ROOT / "data"))' in source
+    assert 'os.environ.setdefault("LOTUS_IMPORT_ROOT", str(LOTUS_ROOT / "imports"))' in source
+    assert 'os.environ.setdefault("LOTUS_TOOL_NAME_STYLE", "underscore")' in source
 
 
 def test_builtin_lotus_completes_mcp_handshake_with_safe_defaults(tmp_path):
