@@ -31,6 +31,23 @@ _BUILTIN_LABEL_PREFIX = re.compile(r"^\s*built-?in\s*:\s*", re.IGNORECASE)
 # `McpManager.discover_requested_tools` strips from a server name.
 _GENERIC_LABEL_WORDS = frozenset({"mcp", "server", "servers", "tool", "tools", "builtin"})
 
+# Tools that cover the same need as a tool policy may withhold, best first.
+# On 2026-09-27 three of eleven research workers quit on round 1: each asked
+# discovery for `trigger_research`, heard only that policy denied it and
+# "if this blocks you, say so", and refused the task ("I won't present a quick
+# web lookup as a sourced research report") with `web_search` attached the
+# whole time. A denied name with a permitted substitute is therefore reported
+# as "not available here, use X instead" and X is attached; only a denied name
+# with no substitute keeps the plain policy explanation.
+_SUBSTITUTES: Dict[str, tuple] = {
+    "trigger_research": ("web_search", "web_fetch"),
+    "apply_patch": ("edit_file", "write_file"),
+    "edit_file": ("apply_patch", "write_file"),
+    "write_file": ("apply_patch",),
+    "orchestrate_agents": ("delegate_to_agent",),
+    "delegate_to_agent": ("orchestrate_agents",),
+}
+
 
 def _schema_name(schema: Dict[str, Any]) -> str:
     fn = schema.get("function") if isinstance(schema, dict) else None
@@ -336,6 +353,11 @@ class TurnToolDiscovery:
             name for name in self._catalog
             if name not in permitted and _name_written_out(name, query)
         )[:limit]
+        substitutes = {
+            name: [alt for alt in _SUBSTITUTES.get(name, ()) if alt in permitted]
+            for name in policy_denied
+        }
+        substitutes = {name: alts for name, alts in substitutes.items() if alts}
         if not permitted:
             return self._result(query, [], limit, policy_denied=policy_denied)
 
@@ -405,10 +427,15 @@ class TurnToolDiscovery:
         semantic_rank = {name: index for index, name in enumerate(semantic) if name in permitted}
         lexical_rank = {row[-1]: row[1:] for row in scored}
         matched_names = {canonical_exact} if canonical_exact else set(lexical_rank) | set(semantic_rank)
+        # A permitted substitute for a named-but-denied tool is a match: it is
+        # attached (or reported as already attached) so the caller can use it
+        # on its next call instead of stopping.
+        substitute_names = {alt for alts in substitutes.values() for alt in alts}
+        matched_names |= substitute_names
 
         def rank(name: str) -> tuple:
             return (
-                0 if name.casefold() in exact else 1,
+                0 if name.casefold() in exact or name in substitute_names else 1,
                 semantic_rank.get(name, 10_000),
                 lexical_rank.get(name, (0, 0, 0, 0, 0, 0, name)),
                 name,
@@ -450,6 +477,7 @@ class TurnToolDiscovery:
             query, chosen, limit, already_attached=already_attached[:limit],
             budget_limited=bool(ranked and not chosen),
             policy_denied=policy_denied,
+            substitutes=substitutes,
         )
 
     def _result(
@@ -457,9 +485,11 @@ class TurnToolDiscovery:
         *, already_attached: Optional[List[str]] = None,
         budget_limited: bool = False,
         policy_denied: Optional[List[str]] = None,
+        substitutes: Optional[Dict[str, List[str]]] = None,
     ) -> Dict[str, Any]:
         already_attached = list(already_attached or ())
         policy_denied = list(policy_denied or ())
+        substitutes = {k: list(v) for k, v in (substitutes or {}).items() if v}
         rows = []
         for name in chosen:
             schema = self._loaded[name]
@@ -472,6 +502,7 @@ class TurnToolDiscovery:
             "already_attached_names": already_attached, "tools": rows,
             "budget_limited": budget_limited,
             "policy_denied_names": policy_denied,
+            "substitutes": substitutes,
         }
         output = (
             "Loaded tools for this turn: " + ", ".join(chosen)
@@ -508,16 +539,35 @@ class TurnToolDiscovery:
             output = output.rstrip()
             if not output.endswith("."):
                 output += "."
-            plural = len(policy_denied) > 1
-            output += (
-                " Dropped by this chat's tool policy, not by the schema budget: "
-                + ", ".join(policy_denied)
-                + f". Policy denies {'them' if plural else 'it'} for this turn, so "
-                f"discovery cannot attach {'them' if plural else 'it'} and retrying "
-                "will not change that. If this blocks you, say that this chat's tool "
-                "policy denies the tool by name — do not report a schema budget, a "
-                "missing server, or any other cause."
-            )
+            available = set(chosen) | set(already_attached)
+            for name in policy_denied:
+                alts = [alt for alt in substitutes.get(name, ()) if alt in available]
+                if not alts:
+                    continue
+                # Said as an instruction to carry on, not as a policy verdict:
+                # "policy denies it, say so if this blocks you" read as
+                # permission to refuse the whole task.
+                output += (
+                    f" {name} isn't available here (tool policy, not the schema budget); "
+                    f"use {' / '.join(alts)} (attached) instead — it covers the same need, "
+                    f"so continue the task with it rather than stopping or refusing."
+                )
+            blocked = [
+                name for name in policy_denied
+                if not any(alt in available for alt in substitutes.get(name, ()))
+            ]
+            if blocked:
+                plural = len(blocked) > 1
+                output += (
+                    " Dropped by this chat's tool policy, not by the schema budget: "
+                    + ", ".join(blocked)
+                    + f". Policy denies {'them' if plural else 'it'} for this turn, so "
+                    f"discovery cannot attach {'them' if plural else 'it'} and retrying "
+                    "will not change that. Do the parts of the task your attached tools "
+                    "can do; if a part truly needs the denied tool, say that this chat's "
+                    "tool policy denies it by name — do not report a schema budget, a "
+                    "missing server, or any other cause."
+                )
         return {
             "output": output,
             "exit_code": 0,

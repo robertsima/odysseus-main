@@ -11,6 +11,7 @@ AI_CHAT_TIMEOUT are reused from there too.
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Dict, Optional
 
@@ -98,6 +99,45 @@ def _find_session(manager, session_id: Optional[str]):
         return manager.get_session(session_id)
     except KeyError:
         return None
+
+
+_RUN_ID_RE = re.compile(r"^[a-z][a-z0-9_]*-[0-9a-f]{10}$")
+
+_SESSION_ID_HELP = (
+    "Pass a chat id exactly as list_sessions prints it after 'id:' (a bare id, not the "
+    "'#session-…' link target), a worker's worker_session from manage_agent_loadout "
+    "status (not its run_id), or session_id 'new' for a fresh chat."
+)
+
+
+def _resolve_target_sid(manager, raw: str) -> str:
+    """The chat id a model meant when it passed something close to one.
+
+    On 2026-09-27 a parent called send_to_session three times with
+    ``session-<uuid>``: list_sessions renders each chat as a ``#session-<id>``
+    link, and worker run ids (``session-<10 hex>``) share the prefix. Accepted
+    here: an existing id as given; that id behind a ``#``/``session-`` link
+    prefix; and a run id, which resolves to the worker chat the run talked to.
+    Anything else is returned unchanged and fails the usual "not found" check,
+    so ownership is still enforced on whatever this returns.
+    """
+    sid = str(raw or "").strip()
+    if not sid or sid.lower() == "new" or _find_session(manager, sid) is not None:
+        return sid
+    bare = sid.lstrip("#")
+    if bare.lower().startswith("session-"):
+        rest = bare[len("session-"):]
+        if rest and _find_session(manager, rest) is not None:
+            return rest
+    if _RUN_ID_RE.match(bare):
+        try:
+            run = activity.get_run(bare) or {}
+        except Exception:
+            run = {}
+        worker = (run.get("summary") or {}).get("target_session")
+        if worker and _find_session(manager, str(worker)) is not None:
+            return str(worker)
+    return sid
 
 
 def _caller_workspace(session_id: Optional[str]) -> Optional[str]:
@@ -359,6 +399,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
 
     target_sid, message, mode = _parse_send_args(content)
     extras = _parse_send_extras(content)
+    target_sid = _resolve_target_sid(_session_manager, target_sid)
     if not target_sid:
         return {"error": "Need a session_id and a message (JSON {session_id, message, mode} or 2 lines)", "exit_code": 1}
     if mode not in ("chat", "agent"):
@@ -423,7 +464,7 @@ async def send_to_session(content: str, session_id: Optional[str] = None, owner:
     else:
         sess = _find_session(_session_manager, target_sid)
     if not sess:
-        return {"error": f"Session '{target_sid}' not found. It may have been deleted; use list_sessions and pass an exact id it returned, or session_id 'new' for a fresh chat.", "exit_code": 1}
+        return {"error": f"Session '{target_sid}' not found. It may have been deleted. {_SESSION_ID_HELP}", "exit_code": 1}
 
     # Owner-scope: reject access to another user's session. When the caller is
     # authenticated, a null-owner (legacy / auth-was-off) session is not theirs
