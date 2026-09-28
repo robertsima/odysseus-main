@@ -3544,21 +3544,21 @@ async function _cmdTourSettings(args, ctx) {
     { sel: '#settings-modal .modal-content',
       text: '<b>Welcome to Settings.</b> HOW EXCITING.',
       placement: 'center-above' },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="services"]',
-      text: '<b>Add Models</b> — add a local endpoint first, like Ollama, vLLM, or llama.cpp. Cloud providers are optional.',
-      before: () => _clickNav('services') },
-    { sel: '#settings-modal .settings-nav-item[data-settings-tab="ai"]',
-      text: '<b>AI Defaults</b> — three roles share the work. Let\'s walk through them.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-defaultModelSelect)',
-      text: '<b>Default Chat Model</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-utilityModelSelect)',
+    { sel: '#settings-modal .settings-nav-item[data-settings-tab="models"]',
+      text: '<b>Models</b> — connect a provider under <b>Providers</b> (a local server like Ollama, vLLM or llama.cpp, or a cloud account), then pick which model does which job.',
+      before: () => _clickNav('models') },
+    { sel: '#settings-modal #set-providersCard',
+      text: '<b>Providers</b> — everything Odysseus can call. <b>Add provider</b> opens the add form; click a provider to choose which of its models show in the picker.',
+      before: () => _clickNav('models') },
+    { sel: '#settings-modal .settings-role:has(#set-defaultModelSelect)',
+      text: '<b>Chat</b> — your main model. The one Odysseus reaches for whenever you start a new chat.',
+      before: () => _clickNav('models') },
+    { sel: '#settings-modal .settings-role:has(#set-utilityModelSelect)',
       text: '<b>Utility Model</b> — your hard-working sidekick. Runs background tasks (compaction, cleanup, auto-naming, summarization) so your chat model doesn\'t burn cycles on chores. <b>Recommend a small local model</b> here — it\'s free and always on.',
-      before: () => _clickNav('ai') },
-    { sel: '#settings-modal .admin-card:has(#set-vlModelSelect)',
+      before: () => _clickNav('models') },
+    { sel: '#settings-modal .settings-role:has(#set-vlModelSelect)',
       text: '<b>Vision</b> — powers any image-recognition feature: drop a photo in chat, ask what\'s in it, OCR, etc.',
-      before: () => _clickNav('ai') },
+      before: () => _clickNav('models') },
     { sel: '#settings-modal .settings-nav-item[data-settings-tab="integrations"]',
       text: '<b>Integrations</b> — wire up email, calendar, contacts here (per-account).',
       before: () => _clickNav('integrations') },
@@ -3589,7 +3589,7 @@ async function _cmdTourSettings(args, ctx) {
   }
 
   // Land on the first tab so the user has a familiar starting point.
-  _clickNav('services');
+  _clickNav('models');
   _clear();
   await typewriterReply('See? Not so bad. Tweak away.');
   return true;

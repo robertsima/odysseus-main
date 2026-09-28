@@ -539,9 +539,7 @@ function buildFixture(document) {
   content.appendChild(panels);
 
   const panelIds = [
-    'services',
-    'added-models',
-    'ai',
+    'models',
     'search',
     'integrations',
     'email',
@@ -589,9 +587,8 @@ function buildFixture(document) {
     sidebarHandle,
     searchInput,
     searchResults,
-    services: settingsPanels.services,
+    models: settingsPanels.models,
     appearance: settingsPanels.appearance,
-    ai: settingsPanels.ai,
     system: settingsPanels.system,
     settingsPanels,
   };
@@ -979,7 +976,7 @@ for (const required of REAL_MODULES) {
 
 
 // First open drives initAll() and therefore the real shell bindings.
-settings.open('services');
+settings.open('models');
 
 assert(
   !fixture.modal.classList.contains('hidden'),
@@ -987,8 +984,8 @@ assert(
 );
 
 assert(
-  fixture.services.button.classList.contains('active'),
-  'first open("services") did not activate Services',
+  fixture.models.button.classList.contains('active'),
+  'first open("models") did not activate Models',
 );
 
 
@@ -1049,17 +1046,18 @@ assert(
 );
 
 
-// Direct public open() after initialization must still coordinate activation.
+// Direct public open() after initialization must still coordinate activation,
+// including for a retired tab id that now lives on another tab.
 settings.open('ai');
 
 assert(
-  fixture.ai.button.classList.contains('active'),
-  'direct open("ai") did not activate AI',
+  fixture.models.button.classList.contains('active'),
+  'direct open("ai") did not activate Models (its new home)',
 );
 
 assert(
-  !fixture.ai.panel.classList.contains('hidden'),
-  'direct open("ai") did not show AI panel',
+  !fixture.models.panel.classList.contains('hidden'),
+  'direct open("ai") did not show the Models panel',
 );
 
 assert(

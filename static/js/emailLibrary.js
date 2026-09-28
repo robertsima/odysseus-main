@@ -1283,13 +1283,13 @@ function _openSettingsTab(tab) {
     return;
   }
   if (settingsModule && typeof settingsModule.open === 'function') {
-    settingsModule.open(tab || 'services');
+    settingsModule.open(tab || 'models');
     return;
   }
   const modal = document.getElementById('settings-modal');
   if (!modal) return;
   modal.classList.remove('hidden');
-  const tabBtn = modal.querySelector(`[data-settings-tab="${tab || 'services'}"]`);
+  const tabBtn = modal.querySelector(`[data-settings-tab="${tab || 'models'}"]`);
   if (tabBtn) tabBtn.click();
 }
 

@@ -2334,7 +2334,7 @@ export function openGallery() {
     visionLink.addEventListener('click', (e) => {
       e.preventDefault();
       import('./settings.js').then(m => {
-        m.open('ai');
+        m.open('models');
         // The gallery modal gets a bumped z-index from modalManager; settings
         // opens with its lower static z-index and lands BEHIND it. Raise it above.
         const sm = document.getElementById('settings-modal');

@@ -242,9 +242,9 @@ function _initModelPickerDropdown() {
       } else if (kind === 'settings') {
         if (settingsModule && typeof settingsModule.open === 'function') settingsModule.open();
       } else if (window.adminModule && typeof window.adminModule.open === 'function') {
-        window.adminModule.open('services');
+        window.adminModule.open('models');
       } else if (settingsModule && typeof settingsModule.open === 'function') {
-        settingsModule.open('services');
+        settingsModule.open('models');
       }
     } catch (_) {}
   }

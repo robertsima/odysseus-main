@@ -3,12 +3,18 @@
 // This module owns panel activation and sidebar click routing only. Individual
 // panels continue to own their data loading and side effects.
 
-import { DEFAULT_SETTINGS_PANEL_ID, isAdminManagedSettingsTab } from './registry.js';
+import {
+  DEFAULT_SETTINGS_PANEL_ID,
+  isAdminManagedSettingsTab,
+  resolveSettingsPanelId,
+} from './registry.js';
 
 const _boundModals = new WeakSet();
 
-export function activateSettingsPanel(modalEl, tab) {
-  if (!modalEl || !tab) return null;
+export function activateSettingsPanel(modalEl, requestedTab) {
+  if (!modalEl || !requestedTab) return null;
+  // Retired ids (e.g. 'ai', 'tools') open the panel that owns them now.
+  const tab = resolveSettingsPanelId(requestedTab);
 
   modalEl.querySelectorAll('[data-settings-tab]').forEach(button => {
     button.classList.toggle('active', button.dataset.settingsTab === tab);

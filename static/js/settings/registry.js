@@ -15,6 +15,7 @@ function definePanel(definition) {
     adminOnly: false,
     ...definition,
     keywords: Object.freeze([...(definition.keywords || [])]),
+    aliases: Object.freeze([...(definition.aliases || [])]),
   });
 }
 
@@ -42,34 +43,25 @@ export const SETTINGS_GROUPS = Object.freeze([
   }),
 ]);
 
-// Order intentionally mirrors the existing Settings sidebar.
+// Order intentionally mirrors the Settings sidebar.
+//
+// `aliases` keeps retired tab ids working: code (and muscle memory, e.g.
+// `/settings ai`) that still opens an old id lands on the tab that now owns
+// those controls instead of on nothing.
 export const SETTINGS_PANELS = Object.freeze([
   definePanel({
-    id: 'services',
-    label: 'Add Models',
+    id: 'models',
+    label: 'Models',
     group: 'models',
     controller: 'admin',
-    keywords: ['models', 'provider', 'endpoint'],
-  }),
-  definePanel({
-    id: 'added-models',
-    label: 'Added Models',
-    group: 'models',
-    controller: 'admin',
-    keywords: ['models', 'configured', 'provider', 'endpoint'],
-  }),
-  definePanel({
-    id: 'ai',
-    label: 'AI Defaults',
-    group: 'models',
-    keywords: ['ai', 'defaults', 'model', 'vision', 'image', 'tts', 'stt'],
-  }),
-  definePanel({
-    id: 'context',
-    label: 'Context',
-    group: 'models',
-    adminOnly: true,
-    keywords: ['context', 'window', 'compaction', 'tokens', 'budget'],
+    aliases: ['services', 'added-models', 'ai', 'context'],
+    keywords: [
+      'models', 'model roles', 'chat model', 'default model', 'utility', 'vision',
+      'research model', 'provider', 'providers', 'endpoint', 'add models',
+      'api key', 'ollama', 'local', 'scan network', 'voice', 'dictation', 'stt',
+      'whisper', 'image generation', 'fallback', 'context', 'window',
+      'compaction', 'tokens',
+    ],
   }),
   definePanel({
     id: 'search',
@@ -158,14 +150,29 @@ export const SETTINGS_PANELS = Object.freeze([
   }),
 ]);
 
-export const DEFAULT_SETTINGS_PANEL_ID = 'services';
+export const DEFAULT_SETTINGS_PANEL_ID = 'models';
 
 const _panelsById = new Map(
   SETTINGS_PANELS.map(panel => [panel.id, panel]),
 );
 
+const _panelIdByAlias = new Map(
+  SETTINGS_PANELS.flatMap(panel => panel.aliases.map(alias => [alias, panel.id])),
+);
+
+/**
+ * Map any tab id, current or retired, to the id of the panel that owns it now.
+ * Unknown ids come back unchanged so callers can still report them.
+ */
+export function resolveSettingsPanelId(id) {
+  const key = String(id || '').trim().toLowerCase();
+  if (!key) return '';
+  if (_panelsById.has(key)) return key;
+  return _panelIdByAlias.get(key) || key;
+}
+
 export function getSettingsPanel(id) {
-  return _panelsById.get(String(id || '')) || null;
+  return _panelsById.get(resolveSettingsPanelId(id)) || null;
 }
 
 export function getSettingsPanelsForGroup(groupId) {
@@ -190,6 +197,7 @@ export function getSettingsPanelSearchText(panelOrId) {
   return [
     panel.label,
     ...(panel.keywords || []),
+    ...(panel.aliases || []),
   ].join(' ').toLowerCase();
 }
 

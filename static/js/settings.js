@@ -7,6 +7,7 @@ import { byId } from './settings/dom.js';
 import {
   getSettingsRegistryIssues,
   isAdminManagedSettingsTab,
+  resolveSettingsPanelId,
 } from './settings/registry.js';
 import { bindSettingsSearch } from './settings/search.js';
 import { bindSettingsSidebar } from './settings/sidebar.js';
@@ -70,9 +71,28 @@ function onSettingsPanelActivated(tab) {
   document.body.classList.toggle('settings-appearance-open', tab === 'appearance');
   syncAppearanceOpacity(tab === 'appearance');
 
-  // AI endpoints are intentionally refreshed only when entering a panel that
-  // shows them: AI Defaults and the admin Context panel.
-  if (tab === 'ai' || tab === 'context') refreshAiModelEndpoints();
+  // The Models tab's endpoint pickers are refreshed by admin.js, which fetches
+  // /api/model-endpoints for the Providers list on every visit and hands the
+  // same list to refreshAiModelEndpoints(); a second fetch here would be a
+  // duplicate.
+  _runPanelActivators(tab);
+}
+
+// Panels that load lazily register here instead of listening for clicks on
+// their nav button, so opening them from code (open('claude-code'), a search
+// result, an alias) runs the same loader as a click does.
+const _panelActivators = new Map();
+function _onPanelActivated(tab, fn) {
+  if (!_panelActivators.has(tab)) _panelActivators.set(tab, []);
+  _panelActivators.get(tab).push(fn);
+}
+function _runPanelActivators(tab) {
+  (_panelActivators.get(tab) || []).forEach(function(fn) {
+    try { fn(); } catch (e) { console.warn('[settings] panel loader failed for', tab, e); }
+  });
+  try {
+    document.dispatchEvent(new CustomEvent('settings:panel-activated', { detail: { tab: tab } }));
+  } catch (_) {}
 }
 
 function openAdminSettingsTab(tab) {
@@ -249,14 +269,16 @@ function _registerAiEndpointRefresh(fn) {
   _aiEndpointRefreshers.add(fn);
 }
 
-export async function refreshAiModelEndpoints() {
+export async function refreshAiModelEndpoints(prefetched) {
+  if (Array.isArray(prefetched)) {
+    _applyAiEndpoints(prefetched);
+    return prefetched;
+  }
   if (_aiEndpointRefreshInFlight) return _aiEndpointRefreshInFlight;
   _aiEndpointRefreshInFlight = (async function() {
     try {
       const endpoints = await _fetchModelEndpoints();
-      _aiEndpointRefreshers.forEach(function(fn) {
-        try { fn(endpoints); } catch (e) { console.warn('[settings] endpoint refresh handler failed', e); }
-      });
+      _applyAiEndpoints(endpoints);
     } catch (e) {
       console.warn('[settings] failed to refresh model endpoints', e);
     } finally {
@@ -264,6 +286,12 @@ export async function refreshAiModelEndpoints() {
     }
   })();
   return _aiEndpointRefreshInFlight;
+}
+
+function _applyAiEndpoints(endpoints) {
+  _aiEndpointRefreshers.forEach(function(fn) {
+    try { fn(endpoints); } catch (e) { console.warn('[settings] endpoint refresh handler failed', e); }
+  });
 }
 
 /* Shared fallback-chain widget — mirrors the Default Chat Model fallback UI
@@ -490,111 +518,23 @@ async function initUtilityModel() {
   });
 }
 
-/* ── Teacher Model ── */
-// SOTA model called automatically when a self-hosted student model
-// fails an agent-mode task. Stored as a single `teacher_model` string
-// in the form `model@endpoint_name` so the backend's _resolve_model
-// can dispatch directly. Master toggle is the separate
-// `teacher_enabled` flag so the user can pause the feature without
-// losing their endpoint+model selection.
-async function initTeacherModel() {
-  var enabledToggle = el('set-teacherEnabledToggle');
-  var epSel = el('set-teacherEpSelect');
-  var modelSel = el('set-teacherModelSelect');
-  var msg = el('set-teacherChatMsg');
-  if (!epSel || !modelSel) return;
-  var _endpoints = [];
-
-  try {
-    _endpoints = await _fetchModelEndpoints();
-    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
-  } catch (e) { console.warn('Failed to load endpoints for teacher model', e); }
-
-  function refreshModels(selectedModel) {
-    var epId = epSel.value;
-    var ep = _endpoints.find(function(e) { return e.id === epId; });
-    _fillModelSelect(modelSel, ep ? ep.models : [], selectedModel, true);
-  }
-
-  // Disable / enable the endpoint+model dropdowns based on the
-  // master switch. Greys them out so users see at a glance that the
-  // selection is dormant.
-  function syncEnabled() {
-    var off = enabledToggle ? !enabledToggle.checked : true;
-    // Dim the card when off as a "dormant" cue, but keep the endpoint+model
-    // dropdowns INTERACTIVE — the toggle gates whether escalation runs, not
-    // whether you can configure it. (Previously the config was inert when off,
-    // so users couldn't pick an endpoint until they'd already enabled it.)
-    var card = enabledToggle ? enabledToggle.closest('.admin-card') : null;
-    if (card) card.style.opacity = off ? '0.7' : '';
-    var wrap = card ? card.querySelector('.settings-col') : null;
-    if (wrap) wrap.style.pointerEvents = '';
-    epSel.disabled = false;
-    modelSel.disabled = false;
-  }
-
-  try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
-    if (enabledToggle) enabledToggle.checked = !!settings.teacher_enabled;
-    // teacher_model is stored as "model@endpoint_name". Split on the
-    // LAST `@` so model ids that contain @ aren't mangled.
-    var spec = settings.teacher_model || '';
-    var savedModel = spec;
-    var savedEpName = '';
-    var at = spec.lastIndexOf('@');
-    if (at >= 0) {
-      savedModel = spec.slice(0, at);
-      savedEpName = spec.slice(at + 1);
-    }
-    if (savedEpName) {
-      var match = _endpoints.find(function(ep) {
-        return ep.name && ep.name.toLowerCase().indexOf(savedEpName.toLowerCase()) >= 0;
-      });
-      if (match) epSel.value = match.id;
-    }
-    refreshModels(savedModel);
-    syncEnabled();
-  } catch (e) { console.warn('Failed to load teacher model settings', e); }
-
-  async function saveTeacher() {
-    try {
-      var spec = '';
-      if (epSel.value && modelSel.value) {
-        var ep = _endpoints.find(function(e) { return e.id === epSel.value; });
-        spec = ep ? (modelSel.value + '@' + ep.name) : modelSel.value;
-      }
-      var enabled = enabledToggle ? !!enabledToggle.checked : false;
-      await _postSettings({ teacher_enabled: enabled, teacher_model: spec });
-      msg.textContent = enabled ? (spec ? 'Saved' : 'Pick an endpoint + model') : 'Disabled';
-      msg.style.color = enabled && !spec ? 'var(--red)' : 'var(--fg)';
-      setTimeout(function() { msg.textContent = ''; }, 2000);
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
-  }
-
-  if (enabledToggle) {
-    enabledToggle.addEventListener('change', function() {
-      syncEnabled();
-      saveTeacher();
-    });
-  }
-  epSel.addEventListener('change', function() { refreshModels(''); saveTeacher(); });
-  modelSel.addEventListener('change', saveTeacher);
-
-  _registerAiEndpointRefresh(function(endpoints) {
-    _endpoints = endpoints;
-    _fillEndpointSelect(epSel, _endpoints, epSel.value, true);
-    refreshModels(modelSel.value);
-  });
-}
-
 /* ── Image Generation ── */
 async function initImageSettings() {
   const modelSel = el('set-imgModelSelect');
   const qualSel = el('set-imgQualitySelect');
   const msg = el('set-imgSettingsMsg');
   const enabledToggle = el('set-imgEnabledToggle');
-  const configWrap = modelSel ? modelSel.closest('div[style*="flex-direction"]') : null;
+  const configWrap = el('set-imgConfigWrap');
+  const imageCard = el('set-imageGenCard');
+  // Image generation needs an image model server; without one the card is
+  // only noise, so it appears once an endpoint of type Image is connected.
+  function syncImageCardVisibility(endpoints) {
+    if (!imageCard) return;
+    var hasImage = (endpoints || []).some(function(ep) { return ep && ep.model_type === 'image' && ep.is_enabled !== false; });
+    imageCard.hidden = !hasImage;
+  }
+  _registerAiEndpointRefresh(syncImageCardVisibility);
+  try { syncImageCardVisibility(await _fetchModelEndpoints()); } catch (_) {}
   try {
     const modelsRes = await fetch('/api/models', { credentials: 'same-origin' });
     const modelsData = await modelsRes.json();
@@ -632,9 +572,10 @@ async function initImageSettings() {
 
   function syncImgDisabled() {
     var off = enabledToggle && !enabledToggle.checked;
-    var card = enabledToggle ? enabledToggle.closest('.admin-card') : null;
-    if (card) card.style.opacity = off ? '0.45' : '';
-    if (configWrap) configWrap.style.pointerEvents = off ? 'none' : '';
+    if (configWrap) {
+      configWrap.style.opacity = off ? '0.45' : '';
+      configWrap.style.pointerEvents = off ? 'none' : '';
+    }
   }
   syncImgDisabled();
 
@@ -655,7 +596,7 @@ async function initVisionSettings() {
   const vlSel = el('set-vlModelSelect');
   const msg = el('set-visionSettingsMsg');
   const enabledToggle = el('set-visionEnabledToggle');
-  const configWrap = vlSel ? vlSel.closest('div[style*="flex-direction"]') : null;
+  const configWrap = el('set-visionConfigWrap');
   var _visionEndpoints = [];
   var visionFallbackWidget = null;
   var _vlExclude = ['audio', 'realtime', 'tts', 'dall-e', 'embedding', 'search', 'whisper'];
@@ -706,9 +647,11 @@ async function initVisionSettings() {
 
   function syncVisionDisabled() {
     var off = enabledToggle && !enabledToggle.checked;
-    var card = enabledToggle ? enabledToggle.closest('.admin-card') : null;
-    if (card) card.style.opacity = off ? '0.45' : '';
-    if (configWrap) configWrap.style.pointerEvents = off ? 'none' : '';
+    // Dim only the Vision row: it shares its card with the other roles.
+    if (configWrap) {
+      configWrap.style.opacity = off ? '0.45' : '';
+      configWrap.style.pointerEvents = off ? 'none' : '';
+    }
   }
   syncVisionDisabled();
 
@@ -725,250 +668,6 @@ async function initVisionSettings() {
     _visionEndpoints = endpoints;
     if (visionFallbackWidget && visionFallbackWidget.refresh) visionFallbackWidget.refresh();
   });
-}
-
-/* ── Face Recognition ── */
-
-/* ── Text to Speech ── */
-async function initTtsSettings() {
-  var provSel = el('set-ttsProviderSelect');
-  var modelSelect = el('set-ttsModelSelect');
-  var modelInput = el('set-ttsModelInput');
-  var voiceSelect = el('set-ttsVoiceSelect');
-  var voiceInput = el('set-ttsVoiceInput');
-  var modelRow = el('set-ttsModelRow');
-  var voiceRow = el('set-ttsVoiceRow');
-  var speedSelect = el('set-ttsSpeedSelect');
-  var speedRow = el('set-ttsSpeedRow');
-  var ttsMsg = el('set-ttsSettingsMsg');
-  var ttsEnabledToggle = el('set-ttsEnabledToggle');
-  var ttsConfigWrap = provSel ? provSel.closest('div[style*="flex-direction"]') : null;
-
-  function isEndpoint() { return provSel.value.startsWith('endpoint:'); }
-  function getModel() { return isEndpoint() ? modelSelect.value : modelInput.value; }
-  function getVoice() { return isEndpoint() ? voiceSelect.value : voiceInput.value; }
-
-  function updateVisibility() {
-    var prov = provSel.value;
-    modelRow.style.display = prov.startsWith('endpoint:') ? 'flex' : 'none';
-    voiceRow.style.display = prov === 'disabled' ? 'none' : 'flex';
-    speedRow.style.display = prov === 'disabled' ? 'none' : 'flex';
-    if (isEndpoint()) {
-      modelSelect.style.display = ''; modelInput.style.display = 'none';
-      voiceSelect.style.display = ''; voiceInput.style.display = 'none';
-    } else {
-      modelSelect.style.display = 'none'; modelInput.style.display = '';
-      voiceSelect.style.display = 'none'; voiceInput.style.display = prov === 'disabled' ? 'none' : '';
-    }
-  }
-
-  var ttsKeywords = ['tts', 'audio'];
-  try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
-    endpoints.forEach(function(ep) {
-      if (!ep.is_enabled) return;
-      var hasTTS = (ep.models || []).some(m => ttsKeywords.some(kw => m.toLowerCase().includes(kw)));
-      if (!hasTTS) return;
-      var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
-    });
-  } catch (e) { console.warn('Failed to load endpoints for TTS', e); }
-
-  try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await settingsRes.json();
-    if (settings.tts_provider) provSel.value = settings.tts_provider;
-    if (settings.tts_model) { modelSelect.value = settings.tts_model; modelInput.value = settings.tts_model; }
-    if (settings.tts_voice) { voiceSelect.value = settings.tts_voice; voiceInput.value = settings.tts_voice; }
-    if (settings.tts_speed) { speedSelect.value = settings.tts_speed; }
-    if (ttsEnabledToggle) ttsEnabledToggle.checked = settings.tts_enabled !== false;
-  } catch (e) { console.warn('Failed to load TTS settings', e); }
-
-  function syncTtsDisabled() {
-    var off = ttsEnabledToggle && !ttsEnabledToggle.checked;
-    var card = ttsEnabledToggle ? ttsEnabledToggle.closest('.admin-card') : null;
-    if (card) card.style.opacity = off ? '0.45' : '';
-    if (ttsConfigWrap) ttsConfigWrap.style.pointerEvents = off ? 'none' : '';
-  }
-  syncTtsDisabled();
-  updateVisibility();
-
-  async function saveTTS() {
-    try {
-      await _postSettings({ tts_enabled: ttsEnabledToggle ? ttsEnabledToggle.checked : true, tts_provider: provSel.value, tts_model: getModel() || 'tts-1', tts_voice: getVoice() || 'alloy', tts_speed: speedSelect.value || '1' });
-      ttsMsg.textContent = 'Saved'; ttsMsg.style.color = 'var(--fg)'; setTimeout(() => { ttsMsg.textContent = ''; }, 2000);
-      if (window.aiTTSManager) window.aiTTSManager.checkAvailability();
-    } catch (e) { ttsMsg.textContent = 'Failed to save'; ttsMsg.style.color = 'var(--red)'; }
-  }
-
-  async function saveAndClearCache() {
-    await saveTTS();
-    fetch('/api/tts/clear-cache', { method: 'POST', credentials: 'same-origin' }).catch(function(){});
-  }
-
-  provSel.addEventListener('change', function() {
-    var prov = provSel.value;
-    if (prov === 'local') voiceInput.value = 'af_heart';
-    else if (isEndpoint()) { voiceSelect.value = 'alloy'; modelSelect.value = 'tts-1'; }
-    else if (prov === 'browser') { voiceInput.value = ''; voiceInput.placeholder = 'OS default voice'; }
-    updateVisibility();
-    saveTTS();
-  });
-  modelSelect.addEventListener('change', saveAndClearCache);
-  modelInput.addEventListener('change', saveTTS);
-  voiceSelect.addEventListener('change', saveAndClearCache);
-  voiceInput.addEventListener('change', saveTTS);
-  speedSelect.addEventListener('change', saveAndClearCache);
-  if (ttsEnabledToggle) ttsEnabledToggle.addEventListener('change', function() { syncTtsDisabled(); saveTTS(); });
-
-  // Preview / test button
-  var previewBtn = el('set-ttsPreviewBtn');
-  if (previewBtn) {
-    var previewAudio = null;
-    var previewPlaying = false;
-    function resetPreview() { previewPlaying = false; previewBtn.textContent = 'Preview'; previewBtn.style.borderColor = ''; }
-
-    previewBtn.addEventListener('click', async function() {
-      if (previewPlaying) {
-        if (previewAudio) { previewAudio.pause(); previewAudio = null; }
-        window.speechSynthesis.cancel();
-        resetPreview(); return;
-      }
-      var prov = provSel.value;
-      if (prov === 'disabled') {
-        ttsMsg.textContent = 'Select a provider first'; ttsMsg.style.color = 'var(--red, #e55)';
-        setTimeout(function() { ttsMsg.textContent = ''; }, 2000); return;
-      }
-      var testText = 'Hello, this is a test of text to speech.';
-      previewPlaying = true; previewBtn.textContent = 'Loading...';
-      try {
-        if (prov === 'browser') {
-          if (!('speechSynthesis' in window)) throw new Error('Browser TTS not supported');
-          var utt = new SpeechSynthesisUtterance(testText);
-          var voiceVal = getVoice();
-          if (voiceVal) {
-            var voices = window.speechSynthesis.getVoices();
-            var target = voiceVal.toLowerCase();
-            var match = voices.find(function(v) { return v.name.toLowerCase() === target; }) ||
-                        voices.find(function(v) { return v.name.toLowerCase().includes(target); });
-            if (match) utt.voice = match;
-          }
-          utt.rate = parseFloat(speedSelect.value) || 1;
-          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red, #e55)';
-          await new Promise(function(resolve, reject) {
-            utt.onend = resolve;
-            utt.onerror = function(e) { reject(new Error('Browser TTS: ' + e.error)); };
-            window.speechSynthesis.speak(utt);
-          });
-        } else {
-          var res = await fetch('/api/tts/synthesize', {
-            method: 'POST', credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text: testText, format: 'audio' })
-          });
-          if (!res.ok) { var err = await res.json().catch(function() { return {}; }); throw new Error(err.detail?.message || 'Synthesis failed'); }
-          var blob = await res.blob();
-          var url = URL.createObjectURL(blob);
-          previewAudio = new Audio(url);
-          previewBtn.textContent = 'Stop'; previewBtn.style.borderColor = 'var(--red, #e55)';
-          await new Promise(function(resolve, reject) {
-            previewAudio.onended = function() { URL.revokeObjectURL(url); previewAudio = null; resolve(); };
-            previewAudio.onerror = function() { URL.revokeObjectURL(url); previewAudio = null; reject(new Error('Playback failed')); };
-            previewAudio.play().catch(reject);
-          });
-        }
-      } catch (e) {
-        ttsMsg.textContent = 'Preview failed: ' + e.message; ttsMsg.style.color = 'var(--red, #e55)';
-        setTimeout(function() { ttsMsg.textContent = ''; }, 3000);
-      } finally {
-        resetPreview();
-      }
-    });
-  }
-}
-
-/* ── Speech to Text ── */
-async function initSttSettings() {
-  var provSel = el('set-sttProviderSelect');
-  var modelSelect = el('set-sttModelSelect');
-  var modelInput = el('set-sttModelInput');
-  var modelRow = el('set-sttModelRow');
-  var langRow = el('set-sttLangRow');
-  var langInput = el('set-sttLangInput');
-  var sttMsg = el('set-sttSettingsMsg');
-  var sttEnabledToggle = el('set-sttEnabledToggle');
-  var sttConfigWrap = el('set-sttConfigWrap');
-  // STT was removed from AI Defaults — bail if the UI isn't present.
-  if (!provSel) return;
-
-  function isEndpoint() { return provSel.value.startsWith('endpoint:'); }
-  function getModel() { return isEndpoint() ? modelInput.value : modelSelect.value; }
-
-  function updateVisibility() {
-    var prov = provSel.value;
-    var showModel = prov === 'local' || prov.startsWith('endpoint:');
-    var showLang = prov !== 'disabled';
-    modelRow.style.display = showModel ? 'flex' : 'none';
-    langRow.style.display = showLang ? 'flex' : 'none';
-    if (isEndpoint()) {
-      modelSelect.style.display = 'none'; modelInput.style.display = '';
-    } else {
-      modelSelect.style.display = ''; modelInput.style.display = 'none';
-    }
-  }
-
-  function syncSttDisabled() {
-    var off = sttEnabledToggle && !sttEnabledToggle.checked;
-    var card = sttEnabledToggle ? sttEnabledToggle.closest('.admin-card') : null;
-    if (card) card.style.opacity = off ? '0.45' : '';
-    if (sttConfigWrap) sttConfigWrap.style.pointerEvents = off ? 'none' : '';
-  }
-
-  // Effective provider: if toggle is off, treat as disabled regardless of provider select
-  function effectiveProvider() {
-    if (sttEnabledToggle && !sttEnabledToggle.checked) return 'disabled';
-    return provSel.value;
-  }
-
-  // Add API endpoints that might support STT
-  try {
-    var epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-    var endpoints = await epRes.json();
-    endpoints.forEach(function(ep) {
-      if (!ep.is_enabled) return;
-      var opt = document.createElement('option'); opt.value = 'endpoint:' + ep.id; opt.textContent = ep.name + ' (API)'; provSel.appendChild(opt);
-    });
-  } catch (e) { console.warn('Failed to load endpoints for STT', e); }
-
-  // Load saved settings
-  try {
-    var settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await settingsRes.json();
-    if (settings.stt_provider) provSel.value = settings.stt_provider;
-    if (settings.stt_model) { modelSelect.value = settings.stt_model; modelInput.value = settings.stt_model; }
-    if (settings.stt_language) langInput.value = settings.stt_language;
-    if (sttEnabledToggle) sttEnabledToggle.checked = settings.stt_enabled !== false;
-  } catch (e) { console.warn('Failed to load STT settings', e); }
-
-  syncSttDisabled();
-  updateVisibility();
-
-  async function saveSTT() {
-    try {
-      var enabled = sttEnabledToggle ? sttEnabledToggle.checked : false;
-      await _postSettings({ stt_enabled: enabled, stt_provider: provSel.value, stt_model: getModel() || 'base', stt_language: langInput.value.trim() });
-      sttMsg.textContent = 'Saved'; sttMsg.style.color = 'var(--fg)'; setTimeout(() => { sttMsg.textContent = ''; }, 2000);
-      // Notify voiceRecorder of effective provider and update send button icon
-      if (window.voiceRecorderModule) window.voiceRecorderModule._sttProvider = effectiveProvider();
-      if (window._updateSendBtnIcon) window._updateSendBtnIcon();
-    } catch (e) { sttMsg.textContent = 'Failed to save'; sttMsg.style.color = 'var(--red)'; }
-  }
-
-  provSel.addEventListener('change', function() { updateVisibility(); saveSTT(); });
-  modelSelect.addEventListener('change', saveSTT);
-  modelInput.addEventListener('change', saveSTT);
-  langInput.addEventListener('change', saveSTT);
-  if (sttEnabledToggle) sttEnabledToggle.addEventListener('change', function() { syncSttDisabled(); saveSTT(); });
 }
 
 /* ═══════════════════════════════════════════
@@ -2294,6 +1993,15 @@ function initContextProfiles() {
   let endpoints = [];
   let state = null;          // last /api/auth/settings/context-profile payload
   let selectedPreset = '';   // '' = recommended (nothing saved)
+  // Knobs an older server still reports but the agent loop no longer reads.
+  // Showing them would offer controls that change nothing.
+  const RETIRED_KNOBS = new Set(['input_token_budget', 'trim_target_ratio', 'reasoning_replay', 'reasoning_replay_rounds']);
+  function liveKnobs() {
+    const knobs = (state && state.knobs) || {};
+    const out = {};
+    Object.keys(knobs).forEach(function(name) { if (!RETIRED_KNOBS.has(name)) out[name] = knobs[name]; });
+    return out;
+  }
 
   function say(text, isError) {
     if (!msg) return;
@@ -2310,7 +2018,6 @@ function initContextProfiles() {
 
   function fmt(name, value) {
     if (typeof value === 'boolean') return value ? 'on' : 'off';
-    if (name === 'input_token_budget' && !value) return 'auto (scales to the window)';
     if (typeof value === 'number' && Number.isInteger(value)) return value.toLocaleString();
     return String(value);
   }
@@ -2353,7 +2060,7 @@ function initContextProfiles() {
 
   function renderKnobs() {
     knobsBox.innerHTML = '';
-    const knobs = (state && state.knobs) || {};
+    const knobs = liveKnobs();
     const saved = (state && state.custom_values) || {};
     const effective = (state && state.effective) || {};
     Object.keys(knobs).forEach(function(name) {
@@ -2391,7 +2098,7 @@ function initContextProfiles() {
   function renderEffective() {
     effectiveBox.innerHTML = '';
     const effective = (state && state.effective) || {};
-    const knobs = (state && state.knobs) || {};
+    const knobs = liveKnobs();
     const SOURCE_LABEL = {
       model: 'this endpoint + model',
       endpoint: 'this endpoint',
@@ -3279,11 +2986,9 @@ function initAll() {
   initOpacityToggle();
   initialized = true;
   initDefaultChat();
-  initTeacherModel();
   initUtilityModel();
   initImageSettings();
   initVisionSettings();
-  initTtsSettings();
   initSttSettingsV2();
   initSearchSettings();
   initResearchSettings();
@@ -6986,18 +6691,21 @@ export function open(tab) {
   showSettingsModal(modalEl);
   syncAdminVisibility();
 
-  if (tab) {
-    activateSettingsPanel(modalEl, tab);
+  // Retired ids ('ai', 'tools', …) open the tab that owns those controls now.
+  const requested = tab ? resolveSettingsPanelId(tab) : '';
+  if (requested) {
+    activateSettingsPanel(modalEl, requested);
   }
 
   // Preserve existing panel-specific side effects when Settings is opened
   // directly to a tab as well as when the user navigates there.
-  const activeTab = tab || getActiveSettingsTab(modalEl);
+  const activeTab = requested || getActiveSettingsTab(modalEl);
   onSettingsPanelActivated(activeTab);
 
-  // Auto-init admin data if showing an admin tab.
-  if (isAdminManagedSettingsTab(activeTab) && window.adminModule && !window.adminModule._initialized) {
-    window.adminModule._initData();
+  // Admin-backed tabs (Models, Users, …) reload their lists each time they
+  // are shown; admin.js initialises itself on the first call.
+  if (isAdminManagedSettingsTab(activeTab) && window.adminModule && typeof window.adminModule._initData === 'function') {
+    window.adminModule._initData(activeTab);
   }
 }
 

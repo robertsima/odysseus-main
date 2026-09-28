@@ -255,10 +255,7 @@ function buildFixture(document) {
   };
 
   const panelIds = [
-    'services',
-    'added-models',
-    'ai',
-    'context',
+    'models',
     'search',
     'integrations',
     'email',
@@ -282,7 +279,7 @@ function buildFixture(document) {
     header,
     close,
     content,
-    services: settingsPanels.services,
+    models: settingsPanels.models,
     appearance: settingsPanels.appearance,
     system: settingsPanels.system,
     settingsPanels,
@@ -377,10 +374,7 @@ function moduleSource(relativePath) {
   check(
     'Settings registry preserves the existing sidebar panel order',
     registryPanelIds === [
-      'services',
-      'added-models',
-      'ai',
-      'context',
+      'models',
       'search',
       'integrations',
       'email',
@@ -408,18 +402,26 @@ function moduleSource(relativePath) {
   );
 
   check(
-    'Settings registry keeps services, models, integrations and admin panels on the existing admin controller',
-    ['services', 'added-models', 'integrations', 'tools', 'users', 'capabilities', 'system']
+    'Settings registry keeps models, integrations and admin panels on the existing admin controller',
+    ['models', 'integrations', 'tools', 'users', 'capabilities', 'system']
       .every(id => context.isAdminManagedSettingsTab(id))
-      && ['ai', 'context', 'search', 'email', 'reminders', 'appearance', 'shortcuts', 'privacy', 'account']
+      && ['search', 'email', 'reminders', 'appearance', 'shortcuts', 'privacy', 'account']
         .every(id => !context.isAdminManagedSettingsTab(id)),
   );
 
   check(
     'Settings registry distinguishes admin-only visibility from admin-controlled routing',
-    ['context', 'tools', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
-      && ['services', 'added-models', 'integrations']
+    ['tools', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
+      && ['models', 'integrations']
         .every(id => !context.isAdminOnlySettingsTab(id)),
+  );
+
+  check(
+    'Settings registry resolves retired tab ids to the panel that owns them now',
+    ['services', 'added-models', 'ai', 'context'].every(id => context.resolveSettingsPanelId(id) === 'models')
+      && context.resolveSettingsPanelId('models') === 'models'
+      && context.resolveSettingsPanelId('missing') === 'missing'
+      && context.isAdminManagedSettingsTab('added-models'),
   );
 
   check(
@@ -445,7 +447,7 @@ function moduleSource(relativePath) {
     'Settings search resolves metadata terms in registry order',
     context.searchSettingsPanels('provider', { isAdmin: true })
       .map(panel => panel.id)
-      .join(',') === 'services,added-models,search',
+      .join(',') === 'models,search',
   );
 
   check(
@@ -668,10 +670,19 @@ function moduleSource(relativePath) {
     'activateSettingsPanel switches sidebar and panel state together',
     fixture.appearance.button.classList.contains('active')
       && !fixture.appearance.panel.classList.contains('hidden')
-      && !fixture.services.button.classList.contains('active')
-      && fixture.services.panel.classList.contains('hidden'),
+      && !fixture.models.button.classList.contains('active')
+      && fixture.models.panel.classList.contains('hidden'),
   );
   check('getActiveSettingsTab reports the active panel', context.getActiveSettingsTab(fixture.modal) === 'appearance');
+
+  context.activateSettingsPanel(fixture.modal, 'ai');
+  check(
+    'activateSettingsPanel opens the owning panel for a retired id',
+    fixture.models.button.classList.contains('active')
+      && !fixture.models.panel.classList.contains('hidden')
+      && fixture.appearance.panel.classList.contains('hidden'),
+  );
+  context.activateSettingsPanel(fixture.modal, 'appearance');
 
   let activated = null;
   let delegated = null;
@@ -679,16 +690,16 @@ function moduleSource(relativePath) {
     openAdminTab(tab) { delegated = tab; return tab === 'system'; },
     onPanelActivated(tab) { activated = tab; },
   });
-  fixture.services.button.click();
+  fixture.appearance.button.click();
   check(
     'normal navigation activates locally and notifies the coordinator',
-    activated === 'services' && fixture.services.button.classList.contains('active'),
+    activated === 'appearance' && fixture.appearance.button.classList.contains('active'),
   );
   activated = null;
   fixture.system.button.click();
   check(
     'admin navigation delegates without performing a second local activation',
-    delegated === 'system' && activated === null && fixture.services.button.classList.contains('active'),
+    delegated === 'system' && activated === null && fixture.appearance.button.classList.contains('active'),
   );
 
   context.bindSettingsDrag(fixture.modal);

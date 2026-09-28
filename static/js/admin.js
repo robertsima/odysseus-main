@@ -3,6 +3,7 @@
 
 import uiModule from './ui.js';
 import settingsModule from './settings.js';
+import { resolveSettingsPanelId } from './settings/registry.js';
 import { providerLogo, providerLogoFromUrl } from './providers.js';
 import { sortModelObjects } from './modelSort.js';
 import { PROVIDER_DEVICE_FLOWS, formatDeviceFlowError, runProviderDeviceFlow } from './providerDeviceFlow.js';
@@ -466,12 +467,22 @@ async function _selectAddedModelInChat(endpoint) {
   } catch (_) {}
 }
 
+// The Providers card keeps the add form folded away behind "Add provider";
+// it opens by itself only when nothing is connected yet.
+function _setAddProviderOpen(open) {
+  const form = el('adm-addProvider');
+  const toggle = el('adm-addProviderToggle');
+  if (!form) return;
+  form.hidden = !open;
+  if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+}
+
 async function loadEndpoints() {
   const listLocal = el('adm-epList-local');
   const listApi = el('adm-epList-api');
   // Render endpoint rows first. Do not make Added Models wait on /api/models or
   // endpoint probes; explicit Refresh/Probe actions do that work.
-  const refreshDependentModelUi = (force = false) => {
+  const refreshDependentModelUi = (force = false, endpoints = null) => {
     setTimeout(() => {
       if (window.modelsModule && window.modelsModule.refreshModels) {
         window.modelsModule.refreshModels(!!force, force ? {} : { cacheOnly: true }).then(() => {
@@ -480,8 +491,10 @@ async function loadEndpoints() {
           }
         }).catch(() => {});
       }
+      // Hand over the list just fetched so the model-role pickers do not
+      // fetch /api/model-endpoints a second time for the same render.
       if (settingsModule && typeof settingsModule.refreshAiModelEndpoints === 'function') {
-        settingsModule.refreshAiModelEndpoints();
+        settingsModule.refreshAiModelEndpoints(Array.isArray(endpoints) ? endpoints : undefined);
       }
     }, 0);
   };
@@ -495,11 +508,16 @@ async function loadEndpoints() {
     if (res.ok) {
       try { data = await res.json(); } catch { data = []; }
     }
+    // Only a list the server actually returned is handed to the role pickers;
+    // on an error they fetch for themselves instead of being emptied.
+    const fetched = res.ok && Array.isArray(data) ? data : null;
     if (!Array.isArray(data) || data.length === 0) {
       const empty = '<div class="admin-empty">None</div>';
       if (listLocal) listLocal.innerHTML = empty;
       if (listApi) listApi.innerHTML = '<div class="admin-empty">None</div>';
-      refreshDependentModelUi();
+      // Nothing connected yet: the add form is the only useful thing here.
+      if (res.ok) _setAddProviderOpen(true);
+      refreshDependentModelUi(false, fetched);
       return;
     }
     const rowHtml = data.map(ep => {
@@ -523,9 +541,11 @@ async function loadEndpoints() {
       // Editable rather than a static badge so endpoint topology remains an
       // explicit operator choice. Private-vault access is granted separately
       // for each chat and is not inferred from this classification.
+      // It lives in the row's Advanced area: almost nobody needs to change it.
       const epKind = ep.endpoint_kind || 'auto';
+      const kindLabels = { auto: 'auto (decide from the host)', local: 'local', api: 'api', proxy: 'proxy' };
       const kindSelect = ['auto', 'local', 'api', 'proxy']
-        .map(k => `<option value="${k}"${epKind === k ? ' selected' : ''}>${k}</option>`)
+        .map(k => `<option value="${k}"${epKind === k ? ' selected' : ''}>${kindLabels[k]}</option>`)
         .join('');
       const keyLabel = ep.has_key
         ? (ep.api_key_fingerprint ? ` (key ${esc(ep.api_key_fingerprint)})` : ' (key set)')
@@ -537,7 +557,6 @@ async function loadEndpoints() {
               <span class="adm-ep-row-logo" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;flex-shrink:0;opacity:0.9;">${providerLogoFromUrl(ep.base_url) || ''}</span>
               <span class="admin-user-name">${esc(ep.name)}</span>
               ${ep.model_type === 'image' ? '<span class="admin-badge" style="background:color-mix(in srgb, var(--accent) 20%, transparent);color:var(--accent);">Image</span>' : ''}
-              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Endpoint kind describes where the model runs. Private-vault access is granted separately for each chat. 'auto' decides from the host.">${kindSelect}</select>
               ${statusBadge}
               ${ep.is_enabled ? '' : '<span class="admin-badge admin-badge-off">disabled</span>'}
               ${hasModels ? `<span style="font-size:10px;opacity:0.4;${category === 'api' ? 'flex-basis:100%;' : ''}">Click to manage models</span>` : ''}
@@ -549,6 +568,12 @@ async function loadEndpoints() {
             </div>
           </div>
           <div class="admin-ep-detail">${esc(ep.base_url)}${category === 'local' ? `<button type="button" class="admin-ep-copy-btn" data-adm-copy-url="${esc(ep.base_url)}" title="Copy URL" aria-label="Copy URL" style="background:none;border:none;padding:0 2px;margin-left:6px;cursor:pointer;color:inherit;opacity:0.45;vertical-align:-2px;line-height:1;"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : ''}${keyLabel}</div>
+          <details class="admin-ep-advanced">
+            <summary>Advanced</summary>
+            <label class="admin-ep-kind-row"><span>Runs on</span>
+              <select class="admin-select-sm" data-adm-ep-kind="${ep.id}" title="Where this model runs. Private-vault access is granted separately for each chat. 'auto' decides from the host.">${kindSelect}</select>
+            </label>
+          </details>
           ${hasModels ? `<div class="mcp-tools-panel hidden" data-adm-ep-models-panel="${ep.id}"></div>` : ''}
         </div>`;
     });
@@ -675,7 +700,7 @@ async function loadEndpoints() {
         // Don't let interactions inside the expanded panel re-fire the
         // expand/collapse handler — the search box was getting closed
         // because clicking it bubbled up to here.
-        if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, input, label')) return;
+        if (e.target.closest('.admin-btn-sm, .admin-btn-delete, .mcp-tools-list, .mcp-tools-header, .mcp-tools-search, .admin-ep-advanced, input, label, select')) return;
         const epId = header.dataset.admEpHeader;
         const panel = row.querySelector(`[data-adm-ep-models-panel="${epId}"]`);
         if (!panel) return;
@@ -789,7 +814,7 @@ async function loadEndpoints() {
         }
       });
     });
-    refreshDependentModelUi();
+    refreshDependentModelUi(false, fetched);
   } catch (e) {
     const err = '<div class="admin-error">Failed to load</div>';
     [listLocal, listApi].forEach(c => { if (c) c.innerHTML = err; });
@@ -931,7 +956,10 @@ function initEndpointForm() {
     const opt = provider.selectedOptions[0] || provider.options[0];
     const logo = opt.dataset.logo ? (providerLogo(opt.dataset.logo) || '') : '';
     pickerCurrent.querySelector('.adm-provider-logo').innerHTML = logo;
-    pickerCurrent.querySelector('.adm-provider-name').textContent = opt.textContent;
+    // Nothing is preselected: until the user picks, say so instead of showing
+    // "Custom URL" as if it were a choice they made.
+    const chosen = provider.value || (picker && picker.dataset.chosen === '1');
+    pickerCurrent.querySelector('.adm-provider-name').textContent = chosen ? opt.textContent : 'Choose provider';
   }
   if (picker && pickerBtn && pickerMenu && pickerCurrent) {
     _renderPickerMenu();
@@ -944,6 +972,7 @@ function initEndpointForm() {
     pickerMenu.addEventListener('click', (e) => {
       const item = e.target.closest('.adm-provider-item');
       if (!item) return;
+      picker.dataset.chosen = '1';
       provider.value = item.dataset.value;
       provider.dispatchEvent(new Event('change', { bubbles: true }));
       pickerMenu.classList.add('hidden');
@@ -1060,7 +1089,7 @@ function initEndpointForm() {
   }
 
   function _endpointMsg(kind) {
-    return el(kind === 'local' ? 'adm-epLocalMsg' : 'adm-epApiMsg') || el('adm-epMsg');
+    return el(kind === 'local' ? 'adm-epLocalMsg' : 'adm-epApiMsg');
   }
 
   let apiTestController = null;
@@ -1148,8 +1177,6 @@ function initEndpointForm() {
       if (provider.value && provider.selectedOptions && provider.selectedOptions[0]) {
         fd.append('name', provider.selectedOptions[0].textContent.trim());
       }
-      const epType = el('adm-epType');
-      if (epType) fd.append('model_type', epType.value);
       if (provider.value && /openrouter\.ai|ollama\.com/i.test(provider.value)) fd.append('require_models', 'true');
       else fd.append('skip_probe', 'false');
       const res = await fetch('/api/model-endpoints', { method: 'POST', body: fd, credentials: 'same-origin' });
@@ -1158,20 +1185,22 @@ function initEndpointForm() {
         const count = d.models ? d.models.length : 0;
         urlInput.value = ''; urlInput.style.display = '';
         el('adm-epApiKey').value = ''; provider.value = '';
+        if (picker) delete picker.dataset.chosen;
+        _renderPickerMenu();
+        _syncPickerCurrent();
         if (kindSel) kindSel.value = 'proxy';
-        if (epType) epType.value = 'llm';
         if (d.id) _recentlyAddedEpId = String(d.id);
         await loadEndpoints();
         await _selectAddedModelInChat(d);
-        const goLink = ' <a href="#" data-go-added-models style="margin-left:6px;text-decoration:underline;color:inherit;font-weight:600;">Added Models →</a>';
+        // The new row is in the list right below and glows once.
         if (!d.online) {
-          msg.innerHTML = 'Added (endpoint offline — will retry on next load)' + goLink;
+          msg.textContent = 'Added (provider offline — will retry on next load)';
           msg.className = 'admin-error';
         } else if (d.status === 'empty') {
-          msg.innerHTML = 'Added — endpoint reachable, no models found' + goLink;
+          msg.textContent = 'Added — provider reachable, no models found';
           msg.className = 'admin-success';
         } else {
-          msg.innerHTML = `Added — found ${count} model${count !== 1 ? 's' : ''}` + goLink;
+          msg.textContent = `Added — found ${count} model${count !== 1 ? 's' : ''}`;
           msg.className = 'admin-success';
         }
       } else { msg.textContent = d.detail || 'Failed'; msg.className = 'admin-error'; }
@@ -1312,14 +1341,14 @@ function initEndpointForm() {
   _wireKeyToggle('adm-epLocalKeyBtn', 'adm-epLocalApiKey-row');
 
   // Delegated link handler for jumping between settings tabs.
-  //   [data-go-added-models]              → quick shortcut for the Added Models tab
-  //   [data-go-settings-tab="X"]          → any tab whose nav button has data-settings-tab="X"
+  //   [data-go-added-models]              → the Providers list on the Models tab
+  //   [data-go-settings-tab="X"]          → the tab X, or the tab that owns the retired id X
   //   [data-go-scroll-to="#elementId"]    → after switching, scroll the element into view
   document.addEventListener('click', (e) => {
     const explicit = e.target.closest('[data-go-settings-tab]');
     if (explicit) {
       e.preventDefault();
-      const tab = explicit.getAttribute('data-go-settings-tab');
+      const tab = resolveSettingsPanelId(explicit.getAttribute('data-go-settings-tab'));
       const scrollTo = explicit.getAttribute('data-go-scroll-to');
       const btn = document.querySelector(`[data-settings-tab="${tab}"]`);
       if (btn) btn.click();
@@ -1336,99 +1365,26 @@ function initEndpointForm() {
     const link = e.target.closest('[data-go-added-models]');
     if (!link) return;
     e.preventDefault();
-    const btn = document.querySelector('[data-settings-tab="added-models"]');
+    const btn = document.querySelector('[data-settings-tab="models"]');
     if (btn) btn.click();
+    requestAnimationFrame(() => el('set-providersCard')?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
   });
 
-  // Generic open/close helper for the kebab dropdowns in this card.
-  // Both the Local and API cards use the same shape: an h2-anchored button
-  // with id "<prefix>MoreBtn" toggles a sibling menu with id "<prefix>MoreMenu".
-  // Global Esc handler: close any currently-open kebab menu in the admin
-  // panel regardless of which _wireKebab instance owns it. Belt-and-braces
-  // backup for the per-instance handler below — registered once.
-  if (!document._admKebabEscWired) {
-    document._admKebabEscWired = true;
-    document.addEventListener('keydown', (e) => {
-      if (e.key !== 'Escape') return;
-      // Any visible kebab dropdown in the admin panel — match by id pattern
-      // so adding a new kebab elsewhere automatically benefits.
-      const menus = document.querySelectorAll(
-        '#adm-epLocalMoreMenu, #adm-epApiMoreMenu'
-      );
-      let closed = false;
-      menus.forEach((m) => {
-        if (m && m.style.display !== 'none') {
-          m.style.display = 'none';
-          // Sync the associated button's aria-expanded when we can find it.
-          const btn = document.getElementById(m.id.replace('Menu', 'Btn'));
-          if (btn) btn.setAttribute('aria-expanded', 'false');
-          closed = true;
-        }
-      });
-      if (closed) e.stopPropagation();
-    }, { capture: true });
-  }
-
-  const _wireKebab = (btnId, menuId, onItem) => {
-    const btn = el(btnId);
-    const menu = el(menuId);
-    if (!btn || !menu) return;
-    const isOpen = () => menu.style.display !== 'none';
-    const close = () => { menu.style.display = 'none'; btn.setAttribute('aria-expanded', 'false'); };
-    const open = () => { menu.style.display = 'flex'; btn.setAttribute('aria-expanded', 'true'); };
-    btn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      if (isOpen()) close(); else open();
-    });
-    menu.addEventListener('click', (e) => {
-      const item = e.target.closest('.adm-more-item');
-      if (!item) return;
-      if (onItem) onItem(item, e);
-      close();
-    });
-    document.addEventListener('click', (e) => {
-      if (!isOpen()) return;
-      if (e.target.closest('#' + menuId + ', #' + btnId)) return;
-      close();
-    });
-    // Use capture phase so this fires before the settings-modal Esc handler
-    // (which is in bubble phase). stopPropagation prevents the modal from
-    // closing when the user only meant to dismiss this menu.
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape' && isOpen()) {
-        e.stopPropagation();
-        close();
+  // "Add provider" folds the add form (cloud first, local servers in a
+  // collapsed section) in and out of the Providers card.
+  const addToggle = el('adm-addProviderToggle');
+  if (addToggle && !addToggle.dataset.bound) {
+    addToggle.dataset.bound = '1';
+    addToggle.addEventListener('click', () => {
+      const form = el('adm-addProvider');
+      const open = !!(form && form.hidden);
+      _setAddProviderOpen(open);
+      if (open) {
+        const first = el('adm-provider-btn');
+        if (first) first.focus();
       }
-    }, { capture: true });
-  };
-
-  // API card "..." menu: contains the Proxy/API connection-mode toggle.
-  // Sync the visible checkmarks with the hidden #adm-epKind select so
-  // downstream code (which reads kindSel.value) keeps working.
-  (function wireApiKindMenu() {
-    const kind = el('adm-epKind');
-    if (!kind) return;
-    const opts = document.querySelectorAll('#adm-epApiMoreMenu .adm-kind-opt');
-    const sync = () => {
-      opts.forEach((o) => {
-        const check = o.querySelector('.adm-kind-check');
-        if (check) check.style.visibility = (o.dataset.kind === kind.value) ? 'visible' : 'hidden';
-      });
-    };
-    sync();
-    kind.addEventListener('change', sync);
-    _wireKebab('adm-epApiMoreBtn', 'adm-epApiMoreMenu', (item) => {
-      const k = item.dataset.kind;
-      if (!k) return;
-      kind.value = k;
-      kind.dispatchEvent(new Event('change'));
     });
-  })();
-
-  // Local card "..." kebab: holds Scan network / Ollama / API key reveal.
-  // Item buttons keep their own click handlers; the helper just handles
-  // open/close + outside-click + Esc.
-  _wireKebab('adm-epLocalMoreBtn', 'adm-epLocalMoreMenu');
+  }
 
   // ── Added Models toolbar: Probe + Clear offline ────────────────────
   // Both buttons act over the currently-rendered endpoint list. The
@@ -1701,6 +1657,7 @@ function initEndpointForm() {
   // Discover local models button
   const discoverBtn = el('adm-epDiscoverBtn');
   if (discoverBtn) {
+    const discoverOriginalHtml = discoverBtn.innerHTML;
     discoverBtn.addEventListener('click', async () => {
       const msg = _endpointMsg('local');
       discoverBtn.disabled = true;
@@ -1779,7 +1736,7 @@ function initEndpointForm() {
       }
       if (discoverBtn._wp) { discoverBtn._wp.destroy(); discoverBtn._wp = null; }
       discoverBtn.disabled = false;
-      discoverBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="vertical-align:-1px;margin-right:4px;"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>Scan for Servers';
+      discoverBtn.innerHTML = discoverOriginalHtml;
     });
   }
 
@@ -3429,30 +3386,37 @@ function initAll() {
     try { fn(); } catch (e) { console.error('Admin init error in', fn.name || 'anonymous', e); }
   }
   initialized = true;
-  refreshAll();
 }
 
-function refreshAll() {
-  loadUsers();
-  loadEndpoints();
-  loadBuiltinTools();
-  loadMcpServers();
-  loadRag();
-  loadTokens();
-  loadLogs(false);
+// What each Settings tab needs from this module. A tab's lists reload every
+// time it is shown (so they are never stale) and only then: opening Models
+// no longer also reloads users, tools, documents and logs.
+const TAB_LOADERS = {
+  models: [loadEndpoints],
+  tools: [loadBuiltinTools, loadMcpServers, loadRag, loadTokens],
+  users: [loadUsers],
+  system: [() => loadLogs(false)],
+};
+
+function refreshTab(tab) {
+  const loaders = TAB_LOADERS[resolveSettingsPanelId(tab)] || [];
+  for (const fn of loaders) {
+    try { fn(); } catch (e) { console.error('Admin load error in', fn.name || 'anonymous', e); }
+  }
 }
 
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
-export function _initData() {
+export function _initData(tab) {
   if (!initialized) initAll();
-  else refreshAll();
+  refreshTab(tab || 'models');
 }
 
 export function open(tab) {
-  _initData();
-  settingsModule.open(tab || 'services');
+  // settings.open() loads this module's data for the tab it shows, so the
+  // tab's lists are fetched once whichever of the two entry points ran.
+  settingsModule.open(resolveSettingsPanelId(tab || 'models'));
 }
 
 export function close() {

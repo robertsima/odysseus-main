@@ -15916,7 +15916,7 @@ span[id$="-logo"] svg:not([width]) {
 
 [data-settings-panel] .admin-card > h2 > svg,
 #theme-popup .admin-card > h2 > svg,
-[data-settings-panel="added-models"] .adm-ep-section-head > svg {
+[data-settings-panel="models"] .adm-ep-section-head > svg {
   color: var(--accent, var(--red));
 }
 .admin-ep-actions {
@@ -43040,3 +43040,145 @@ body.composer-agent-mode.loadout-voice #character-indicator-btn { display: none 
 .uf-mcp-conn-actions > span { flex: 1; font-size: 11px; }
 
 .ag-this-chat { display: inline-flex; align-items: center; padding: 2px 8px; border: 1px dashed var(--wb-line); border-radius: 999px; color: var(--wb-muted); font-size: 11px; }
+
+/* ── Settings consolidation (Models / Agents / Claude Code tabs) ──────────
+   Shared pieces for the regrouped Settings tabs: role rows inside one card,
+   collapsed "Advanced" sections, the folded add-provider flow and the
+   collapsed agent-profile accordion. */
+.settings-msg { font-size: 11px; color: color-mix(in srgb, var(--fg) 55%, transparent); min-height: 0; }
+.settings-msg:empty { display: none; }
+.settings-inline-link { color: var(--accent, var(--red)); text-decoration: underline; font-weight: 600; }
+.adm-model-logo { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; flex-shrink: 0; opacity: 0.9; color: var(--fg); }
+.settings-role { padding: 10px 0; border-top: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+.settings-role:first-of-type { border-top: 0; padding-top: 2px; }
+.settings-role-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.settings-role-name { font-size: 12.5px; font-weight: 600; min-width: 70px; }
+.settings-role-hint { font-size: 11px; color: color-mix(in srgb, var(--fg) 62%, transparent); }
+details.settings-advanced > summary,
+details.settings-details > summary {
+  cursor: pointer; list-style: none; font-size: 13px; font-weight: 600;
+  display: flex; align-items: center; gap: 8px; user-select: none;
+}
+details.settings-advanced > summary::-webkit-details-marker,
+details.settings-details > summary::-webkit-details-marker { display: none; }
+details.settings-advanced > summary::before,
+details.settings-details > summary::before {
+  content: "›"; display: inline-block; width: 10px; color: color-mix(in srgb, var(--fg) 55%, transparent);
+  transition: transform 0.15s ease;
+}
+details.settings-advanced[open] > summary::before,
+details.settings-details[open] > summary::before { transform: rotate(90deg); }
+details.settings-advanced[open] > summary { margin-bottom: 8px; }
+details.settings-details { margin-top: 10px; }
+details.settings-details > summary { font-size: 12px; font-weight: 500; color: color-mix(in srgb, var(--fg) 75%, transparent); }
+details.settings-details[open] > summary { margin-bottom: 8px; }
+.settings-advanced-hint { font-size: 11px; font-weight: 400; color: color-mix(in srgb, var(--fg) 55%, transparent); }
+.settings-subhead { font-size: 12px; font-weight: 600; margin: 14px 0 4px; }
+.settings-advanced > .settings-subhead:first-of-type { margin-top: 4px; }
+.settings-ctx-custom { margin-top: 4px; }
+.settings-status-line { font-size: 11px; margin-top: 2px; }
+.settings-status-line.is-ok { color: var(--green, #6bce8a); }
+.settings-status-line.is-warn { color: var(--warn, #d9a441); }
+.settings-status-line.is-bad { color: var(--red, #e55); }
+.settings-warning {
+  font-size: 11.5px; line-height: 1.45; padding: 7px 10px; margin: 4px 0;
+  border: 1px solid color-mix(in srgb, var(--warn, #d9a441) 45%, transparent);
+  border-left: 3px solid var(--warn, #d9a441); border-radius: 5px;
+  background: color-mix(in srgb, var(--warn, #d9a441) 9%, transparent);
+}
+.adm-add-provider {
+  margin: 0 0 12px; padding: 10px; border: 1px dashed color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 8px; background: color-mix(in srgb, var(--fg) 2%, transparent);
+}
+.adm-add-provider[hidden] { display: none; }
+.adm-add-provider-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+.adm-add-provider-title { font-size: 12.5px; font-weight: 600; }
+details.adm-add-local { margin-top: 10px; }
+details.adm-add-local > summary { cursor: pointer; font-size: 12px; color: color-mix(in srgb, var(--fg) 75%, transparent); }
+.adm-add-local-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+details.admin-ep-advanced { margin: 2px 0 0; font-size: 11px; }
+details.admin-ep-advanced > summary { cursor: pointer; display: inline-block; opacity: 0.55; }
+details.admin-ep-advanced[open] > summary { opacity: 0.8; }
+.admin-ep-kind-row { display: inline-flex; align-items: center; gap: 6px; margin: 4px 0 2px 12px; }
+.agent-profile-item {
+  border: 1px solid color-mix(in srgb, var(--border) 60%, transparent); border-radius: 8px;
+  background: var(--bg); margin-bottom: 6px;
+}
+.agent-profile-item > summary {
+  cursor: pointer; list-style: none; display: grid; grid-template-columns: minmax(90px, auto) 1fr; gap: 2px 10px;
+  align-items: baseline; padding: 8px 10px; font-size: 12px;
+}
+.agent-profile-item > summary::-webkit-details-marker { display: none; }
+.agent-profile-item[open] > summary { border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+.agent-profile-summary-name { font-weight: 600; }
+.agent-profile-summary-meta { font-size: 11px; color: color-mix(in srgb, var(--fg) 62%, transparent); }
+.agent-profile-summary-desc { grid-column: 1 / -1; font-size: 11px; color: color-mix(in srgb, var(--fg) 55%, transparent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-profile-item > .agent-profile { border: 0; border-radius: 0 0 8px 8px; }
+.agent-profiles-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+/* The global details/summary styles above are the Deep Research report look.
+   Settings' collapsible sections are plain disclosure rows instead. */
+#settings-modal details.settings-advanced,
+#settings-modal details.settings-details,
+#settings-modal details.adm-add-local,
+#settings-modal details.admin-ep-advanced,
+#settings-modal details.agent-profile-item {
+  margin: 0; padding: 0; overflow: visible; transition: none;
+  background: none; border: 0; border-radius: 0;
+}
+#settings-modal details.settings-advanced {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px; margin-bottom: 10px;
+}
+#settings-modal details.agent-profile-item {
+  background: var(--bg); border: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  border-radius: 8px; margin-bottom: 6px;
+}
+#settings-modal details.settings-details { margin-top: 10px; }
+#settings-modal details.adm-add-local { margin-top: 10px; }
+#settings-modal details.settings-advanced > summary,
+#settings-modal details.settings-details > summary,
+#settings-modal details.adm-add-local > summary,
+#settings-modal details.admin-ep-advanced > summary {
+  padding: 0; background: none; border-bottom: 0; color: var(--fg);
+  font-style: normal; display: flex; align-items: center; gap: 8px;
+}
+#settings-modal details.settings-advanced > summary { font-size: 13px; font-weight: 600; }
+#settings-modal details.settings-details > summary,
+#settings-modal details.adm-add-local > summary { font-size: 12px; font-weight: 500; color: color-mix(in srgb, var(--fg) 78%, transparent); }
+#settings-modal details.admin-ep-advanced > summary { display: inline-flex; font-size: 11px; font-weight: 400; opacity: 0.6; }
+#settings-modal details.agent-profile-item > summary { background: none; border-bottom: 0; color: var(--fg); padding: 8px 10px; font-weight: 400; }
+#settings-modal details.agent-profile-item[open] > summary { border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent); }
+#settings-modal details.settings-advanced > summary:hover,
+#settings-modal details.settings-details > summary:hover,
+#settings-modal details.adm-add-local > summary:hover,
+#settings-modal details.admin-ep-advanced > summary:hover,
+#settings-modal details.agent-profile-item > summary:hover { background: none; }
+#settings-modal details.agent-profile-item > summary:hover { background: color-mix(in srgb, var(--fg) 3%, transparent); }
+#settings-modal details.settings-advanced > summary::before,
+#settings-modal details.settings-details > summary::before,
+#settings-modal details.adm-add-local > summary::before,
+#settings-modal details.admin-ep-advanced > summary::before,
+#settings-modal details.agent-profile-item > summary::before {
+  content: "›"; font-size: 14px; line-height: 1; width: 10px; display: inline-block;
+  color: color-mix(in srgb, var(--fg) 55%, transparent); transition: transform 0.15s ease;
+}
+#settings-modal details.agent-profile-item > summary::before { position: absolute; margin-left: -2px; }
+#settings-modal details.agent-profile-item > summary { position: relative; padding-left: 22px; }
+#settings-modal details[open].settings-advanced > summary::before,
+#settings-modal details[open].settings-details > summary::before,
+#settings-modal details[open].adm-add-local > summary::before,
+#settings-modal details[open].admin-ep-advanced > summary::before,
+#settings-modal details[open].agent-profile-item > summary::before { transform: rotate(90deg); }
+#settings-modal details.agent-profile-item > summary::before { left: 10px; top: 9px; }
+#settings-modal details.settings-advanced[open] > summary { margin-bottom: 10px; }
+#settings-modal details.settings-details[open] > summary,
+#settings-modal details.adm-add-local[open] > summary { margin-bottom: 8px; }
+#settings-modal details.settings-advanced > div,
+#settings-modal details.settings-details > div,
+#settings-modal details.adm-add-local > div,
+#settings-modal details.admin-ep-advanced > label,
+#settings-modal details.agent-profile-item > div {
+  padding: 0; font-size: inherit; line-height: inherit; animation: none;
+}
+#settings-modal details h3.settings-subhead { color: var(--fg); font-size: 12px; font-weight: 600; margin: 14px 0 4px; }
+#settings-modal details.settings-advanced > h3.settings-subhead:first-of-type { margin-top: 2px; }
