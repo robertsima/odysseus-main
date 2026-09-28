@@ -127,10 +127,14 @@ def _trim_budget_tokens(session, context_length: int) -> int:
     """The soft budget an agent turn on this session would trim to, or 0.
 
     The trim gate is NOT the context window: it is 85% of the window capped at
-    200k by default, and a context profile can override it per endpoint/model.
-    Surfacing it next to the window is what stops the header ring and the
-    "soft-trimmed context" log line from looking like they contradict each
-    other — they are measured against different denominators.
+    200k by default. Surfacing it next to the window is what stops the header
+    ring and the "soft-trimmed context" log line from looking like they
+    contradict each other — they are measured against different denominators.
+
+    Same inputs as the agent loop's trim (``agent_input_token_budget`` and
+    ``agent_input_token_hard_max``). Until 2026-09-28 a context profile's
+    ``input_token_budget`` overrode the budget here, but the loop never read
+    it, so the meter showed a budget the trim did not use.
 
     Best-effort: this is a display number, so a misconfigured setting returns 0
     (the row is then hidden) rather than failing the whole context endpoint.
@@ -142,20 +146,12 @@ def _trim_budget_tokens(session, context_length: int) -> int:
             DEFAULT_BUDGET,
             DEFAULT_HARD_MAX,
         )
-        from src.context_profiles import resolve as resolve_profile
         from src.settings import get_setting
 
-        profile = resolve_profile(session.endpoint_url, session.model, context_length)
-        try:
-            profile_budget = int(profile.get("input_token_budget") or 0)
-        except (TypeError, ValueError):
-            profile_budget = 0
         try:
             soft = int(get_setting("agent_input_token_budget", DEFAULT_BUDGET) or 0)
         except (TypeError, ValueError):
             soft = DEFAULT_BUDGET
-        if profile_budget > 0:
-            soft = profile_budget
         if soft <= 0:
             return 0  # trimming is switched off entirely
         try:
@@ -167,7 +163,7 @@ def _trim_budget_tokens(session, context_length: int) -> int:
         return int(compute_input_token_budget(
             soft,
             context_length,
-            bool(profile_budget) or budget_is_explicit(soft),
+            budget_is_explicit(soft),
             hard_max=hard_max,
         ))
     except Exception as exc:  # pragma: no cover - display-only

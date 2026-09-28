@@ -33,7 +33,7 @@ def test_a_long_context_model_keeps_more_inline_than_a_small_one(stored):
     big = cp.resolve(CODEX, "gpt-5.4", 400_000)
     small = cp.resolve(LOCAL, "qwen3:8b", 8_192)
     assert big["tool_output_inline_limit"] > small["tool_output_inline_limit"]
-    assert big["trim_target_ratio"] >= small["trim_target_ratio"]
+    assert big["tool_output_tail_chars"] >= small["tool_output_tail_chars"]
 
 
 def test_model_profile_beats_endpoint_beats_global(stored):
@@ -79,12 +79,12 @@ def test_out_of_range_values_are_clamped_not_rejected():
     clean = cp.sanitize({"a|b": {"preset": "custom", "values": {
         "tool_output_inline_limit": 99_999_999,
         "tool_output_tail_chars": -5,
-        "trim_target_ratio": 4.0,
+        "tool_output_head_chars": 10**9,
     }}})
     values = clean["a|b"]["values"]
     assert values["tool_output_inline_limit"] == cp.KNOBS["tool_output_inline_limit"]["max"]
     assert values["tool_output_tail_chars"] == cp.KNOBS["tool_output_tail_chars"]["min"]
-    assert values["trim_target_ratio"] == cp.KNOBS["trim_target_ratio"]["max"]
+    assert values["tool_output_head_chars"] == cp.KNOBS["tool_output_head_chars"]["max"]
 
 
 def test_junk_is_dropped_without_losing_the_rest():
@@ -212,3 +212,40 @@ def test_settings_tab_calls_the_context_profile_route_that_exists():
         f"settings.js fetches {sorted(called - served)}, which the auth router does not serve; "
         f"it serves {sorted(p for p in served if 'context-profile' in p)}"
     )
+
+
+# ── Knobs nothing read (removed 2026-09-28) ─────────────────────────────
+
+
+def test_the_tab_no_longer_offers_knobs_nothing_reads(stored):
+    """input_token_budget (only the meter read it), trim_target_ratio (the loop
+    cuts to a fixed ratio) and reasoning replay (the returned items are not
+    replayed since the 2026-09-18 upstream sync) did nothing when set."""
+    described = cp.describe(CODEX, "gpt-5.4", 400_000)
+    for name in cp.RETIRED_KNOBS:
+        assert name not in cp.KNOBS
+        assert name not in described["knobs"]
+        assert name not in described["effective"]
+        for preset in described["presets"].values():
+            assert name not in preset["values"]
+
+
+def test_a_profile_saved_with_retired_knobs_still_loads(stored):
+    stored[cp.profile_key(CODEX, "gpt-5.4")] = {"preset": "custom", "values": {
+        "tool_output_inline_limit": 7000, "trim_target_ratio": 0.9, "reasoning_replay": False,
+    }}
+    resolved = cp.resolve(CODEX, "gpt-5.4", 400_000)
+    assert resolved["tool_output_inline_limit"] == 7000
+    assert "trim_target_ratio" not in resolved and "reasoning_replay" not in resolved
+    assert cp.describe(CODEX, "gpt-5.4", 400_000)["custom_values"] == {"tool_output_inline_limit": 7000}
+    clean = cp.sanitize({"k|m": {"preset": "custom", "values": {"input_token_budget": 5000}}})
+    assert clean == {}, "a custom profile of only retired knobs has nothing left to save"
+
+
+def test_reasoning_is_still_requested_when_a_profile_is_silent(stored):
+    """Removing the knob keeps the request as it was: `include` is llm_core's
+    default when no profile says otherwise."""
+    from src.llm_core import _reasoning_replay_enabled
+
+    stored[cp.GLOBAL_KEY] = {"preset": "custom", "values": {"reasoning_replay": False}}
+    assert _reasoning_replay_enabled(CODEX, "gpt-5.4") is True

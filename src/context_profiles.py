@@ -4,11 +4,10 @@ context_profiles.py
 Per-endpoint/model tuning for how much context an agent turn spends.
 
 The knobs that decide whether an agent run feels sharp or flat — how much of a
-tool result stays inline, how deep a trim cuts, whether a reasoning model gets
-its own thinking back on the next round — were spread across env vars, module
-constants and one global setting. None of them could differ between a 400k
-hosted model and an 8k local one, even though the right answer is close to
-opposite for the two:
+tool result stays inline, and how much of it survives as an excerpt — were
+spread across env vars, module constants and one global setting. None of them
+could differ between a 400k hosted model and an 8k local one, even though the
+right answer is close to opposite for the two:
 
 - On a long-context hosted model, tokens are cheap and round-trips are not. A
   recall costs a whole extra request; keeping 2k tokens of a log inline costs
@@ -59,38 +58,22 @@ KNOBS: Dict[str, Dict[str, Any]] = {
             "and error lines live at the end of a shell result."
         ),
     },
-    "input_token_budget": {
-        "type": int, "min": 0, "max": 1_000_000, "default": 0,
-        "label": "Input token budget", "unit": "tokens (0 = auto)",
-        "help": (
-            "Soft cap on prompt size before older turns are trimmed. 0 scales "
-            "to 85% of the model's window, capped at 200k."
-        ),
-    },
-    "trim_target_ratio": {
-        "type": float, "min": 0.4, "max": 0.95, "default": 0.8,
-        "label": "Trim depth", "unit": "fraction of budget",
-        "help": (
-            "When a trim is unavoidable, cut to this fraction of the budget. "
-            "Trimming rewrites the prompt prefix and costs a full re-prefill, "
-            "so cutting deeper buys several cheap rounds."
-        ),
-    },
-    "reasoning_replay": {
-        "type": bool, "default": True,
-        "label": "Reasoning continuity",
-        "help": (
-            "Hand a reasoning model its own encrypted thinking back on the next "
-            "round so it keeps its plan across tool calls instead of re-deriving "
-            "it. Responses API models only; ignored elsewhere."
-        ),
-    },
-    "reasoning_replay_rounds": {
-        "type": int, "min": 1, "max": 8, "default": 3,
-        "label": "Reasoning rounds kept", "unit": "rounds",
-        "help": "How many recent rounds keep their reasoning. Opaque payload, so bounded.",
-    },
 }
+
+# Knobs this tab used to offer that nothing reads (removed 2026-09-28), so a
+# profile that set them did nothing while the tab said it did:
+# - input_token_budget: only the context meter read it; the agent loop trims to
+#   the global `agent_input_token_budget`, so the meter and the trim disagreed.
+# - trim_target_ratio: the loop cuts to a fixed 60% (_AGENT_TRIM_TARGET_RATIO).
+# - reasoning_replay / reasoning_replay_rounds: the returned reasoning items are
+#   not replayed since the 2026-09-18 upstream sync (re-port backlog in
+#   website/upstream-sync-2026-09-18.md); llm_core still asks for them, which
+#   is its default when a profile says nothing.
+# A stored profile may still carry them. `sanitize` and `resolve` drop unknown
+# knobs, so old settings keep loading.
+RETIRED_KNOBS = frozenset({
+    "input_token_budget", "trim_target_ratio", "reasoning_replay", "reasoning_replay_rounds",
+})
 
 PRESETS: Dict[str, Dict[str, Any]] = {
     "long_context": {
@@ -100,10 +83,6 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "tool_output_inline_limit": 8000,
             "tool_output_head_chars": 4000,
             "tool_output_tail_chars": 1500,
-            "input_token_budget": 0,
-            "trim_target_ratio": 0.8,
-            "reasoning_replay": True,
-            "reasoning_replay_rounds": 3,
         },
     },
     "balanced": {
@@ -113,23 +92,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "tool_output_inline_limit": 4000,
             "tool_output_head_chars": 2000,
             "tool_output_tail_chars": 800,
-            "input_token_budget": 0,
-            "trim_target_ratio": 0.8,
-            "reasoning_replay": True,
-            "reasoning_replay_rounds": 3,
         },
     },
     "compact": {
         "label": "Compact (small local)",
-        "hint": "Under 32k. Offloads aggressively and trims deep so a run survives the window.",
+        "hint": "Under 32k. Offloads aggressively so a run survives the window.",
         "values": {
             "tool_output_inline_limit": 2000,
             "tool_output_head_chars": 1200,
             "tool_output_tail_chars": 400,
-            "input_token_budget": 0,
-            "trim_target_ratio": 0.7,
-            "reasoning_replay": True,
-            "reasoning_replay_rounds": 2,
         },
     },
 }
@@ -329,7 +300,14 @@ def describe(endpoint_url: str = "", model: str = "", context_length: int = 0) -
         "context_length": context_length,
         "recommended": preset_for_window(context_length),
         "selected": entry.get("preset") or "",
-        "custom_values": entry.get("values") or {},
+        # Only knobs that still exist: a profile saved before 2026-09-28 may
+        # carry a retired one (RETIRED_KNOBS), which the tab has no field for.
+        "custom_values": {
+            name: value for name, value in (
+                entry.get("values") if isinstance(entry.get("values"), dict) else {}
+            ).items()
+            if name in KNOBS
+        },
         "effective": resolve(endpoint_url, model, context_length),
         "presets": {
             name: {"label": p["label"], "hint": p["hint"], "values": p["values"]}

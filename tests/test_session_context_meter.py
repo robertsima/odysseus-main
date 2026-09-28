@@ -120,3 +120,17 @@ def test_trim_budget_reports_zero_rather_than_failing_the_endpoint(monkeypatch):
 
     monkeypatch.setattr(settings_mod, "get_setting", _boom)
     assert _trim_budget_tokens(_Session(), 128_000) == 0
+
+
+def test_trim_budget_ignores_a_profile_budget_the_loop_never_reads(monkeypatch):
+    """The meter used a context profile's input_token_budget while the agent
+    loop trims to agent_input_token_budget, so the two disagreed (2026-09-28)."""
+    import src.context_profiles as cp
+    import src.settings as settings_mod
+
+    monkeypatch.setattr(settings_mod, "get_setting", lambda key, default=None: default)
+    baseline = _trim_budget_tokens(_Session(), 128_000)
+    monkeypatch.setattr(cp, "_stored_profiles", lambda: {
+        cp.GLOBAL_KEY: {"preset": "custom", "values": {"input_token_budget": 5000}},
+    })
+    assert _trim_budget_tokens(_Session(), 128_000) == baseline != 5000
