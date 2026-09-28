@@ -46,13 +46,15 @@ def test_off_domain_results_are_dropped_and_domain_retried_as_keyword(monkeypatc
 def test_searxng_is_not_retried_because_it_already_sent_keywords(monkeypatch):
     calls = []
 
-    def fake_searxng(query, count, time_filter=None):
-        calls.append(query)
+    def fake_searxng(query, count, time_filter=None, pageno=1):
+        calls.append((query, pageno))
         return [_r("https://dor.mo.gov/driver-license/")]
 
     monkeypatch.setattr(core, "searxng_search_api", fake_searxng)
     assert core._call_provider("searxng", "site:lucide.dev license icons", 5, "year") == []
-    assert calls == ["site:lucide.dev license icons"]
+    # No keyword retry; the only extra request is result page 2 of the same
+    # query (fewer than _SITE_MIN_ROWS on-domain rows survived page 1).
+    assert calls == [("site:lucide.dev license icons", 1), ("site:lucide.dev license icons", 2)]
 
 
 def test_searxng_sends_the_site_operator_as_keywords(monkeypatch):
@@ -103,14 +105,22 @@ def test_provider_that_honours_site_is_only_filtered(monkeypatch):
 
 
 def test_nothing_on_domain_returns_empty_so_the_chain_can_fall_through(monkeypatch):
-    monkeypatch.setattr(core, "searxng_search_api", lambda q, c, time_filter=None: [_r("https://elsewhere.org/a")])
+    monkeypatch.setattr(core, "searxng_search_api",
+                        lambda q, c, time_filter=None, pageno=1: [_r("https://elsewhere.org/a")])
     assert core._call_provider("searxng", "site:lucide.dev license", 5, None) == []
 
 
 def test_queries_without_site_are_untouched(monkeypatch):
     rows = [_r("https://a.example/"), _r("https://b.example/")]
-    monkeypatch.setattr(core, "searxng_search_api", lambda q, c, time_filter=None: list(rows))
+    calls = []
+
+    def fake(q, c, time_filter=None, pageno=1):
+        calls.append(pageno)
+        return list(rows)
+
+    monkeypatch.setattr(core, "searxng_search_api", fake)
     assert core._call_provider("searxng", "plain query", 5, None) == rows
+    assert calls == [1], "no second page without a site: scope"
 
 
 def test_no_results_message_explains_the_site_scope(monkeypatch):

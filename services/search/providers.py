@@ -153,8 +153,8 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 #   366 requests, but those were five research workers sending every query
 #   to every default engine at once. Now it gets one paced request per
 #   search, and when it reports "too many requests" or a CAPTCHA the
-#   cooldown below leaves it out for SEARXNG_ENGINE_COOLDOWN_SECONDS while
-#   yahoo carries on.
+#   backoff below leaves it out (300 s, doubling per consecutive report,
+#   an hour once SearXNG calls it "Suspended") while yahoo carries on.
 # * wikipedia -- enabled by default. It makes one REST summary lookup by
 #   exact title (the query, title-cased), so it can only answer a query that
 #   *is* an article title ("pgvector", "Vector database"). With the default
@@ -205,9 +205,15 @@ _UNAVAILABLE_ENGINES = frozenset({
 })
 _warned_unavailable: set = set()
 
-# Engines that SearXNG reports as blocked are left out of the pin for this
-# long (SEARXNG_ENGINE_COOLDOWN_SECONDS). SearXNG suspends them itself, but a
-# request pinned only to suspended engines is a wasted round trip that then
+# Engines that SearXNG reports as blocked are left out of the pin, first for
+# SEARXNG_ENGINE_COOLDOWN_SECONDS (300), doubling on every consecutive report
+# up to SEARXNG_ENGINE_COOLDOWN_MAX_SECONDS (3600); rows from the engine reset
+# the doubling. A "Suspended: ..." report means SearXNG itself will not ask the
+# engine for a while (its default for too-many-requests is an hour), so it
+# cools for at least SEARXNG_ENGINE_SUSPENDED_SECONDS (3600). On 2026-09-28 the
+# flat 300 s let brave back in three times to fail again, and SearXNG was
+# already reporting it "Suspended": search was yahoo alone in all but name.
+# A request pinned only to suspended engines is a wasted round trip that then
 # pays for two retries.
 _ENGINE_BLOCK_MARKERS = (
     "suspended", "too many requests", "captcha", "access denied", "forbidden",
@@ -242,6 +248,20 @@ def _engine_cooldown_seconds() -> float:
         return max(0.0, float(os.environ.get("SEARXNG_ENGINE_COOLDOWN_SECONDS", "") or 300))
     except ValueError:
         return 300.0
+
+
+def _engine_cooldown_max_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("SEARXNG_ENGINE_COOLDOWN_MAX_SECONDS", "") or 3600))
+    except ValueError:
+        return 3600.0
+
+
+def _engine_suspended_seconds() -> float:
+    try:
+        return max(0.0, float(os.environ.get("SEARXNG_ENGINE_SUSPENDED_SECONDS", "") or 3600))
+    except ValueError:
+        return 3600.0
 
 
 def _engine_cooldown_key(engine: str) -> str:
@@ -298,7 +318,9 @@ def _note_unresponsive_engines(unresponsive) -> None:
     from .resilience import cooldowns
 
     pinned = set(_general_engines())
-    seconds = _engine_cooldown_seconds()
+    base = _engine_cooldown_seconds()
+    cap = _engine_cooldown_max_seconds()
+    suspended = _engine_suspended_seconds()
     for entry in unresponsive or []:
         if not isinstance(entry, (list, tuple)) or not entry:
             continue
@@ -306,8 +328,26 @@ def _note_unresponsive_engines(unresponsive) -> None:
         reason = str(entry[1]) if len(entry) > 1 else ""
         if name not in pinned:
             continue
-        if any(marker in reason.casefold() for marker in _ENGINE_BLOCK_MARKERS):
-            cooldowns.cool(_engine_cooldown_key(name), seconds, f"SearXNG reported {reason!r}")
+        folded = reason.casefold()
+        if any(marker in folded for marker in _ENGINE_BLOCK_MARKERS):
+            cooldowns.backoff(
+                _engine_cooldown_key(name), base, cap, f"SearXNG reported {reason!r}",
+                floor=suspended if "suspended" in folded else 0.0,
+            )
+
+
+def _note_answering_engines(rows) -> None:
+    """Engines that returned rows start their backoff over."""
+    from .resilience import cooldowns
+
+    seen = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        for name in row.get("engines") or ([row["engine"]] if row.get("engine") else []):
+            if name and name not in seen:
+                seen.add(name)
+                cooldowns.reset_backoff(_engine_cooldown_key(str(name)))
 
 
 def _engine_tally(results) -> str:
@@ -353,9 +393,18 @@ def _infobox_rows(infoboxes) -> List[dict]:
 
 
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
-                       time_filter: Optional[str] = None) -> List[dict]:
-    """Search using SearXNG JSON API. Returns list of {title, url, snippet, engine}."""
+                       time_filter: Optional[str] = None, pageno: int = 1) -> List[dict]:
+    """Search using SearXNG JSON API. Returns list of {title, url, snippet, engine}.
+
+    ``pageno`` > 1 asks for a later result page with one request and no
+    retry ladder (core._call_provider uses it when a ``site:`` query kept
+    too few on-domain rows from page 1).
+    """
     count = count if count is not None else _get_result_count()
+    try:
+        pageno = max(1, int(pageno or 1))
+    except (TypeError, ValueError):
+        pageno = 1
     instance = _get_search_instance()
     api_key = ""
     headers = {"User-Agent": WEB_FETCH_USER_AGENT}
@@ -396,6 +445,8 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         "language": "en",
         "safesearch": _safesearch_for("searxng"),
     }
+    if pageno > 1:
+        params["pageno"] = pageno
     is_news = not scoped_to_site and (
         time_filter in ("day", "week", "month") or any(h in q_lc for h in _NEWS_HINTS)
     )
@@ -466,16 +517,21 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             if not isinstance(data, dict):
                 data = {}
             raw_rows = _rows_of(data)
+            _note_answering_engines(raw_rows)
             _note_unresponsive_engines(data.get("unresponsive_engines"))
             logger.info(
-                "SearXNG answered %d row(s) for %r (engines: %s; asked: %s)",
+                "SearXNG answered %d row(s) for %r (engines: %s; asked: %s%s)",
                 len(raw_rows), engine_query, _engine_tally(raw_rows) or "none",
                 search_params.get("engines") or f"categories={search_params.get('categories')}",
+                f"; page {search_params['pageno']}" if search_params.get("pageno") else "",
             )
             return _parse_results(raw_rows), data
 
         active_params = params
         parsed, data = _run(active_params)
+        if pageno > 1:
+            # A later page is one extra look, not a new search: no ladder.
+            return parsed
         if not parsed and is_news and categories == "general":
             # Some self-hosted SearXNG configs have no working news engines.
             # Fall back to the known-good general engines before reporting an
@@ -527,7 +583,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         return []
     except Exception as e:
         logger.warning(f"SearXNG JSON API search failed: {e}")
-        if out_of_time():
+        if out_of_time() or pageno > 1:
             return []
         html_results = searxng_search(engine_query, max_results=count)
         if html_results:
@@ -853,6 +909,9 @@ def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now
             "snippet": body[:_GITHUB_SNIPPET_CHARS],
             "age": str(item.get("updated_at") or "")[:10],
             "engine": "github",
+            # For the ranking/merge log lines (core._merge_with_github).
+            "repo": repo,
+            "engagement": _gh_activity(item),
         }
         if not repo_scoped and _gh_low_signal(item):
             row["low_signal"] = True
@@ -860,6 +919,20 @@ def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now
         if len(rows) >= count:
             break
     return rows
+
+
+def github_row_summary(row: dict) -> str:
+    """``owner/repo #N (engagement 12)`` for one GitHub row, for log lines."""
+    if not isinstance(row, dict):
+        return "?"
+    url = str(row.get("url") or "")
+    number = url.rstrip("/").rsplit("/", 1)[-1] if "/issues/" in url or "/pull/" in url else ""
+    repo = row.get("repo") or "?"
+    engagement = row.get("engagement")
+    detail = f"engagement {engagement}" if isinstance(engagement, int) else "engagement ?"
+    if row.get("low_signal"):
+        detail += ", low signal"
+    return f"{repo}{' #' + number if number else ''} ({detail})"
 
 
 def github_issue_search(query: str, count: Optional[int] = None, time_filter: Optional[str] = None) -> List[dict]:
@@ -926,8 +999,9 @@ def github_issue_search(query: str, count: Optional[int] = None, time_filter: Op
         rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count, attempt,
                                   repo_scoped=bool(scope.get("repo")))
         low = sum(1 for r in rows if r.get("low_signal"))
-        logger.info("GitHub issue search %r returned %d row(s)%s", q, len(rows),
-                    f" ({low} with no comments or reactions)" if low else "")
+        logger.info("GitHub issue search %r returned %d row(s)%s%s", q, len(rows),
+                    f" ({low} with no comments or reactions)" if low else "",
+                    f"; ranked top: {github_row_summary(rows[0])}" if rows else "")
         if rows:
             return rows
     return []

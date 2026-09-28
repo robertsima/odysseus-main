@@ -73,6 +73,46 @@ def _extract_site_filter(query: str) -> Tuple[str, Optional[str]]:
     return query, None
 
 
+# Labels too generic to be worth a keyword when a wildcard site: is dropped.
+_WILDCARD_DROP_LABELS = {"www", "com", "org", "net", "io", "dev", "co", "ai", "app"}
+
+
+def normalize_site_wildcard(query: str) -> Tuple[str, Optional[str]]:
+    """Drop a ``site:`` scope the engines cannot honour; return ``(query, note)``.
+
+    Search engines accept a host (``site:status.openai.com``) or a leading
+    subdomain wildcard (``site:*.openai.com``), not a wildcard anywhere else.
+    On 2026-09-28 the agent searched ``site:status.* vector database deletion
+    incident``: the engines were sent ``status.*`` as a word, the domain
+    filter then looked for a host literally called ``status.*`` and threw away
+    every row — including ``status.withvector.com`` — and the search
+    reported nothing found. The operator is now removed, its concrete labels
+    (``status``) kept as keywords, and *note* tells the model why. ``note``
+    is None and the query unchanged when there is nothing to fix.
+    """
+    rest, site = _extract_site_filter(query)
+    if not site:
+        return query, None
+    bare = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site.strip(), flags=re.I)
+    host = bare.split("/", 1)[0].split("?", 1)[0].strip(".")
+    check = host[2:] if host.startswith("*.") else host
+    if "*" not in check and check:
+        return query, None
+    labels = [
+        part for part in re.split(r"[.*]+", check)
+        if part and part.casefold() not in _WILDCARD_DROP_LABELS
+    ]
+    keywords = [lab for lab in labels if lab.casefold() not in rest.casefold().split()]
+    new_query = " ".join(part for part in (rest.strip(), " ".join(keywords)) if part).strip()
+    kept = f", with {' '.join(keywords)!r} as a keyword" if keywords else ""
+    note = (
+        f"site:{site} is not a usable site: scope — search engines accept a host "
+        f"(site:status.example.com) or a leading wildcard (site:*.example.com), not a "
+        f"wildcard elsewhere. Searched without it{kept}. To search one site, name its host."
+    )
+    return new_query or query, note
+
+
 _KEYWORD_CODE_HOSTS = {"github.com", "gitlab.com", "codeberg.org", "bitbucket.org"}
 _KEYWORD_CODE_HOST_RESERVED = {
     "issues", "pulls", "pull", "search", "topics", "orgs", "explore",

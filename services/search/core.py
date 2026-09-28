@@ -26,6 +26,7 @@ from .query import (
     _cache_duration_for_query,
     _extract_site_filter,
     github_issue_scope,
+    normalize_site_wildcard,
     simplify_query,
 )
 from .ranking import rank_search_results
@@ -33,6 +34,7 @@ from . import resilience
 from .providers import (
     github_issue_search,
     github_issue_search_enabled,
+    github_row_summary,
     searxng_search_api,
     brave_search,
     duckduckgo_search,
@@ -450,6 +452,13 @@ _PROVIDER_POOL = {"searxng": 20}
 # query.site_keyword_query); _call_provider does not retry them with keywords.
 _SITE_AS_KEYWORDS_PROVIDERS = {"searxng"}
 
+# A `site:` query that keeps fewer rows than this after the domain filter asks
+# the provider for one more result page (see _add_second_page), if at least
+# _SECOND_PAGE_MIN_SECONDS of the search deadline are left.
+_SITE_MIN_ROWS = 3
+_SECOND_PAGE_PROVIDERS = {"searxng"}
+_SECOND_PAGE_MIN_SECONDS = 3.0
+
 
 def _pool_size(provider_name: str, count: int) -> int:
     return max(count, _PROVIDER_POOL.get(provider_name, count))
@@ -479,6 +488,10 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
         return results
     path_prefix = _site_path_prefix(query)
     kept = _keep_on_site(results, domain, path_prefix)
+    if provider_name in _SECOND_PAGE_PROVIDERS and len(kept) < _SITE_MIN_ROWS:
+        kept, results = _add_second_page(
+            provider_name, query, count, time_filter, domain, path_prefix, kept, results,
+        )
     if kept:
         if len(kept) < len(results):
             off = [r for r in results if r not in kept]
@@ -507,6 +520,46 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
         provider_name, query, len(results), _hosts_summary(results), alt_query,
     )
     return _keep_on_site(_call_provider_raw(provider_name, alt_query, count, time_filter), domain, path_prefix)
+
+
+def _add_second_page(provider_name: str, query: str, count: int, time_filter: Optional[str],
+                     domain: str, path_prefix: Optional[str], kept: List[dict],
+                     results: List[dict]) -> Tuple[List[dict], List[dict]]:
+    """Ask for result page 2 once when too few rows survived the site filter.
+
+    Engines answer a ``site:`` query sent as keywords with mostly off-domain
+    rows: on 2026-09-28, 5 of 7 yahoo rows were dropped for every
+    ``site:docs.*`` lookup, leaving two. Page 2 costs one more request and
+    usually carries more rows from the domain. Best effort: skipped when too
+    little of the search deadline is left, and any failure keeps page 1.
+    Returns ``(kept, results)`` with page 2 merged into both.
+    """
+    if resilience.out_of_time(_SECOND_PAGE_MIN_SECONDS):
+        logger.info(
+            "%s: %d row(s) on %s for %r; no time left for a second page",
+            provider_name, len(kept), domain, query,
+        )
+        return kept, results
+    try:
+        with resilience.get_gate(provider_name).slot():
+            page2 = searxng_search_api(query, count, time_filter=time_filter, pageno=2) or []
+    except Exception as e:  # ProviderBusy, DeadlineExceeded, transport errors
+        logger.info("%s: second page for %r skipped: %s", provider_name, query, e)
+        return kept, results
+    seen = {r.get("url") for r in results if isinstance(r, dict)}
+    fresh = [r for r in page2 if isinstance(r, dict) and r.get("url") not in seen]
+    added = _keep_on_site(fresh, domain, path_prefix)
+    logger.info(
+        "%s: only %d row(s) on %s from page 1 for %r; page 2 added %d of %d new row(s)",
+        provider_name, len(kept), domain, query, len(added), len(fresh),
+    )
+    if not added:
+        return kept, results + fresh
+    merged = kept + added
+    if path_prefix:
+        inside = [r for r in merged if _row_in_scope(r, domain, path_prefix)]
+        merged = inside + [r for r in merged if r not in inside]
+    return merged, results + fresh
 
 
 def _call_provider_raw(provider_name: str, query: str, count: int, time_filter: str = None) -> List[dict]:
@@ -668,6 +721,12 @@ def _merge_with_github(web_rows: List[dict], github_rows: List[dict], count: int
             continue
         seen.add(row.get("url"))
         merged.append(row)
+    github_kept = [r for r in merged if isinstance(r, dict) and r.get("engine") == "github"]
+    logger.info(
+        "Merged %d web row(s) with %d of %d low-engagement GitHub row(s) (top GitHub: %s)",
+        len(merged) - len(github_kept), len(github_kept), len(github_rows),
+        github_row_summary(github_kept[0]) if github_kept else "none",
+    )
     return merged
 
 
@@ -783,6 +842,9 @@ def _searxng_search_results(query: str, count: int, time_filter: Optional[str]) 
     # Use configured count if caller used default
     if count == 10:
         count = result_count
+    query, site_note = normalize_site_wildcard(query)
+    if site_note:
+        logger.info("Search rewritten to %r: %s", query, site_note)
 
     cache_key = generate_cache_key(f"{query}|{count}|{time_filter}")
     cache_file = SEARCH_CACHE_DIR / f"{cache_key}.cache"
@@ -911,6 +973,9 @@ def _comprehensive_web_search(query, max_pages, max_workers, time_filter, domain
     logger.info(f"Starting comprehensive search for: {query}")
     if time_filter:
         logger.info(f"Applying time filter: {time_filter}")
+    query, site_note = normalize_site_wildcard(query)
+    if site_note:
+        logger.info("Search rewritten to %r: %s", query, site_note)
 
     settings = _get_search_settings()
     search_provider = settings.get("search_provider", "searxng")
@@ -981,6 +1046,8 @@ def _comprehensive_web_search(query, max_pages, max_workers, time_filter, domain
                 "came back — off-domain hits are never substituted. Fetch a page on the site "
                 "directly with web_fetch, or search again without the site: operator."
             )
+        if site_note:
+            msg = f"Note: {site_note}\n{msg}"
         logger.warning(msg)
         return (msg, []) if return_sources else msg
 
@@ -1087,6 +1154,8 @@ def _comprehensive_web_search(query, max_pages, max_workers, time_filter, domain
     output_parts.append("=" * 70)
     output_parts.append("WEB SEARCH RESULTS AND FETCHED CONTENT")
     output_parts.append(f"Query: {query}")
+    if site_note:
+        output_parts.append(f"Note: {site_note}")
     output_parts.append(f"Searched {len(search_results)} results, fetched {len(fetched_content)} pages")
     if unfetched:
         output_parts.append(

@@ -236,9 +236,15 @@ def test_suspended_pinned_engine_is_left_out_for_a_cooldown(monkeypatch, clock):
     assert seen[1]["engines"] == "yahoo,wikipedia"
     assert not resilience.cooldowns.is_cooling("searxng engine qwant")
 
+    # "Suspended" is SearXNG's own verdict (an hour for too-many-requests by
+    # default): one base cooldown is not enough.
     clock.t += providers._engine_cooldown_seconds() + 1
     providers.searxng_search_api("third query", count=5)
-    assert seen[2]["engines"] == "yahoo,brave,wikipedia"
+    assert seen[2]["engines"] == "yahoo,wikipedia"
+
+    clock.t += providers._engine_suspended_seconds()
+    providers.searxng_search_api("fourth query", count=5)
+    assert seen[3]["engines"] == "yahoo,brave,wikipedia"
 
 
 def test_a_plain_timeout_does_not_cool_an_engine(monkeypatch, clock):

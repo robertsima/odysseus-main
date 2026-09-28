@@ -355,6 +355,67 @@ class Cooldowns:
     def __init__(self):
         self._lock = threading.Lock()
         self._until: Dict[str, Tuple[float, str]] = {}
+        # name -> (consecutive strikes, time of the last strike), for backoff().
+        self._strikes: Dict[str, Tuple[int, float]] = {}
+
+    def backoff(self, name: str, base: float, cap: float, reason: str = "",
+                floor: float = 0.0) -> float:
+        """Cool *name* down exponentially: base, 2x base, 4x base ... up to *cap*.
+
+        A flat cooldown let a rate-limited engine back in on the dot every
+        time: on 2026-09-28 brave reported "too many requests" at 07:33:24,
+        07:38:36 and 07:55:18, each followed by exactly 300 s off, and was
+        asked (and failed) again after each. Every consecutive strike now
+        doubles the pause, capped at *cap*; :meth:`reset_backoff` (the engine
+        answered with rows) or a long quiet spell starts over at *base*.
+
+        A report that arrives while *name* is already cooling came from a
+        request sent before the cooldown began — parallel searches report the
+        same episode several times — so it is not a new strike. *floor* is a
+        minimum for this report, applied either way (SearXNG's own
+        "Suspended" state lasts far longer than one base cooldown).
+
+        Returns the cooldown now in force for *name* (0 when disabled).
+        """
+        if base <= 0:
+            return 0.0
+        cap = max(base, cap)
+        extended = False
+        with self._lock:
+            now = _now()
+            current = self._until.get(name)
+            cooling = current is not None and current[0] > now
+            strikes, last = self._strikes.get(name, (0, now))
+            if strikes and now - last > cap * 3:
+                strikes = 0  # quiet for a long while: start over
+            if cooling:
+                seconds = current[0] - now
+                if floor > seconds:
+                    seconds = floor
+                    extended = True
+            else:
+                seconds = min(cap, base * (2 ** min(strikes, 20)))
+                strikes += 1
+                self._strikes[name] = (strikes, now)
+                seconds = max(seconds, floor)
+        if cooling:
+            if extended:
+                with self._lock:
+                    self._until[name] = (_now() + seconds, reason)
+                logger.info("%s: %s; leaving it out for %.0fs", name, (reason or "backing off")[:120], seconds)
+            return seconds
+        suffix = f" (strike {strikes}, backoff {base:.0f}s doubling to {cap:.0f}s)" if strikes > 1 else ""
+        self.cool(name, seconds, f"{reason}{suffix}")
+        return seconds
+
+    def reset_backoff(self, name: str) -> None:
+        """Forget *name*'s strikes (it answered); a running cooldown stays."""
+        with self._lock:
+            self._strikes.pop(name, None)
+
+    def strikes(self, name: str) -> int:
+        with self._lock:
+            return self._strikes.get(name, (0, 0.0))[0]
 
     def cool(self, name: str, seconds: float, reason: str = "") -> None:
         if seconds <= 0:
@@ -387,6 +448,7 @@ class Cooldowns:
     def clear(self) -> None:
         with self._lock:
             self._until.clear()
+            self._strikes.clear()
 
 
 # ----------------------------------------------------------------------
