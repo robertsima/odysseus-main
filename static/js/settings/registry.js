@@ -105,7 +105,7 @@ export const SETTINGS_PANELS = Object.freeze([
     keywords: [
       'connections', 'integrations', 'services', 'email', 'email accounts',
       'imap', 'smtp', 'oauth', 'gmail', 'calendar', 'caldav', 'google calendar',
-      'contacts', 'carddav', 'mcp', 'mcp servers', 'api', 'webhook', 'ntfy server',
+      'contacts', 'carddav', 'mcp', 'mcp servers', 'api', 'webhooks',
       'tokens', 'codex', 'claude agent', 'writing style', 'auto reply',
     ],
   }),

@@ -1111,14 +1111,14 @@ def test_mcp_oauth_config_sanitizes_paths_and_env(tmp_path, monkeypatch):
 
 
 def test_gmail_mcp_preset_uses_contained_oauth_paths():
-    src = Path(__file__).resolve().parents[1] / "static" / "js" / "admin.js"
-    text = src.read_text()
-    preset = text.split('{ name: "Gmail"', 1)[1].split('{ name: "Email (IMAP/SMTP)"', 1)[0]
-
-    assert "~/.gmail-mcp" not in preset
-    assert 'oauthFile: { dir: "gmail"' in preset
-    assert 'keys_file: "gmail/gcp-oauth.keys.json"' in preset
-    assert 'token_file: "gmail/credentials.json"' in preset
+    # The Gmail MCP preset lived in admin.js's MCP form, whose markup was
+    # removed (MCP servers are managed under Settings > Connections). The
+    # guarantee that matters is that no shipped UI points Gmail's OAuth files
+    # outside the contained data directory again.
+    static = Path(__file__).resolve().parents[1] / "static"
+    for path in static.rglob("*.js"):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        assert "~/.gmail-mcp" not in text, path
 
 
 

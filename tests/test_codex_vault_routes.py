@@ -121,6 +121,8 @@ def test_the_token_uis_can_actually_grant_the_vault_scopes():
     assert "defaultOff: true" in settings
     assert "toolScopes.filter(s => !s.defaultOff)" in settings
 
+    # The Connections form (settings.js) is the only token UI. admin.js kept a
+    # second scope catalog for a token panel whose markup was removed; that
+    # catalog is gone with it, so there is no second list to fall out of sync.
     admin = open("static/js/admin.js", encoding="utf-8").read()
-    assert "{ key: 'vault:read'," in admin
-    assert "{ key: 'vault:read_private'," in admin
+    assert "_TOKEN_SCOPES" not in admin

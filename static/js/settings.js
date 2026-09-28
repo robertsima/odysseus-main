@@ -200,10 +200,22 @@ function initOpacityToggle() {
 const _aiEndpointRefreshers = new Set();
 let _aiEndpointRefreshInFlight = null;
 
-async function _fetchModelEndpoints() {
-  const epRes = await fetch('/api/model-endpoints', { credentials: 'same-origin' });
-  const endpoints = await epRes.json();
-  return Array.isArray(endpoints) ? endpoints : [];
+// Like the settings snapshot: the pickers on the Models tab all read the
+// endpoint list when Settings opens; they share one request. open() drops
+// it, refreshAiModelEndpoints() refetches (or takes the list admin.js just
+// fetched), and every caller gets its own copies of the rows.
+let _endpointsSnapshot = null;
+function _fetchModelEndpoints() {
+  if (!_endpointsSnapshot) {
+    const request = fetch('/api/model-endpoints', { credentials: 'same-origin' })
+      .then(function(res) { return res.json(); })
+      .then(function(endpoints) { return Array.isArray(endpoints) ? endpoints : []; });
+    _endpointsSnapshot = request;
+    request.catch(function() { if (_endpointsSnapshot === request) _endpointsSnapshot = null; });
+  }
+  return _endpointsSnapshot.then(function(list) {
+    return list.map(function(ep) { return Object.assign({}, ep); });
+  });
 }
 
 function _endpointLabel(ep) {
@@ -303,14 +315,16 @@ function _registerAiEndpointRefresh(fn) {
   _aiEndpointRefreshers.add(fn);
 }
 
-export async function refreshAiModelEndpoints(prefetched) {
+async function _refreshAiModelEndpointsImpl(prefetched) {
   if (Array.isArray(prefetched)) {
+    _endpointsSnapshot = Promise.resolve(prefetched);
     _applyAiEndpoints(prefetched);
     return prefetched;
   }
   if (_aiEndpointRefreshInFlight) return _aiEndpointRefreshInFlight;
   _aiEndpointRefreshInFlight = (async function() {
     try {
+      _endpointsSnapshot = null;
       const endpoints = await _fetchModelEndpoints();
       _applyAiEndpoints(endpoints);
     } catch (e) {
@@ -464,8 +478,7 @@ async function initDefaultChat() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
+    var settings = await _loadSettingsSnapshot();
     if (settings.default_endpoint_id) epSel.value = settings.default_endpoint_id;
     refreshModels(settings.default_model || '');
   } catch (e) { console.warn('Failed to load default chat settings', e); }
@@ -512,8 +525,7 @@ async function initUtilityModel() {
   }
 
   try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
+    var settings = await _loadSettingsSnapshot();
     if (settings.utility_endpoint_id) epSel.value = settings.utility_endpoint_id;
     refreshModels(settings.utility_model || '');
     fallbackWidget = _bindFallbackWidget({
@@ -597,8 +609,7 @@ async function initImageSettings() {
     });
   } catch (e) { console.warn('Failed to load models for image settings', e); }
   try {
-    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    const settings = await settingsRes.json();
+    const settings = await _loadSettingsSnapshot();
     if (settings.image_model) modelSel.value = settings.image_model;
     if (settings.image_quality) qualSel.value = settings.image_quality;
     if (enabledToggle) enabledToggle.checked = settings.image_gen_enabled === true;
@@ -660,8 +671,7 @@ async function initVisionSettings() {
     _visionEndpoints = await _fetchModelEndpoints();
   } catch (e) { console.warn('Failed to load endpoints for vision fallback', e); }
   try {
-    const settingsRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    const settings = await settingsRes.json();
+    const settings = await _loadSettingsSnapshot();
     if (settings.vision_model) vlSel.value = settings.vision_model;
     _syncModelLogo(vlSel);
     if (enabledToggle) enabledToggle.checked = settings.vision_enabled !== false;
@@ -793,8 +803,7 @@ async function initSearchSettings() {
 
   async function refreshStatus() {
     try {
-      var sRes = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-      var s = await sRes.json();
+      var s = await _loadSettingsSnapshot();
       _settings = s;
       var active = s.search_provider || 'searxng';
       var label = _searchLabels[active] || active;
@@ -1415,11 +1424,11 @@ async function initWorkspaceSettings() {
       else if (s.available && s.degraded) { text = 'Degraded: ' + (s.reason || 'running with reduced isolation'); cls = 'is-warn'; }
       else { text = 'Unavailable: ' + (s.reason || 'this host cannot run the sandbox'); cls = 'is-bad'; }
       status.textContent = text;
-      status.className = 'settings-status-line ' + cls;
+      status.className = 'settings-status-line settings-row-hint ' + cls;
       status.hidden = false;
     } catch (e) {
       status.textContent = 'Sandbox status unavailable';
-      status.className = 'settings-status-line is-warn';
+      status.className = 'settings-status-line settings-row-hint is-warn';
       status.hidden = false;
     }
   }
@@ -1682,8 +1691,7 @@ async function initShortcuts() {
   // Load saved keybinds
   let keybinds = { ...SHORTCUT_DEFAULTS };
   try {
-    const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    const settings = await res.json();
+    const settings = await _loadSettingsSnapshot();
     if (settings.keybinds) keybinds = { ...keybinds, ...settings.keybinds };
   } catch (e) {}
 
@@ -3566,8 +3574,7 @@ async function initReminderSettings() {
     } catch (_) {}
     if (!ntfyConfigured) {
       try {
-        const res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-        const s = await res.json();
+        const s = await _loadSettingsSnapshot();
         if (s.reminder_channel === 'ntfy') ntfyConfigured = true;
       } catch (_) {}
     }
@@ -6214,9 +6221,10 @@ async function _syncUsersNavVisibility() {
 /* ═══════════════════════════════════════════
    PUBLIC API
    ═══════════════════════════════════════════ */
-export function open(tab) {
-  // A fresh open reads fresh settings (see _loadSettingsSnapshot).
+function _openImpl(tab) {
+  // A fresh open reads fresh settings and endpoints (see _loadSettingsSnapshot).
   _settingsSnapshot = null;
+  _endpointsSnapshot = null;
   if (!initialized) initAll();
 
   syncAppearanceCheckboxes();
@@ -6241,7 +6249,7 @@ export function open(tab) {
   }
 }
 
-export function close() {
+function _closeImpl() {
   if (!modalEl) return;
 
   // Always clear the Appearance state so the rest of the app does not remain
@@ -6252,8 +6260,35 @@ export function close() {
   hideSettingsModal(modalEl);
 }
 
+/* ── One Settings controller per page ──
+ * This file is imported under several URLs: index.html's and app.js's
+ * cache-busting tags and a bare './settings.js' from other modules. Every
+ * distinct URL is a separate module instance with its own state, so clicking
+ * an admin-backed tab (admin.js -> its instance's open()) used to run
+ * initAll() a second time over the same modal: every control got a second
+ * listener and saved twice. The first instance to load owns the modal; the
+ * public functions of any later instance forward to it.
+ */
+const _OWN_CONTROLLER = {
+  open: _openImpl,
+  close: _closeImpl,
+  initUnifiedIntegrations,
+  syncAdminVisibility,
+  refreshAiModelEndpoints: _refreshAiModelEndpointsImpl,
+};
+const _controller = (typeof window !== 'undefined' && window.__odysseusSettingsController) || _OWN_CONTROLLER;
+if (typeof window !== 'undefined' && !window.__odysseusSettingsController) {
+  window.__odysseusSettingsController = _OWN_CONTROLLER;
+}
+const _ownsModal = _controller === _OWN_CONTROLLER;
+
+export function open(tab) { return _controller.open(tab); }
+export function close() { return _controller.close(); }
+export function refreshAiModelEndpoints(prefetched) { return _controller.refreshAiModelEndpoints(prefetched); }
+
 // Handle redirect back from Google OAuth2 — open settings to integrations and show status.
 (function _handleOauthRedirect() {
+  if (!_ownsModal) return;
   const sp = new URLSearchParams(window.location.search);
   const isEmail = sp.has('email_oauth_success') || sp.has('email_oauth_error');
   const isCalendar = sp.has('calendar_oauth_success') || sp.has('calendar_oauth_error');
@@ -6289,7 +6324,13 @@ export function close() {
   }
 })();
 
-const settingsModule = { open, close, initUnifiedIntegrations, syncAdminVisibility, refreshAiModelEndpoints };
+const settingsModule = {
+  open,
+  close,
+  initUnifiedIntegrations: (...args) => _controller.initUnifiedIntegrations(...args),
+  syncAdminVisibility: (...args) => _controller.syncAdminVisibility(...args),
+  refreshAiModelEndpoints,
+};
 
 
 export default settingsModule;

@@ -245,10 +245,10 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260928subagentui1">
+  <link rel="stylesheet" href="/static/style.css?v=20260928settingsux1">
   <link rel="stylesheet" href="/static/skill-import-review.css">
-  <link rel="modulepreload" href="/static/app.js?v=20260815toolapproval4">
-  <link rel="modulepreload" href="/static/js/chat.js?v=20260928subagentui1">
+  <link rel="modulepreload" href="/static/app.js?v=20260928settingsux1">
+  <link rel="modulepreload" href="/static/js/chat.js?v=20260928settingsux1">
   <link rel="modulepreload" href="/static/js/ui.js">
   <link rel="modulepreload" href="/static/js/sessions.js">
   <link rel="modulepreload" href="/static/js/markdown.js">
@@ -2108,7 +2108,7 @@
                   <option value="ask_all">Ask for everything</option>
                 </select>
               </div>
-              <div class="admin-toggle-sub" id="set-agentApprovalHint" style="margin:-2px 0 4px 158px">Ask for risky stops destructive or outward-facing actions. Ask for everything stops every tool that can change something, and anything high-impact once web, email or file content has entered the run.</div>
+              <div class="admin-toggle-sub settings-row-hint" id="set-agentApprovalHint">Ask for risky stops destructive or outward-facing actions. Ask for everything stops every tool that can change something, and anything high-impact once web, email or file content has entered the run.</div>
               <div class="settings-row" data-setting-key="agent_max_tool_calls">
                 <label class="settings-label" for="set-agentMaxTools" title="Safety limit per turn. 0 = no fixed ceiling; stall detection still applies.">Tool-call limit</label>
                 <input id="set-agentMaxTools" type="text" inputmode="numeric" placeholder="500 (0 = unlimited)" class="settings-select">
@@ -2141,7 +2141,7 @@
                 <label class="settings-label" for="set-agentDevFolders" style="margin-top:6px;">Development folders<br><span style="font-weight:normal;opacity:.7">one per line</span></label>
                 <textarea id="set-agentDevFolders" rows="3" placeholder="/app/data/development" class="settings-select" style="font-family:var(--mono, ui-monospace, monospace);font-size:12px;"></textarea>
               </div>
-              <div class="admin-toggle-sub" style="margin:-2px 0 4px 158px">Absolute folders. A Git checkout in one of them, or one level below, can be opened as an agent workspace, used by its git tools and delegated to Claude Code.</div>
+              <div class="admin-toggle-sub settings-row-hint">Absolute folders. A Git checkout in one of them, or one level below, can be opened as an agent workspace, used by its git tools and delegated to Claude Code.</div>
               <div class="settings-row" data-setting-key="agent_base_branch">
                 <label class="settings-label" for="set-agentBaseBranch" title="Branch agent worktrees start from and pull requests target when a task names none.">Default target branch</label>
                 <input id="set-agentBaseBranch" type="text" placeholder="main" class="settings-select" autocomplete="off" spellcheck="false">
@@ -2157,7 +2157,7 @@
                 <label class="settings-label" for="set-shellSandboxNetwork" title="Whether sandboxed commands can reach the network (package installs, git fetch).">Sandbox network access</label>
                 <label class="admin-switch"><input type="checkbox" id="set-shellSandboxNetwork"><span class="admin-slider"></span></label>
               </div>
-              <div id="set-shellSandboxStatus" class="settings-status-line" role="status" hidden style="margin-left:158px"></div>
+              <div id="set-shellSandboxStatus" class="settings-status-line settings-row-hint" role="status" hidden></div>
               <div id="set-agentWorkspaceMsg" class="settings-msg"></div>
             </div>
           </div>
@@ -2992,16 +2992,16 @@
 <script type="module" src="/static/js/chatRenderer.js?v=20260928subagentui1"></script>
 <script type="module" src="/static/js/codeRunner.js"></script>
 <script type="module" src="/static/js/chatStream.js?v=20260819approvalcontrol1"></script>
-  <script type="module" src="/static/js/chat.js?v=20260928subagentui1"></script>
+  <script type="module" src="/static/js/chat.js?v=20260928settingsux1"></script>
 <script type="module" src="/static/js/cookbook.js"></script>
 <script src="/static/js/cookbookSchedule.js"></script>
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260928cloudhub1"></script>
-<script type="module" src="/static/js/capabilitiesPanel.js?v=20260916workspace2"></script>
+<script type="module" src="/static/js/settings.js?v=20260928settingsux1"></script>
+<script type="module" src="/static/js/capabilitiesPanel.js?v=20260928settingsux1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
-<script type="module" src="/static/app.js?v=20260815toolapproval4"></script>  <!-- app.js must be LAST -->
+<script type="module" src="/static/app.js?v=20260928settingsux1"></script>  <!-- app.js must be LAST -->
   <script type="module" src="/static/js/init.js?v=20260715freshroot3"></script>
 <script type="module" src="/static/js/a11y.js"></script>
 <script nonce="{{CSP_NONCE}}">if('serviceWorker' in navigator){navigator.serviceWorker.register('/static/sw.js').catch(()=>{});}</script>

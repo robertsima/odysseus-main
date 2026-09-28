@@ -11,7 +11,7 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260928subagentui1';
+import chatModule from './js/chat.js?v=20260928settingsux1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260928docedittarget1';
 import searchChatModule from './js/search-chat.js';
@@ -43,8 +43,8 @@ import tasksModule from './js/tasks.js?v=20260918upsync1';
 import calendarModule from './js/calendar.js';
 import notesModule from './js/notes.js?v=20260915vaulttree3';
 import lotusModule from './js/lotus.js';
-import adminModule from './js/admin.js?v=20260918upsync1';
-import settingsModule from './js/settings.js?v=20260927settingsfix1';
+import adminModule from './js/admin.js?v=20260928settingsux1';
+import settingsModule from './js/settings.js?v=20260928settingsux1';
 // Eagerly bind unified minimize/restore behavior across all tool modals.
 import './js/modalManager.js?v=20260723compareicon2';
 // Desktop window tiling — drag a modal near an edge/corner to snap.
