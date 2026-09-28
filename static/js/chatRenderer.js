@@ -13,6 +13,34 @@ import { bindMenuDismiss } from './escMenuStack.js';
 import { loadPanel } from './panels.js';
 import { matchModelKey } from './model/matchKey.js';
 import agentThread from './agentThread.js';
+import { isCardOpen, setCardOpen } from './cardState.js';
+
+// A worker's result handed back to this chat is a long "[Worker X finished]
+// Task: … Result: …" message. It renders as one collapsed line; opening it is
+// remembered per worker message across refreshes (cardState).
+function _makeWorkerResultCollapsible(wrap, roleEl, textRaw, metadata) {
+  const key = `worker-msg:${metadata.from_session || ''}:${metadata._db_id || metadata.timestamp || ''}`;
+  const first = String(textRaw || '').split('\n', 1)[0].trim();
+  const m = first.match(/^\[Worker .+? (finished|ran out of rounds|is waiting for the user's approval|failed|cancelled|[a-z_]+)\]$/);
+  const headline = m ? m[1] : 'result';
+  const open = isCardOpen(key);
+  wrap.classList.add('msg-worker-result');
+  wrap.classList.toggle('collapsed', !open);
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-worker-toggle';
+  btn.setAttribute('aria-expanded', String(open));
+  btn.title = 'Show or hide the worker\'s result';
+  btn.innerHTML = '<span class="agent-run-caret" aria-hidden="true"></span><span></span>';
+  btn.lastChild.textContent = headline;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const nowOpen = wrap.classList.toggle('collapsed') === false;
+    btn.setAttribute('aria-expanded', String(nowOpen));
+    setCardOpen(key, nowOpen);
+  });
+  roleEl.appendChild(btn);
+}
 import { getTools } from './appConfig.js';
 
 const SEARCH_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>';
@@ -2736,6 +2764,7 @@ export function addMessage(role, content, modelName, metadata) {
             const evDiffHtml = (ev.diff && ev.diff.text) ? renderDiffCard(ev.diff) : '';
             const node = document.createElement('div');
             node.className = 'agent-thread-node' + (ok ? '' : ' error');
+            node.dataset.tool = ev.tool || '';
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
             node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
@@ -2962,6 +2991,7 @@ export function addMessage(role, content, modelName, metadata) {
 
     wrap.appendChild(r);
     wrap.appendChild(b);
+    if (isWorkerMsg) _makeWorkerResultCollapsible(wrap, r, textRaw, metadata);
 
     // Add stopped indicator + continue button for messages that were stopped by user
     if (role === 'assistant' && metadata?.stopped) {

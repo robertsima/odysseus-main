@@ -6,8 +6,10 @@
  * the live stream (chat.js) and history reload (chatRenderer.js) call after
  * they append a node:
  *
- *   - a summary bar: "37 tool calls · 2 failed · read_file ×20, grep ×9 …"
- *     with Expand all / Collapse all;
+ *   - a one-line activity summary: "Searched 3 times, read 2 files, ran 1
+ *     worker · 1 failed". The timeline under it starts collapsed (only a
+ *     still-running call stays visible, so live progress shows); the summary
+ *     is the disclosure that opens it, with Expand all / Collapse all;
  *   - automatic folding after `chat_tool_fold_after` calls (Settings > Tools
  *     > Agent; default 12; 0 = never): the first two and the last three nodes
  *     stay visible, the rest collapse into one "… N more" row. The newest
@@ -55,6 +57,48 @@ async function _loadSettings() {
   } catch (e) { /* offline/anon: keep the default */ }
 }
 
+// What a tool call did, in words: [category, test]. First match wins; the
+// launchers come first so e.g. `delegate_to_agent` is a worker, not "other".
+const ACTIVITY = [
+  ['worker', (t) => /^(send_to_session|create_session|pipeline|delegate_to_agent|delegate_to_claude_code|orchestrate_agents|manage_agent_loadout)$/.test(t)],
+  ['search', (t) => /search|grep|glob|find|research/.test(t)],
+  ['edit', (t) => /write|edit|patch|create_document|update_document|replace|delete_file|move_file/.test(t)],
+  ['read', (t) => /read|view|list_files|list_dir|cat_file|open_file/.test(t)],
+  ['fetch', (t) => /fetch|browse|url|http|navigate|scrape|crawl/.test(t)],
+  ['run', (t) => /^(bash|python|shell|sh|exec|terminal)$|run_|_run|execute|command/.test(t)],
+];
+function _plural(n, one, many) { return `${n} ${n === 1 ? one : (many || one + 's')}`; }
+const PHRASE = {
+  search: (n) => (n === 1 ? 'searched once' : `searched ${n} times`),
+  read: (n) => `read ${_plural(n, 'file')}`,
+  edit: (n) => `edited ${_plural(n, 'file')}`,
+  fetch: (n) => `fetched ${_plural(n, 'page')}`,
+  run: (n) => `ran ${_plural(n, 'command')}`,
+  worker: (n) => `ran ${_plural(n, 'worker')}`,
+};
+
+function _nodeTool(n) {
+  return String(n.dataset.tool || n.querySelector('.agent-thread-tool')?.textContent || '').trim();
+}
+
+/** "Searched 3 times, read 2 files, ran 1 worker" for a list of tool names. */
+export function activitySummary(tools) {
+  const counts = {};
+  let other = 0;
+  for (const raw of tools) {
+    const t = String(raw || '').toLowerCase();
+    const hit = ACTIVITY.find(([, test]) => test(t));
+    if (hit) counts[hit[0]] = (counts[hit[0]] || 0) + 1;
+    else other++;
+  }
+  const parts = ACTIVITY.map(([cat]) => cat).filter((cat) => counts[cat])
+    .sort((a, b) => counts[b] - counts[a])
+    .map((cat) => PHRASE[cat](counts[cat]));
+  if (other) parts.push(parts.length ? `used ${_plural(other, 'other tool')}` : `used ${_plural(other, 'tool')}`);
+  const text = parts.join(', ');
+  return text ? text[0].toUpperCase() + text.slice(1) : '';
+}
+
 function _nodes(thread) {
   return Array.from(thread.children).filter((c) => c.classList.contains('agent-thread-node'));
 }
@@ -71,34 +115,34 @@ export function refreshThread(thread) {
   let summary = thread.querySelector(':scope > .agent-thread-summary');
   let gap = thread.querySelector(':scope > .agent-thread-gap');
 
-  // Tiny threads need no chrome at all.
-  if (total < 3) {
+  if (!total) {
     if (summary) summary.remove();
     if (gap) gap.remove();
-    nodes.forEach((n) => n.classList.remove('agent-thread-hidden'));
-    thread.classList.remove('folded');
     return;
   }
 
   let failed = 0, running = 0;
-  const counts = {};
   for (const n of nodes) {
     if (n.classList.contains('error')) failed++;
     if (n.classList.contains('running')) running++;
-    const t = (n.querySelector('.agent-thread-tool')?.textContent || '').trim();
-    if (t) counts[t] = (counts[t] || 0) + 1;
   }
-  const entries = Object.entries(counts).sort((a, b) => b[1] - a[1]);
-  const top = entries.slice(0, 4).map(([t, c]) => (c > 1 ? `${t} ×${c}` : t)).join(', ');
-  const more = Math.max(0, entries.length - 4);
+  const activity = activitySummary(nodes.map(_nodeTool));
+
+  // Collapsed until opened: the summary says what happened; the individual
+  // calls are one click away. A running call stays visible so a live turn
+  // still shows what it is doing right now.
+  const collapsed = thread.dataset.activity !== 'open';
+  thread.classList.toggle('activity-collapsed', collapsed);
 
   const foldable = _foldAfter > 0 && total > _foldAfter;
-  const fold = foldable && thread.dataset.fold !== 'open';
+  const fold = !collapsed && foldable && thread.dataset.fold !== 'open';
   nodes.forEach((n, i) => {
-    const hide = fold && i >= KEEP_HEAD && i < total - KEEP_TAIL;
+    const hide = collapsed
+      ? !n.classList.contains('running')
+      : fold && i >= KEEP_HEAD && i < total - KEEP_TAIL;
     n.classList.toggle('agent-thread-hidden', hide);
   });
-  thread.classList.toggle('folded', fold);
+  thread.classList.toggle('folded', fold || collapsed);
   const hidden = fold ? Math.max(0, total - KEEP_HEAD - KEEP_TAIL) : 0;
 
   if (!summary) {
@@ -106,16 +150,18 @@ export function refreshThread(thread) {
     summary.className = 'agent-thread-summary';
     thread.insertBefore(summary, thread.firstChild);
   }
-  const parts = [`<span class="ats-count">${total} tool call${total === 1 ? '' : 's'}</span>`];
+  const label = `${collapsed ? 'Show' : 'Hide'} the ${_plural(total, 'tool call')} in this turn`;
+  const parts = [`<button type="button" class="ats-toggle" data-ats="toggle" aria-expanded="${!collapsed}" title="${label}"><span class="ats-caret" aria-hidden="true"></span><span class="ats-activity">${_esc(activity || _plural(total, 'tool call'))}</span></button>`];
   if (running) parts.push(`<span class="ats-running">${running} running</span>`);
   if (failed) parts.push(`<span class="ats-failed">${failed} failed</span>`);
-  if (top) parts.push(`<span class="ats-tools">${_esc(top)}${more ? ` +${more} more` : ''}</span>`);
   const actions = [];
-  if (hidden) actions.push(`<button type="button" class="ats-btn" data-ats="unfold" title="Show every tool call in this turn">Show all ${total}</button>`);
-  else if (foldable) actions.push(`<button type="button" class="ats-btn" data-ats="fold" title="Fold the middle of this timeline">Fold</button>`);
-  actions.push(`<button type="button" class="ats-btn" data-ats="expand" title="Open every card">Expand all</button>`);
-  actions.push(`<button type="button" class="ats-btn" data-ats="collapse" title="Close every card">Collapse all</button>`);
-  summary.innerHTML = parts.join(' <span class="ats-sep">·</span> ') + `<span class="ats-actions">${actions.join('')}</span>`;
+  if (!collapsed && total > 1) {
+    if (hidden) actions.push(`<button type="button" class="ats-btn" data-ats="unfold" title="Show every tool call in this turn">Show all ${total}</button>`);
+    else if (foldable) actions.push(`<button type="button" class="ats-btn" data-ats="fold" title="Fold the middle of this timeline">Fold</button>`);
+    actions.push(`<button type="button" class="ats-btn" data-ats="expand" title="Open every card">Expand all</button>`);
+    actions.push(`<button type="button" class="ats-btn" data-ats="collapse" title="Close every card">Collapse all</button>`);
+  }
+  summary.innerHTML = parts.join(' <span class="ats-sep">·</span> ') + (actions.length ? `<span class="ats-actions">${actions.join('')}</span>` : '');
 
   if (hidden) {
     if (!gap) {
@@ -143,7 +189,8 @@ function _onClick(e) {
   const thread = (btn || gapEl)?.closest('.agent-thread');
   if (!thread) return;
   const action = gapEl ? 'unfold' : btn.dataset.ats;
-  if (action === 'unfold') thread.dataset.fold = 'open';
+  if (action === 'toggle') thread.dataset.activity = thread.dataset.activity === 'open' ? '' : 'open';
+  else if (action === 'unfold') thread.dataset.fold = 'open';
   else if (action === 'fold') thread.dataset.fold = 'auto';
   else if (action === 'expand') {
     thread.dataset.fold = 'open';
@@ -165,6 +212,6 @@ if (typeof document !== 'undefined' && !window.__odysseus_thread_summary_bound) 
   _loadSettings();
 }
 
-const agentThread = { refreshThread, refreshAllThreads, foldThreshold, setFoldThreshold };
+const agentThread = { refreshThread, refreshAllThreads, foldThreshold, setFoldThreshold, activitySummary };
 export default agentThread;
 window.agentThread = agentThread;

@@ -9955,6 +9955,29 @@ body.fullwidth-chat .chat-history {
   font-weight: 600;
   color: color-mix(in srgb, var(--fg) 82%, transparent);
 }
+.agent-thread-summary .ats-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 6px 1px 2px;
+  font: inherit;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--fg) 82%, transparent);
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.agent-thread-summary .ats-toggle:hover,
+.agent-thread-summary .ats-toggle:focus-visible { color: var(--fg); background: color-mix(in srgb, var(--fg) 6%, transparent); outline: none; }
+.agent-thread-summary .ats-caret {
+  width: 0; height: 0; flex-shrink: 0;
+  border-left: 4px solid currentColor; border-top: 3px solid transparent; border-bottom: 3px solid transparent;
+  opacity: 0.6; transition: transform 0.15s;
+}
+.agent-thread-summary .ats-toggle[aria-expanded="true"] .ats-caret { transform: rotate(90deg); }
+/* Collapsed: just the summary line, no timeline rail under it. */
+.agent-thread.activity-collapsed > .agent-thread-summary { padding-bottom: 2px; }
 .agent-thread-summary .ats-sep { opacity: 0.5; }
 .agent-thread-summary .ats-running { color: var(--red); }
 .agent-thread-summary .ats-failed { color: var(--color-error, var(--red)); font-weight: 600; }
@@ -10017,6 +10040,29 @@ body.fullwidth-chat .chat-history {
   text-decoration: none;
 }
 .msg-agent-badge[href]:hover { text-decoration: underline; color: var(--fg); }
+/* A worker's handed-back result: one line until opened (chatRenderer.js). */
+.msg-worker-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 6px;
+  padding: 1px 7px;
+  font: inherit;
+  font-size: 0.72em;
+  font-weight: 500;
+  vertical-align: middle;
+  color: color-mix(in srgb, var(--fg) 70%, transparent);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  cursor: pointer;
+}
+.msg-worker-toggle:hover, .msg-worker-toggle:focus-visible { color: var(--fg); }
+.msg-worker-toggle[aria-expanded="true"] .agent-run-caret { transform: rotate(90deg); }
+.msg.msg-worker-result.collapsed > .body { display: none; }
+/* Worker names are long ("↳ Scout: find the parser bug"); wrap the header
+   instead of clipping it now that it also carries the toggle. */
+.msg.msg-worker-result .role { flex-wrap: wrap; white-space: normal; row-gap: 4px; }
 
 /* Settings > Tools > Claude Code delegation */
 .cc-status { font-size: 12px; line-height: 1.5; }
@@ -42006,9 +42052,12 @@ table.wb-diff tr.wb-hunk:first-child td.wb-hunk-cell { border-top: 0; }
 .agent-run-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
 .agent-run-count { font-size: 11px; color: var(--wb-faint); white-space: nowrap; }
 .agent-run-caret { width: 0; height: 0; flex-shrink: 0; border-left: 4px solid currentColor; border-top: 3px solid transparent; border-bottom: 3px solid transparent; opacity: 0.5; transition: transform 0.15s; }
-.agent-run-card.open .agent-run-caret, .agent-run-card.running .agent-run-caret { transform: rotate(90deg); }
+.agent-run-card.open .agent-run-caret { transform: rotate(90deg); }
 .agent-run-steps { display: none; max-height: 220px; overflow: auto; padding: 6px 12px 8px 13px; font-size: 12px; border-top: 1px solid var(--wb-line); }
-.agent-run-card.open .agent-run-steps, .agent-run-card.running .agent-run-steps { display: block; }
+/* Collapsed by default, running or not: the head line says what it is and
+   how far along; the steps and result open on demand (state kept per run). */
+.agent-run-card.open .agent-run-steps { display: block; }
+.agent-run-card:not(.open) .agent-run-foot { display: none; }
 .agent-run-card .agent-run-steps:empty { display: none; }
 .agent-run-step { display: grid; grid-template-columns: 12px minmax(0, 1fr); column-gap: 6px; align-items: baseline; padding: 2px 0; }
 .agent-run-step .wb-disclosure { grid-column: 2; }
@@ -42422,6 +42471,21 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-textarea { flex: 1; height: auto; min-height: 44px; padding: 6px 8px; line-height: 1.4; resize: vertical; box-sizing: border-box; }
 .ag-events { flex: 1; min-height: 200px; }
 .ag-ev-list { flex: 1; min-height: 160px; max-height: none; overflow: visible; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); background: var(--bg); }
+/* Control Room → Conversation: a sub-agent's own transcript. */
+.ag-convo { flex: 1; min-height: 200px; }
+.ag-convo-list { display: flex; flex-direction: column; gap: 8px; }
+.ag-convo-msg { display: flex; flex-direction: column; gap: 5px; padding: 8px 10px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); background: var(--bg); }
+.ag-convo-msg.ag-convo-user { box-shadow: inset 3px 0 0 var(--wb-muted); }
+.ag-convo-role { display: flex; align-items: center; gap: 8px; font-size: 11px; font-weight: 600; color: var(--wb-muted); }
+.ag-convo-text { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; line-height: 1.45; max-height: 420px; overflow: auto; }
+.ag-convo-tools > summary { cursor: pointer; font-size: 11.5px; color: var(--wb-muted); }
+.ag-convo-tools[open] > summary { margin-bottom: 4px; }
+.ag-convo-tool { margin: 2px 0 2px 10px; font-size: 11.5px; }
+.ag-convo-tool > summary, div.ag-convo-tool { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+div.ag-convo-tool { cursor: default; }
+.ag-convo-tool-icon { color: var(--wb-ok); }
+.ag-convo-tool-icon.bad { color: var(--wb-bad); }
+.ag-convo-cmd, .ag-convo-out { margin: 4px 0; padding: 6px 8px; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); background: var(--panel); }
 .ag-launch { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; overflow: auto; }
 .ag-launch-head { display: flex; align-items: center; justify-content: space-between; }
 .ag-field { display: flex; flex-direction: column; gap: 4px; font-size: 11px; color: var(--wb-muted); }
