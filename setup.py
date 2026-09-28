@@ -155,7 +155,18 @@ def create_default_admin():
 
 
 def create_env():
-    """Copy .env.example to .env if it doesn't exist."""
+    """Copy .env.example to .env if it doesn't exist.
+
+    Skipped when ``ODYSSEUS_SKIP_ENV_FILE`` is set, which the Docker entrypoint
+    does. Inside the image a copied .env is a hidden configuration layer:
+    app.py loads it on every start, so .env.example's values would fill in
+    anything the compose file does not set. In Docker, configuration belongs
+    in the compose file's ``environment:`` block only.
+    """
+    if os.getenv("ODYSSEUS_SKIP_ENV_FILE", "").strip().lower() in ("1", "true", "yes", "on"):
+        print("  [skip] .env not created (ODYSSEUS_SKIP_ENV_FILE is set; in Docker,")
+        print("         configuration comes from the compose file's environment)")
+        return
     env_path = os.path.join(BASE_DIR, ".env")
     example_path = os.path.join(BASE_DIR, ".env.example")
     if os.path.exists(env_path):

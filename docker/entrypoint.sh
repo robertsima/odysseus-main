@@ -145,9 +145,14 @@ export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 export PATH="/app/.local/bin:$PATH"
 
 # Run first-time setup as the app user so data/ files get the right ownership.
-# setup.py is idempotent — skips auth.json / .env if they already exist.
+# setup.py is idempotent — skips auth.json if it already exists.
+# ODYSSEUS_SKIP_ENV_FILE=1 stops it copying .env.example to /app/.env: in the
+# image that copy was a hidden configuration layer (app.py load_dotenv()s it),
+# silently filling in .env.example's values on every start. Configuration
+# reaches the container only through the compose file's `environment:`.
+# The assignment applies to this one command, not to the app.
 # || true so a setup failure never prevents the container from starting.
-"$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py || true
+ODYSSEUS_SKIP_ENV_FILE=1 "$GOSU_BIN" "$ODY_USER" "$PYTHON_BIN" /app/setup.py || true
 
 # Drop root and run the actual app. `gosu` is preferred over `su` /
 # `sudo` because it cleans up the process tree (no extra shell layer)
