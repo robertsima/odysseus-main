@@ -42,6 +42,15 @@ def _utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _endpoint_host(url: str | None) -> str:
+    """Host of an endpoint URL for log lines (never the path or credentials)."""
+    try:
+        from urllib.parse import urlparse
+        return urlparse(url or "").hostname or "?"
+    except Exception:
+        return "?"
+
+
 # Shell/file tools a scheduled task's agent should be offered by default,
 # mirroring the chat agent (where these are on unless a privilege or global
 # setting turns them off). The RAG tool selector + ASSISTANT_ALWAYS_AVAILABLE
@@ -1204,79 +1213,117 @@ class TaskScheduler:
             # slept the full minute; now the loop wakes near the boundary.
             sleep_for = 60.0
             try:
-                from core.database import SessionLocal as _SL, ScheduledTask as _ST
-                _db = _SL()
-                try:
-                    next_run = _db.query(_ST.next_run).filter(
-                        _ST.status == "active",
-                        _ST.next_run.isnot(None),
-                    ).order_by(_ST.next_run.asc()).first()
-                    if next_run and next_run[0]:
-                        delta = (next_run[0] - _utcnow()).total_seconds()
-                        sleep_for = max(1.0, min(60.0, delta))
-                finally:
-                    _db.close()
+                # Off the loop for the same reason as _claim_due_tasks_sync.
+                sleep_for = await asyncio.to_thread(self._seconds_until_next_due)
             except Exception:
                 pass
             await asyncio.sleep(sleep_for)
 
-    async def _check_due_tasks(self):
+    @staticmethod
+    def _seconds_until_next_due() -> float:
+        """Seconds until the earliest active next_run, clamped to [1, 60]."""
+        from core.database import SessionLocal as _SL, ScheduledTask as _ST
+        _db = _SL()
+        try:
+            next_run = _db.query(_ST.next_run).filter(
+                _ST.status == "active",
+                _ST.next_run.isnot(None),
+            ).order_by(_ST.next_run.asc()).first()
+            if next_run and next_run[0]:
+                delta = (next_run[0] - _utcnow()).total_seconds()
+                return max(1.0, min(60.0, delta))
+            return 60.0
+        finally:
+            _db.close()
+
+    @staticmethod
+    def _claim_due_tasks_sync(now, executing_snapshot: set, foreground_active: bool):
+        """Blocking half of :meth:`_check_due_tasks`: query, defer, commit.
+
+        Runs in a worker thread. On 2026-09-28 the deferral commit for the
+        tasks due at 08:00 blocked the event loop for 3.48s
+        (``do_executemany <- _check_due_tasks``) — every request, SSE stream
+        and heartbeat in the app stalled behind a scheduler bookkeeping write.
+
+        Returns ``(dispatch_ids, deferred)``; ``deferred`` holds plain
+        snapshots, never live ORM rows, because the session is closed before
+        the caller touches them.
+        """
         from core.database import SessionLocal, ScheduledTask
+
         db = SessionLocal()
         try:
-            now = _utcnow()
-            foreground_active = False
-            try:
-                from src.interactive_gate import has_foreground_activity
-                foreground_active = has_foreground_activity()
-            except Exception:
-                foreground_active = False
-            async with self._executing_lock:
-                # Snapshot under the lock so we don't race with mid-iteration adds.
-                executing_snapshot = set(self._executing)
-                # Scheduled tasks and deferred event tasks both use next_run.
-                due = db.query(ScheduledTask).filter(
-                    ScheduledTask.status == "active",
-                    ScheduledTask.next_run <= now,
-                    ScheduledTask.id.notin_(executing_snapshot) if executing_snapshot else True,
-                ).all()
-                to_dispatch = []
-                deferred = []
-                for task in due:
-                    if task.id in self._executing:
-                        continue
-                    if foreground_active:
-                        was_due_at = task.next_run
-                        task.next_run = now + timedelta(minutes=15)
-                        # The most confusing case in the whole scheduler: a due
-                        # task that simply never fires, with nothing anywhere
-                        # saying why. No run row is created here, so the only
-                        # place this can be recorded is the activity timeline.
-                        deferred.append((task, was_due_at, task.next_run))
-                        continue
-                    self._executing.add(task.id)
-                    to_dispatch.append(task.id)
-                if foreground_active and due:
-                    db.commit()
-            # Outside the dispatch lock: publishing writes a JSONL line per
-            # deferred task, and nothing else needs to wait on that.
-            for task, was_due_at, pushed_to in deferred:
-                _note_scheduler_event(
-                    task,
-                    title=f"Task '{task.name}' did not run — Odysseus was active",
-                    reason="foreground_active",
-                    data={
-                        "event": "deferred",
-                        "was_due_at": was_due_at.isoformat() if was_due_at else None,
-                        "deferred_to": pushed_to.isoformat() if pushed_to else None,
-                        "deferred_by_minutes": 15,
-                        "gate": "interactive_gate.has_foreground_activity",
-                    },
-                )
-            for task_id in to_dispatch:
-                asyncio.create_task(self._execute_task(task_id))
+            # Scheduled tasks and deferred event tasks both use next_run.
+            due = db.query(ScheduledTask).filter(
+                ScheduledTask.status == "active",
+                ScheduledTask.next_run <= now,
+                ScheduledTask.id.notin_(executing_snapshot) if executing_snapshot else True,
+            ).all()
+            to_dispatch = []
+            deferred = []
+            for task in due:
+                if task.id in executing_snapshot:
+                    continue
+                if foreground_active:
+                    was_due_at = task.next_run
+                    task.next_run = now + timedelta(minutes=15)
+                    # The most confusing case in the whole scheduler: a due
+                    # task that simply never fires, with nothing anywhere
+                    # saying why. No run row is created here, so the only
+                    # place this can be recorded is the activity timeline.
+                    deferred.append((
+                        SimpleNamespace(
+                            id=task.id,
+                            name=task.name,
+                            owner=getattr(task, "owner", None),
+                            session_id=getattr(task, "session_id", None),
+                        ),
+                        was_due_at,
+                        task.next_run,
+                    ))
+                    continue
+                to_dispatch.append(task.id)
+            if foreground_active and due:
+                db.commit()
+            return to_dispatch, deferred
         finally:
             db.close()
+
+    async def _check_due_tasks(self):
+        now = _utcnow()
+        foreground_active = False
+        try:
+            from src.interactive_gate import has_foreground_activity
+            foreground_active = has_foreground_activity()
+        except Exception:
+            foreground_active = False
+        async with self._executing_lock:
+            # Snapshot under the lock so we don't race with mid-iteration adds.
+            # Every mutation of _executing takes this lock, so the snapshot
+            # stays true while the worker thread does the database half.
+            executing_snapshot = set(self._executing)
+            to_dispatch, deferred = await asyncio.to_thread(
+                self._claim_due_tasks_sync, now, executing_snapshot, foreground_active,
+            )
+            for task_id in to_dispatch:
+                self._executing.add(task_id)
+        # Outside the dispatch lock: publishing writes a JSONL line per
+        # deferred task, and nothing else needs to wait on that.
+        for task, was_due_at, pushed_to in deferred:
+            _note_scheduler_event(
+                task,
+                title=f"Task '{task.name}' did not run — Odysseus was active",
+                reason="foreground_active",
+                data={
+                    "event": "deferred",
+                    "was_due_at": was_due_at.isoformat() if was_due_at else None,
+                    "deferred_to": pushed_to.isoformat() if pushed_to else None,
+                    "deferred_by_minutes": 15,
+                    "gate": "interactive_gate.has_foreground_activity",
+                },
+            )
+        for task_id in to_dispatch:
+            asyncio.create_task(self._execute_task(task_id))
 
     async def _execute_task(
         self,
@@ -1397,6 +1444,7 @@ class TaskScheduler:
                 # and a later run must start clean. A mark made against some
                 # other live handle for this task belongs to that run.
                 self._foreground_preemptions().pop(task_id, None)
+                self._remote_model_runs().pop(task_id, None)
             if release_executing:
                 async with self._executing_lock:
                     self._executing.discard(task_id)
@@ -1461,6 +1509,72 @@ class TaskScheduler:
             marks = {}
             self._foreground_preempted = marks
         return marks
+
+    #: Upper bound on how long a started run on a remote model may keep going
+    #: through ordinary foreground activity. The run's own budget (max_steps,
+    #: the per-round timeout) normally ends it long before this; the bound is
+    #: for a run that is somehow still going after it, which is then
+    #: preempted as before.
+    _REMOTE_RUN_FOREGROUND_GRACE = timedelta(minutes=60)
+
+    def _remote_model_runs(self) -> dict:
+        """task_id -> monotonic start, for started runs whose model is remote.
+
+        The foreground gate exists to keep the *local* model free for the user
+        (interactive_gate, architecture-runtime.md "The foreground-activity
+        gate": a background LLM task must not compete with the user's chat on
+        the same local model). A run on an API endpoint competes for nothing
+        the user is waiting on, so cancelling it saves nothing and throws its
+        work away: on 2026-09-28 "Nightly Odysseus Log Issue Triage", running
+        on chatgpt.com, was cancelled at 07:49:34 by a browser heartbeat after
+        five tool calls and ~128k tokens, then kept sliding while the tab was
+        open. Only runs that have already started are recorded here — a due
+        task that has not started still waits for the UI to go quiet.
+
+        Lazy for the same ``__new__`` reason as :meth:`_transient_retry_counts`.
+        """
+        runs = getattr(self, "_remote_model_run_starts", None)
+        if runs is None:
+            runs = {}
+            self._remote_model_run_starts = runs
+        return runs
+
+    def _note_run_model_scope(self, task_id, endpoint_url: str) -> str:
+        """Record whether this started run's model lane is local or remote.
+
+        Called by the LLM and research executors once the endpoint is
+        resolved. Anything that is not positively a remote API endpoint
+        (loopback, LAN, Tailscale, an endpoint registered as local, or an
+        unclassifiable URL) keeps the old preemption.
+        """
+        if not task_id:
+            return "unknown"
+        try:
+            from src.model_context import classify_endpoint_scope
+            scope = classify_endpoint_scope(endpoint_url or "")
+        except Exception:
+            scope = "unknown"
+        runs = self._remote_model_runs()
+        if scope == "api":
+            if task_id not in runs:
+                runs[task_id] = time.monotonic()
+                logger.info(
+                    "Task %s runs on a remote model endpoint (%s); ordinary "
+                    "foreground activity will not preempt it once started",
+                    task_id, _endpoint_host(endpoint_url),
+                )
+        else:
+            runs.pop(task_id, None)
+        return scope
+
+    def _foreground_preemption_exempt(self, task_id) -> bool:
+        """True when foreground activity should leave this running task alone."""
+        started = self._remote_model_runs().get(task_id)
+        if started is None:
+            return False
+        if time.monotonic() - started > self._REMOTE_RUN_FOREGROUND_GRACE.total_seconds():
+            return False
+        return True
 
     def _interrupted_progress(self) -> dict:
         """task_id -> tool calls made by a run that was preempted.
@@ -1871,6 +1985,11 @@ class TaskScheduler:
                     while True:
                         await asyncio.sleep(0.25)
                         if has_foreground_activity():
+                            # A started run on a remote model competes for
+                            # nothing the user is waiting on; see
+                            # _remote_model_runs.
+                            if self._foreground_preemption_exempt(task_id):
+                                continue
                             foreground_cancel["hit"] = True
                             logger.info("Task '%s' interrupted because Odysseus became active", task.name)
                             if current_task:
@@ -2718,6 +2837,9 @@ class TaskScheduler:
         # which model actually produced the output).
         self._last_run_model = model
         self._last_run_endpoint = endpoint_url
+        # Local or remote model lane: decides whether foreground activity may
+        # still preempt this run now that it has started.
+        self._note_run_model_scope(getattr(task, "id", None), endpoint_url)
 
         # Ensure a session exists for output
         session_id = task.session_id
@@ -3435,6 +3557,7 @@ class TaskScheduler:
         # Record the resolved model for the run record (see _execute_task_locked).
         self._last_run_model = model
         self._last_run_endpoint = endpoint_url
+        self._note_run_model_scope(getattr(task, "id", None), endpoint_url)
 
         max_tokens = int(get_setting("research_max_tokens", 8192))
         extraction_timeout = int(get_setting("research_extraction_timeout_seconds", 90) or 90)
@@ -3721,6 +3844,11 @@ class TaskScheduler:
         for task_id in task_ids:
             handle = self._task_handles.get(task_id)
             if handle and not handle.done():
+                if self._foreground_preemption_exempt(task_id):
+                    # Already running on a remote model: preempting it frees
+                    # nothing the user needs and throws its work away. A task
+                    # that has not started is not in this set and still yields.
+                    continue
                 if task_id in preempt:
                     # An earlier sweep already cancelled this run and it is
                     # still unwinding. Cancelling again would count it twice

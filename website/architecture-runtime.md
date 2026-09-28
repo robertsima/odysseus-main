@@ -899,7 +899,15 @@ the user, and it does so in two directions at once.
 `_InteractiveActivityMiddleware` fire
 `task_scheduler.stop_background_tasks_for_foreground()`, which cancels every
 running scheduler task except manual "Run now" runs. That is deliberately
-blunt.
+blunt — with one exception: an LLM or research run that has *already started*
+on a remote API endpoint (anything `model_context.classify_endpoint_scope`
+does not call `local` or `lan`) is left to finish. The gate exists to keep the
+local model free for the user; cancelling a run on someone else's GPU frees
+nothing and throws its work away. The exemption is bounded
+(`_REMOTE_RUN_FOREGROUND_GRACE`, 60 min, on top of the run's own `max_steps`
+budget), any local model call such a run falls back to still queues behind
+the user in `llm_core`'s model gate, and a due task that has not started still
+waits for the UI to go quiet.
 
 **Holding background work back.** `_check_due_tasks()` calls
 `has_foreground_activity()` before dispatching, and pushes anything due out by

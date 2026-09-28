@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 from sqlalchemy import create_engine, Column, String, DateTime, Integer, Boolean, Text
 from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.pool import StaticPool
 
 
 def _test_utcnow():
@@ -70,7 +71,13 @@ def _setup_isolated_db(monkeypatch):
         status = Column(String, default="queued")
         error = Column(Text)
 
-    eng = create_engine("sqlite:///:memory:")
+    # One shared connection: _check_due_tasks queries from a worker thread,
+    # and a plain :memory: engine gives every thread its own empty database.
+    eng = create_engine(
+        "sqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
     B.metadata.create_all(eng)
     monkeypatch.setattr(cd, "engine", eng, raising=False)
     monkeypatch.setattr(
