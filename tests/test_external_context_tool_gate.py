@@ -1394,8 +1394,20 @@ def test_frontend_tool_approval_uses_opaque_id_and_fixed_decisions():
         "20260722emailfastindex1" not in source
         for source in approval_module_sources
     )
+    # document.js has since moved to a newer tag; every importer must share
+    # one tag (two tags load two document-module instances).
+    import re as _re
+
+    doc_tags = {
+        tag
+        for source in approval_module_sources
+        for tag in _re.findall(r"document\.js\?v=([\w.-]+)", source)
+    }
+    assert len(doc_tags) == 1, doc_tags
+    assert "20260722emailfastindex1" not in doc_tags
+    doc_tag = next(iter(doc_tags))
     assert all(
-        "20260815approvalsave1" in source
+        "20260815approvalsave1" in source or f"document.js?v={doc_tag}" in source
         for source in approval_module_sources
     )
 

@@ -90,6 +90,10 @@ from src.agent_tools import (
     ToolBlock,
     MAX_AGENT_ROUNDS,
 )
+from src.agent_tools.document_tools import (
+    resolve_document_for_approval,
+    split_document_id_header,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -899,13 +903,13 @@ old text to find
 new replacement text
 <<<END>>>
 ```
-Edit a document OPEN IN THE EDITOR PANEL — NOT a file on disk. For files on disk (home folder, project files, any real path like ~/sweden.txt) use `edit_file` instead. Find exact text and replace it. Multiple FIND/REPLACE blocks per call OK. Use for any edit smaller than a full rewrite. **If a document is open in the editor, treat it as the user's current context: don't ask which file they mean, and don't create a new one — just edit_document the active one.** Do NOT re-send the whole file with update_document for small changes.""",
+Edit a document OPEN IN THE EDITOR PANEL — NOT a file on disk. For files on disk (home folder, project files, any real path like ~/sweden.txt) use `edit_file` instead. Find exact text and replace it. Multiple FIND/REPLACE blocks per call OK. Use for any edit smaller than a full rewrite. **If a document is open in the editor, treat it as the user's current context: don't ask which file they mean, and don't create a new one — just edit_document the active one.** To change a document that is NOT the one open in this chat, make the first line `<<<DOCUMENT_ID: <id>>>>` with the id from manage_documents list. Do NOT re-send the whole file with update_document for small changes.""",
 
     "update_document": """\
 ```update_document
 <entire new content>
 ```
-Replace the ENTIRE active document. ONLY use when you're genuinely rewriting more than half of it from scratch. For any smaller change, use edit_document — echoing back the whole file for a two-line edit wastes tokens and is hard to review.""",
+Replace the ENTIRE active document (or, with a first line `<<<DOCUMENT_ID: <id>>>>`, that document). ONLY use when you're genuinely rewriting more than half of it from scratch. For any smaller change, use edit_document — echoing back the whole file for a two-line edit wastes tokens and is hard to review.""",
 
     "suggest_document": """\
 ```suggest_document
@@ -2884,9 +2888,11 @@ def _document_stream_events(block: ToolBlock) -> list[dict]:
             events.append({"type": "doc_stream_delta", "content": content})
         return events
     if block.tool_type == "update_document":
+        # An explicit `<<<DOCUMENT_ID: ...>>>` target line is routing, not text.
+        _, _update_body = split_document_id_header(block.content)
         return [
             {"type": "doc_stream_open", "title": "", "language": ""},
-            {"type": "doc_stream_delta", "content": block.content.strip()},
+            {"type": "doc_stream_delta", "content": _update_body.strip()},
         ]
     return []
 
@@ -3604,7 +3610,13 @@ def _build_system_prompt(
     _mcp_desc_message = None
     _active_doc_is_email_doc = False
     if active_document:
-        set_active_document(active_document.id)
+        # The per-chat active-document pointer is set once per turn in
+        # stream_agent_loop (keyed by session); building a prompt must not
+        # move it, since a mid-turn route fallback rebuilds the prompt.
+        _doc_id_line = (
+            f'Document id: {active_document.id} (link: #document-{active_document.id}; '
+            f'document tools target it by default)\n'
+        )
         _doc_raw = active_document.current_content or ""
         _document_writing_style = ""
         try:
@@ -3624,6 +3636,7 @@ def _build_system_prompt(
             doc_ctx = (
                 f'ACTIVE EMAIL DRAFT (open in editor — the user is looking at this right now)\n'
                 f'Title: "{active_document.title}"\n'
+                f'{_doc_id_line}'
                 f'```\n{_email_prompt_doc}\n```\n\n'
                 f'This is the current email compose window, not a normal document library item. If the user says "write", "draft", "reply", "make it say", or "write the email" without naming another target, edit THIS email draft.\n\n'
                 f'When the user asks you to write, reply to, or improve this email:\n'
@@ -3652,6 +3665,7 @@ def _build_system_prompt(
                 doc_ctx = (
                     f'ACTIVE PDF FORM (open in editor — the user is looking at this right now)\n'
                     f'Title: "{active_document.title}"\n'
+                    f'{_doc_id_line}'
                     f'```\n{active_document.current_content}\n```\n\n'
                     f'The ENTIRE form is in the markdown above. Every field, on every '
                     f'page, is a bullet line you can see now.\n\n'
@@ -3692,6 +3706,7 @@ def _build_system_prompt(
                 doc_ctx = (
                     f'ACTIVE DOCUMENT (open in the editor — the user is looking at it right now)\n'
                     f'Title: "{active_document.title}" | Language: {active_document.language or "text"}\n'
+                    f'{_doc_id_line}'
                     f'Below is the full text. Each line is prefixed with its line number and a TAB, '
                     f'purely so you can locate references like "[Doc edit: L25]" — the number and tab '
                     f'are NOT part of the document.\n'
@@ -3736,8 +3751,6 @@ def _build_system_prompt(
                 "suggestions for the active editor document. Use suggest_document "
                 "with <<<FIND>>>...<<<SUGGEST>>>...<<<REASON>>>...<<<END>>> blocks."
             )
-    else:
-        set_active_document(None)
 
     # Active email reader — frontend told us the user has an email open.
     # Inject a context block so "reply", "summarize this", "what does it say"
@@ -5746,6 +5759,10 @@ async def stream_agent_loop(
             "mcp__email__list_emails", "mcp__email__read_email", "mcp__email__scan_email_unsubscribes",
         })
     _prompt_active_document = active_document if _active_document_relevant else None
+    # The chat's active document (the one open in its editor / bound to it)
+    # is what argument-less edit/update/suggest_document calls target. Keyed
+    # by this session: another chat's document is never an implicit target.
+    set_active_document(getattr(active_document, "id", None), session_id)
     _direct_low_signal = (
         _low_signal_turn
         and not _existing_conversation
@@ -8688,8 +8705,12 @@ async def stream_agent_loop(
                     block.tool_type, round_num, _last_user[:80],
                 )
             elif not security_decision.allowed:
+                # Seal the document the call will actually act on: the one its
+                # explicit document_id names, else this chat's active document.
                 approval_document = (
-                    active_document
+                    resolve_document_for_approval(
+                        block.content, owner, session_id, active_document,
+                    )
                     if block.tool_type
                     in {"edit_document", "suggest_document", "update_document"}
                     else None
@@ -8703,15 +8724,15 @@ async def stream_agent_loop(
                         or getattr(approval_document, "version_count", None) is None
                     )
                 ):
-                    # These legacy tools otherwise fall back to a process-global
-                    # or most-recent document at dispatch time. That target can
-                    # change while an approval card is pending, so there is no
-                    # exact action to seal until the user opens a real document.
+                    # No single target document (no document_id, nothing open
+                    # in this chat, or an unknown/ambiguous id): there is no
+                    # exact action to seal for an approval card.
                     desc = f"{block.tool_type}: BLOCKED"
                     result = {
                         "error": (
-                            "Open the exact document to edit, then request this "
-                            "action again so its id and version can be sealed."
+                            "Open the exact document to edit (or name it with "
+                            "document_id), then request this action again so its "
+                            "id and version can be sealed."
                         ),
                         "exit_code": 1,
                         "blocked": True,
@@ -8953,7 +8974,7 @@ async def stream_agent_loop(
                     )
                 else:
                     yield (
-                        f'data: {json.dumps({"type": "doc_update", "doc_id": result["doc_id"], "content": result["content"], "version": result["version"], "title": result.get("title", ""), "language": result.get("language")})}\n\n'
+                        f'data: {json.dumps({"type": "doc_update", "action": result.get("action"), "doc_id": result["doc_id"], "content": result["content"], "version": result["version"], "title": result.get("title", ""), "language": result.get("language")})}\n\n'
                     )
 
             # Emit ui_control event for frontend to apply UI changes
@@ -9206,6 +9227,7 @@ async def stream_agent_loop(
                 yield (
                     'data: ' + json.dumps({
                         "type": "doc_update",
+                        "action": result.get("action"),
                         "doc_id": result["doc_id"],
                         "title": result.get("title", ""),
                         "language": result.get("language", ""),

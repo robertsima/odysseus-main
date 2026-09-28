@@ -131,7 +131,11 @@ def test_update_document_active_id_filters_to_calling_owner(monkeypatch):
     finally:
         set_active_document(None)
 
-    assert result["error"] == "No documents exist to update"
+    # The pointer names a document alice does not own: refused, never
+    # replaced by some other document.
+    assert result["exit_code"] == 1
+    assert "doc-bob" in result["error"]
+    assert result.get("needs_document_id") is True
     assert ("id", "eq", "doc-bob") in query.filters
     assert ("owner", "eq", "alice") in query.filters
 
@@ -150,7 +154,8 @@ def test_suggest_document_active_id_filters_to_calling_owner(monkeypatch):
     finally:
         set_active_document(None)
 
-    assert result["error"] == "Document doc-bob not found"
+    assert result["exit_code"] == 1
+    assert "doc-bob" in result["error"]
     assert ("id", "eq", "doc-bob") in query.filters
     assert ("owner", "eq", "alice") in query.filters
 

@@ -63,7 +63,7 @@ def create_office_document(
         db.add(doc)
         db.add(ver)
         db.commit()
-        set_active_document(doc_id)
+        set_active_document(doc_id, session_id)
         return doc_id
     except Exception as e:
         db.rollback()

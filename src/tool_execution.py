@@ -2264,6 +2264,9 @@ _FORMATTER_HANDLED_KEYS = {
     "response", "results", "session_id", "name", "model", "session_name",
     "success", "path", "action", "title", "doc_id", "version", "applied",
     "error", "output", "delegation_state", "delegation_note",
+    # Document tools: the summary line is printed first; the candidate list
+    # is already spelled out in the error text.
+    "document_summary", "document_candidates", "needs_document_id",
 }
 
 
@@ -2278,6 +2281,11 @@ def format_tool_result(description: str, result: Dict) -> str:
         state = str(result["delegation_state"])
         note = str(result.get("delegation_note") or "")
         parts.append(f"**delegation:** `{state}`" + (f" — {note}" if note else ""))
+
+    # Document tools name the exact document they changed (title + id link),
+    # so the reply links what was actually edited rather than a same-titled one.
+    if result.get("document_summary"):
+        parts.append(str(result["document_summary"]))
 
     if "stdout" in result:
         if result["stdout"]:

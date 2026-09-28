@@ -437,10 +437,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_document",
-            "description": "Edit a document OPEN IN THE EDITOR PANEL (created via create_document) — NOT a file on disk. For files on disk (home folder, project files, anything with a path like ~/x.txt or /path/to/file) use edit_file instead. Targeted find-and-replace with multiple FIND/REPLACE pairs per call; use for any edit smaller than a full rewrite. Do NOT send the whole file back via update_document for small edits.",
+            "description": "Edit a document in the editor panel (created via create_document) — NOT a file on disk. Targets the document open in this chat, or the one named by document_id; pass document_id whenever the document is not the one open here. For files on disk (home folder, project files, anything with a path like ~/x.txt or /path/to/file) use edit_file instead. Targeted find-and-replace with multiple FIND/REPLACE pairs per call; use for any edit smaller than a full rewrite. Do NOT send the whole file back via update_document for small edits.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
                     "edits": {
                         "type": "array",
                         "description": "List of find/replace edits (first match only per edit)",
@@ -462,10 +463,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "suggest_document",
-            "description": "Suggest improvements to the active document WITHOUT editing it. Creates inline comment bubbles the user can accept or reject. Use when the user asks for suggestions, review, improvements, or feedback.",
+            "description": "Suggest improvements to the document open in this chat (or the one named by document_id) WITHOUT editing it. Creates inline comment bubbles the user can accept or reject. Use when the user asks for suggestions, review, improvements, or feedback.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
                     "suggestions": {
                         "type": "array",
                         "description": "List of suggested changes with reasons",
@@ -488,10 +490,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_document",
-            "description": "Replace the ENTIRE active document. ONLY use for genuine full rewrites (>50% of lines changed). For any smaller change, use edit_document — echoing back the whole file for small edits is wasteful.",
+            "description": "Replace the ENTIRE document open in this chat (or the one named by document_id). ONLY use for genuine full rewrites (>50% of lines changed). For any smaller change, use edit_document — echoing back the whole file for small edits is wasteful.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
                     "content": {"type": "string", "description": "Complete new document content"}
                 },
                 "required": ["content"]
@@ -1897,6 +1900,19 @@ def _repair_document_function_args(tool_type: str, arguments: str) -> Optional[d
     return None
 
 
+def _with_document_target(content: str, args: dict) -> str:
+    """Carry an explicit edit/update/suggest_document target in the tool content.
+
+    ToolBlock is (tool_type, content), so the optional `document_id` argument
+    rides as a `<<<DOCUMENT_ID: ...>>>` first line the document tools strip.
+    """
+    ref = args.get("document_id") or args.get("doc_id") or args.get("document")
+    if not isinstance(ref, (str, int)) or not str(ref).strip():
+        return content
+    from src.agent_tools.document_tools import with_document_id_header
+    return with_document_id_header(content, ref)
+
+
 def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock]:
     """Convert a native function call into a ToolBlock for the existing execution pipeline."""
     tool_type = _TOOL_NAME_MAP.get(name, name)
@@ -1996,7 +2012,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             blocks.append(
                 f'<<<FIND>>>\n{edit.get("find", "")}\n<<<REPLACE>>>\n{edit.get("replace", "")}\n<<<END>>>'
             )
-        content = "\n".join(blocks)
+        content = _with_document_target("\n".join(blocks), args)
     elif tool_type == "suggest_document":
         blocks = []
         suggestions = args.get("suggestions", [])
@@ -2008,9 +2024,9 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             blocks.append(
                 f'<<<FIND>>>\n{s.get("find", "")}\n<<<SUGGEST>>>\n{s.get("replace", "")}\n<<<REASON>>>\n{s.get("reason", "")}\n<<<END>>>'
             )
-        content = "\n".join(blocks)
+        content = _with_document_target("\n".join(blocks), args)
     elif tool_type == "update_document":
-        content = args.get("content", "")
+        content = _with_document_target(args.get("content", ""), args)
     elif tool_type == "search_chats":
         content = args.get("query", "")
     elif tool_type == "chat_with_model":

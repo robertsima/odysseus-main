@@ -688,8 +688,10 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
         parts.append(args.get("content", ""))
         content = "\n".join(parts)
     elif tool_type == "update_document":
-        content = args.get("content", "")
+        from src.tool_schemas import _with_document_target
+        content = _with_document_target(args.get("content", ""), args)
     elif tool_type in ("edit_document", "suggest_document"):
+        from src.tool_schemas import _with_document_target
         marker = "SUGGEST" if tool_type == "suggest_document" else "REPLACE"
         blocks = []
         for edit in args.get("suggestions" if tool_type == "suggest_document" else "edits", []) or []:
@@ -699,7 +701,7 @@ def _raw_openai_tool_call_to_block(value) -> Optional[ToolBlock]:
             if tool_type == "suggest_document":
                 block += f'\n<<<REASON>>>\n{edit.get("reason", "")}'
             blocks.append(block + "\n<<<END>>>")
-        content = "\n".join(blocks)
+        content = _with_document_target("\n".join(blocks), args)
     elif tool_type == "search_chats":
         content = args.get("query", "")
     elif tool_type == "chat_with_model":

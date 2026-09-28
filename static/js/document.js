@@ -10606,6 +10606,15 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       if (activeDocId === streamingId) activeDocId = docId;
     }
 
+    // An edit/update names a real, existing server document. It must land in
+    // THAT document's tab even when another open doc shares its title —
+    // title reuse here once showed one note's edit inside a same-titled other
+    // note and made that one the chat's active document. Older events carry
+    // no action: an edit always has version >= 2.
+    const isServerEdit = data.action
+      ? (data.action === 'edit' || data.action === 'update')
+      : Number(data.version || 1) > 1;
+
     // Deduplicate: if a new doc has same title as existing doc in this session, update it instead
     if (!docs.has(docId)) {
       const curSession = sessionModule?.getCurrentSessionId() || '';
@@ -10629,8 +10638,8 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
         }
       }
 
-      // First: match by title
-      if (!reuseId && data.title) {
+      // First: match by title (only for a freshly created doc)
+      if (!reuseId && data.title && !isServerEdit) {
         for (const [existingId, existingDoc] of docs) {
           if (
             existingDoc.title === data.title
@@ -10644,7 +10653,7 @@ import { bindMenuDismiss, dismissOrRemove } from './escMenuStack.js';
       }
 
       // Second: if no title match, reuse an empty untitled doc in this session
-      if (!reuseId) {
+      if (!reuseId && !isServerEdit) {
         for (const [existingId, existingDoc] of docs) {
           if (existingDoc.sessionId === curSession &&
               (!existingDoc.title || existingDoc.title === 'Untitled') &&

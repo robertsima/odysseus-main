@@ -1488,7 +1488,8 @@ def setup_chat_routes(
             if not active_doc and not ctx.suppress_active_document:
                 try:
                     from src.agent_tools.document_tools import get_active_document
-                    _mem_id = get_active_document()
+                    # Per-chat pointer: another chat's document never lands here.
+                    _mem_id = get_active_document(session)
                     if _mem_id:
                         _mem_q = _doc_db.query(DBDocument).filter(DBDocument.id == _mem_id)
                         cand = _owner_session_filter(_mem_q, ctx.user).first()

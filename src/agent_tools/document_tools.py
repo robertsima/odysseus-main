@@ -16,15 +16,34 @@ def _missing_document_upload(owner: Optional[str], content: Any) -> Optional[str
 # ---------------------------------------------------------------------------
 # Active document state
 # ---------------------------------------------------------------------------
+#
+# The active document is tracked PER CHAT SESSION. It used to be one
+# process-wide id, so a document opened or edited in one chat became the
+# target of an argument-less edit_document in any other chat, and after a
+# restart (pointer empty) the tools silently fell back to "the most recently
+# updated document" — on 2026-09-28 that sent three edits to a different
+# document that shared the requested note's title. Callers without a session
+# (legacy helpers, unit tests) share the "" key.
 
-_active_document_id: Optional[str] = None
+_active_documents: Dict[str, str] = {}
+_ACTIVE_DOCUMENTS_MAX = 4096
 _active_model: Optional[str] = None
 
 
-def set_active_document(doc_id: Optional[str]):
-    """Set the active document ID for document tool execution."""
-    global _active_document_id
-    _active_document_id = doc_id
+def _active_key(session_id: Optional[str]) -> str:
+    return str(session_id) if session_id else ""
+
+
+def set_active_document(doc_id: Optional[str], session_id: Optional[str] = None):
+    """Set (or with ``None`` clear) the active document for one chat session."""
+    key = _active_key(session_id)
+    if not doc_id:
+        _active_documents.pop(key, None)
+        return
+    _active_documents.pop(key, None)  # re-insert so the newest is last
+    _active_documents[key] = str(doc_id)
+    while len(_active_documents) > _ACTIVE_DOCUMENTS_MAX:
+        _active_documents.pop(next(iter(_active_documents)), None)
 
 
 def set_active_model(model: Optional[str]):
@@ -33,26 +52,281 @@ def set_active_model(model: Optional[str]):
     _active_model = model
 
 
-def get_active_document():
-    return _active_document_id
+def get_active_document(session_id: Optional[str] = None) -> Optional[str]:
+    """The active document id for this chat session, if any."""
+    return _active_documents.get(_active_key(session_id))
 
 
-def clear_active_document(doc_id: Optional[str] = None) -> bool:
-    """Clear the in-memory active-document pointer.
+def clear_active_document(doc_id: Optional[str] = None, session_id: Optional[str] = None) -> bool:
+    """Clear in-memory active-document pointers. Returns True if one was cleared.
 
-    With ``doc_id`` given, only clears when it matches the current pointer, so a
-    different active document is left untouched. Returns True if it was cleared.
+    - ``session_id`` given: clear that session's pointer (only if it matches
+      ``doc_id`` when one is given).
+    - only ``doc_id`` given: clear every session pointing at that document, so
+      a different active document is left untouched.
+    - neither: clear all pointers.
 
     Called when a document is detached from its session or deleted (its tab is
     closed): without this, the stale pointer makes the last-resort doc-injection
-    path re-surface a closed document in a later, unrelated chat — even one whose
-    session no longer matches — because an unlinked doc has session_id NULL (#1160).
+    path re-surface a closed document in a later chat (#1160).
     """
-    global _active_document_id
-    if doc_id is None or _active_document_id == doc_id:
-        _active_document_id = None
+    if session_id is not None:
+        key = _active_key(session_id)
+        current = _active_documents.get(key)
+        if current and (doc_id is None or current == doc_id):
+            _active_documents.pop(key, None)
+            return True
+        return False
+    if doc_id is None:
+        _active_documents.clear()
         return True
-    return False
+    keys = [k for k, v in _active_documents.items() if v == doc_id]
+    for k in keys:
+        _active_documents.pop(k, None)
+    return bool(keys)
+
+
+# ---------------------------------------------------------------------------
+# Explicit document targets
+# ---------------------------------------------------------------------------
+#
+# Native calls carry `document_id` as a structured argument; the text tool
+# pipeline turns it into a first-line header of the tool content so it
+# survives the ToolBlock(tool_type, content) shape, approvals (the header is
+# part of the sealed content) and the text-fence tool syntax alike.
+
+_DOC_ID_HEADER_RE = re.compile(
+    r"\A[ \t]*<<<DOCUMENT_ID:[ \t]*([^\n>]*?)[ \t]*>>>[ \t]*(?:\r?\n|\Z)"
+)
+_DOC_LINK_RE = re.compile(r"#document-([A-Za-z0-9][A-Za-z0-9_-]*)")
+
+
+def normalize_document_ref(ref: Any) -> str:
+    """Reduce a document reference to its id when it is a link.
+
+    Accepts a bare id, ``document-<id>``, ``#document-<id>`` and a markdown
+    link ``[Title](#document-<id>)``. Anything else (e.g. a title) is returned
+    stripped, for the caller to resolve.
+    """
+    s = str(ref or "").strip().strip("`'\"").strip()
+    m = _DOC_LINK_RE.search(s)
+    if m:
+        return m.group(1)
+    if s.lower().startswith("document-") and re.fullmatch(r"document-[A-Za-z0-9_-]+", s):
+        return s[len("document-"):]
+    return s
+
+
+def with_document_id_header(content: str, document_id: Any) -> str:
+    """Prefix tool content with the explicit-target header (no-op without an id)."""
+    ref = normalize_document_ref(document_id) if document_id is not None else ""
+    ref = ref.replace("\n", " ").replace(">", "").strip()
+    if not ref:
+        return content or ""
+    return f"<<<DOCUMENT_ID: {ref}>>>\n{content or ''}"
+
+
+def split_document_id_header(content: Any) -> tuple:
+    """Return ``(document_ref or None, content without the header)``."""
+    text = content if isinstance(content, str) else ("" if content is None else str(content))
+    m = _DOC_ID_HEADER_RE.match(text)
+    if not m:
+        return None, text
+    ref = normalize_document_ref(m.group(1))
+    return (ref or None), text[m.end():]
+
+
+_CANDIDATE_LIMIT = 10
+
+
+def _iso(ts: Any) -> str:
+    try:
+        return ts.isoformat(timespec="seconds") if ts else ""
+    except Exception:
+        return str(ts or "")
+
+
+def _candidate_rows(docs) -> List[Dict[str, str]]:
+    rows = []
+    for d in docs or []:
+        rows.append({
+            "id": str(getattr(d, "id", "") or ""),
+            "title": str(getattr(d, "title", "") or ""),
+            "updated_at": _iso(getattr(d, "updated_at", None)),
+        })
+    return rows
+
+
+def _document_candidates(db, Document, owner: Optional[str], limit: int = _CANDIDATE_LIMIT):
+    try:
+        q = db.query(Document).filter(Document.is_active == True)
+        q = _owned_document_query(q, Document, owner)
+        return _candidate_rows(q.order_by(Document.updated_at.desc()).limit(limit).all())
+    except Exception:
+        logger.debug("document candidate listing failed", exc_info=True)
+        return []
+
+
+def _target_error(message: str, candidates: List[Dict[str, str]], **extra) -> Dict:
+    lines = [message]
+    if candidates:
+        lines.append("Candidate documents (most recently updated first):")
+        for c in candidates:
+            lines.append(
+                f"- [{c['title'] or 'Untitled'}](#document-{c['id']}) "
+                f"— document_id: {c['id']}, updated {c['updated_at'] or 'unknown'}"
+            )
+        lines.append("Call the tool again with document_id set to the intended document's id.")
+    else:
+        lines.append("You have no documents to edit — use create_document to make one.")
+    out = {
+        "error": "\n".join(lines),
+        "exit_code": 1,
+        "needs_document_id": True,
+        "document_candidates": candidates,
+    }
+    out.update(extra)
+    return out
+
+
+def _lookup_document_ref(db, Document, ref: str, owner: Optional[str]):
+    """Resolve an explicit reference to exactly one owned document.
+
+    Returns ``(doc, error_dict)``. Order: exact id, unique id prefix (8+
+    chars), unique exact title (case-insensitive). Several matches are
+    refused, never guessed.
+    """
+    ref = normalize_document_ref(ref)
+    if not ref:
+        return None, None
+    doc = _get_owned_document(db, Document, ref, owner, active_only=True)
+    if doc:
+        return doc, None
+    try:
+        if len(ref) >= 8 and re.fullmatch(r"[0-9A-Fa-f-]+", ref):
+            q = db.query(Document).filter(Document.is_active == True, Document.id.like(f"{ref.lower()}%"))
+            matches = _owned_document_query(q, Document, owner).order_by(Document.updated_at.desc()).limit(_CANDIDATE_LIMIT + 1).all()
+            if len(matches) == 1:
+                return matches[0], None
+            if len(matches) > 1:
+                return None, _target_error(
+                    f"document_id '{ref}' is ambiguous: it matches {len(matches)} documents. Pass the full id.",
+                    _candidate_rows(matches[:_CANDIDATE_LIMIT]),
+                )
+        from sqlalchemy import func
+        q = db.query(Document).filter(Document.is_active == True, func.lower(Document.title) == ref.lower())
+        matches = _owned_document_query(q, Document, owner).order_by(Document.updated_at.desc()).limit(_CANDIDATE_LIMIT + 1).all()
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, _target_error(
+                f"'{ref}' is ambiguous: {len(matches)} documents share that title. "
+                "Pass the id of the one you mean as document_id.",
+                _candidate_rows(matches[:_CANDIDATE_LIMIT]),
+                ambiguous=True,
+            )
+    except Exception:
+        logger.debug("document reference lookup failed for %r", ref, exc_info=True)
+    return None, _target_error(
+        f"Document '{ref}' was not found among your documents.",
+        _document_candidates(db, Document, owner),
+    )
+
+
+def _resolve_target_document(db, Document, ctx: dict, explicit_ref: Optional[str], tool_name: str):
+    """Pick the one document an edit/update/suggest acts on.
+
+    Returns ``(doc, error_dict)``. Precedence:
+      1. the sealed approval target (``ctx["doc_id"]``) — an explicit ref in
+         the content must name that same document;
+      2. an explicit ``document_id`` from the call;
+      3. this chat session's active document.
+    There is no "most recent document" fallback: without a target the call
+    fails with a list of candidates so the model can pass document_id.
+    """
+    owner = ctx.get("owner")
+    session_id = ctx.get("session_id")
+    sealed_id = ctx.get("doc_id") or None
+
+    if sealed_id:
+        doc = _get_owned_document(db, Document, sealed_id, owner)
+        if not doc:
+            if ctx.get("expected_document_version") is not None:
+                return None, _approved_document_version_error(None, ctx)
+            return None, _target_error(
+                f"Document '{sealed_id}' was not found among your documents.",
+                _document_candidates(db, Document, owner),
+            )
+        if explicit_ref:
+            ref = normalize_document_ref(explicit_ref)
+            if ref != doc.id and not (len(ref) >= 8 and doc.id.startswith(ref)) and ref.lower() != (doc.title or "").strip().lower():
+                return None, {
+                    "error": (
+                        f"{tool_name}: the call names document '{ref}' but the approved "
+                        f"target is '{doc.title}' ({doc.id}). Request the edit again."
+                    ),
+                    "exit_code": 1,
+                }
+        return doc, None
+
+    if explicit_ref:
+        return _lookup_document_ref(db, Document, explicit_ref, owner)
+
+    active_id = get_active_document(session_id)
+    if active_id:
+        doc = _get_owned_document(db, Document, active_id, owner, active_only=True)
+        if doc:
+            return doc, None
+        return None, _target_error(
+            f"{tool_name}: the document last active in this chat ({active_id}) is no longer "
+            "available. Pass document_id to choose the document to change.",
+            _document_candidates(db, Document, owner),
+        )
+
+    return None, _target_error(
+        f"{tool_name}: no document_id was given and no document is open in this chat, "
+        "so the target is unknown. Nothing was changed.",
+        _document_candidates(db, Document, owner),
+    )
+
+
+def _document_summary(verb: str, title: Any, doc_id: Any) -> str:
+    title_s = str(title or "Untitled")
+    return f'{verb} document "{title_s}" (#document-{doc_id}) — link it as [{title_s}](#document-{doc_id})'
+
+
+def resolve_document_for_approval(content: Any, owner: Optional[str], session_id: Optional[str], active_document: Any):
+    """The document an edit/update/suggest call would target, for sealing an approval.
+
+    Mirrors ``_resolve_target_document`` without a sealed id: the explicit
+    ``document_id`` header wins, else the session's active document (the one
+    injected this turn, or the one a previous call in this chat targeted).
+    Returns a detached Document or None when there is no single target.
+    """
+    ref, _ = split_document_id_header(content)
+    pointer = get_active_document(session_id)
+    if not ref and active_document is not None and pointer in (None, getattr(active_document, "id", None)):
+        return active_document
+    try:
+        from src.database import SessionLocal, Document
+    except Exception:
+        return None if ref else active_document
+    db = SessionLocal()
+    try:
+        doc, _err = _resolve_target_document(
+            db, Document, {"owner": owner, "session_id": session_id}, ref, "approval",
+        )
+        if doc is not None:
+            try:
+                db.expunge(doc)
+            except Exception:
+                pass
+        return doc
+    except Exception:
+        logger.debug("approval target resolution failed", exc_info=True)
+        return None
+    finally:
+        db.close()
 
 
 def _owned_document_query(query, Document, owner: Optional[str]):
@@ -307,7 +581,8 @@ def _strip_pdf_editor_markers(content: str) -> str:
     return text.strip()
 
 
-def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional[str], summary: str) -> dict:
+def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional[str], summary: str,
+                                session_id: Optional[str] = None) -> dict:
     import uuid
     from src.database import Document, DocumentVersion
 
@@ -337,7 +612,7 @@ def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional
     db.add(new_doc)
     db.add(ver)
     db.commit()
-    set_active_document(doc_id)
+    set_active_document(doc_id, session_id)
     return {
         "action": "create",
         "doc_id": doc_id,
@@ -346,6 +621,10 @@ def _create_pdf_text_derivative(db, *, source_doc, content: str, owner: Optional
         "content": clean,
         "version": 1,
         "source_doc_id": getattr(source_doc, "id", None),
+        "document_summary": (
+            _document_summary("Created", title, doc_id)
+            + f" (a text copy of PDF document #document-{getattr(source_doc, 'id', '')}, which is unchanged)"
+        ),
     }
 
 
@@ -454,7 +733,7 @@ class CreateDocumentTool:
             db.add(ver)
             db.commit()
 
-            set_active_document(doc_id)
+            set_active_document(doc_id, session_id)
             try:
                 from src.event_bus import fire_event
                 fire_event("document_created", _owner)
@@ -468,6 +747,7 @@ class CreateDocumentTool:
                 "language": language,
                 "content": content,
                 "version": 1,
+                "document_summary": _document_summary("Created", title, doc_id),
             }
         except Exception as e:
             db.rollback()
@@ -481,28 +761,18 @@ class UpdateDocumentTool:
         import uuid
         from src.database import SessionLocal, Document, DocumentVersion
 
-        target_id = ctx.get("doc_id", None) or _active_document_id
+        explicit_ref, content = split_document_id_header(content)
         owner = ctx.get("owner")
+        session_id = ctx.get("session_id")
 
         db = SessionLocal()
         try:
-            doc = None
-            if target_id:
-                doc = _get_owned_document(db, Document, target_id, owner)
-            if (
-                not doc
-                and target_id
-                and ctx.get("expected_document_version") is not None
-            ):
-                return _approved_document_version_error(None, ctx)
-            if not doc:
-                doc = _most_recent_owned_document(db, Document, owner)
-                if doc:
-                    target_id = doc.id
-                    set_active_document(target_id)
-                    logger.info(f"update_document: fell back to most recent doc id={target_id}")
-            if not doc:
-                return {"error": "No documents exist to update", "exit_code": 1}
+            doc, target_error = _resolve_target_document(
+                db, Document, ctx, explicit_ref, "update_document",
+            )
+            if target_error:
+                return target_error
+            target_id = doc.id
 
             version_error = _approved_document_version_error(doc, ctx)
             if version_error:
@@ -527,6 +797,7 @@ class UpdateDocumentTool:
                     content=new_content,
                     owner=owner,
                     summary=f"Created from PDF edit by {_active_model or 'AI'}",
+                    session_id=session_id,
                 )
 
             new_ver = doc.version_count + 1
@@ -542,6 +813,8 @@ class UpdateDocumentTool:
             doc.version_count = new_ver
             db.add(ver)
             db.commit()
+            set_active_document(target_id, session_id)
+            logger.info("update_document: updated doc id=%s title=%r (session=%s)", target_id, doc.title, session_id)
 
             return {
                 "action": "update",
@@ -550,6 +823,7 @@ class UpdateDocumentTool:
                 "language": doc.language,
                 "content": new_content,
                 "version": new_ver,
+                "document_summary": _document_summary("Updated", doc.title, target_id),
             }
         except Exception as e:
             db.rollback()
@@ -563,8 +837,9 @@ class EditDocumentTool:
         import uuid
         from src.database import SessionLocal, Document, DocumentVersion
 
-        target_id = ctx.get("doc_id", None) or _active_document_id
+        explicit_ref, content = split_document_id_header(content)
         owner = ctx.get("owner")
+        session_id = ctx.get("session_id")
 
         edits = parse_edit_blocks(content)
         if not edits:
@@ -572,25 +847,14 @@ class EditDocumentTool:
 
         db = SessionLocal()
         try:
-            doc = None
-            if target_id:
-                doc = _get_owned_document(db, Document, target_id, owner)
-            if (
-                not doc
-                and target_id
-                and ctx.get("expected_document_version") is not None
-            ):
-                return _approved_document_version_error(None, ctx)
-            if not doc:
-                # Fallback: most recently updated document. Avoids "no active doc" errors
-                # after server restart or when the agent loses track of which doc to edit.
-                doc = _most_recent_owned_document(db, Document, owner)
-                if doc:
-                    target_id = doc.id
-                    set_active_document(target_id)
-                    logger.info(f"edit_document: fell back to most recent doc id={target_id} title={doc.title!r}")
-            if not doc:
-                return {"error": "No documents exist to edit", "exit_code": 1}
+            # No "most recent document" fallback: guessing the target once sent
+            # edits to a different document that shared the requested title.
+            doc, target_error = _resolve_target_document(
+                db, Document, ctx, explicit_ref, "edit_document",
+            )
+            if target_error:
+                return target_error
+            target_id = doc.id
 
             version_error = _approved_document_version_error(doc, ctx)
             if version_error:
@@ -626,6 +890,7 @@ class EditDocumentTool:
                     doc.version_count = new_ver
                     db.add(ver)
                     db.commit()
+                    set_active_document(target_id, session_id)
                     return {
                         "action": "edit",
                         "doc_id": target_id,
@@ -635,6 +900,7 @@ class EditDocumentTool:
                         "version": new_ver,
                         "applied": applied,
                         "skipped": skipped,
+                        "document_summary": _document_summary("Edited", doc.title, target_id),
                     }
                 return {"error": "No edits applied — FIND text cannot be blank", "exit_code": 1}
 
@@ -679,6 +945,7 @@ class EditDocumentTool:
                     content=updated_content,
                     owner=owner,
                     summary=f"Created from PDF edit by {_active_model or 'AI'} ({applied} edit(s))",
+                    session_id=session_id,
                 )
 
             new_ver = doc.version_count + 1
@@ -694,6 +961,11 @@ class EditDocumentTool:
             doc.version_count = new_ver
             db.add(ver)
             db.commit()
+            set_active_document(target_id, session_id)
+            logger.info(
+                "edit_document: edited doc id=%s title=%r (%d applied, session=%s)",
+                target_id, doc.title, applied, session_id,
+            )
 
             return {
                 "action": "edit",
@@ -704,6 +976,7 @@ class EditDocumentTool:
                 "version": new_ver,
                 "applied": applied,
                 "skipped": skipped,
+                "document_summary": _document_summary("Edited", doc.title, target_id),
             }
         except Exception as e:
             db.rollback()
@@ -716,11 +989,7 @@ class SuggestDocumentTool:
         """Create inline suggestions for the active document WITHOUT modifying it."""
         from src.database import SessionLocal, Document
 
-        target_id = ctx.get("doc_id", None) or _active_document_id
-        owner = ctx.get("owner")
-
-        if not target_id:
-            return {"error": "No active document to suggest on", "exit_code": 1}
+        explicit_ref, content = split_document_id_header(content)
 
         suggestions = parse_suggest_blocks(content)
         if not suggestions:
@@ -728,9 +997,12 @@ class SuggestDocumentTool:
 
         db = SessionLocal()
         try:
-            doc = _get_owned_document(db, Document, target_id, owner)
-            if not doc:
-                return {"error": f"Document {target_id} not found", "exit_code": 1}
+            doc, target_error = _resolve_target_document(
+                db, Document, ctx, explicit_ref, "suggest_document",
+            )
+            if target_error:
+                return target_error
+            target_id = doc.id
 
             version_error = _approved_document_version_error(doc, ctx)
             if version_error:
@@ -747,11 +1019,16 @@ class SuggestDocumentTool:
             if not valid:
                 return {"error": "No suggestions matched the document content", "exit_code": 1}
 
+            set_active_document(target_id, ctx.get("session_id"))
             return {
                 "action": "suggest",
                 "doc_id": target_id,
+                "title": doc.title,
                 "suggestions": valid,
                 "count": len(valid),
+                "document_summary": _document_summary(
+                    f"Added {len(valid)} suggestion(s) to", doc.title, target_id,
+                ),
             }
         finally:
             db.close()
@@ -826,7 +1103,7 @@ class ManageDocumentTool:
                 }
 
             elif action in ("read", "view", "open", "get"):
-                doc_id = args.get("document_id") or args.get("id") or args.get("uid")
+                doc_id = normalize_document_ref(args.get("document_id") or args.get("id") or args.get("uid"))
                 if not doc_id:
                     return {"error": "Need document_id (use action=list to find one)", "exit_code": 1}
                 doc = _get_owned_document(db, Document, doc_id, owner, active_only=True)
@@ -864,21 +1141,23 @@ class ManageDocumentTool:
                 }
 
             elif action == "delete":
-                doc_id = args.get("document_id") or args.get("id") or args.get("uid") or _active_document_id
-                doc = None
-                if doc_id:
-                    doc = _get_owned_document(db, Document, doc_id, owner)
-                if not doc:
-                    # Fallback: most recently updated doc (likely what the user means)
-                    doc = _most_recent_owned_document(db, Document, owner, active_only=True)
-                if not doc:
-                    return {"error": "No document to delete", "exit_code": 1}
+                # Same rule as the edit tools: an explicit id, else this chat's
+                # active document — never "whatever was updated last".
+                explicit = args.get("document_id") or args.get("id") or args.get("uid")
+                doc, target_error = _resolve_target_document(
+                    db, Document,
+                    {"owner": owner, "session_id": ctx.get("session_id")},
+                    str(explicit) if explicit else None,
+                    "manage_documents delete",
+                )
+                if target_error:
+                    return target_error
                 title = doc.title
+                deleted_id = doc.id
                 doc.is_active = False
                 db.commit()
-                if _active_document_id == doc.id:
-                    set_active_document(None)
-                return {"response": f"Deleted document '{title}'", "exit_code": 0}
+                clear_active_document(deleted_id)
+                return {"response": f"Deleted document '{title}' (id {deleted_id})", "exit_code": 0}
 
             elif action == "tidy":
                 from src.document_actions import run_document_tidy

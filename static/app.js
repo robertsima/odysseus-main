@@ -13,7 +13,7 @@ import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
 import chatModule from './js/chat.js?v=20260928subagentui1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
-import documentModule from './js/document.js?v=20260815approvalsave1';
+import documentModule from './js/document.js?v=20260928docedittarget1';
 import searchChatModule from './js/search-chat.js';
 import { makeWindowDraggable } from './js/windowDrag.js';
 import {
