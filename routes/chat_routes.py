@@ -246,6 +246,24 @@ def _stream_set(session_id: str, **fields) -> None:
     rec.update(fields)
 
 
+def _round_text_separator(previous: str, incoming: str) -> str:
+    """Newlines to put before ``incoming`` so it starts a new paragraph.
+
+    An agent turn's visible text arrives round by round, with tool calls in
+    between, and the reply was the plain concatenation of the deltas: saved
+    replies read "…the local `main` ref.The note edit is saved…" (2026-09-28).
+    The live stream showed each round in its own bubble, so only the reloaded
+    transcript was glued together. Returns "" when there is nothing before it
+    or the two sides already make a paragraph break.
+    """
+    if not previous or not previous.strip():
+        return ""
+    tail = len(previous) - len(previous.rstrip("\n"))
+    head = len(incoming) - len(incoming.lstrip("\n"))
+    missing = 2 - (tail + head)
+    return "\n" * missing if missing > 0 else ""
+
+
 def _message_plain_text(content: Any) -> str:
     if isinstance(content, list):
         parts: List[str] = []
@@ -2449,6 +2467,10 @@ def setup_chat_routes(
                     elif _explicit_browser_intent:
                         _forced_tools = set(_BROWSER_MCP_TOOLS)
 
+                    # Set when a round/tool boundary passes; the next visible
+                    # text delta then starts a new paragraph (see
+                    # _round_text_separator).
+                    _text_segment_break = False
                     async for chunk in stream_agent_loop(
                         sess.endpoint_url,
                         sess.model,
@@ -2501,7 +2523,19 @@ def setup_chat_routes(
                                     if data.get("thinking"):
                                         thinking_response += data["delta"]
                                     else:
-                                        full_response += data["delta"]
+                                        _delta_text = data["delta"]
+                                        if _text_segment_break and str(_delta_text).strip():
+                                            # Text from a new round after tool
+                                            # calls. Rewrite the frame itself so
+                                            # the live bubble and the saved
+                                            # reply carry the same break.
+                                            _sep = _round_text_separator(full_response, _delta_text)
+                                            if _sep:
+                                                _delta_text = _sep + _delta_text
+                                                data["delta"] = _delta_text
+                                                chunk = f"data: {json.dumps(data)}\n\n"
+                                            _text_segment_break = False
+                                        full_response += _delta_text
                                         _stream_set(session, partial=full_response)
                                     yield chunk
                                 elif data.get("type") == "steer_applied":
@@ -2532,6 +2566,8 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                 ):
+                                    if data.get("type") in ("agent_step", "tool_start", "tool_output"):
+                                        _text_segment_break = True
                                     if data.get("type") == "agent_step":
                                         _event_round = data.get("round", 1)
                                         _agent_rounds = max(_agent_rounds, _event_round)
