@@ -257,6 +257,8 @@ function buildFixture(document) {
   const panelIds = [
     'models',
     'search',
+    'agents',
+    'claude-code',
     'integrations',
     'email',
     'reminders',
@@ -264,7 +266,6 @@ function buildFixture(document) {
     'shortcuts',
     'privacy',
     'account',
-    'tools',
     'users',
     'capabilities',
     'system',
@@ -376,6 +377,8 @@ function moduleSource(relativePath) {
     registryPanelIds === [
       'models',
       'search',
+      'agents',
+      'claude-code',
       'integrations',
       'email',
       'reminders',
@@ -383,7 +386,6 @@ function moduleSource(relativePath) {
       'shortcuts',
       'privacy',
       'account',
-      'tools',
       'users',
       'capabilities',
       'system',
@@ -403,15 +405,15 @@ function moduleSource(relativePath) {
 
   check(
     'Settings registry keeps models, integrations and admin panels on the existing admin controller',
-    ['models', 'integrations', 'tools', 'users', 'capabilities', 'system']
+    ['models', 'agents', 'integrations', 'privacy', 'users', 'capabilities', 'system']
       .every(id => context.isAdminManagedSettingsTab(id))
-      && ['search', 'email', 'reminders', 'appearance', 'shortcuts', 'privacy', 'account']
+      && ['search', 'claude-code', 'email', 'reminders', 'appearance', 'shortcuts', 'account']
         .every(id => !context.isAdminManagedSettingsTab(id)),
   );
 
   check(
     'Settings registry distinguishes admin-only visibility from admin-controlled routing',
-    ['tools', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
+    ['agents', 'claude-code', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
       && ['models', 'integrations']
         .every(id => !context.isAdminOnlySettingsTab(id)),
   );
@@ -419,6 +421,7 @@ function moduleSource(relativePath) {
   check(
     'Settings registry resolves retired tab ids to the panel that owns them now',
     ['services', 'added-models', 'ai', 'context'].every(id => context.resolveSettingsPanelId(id) === 'models')
+      && context.resolveSettingsPanelId('tools') === 'agents'
       && context.resolveSettingsPanelId('models') === 'models'
       && context.resolveSettingsPanelId('missing') === 'missing'
       && context.isAdminManagedSettingsTab('added-models'),
@@ -455,7 +458,7 @@ function moduleSource(relativePath) {
     context.searchSettingsPanels('agent tools', { isAdmin: false }).length === 0
       && context.searchSettingsPanels('agent tools', { isAdmin: true })
         .map(panel => panel.id)
-        .join(',') === 'tools',
+        .join(',') === 'agents',
   );
 
   check(

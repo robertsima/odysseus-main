@@ -75,6 +75,32 @@ export const SETTINGS_PANELS = Object.freeze([
   }),
 
   definePanel({
+    id: 'agents',
+    label: 'Agents',
+    group: 'models',
+    controller: 'admin',
+    adminOnly: true,
+    aliases: ['tools'],
+    keywords: [
+      'agent', 'agents', 'agent tools', 'tools', 'built-in tools', 'approvals',
+      'approval mode', 'tool calls', 'context cap', 'reasoning effort',
+      'peer messaging', 'workspace', 'development folders', 'repository roots',
+      'branch', 'shell', 'sandbox', 'workbench', 'profiles', 'loadouts',
+      'control room', 'capabilities',
+    ],
+  }),
+  definePanel({
+    id: 'claude-code',
+    label: 'Claude Code',
+    group: 'models',
+    adminOnly: true,
+    keywords: [
+      'claude', 'claude code', 'delegation', 'sign in', 'cloud runner',
+      'github actions', 'hub repository', 'workflow', 'transcript', 'auto-update',
+    ],
+  }),
+
+  definePanel({
     id: 'integrations',
     label: 'Integrations',
     group: 'communications',
@@ -111,6 +137,7 @@ export const SETTINGS_PANELS = Object.freeze([
     id: 'privacy',
     label: 'Privacy',
     group: 'account',
+    controller: 'admin',
     keywords: ['privacy', 'sensitive', 'blur', 'private', 'vault'],
   }),
   definePanel({
@@ -120,14 +147,6 @@ export const SETTINGS_PANELS = Object.freeze([
     keywords: ['account', 'password', 'logout'],
   }),
 
-  definePanel({
-    id: 'tools',
-    label: 'Agent Tools',
-    group: 'administration',
-    controller: 'admin',
-    adminOnly: true,
-    keywords: ['agent', 'tools'],
-  }),
   definePanel({
     id: 'users',
     label: 'Users',

@@ -342,9 +342,8 @@ function onMenuKey(e) {
 
 function openLoadoutSettings() {
   if (typeof window.adminModule?.open !== 'function') return;
-  window.adminModule.open('tools');
-  setTimeout(() => $('set-agentProfiles')?.closest('.settings-col, [data-settings-panel]')
-    ?.querySelector('.agent-profiles-title')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 150);
+  window.adminModule.open('agents');
+  setTimeout(() => $('set-agentProfilesCard')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 150);
 }
 
 // ── wiring ────────────────────────────────────────────────────────────────

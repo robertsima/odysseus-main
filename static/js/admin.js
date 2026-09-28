@@ -3393,7 +3393,8 @@ function initAll() {
 // no longer also reloads users, tools, documents and logs.
 const TAB_LOADERS = {
   models: [loadEndpoints],
-  tools: [loadBuiltinTools, loadMcpServers, loadRag, loadTokens],
+  agents: [loadBuiltinTools],
+  privacy: [loadRag],
   users: [loadUsers],
   system: [() => loadLogs(false)],
 };

@@ -1278,27 +1278,32 @@ async function initResearchSearchSettings() {
   searchSel.addEventListener('change', function() { updateSearchLogo(); saveResearchSearch(); });
 }
 
-/* ── Agent Settings (AI tab) ── */
+/* ── Agents tab: defaults ──
+ * Each control saves only its own key, so changing one never re-posts (and
+ * silently re-clamps) the others. */
 async function initAgentSettings() {
+  var approval = el('set-agentApproval');
   var toolsInput = el('set-agentMaxTools');
-  var roundsInput = el('set-agentMaxRounds');
-  var foldInput = el('set-agentFoldAfter');
   var capInput = el('set-agentContextCap');
   var reasonInput = el('set-agentReasoning');
-  var supInput = el('set-agentSupervisorLadder');
+  var peerToggle = el('set-agentPeerMessaging');
+  var peerBudget = el('set-agentPeerBudget');
   var msg = el('set-agentMsg');
   if (!toolsInput) return;
 
-  try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    var settings = await res.json();
-    if (settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
-    if (roundsInput && settings.agent_max_rounds) roundsInput.value = settings.agent_max_rounds;
-    if (foldInput && settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
-    if (capInput && settings.agent_input_token_hard_max) capInput.value = settings.agent_input_token_hard_max;
-    if (reasonInput) reasonInput.value = settings.chatgpt_reasoning_effort || '';
-    if (supInput) supInput.checked = !!settings.agent_supervisor_ladder;
-  } catch (e) {}
+  var settings = {};
+  try { settings = await _loadSettingsSnapshot(); } catch (e) {}
+  if (approval) approval.value = settings.agent_approval_mode || 'auto';
+  if (settings.agent_max_tool_calls != null) toolsInput.value = settings.agent_max_tool_calls;
+  if (capInput && settings.agent_input_token_hard_max) capInput.value = settings.agent_input_token_hard_max;
+  if (reasonInput) reasonInput.value = settings.chatgpt_reasoning_effort || '';
+  if (peerToggle) peerToggle.checked = settings.agent_peer_messaging !== false;
+  if (peerBudget && settings.agent_peer_message_budget != null) peerBudget.value = settings.agent_peer_message_budget;
+
+  function syncPeer() {
+    if (peerBudget && peerToggle) peerBudget.disabled = !peerToggle.checked;
+  }
+  syncPeer();
 
   // Clamp + coerce a raw input to an int in [lo, hi]; falls back to `dflt`
   // when blank/non-numeric. Mirrors the server-side validation.
@@ -1308,42 +1313,150 @@ async function initAgentSettings() {
     return Math.max(lo, Math.min(n, hi));
   }
 
-  async function save() {
-    var tools = clampInt(toolsInput.value, 0, 2000, 500);
-    var rounds = roundsInput ? clampInt(roundsInput.value, 1, 500, 100) : null;
-    toolsInput.value = tools;                       // reflect the clamped value
-    if (roundsInput) roundsInput.value = rounds;
-    var payload = { agent_max_tool_calls: tools };
-    if (rounds != null) payload.agent_max_rounds = rounds;
-    var fold = foldInput ? clampInt(foldInput.value, 0, 500, 12) : null;
-    if (foldInput) { foldInput.value = fold; payload.chat_tool_fold_after = fold; }
-    var cap = capInput ? clampInt(capInput.value, 16000, 1000000, 200000) : null;
-    if (capInput) { capInput.value = cap; payload.agent_input_token_hard_max = cap; }
-    if (reasonInput) payload.chatgpt_reasoning_effort = reasonInput.value || '';
-    if (supInput) payload.agent_supervisor_ladder = !!supInput.checked;
+  async function save(patch, text) {
     try {
-      await _postSettings(payload);
-      if (fold != null && window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(fold);
-      msg.textContent = (tools > 0 ? 'Limit: ' + tools + ' tool calls' : 'Unlimited tool calls') +
-        (rounds != null ? ' · ' + rounds + ' rounds/message (advisory)' : '') +
-        (fold != null ? ' · fold after ' + (fold > 0 ? fold : 'never') : '') +
-        (cap != null ? ' · context cap ' + Math.round(cap / 1000) + 'k' : '') +
-        (supInput && supInput.checked ? ' · supervisor on' : '');
-      msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      var r = await _postSettings(patch);
+      if (r && r.ok === false) {
+        var err = null;
+        try { err = await r.json(); } catch (_) {}
+        throw new Error((err && err.detail) || ('HTTP ' + r.status));
+      }
+      if (msg) { msg.textContent = 'Saved · ' + text; msg.style.color = 'var(--fg)'; }
+    } catch (e) {
+      if (msg) { msg.textContent = 'Not saved: ' + (e.message || e); msg.style.color = 'var(--red)'; }
+    }
   }
 
-  toolsInput.addEventListener('change', save);
-  if (roundsInput) roundsInput.addEventListener('change', save);
-  if (capInput) capInput.addEventListener('change', save);
-  if (reasonInput) reasonInput.addEventListener('change', save);
-  if (supInput) supInput.addEventListener('change', save);
-  var cur = parseInt(toolsInput.value, 10) || 0;
-  var curR = roundsInput ? (parseInt(roundsInput.value, 10) || 20) : null;
-  msg.textContent = (cur > 0 ? 'Limit: ' + cur + ' tool calls' : 'Unlimited tool calls') +
-    (curR != null ? ' · ' + curR + ' rounds/message (advisory)' : '') +
-    (supInput && supInput.checked ? ' · supervisor on' : '');
+  if (approval) approval.addEventListener('change', function() {
+    save({ agent_approval_mode: approval.value }, 'approvals: ' + approval.options[approval.selectedIndex].textContent);
+  });
+  toolsInput.addEventListener('change', function() {
+    var tools = clampInt(toolsInput.value, 0, 2000, 500);
+    toolsInput.value = tools;
+    save({ agent_max_tool_calls: tools }, tools > 0 ? 'limit ' + tools + ' tool calls' : 'no tool-call limit');
+  });
+  if (capInput) capInput.addEventListener('change', function() {
+    var cap = clampInt(capInput.value, 16000, 1000000, 200000);
+    capInput.value = cap;
+    save({ agent_input_token_hard_max: cap }, 'context cap ' + Math.round(cap / 1000) + 'k tokens');
+  });
+  if (reasonInput) reasonInput.addEventListener('change', function() {
+    save({ chatgpt_reasoning_effort: reasonInput.value || '' }, 'reasoning effort ' + (reasonInput.value || 'provider default'));
+  });
+  if (peerToggle) peerToggle.addEventListener('change', function() {
+    syncPeer();
+    save({ agent_peer_messaging: !!peerToggle.checked }, peerToggle.checked ? 'agents may message each other' : 'peer messaging off');
+  });
+  if (peerBudget) peerBudget.addEventListener('change', function() {
+    var n = clampInt(peerBudget.value, 0, 64, 40);
+    peerBudget.value = n;
+    save({ agent_peer_message_budget: n }, n + ' peer messages per turn');
+  });
+}
 
+/* ── Agents tab: workspace & shell ──
+ * Development folders are claude_code_repository_roots: they bound where any
+ * agent's workspace and git tools may reach, not only Claude Code, so they
+ * live here rather than in the Claude Code tab. */
+async function initWorkspaceSettings() {
+  var folders = el('set-agentDevFolders');
+  var branch = el('set-agentBaseBranch');
+  var sandbox = el('set-shellSandbox');
+  var network = el('set-shellSandboxNetwork');
+  var status = el('set-shellSandboxStatus');
+  var msg = el('set-agentWorkspaceMsg');
+  if (!folders && !sandbox) return;
+
+  var settings = {};
+  try { settings = await _loadSettingsSnapshot(); } catch (e) {}
+  if (folders) folders.value = Array.isArray(settings.claude_code_repository_roots) ? settings.claude_code_repository_roots.join('\n') : '';
+  if (branch) branch.value = settings.agent_base_branch || '';
+  if (sandbox) sandbox.value = settings.shell_sandbox === 'off' ? 'off' : 'auto';
+  if (network) network.checked = settings.shell_sandbox_network !== false;
+
+  function say(text, bad) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.style.color = bad ? 'var(--red)' : 'var(--fg)';
+  }
+  async function save(patch, text) {
+    try {
+      var r = await _postSettings(patch);
+      if (r && r.ok === false) {
+        var err = null;
+        try { err = await r.json(); } catch (_) {}
+        throw new Error((err && err.detail) || ('HTTP ' + r.status));
+      }
+      say('Saved · ' + text);
+      return true;
+    } catch (e) { say('Not saved: ' + (e.message || e), true); return false; }
+  }
+
+  // Live sandbox state (CONTRACT: GET /api/settings/shell-sandbox →
+  // {mode, network, available, degraded, reason}). A server without the
+  // route answers 404; the line then stays hidden.
+  async function refreshSandboxStatus() {
+    if (!status) return;
+    try {
+      var r = await fetch('/api/settings/shell-sandbox', { credentials: 'same-origin' });
+      if (r.status === 404) { status.hidden = true; return; }
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      var s = await r.json();
+      var text, cls;
+      if (s.mode === 'off') { text = 'Off: commands run directly in the container'; cls = 'is-warn'; }
+      else if (s.available && !s.degraded) { text = 'Sandbox available' + (s.network === false ? ' (no network)' : ''); cls = 'is-ok'; }
+      else if (s.available && s.degraded) { text = 'Degraded: ' + (s.reason || 'running with reduced isolation'); cls = 'is-warn'; }
+      else { text = 'Unavailable: ' + (s.reason || 'this host cannot run the sandbox'); cls = 'is-bad'; }
+      status.textContent = text;
+      status.className = 'settings-status-line ' + cls;
+      status.hidden = false;
+    } catch (e) {
+      status.textContent = 'Sandbox status unavailable';
+      status.className = 'settings-status-line is-warn';
+      status.hidden = false;
+    }
+  }
+
+  if (folders) folders.addEventListener('change', function() {
+    var roots = folders.value.split(/\r?\n/).map(function(x) { return x.trim(); }).filter(Boolean);
+    save({ claude_code_repository_roots: roots }, roots.length + ' development folder' + (roots.length === 1 ? '' : 's'));
+  });
+  if (branch) branch.addEventListener('change', function() {
+    save({ agent_base_branch: branch.value.trim() }, 'target branch ' + (branch.value.trim() || 'repository default'));
+  });
+  if (sandbox) sandbox.addEventListener('change', async function() {
+    if (await save({ shell_sandbox: sandbox.value }, 'sandbox ' + sandbox.value)) refreshSandboxStatus();
+  });
+  if (network) network.addEventListener('change', async function() {
+    if (await save({ shell_sandbox_network: !!network.checked }, network.checked ? 'sandbox may use the network' : 'sandbox network off')) refreshSandboxStatus();
+  });
+
+  _onPanelActivated('agents', refreshSandboxStatus);
+  if (window._isAdmin && status && status.offsetParent !== null) refreshSandboxStatus();
+}
+
+/* ── Appearance: chat display ── */
+async function initChatDisplaySettings() {
+  var foldInput = el('set-chatFoldAfter');
+  var msg = el('set-chatDisplayMsg');
+  if (!foldInput) return;
+  try {
+    var settings = await _loadSettingsSnapshot();
+    if (settings.chat_tool_fold_after != null) foldInput.value = settings.chat_tool_fold_after;
+  } catch (e) {}
+  // This input used to have no change listener at all, so edits never saved.
+  foldInput.addEventListener('change', async function () {
+    var n = parseInt(foldInput.value, 10);
+    if (isNaN(n)) n = 12;
+    n = Math.max(0, Math.min(n, 500));
+    foldInput.value = n;
+    try {
+      var r = await _postSettings({ chat_tool_fold_after: n });
+      if (r && r.ok === false) throw new Error('HTTP ' + r.status);
+      if (window.agentThread && window.agentThread.setFoldThreshold) window.agentThread.setFoldThreshold(n);
+      if (msg) { msg.textContent = n > 0 ? 'Saved · fold after ' + n + ' calls' : 'Saved · never fold'; msg.style.color = 'var(--fg)'; }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
+  });
 }
 
 /* ═══════════════════════════════════════════
@@ -2287,67 +2400,65 @@ function initContextProfiles() {
   load();
 }
 
-// ── Claude Code delegation (Tools tab) ──
-// Persists the claude_code_* keys through /api/auth/settings (admin only,
-// validated server-side in auth_routes.set_settings) and shows the live
-// preflight from /api/claude-code/status plus recent jobs from
-// /api/claude-code/tasks. Empty fields keep the CLAUDE_CODE_* env defaults.
+// ── Workbench toggles and agent profiles (Agents tab) ──
 async function initWorkbenchSettings() {
   var card = el('set-workbenchCard');
   if (!card) return;
-  var f = { enabled: el('set-wbEnabled'), autoOpen: el('set-wbAutoOpen'), stream: el('set-wbStream'), approval: el('set-wbApproval') };
+  var f = { enabled: el('set-wbEnabled'), autoOpen: el('set-wbAutoOpen') };
   var msg = el('set-wbMsg');
   function fill(s) {
     if (!s) return;
     if (f.enabled) f.enabled.checked = s.workbench_enabled !== false;
     if (f.autoOpen) f.autoOpen.checked = s.workbench_auto_open !== false;
-    if (f.stream) f.stream.checked = s.claude_code_stream_transcript !== false;
-    if (f.approval) f.approval.value = s.agent_approval_mode || 'auto';
   }
   var loaded = null;
-  try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    if (res.ok) { loaded = await res.json(); fill(loaded); }
-  } catch (e) {}
+  try { loaded = await _loadSettingsSnapshot(); fill(loaded); } catch (e) {}
   initAgentProfilesEditor(loaded && Array.isArray(loaded.agent_profiles) ? loaded.agent_profiles : []);
-  if (f.approval) f.approval.addEventListener('change', async function () {
-    try {
-      var r = await _postSettings({ agent_approval_mode: f.approval.value });
-      msg.textContent = r.ok ? 'Saved' : 'Not saved (' + r.status + ')';
-      msg.style.color = r.ok ? 'var(--fg)' : 'var(--red)';
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
-  });
   async function save() {
     try {
       var r = await _postSettings({
         workbench_enabled: !!(f.enabled && f.enabled.checked),
         workbench_auto_open: !!(f.autoOpen && f.autoOpen.checked),
-        claude_code_stream_transcript: !!(f.stream && f.stream.checked),
       });
-      if (!r.ok) { msg.textContent = 'Not saved (' + r.status + ')'; msg.style.color = 'var(--red)'; return; }
+      if (!r.ok) { if (msg) { msg.textContent = 'Not saved (' + r.status + ')'; msg.style.color = 'var(--red)'; } return; }
       fill(await r.json());
-      msg.textContent = 'Saved'; msg.style.color = 'var(--fg)';
+      if (msg) { msg.textContent = 'Saved'; msg.style.color = 'var(--fg)'; }
       if (window.workbenchModule && window.workbenchModule.refreshSettings) window.workbenchModule.refreshSettings();
       ['rail-workbench', 'tool-workbench-btn'].forEach(function (id) {
         var btn = el(id);
         if (btn) btn.style.display = (f.enabled && f.enabled.checked) ? '' : 'none';
       });
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+    } catch (e) { if (msg) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; } }
   }
-  [f.enabled, f.autoOpen, f.stream].forEach(function (x) { if (x) x.addEventListener('change', save); });
+  [f.enabled, f.autoOpen].forEach(function (x) { if (x) x.addEventListener('change', save); });
+
+  var controlRoom = el('set-agentOpenControlRoom');
+  if (controlRoom) {
+    if (!(window.agentsDashboard && typeof window.agentsDashboard.open === 'function')) controlRoom.hidden = true;
+    controlRoom.addEventListener('click', function () {
+      if (!(window.agentsDashboard && typeof window.agentsDashboard.open === 'function')) return;
+      close();
+      window.agentsDashboard.open();
+    });
+  }
 }
 
-// ── Agent profiles (Workbench card) ──
+// ── Agent profiles (Agents tab) ──
 // A list editor for the `agent_profiles` setting (validated server-side by
-// src/agent_profiles.validate_profiles through /api/auth/settings).
+// src/agent_profiles.validate_profiles through /api/auth/settings). Each
+// profile is a collapsed row whose summary says what it is; opening it shows
+// the full editor. Twelve always-open editors made this page 8,000px tall.
 function initAgentProfilesEditor(initial) {
   var list = el('set-agentProfiles');
   var addBtn = el('set-agentProfileAdd');
   var saveBtn = el('set-agentProfileSave');
   var note = el('set-agentProfileMsg');
-  if (!list || list.dataset.wired) return;
+  if (!list || !note || list.dataset.wired) return;
   list.dataset.wired = '1';
   var profiles = (initial || []).map(function (p) { return Object.assign({}, p); });
+  // Which rows are open survives a re-render (add, remove, persona copy) and a
+  // save, which replaces every object with the server's normalized copy.
+  var openProfiles = new WeakSet();
   // Saved personas a loadout can start from. Choosing one copies it into the
   // loadout, which then keeps its own persona: editing the shared persona
   // later does not change agents built from it.
@@ -2380,6 +2491,31 @@ function initAgentProfilesEditor(initial) {
     wrap.appendChild(input);
     return wrap;
   }
+  function toolsSummary(p) {
+    var access = p.tool_access || 'all';
+    var text = access === 'none' ? 'no action tools'
+      : access === 'selected' ? ((p.enabled_tools || []).length + ' selected tools')
+      : 'all tools';
+    var denied = (p.disabled_tools || []).length;
+    return denied ? text + ', ' + denied + ' denied' : text;
+  }
+  function fillSummary(summary, p) {
+    summary.textContent = '';
+    var name = document.createElement('span');
+    name.className = 'agent-profile-summary-name';
+    name.textContent = p.name || '(unnamed)';
+    var meta = document.createElement('span');
+    meta.className = 'agent-profile-summary-meta';
+    meta.textContent = [p.model ? p.model : 'inherits chat model', toolsSummary(p)].join(' · ');
+    summary.appendChild(name);
+    summary.appendChild(meta);
+    if (p.description) {
+      var desc = document.createElement('span');
+      desc.className = 'agent-profile-summary-desc';
+      desc.textContent = p.description;
+      summary.appendChild(desc);
+    }
+  }
   function render() {
     list.textContent = '';
     if (!profiles.length) {
@@ -2390,6 +2526,16 @@ function initAgentProfilesEditor(initial) {
       return;
     }
     profiles.forEach(function (p, i) {
+      var item = document.createElement('details');
+      item.className = 'agent-profile-item';
+      if (openProfiles.has(p)) item.open = true;
+      item.addEventListener('toggle', function () {
+        if (item.open) openProfiles.add(p); else openProfiles.delete(p);
+      });
+      var summary = document.createElement('summary');
+      fillSummary(summary, p);
+      item.appendChild(summary);
+      var refreshSummary = function () { fillSummary(summary, p); };
       var card = document.createElement('div');
       card.className = 'agent-profile';
       var mk = function (tag, key, attrs) {
@@ -2404,6 +2550,7 @@ function initAgentProfilesEditor(initial) {
             ? inp.value.split(/[\n,]+/).map(function (v) { return v.trim(); }).filter(Boolean) : inp.value);
           note.textContent = 'Unsaved changes';
           note.style.color = 'var(--fg)';
+          refreshSummary();
         });
         return inp;
       };
@@ -2417,7 +2564,7 @@ function initAgentProfilesEditor(initial) {
           sel.appendChild(opt);
         });
         sel.title = hint || '';
-        sel.addEventListener('change', function () { p[key] = sel.value; note.textContent = 'Unsaved changes'; note.style.color = 'var(--fg)'; });
+        sel.addEventListener('change', function () { p[key] = sel.value; note.textContent = 'Unsaved changes'; note.style.color = 'var(--fg)'; refreshSummary(); });
         return sel;
       };
       var head = document.createElement('div');
@@ -2475,7 +2622,7 @@ function initAgentProfilesEditor(initial) {
       vaultCheck.addEventListener('change', function () { p.private_vault_access = vaultCheck.checked; note.textContent = 'Unsaved changes'; });
       vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads (also enables bash and python, which could read the vault)'; vault.appendChild(vaultText); card.appendChild(vault);
       var advanced = document.createElement('details'); advanced.className = 'agent-profile-capabilities';
-      var summary = document.createElement('summary'); summary.textContent = 'Capability allowlists'; advanced.appendChild(summary);
+      var advSummary = document.createElement('summary'); advSummary.textContent = 'Capability allowlists'; advanced.appendChild(advSummary);
       var advancedGrid = document.createElement('div'); advancedGrid.className = 'agent-profile-cap-grid';
       advancedGrid.appendChild(field('Enabled tools', mk('textarea', 'enabled_tools', { rows: '2', placeholder: 'Used when Tools = Selected. Every tool the worker may call, MCP included: web_search, mcp__email__list_emails, mcp__github__* (whole server), mcp__* (all servers). Anything unlisted is denied, including tools added later.' })));
       advancedGrid.appendChild(field('Extra denied tools', mk('textarea', 'disabled_tools', { rows: '2', placeholder: 'Always denied, e.g. bash, send_email' })));
@@ -2484,17 +2631,20 @@ function initAgentProfilesEditor(initial) {
       advancedGrid.appendChild(field('Allowed models', mk('textarea', 'allowed_models', { rows: '2', placeholder: 'model or model@endpoint; used when Models = Selected' })));
       advancedGrid.appendChild(field('Model fallbacks', mk('textarea', 'model_fallbacks', { rows: '2', placeholder: 'Try in order if the primary model is unavailable' })));
       advanced.appendChild(advancedGrid); card.appendChild(advanced);
-      list.appendChild(card);
+      item.appendChild(card);
+      list.appendChild(item);
     });
   }
   addBtn && addBtn.addEventListener('click', function () {
-    profiles.push({ name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
+    var fresh = { name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
       max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
       private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
-      persona_name: '', temperature: null, max_tokens: null });
+      persona_name: '', temperature: null, max_tokens: null };
+    profiles.push(fresh);
+    openProfiles.add(fresh);
     render();
-    var inputs = list.querySelectorAll('.agent-profile:last-child input');
+    var inputs = list.querySelectorAll('.agent-profile-item:last-child input');
     if (inputs[0]) inputs[0].focus();
   });
   saveBtn && saveBtn.addEventListener('click', async function () {
@@ -2509,7 +2659,10 @@ function initAgentProfilesEditor(initial) {
         note.style.color = 'var(--red)';
         return;
       }
+      var openNames = new Set(profiles.filter(function (p) { return openProfiles.has(p); })
+        .map(function (p) { return String(p.name || '').toLowerCase(); }));
       profiles = ((body && body.agent_profiles) || profiles).map(function (p) { return Object.assign({}, p); });
+      profiles.forEach(function (p) { if (openNames.has(String(p.name || '').toLowerCase())) openProfiles.add(p); });
       render();
       note.textContent = 'Saved';
     } catch (e) { note.textContent = 'Failed to save'; note.style.color = 'var(--red)'; }
@@ -2628,13 +2781,21 @@ function initAgentProfilesTransfer(note, replaceProfiles) {
   });
 }
 
+// ── Claude Code tab ──
+// Persists the claude_code_* keys through /api/auth/settings (admin only,
+// validated server-side in auth_routes.set_settings) and shows the live
+// preflight from /api/claude-code/status plus recent jobs from
+// /api/claude-code/tasks. Empty fields keep the CLAUDE_CODE_* env defaults.
+// Development folders (claude_code_repository_roots) are edited on the Agents
+// tab and deliberately left out of this card's payload.
 async function initClaudeCodeSettings() {
   var card = el('set-claudeCodeCard');
   if (!card) return;
   var f = {
-    binary: el('set-ccBinary'), home: el('set-ccHome'), roots: el('set-ccRoots'),
+    binary: el('set-ccBinary'), home: el('set-ccHome'),
     defaultRepo: el('set-ccDefaultRepo'), concurrency: el('set-ccConcurrency'),
     model: el('set-ccModel'), restricted: el('set-ccRestricted'),
+    stream: el('set-ccStream'), autoUpdate: el('set-ccAutoUpdate'),
     backend: el('set-ccBackend'), cloudRepos: el('set-ccCloudRepos'), cloudWorkflow: el('set-ccCloudWorkflow'),
     cloudHub: el('set-ccCloudHub'),
     callbackUrl: el('set-ccCallbackUrl'), tokenFile: el('set-ccTokenFile'),
@@ -2642,17 +2803,24 @@ async function initClaudeCodeSettings() {
   var msg = el('set-ccMsg');
   var statusBox = el('set-ccStatus');
   var tasksBox = el('set-ccTasks');
+  var warningBox = el('set-ccBackendWarning');
   var _e = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+  function say(text, bad) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.style.color = bad ? 'var(--red)' : 'var(--fg)';
+  }
 
   function fill(settings) {
     if (!settings) return;
     if (f.binary) f.binary.value = settings.claude_code_binary || '';
     if (f.home) f.home.value = settings.claude_code_home || '';
-    if (f.roots) f.roots.value = Array.isArray(settings.claude_code_repository_roots) ? settings.claude_code_repository_roots.join('\n') : '';
     if (f.defaultRepo) f.defaultRepo.value = settings.claude_code_default_repository || '';
     if (f.concurrency) f.concurrency.value = settings.claude_code_max_concurrent_tasks ? settings.claude_code_max_concurrent_tasks : '';
     if (f.model) f.model.value = settings.claude_code_model || '';
     if (f.restricted) f.restricted.checked = settings.claude_code_restricted !== false;
+    if (f.stream) f.stream.checked = settings.claude_code_stream_transcript !== false;
+    if (f.autoUpdate) f.autoUpdate.checked = settings.claude_code_auto_update !== false;
     if (f.backend) f.backend.value = settings.claude_code_backend === 'cloud' ? 'cloud' : 'local';
     if (f.cloudRepos) f.cloudRepos.value = Array.isArray(settings.claude_cloud_repositories) ? settings.claude_cloud_repositories.join('\n') : '';
     if (f.cloudWorkflow) f.cloudWorkflow.value = settings.claude_cloud_workflow || '';
@@ -2661,18 +2829,14 @@ async function initClaudeCodeSettings() {
     if (f.tokenFile) f.tokenFile.value = settings.claude_code_odysseus_token_file || '';
   }
 
-  try {
-    var res = await fetch('/api/auth/settings', { credentials: 'same-origin' });
-    fill(await res.json());
-  } catch (e) {}
+  try { fill(await _loadSettingsSnapshot()); } catch (e) {}
 
   function payload() {
     var conc = parseInt((f.concurrency && f.concurrency.value) || '0', 10);
     if (isNaN(conc) || conc < 0) conc = 0;
-    return {
+    var out = {
       claude_code_binary: (f.binary && f.binary.value.trim()) || '',
       claude_code_home: (f.home && f.home.value.trim()) || '',
-      claude_code_repository_roots: f.roots ? f.roots.value.split(/\r?\n/).map(function (s) { return s.trim(); }).filter(Boolean) : [],
       claude_code_default_repository: (f.defaultRepo && f.defaultRepo.value.trim()) || '',
       claude_code_max_concurrent_tasks: Math.min(conc, 16),
       claude_code_model: (f.model && f.model.value.trim()) || '',
@@ -2684,6 +2848,9 @@ async function initClaudeCodeSettings() {
       claude_code_odysseus_url: (f.callbackUrl && f.callbackUrl.value.trim()) || '',
       claude_code_odysseus_token_file: (f.tokenFile && f.tokenFile.value.trim()) || '',
     };
+    if (f.stream) out.claude_code_stream_transcript = !!f.stream.checked;
+    if (f.autoUpdate) out.claude_code_auto_update = !!f.autoUpdate.checked;
+    return out;
   }
 
   async function save() {
@@ -2692,17 +2859,27 @@ async function initClaudeCodeSettings() {
       if (!r.ok) {
         var err = {};
         try { err = await r.json(); } catch (e) {}
-        msg.textContent = 'Not saved: ' + (err.detail || r.status);
-        msg.style.color = 'var(--red)';
+        say('Not saved: ' + (err.detail || r.status), true);
         return;
       }
       fill(await r.json());
-      msg.textContent = 'Saved';
-      msg.style.color = 'var(--fg)';
-    } catch (e) { msg.textContent = 'Failed to save'; msg.style.color = 'var(--red)'; }
+      say('Saved');
+      if (window.workbenchModule && window.workbenchModule.refreshSettings) window.workbenchModule.refreshSettings();
+    } catch (e) { say('Failed to save', true); }
+  }
+
+  // CONTRACT: /api/claude-code/status carries `backend_warning` (string|null)
+  // when the default runner cannot work as configured (e.g. "cloud" with no
+  // GitHub credential). It belongs next to the runner choice, not in a list.
+  function renderBackendWarning(s) {
+    if (!warningBox) return;
+    var text = s && typeof s.backend_warning === 'string' ? s.backend_warning.trim() : '';
+    warningBox.textContent = text;
+    warningBox.hidden = !text;
   }
 
   function renderStatus(s) {
+    renderBackendWarning(s);
     if (!statusBox) return;
     if (!s || s.error) { statusBox.innerHTML = '<span style="color:var(--red)">' + _e((s && s.error) || 'status unavailable') + '</span>'; return; }
     var b = s.binary || {}, a = s.auth || {}, cb = s.callback || {};
@@ -2724,7 +2901,7 @@ async function initClaudeCodeSettings() {
         return '<li><code>' + _e(r.path) + '</code>' + (r.branch ? ' <span style="opacity:.7">(' + _e(r.branch) + ')</span>' : '') + (isDefault ? ' <span class="cc-pill ok">default</span>' : '') + '</li>';
       }).join('') + '</ul></div>');
     } else {
-      rows.push('<div class="cc-status-line" style="color:var(--red)">No Git checkout found under: ' + _e((s.repository_roots || []).join(', ') || '(no roots)') + '</div>');
+      rows.push('<div class="cc-status-line" style="color:var(--red)">No Git checkout found under: ' + _e((s.repository_roots || []).join(', ') || '(no development folders)') + '</div>');
     }
     (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });
     statusBox.innerHTML = rows.join('');
@@ -2800,10 +2977,10 @@ async function initClaudeCodeSettings() {
   }
   var cloudCheckBtn = el('set-ccCloudCheck');
   if (cloudCheckBtn) cloudCheckBtn.addEventListener('click', checkCloud);
+  // One button re-checks everything this tab shows: the preflight and the
+  // recent delegations (they were two buttons doing half each).
   var checkBtn = el('set-ccCheck');
   if (checkBtn) checkBtn.addEventListener('click', function () { checkStatus(); loadTasks(); });
-  var refreshBtn = el('set-ccRefreshTasks');
-  if (refreshBtn) refreshBtn.addEventListener('click', loadTasks);
   if (tasksBox) tasksBox.addEventListener('click', async function (e) {
     var btn = e.target.closest('.cc-cancel');
     if (!btn) return;
@@ -2812,13 +2989,13 @@ async function initClaudeCodeSettings() {
     } catch (err) {}
     loadTasks();
   });
-  // Load lazily the first time the Tools tab becomes visible so opening
-  // Settings never spawns a `claude --version` probe by itself.
+  // Load lazily the first time the Claude Code tab is shown (however it was
+  // opened) so opening Settings never spawns a `claude --version` probe by
+  // itself.
   var login = initClaudeCodeLogin(function () { checkStatus(); });
-  var tab = document.querySelector('[data-settings-tab="tools"]');
   var loadedOnce = false;
   function lazy() { if (loadedOnce) return; loadedOnce = true; checkStatus(); loadTasks(); if (login) login.resume(); }
-  if (tab) tab.addEventListener('click', lazy);
+  _onPanelActivated('claude-code', lazy);
   if (window._isAdmin && card.offsetParent !== null) lazy();
 }
 
@@ -3073,8 +3250,10 @@ function initAll() {
   initResearchLimits();
   initResearchSearchSettings();
   initAgentSettings();
+  initWorkspaceSettings();
   initClaudeCodeSettings();
   initWorkbenchSettings();
+  initChatDisplaySettings();
   initContextProfiles();
   initAppearance();
   initShortcuts();
