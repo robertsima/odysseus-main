@@ -596,15 +596,35 @@ def _dispatch_provider(provider_name: str, query: str, count: int, time_filter: 
 # empty, fall back to the no-key provider so "search X" still works on fresh
 # installs. Users can override/disable with `search_fallback_chain`.
 _FALLBACK_ORDER = ["duckduckgo"]
+# `search_fallback_chain: ["none"]` means no fallback at all. An empty chain
+# keeps meaning "the default chain" above, so an install that never touched
+# the setting keeps its DuckDuckGo safety net; before 2026-09-28 removing the
+# last fallback in Settings saved [] and silently brought DuckDuckGo back.
+# ("disabled" entries are skipped too, which older saves relied on.)
+FALLBACK_NONE = "none"
+# Names older builds stored for a provider the dispatcher knows by another.
+# The Research tab saved "google", which matched no provider, so Deep Research
+# silently used the fallback engine instead of Google PSE (2026-09-28).
+_PROVIDER_ALIASES = {"google": "google_pse"}
+
+
+def normalize_provider_name(name: Any) -> str:
+    """The dispatcher's name for a stored provider choice ("" when unset)."""
+    text = str(name or "").strip().lower()
+    return _PROVIDER_ALIASES.get(text, text)
 
 
 def _build_provider_chain(primary: str) -> List[str]:
     """Build ordered list: primary first, then configured/default fallbacks."""
+    primary = normalize_provider_name(primary) or primary
     chain = [primary]
     settings = _get_search_settings()
     user_chain = settings.get("search_fallback_chain") or []
     if isinstance(user_chain, str):
         user_chain = [s.strip() for s in user_chain.split(",") if s.strip()]
+    user_chain = [normalize_provider_name(fb) for fb in user_chain]
+    if FALLBACK_NONE in user_chain:
+        return chain
     fallbacks = user_chain if user_chain else _FALLBACK_ORDER
     for fb in fallbacks:
         if fb and fb != primary and fb not in chain and fb != "disabled":

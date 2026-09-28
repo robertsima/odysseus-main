@@ -575,13 +575,17 @@ class DeepResearcher:
         try:
             from src.search.providers import _get_search_settings
             from src.search.core import _call_provider, _build_provider_chain
+            from services.search.core import normalize_provider_name
 
             settings = _get_search_settings()
-            provider = (self.search_provider_override or "").strip()
+            # normalize_provider_name reads a stored "google" (the Research
+            # tab's value until 2026-09-28) as google_pse; unnormalized it
+            # matched no provider and every query went to the fallback.
+            provider = normalize_provider_name(self.search_provider_override)
             if not provider:
-                provider = (settings.get("research_search_provider") or "").strip()
+                provider = normalize_provider_name(settings.get("research_search_provider"))
             if not provider:
-                provider = settings.get("search_provider", "searxng")
+                provider = normalize_provider_name(settings.get("search_provider")) or "searxng"
 
             if provider == "disabled":
                 logger.info("Search is disabled for research")
