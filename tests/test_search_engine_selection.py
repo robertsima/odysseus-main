@@ -74,9 +74,10 @@ def test_pinned_engines_are_sent_without_a_category(monkeypatch):
     monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
     seen = _capture_searxng(monkeypatch)
     providers.searxng_search_api("pgvector hybrid search", count=5)
-    # Bing answered in the 2026-09-27 22:55 bundle but its rows were junk.
-    assert seen[0]["engines"] == "yahoo,qwant,wikipedia"
-    assert "bing" not in seen[0]["engines"].split(",")
+    # Bing answered in the 2026-09-27 22:55 bundle but its rows were junk;
+    # qwant served a CAPTCHA from the NAS on 2026-09-28.
+    assert seen[0]["engines"] == "yahoo,brave,wikipedia"
+    assert not {"bing", "qwant"} & set(seen[0]["engines"].split(","))
     assert "categories" not in seen[0], (
         "categories=general would make SearXNG add every default general engine to the pin"
     )
@@ -110,18 +111,88 @@ def test_news_fallback_to_general_uses_the_new_pin(monkeypatch):
     seen = _capture_searxng(monkeypatch, {"results": []})
     providers.searxng_search_api("canada election news", count=5)
     assert seen[0]["categories"] == "news"
-    assert seen[1]["engines"] == "yahoo,qwant,wikipedia" and "categories" not in seen[1]
+    # Three words: could be an article title, so wikipedia is asked too.
+    assert seen[1]["engines"] == "yahoo,brave,wikipedia" and "categories" not in seen[1]
 
 
 def test_rate_limited_engines_cool_down_one_by_one(monkeypatch, clock):
     monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
     seen = _capture_searxng(monkeypatch, {
         "results": [{"title": "t", "url": "https://x.test/", "content": "", "engines": ["wikipedia"]}],
-        "unresponsive_engines": [["yahoo", "HTTP error 429"], ["qwant", "too many requests"]],
+        "unresponsive_engines": [["yahoo", "HTTP error 429"]],
     })
     providers.searxng_search_api("q one", count=5)
     providers.searxng_search_api("q two", count=5)
-    assert seen[1]["engines"] == "wikipedia"
+    assert seen[1]["engines"] == "brave,wikipedia"
+
+
+def test_wikipedia_is_only_asked_for_entity_like_queries(monkeypatch):
+    # It looks up one article by exact title; a keyword list is never a title
+    # (0 rows on all 3 asks in the 2026-09-28 bundle).
+    monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
+    seen = _capture_searxng(monkeypatch)
+    providers.searxng_search_api("pgvector", count=5)
+    providers.searxng_search_api("Retrieval-augmented generation", count=5)
+    providers.searxng_search_api("pgvector hybrid search benchmark recall latency", count=5)
+    providers.searxng_search_api("site:pgvector.dev hnsw", count=5)
+    assert seen[0]["engines"] == "yahoo,brave,wikipedia"
+    assert seen[1]["engines"] == "yahoo,brave,wikipedia"
+    assert seen[2]["engines"] == "yahoo,brave"
+    assert seen[3]["engines"] == "yahoo,brave"
+
+
+def test_an_operator_pin_of_wikipedia_alone_is_honoured_for_titles(monkeypatch):
+    monkeypatch.setenv("SEARXNG_GENERAL_ENGINES", "wikipedia")
+    seen = _capture_searxng(monkeypatch)
+    providers.searxng_search_api("pgvector", count=5)
+    providers.searxng_search_api("pgvector hybrid search benchmark recall latency", count=5)
+    assert seen[0]["engines"] == "wikipedia"
+    assert "engines" not in seen[1] and seen[1]["categories"] == "general"
+
+
+def test_wikipedia_alone_does_not_count_as_a_working_pin(monkeypatch, clock):
+    monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
+    seen = _capture_searxng(monkeypatch, {
+        "results": [{"title": "t", "url": "https://x.test/", "content": ""}],
+        "unresponsive_engines": [["yahoo", "CAPTCHA"], ["brave", "too many requests"]],
+    })
+    providers.searxng_search_api("pgvector", count=5)
+    providers.searxng_search_api("pgvector", count=5)
+    assert seen[1]["categories"] == "general" and "engines" not in seen[1]
+
+
+def test_infobox_hits_become_rows(monkeypatch):
+    # wikipedia's default display_type is ["infobox"]: its hit is in
+    # `infoboxes`, not `results`.
+    _capture_searxng(monkeypatch, {
+        "results": [{"title": "pgvector on GitHub", "url": "https://github.com/pgvector/pgvector",
+                     "content": "Open-source vector similarity search", "engines": ["brave"]}],
+        "infoboxes": [
+            {"infobox": "Pgvector", "id": "https://en.wikipedia.org/wiki/Pgvector",
+             "content": "pgvector is a PostgreSQL extension", "engine": "wikipedia",
+             "urls": [{"title": "Wikipedia", "url": "https://en.wikipedia.org/wiki/Pgvector"}]},
+            {"infobox": "No url", "content": "dropped"},
+            "junk",
+        ],
+    })
+    rows = providers.searxng_search_api("pgvector", count=5)
+    assert [r["url"] for r in rows] == [
+        "https://en.wikipedia.org/wiki/Pgvector", "https://github.com/pgvector/pgvector",
+    ]
+    assert rows[0]["title"] == "Pgvector" and rows[0]["engine"] == "wikipedia"
+    assert rows[0]["snippet"].startswith("pgvector is a PostgreSQL extension")
+
+
+def test_an_infobox_alone_is_an_answer(monkeypatch):
+    seen = _capture_searxng(monkeypatch, {
+        "results": [],
+        "infoboxes": [{"infobox": "Pgvector", "id": "wd:Q1",
+                       "urls": [{"title": "Wikipedia", "url": "https://en.wikipedia.org/wiki/Pgvector"}],
+                       "engines": ["wikidata"]}],
+    })
+    rows = providers.searxng_search_api("pgvector", count=5)
+    assert len(seen) == 1, "no retry ladder when the infobox answered"
+    assert rows[0]["url"] == "https://en.wikipedia.org/wiki/Pgvector"
 
 
 def test_news_queries_keep_the_news_category(monkeypatch):
@@ -154,32 +225,32 @@ def test_suspended_pinned_engine_is_left_out_for_a_cooldown(monkeypatch, clock):
     payload = {
         "results": [{"title": "t", "url": "https://x.test/", "content": "", "engines": ["yahoo"]}],
         "unresponsive_engines": [
-            ["qwant", "Suspended: CAPTCHA"],
-            ["brave", "Suspended: too many requests"],  # not pinned: ignored
+            ["brave", "Suspended: too many requests"],
+            ["qwant", "Suspended: CAPTCHA"],  # not pinned: ignored
         ],
     }
     seen = _capture_searxng(monkeypatch, payload)
     providers.searxng_search_api("first query", count=5)
     providers.searxng_search_api("second query", count=5)
-    assert seen[0]["engines"] == "yahoo,qwant,wikipedia"
+    assert seen[0]["engines"] == "yahoo,brave,wikipedia"
     assert seen[1]["engines"] == "yahoo,wikipedia"
-    assert not resilience.cooldowns.is_cooling("searxng engine brave")
+    assert not resilience.cooldowns.is_cooling("searxng engine qwant")
 
     clock.t += providers._engine_cooldown_seconds() + 1
     providers.searxng_search_api("third query", count=5)
-    assert seen[2]["engines"] == "yahoo,qwant,wikipedia"
+    assert seen[2]["engines"] == "yahoo,brave,wikipedia"
 
 
 def test_a_plain_timeout_does_not_cool_an_engine(monkeypatch, clock):
     monkeypatch.delenv("SEARXNG_GENERAL_ENGINES", raising=False)
     payload = {
         "results": [{"title": "t", "url": "https://x.test/", "content": ""}],
-        "unresponsive_engines": [["qwant", "timeout"]],
+        "unresponsive_engines": [["brave", "timeout"]],
     }
     seen = _capture_searxng(monkeypatch, payload)
     providers.searxng_search_api("q one", count=5)
     providers.searxng_search_api("q two", count=5)
-    assert seen[1]["engines"] == "yahoo,qwant,wikipedia"
+    assert seen[1]["engines"] == "yahoo,brave,wikipedia"
 
 
 def test_when_every_pinned_engine_cools_searxng_defaults_are_used(monkeypatch, clock):
@@ -280,15 +351,17 @@ def test_direct_provider_calls_keep_their_count(monkeypatch):
 def test_site_retry_keeps_the_repository_and_prefers_rows_inside_it(monkeypatch):
     calls = []
 
-    def fake_searxng(query, count, time_filter=None):
+    # SearXNG sends the keyword form itself (test_search_site_operator); a
+    # provider that is sent the operator gets the keyword retry.
+    def fake_ddg(query, count, time_filter=None):
         calls.append(query)
         if query.startswith("site:"):
             return [_row("https://medium.com/x")]
         return [_row("https://github.com/other/repo/issues/1"),
                 _row("https://github.com/langchain-ai/langchain/issues/2")]
 
-    monkeypatch.setattr(core, "searxng_search_api", fake_searxng)
-    out = core._call_provider("searxng", "site:github.com/langchain-ai/langchain/issues stale vectors", 5)
+    monkeypatch.setattr(core, "duckduckgo_search", fake_ddg)
+    out = core._call_provider("duckduckgo", "site:github.com/langchain-ai/langchain/issues stale vectors", 5)
     assert calls[1] == "stale vectors langchain-ai/langchain github.com"
     assert [r["url"] for r in out] == [
         "https://github.com/langchain-ai/langchain/issues/2",

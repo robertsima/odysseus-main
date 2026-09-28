@@ -54,9 +54,10 @@ def test_site_drift_queries_each_provider_once_per_distinct_query(monkeypatch):
     monkeypatch.setattr(core, "duckduckgo_search", off_domain("duckduckgo"))
     core.comprehensive_web_search("site:example.com distinctive subject", return_sources=True)
 
+    # SearXNG sends the operator as keywords itself (searxng_search_api), so
+    # it is not asked a second time with them.
     assert calls == [
         ("searxng", "site:example.com distinctive subject"),
-        ("searxng", "distinctive subject example.com"),
         ("duckduckgo", "site:example.com distinctive subject"),
         ("duckduckgo", "distinctive subject example.com"),
     ]

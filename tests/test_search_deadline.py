@@ -268,7 +268,8 @@ def test_site_retry_is_skipped_when_out_of_time(monkeypatch, clock):
 
     monkeypatch.setattr(core, "_call_provider_raw", raw)
     with resilience.deadline_scope(10):
-        assert core._call_provider("searxng", "site:lucide.dev license icons", 5) == []
+        # DuckDuckGo gets the operator and would be retried with keywords.
+        assert core._call_provider("duckduckgo", "site:lucide.dev license icons", 5) == []
     assert calls == ["site:lucide.dev license icons"]
 
 

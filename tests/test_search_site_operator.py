@@ -30,17 +30,62 @@ def test_url_on_site_matches_host_and_subdomains():
 def test_off_domain_results_are_dropped_and_domain_retried_as_keyword(monkeypatch):
     calls = []
 
-    def fake_searxng(query, count, time_filter=None):
+    def fake_ddg(query, count, time_filter=None):
         calls.append(query)
         if query.startswith("site:"):
             return [_r("https://dor.mo.gov/driver-license/"), _r("https://www.dmv.org/mo-missouri/renew-license.php")]
         return [_r("https://lucide.dev/license"), _r("https://example.com/unrelated")]
 
-    monkeypatch.setattr(core, "searxng_search_api", fake_searxng)
-    out = core._call_provider("searxng", "site:lucide.dev license icons", 5, "year")
+    monkeypatch.setattr(core, "duckduckgo_search", fake_ddg)
+    out = core._call_provider("duckduckgo", "site:lucide.dev license icons", 5, "year")
 
     assert calls == ["site:lucide.dev license icons", "license icons lucide.dev"]
     assert [r["url"] for r in out] == ["https://lucide.dev/license"]
+
+
+def test_searxng_is_not_retried_because_it_already_sent_keywords(monkeypatch):
+    calls = []
+
+    def fake_searxng(query, count, time_filter=None):
+        calls.append(query)
+        return [_r("https://dor.mo.gov/driver-license/")]
+
+    monkeypatch.setattr(core, "searxng_search_api", fake_searxng)
+    assert core._call_provider("searxng", "site:lucide.dev license icons", 5, "year") == []
+    assert calls == ["site:lucide.dev license icons"]
+
+
+def test_searxng_sends_the_site_operator_as_keywords(monkeypatch):
+    # yahoo answered 0 rows for a `site:github.com/<owner>/<repo>` query
+    # (2026-09-28 bundle); other engines ignore the operator.
+    seen = _capture_searxng(monkeypatch, [
+        {"title": "Stale vectors", "url": "https://github.com/weaviate/weaviate/issues/1", "content": ""},
+        {"title": "Elsewhere", "url": "https://medium.com/x", "content": ""},
+    ])
+    rows = core._call_provider(
+        "searxng", "site:github.com/weaviate/weaviate/issues stale vectors delete", 5,
+    )
+    assert seen[0]["q"] == "stale vectors delete weaviate/weaviate github.com"
+    assert "site:" not in seen[0]["q"]
+    assert seen[0].get("categories") != "news"
+    assert [r["url"] for r in rows] == ["https://github.com/weaviate/weaviate/issues/1"]
+
+
+def test_site_keyword_query_forms():
+    from services.search.query import site_keyword_query
+
+    assert site_keyword_query("site:lucide.dev license icons") == "license icons lucide.dev"
+    assert site_keyword_query("site:https://www.github.com/o/r/pulls fix") == "fix o/r github.com"
+    assert site_keyword_query("site:github.com/issues stale vectors") == "stale vectors github.com"
+    assert site_keyword_query("ISO 29148 site:https://www.iso.org/standards/") == "ISO 29148 www.iso.org"
+    assert site_keyword_query("plain query") == "plain query"
+
+
+def test_site_query_with_a_news_word_stays_general(monkeypatch):
+    seen = _capture_searxng(monkeypatch, [{"title": "t", "url": "https://docs.example/x", "content": ""}])
+    providers.searxng_search_api("site:docs.example latest release notes", count=5)
+    assert seen[0]["q"] == "latest release notes docs.example"
+    assert seen[0].get("categories") != "news"
 
 
 def test_provider_that_honours_site_is_only_filtered(monkeypatch):

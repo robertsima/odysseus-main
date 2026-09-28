@@ -446,6 +446,10 @@ def _hosts_summary(rows: List[dict], limit: int = 8) -> str:
 # callers of _call_provider (/api/search/query, deep research) get their count.
 _PROVIDER_POOL = {"searxng": 20}
 
+# Providers that turn a `site:` operator into plain keywords themselves (see
+# query.site_keyword_query); _call_provider does not retry them with keywords.
+_SITE_AS_KEYWORDS_PROVIDERS = {"searxng"}
+
 
 def _pool_size(provider_name: str, count: int) -> int:
     return max(count, _PROVIDER_POOL.get(provider_name, count))
@@ -462,6 +466,9 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
     more with the domain (and, for ``site:github.com/<owner>/<repo>/...``,
     the ``owner/repo``) as plain keywords. An empty list lets the provider
     chain fall through to a provider that does honour the operator.
+
+    SearXNG already sends the operator as those keywords on its first
+    request (``providers.searxng_search_api``), so it is not asked again.
 
     Returns at most *count* rows; ``_run_chain`` passes a larger pool
     (``_PROVIDER_POOL``) and trims after the relevance gate.
@@ -480,6 +487,12 @@ def _call_provider(provider_name: str, query: str, count: int, time_filter: str 
                 provider_name, len(off), domain, _hosts_summary(off),
             )
         return kept
+    if provider_name in _SITE_AS_KEYWORDS_PROVIDERS:
+        logger.info(
+            "%s: no result on %s for %r (%d off-domain results dropped: %s)",
+            provider_name, domain, query, len(results), _hosts_summary(results),
+        )
+        return []
     repo = _repo_hint(query)
     alt_query = " ".join(part for part in (rest, repo, domain) if part).strip()
     if resilience.out_of_time():
@@ -561,8 +574,15 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
     Under a search deadline (``resilience.deadline_scope``) providers are not
     started once too little time is left (``"out of time"``), and a provider
     that runs out mid-call is reported the same way.
+
+    When the GitHub issue step answers only with ``low_signal`` rows (a
+    search across all of GitHub that found no issue with comments or
+    reactions), the chain goes on to the web providers and merges their rows
+    with GitHub's (``_merge_with_github``). If none answers, the GitHub rows
+    are returned alone.
     """
     attempts: Dict[str, str] = {}
+    held_github: List[dict] = []
     for provider_name in chain:
         key = f"{provider_name}{label}"
         if resilience.out_of_time():
@@ -607,11 +627,48 @@ def _run_chain(query: str, count: int, time_filter: Optional[str], chain: List[s
             results = _keep_relevant_results(query, results)
         if results:
             results = results[:count]
+            if provider_name == GITHUB_ISSUES and all(
+                isinstance(r, dict) and r.get("low_signal") for r in results
+            ):
+                # Only issues nobody commented on or reacted to, usually in
+                # tiny repositories: weak evidence on their own. Keep them and
+                # ask the web providers as well.
+                held_github = results
+                attempts[key] = f"ok ({len(results)}, no engagement)"
+                logger.info(
+                    "GitHub issue search found only issues without comments or reactions for %r; "
+                    "adding web results", query,
+                )
+                continue
             attempts[key] = f"ok ({len(results)})"
             logger.info(f"{provider_name} search returned {len(results)} relevant results")
+            if held_github:
+                results = _merge_with_github(results, held_github, count)
             return results, attempts
         attempts[key] = f"irrelevant (0/{raw_count})" if raw_count else "empty"
+    if held_github:
+        return held_github, attempts
     return [], attempts
+
+
+def _merge_with_github(web_rows: List[dict], github_rows: List[dict], count: int) -> List[dict]:
+    """Web rows plus some low-engagement GitHub rows, at most *count* in all.
+
+    The GitHub rows get up to half the slots (at least one) and any slots the
+    web rows leave empty. The mixed list then goes through the generic
+    ranking (``_rank_rows``).
+    """
+    web_slots = max(0, count - min(len(github_rows), max(1, count // 2)))
+    merged: List[dict] = []
+    seen = set()
+    for row in web_rows[:web_slots] + github_rows + web_rows[web_slots:]:
+        if len(merged) >= count:
+            break
+        if row.get("url") in seen:
+            continue
+        seen.add(row.get("url"))
+        merged.append(row)
+    return merged
 
 
 def _is_empty_attempt(outcome: str) -> bool:

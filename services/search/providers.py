@@ -12,7 +12,7 @@ from bs4 import BeautifulSoup
 
 from src.constants import SEARXNG_INSTANCE, REQUEST_TIMEOUT, WEB_FETCH_USER_AGENT
 from .analytics import RateLimitError, error_logger
-from .query import build_enhanced_query
+from .query import build_enhanced_query, site_keyword_query
 from .resilience import DeadlineExceeded, out_of_time, request_timeout
 
 logger = logging.getLogger(__name__)
@@ -135,26 +135,44 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 # SEARXNG_GENERAL_ENGINES (comma-separated SearXNG engine names; an empty value
 # sends no pin and lets SearXNG use its enabled general engines).
 #
-# Default pin: yahoo, qwant, wikipedia. Checked against searx/settings.yml and
-# searx/engines/ at searxng 12f8b6515 (the 2026.9.25 image the NAS runs):
+# Default pin: yahoo, brave, wikipedia (wikipedia only on short entity-like
+# queries, see _ENTITY_ONLY_ENGINES). Checked against searx/settings.yml and
+# searx/engines/ at searxng 12f8b6515 (the 2026.9.25 image the NAS runs).
+# Evidence: the 2026-09-28 02:42-03:31 bundle (21 searches, pin
+# yahoo,qwant,wikipedia) and the 2026-09-27 22:55 bundle (pin bing,yahoo).
 #
 # * yahoo  -- ``disabled: true`` (answers when named), scrapes search.yahoo.com
-#   with no key. It already answered from the NAS in the 2026-09-27 bundle.
-# * qwant  -- ``disabled: true``, uses Qwant's keyless JSON API
-#   (api.qwant.com/v3/search/web) and has its own index and ranking on top
-#   of Bing's, so its rows differ from yahoo's. When Qwant answers with a
-#   CAPTCHA or error 24 SearXNG reports it as suspended or "too many
-#   requests", and the cooldown below drops it from the pin.
+#   with no key. It answered from the NAS in both bundles (21/32 calls with
+#   rows on 2026-09-27; 7 rows per ask on 2026-09-28). It returned 0 rows for
+#   a ``site:github.com/<owner>/<repo>`` query, so searxng_search_api sends
+#   the operator as plain keywords (query.site_keyword_query).
+# * brave  -- enabled by default, scrapes search.brave.com with no key
+#   (``require_api_key: False``). When the 2026-09-28 pin came back empty,
+#   SearXNG's defaults ran and brave returned 20 rows, 14 of which passed the
+#   relevance gate. On 2026-09-27 it reported "too many requests" on 365 of
+#   366 requests, but those were five research workers sending every query
+#   to every default engine at once. Now it gets one paced request per
+#   search, and when it reports "too many requests" or a CAPTCHA the
+#   cooldown below leaves it out for SEARXNG_ENGINE_COOLDOWN_SECONDS while
+#   yahoo carries on.
 # * wikipedia -- enabled by default. It makes one REST summary lookup by
-#   exact title, so it adds an authoritative row for entity queries ("pgvector",
-#   "LlamaIndex"). An unknown title is an HTTP 404 that the engine treats as
-#   "no result", not as an error.
+#   exact title (the query, title-cased), so it can only answer a query that
+#   *is* an article title ("pgvector", "Vector database"). With the default
+#   ``display_type: ["infobox"]`` the hit arrives in the JSON ``infoboxes``
+#   list, not in ``results``. That is why it showed "0 rows" on all 3 asks on
+#   2026-09-28. searxng_search_api now reads infoboxes too (_infobox_rows).
+#   It is only asked for short entity-like queries: a 10-word keyword list is
+#   never a title.
 #
 # Left out, and why:
-# * bing -- answered, but in the 2026-09-27 22:55 bundle its rows were
-#   off-topic. The relevance gate dropped most of them (host[bing]:0/1).
-# * brave, duckduckgo, google cse -- rate-limited, timing out or suspended
-#   from the NAS (see above). google (``disabled: true``) serves CAPTCHAs to
+# * qwant -- ``disabled: true``, keyless JSON API. Its first reply from the NAS
+#   on 2026-09-28 was a CAPTCHA (cooled down 300 s), so from a residential IP
+#   it answers nothing. Operators on other IPs can add it back through
+#   SEARXNG_GENERAL_ENGINES.
+# * bing -- answered 32/32 calls on 2026-09-27, but the relevance gate
+#   dropped nearly all of its rows (junk single-word matches).
+# * duckduckgo, google cse -- CAPTCHA, timeouts or "too many requests" from
+#   the NAS in both bundles. google (``disabled: true``) serves CAPTCHAs to
 #   scrapers from a residential IP under parallel load.
 # * startpage, mojeek, dogpile, marginalia, yahoo news -- ``inactive: true``
 #   on this image, so SearXNG does not load them. presearch no longer exists.
@@ -168,7 +186,14 @@ _NEWS_HINTS = ("news", "nyheter", "headlines", "breaking", "latest", "today", "i
 # ``engines=bing,mojeek,presearch&categories=general`` request reached all of
 # the rate-limited defaults on every query. mojeek is inactive and presearch
 # no longer exists on current images, so that pin was really "bing + defaults".
-_DEFAULT_GENERAL_ENGINES = "yahoo,qwant,wikipedia"
+_DEFAULT_GENERAL_ENGINES = "yahoo,brave,wikipedia"
+
+# Engines that look up one article by exact title. They are asked only when
+# the query could be a title (at most _ENTITY_MAX_WORDS words, no site:
+# scope). They do not count as a working pin by themselves: when every other
+# pinned engine is cooling down, SearXNG's defaults are used instead.
+_ENTITY_ONLY_ENGINES = frozenset({"wikipedia", "wikidata"})
+_ENTITY_MAX_WORDS = 3
 
 # Engine names that cannot answer on searxng 2026.9.25: ``inactive: true``
 # engines are not loaded at all and presearch was removed. Naming one in the
@@ -223,17 +248,49 @@ def _engine_cooldown_key(engine: str) -> str:
     return f"searxng engine {engine}"
 
 
-def _active_general_engines() -> tuple:
+def _entity_like(query: Optional[str]) -> bool:
+    """True when *query* could be an encyclopedia article title.
+
+    At most ``_ENTITY_MAX_WORDS`` words, no search operators. ``pgvector``,
+    ``Vector database`` and ``Retrieval-augmented generation`` qualify;
+    ``pgvector hybrid search benchmark recall`` does not.
+    """
+    if not isinstance(query, str) or not query.strip():
+        return False
+    if re.search(r"\b[a-z]+:\S", query, flags=re.I):
+        return False
+    words = [w for w in re.split(r"\s+", query.strip()) if re.search(r"\w", w)]
+    return 0 < len(words) <= _ENTITY_MAX_WORDS
+
+
+def _active_general_engines(entity_lookup: bool = True) -> tuple:
     """Return ``(pin, all_cooling)``: the configured pin minus cooling engines.
 
-    ``all_cooling`` is True when a pin is configured but every engine in it is
-    cooling down -- the caller then asks SearXNG's own defaults instead.
+    Title-lookup engines (``_ENTITY_ONLY_ENGINES``) stay in the pin only when
+    *entity_lookup* is True (the query could be an article title, see
+    ``_entity_like``). ``all_cooling`` is True when a pin is configured but
+    every engine in it that searches the web is cooling down. The caller then
+    asks SearXNG's own defaults instead.
     """
     from .resilience import cooldowns
 
     pinned = _general_engines()
-    active = [e for e in pinned if not cooldowns.is_cooling(_engine_cooldown_key(e))]
-    return active, bool(pinned) and not active
+    active = [
+        e for e in pinned
+        if not cooldowns.is_cooling(_engine_cooldown_key(e))
+        and (entity_lookup or e.casefold() not in _ENTITY_ONLY_ENGINES)
+    ]
+    searching = [e for e in active if e.casefold() not in _ENTITY_ONLY_ENGINES]
+    web_pinned = [e for e in pinned if e.casefold() not in _ENTITY_ONLY_ENGINES]
+    if web_pinned:
+        exhausted = not searching
+    else:
+        # An operator pinned only title-lookup engines: honour that as long
+        # as one of them may be asked.
+        exhausted = bool(pinned) and not active
+    if exhausted:
+        return [], bool(pinned)
+    return active, False
 
 
 def _note_unresponsive_engines(unresponsive) -> None:
@@ -265,6 +322,36 @@ def _engine_tally(results) -> str:
     return ", ".join(f"{k}={v}" for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
 
 
+def _infobox_rows(infoboxes) -> List[dict]:
+    """SearXNG ``infoboxes`` entries as result-shaped rows.
+
+    The wikipedia engine's default ``display_type: ["infobox"]`` puts its hit
+    here (``{"infobox": title, "id": url, "content": extract, "urls": [...]}``),
+    so reading only ``results`` made it look as if it never answered.
+    """
+    rows: List[dict] = []
+    for box in infoboxes or []:
+        if not isinstance(box, dict):
+            continue
+        url = box.get("id") if isinstance(box.get("id"), str) else ""
+        if not url.startswith(("http://", "https://")):
+            url = ""
+            for link in box.get("urls") or []:
+                if isinstance(link, dict) and str(link.get("url") or "").startswith(("http://", "https://")):
+                    url = link["url"]
+                    break
+        if not url:
+            continue
+        engines = box.get("engines") or ([box["engine"]] if box.get("engine") else [])
+        rows.append({
+            "title": box.get("infobox") or "",
+            "url": url,
+            "content": str(box.get("content") or "")[:500],
+            "engines": list(engines),
+        })
+    return rows
+
+
 def searxng_search_api(query: str, count: Optional[int] = None, categories: str = "general",
                        time_filter: Optional[str] = None) -> List[dict]:
     """Search using SearXNG JSON API. Returns list of {title, url, snippet, engine}."""
@@ -274,7 +361,24 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
     headers = {"User-Agent": WEB_FETCH_USER_AGENT}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    pinned_engines, pin_exhausted = _active_general_engines()
+    q_lc = query.lower()
+    # A `site:` query is a lookup on a known site (docs, a standard, a
+    # licence page) — the news category has nothing for it and every such
+    # query used to pay a wasted news round-trip before the general retry.
+    # Likewise `time_filter="year"` is a "prefer recent" hint the agent puts
+    # on ordinary lookups, not a news signal: only day/week/month or a news
+    # word in the query switches category.
+    scoped_to_site = bool(re.search(r"\bsite:\S+", q_lc))
+    # The engines behind SearXNG ignore `site:` (off-domain rows) or answer
+    # nothing at all (yahoo: 0 rows for `site:github.com/<owner>/<repo>`), so
+    # the operator goes out as plain words: the subject, `owner/repo`, the
+    # host. core._call_provider keeps the on-domain rows.
+    engine_query = site_keyword_query(query) if scoped_to_site else query
+    if engine_query != query:
+        logger.info("SearXNG: sending %r as %r (site: operator as keywords)", query, engine_query)
+    pinned_engines, pin_exhausted = _active_general_engines(
+        entity_lookup=not scoped_to_site and _entity_like(engine_query)
+    )
     pinned_param = ",".join(pinned_engines)
     # News/fresh queries do badly in the 'general' category — it favours
     # encyclopedic/tourism pages, ignores recency, and (with no language pin)
@@ -287,19 +391,11 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
     # "Odyssey" → Honda Japan, "Trojan" → Japanese malware blogs, "Polyphemus"
     # → Chinese math forums). The news path already did this; general didn't.
     params = {
-        "q": query,
+        "q": engine_query,
         "format": "json",
         "language": "en",
         "safesearch": _safesearch_for("searxng"),
     }
-    q_lc = query.lower()
-    # A `site:` query is a lookup on a known site (docs, a standard, a
-    # licence page) — the news category has nothing for it and every such
-    # query used to pay a wasted news round-trip before the general retry.
-    # Likewise `time_filter="year"` is a "prefer recent" hint the agent puts
-    # on ordinary lookups, not a news signal: only day/week/month or a news
-    # word in the query switches category.
-    scoped_to_site = bool(re.search(r"\bsite:\S+", q_lc))
     is_news = not scoped_to_site and (
         time_filter in ("day", "week", "month") or any(h in q_lc for h in _NEWS_HINTS)
     )
@@ -332,11 +428,13 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
     try:
         def _parse_results(results):
             parsed = []
+            seen_urls = set()
             for r in results:
                 if len(parsed) >= count:
                     break
-                if not isinstance(r, dict) or not r.get("url"):
+                if not isinstance(r, dict) or not r.get("url") or r["url"] in seen_urls:
                     continue
+                seen_urls.add(r["url"])
                 engines = r.get("engines") or ([r["engine"]] if r.get("engine") else [])
                 parsed.append({
                     "title": r.get("title", ""),
@@ -347,6 +445,11 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
                     "engine": ",".join(str(e) for e in engines),
                 })
             return parsed
+
+        def _rows_of(data):
+            # Infobox hits first: wikipedia's (and wikidata's) article for an
+            # entity query arrives in `infoboxes`, not in `results`.
+            return _infobox_rows(data.get("infoboxes")) + list(data.get("results", []) or [])
 
         def _run(search_params):
             # Every attempt below (news -> general -> no language -> SearXNG
@@ -362,11 +465,11 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             data = response.json()
             if not isinstance(data, dict):
                 data = {}
-            raw_rows = data.get("results", []) or []
+            raw_rows = _rows_of(data)
             _note_unresponsive_engines(data.get("unresponsive_engines"))
             logger.info(
                 "SearXNG answered %d row(s) for %r (engines: %s; asked: %s)",
-                len(raw_rows), query, _engine_tally(raw_rows) or "none",
+                len(raw_rows), engine_query, _engine_tally(raw_rows) or "none",
                 search_params.get("engines") or f"categories={search_params.get('categories')}",
             )
             return _parse_results(raw_rows), data
@@ -378,7 +481,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
             # Fall back to the known-good general engines before reporting an
             # empty search, otherwise common queries like "Canada news" fail.
             fallback = {
-                "q": query,
+                "q": engine_query,
                 "format": "json",
                 "language": "en",
                 "safesearch": _safesearch_for("searxng"),
@@ -426,7 +529,7 @@ def searxng_search_api(query: str, count: Optional[int] = None, categories: str 
         logger.warning(f"SearXNG JSON API search failed: {e}")
         if out_of_time():
             return []
-        html_results = searxng_search(query, max_results=count)
+        html_results = searxng_search(engine_query, max_results=count)
         if html_results:
             logger.info(f"SearXNG HTML fallback returned {len(html_results)} results for: {query}")
         return html_results
@@ -566,8 +669,69 @@ def _gh_age_days(stamp, now) -> Optional[float]:
     return max(0.0, (now - when).total_seconds() / 86400.0)
 
 
-def _github_issue_score(item: dict, terms: List[str], position: int, total: int, now) -> float:
-    """Relevance of one GitHub search item to the query *terms* (higher first)."""
+# Repo-less GitHub queries ("GitHub issue <subject>", site:github.com/issues
+# ...) search every public repository, and GitHub ANDs the terms, so a tiny
+# personal repo whose own issue tracker happens to use the same words matches
+# as well as a real project. On 2026-09-28 DGAFP/assistant-rh#471,
+# fpt/rs-gallium#289 and Early-Bird-Solutions-LLC/PinballWizard#588 -- tiny
+# repos, no engagement -- ranked high and one of them became a headline
+# finding in a research report. The search response has no star count (only
+# ``repository_url``; a stars lookup would cost one more API call per
+# repository against a 10-30/minute quota), so the quality signals are the
+# ones each item carries plus how many hits share a repository:
+#
+# * engagement (reactions + comments) weighs more than on a repository search;
+# * a repository with several matching issues gets a small bonus (the topic
+#   recurs there), a single hit gets none;
+# * an issue its repository's owner filed that nobody answered, or one a bot
+#   opened, loses a little;
+# * below the engagement floor (_GH_MIN_ENGAGEMENT) an issue is "low signal":
+#   it is sorted after every issue that has engagement, whatever its text
+#   score, and single-hit repositories come last. Its row carries
+#   ``low_signal: True`` so the chain can add web results when GitHub found
+#   nothing better (core._run_chain).
+#
+# Repository-scoped queries (``repo:owner/name``) keep the plain ranking: every
+# row comes from the repository the model asked about.
+_GH_MIN_ENGAGEMENT = 1
+_GH_REPOLESS_WEIGHTS = {
+    "engagement": 1.25,    # replaces _GH_WEIGHTS["engagement"]
+    "repo_breadth": 0.3,   # several hits in one repository (saturates at 4)
+    "solo_owner": -0.4,    # the owner filed it, no reactions or comments
+    "bot": -0.4,           # opened by a bot account
+}
+
+
+def _gh_activity(item: dict) -> int:
+    """Reactions plus comments of a GitHub search item (0 when malformed)."""
+    reactions = item.get("reactions") if isinstance(item.get("reactions"), dict) else {}
+    try:
+        reacted = max(0, int(reactions.get("total_count") or 0))
+    except (TypeError, ValueError):
+        reacted = 0
+    try:
+        commented = max(0, int(item.get("comments") or 0))
+    except (TypeError, ValueError):
+        commented = 0
+    return reacted + commented
+
+
+def _gh_repo_key(item: dict) -> str:
+    repo_url = str(item.get("repository_url") or "")
+    if "/repos/" in repo_url:
+        return repo_url.split("/repos/", 1)[1].casefold()
+    match = re.match(r"https?://github\.com/([^/]+/[^/]+)/", str(item.get("html_url") or ""), flags=re.I)
+    return match.group(1).casefold() if match else ""
+
+
+def _github_issue_score(item: dict, terms: List[str], position: int, total: int, now,
+                        repo_hits: Optional[int] = None) -> float:
+    """Relevance of one GitHub search item to the query *terms* (higher first).
+
+    *repo_hits* is given for repository-less searches only: how many items in
+    the result set share this item's repository. It switches on the quality
+    weighting described above ``_GH_MIN_ENGAGEMENT``.
+    """
     import math
 
     w = _GH_WEIGHTS
@@ -590,15 +754,20 @@ def _github_issue_score(item: dict, terms: List[str], position: int, total: int,
     age = _gh_age_days(item.get("updated_at") or item.get("created_at"), now)
     if age is not None:
         score += w["recency"] * 0.5 ** (age / _GH_RECENCY_HALF_LIFE_DAYS)
-    reactions = item.get("reactions") if isinstance(item.get("reactions"), dict) else {}
-    try:
-        activity = int(reactions.get("total_count") or 0) + int(item.get("comments") or 0)
-    except (TypeError, ValueError):
-        activity = 0
+    activity = _gh_activity(item)
+    engagement_weight = w["engagement"] if repo_hits is None else _GH_REPOLESS_WEIGHTS["engagement"]
     if activity > 0:
-        score += w["engagement"] * min(
+        score += engagement_weight * min(
             1.0, math.log1p(activity) / math.log1p(_GH_ENGAGEMENT_SATURATION)
         )
+    if repo_hits is not None:
+        rw = _GH_REPOLESS_WEIGHTS
+        score += rw["repo_breadth"] * min(1.0, max(0, repo_hits - 1) / 3.0)
+        user = item.get("user") if isinstance(item.get("user"), dict) else {}
+        if str(user.get("type") or "").casefold() == "bot":
+            score += rw["bot"]
+        elif activity == 0 and str(item.get("author_association") or "").upper() == "OWNER":
+            score += rw["solo_owner"]
     if total > 1:
         score += w["position"] * (1.0 - position / (total - 1))
     elif total == 1:
@@ -606,26 +775,54 @@ def _github_issue_score(item: dict, terms: List[str], position: int, total: int,
     return score
 
 
-def rank_github_issues(items, terms: List[str], now=None) -> List[dict]:
+def _gh_low_signal(item: dict) -> bool:
+    """Below the engagement floor: nobody reacted to or commented on it."""
+    return _gh_activity(item) < _GH_MIN_ENGAGEMENT
+
+
+def rank_github_issues(items, terms: List[str], now=None, repo_scoped: bool = True) -> List[dict]:
     """GitHub search *items* ordered by :func:`_github_issue_score`.
 
-    Ties keep GitHub's order (the sort is stable).
+    With ``repo_scoped=False`` (a search across all of GitHub) issues below
+    the engagement floor are sorted after every engaged issue, and among
+    them issues from repositories with a single hit come last; see the
+    comment above ``_GH_MIN_ENGAGEMENT``. Ties keep GitHub's order (the sort
+    is stable).
     """
     from datetime import datetime, timezone
 
     now = now or datetime.now(timezone.utc)
     usable = [it for it in (items or []) if isinstance(it, dict) and it.get("html_url")]
+    hits: dict = {}
+    if not repo_scoped:
+        for it in usable:
+            key = _gh_repo_key(it)
+            hits[key] = hits.get(key, 0) + 1
+
+    def tier(it) -> int:
+        if repo_scoped or not _gh_low_signal(it):
+            return 0
+        return 1 if hits.get(_gh_repo_key(it), 0) > 1 else 2
+
     scored = [
-        (_github_issue_score(it, terms, i, len(usable), now), it)
+        (tier(it),
+         _github_issue_score(it, terms, i, len(usable), now,
+                             None if repo_scoped else hits.get(_gh_repo_key(it), 1)),
+         it)
         for i, it in enumerate(usable)
     ]
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    return [it for _, it in scored]
+    scored.sort(key=lambda entry: (entry[0], -entry[1]))
+    return [it for _, _, it in scored]
 
 
-def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now=None) -> List[dict]:
+def _gh_count_label(n: int, noun: str) -> str:
+    return f"{n} {noun}{'' if n == 1 else 's'}"
+
+
+def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now=None,
+                       repo_scoped: bool = True) -> List[dict]:
     rows = []
-    for item in rank_github_issues(items, list(terms or []), now=now):
+    for item in rank_github_issues(items, list(terms or []), now=now, repo_scoped=repo_scoped):
         repo = ""
         repo_url = item.get("repository_url") or ""
         if "/repos/" in repo_url:
@@ -637,16 +834,29 @@ def _github_issue_rows(items, count: int, terms: Optional[List[str]] = None, now
         label = f"{title} · {kind} #{number}" if number is not None else title
         if repo:
             label += f" · {repo}"
-        if state:
-            label += f" ({state})"
+        details = [str(state)] if state else []
+        if not repo_scoped:
+            # Across all of GitHub the model should see how much attention an
+            # issue got before treating it as evidence.
+            comments = item.get("comments") if isinstance(item.get("comments"), int) else 0
+            reactions = item.get("reactions") if isinstance(item.get("reactions"), dict) else {}
+            reacted = reactions.get("total_count") if isinstance(reactions.get("total_count"), int) else 0
+            details.append(_gh_count_label(comments, "comment"))
+            if reacted:
+                details.append(_gh_count_label(reacted, "reaction"))
+        if details:
+            label += f" ({', '.join(details)})"
         body = re.sub(r"\s+", " ", str(item.get("body") or "")).strip()
-        rows.append({
+        row = {
             "title": label,
             "url": item["html_url"],
             "snippet": body[:_GITHUB_SNIPPET_CHARS],
             "age": str(item.get("updated_at") or "")[:10],
             "engine": "github",
-        })
+        }
+        if not repo_scoped and _gh_low_signal(item):
+            row["low_signal"] = True
+        rows.append(row)
         if len(rows) >= count:
             break
     return rows
@@ -713,8 +923,11 @@ def github_issue_search(query: str, count: Optional[int] = None, time_filter: Op
         except (httpx.HTTPError, ValueError) as e:
             logger.warning("GitHub issue search failed for %r: %s", q, e)
             return []
-        rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count, attempt)
-        logger.info("GitHub issue search %r returned %d row(s)", q, len(rows))
+        rows = _github_issue_rows(data.get("items") if isinstance(data, dict) else None, count, attempt,
+                                  repo_scoped=bool(scope.get("repo")))
+        low = sum(1 for r in rows if r.get("low_signal"))
+        logger.info("GitHub issue search %r returned %d row(s)%s", q, len(rows),
+                    f" ({low} with no comments or reactions)" if low else "")
         if rows:
             return rows
     return []

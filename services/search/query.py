@@ -73,6 +73,43 @@ def _extract_site_filter(query: str) -> Tuple[str, Optional[str]]:
     return query, None
 
 
+_KEYWORD_CODE_HOSTS = {"github.com", "gitlab.com", "codeberg.org", "bitbucket.org"}
+_KEYWORD_CODE_HOST_RESERVED = {
+    "issues", "pulls", "pull", "search", "topics", "orgs", "explore",
+    "marketplace", "discussions", "notifications", "features", "sponsors",
+}
+
+
+def site_keyword_query(query: str) -> str:
+    """*query* with its ``site:`` operator turned into plain keywords.
+
+    ``site:github.com/weaviate/weaviate/issues stale vectors`` becomes
+    ``stale vectors weaviate/weaviate github.com``: the remaining words, then
+    ``owner/repo`` for a code-host repository path, then the host. Engines
+    behind SearXNG ignore the operator (off-domain rows) or answer nothing at
+    all (yahoo returned 0 rows for a ``site:github.com/<owner>/<repo>``
+    query); the host and repository as words steer them to the right pages,
+    and the caller filters rows by domain afterwards. A query without the
+    operator is returned unchanged.
+    """
+    rest, site = _extract_site_filter(query)
+    if not site:
+        return query if isinstance(query, str) else ""
+    bare = re.sub(r"^[a-z][a-z0-9+.-]*://", "", site.strip(), flags=re.I)
+    host, _, path = bare.partition("/")
+    host = host.split("?", 1)[0].strip(".").lower()
+    if host.startswith("*."):
+        host = host[2:]
+    if host.startswith("www.") and host[4:] in _KEYWORD_CODE_HOSTS:
+        host = host[4:]
+    segments = [s for s in path.split("?", 1)[0].split("#", 1)[0].split("/") if s]
+    repo = ""
+    if (host in _KEYWORD_CODE_HOSTS and len(segments) >= 2
+            and segments[0].lower() not in _KEYWORD_CODE_HOST_RESERVED):
+        repo = f"{segments[0]}/{segments[1]}"
+    return " ".join(part for part in (rest.strip(), repo, host) if part).strip()
+
+
 # ----------------------------------------------------------------------
 # Simplified retry query
 # ----------------------------------------------------------------------
