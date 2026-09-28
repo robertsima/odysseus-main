@@ -27,6 +27,7 @@ from src.agent_loop import (
     _harness_directive,
     _pinned_policy_toolset,
     _reassert_pinned_toolset,
+    _spoken_user_text,
     _tool_schemas_for_round,
     apply_terminus_toolset,
     document_tools_to_drop,
@@ -836,6 +837,25 @@ def test_a_passing_mention_does_not_open_the_delegation_gate(text):
     log containing it is not. This is a policy gate, so the case it cannot read
     as an instruction goes in the restrictive bucket."""
     assert _delegation_gated_tools("explicit", text) == set(_DELEGATION_TOOLS)
+
+
+@pytest.mark.parametrize("text", [
+    "[tool-rag] dropped 1 selected tool(s) the chat's policy disables: ['manage_agent_loadout']",
+    "[agent-intent] latest='use manage_agent_loadout'",
+    "[a] manage_agent_loadout is odd\n[b] and so is this",
+])
+def test_log_shaped_tag_lines_are_still_pasted_text(text):
+    assert "manage_agent_loadout" not in _spoken_user_text(text)
+
+
+def test_a_leading_tag_on_a_sentence_is_still_the_user_speaking():
+    """2026-09-28: "[e2e-admin] Have the Lead Engineer ..." had its whole line
+    cut as a pasted log, the loadout name went with it, and the delegation
+    gate refused the start the user had asked for."""
+    for text in ("[urgent] use manage_agent_loadout to start the Lead Engineer",
+                 "[e2e-admin] Have the Lead Engineer add double(x); use manage_agent_loadout"):
+        assert "manage_agent_loadout" in _spoken_user_text(text)
+        assert "manage_agent_loadout" not in _delegation_gated_tools("explicit", text)
 
 
 # ── A pinned role's MCP tools ──────────────────────────────────────────────

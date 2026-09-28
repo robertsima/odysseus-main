@@ -1733,17 +1733,31 @@ _PASTED_LOG_LINE_RE = re.compile(
     r"^[ \t]*(?:"
     r"\d{1,2}:\d{2}(?::\d{2})?(?:[.,]\d+)?"          # 21:45:30
     r"|\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2})?"        # 2026-09-23 21:45
-    r"|\[[A-Za-z0-9_.:+-]{1,40}\]"                   # [tool-rag]
     r"|(?:DEBUG|INFO|WARN|WARNING|ERROR|CRITICAL|TRACE)\b"
     r").*$",
     re.MULTILINE,
 )
+# A `[tag]` at the start of a line is a pasted harness log line
+# (`[tool-rag] dropped ... ['manage_agent_loadout']`) only when the line reads
+# like one, or when several such lines arrive together. A lone "[urgent] have
+# the Lead Engineer ..." is the user talking: on 2026-09-28 the end-to-end run's
+# "[e2e-admin] Have the Lead Engineer ..." lost the loadout name to this strip,
+# and the delegation gate then refused the start it had asked for.
+_TAG_LINE_RE = re.compile(r"^[ \t]*\[[A-Za-z0-9_.:+-]{1,40}\].*$", re.MULTILINE)
+_LOG_SHAPE_RE = re.compile(r"\w=\S|\['|->|exit_code|\b\d{1,2}:\d{2}:\d{2}\b")
+
+
+def _strip_pasted_tag_lines(text: str) -> str:
+    if len(_TAG_LINE_RE.findall(text)) >= 2:
+        return _TAG_LINE_RE.sub(" ", text)
+    return _TAG_LINE_RE.sub(lambda m: " " if _LOG_SHAPE_RE.search(m.group(0)) else m.group(0), text)
 
 
 def _spoken_user_text(text: str) -> str:
     """The part of a user turn the user is saying, with quoted/pasted parts cut."""
     out = _QUOTED_FENCE_RE.sub(" ", str(text or ""))
     out = _PASTED_LOG_LINE_RE.sub(" ", out)
+    out = _strip_pasted_tag_lines(out)
     return _QUOTED_LINE_RE.sub(" ", out)
 
 
