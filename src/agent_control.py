@@ -617,14 +617,17 @@ async def stop_chat_work(session_id: str, *, by: str = "from the chat's Stop but
     They run without a chat stream (a loadout's child chat, a worker, a
     background follow-up), so the chat Stop found nothing to cancel: on
     2026-09-29 five Stops on a Planning Command Center worker's chat all
-    answered "Nothing to stop" while it kept going. Returns how many stopped.
+    answered "Nothing to stop" while it kept going. The chat that started a
+    worker counts too: once its own turn has ended, Stop there means the work
+    it launched. Returns how many stopped.
     """
     stopped = 0
     for rec in activity.list_runs(limit=200, active_only=True):
         if rec.get("source") == "odysseus" or rec.get("status") != "running":
             continue
         summary = rec.get("summary") or {}
-        if session_id not in (rec.get("session_id"), summary.get("target_session")):
+        if session_id not in (rec.get("session_id"), summary.get("target_session"),
+                              summary.get("parent_session")):
             continue
         try:
             if (await stop_run(rec["run_id"], by=by)).get("stopped"):

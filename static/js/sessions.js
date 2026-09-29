@@ -2580,7 +2580,10 @@ function _updateResearchDots() {
     if (listItem) {
       listItem.classList.toggle('stream-complete', isCompleted);
       listItem.classList.toggle('session-running', isRunning);
-      _decorateRunRow(listItem, sid, isRunning && !_researchingSessions.has(sid));
+      // Stoppable while the chat runs, and while agents it started run after
+      // its own turn ended (Stop there stops them: agent_control.stop_chat_work).
+      _decorateRunRow(listItem, sid,
+        (isRunning || (_serverAgents.get(sid) || 0) > 0) && !_researchingSessions.has(sid));
     }
 
     if (isRunning || isCompleted) {

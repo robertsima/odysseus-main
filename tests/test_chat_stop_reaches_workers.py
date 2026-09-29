@@ -49,6 +49,13 @@ async def test_stop_reaches_a_sub_agent_working_in_a_child_chat(stopped):
 
 
 @pytest.mark.asyncio
+async def test_stop_on_the_chat_that_started_a_worker_stops_it(stopped):
+    # parent-chat's own turn has ended; its worker is still running.
+    assert await agent_control.stop_chat_work("parent-chat") == 2
+    assert sorted(run for run, _ in stopped) == ["sub-1", "worker-1"]
+
+
+@pytest.mark.asyncio
 async def test_nothing_running_in_the_chat_stops_nothing(stopped):
     assert await agent_control.stop_chat_work("quiet-chat") == 0
     assert stopped == []
