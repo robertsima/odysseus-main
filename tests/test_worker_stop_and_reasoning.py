@@ -100,4 +100,6 @@ def test_agent_cards_are_restored_after_the_chat_re_renders():
     sessions = (ROOT / "static/js/sessions.js").read_text(encoding="utf-8")
     assert "odysseus:history-rendered" in sessions and "odysseus:history-rendered" in wb
     restore = wb.split("function restoreChatCards()", 1)[1].split("\nfunction ", 1)[0]
-    assert "!card.isConnected" in restore and "isLive(run.status)" in restore
+    assert "card.isConnected" in restore and "isLive(run.status)" in restore
+    # Re-attached in time order, not below everything (test_agent_card_order).
+    assert "cardAnchor(hist" in restore

@@ -278,6 +278,11 @@ const _streamingSessions = new Set();   // Background chat streams (not polled a
 const _completedSessions = new Set();   // Sessions with completed background streams
 const _serverRunning = new Set();       // Chats the server reports as working (see _pollServerRuns)
 const _serverBackgroundRunning = new Set(); // ...of those, working on a run this tab did not stream (worker, sub-agent)
+// The server clock at the last runs poll, and the chat open then: a background
+// run that finished after it, in the same chat, is one this tab may never have
+// seen running.
+let _lastRunsPollNow = null;
+let _lastRunsPollSession = null;
 const _serverAgents = new Map();        // session id -> sub-agents / jobs running
 let _researchPollTimer = null;
 
@@ -2764,7 +2769,16 @@ async function _pollServerRuns() {
     // server-side run in this chat ends.
     // Only background runs count; the tab's own streamed turns already render.
     const cur = currentSessionId;
-    if (cur && _serverBackgroundRunning.has(cur) && !running.has(cur)) {
+    // A background run can also start and end between two polls: a follow-up
+    // after a worker takes a second with a fast model. It was never seen
+    // running, so its reply stayed hidden until the chat was reopened.
+    const prevNow = _lastRunsPollSession === cur ? _lastRunsPollNow : null;
+    _lastRunsPollNow = typeof data.now === 'number' ? data.now : null;
+    _lastRunsPollSession = cur;
+    const finishedUnseen = prevNow != null && (data.runs || []).some((run) =>
+      run.session_id === cur && run.source && run.source !== 'chat' && run.status !== 'running'
+      && Number(run.finished_at) > prevNow);
+    if (cur && (_serverBackgroundRunning.has(cur) || finishedUnseen) && !running.has(cur)) {
       _serverBackgroundRunning.delete(cur);
       if (!window.chatModule?.hasActiveStream?.(cur)) {
         selectSession(cur, { keepSidebar: true, showLoading: false }).catch(() => {});

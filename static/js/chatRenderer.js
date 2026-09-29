@@ -2729,6 +2729,9 @@ export function addMessage(role, content, modelName, metadata) {
           wrap.appendChild(body);
           wrap.dataset.raw = txt;
           if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
+          // When the message was saved; agent run cards (workbench.js) are
+          // put back in time order against it after a re-render.
+          if (metadata?.timestamp) wrap.dataset.ts = metadata.timestamp;
           box.appendChild(wrap);
           lastWrap = wrap;
           if (!firstMsgAi) firstMsgAi = wrap;
@@ -2924,6 +2927,7 @@ export function addMessage(role, content, modelName, metadata) {
 
 	    wrap.dataset.raw = text;
 	    if (metadata?._db_id) wrap.dataset.dbId = metadata._db_id;
+	    if (metadata?.timestamp) wrap.dataset.ts = metadata.timestamp;
 	    if (metadata?.steer_id) wrap.dataset.steerId = String(metadata.steer_id);
     // Prepend sources box if saved in metadata
     var sourcesPrefix = '';

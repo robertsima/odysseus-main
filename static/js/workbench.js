@@ -1221,8 +1221,10 @@ function chatHistory() { return $('chat-history'); }
  *  left the parent chat with no agent box. */
 function restoreChatCards() {
   const hist = chatHistory(); if (!hist) return;
-  for (const card of state.chatCards.values()) {
-    if (!card.isConnected) hist.appendChild(card);
+  for (const [runId, card] of state.chatCards) {
+    if (card.isConnected) continue;
+    const before = cardAnchor(hist, state.runs.get(runId));
+    if (before) before.parentNode.insertBefore(card, before); else hist.appendChild(card);
   }
   for (const run of state.runs.values()) {
     if (run.session_id !== state.sessionId || !CHAT_CARD_SOURCES.has(run.source)) continue;
@@ -1243,6 +1245,33 @@ function restoreChatCards() {
       status: row.status, started_at: row.started_at, finished_at: null, events: [], data: { ...(row.summary || {}) }, tools: 0, errors: 0 });
     updateChatCard({ run_id: row.run_id, source: row.source, session_id: state.sessionId, kind: 'restore' });
   }
+}
+/** The message a re-attached card goes above, or null for the end.
+ *
+ *  The chat re-renders when a background run in it ends (sessions.js), and
+ *  the cards were re-appended below everything: a worker's card, still
+ *  showing it running then finishing, landed under the reply the chat wrote
+ *  after reading the worker's result. A worker this chat started goes just
+ *  above the result it handed back; any other run ran inside a turn of this
+ *  chat and goes above that turn's reply, which is saved when the turn ends. */
+function cardAnchor(hist, run) {
+  if (!run) return null;
+  // A run first seen through a "→ worker" message on this chat's feed has no
+  // run_started data here; the server's run list has its lineage.
+  const row = state.agentRuns.get(run.run_id) || {};
+  const d = { ...(row.summary || {}), ...(run.data || {}) };
+  const started = Number(run.started_at || row.started_at) || 0;
+  const savedAt = (m) => Date.parse(m.dataset.ts || '') / 1000;
+  if (d.parent_session === state.sessionId && d.target_session) {
+    for (const m of hist.querySelectorAll('.msg-worker-result')) {
+      if (m.dataset.fromSession === String(d.target_session) && !(savedAt(m) < started)) return m;
+    }
+  }
+  if (!started) return null;
+  for (const m of hist.querySelectorAll('.msg[data-ts]')) {
+    if (savedAt(m) > started) return m;
+  }
+  return null;
 }
 function refreshCardTitle(run) {
   const title = state.chatCards.get(run.run_id)?.querySelector('.agent-run-title');
