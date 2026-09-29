@@ -69,6 +69,11 @@ function _personaNameForTurn() {
   let _sendInFlight = false;   // covers the window from click → streaming start
   let _displayOverride = null; // Override visible user bubble text (hides injected prompts)
   let _hideUserBubble = false; // Skip user bubble entirely (e.g. continue after stop)
+  // The existing bubble a regenerate/retry re-sends (no new bubble is drawn),
+  // and the bubble of the turn in flight. The server's user_message_saved id
+  // lands on the latter so edit/regenerate work without a reload.
+  let _keptUserBubble = null;
+  let _turnUserBubble = null;
   // A mid-turn steer is not a normal chat turn: it is an ephemeral composer
   // affordance backed by the steering activity log.  Keep the server-issued
   // id with its bubble so it can leave the pending UI once the loop has
@@ -1966,6 +1971,8 @@ function _personaNameForTurn() {
       if (!skipBubble) {
         _userMsgEl = addMessage('user', userDisplay, null, _pendingAttachInfo ? { attachments: _pendingAttachInfo } : null);
       }
+      _turnUserBubble = _userMsgEl || _keptUserBubble;
+      _keptUserBubble = null;
       _sendPerf.mark('user_bubble_visible');
       messageInput.value = approvalForSend ? (approvalForSend.draft || '') : '';
       messageInput.style.height = '';
@@ -3866,6 +3873,12 @@ function _personaNameForTurn() {
                 // can be edited/deleted immediately, without reloading the chat.
                 if (_isBg) continue;
                 if (holder && json.id) holder.dataset.dbId = json.id;
+
+              } else if (json.type === 'user_message_saved') {
+                // Same for the user's bubble; edit/regenerate delete from it.
+                if (_isBg) continue;
+                if (_turnUserBubble && json.id) _turnUserBubble.dataset.dbId = json.id;
+                _turnUserBubble = null;
 
               } else if (json.type === 'tool_start') {
                 _closeOpenThinkingMarkup(_isBg);
@@ -5869,9 +5882,38 @@ function _personaNameForTurn() {
   }
 
   /**
-   * Regenerate response: truncate history to the user message before this AI message,
-   * then re-submit that user message.
+   * Delete `msgEl` and everything after it from the chat, by stored id.
+   *
+   * The chat renders only the newest page of history, so a bubble's position
+   * on screen is not its position in the chat. Edit, regenerate and retry
+   * used to send that position as keep_count; on 2026-09-29 editing the 22nd
+   * bubble of a 433-message chat kept the first 22 messages and deleted 411.
+   * A bubble without an id yet (sent before the page learned it) is cut after
+   * the nearest saved bubble above it instead. Throws, deleting nothing, when
+   * there is no id to go on.
    */
+  async function _truncateFromBubble(sessionId, allMsgs, index) {
+    const msgEl = allMsgs[index];
+    let body = null;
+    if (msgEl && msgEl.dataset.dbId) {
+      body = { from_message_id: msgEl.dataset.dbId };
+    } else {
+      for (let i = index - 1; i >= 0; i--) {
+        if (allMsgs[i].dataset.dbId) { body = { after_message_id: allMsgs[i].dataset.dbId }; break; }
+      }
+    }
+    if (!body) throw new Error('this message has not finished saving. Reload the chat and try again.');
+    const res = await fetch(`${API_BASE}/api/session/${sessionId}/truncate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.detail || data.error || `HTTP ${res.status}`);
+    }
+  }
+
   /**
    * Edit a user message: show an input, truncate to before it, resubmit the edited text.
    */
@@ -5922,13 +5964,8 @@ function _personaNameForTurn() {
       const sessionId = sessionModule.getCurrentSessionId();
       if (!sessionId) return;
 
-      const keepCount = msgIndex;
       try {
-        await fetch(`${API_BASE}/api/session/${sessionId}/truncate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ keep_count: keepCount })
-        });
+        await _truncateFromBubble(sessionId, allMsgs, msgIndex);
 
         // Remove DOM elements from msgIndex onward
         for (let i = allMsgs.length - 1; i >= msgIndex; i--) {
@@ -6013,12 +6050,10 @@ function _personaNameForTurn() {
       if (replaceFromHere) {
         // Regenerate flows intentionally trim history to this point before
         // resubmitting. The plain "Resend message" action must not do this.
-        const keepCount = msgIndex;
-        await fetch(`${API_BASE}/api/session/${sessionId}/truncate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ keep_count: keepCount })
-        });
+        await _truncateFromBubble(sessionId, allMsgs, msgIndex);
+        // The server deleted this message too and saves the resend as a new
+        // one; its id lands on this kept bubble (user_message_saved).
+        _keptUserBubble = userMsgElement;
 
         // Drop the AI replies after the user message but KEEP the user bubble
         // itself (so its photo stays visible). Then suppress the new user
@@ -6039,6 +6074,7 @@ function _personaNameForTurn() {
       const submitBtn = document.querySelector('.send-btn');
       if (submitBtn) submitBtn.click();
     } catch (err) {
+      _keptUserBubble = null;
       console.error('Resend failed:', err);
       if (uiModule) uiModule.showError('Resend failed: ' + err.message);
     }
@@ -6127,14 +6163,9 @@ function _personaNameForTurn() {
       variants.push({ raw: oldRaw, html: oldHtml, label: 'original' });
     }
 
-    const keepCount = userIndex;
-
     try {
-      await fetch(`${API_BASE}/api/session/${sessionId}/truncate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keep_count: keepCount })
-      });
+      await _truncateFromBubble(sessionId, allMsgs, userIndex);
+      _keptUserBubble = userMsgEl;
 
       for (let i = allMsgs.length - 1; i > aiIndex; i--) {
         allMsgs[i].remove();
@@ -6153,6 +6184,10 @@ function _personaNameForTurn() {
       if (submitBtn) submitBtn.click();
 
     } catch (err) {
+      // Nothing was sent: don't let this regen's attachments or bubble ride
+      // along with the next message.
+      _pendingRegenAttachments = null;
+      _keptUserBubble = null;
       console.error('Regenerate failed:', err);
       if (uiModule) uiModule.showError('Regenerate failed: ' + err.message);
     }
@@ -6303,13 +6338,21 @@ function _personaNameForTurn() {
     const sessionId = sessionModule.getCurrentSessionId();
     if (!sessionId) return;
 
-    const keepCount = aiIndex + 1;
+    // Fork through this reply by its stored id (a position counted on screen
+    // is wrong when older history is not loaded). A reply streamed as several
+    // bubbles carries the id on one of them, so look ahead within the turn.
+    let throughId = '';
+    for (let i = aiIndex; i < allMsgs.length; i++) {
+      if (i > aiIndex && allMsgs[i].classList.contains('msg-user')) break;
+      if (allMsgs[i].dataset.dbId) { throughId = allMsgs[i].dataset.dbId; break; }
+    }
 
     try {
+      if (!throughId) throw new Error('this reply has not finished saving. Reload the chat and try again.');
       const res = await fetch(`${API_BASE}/api/session/${sessionId}/fork`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keep_count: keepCount }),
+        body: JSON.stringify({ through_message_id: throughId }),
       });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();

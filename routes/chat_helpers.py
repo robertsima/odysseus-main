@@ -377,6 +377,10 @@ class ChatContext:
     # retained only when explicit foreground fallbacks are enabled so each
     # concrete candidate can apply its own context budget independently.
     route_messages: list = field(default_factory=list)
+    # Stored id of the user message this turn saved ("" when nothing was
+    # saved). The route sends it to the browser so the new bubble can be
+    # edited or regenerated before the chat is reloaded.
+    user_message_id: str = ""
 
 
 # ── Helpers ────────────────────────────────────────────────────────────── #
@@ -680,12 +684,15 @@ def build_uploaded_file_manifest(att_ids: list, upload_handler, owner: Optional[
 def add_user_message(sess, chat_handler, preprocessed: PreprocessedMessage, incognito: bool = False):
     """Add user message to session history and update session name.
     Incognito messages must not mutate persistent session history, even in
-    memory, because a later normal turn can persist the same session object."""
+    memory, because a later normal turn can persist the same session object.
+    Returns the saved message (None for incognito)."""
     if incognito:
-        return
+        return None
     user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
-    sess.add_message(ChatMessage("user", preprocessed.user_content, metadata=user_meta))
+    user_msg = ChatMessage("user", preprocessed.user_content, metadata=user_meta)
+    sess.add_message(user_msg)
     chat_handler.update_session_name_if_needed(sess, preprocessed.text_for_context)
+    return user_msg
 
 
 def fire_message_event(request, webhook_manager, session_id: str, sess, message: str, compare_mode: bool = False):
@@ -940,11 +947,13 @@ async def build_chat_context(
     # Add user message to history. Nobody/incognito uses a request-local
     # transcript store instead of session history so stale saved chats cannot
     # bleed into context and the turn is not persisted.
+    user_message_id = ""
     if persist_user_message and incognito:
         user_meta = {"attachments": preprocessed.attachment_meta} if preprocessed.attachment_meta else None
         _append_incognito_message(session_id, "user", preprocessed.user_content, user_meta)
     elif persist_user_message:
-        add_user_message(sess, chat_handler, preprocessed, incognito=False)
+        _user_msg = add_user_message(sess, chat_handler, preprocessed, incognito=False)
+        user_message_id = str((getattr(_user_msg, "metadata", None) or {}).get("_db_id") or "")
 
     # Fire events
     if persist_user_message and not incognito:
@@ -1164,6 +1173,7 @@ async def build_chat_context(
         allow_private=allow_private,
         suppress_active_document=suppress_ambient_documents,
         route_messages=route_messages,
+        user_message_id=user_message_id,
     )
 
 

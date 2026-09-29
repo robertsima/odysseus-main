@@ -348,6 +348,104 @@ class SessionManager:
         finally:
             db.close()
 
+    def truncate_from_message(self, session_id: str, message_id: str, *, inclusive: bool = True) -> Optional[int]:
+        """Delete ``message_id`` and every message after it (``inclusive=False``:
+        only the messages after it); return how many were deleted, or None when
+        the message is not in this session.
+
+        Edit, regenerate and retry used to send a keep_count taken from the
+        bubble's position on screen. The chat renders only the newest page of
+        history, so on 2026-09-29 editing the 22nd bubble of a 433-message chat
+        kept the first 22 messages and deleted the other 411. An id cannot be
+        miscounted.
+        """
+        session = self.get_session(session_id)
+        target = str(message_id or "").strip()
+        if not target:
+            return None
+        db = SessionLocal()
+        try:
+            db_messages = db.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id
+            ).order_by(DbChatMessage.timestamp).all()
+            index = next((i for i, m in enumerate(db_messages) if str(m.id) == target), None)
+            if index is None:
+                return None
+            if not inclusive:
+                index += 1
+            doomed = db_messages[index:]
+            doomed_ids = {str(m.id) for m in doomed}
+            for msg in doomed:
+                db.delete(msg)
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session:
+                db_session.message_count = index
+                db_session.updated_at = datetime.now(timezone.utc)
+            db.commit()
+
+            history = list(session.history or [])
+            cut = next(
+                (i for i, m in enumerate(history)
+                 if str((getattr(m, "metadata", None) or {}).get("_db_id") or "") == target),
+                None,
+            )
+            if cut is not None:
+                history = history[:cut if inclusive else cut + 1]
+            else:
+                history = [
+                    m for m in history
+                    if str((getattr(m, "metadata", None) or {}).get("_db_id") or "") not in doomed_ids
+                ]
+            session.history = history
+            session._history = session.history
+            logger.info(f"Truncated session {session_id} from message {target}: deleted {len(doomed)}")
+            return len(doomed)
+        except Exception as e:
+            logger.error(f"Error truncating session {session_id} from message {target}: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
+    def keep_last_messages(self, session_id: str, keep_last: int) -> int:
+        """Delete all but the newest ``keep_last`` messages; return how many were deleted.
+
+        What `/truncate N` promises ("deletes older messages, keeps the last
+        N"); it used to call truncate_messages, which keeps the FIRST N.
+        """
+        session = self.get_session(session_id)
+        keep_last = max(0, int(keep_last))
+        db = SessionLocal()
+        try:
+            db_messages = db.query(DbChatMessage).filter(
+                DbChatMessage.session_id == session_id
+            ).order_by(DbChatMessage.timestamp).all()
+            doomed = db_messages[:max(0, len(db_messages) - keep_last)]
+            doomed_ids = {str(m.id) for m in doomed}
+            for msg in doomed:
+                db.delete(msg)
+            db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
+            if db_session:
+                db_session.message_count = len(db_messages) - len(doomed)
+                db_session.updated_at = datetime.now(timezone.utc)
+            db.commit()
+            history = [
+                m for m in list(session.history or [])
+                if str((getattr(m, "metadata", None) or {}).get("_db_id") or "") not in doomed_ids
+            ]
+            if len(history) > keep_last:
+                history = history[len(history) - keep_last:] if keep_last else []
+            session.history = history
+            session._history = session.history
+            logger.info(f"Kept the last {keep_last} messages of session {session_id}: deleted {len(doomed)}")
+            return len(doomed)
+        except Exception as e:
+            logger.error(f"Error trimming session {session_id} to its last {keep_last}: {e}")
+            db.rollback()
+            raise
+        finally:
+            db.close()
+
     def truncate_messages(self, session_id: str, keep_count: int) -> bool:
         """Truncate session history, keeping only the first `keep_count` messages."""
         session = self.get_session(session_id)

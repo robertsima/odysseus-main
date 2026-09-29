@@ -1122,9 +1122,10 @@ async function _cmdSessionTruncate(args, ctx) {
   const res = await fetch(`${API_BASE}/api/session/${ctx.sid}/truncate`, {
     method: 'POST', credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ keep_count: keep })
+    // The newest N, as the usage line promises (this used to keep the FIRST N).
+    body: JSON.stringify({ keep_last: keep })
   });
-  if (res.ok) { await typewriterReply(`Truncated to ${keep} messages`); }
+  if (res.ok) { await typewriterReply(`Truncated to the last ${keep} messages`); }
   else { slashReply('Truncate failed'); }
   return true;
 }

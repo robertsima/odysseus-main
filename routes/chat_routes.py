@@ -1759,6 +1759,13 @@ def setup_chat_routes(
             if workspace_rejected:
                 yield f"data: {json.dumps({'type': 'workspace_rejected', 'data': {'path': workspace_rejected}})}\n\n"
 
+            # The stored id of the user message just saved, so its bubble can
+            # be edited or regenerated (both delete from that id onward)
+            # without reloading the chat first.
+            _user_msg_id = getattr(ctx, "user_message_id", "")
+            if _user_msg_id:
+                yield f"data: {json.dumps({'type': 'user_message_saved', 'id': _user_msg_id})}\n\n"
+
             if ctx.preprocessed.attachment_meta:
                 yield f"data: {json.dumps({'type': 'attachments', 'data': ctx.preprocessed.attachment_meta})}\n\n"
 

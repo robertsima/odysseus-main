@@ -982,11 +982,15 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                     keep_count = int(value)
                 except ValueError:
                     pass
-            success = _session_manager.truncate_messages(target_sid, keep_count)
-            if success:
-                return {"action": "truncate", "session_id": target_sid,
-                        "results": f"Session truncated to last {keep_count} messages"}
-            return {"error": f"Failed to truncate session '{target_sid}'", "exit_code": 1}
+            # Keep the newest N, as the result has always said. This used to
+            # call truncate_messages, which keeps the FIRST N and deletes the
+            # rest of the conversation.
+            try:
+                deleted = _session_manager.keep_last_messages(target_sid, keep_count)
+            except Exception as e:
+                return {"error": f"Failed to truncate session '{target_sid}': {e}", "exit_code": 1}
+            return {"action": "truncate", "session_id": target_sid,
+                    "results": f"Session truncated to last {keep_count} messages ({deleted} older deleted)"}
 
         elif action == "fork":
             db_sess = _session_query(db).first()

@@ -227,8 +227,12 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 meta = {}
         if m.timestamp and "timestamp" not in meta:
             meta["timestamp"] = m.timestamp.isoformat() + "Z"
-        if meta:
-            entry["metadata"] = meta
+        # The row's own id, always: edit, regenerate, delete and fork address
+        # messages by it. Stored metadata never has the right one (it is
+        # written before the id is stamped, and a forked copy carries its
+        # source's).
+        meta["_db_id"] = m.id
+        entry["metadata"] = meta
         return entry
 
     @router.get("/api/history/{session_id}")
@@ -340,12 +344,34 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
     @router.post("/api/session/{session_id}/truncate")
     async def truncate_session(request: Request, session_id: str):
+        """Delete messages from a chat.
+
+        ``from_message_id``: that message and everything after it (edit,
+        regenerate, retry). ``after_message_id``: only what follows it.
+        ``keep_last``: all but the newest N (``/truncate N``). ``keep_count``
+        (keep the first N) is still accepted, but a count taken from the
+        rendered chat is wrong whenever older history is not loaded, which is
+        how 411 messages were deleted on 2026-09-29.
+        """
         _verify_session_owner(request, session_id)
         try:
             body = await request.json()
+            if body.get("from_message_id") or body.get("after_message_id"):
+                inclusive = bool(body.get("from_message_id"))
+                anchor = str(body.get("from_message_id") or body.get("after_message_id"))
+                deleted = session_manager.truncate_from_message(session_id, anchor, inclusive=inclusive)
+                if deleted is None:
+                    raise HTTPException(404, "That message is not in this chat (reload the chat and try again)")
+                return {"status": "ok", "deleted": deleted, "truncated": True}
+            if body.get("keep_last") is not None:
+                deleted = session_manager.keep_last_messages(session_id, int(body["keep_last"]))
+                return {"status": "ok", "deleted": deleted, "truncated": True}
             keep_count = body.get("keep_count", 0)
+            logger.warning("Truncate of %s by keep_count=%s (position-based)", session_id, keep_count)
             result = session_manager.truncate_messages(session_id, keep_count)
             return {"status": "ok", "kept": keep_count, "truncated": result}
+        except HTTPException:
+            raise
         except KeyError:
             raise HTTPException(404, "Session not found")
         except Exception as e:
@@ -706,6 +732,23 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             if not source:
                 raise HTTPException(404, "Session not found")
 
+            # Copy messages through `through_message_id` (the bubble the user
+            # forked from) or, for /fork N, the first keep_count. The rendered
+            # chat holds only the newest page, so a position counted there
+            # forks from the wrong message.
+            through_id = str((body or {}).get("through_message_id") or "").strip()
+            if through_id:
+                cut = next(
+                    (i for i, m in enumerate(source.history)
+                     if str((getattr(m, "metadata", None) or {}).get("_db_id") or "") == through_id),
+                    None,
+                )
+                if cut is None:
+                    raise HTTPException(404, "That message is not in this chat (reload the chat and try again)")
+                msgs_to_copy = source.history[:cut + 1]
+            else:
+                msgs_to_copy = source.history[:] if keep_count is None else source.history[:max(0, int(keep_count))]
+
             # Create new session
             new_id = str(uuid.uuid4())
             fork_name = f"\u2ADD {source.name}"
@@ -718,8 +761,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
                 owner=getattr(source, 'owner', None),
             )
 
-            # Copy messages up to keep_count
-            msgs_to_copy = source.history[:] if keep_count is None else source.history[:max(0, int(keep_count))]
             for msg in msgs_to_copy:
                 # Copy the metadata dict. Sharing it would let the fork's
                 # persistence (add_message -> _persist_message stamps

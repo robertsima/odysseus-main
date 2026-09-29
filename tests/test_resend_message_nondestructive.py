@@ -27,12 +27,14 @@ def test_resend_message_does_not_truncate_by_default():
     assert "const replaceFromHere = Boolean(opts && opts.replaceFromHere);" in body
 
     guard_idx = body.index("if (replaceFromHere)")
-    truncate_idx = body.index("/api/session/${sessionId}/truncate")
+    # Truncation goes through _truncateFromBubble (by stored message id).
+    truncate_idx = body.index("_truncateFromBubble(")
     hide_idx = body.index("_hideUserBubble = true;")
 
     assert guard_idx < truncate_idx
     assert guard_idx < hide_idx
     assert "/truncate" not in body[:guard_idx]
+    assert "_truncateFromBubble(" not in body[:guard_idx]
     assert "_hideUserBubble = true;" not in body[:guard_idx]
 
 
