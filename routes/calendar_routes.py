@@ -1027,19 +1027,22 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
     # there's no pre-existing CalDAV account to edit — the callback creates or
     # updates one once we know which Google account was authorized.
 
-    @router.get("/oauth/google/authorize")
-    async def calendar_google_oauth_authorize(request: Request):
+    # Sign-in without a public or HTTPS address: Google always accepts a
+    # plain http://localhost redirect, and it is the user's browser, never
+    # Google, that follows it. The browser lands on a localhost page that does
+    # not load, with the one-time code in its address; the user pastes that
+    # address back and /oauth/google/exchange finishes here. Until 2026-09-28
+    # connecting needed a public Tailscale Funnel URL just for this redirect.
+    _GOOGLE_LOOPBACK_REDIRECT = "http://localhost"
+    _GOOGLE_CAL_CALLBACK = "/api/calendar/oauth/google/callback"
+    _GOOGLE_CAL_REDIRECT_ENV = "GOOGLE_CALENDAR_OAUTH_REDIRECT_URI"
+
+    def _google_calendar_auth_url(owner: str, redirect_uri: str) -> str:
         import urllib.parse
         from routes.email_helpers import make_oauth_state
-        owner = _require_user(request)
         client_id = _os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
         if not client_id:
-            raise HTTPException(400, "GOOGLE_OAUTH_CLIENT_ID not set — add it to .env")
-        redirect_uri = (
-            _os.environ.get("GOOGLE_CALENDAR_OAUTH_REDIRECT_URI")
-            or f"http://{request.headers.get('host', 'localhost:7000')}/api/calendar/oauth/google/callback"
-        )
-        state = make_oauth_state("", owner)
+            raise HTTPException(400, "GOOGLE_OAUTH_CLIENT_ID is not set in the container environment")
         params = urllib.parse.urlencode({
             "client_id": client_id,
             "redirect_uri": redirect_uri,
@@ -1047,39 +1050,26 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             "scope": "https://www.googleapis.com/auth/calendar email",
             "access_type": "offline",
             "prompt": "consent",
-            "state": state,
+            "state": make_oauth_state("", owner),
         })
-        from fastapi.responses import RedirectResponse as _RR
-        return _RR(f"https://accounts.google.com/o/oauth2/v2/auth?{params}")
+        return f"https://accounts.google.com/o/oauth2/v2/auth?{params}"
 
-    @router.get("/oauth/google/callback")
-    async def calendar_google_oauth_callback(
-        code: str = Query(None),
-        state: str = Query(None),
-        error: str = Query(None),
-        request: Request = None,
-    ):
+    def _google_calendar_direct_redirect(request: Request) -> tuple:
+        """``(redirect_uri, problem)`` for the redirect-back flow."""
+        from src.oauth_redirect import google_redirect_problem, google_redirect_uri
+        redirect_uri = google_redirect_uri(request, _GOOGLE_CAL_CALLBACK, _GOOGLE_CAL_REDIRECT_ENV)
+        if _os.environ.get(_GOOGLE_CAL_REDIRECT_ENV):
+            return redirect_uri, None  # the operator's explicit choice
+        return redirect_uri, google_redirect_problem(redirect_uri)
+
+    def _finish_google_calendar_oauth(owner: str, code: str, redirect_uri: str) -> tuple:
+        """Exchange ``code`` and save the account. ``(error_code | None, email)``."""
         import time as _time
         import urllib.parse
-        from fastapi.responses import RedirectResponse as _RR
-        from routes.email_helpers import verify_oauth_state
-
-        if error:
-            return _RR("/?section=integrations&calendar_oauth_error=google_error")
-        if not code or not state:
-            return _RR("/?section=integrations&calendar_oauth_error=missing_code")
-        state_data = verify_oauth_state(state)
-        owner = (state_data or {}).get("o", "")
-        if not owner:
-            return _RR("/?section=integrations&calendar_oauth_error=invalid_state")
+        import httpx as _httpx
 
         client_id = _os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
         client_secret = _os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET", "")
-        redirect_uri = (
-            _os.environ.get("GOOGLE_CALENDAR_OAUTH_REDIRECT_URI")
-            or f"http://{request.headers.get('host', 'localhost:7000')}/api/calendar/oauth/google/callback"
-        )
-        import httpx as _httpx
         try:
             resp = _httpx.post("https://oauth2.googleapis.com/token", data={
                 "code": code,
@@ -1092,7 +1082,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             data = resp.json()
         except Exception:
             logger.warning("Google Calendar token exchange failed")
-            return _RR("/?section=integrations&calendar_oauth_error=token_exchange_failed")
+            return "token_exchange_failed", ""
 
         access_token = data.get("access_token", "")
         refresh_token = data.get("refresh_token", "")
@@ -1101,7 +1091,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             # repeat authorize without prompt=consent re-issuing one) — sync
             # would work until the access token expires, then die silently.
             logger.warning("Google Calendar token exchange omitted required offline credentials")
-            return _RR("/?section=integrations&calendar_oauth_error=token_exchange_failed")
+            return "token_exchange_failed", ""
         expiry = str(int(_time.time()) + data.get("expires_in", 3600))
 
         email_addr = ""
@@ -1116,7 +1106,7 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
             pass
         if not email_addr:
             logger.warning("Google Calendar OAuth: could not resolve account email")
-            return _RR("/?section=integrations&calendar_oauth_error=identity_verification_failed")
+            return "identity_verification_failed", ""
 
         from src.secret_storage import encrypt as _enc
         events_url = (
@@ -1155,7 +1145,103 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
                 "oauth_token_expiry": expiry,
             })
         _save_caldav_accounts(owner, accounts)
+        return None, email_addr
+
+    @router.get("/oauth/google/start")
+    async def calendar_google_oauth_start(request: Request):
+        """How to sign in from here: ``{"mode": "redirect"|"paste", "auth_url", "redirect_uri"}``.
+
+        ``redirect`` when this page is on an address Google accepts as a
+        redirect (public-domain HTTPS, or an explicit
+        GOOGLE_CALENDAR_OAUTH_REDIRECT_URI); otherwise ``paste``, the
+        localhost flow that needs no public or HTTPS address at all.
+        """
+        owner = _require_user(request)
+        redirect_uri, problem = _google_calendar_direct_redirect(request)
+        if problem:
+            return {
+                "mode": "paste",
+                "auth_url": _google_calendar_auth_url(owner, _GOOGLE_LOOPBACK_REDIRECT),
+                "redirect_uri": _GOOGLE_LOOPBACK_REDIRECT,
+                "reason": problem,
+            }
+        return {"mode": "redirect", "auth_url": _google_calendar_auth_url(owner, redirect_uri),
+                "redirect_uri": redirect_uri}
+
+    @router.get("/oauth/google/authorize")
+    async def calendar_google_oauth_authorize(request: Request):
+        from fastapi.responses import RedirectResponse as _RR
+        owner = _require_user(request)
+        redirect_uri, problem = _google_calendar_direct_redirect(request)
+        if problem:
+            # Google would refuse this address on its own error page; the
+            # Settings button uses /start and the paste flow instead.
+            return _RR(f"/?section=integrations&calendar_oauth_error={problem}")
+        return _RR(_google_calendar_auth_url(owner, redirect_uri))
+
+    @router.get("/oauth/google/callback")
+    async def calendar_google_oauth_callback(
+        code: str = Query(None),
+        state: str = Query(None),
+        error: str = Query(None),
+        request: Request = None,
+    ):
+        from fastapi.responses import RedirectResponse as _RR
+        from routes.email_helpers import verify_oauth_state
+
+        if error:
+            return _RR("/?section=integrations&calendar_oauth_error=google_error")
+        if not code or not state:
+            return _RR("/?section=integrations&calendar_oauth_error=missing_code")
+        state_data = verify_oauth_state(state)
+        owner = (state_data or {}).get("o", "")
+        if not owner:
+            return _RR("/?section=integrations&calendar_oauth_error=invalid_state")
+        # Must be byte-identical to the address the authorize step sent.
+        redirect_uri, _problem = _google_calendar_direct_redirect(request)
+        failure, _email = _finish_google_calendar_oauth(owner, code, redirect_uri)
+        if failure:
+            return _RR(f"/?section=integrations&calendar_oauth_error={failure}")
         return _RR("/?section=integrations&calendar_oauth_success=1")
+
+    @router.post("/oauth/google/exchange")
+    async def calendar_google_oauth_exchange(request: Request):
+        """Finish the localhost sign-in from the address the browser landed on.
+
+        Body ``{"callback_url": "http://localhost/?state=...&code=..."}`` (the
+        whole address; the state proves the flow was started by this user).
+        """
+        import urllib.parse
+        from routes.email_helpers import verify_oauth_state
+
+        owner = _require_user(request)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw = str((body or {}).get("callback_url") or "").strip()
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(raw).query)
+        if (query.get("error") or [""])[0]:
+            return {"ok": False, "error": "google_error",
+                    "message": "Google reported an error instead of a code: access was denied or the app is misconfigured."}
+        code = (query.get("code") or [""])[0]
+        state = (query.get("state") or [""])[0]
+        if not code or not state:
+            return {"ok": False, "error": "missing_code",
+                    "message": "That address has no code in it. Paste the whole address of the page Google sent you to "
+                               "(it starts with http://localhost and contains code=)."}
+        state_data = verify_oauth_state(state)
+        if not state_data or state_data.get("o") != owner:
+            return {"ok": False, "error": "invalid_state",
+                    "message": "That address is from a different sign-in. Start again from Settings."}
+        failure, email = _finish_google_calendar_oauth(owner, code, _GOOGLE_LOOPBACK_REDIRECT)
+        if failure == "token_exchange_failed":
+            return {"ok": False, "error": failure,
+                    "message": "Google refused the code. Codes are single-use and expire in minutes, so start again; "
+                               "and check that http://localhost is an authorized redirect URI of the Google OAuth client."}
+        if failure:
+            return {"ok": False, "error": failure, "message": "Google did not say which account signed in."}
+        return {"ok": True, "email": email}
 
     @router.post("/test")
     async def test_connection(request: Request):

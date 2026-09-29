@@ -3980,6 +3980,53 @@ async function initUnifiedIntegrations() {
     });
   }
 
+  // Google Calendar sign-in. When this page is on an address Google accepts
+  // as a redirect (public-domain HTTPS) it is the usual redirect; otherwise
+  // (LAN or Tailscale IP, plain http) Google sends the browser to a localhost
+  // page that does not load, and the user pastes that address here. No public
+  // URL or HTTPS needed (2026-09-28; it used to take a Tailscale Funnel).
+  async function _connectGoogleCalendar() {
+    let start;
+    try {
+      const r = await fetch('/api/calendar/oauth/google/start', { credentials: 'same-origin' });
+      start = await r.json();
+      if (!r.ok) throw new Error(start.detail || start.error || `HTTP ${r.status}`);
+    } catch (e) {
+      uiModule.showError(`Could not start Google sign-in: ${e.message || e}`);
+      return;
+    }
+    if (start.mode === 'redirect') {
+      window.location.href = start.auth_url;
+      return;
+    }
+    window.open(start.auth_url, '_blank', 'noopener');
+    const pasted = await uiModule.styledPrompt(
+      'A Google sign-in tab opened. Approve access there. Google then sends that tab to a localhost page '
+      + 'that will not load; that is expected. Copy that page\'s full address (it contains code=) and paste it here.',
+      {
+        title: 'Finish connecting Google Calendar',
+        placeholder: 'http://localhost/?state=…&code=…',
+        confirmText: 'Connect',
+        maxLength: 4000,
+      },
+    );
+    if (!pasted) return;
+    try {
+      const r = await fetch('/api/calendar/oauth/google/exchange', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_url: pasted }),
+      });
+      const res = await r.json().catch(() => ({}));
+      if (!r.ok || !res.ok) throw new Error(res.message || res.detail || res.error || `HTTP ${r.status}`);
+      uiModule.showToast(`Google Calendar connected (${res.email})`);
+      await renderList();
+    } catch (e) {
+      uiModule.showError(e.message || String(e));
+    }
+  }
+
   async function fetchAll() {
     const [apiRes, calRes, cardRes, contactsRes, emailAccountsRes, mcpRes, tokenRes] = await Promise.all([
       fetch('/api/auth/integrations', { credentials: 'same-origin' }).then(r => r.ok ? r.json() : { integrations: [] }).catch(() => ({ integrations: [] })),
@@ -4452,7 +4499,7 @@ async function initUnifiedIntegrations() {
         </div>`;
       el('uf-caldav-cancel').addEventListener('click', () => { formEl.style.display = 'none'; });
       el('uf-caldav-google-reconnect').addEventListener('click', () => {
-        window.location.href = '/api/calendar/oauth/google/authorize';
+        _connectGoogleCalendar();
       });
       el('uf-caldav-test').addEventListener('click', async () => {
         const msg = el('uf-caldav-msg');
@@ -6180,8 +6227,8 @@ async function initUnifiedIntegrations() {
           _closeMenu();
           if (k === 'google_calendar') {
             // No form to fill in — Google identifies the account via the
-            // OAuth consent screen, so jump straight to the redirect.
-            window.location.href = '/api/calendar/oauth/google/authorize';
+            // OAuth consent screen.
+            _connectGoogleCalendar();
             return;
           }
           showForm(k, 'new');
@@ -6310,9 +6357,17 @@ export function refreshAiModelEndpoints(prefetched) { return _controller.refresh
     open('integrations');
     // Brief toast-style banner.
     const banner = document.createElement('div');
+    const reasons = {
+      needs_https: 'Google only redirects back to an https address (or localhost). Use Connect from Settings: it signs in through localhost instead.',
+      ip_address: 'Google does not accept an IP address as the redirect. Use Connect from Settings: it signs in through localhost instead.',
+      private_hostname: 'Google only accepts public domain names as the redirect. Use Connect from Settings: it signs in through localhost instead.',
+      token_exchange_failed: 'Google refused the sign-in code. Try again; if it keeps failing, check the OAuth client ID, secret and redirect URIs.',
+      invalid_state: 'That sign-in link expired or belongs to another session. Start again from Settings.',
+      google_error: 'Google reported an error: access was denied or the OAuth client is misconfigured.',
+    };
     banner.textContent = success
       ? (isCalendar ? 'Google account connected — Calendar is ready' : 'Google account connected — email is ready')
-      : `Google OAuth failed: ${errMsg || 'unknown error'}`;
+      : `Google sign-in failed: ${reasons[errMsg] || errMsg || 'unknown error'}`;
     Object.assign(banner.style, {
       position: 'fixed', bottom: '24px', left: '50%', transform: 'translateX(-50%)',
       background: success ? 'var(--accent, #50fa7b)' : 'var(--red, #ff5555)',
@@ -6321,7 +6376,7 @@ export function refreshAiModelEndpoints(prefetched) { return _controller.refresh
       boxShadow: '0 2px 12px rgba(0,0,0,0.3)',
     });
     document.body.appendChild(banner);
-    setTimeout(() => banner.remove(), 4000);
+    setTimeout(() => banner.remove(), success ? 4000 : 9000);
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', _showResult, { once: true });
