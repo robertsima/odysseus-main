@@ -62,8 +62,31 @@ Environment knobs:
 | `E2E_WORKER_MODEL` | empty | Pin the worker loadout's model instead of inheriting the chat's. |
 | `E2E_APPROVAL_MODE` | unset | Set `agent_approval_mode` (e.g. `ask_risky`). |
 | `E2E_TIMEOUT` | `300` | Seconds to wait for the worker and the follow-up. |
+| `E2E_SCENARIOS` | `all` | Scenario suite after the main flow: `all`, `none`, or a comma list of names. |
 
-A run takes about 15 seconds.
+The main flow takes about 15 seconds; with the scenario suite and the
+shutdown check, about four minutes.
+
+## Scenario suite
+
+After the main flow, `scenarios.py` runs the cases that broke in real use
+(2026-09-29), each in its own chat, scripted by `scenario_scripts.py`:
+
+| Scenario | What must hold |
+| --- | --- |
+| `broad_parent` | A chat bound to a folder holding the app's data (like `/app`) starts a worker without the private-vault grant: the worker still gets bash, sandboxed in the repository the task names. |
+| `ssh_remote` | With a `git@host:owner/repo` origin, `manage_git fetch` works; a `git fetch` from bash fails and its result points at `manage_git`. |
+| `feature_base` | A worktree starts from a local branch whose commits are not on the remote. |
+| `interactive` | `git log` (a pager), `git commit` without `-m` (an editor) and `read` (stdin) return at once in the agent's terminal. |
+| `stop_worker` | Stop (no run id, as the sidebar and dashboard send it) on a worker's chat cancels it mid-`sleep 600` and closes its terminal. |
+| `stop_parent` | Stop on the chat that started the worker, once that chat is idle, does the same. |
+| `parallel` | Two workers at once give exactly one summarising reply with both results. |
+| `publish` | A commit in a third-party worktree lands; `request_publish` proceeds or names the missing setting. |
+| shutdown | SIGTERM while a reply streams to an open client: the app exits within seconds and the partial reply is saved (run.sh restarts the app to check). |
+
+Each check prints `[PASS]`/`[FAIL] [scenario] ...`; `scenarios_report.json`
+has the details. Against the code before those fixes, every scenario except
+`feature_base`, `parallel` and `publish` fails.
 
 ## Where to look when it fails
 

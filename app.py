@@ -1431,4 +1431,7 @@ if __name__ == "__main__":
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7000"))
 
-    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info")
+    # Same as the image's CMD: a browser watching a running agent holds its
+    # stream open, and without a bound uvicorn waits on it until the process
+    # is killed, so shutdown never saves the running turns' partial replies.
+    uvicorn.run(app, host=bind_host, port=bind_port, log_level="info", timeout_graceful_shutdown=3)

@@ -46,6 +46,8 @@ for pidfile in "$E2E_ROOT"/run/*.pid; do
   else kill "$pid" 2>/dev/null || true; fi
 done
 sleep 1
+# Agent terminals from an earlier run (a stuck one included) must not leak in.
+tmux ls -F '#S' 2>/dev/null | grep '^ody-agent-' | xargs -r -n1 tmux kill-session -t 2>/dev/null || true
 rm -rf "$E2E_ROOT"
 mkdir -p "$E2E_ROOT"/{app,data,development,logs,run/home}
 touch "$E2E_ROOT/.e2e-harness"
@@ -118,30 +120,64 @@ PIDS+=($!); echo "${PIDS[-1]}" > "$E2E_ROOT/run/mock.pid"
 for _ in $(seq 1 40); do curl -sf "http://127.0.0.1:$MOCK_PORT/v1/models" >/dev/null && break; sleep 0.25; done
 
 # ── the app ────────────────────────────────────────────────────────────────
+# publishing on, for the publish scenario (it pushes to the local git host).
+start_app() {
+  (
+    cd "$E2E_ROOT/app"
+    # exec: $! is then the app itself, which the shutdown phase signals.
+    exec env -u VIRTUAL_ENV \
+      PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+      HOME="$E2E_ROOT/run/home" \
+      ODYSSEUS_DATA_DIR="$E2E_ROOT/data" \
+      APP_BIND=127.0.0.1 APP_PORT="$APP_PORT" \
+      AUTH_ENABLED=true LOCALHOST_BYPASS=false SECURE_COOKIES=false \
+      ODYSSEUS_INPROCESS_POLLERS=0 ODYSSEUS_INPROCESS_TASKS=0 \
+      ODYSSEUS_AGENT_SOURCE_REPO="$SRC" ODYSSEUS_AGENT_PUBLISH_ENABLED=1 \
+      CHROMADB_HOST=127.0.0.1 CHROMADB_PORT=1 \
+      FASTEMBED_CACHE_PATH="$E2E_ROOT/data/fastembed_cache" \
+      TZ=UTC LANG=C.UTF-8 \
+      "${APP_ENV[@]}" \
+      "$PY" app.py
+  ) >> "$LOGS/app.stdout" 2>&1 &
+  APP_PID=$!
+  PIDS+=("$APP_PID"); echo "$APP_PID" > "$E2E_ROOT/run/app.pid"
+}
 echo "== starting Odysseus on :$APP_PORT (data $E2E_ROOT/data)"
-(
-  cd "$E2E_ROOT/app"
-  env -u VIRTUAL_ENV \
-    PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-    HOME="$E2E_ROOT/run/home" \
-    ODYSSEUS_DATA_DIR="$E2E_ROOT/data" \
-    APP_BIND=127.0.0.1 APP_PORT="$APP_PORT" \
-    AUTH_ENABLED=true LOCALHOST_BYPASS=false SECURE_COOKIES=false \
-    ODYSSEUS_INPROCESS_POLLERS=0 ODYSSEUS_INPROCESS_TASKS=0 \
-    ODYSSEUS_AGENT_SOURCE_REPO="$SRC" \
-    CHROMADB_HOST=127.0.0.1 CHROMADB_PORT=1 \
-    FASTEMBED_CACHE_PATH="$E2E_ROOT/data/fastembed_cache" \
-    TZ=UTC LANG=C.UTF-8 \
-    "${APP_ENV[@]}" \
-    "$PY" app.py
-) > "$LOGS/app.stdout" 2>&1 &
-PIDS+=($!); echo "${PIDS[-1]}" > "$E2E_ROOT/run/app.pid"
+start_app
 
 # ── drive it ───────────────────────────────────────────────────────────────
 set +e
 "$PY" "$HERE/driver.py" --app "http://127.0.0.1:$APP_PORT" --mock "http://127.0.0.1:$MOCK_PORT/v1" \
   --root "$E2E_ROOT" --variant "$VARIANT" --timeout "$TIMEOUT"
 RC=$?
+
+# ── scenario suite (scenarios.py): the cases that broke in real use ────────
+# E2E_SCENARIOS=all (default), none, or a comma list of names.
+SCENARIOS="${E2E_SCENARIOS:-all}"
+if [ "$SCENARIOS" != "none" ]; then
+  ONLY=(); [ "$SCENARIOS" != "all" ] && ONLY=(--only "$SCENARIOS")
+  "$PY" "$HERE/scenarios.py" --app "http://127.0.0.1:$APP_PORT" --root "$E2E_ROOT" "${ONLY[@]}"
+  [ $? -eq 0 ] || RC=1
+
+  # A redeploy while a reply streams to a watching browser: the app must stop
+  # within seconds and keep the partial reply.
+  echo "== shutdown: SIGTERM while a reply streams"
+  rm -f "$LOGS/shutdown_sid"
+  "$PY" "$HERE/scenarios.py" --app "http://127.0.0.1:$APP_PORT" --root "$E2E_ROOT" --only shutdown_begin \
+    > "$LOGS/shutdown_begin.log" 2>&1 &
+  for _ in $(seq 1 60); do [ -s "$LOGS/shutdown_sid" ] && break; sleep 0.5; done
+  T1=$(date +%s); kill -TERM "$APP_PID"
+  for _ in $(seq 1 40); do kill -0 "$APP_PID" 2>/dev/null || break; sleep 0.5; done
+  if kill -0 "$APP_PID" 2>/dev/null; then
+    echo "[FAIL] [shutdown] the app was still running 20s after SIGTERM"; kill -9 "$APP_PID"; RC=1
+  else
+    echo "[PASS] [shutdown] the app exited $(( $(date +%s) - T1 ))s after SIGTERM"
+  fi
+  start_app
+  "$PY" "$HERE/scenarios.py" --app "http://127.0.0.1:$APP_PORT" --root "$E2E_ROOT" --only shutdown_check \
+    --sid "$(cat "$LOGS/shutdown_sid" 2>/dev/null)"
+  [ $? -eq 0 ] || RC=1
+fi
 set -e
 cp -f "$E2E_ROOT/data/logs/app.log" "$LOGS/app.log" 2>/dev/null || true
 echo "== remote mode: $REMOTE; wall time $(( $(date +%s) - T0 ))s; logs in $LOGS"

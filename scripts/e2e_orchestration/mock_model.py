@@ -396,11 +396,60 @@ async def models():
                                         "context_length": 131072, "max_model_len": 131072}]}
 
 
+def _stream_scenario(reply: Dict[str, Any], slow: bool):
+    """Like _stream, for scenario replies: several tool calls in one round, or
+    a text streamed slowly enough to still be running when the app stops."""
+    cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    yield _chunk(cid, {"role": "assistant", "content": ""})
+    if "calls" in reply:
+        for i, call in enumerate(reply["calls"]):
+            yield _chunk(cid, {"tool_calls": [{"index": i, "id": f"call_s_{uuid.uuid4().hex[:8]}", "type": "function",
+                                               "function": {"name": call["name"], "arguments": ""}}]})
+            yield _chunk(cid, {"tool_calls": [{"index": i, "function": {"arguments": json.dumps(call["args"])}}]})
+        yield _chunk(cid, {}, "tool_calls")
+    else:
+        text = reply["text"]
+        step = 8 if slow else 40
+        for i in range(0, len(text), step):
+            time.sleep(0.5 if slow else CHUNK_DELAY_S)
+            yield _chunk(cid, {"content": text[i:i + step]})
+        yield _chunk(cid, {}, "stop")
+    yield "data: [DONE]\n\n"
+
+
 @app.post("/v1/chat/completions")
 @app.post("/chat/completions")
 async def chat(request: Request):
     body = await request.json()
     messages = body.get("messages") or []
+    if body.get("tools"):
+        import asyncio
+
+        try:
+            from scenario_scripts import env_context, scenario_turn
+
+            scen = scenario_turn(body, env_context())
+        except Exception as exc:  # a broken scenario must not take the main flow down
+            log({"kind": "scenario_error", "error": repr(exc)[:2000]})
+            scen = None
+        if scen is not None:
+            if scen["delay"]:
+                await asyncio.sleep(scen["delay"])
+            log({"kind": "scenario", "scenario": scen["scenario"], "agent": scen["agent"], "tag": scen["tag"],
+                 "round": scen["round"], "ts": time.time(), "tools": _tool_names(body),
+                 "results": [{"name": r["name"], "args": r["args"], "result": (r["result"] or "")[:4000]}
+                             for r in scen["results"]],
+                 "reply": scen["reply"]})
+            if body.get("stream"):
+                return StreamingResponse(_stream_scenario(scen["reply"], scen["slow"]),
+                                         media_type="text/event-stream")
+            if "calls" in scen["reply"]:
+                return JSONResponse({"id": "s", "object": "chat.completion", "model": MODEL_ID, "choices": [{
+                    "index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant", "content": None,
+                    "tool_calls": [{"id": f"call_s_{i}", "type": "function", "function": {
+                        "name": c["name"], "arguments": json.dumps(c["args"])}}
+                        for i, c in enumerate(scen["reply"]["calls"])]}}]})
+            return JSONResponse(_completion(_say(scen["reply"]["text"], "scenario")))
     kind = _classify(body)
     if DUMP_DIR:
         # Full request bodies, one file per request, for reading what each
