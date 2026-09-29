@@ -260,6 +260,7 @@ function buildFixture(document) {
     'agents',
     'claude-code',
     'integrations',
+    'builtin',
     'reminders',
     'privacy',
     'appearance',
@@ -378,6 +379,7 @@ function moduleSource(relativePath) {
       'agents',
       'claude-code',
       'integrations',
+      'builtin',
       'reminders',
       'privacy',
       'appearance',
@@ -402,13 +404,13 @@ function moduleSource(relativePath) {
     'Settings registry keeps models, integrations and admin panels on the existing admin controller',
     ['models', 'agents', 'integrations', 'privacy', 'users', 'capabilities', 'system']
       .every(id => context.isAdminManagedSettingsTab(id))
-      && ['search', 'claude-code', 'reminders', 'appearance', 'account']
+      && ['search', 'claude-code', 'builtin', 'reminders', 'appearance', 'account']
         .every(id => !context.isAdminManagedSettingsTab(id)),
   );
 
   check(
     'Settings registry distinguishes admin-only visibility from admin-controlled routing',
-    ['agents', 'claude-code', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
+    ['agents', 'claude-code', 'builtin', 'users', 'capabilities', 'system'].every(id => context.isAdminOnlySettingsTab(id))
       && ['models', 'integrations']
         .every(id => !context.isAdminOnlySettingsTab(id)),
   );
@@ -436,7 +438,7 @@ function moduleSource(relativePath) {
     'Settings registry exposes group membership in sidebar order',
     context.getSettingsPanelsForGroup('communications')
       .map(panel => panel.id)
-      .join(',') === 'integrations,reminders',
+      .join(',') === 'integrations,builtin,reminders',
   );
 
   check(
