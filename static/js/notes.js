@@ -34,6 +34,7 @@ let _vaultTree = null;
 let _vaultFile = null;
 let _vaultLoading = false;
 let _vaultDirty = false;
+let _vaultNewOpen = false; // the inline "New note" form in the tree pane
 // Folders start collapsed and only open after a human toggles them. Keep that
 // explicit state across file loads/search rerenders without persisting it as a
 // surprising default for the next browser session.
@@ -100,7 +101,7 @@ function _showNotesFirstOpenHint(pane) {
   hint.id = 'notes-first-open-hint';
   hint.className = 'tour-hint';
   hint.innerHTML = `
-    <div class="tour-hint-text"><b>Notes</b> manages todos and reminders. Use <b>Vault files</b> to browse and edit every Markdown note in your mounted vault.</div>
+    <div class="tour-hint-text"><b>Notes</b> manages todos and reminders. Use <b>Vault files</b> to browse, create, edit and delete every Markdown note in your mounted vault.</div>
     <button type="button" class="tour-hint-dismiss">OK</button>
   `;
   document.body.appendChild(hint);
@@ -586,6 +587,105 @@ async function _saveVaultFile() {
   }
 }
 
+async function _vaultError(res) {
+  const data = await res.json().catch(() => ({}));
+  return new Error(data.detail || data.error || `HTTP ${res.status}`);
+}
+
+function _vaultFolders(node, out = []) {
+  if (!node || node.type !== 'directory') return out;
+  if (node.path) out.push(node.path);
+  (node.children || []).forEach(child => _vaultFolders(child, out));
+  return out;
+}
+
+function _vaultDefaultFolder() {
+  // The folder of the open note, else the last folder the user expanded.
+  if (_vaultFile?.path?.includes('/')) return _vaultFile.path.slice(0, _vaultFile.path.lastIndexOf('/'));
+  const expanded = [..._vaultExpandedFolders].filter(Boolean);
+  return expanded.length ? expanded[expanded.length - 1] : '';
+}
+
+async function _createVaultNote(folder, name) {
+  const clean = String(name || '').trim().replace(/\.(md|markdown)$/i, '');
+  if (!clean) return;
+  if (_vaultDirty) {
+    const ok = uiModule?.styledConfirm
+      ? await uiModule.styledConfirm('Discard the unsaved changes to this vault file?', { confirmText: 'Discard', danger: true })
+      : confirm('Discard the unsaved changes to this vault file?');
+    if (!ok) return;
+  }
+  const path = folder ? `${folder}/${clean}.md` : `${clean}.md`;
+  try {
+    const res = await fetch(`${API_BASE}/api/personal/vault/file`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, content: `# ${clean}\n\n` }),
+    });
+    if (!res.ok) throw await _vaultError(res);
+    const created = await res.json();
+    _vaultNewOpen = false;
+    _vaultFile = created;
+    _vaultDirty = false;
+    // Show the new note where it lives: open every folder on its path.
+    const segments = created.path.split('/').slice(0, -1);
+    segments.forEach((_, i) => _vaultExpandedFolders.add(segments.slice(0, i + 1).join('/')));
+    await _fetchVaultTree();
+    _renderVault();
+    uiModule.showToast(`Created ${created.path}`);
+    const editor = document.getElementById('vault-file-editor');
+    if (editor) {
+      editor.focus();
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+    }
+  } catch (e) {
+    uiModule.showError(`Could not create the note: ${e.message || e}`);
+  }
+}
+
+async function _deleteVaultNote() {
+  if (!_vaultFile?.path) return;
+  const path = _vaultFile.path;
+  const message = `Delete ${path}? It moves to the vault's .trash folder, so it can be restored from disk.`;
+  const ok = uiModule?.styledConfirm
+    ? await uiModule.styledConfirm(message, { confirmText: 'Delete', danger: true })
+    : confirm(message);
+  if (!ok) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/personal/vault/file?path=${encodeURIComponent(path)}`, {
+      method: 'DELETE',
+      credentials: 'same-origin',
+    });
+    if (!res.ok) throw await _vaultError(res);
+    _vaultFile = null;
+    _vaultDirty = false;
+    await _fetchVaultTree();
+    _renderVault();
+    uiModule.showToast(`Moved ${path} to .trash`);
+  } catch (e) {
+    uiModule.showError(`Could not delete the note: ${e.message || e}`);
+  }
+}
+
+function _vaultNewFormHtml() {
+  if (!_vaultNewOpen) return '';
+  const folders = _vaultFolders(_vaultTree);
+  const current = _vaultDefaultFolder();
+  const options = [`<option value=""${current ? '' : ' selected'}>Vault root</option>`]
+    .concat(folders.map(f => `<option value="${_attrEsc(f)}"${f === current ? ' selected' : ''}>${_esc(f)}</option>`))
+    .join('');
+  return `
+    <form class="vault-new-form" id="vault-new-form" autocomplete="off">
+      <label>Folder<select id="vault-new-folder">${options}</select></label>
+      <label>Name<input id="vault-new-name" type="text" placeholder="Note name" maxlength="180" required /></label>
+      <div class="vault-new-form-actions">
+        <button type="button" id="vault-new-cancel">Cancel</button>
+        <button type="submit" class="vault-new-create">Create</button>
+      </div>
+    </form>`;
+}
+
 function _vaultNodeMatches(node, query) {
   if (!query) return true;
   if (node.type === 'file') return `${node.name} ${node.path}`.toLowerCase().includes(query);
@@ -675,12 +775,14 @@ function _renderVault() {
     <div class="vault-browser">
       <aside class="vault-tree-pane">
         <div class="vault-tree-heading">
-          <span><b>${_searchQuery ? 'Search results' : 'Vault files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
+          <span><b>${_searchQuery ? 'Results' : 'Files'}</b><small>${_searchQuery ? 'filtered' : `${fileCount} Markdown`}</small></span>
           <div class="vault-tree-actions">
+            <button type="button" id="vault-new-note" class="vault-new-btn${_vaultNewOpen ? ' active' : ''}" title="New note" aria-label="New note" aria-expanded="${_vaultNewOpen ? 'true' : 'false'}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h8l4 4v16H6z"/><path d="M14 2v5h5"/><path d="M12 11v6M9 14h6"/></svg><span>New</span></button>
             ${!_searchQuery ? `<button type="button" id="vault-tree-collapse" title="Collapse all folders" aria-label="Collapse all folders"${_vaultExpandedFolders.size ? '' : ' hidden'}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 10 5 5 5-5"/><path d="m7 5 5 5 5-5"/></svg></button>` : ''}
             <button type="button" id="vault-tree-refresh" title="Refresh vault tree" aria-label="Refresh vault tree"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg></button>
           </div>
         </div>
+        ${_vaultNewFormHtml()}
         <div class="vault-tree" aria-label="Vault file tree">${treeHtml || `<div class="vault-tree-empty">${_searchQuery ? 'No matching Markdown files' : 'No Markdown files found'}</div>`}</div>
       </aside>
       <section class="vault-editor-pane">
@@ -688,15 +790,17 @@ function _renderVault() {
           <div class="vault-editor-header">
             <div class="vault-editor-title"><b>${_esc(_vaultFile.name || _vaultFile.path)}</b><small>${_esc(_vaultFile.path)}</small></div>
             <span class="vault-policy-badges">${policyBadges}</span>
+            <button type="button" id="vault-file-delete" class="vault-delete-btn" title="Delete: moves the note to the vault's .trash folder" aria-label="Delete note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
             <button type="button" id="vault-file-save" class="vault-save-btn"${_vaultDirty ? '' : ' disabled'}>Save</button>
           </div>
-          <div class="vault-human-note">You can edit this file. ${_esc(policyText)} applies to LLMs and agents, not your UI access.</div>
+          <div class="vault-human-note">Model access: ${_esc(policyText)}. That limits models and agents only; you can always edit this note.</div>
           <textarea id="vault-file-editor" spellcheck="true" aria-label="Markdown file editor"></textarea>
         ` : `
           <div class="vault-editor-empty">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4z"/><path d="M8 9h8M8 13h8M8 17h5"/></svg>
-            <b>Select a Markdown file</b>
-            <span>Private, readonly and public are model policies. Your signed-in UI can open and edit all mounted files.</span>
+            <b>Select a note, or create one</b>
+            <span>Private, readonly and public limit what models and agents may do. You can open, edit, create and delete every note here.</span>
+            <button type="button" class="vault-empty-new" id="vault-empty-new">New note</button>
           </div>
         `}
       </section>
@@ -718,6 +822,34 @@ function _renderVault() {
     });
   }
   document.getElementById('vault-file-save')?.addEventListener('click', _saveVaultFile);
+  document.getElementById('vault-file-delete')?.addEventListener('click', _deleteVaultNote);
+  const openNewForm = () => {
+    _vaultNewOpen = !_vaultNewOpen;
+    _renderVault();
+    if (_vaultNewOpen) document.getElementById('vault-new-name')?.focus();
+  };
+  document.getElementById('vault-new-note')?.addEventListener('click', openNewForm);
+  document.getElementById('vault-empty-new')?.addEventListener('click', () => {
+    if (!_vaultNewOpen) openNewForm();
+    else document.getElementById('vault-new-name')?.focus();
+  });
+  document.getElementById('vault-new-cancel')?.addEventListener('click', () => {
+    _vaultNewOpen = false;
+    _renderVault();
+  });
+  document.getElementById('vault-new-form')?.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const folder = document.getElementById('vault-new-folder')?.value || '';
+    const name = document.getElementById('vault-new-name')?.value || '';
+    _createVaultNote(folder, name);
+  });
+  document.getElementById('vault-new-name')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      _vaultNewOpen = false;
+      _renderVault();
+    }
+  });
   document.getElementById('vault-tree-refresh')?.addEventListener('click', async () => {
     await _fetchVaultTree();
     _renderVault();
