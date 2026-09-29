@@ -105,3 +105,40 @@ simulation (`tests/test_tool_set_stability.py`) went from 453 to 205
 tool-set changes over 20 chats, and its re-billed-token proxy from ~2.3M to
 ~0.8M per chat. Codex still misses on any tools change; the remaining
 changes are mostly tools no domain covers, picked for the first time.
+
+## Follow-up — 2026-09-29: keep the tools array fixed (`allowed_tools`)
+
+The 3-day bundle to 2026-09-29: 113M input tokens, 81% cached, 21.2M uncached.
+The first round of a turn was 6% cached (9.9M of the uncached). Requests whose
+tool list changed cached 16% (additions), 4% (additions plus removals), 0-4%
+(removals, reorders, a tool-free round) — ~7.3M uncached in all; nothing
+changed, 94%. The admin chat's list grew 46 → 132 over a day, and the system
+prompt changed with it (its tool list and domain rules follow the tools).
+
+OpenAI documents the fix for a harness that must vary what may be called: keep
+`tools` identical and narrow with `tool_choice: {"type": "allowed_tools",
+"mode": "auto", "tools": [...]}`; a tool-free request sends `tool_choice:
+"none"` instead of dropping the tools. `tool_choice` is not in the list of
+settings that change the prefix. Measured on gpt-6-luna by another pi-based
+harness (senpi PR #2112): removing a tool cached 0 of the next turn; the
+`allowed_tools` form cached 19.5k.
+
+Changes (`src/stable_tools.py`, ChatGPT/Codex route, GPT-5.6 and later,
+setting `chatgpt_stable_tools`):
+
+- a chat's tools are *declared* in first-offered order, persisted under
+  `<data>/prompt_cache/declared_tools`, and sent on every request; the
+  round's selection goes in `allowed_tools`, a tool-free round sends `none`;
+- a tool a round withholds (a worker follow-up's launchers, a sticky-set
+  restart) stays declared, so narrowing no longer rewrites the prefix;
+  a new tool is appended (one miss, as before); past 160 the list starts over;
+- the system prompt's tool-dependent parts are built from the declared set, so
+  they change only on the request where the tools change; a note beside the
+  request names the callable tools;
+- a backend that rejects `tool_choice` is remembered (`_rejected_param_retry_chunk`)
+  and then gets only the callable tools, as before;
+- `[prompt-prefix]` shows `callable=N`.
+
+Not done: GPT-5.6+'s `additional_tools` input item (append a new tool at the
+end of `input` instead of changing `tools`) would also make growth free, but
+its position has to survive history collapse and trimming.

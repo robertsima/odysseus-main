@@ -205,6 +205,10 @@ DEFAULT_SETTINGS = {
     # Send prompt_cache_key (the Odysseus session id) on ChatGPT-subscription
     # Responses requests so consecutive rounds hit the same prompt cache.
     "chatgpt_prompt_cache_key": True,
+    # Send a chat's whole declared tool list on every GPT-5.6+/GPT-6 request and
+    # name the callable subset with allowed_tools, so the prompt cache survives a
+    # changing selection (src/stable_tools.py).
+    "chatgpt_stable_tools": True,
     # Claude Code delegation (delegate_to_claude_code / /api/claude-code/*).
     # Empty string / empty list / 0 means "use the CLAUDE_CODE_* environment
     # variable or its built-in default"; a value set here wins over the

@@ -37,11 +37,18 @@ ALL_NATIVE = {s["function"]["name"] for s in FUNCTION_TOOL_SCHEMAS}
 
 
 @pytest.fixture(autouse=True)
-def _fresh(monkeypatch):
+def _fresh(monkeypatch, tmp_path):
+    from src import constants, stable_tools
+
     _STICKY_TOOLS.clear()
+    # The ChatGPT route keeps a declared tool list per chat (src/stable_tools.py);
+    # each test starts its chats without one.
+    stable_tools.reset_for_tests()
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path))
     monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
     yield
     _STICKY_TOOLS.clear()
+    stable_tools.reset_for_tests()
 
 
 # ── cap ────────────────────────────────────────────────────────────────────

@@ -101,6 +101,33 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
+def _isolated_declared_tools(tmp_path):
+    """Give every test an empty declared-tools state (src/stable_tools.py).
+
+    The ChatGPT route persists each chat's declared tool list under the data
+    folder; tests reuse session ids, so without this one test's list would be
+    loaded by the next and the tools it sends would depend on test order.
+
+    Patched by hand, not with ``monkeypatch``: an autouse fixture that requests
+    it makes monkeypatch outlive the test module's own fixtures, and a module
+    fixture that reloads a module on teardown (test_upload_limits_centralized)
+    then ran while the test's environment variables were still set.
+    """
+    mod = sys.modules.get("src.stable_tools")
+    if mod is None:
+        import src.stable_tools as mod
+    mod.reset_for_tests()
+    store = str(tmp_path / "declared_tools")
+    original = mod._store_dir
+    mod._store_dir = lambda: store
+    try:
+        yield
+    finally:
+        mod._store_dir = original
+        mod.reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _reset_search_resilience_state():
     """Give every test fresh search gates, breakers and caches.
 

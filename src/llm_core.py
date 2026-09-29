@@ -1661,7 +1661,11 @@ def _build_chatgpt_responses_payload(
     tool_choice_none: bool = False,
     target_url_hint: str = "",
     cache_key: Optional[str] = None,
+    allowed_tools: Optional[List[str]] = None,
 ) -> Dict:
+    """``allowed_tools`` (src/stable_tools.py): ``tools`` is the chat's whole
+    declared list, sent unchanged so the cached prefix survives, and only these
+    names may be called this round (none: a tool-free round)."""
     from src.chatgpt_subscription import build_responses_input, build_responses_tools
 
     conversation = [msg for msg in (messages or []) if (msg.get("role") or "") != "system"]
@@ -1682,6 +1686,22 @@ def _build_chatgpt_responses_payload(
     ):
         payload["include"] = ["reasoning.encrypted_content"]
     converted_tools = build_responses_tools(tools)
+    if allowed_tools is not None and converted_tools:
+        declared = {tool["name"] for tool in converted_tools}
+        callable_names = [name for name in dict.fromkeys(allowed_tools) if name in declared]
+        if _param_rejected(target_url_hint, model, "tool_choice"):
+            # This backend refused tool_choice once (_rejected_param_retry_chunk):
+            # send only what may be called, as before stable tools.
+            keep = set(callable_names)
+            converted_tools = [tool for tool in converted_tools if tool["name"] in keep]
+        elif callable_names:
+            payload["tool_choice"] = {
+                "type": "allowed_tools",
+                "mode": "auto",
+                "tools": [{"type": "function", "name": name} for name in callable_names],
+            }
+        else:
+            payload["tool_choice"] = "none"
     if converted_tools:
         payload["tools"] = converted_tools
     elif tool_choice_none:
@@ -1852,6 +1872,13 @@ def _log_prompt_prefix(session_id: Optional[str], model: str, payload: dict) -> 
         _PREFIX_FINGERPRINTS[session_id] = _PrefixFingerprint((
             instructions, tools, items, item_digests, instruction_digests, tool_digests, tool_names,
         ))
+        # How many of the tools may be called: `allowed_tools` (src/stable_tools.py)
+        # keeps `tools` fixed and narrows here, which does not change the prefix.
+        choice = payload.get("tool_choice")
+        if isinstance(choice, dict) and choice.get("type") == "allowed_tools":
+            extra += " callable=%d" % len(choice.get("tools") or [])
+        elif choice == "none" and raw_tools:
+            extra += " callable=0"
         # `changed=` stays the last field: existing log readers split on it.
         logger.info(
             "[prompt-prefix] session=%s model=%s instructions=%s tools=%s(%d) input_items=%d%s changed=%s",
@@ -2355,6 +2382,13 @@ def _apply_param_rejection(payload: Dict, param: str, replacement: Optional[str]
     value = payload.pop(param)
     if replacement and replacement not in payload:
         payload[replacement] = value
+
+
+def _param_rejected(url: str, model: str, param: str) -> bool:
+    """Whether this (host, model) has rejected ``param`` before."""
+    key = (_host_key(url or ""), (model or "").lower())
+    with _REJECTED_REQUEST_PARAMS_LOCK:
+        return param in (_REJECTED_REQUEST_PARAMS.get(key) or {})
 
 
 def _strip_rejected_params(payload: Dict, url: str, model: str) -> Dict:
@@ -3627,9 +3661,16 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                      max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                      timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                      tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                     tool_choice_none: bool = False, workload: str = "foreground"):
+                     tool_choice_none: bool = False, workload: str = "foreground",
+                     allowed_tools: Optional[List[str]] = None):
     target_url = _stream_target_url(url)
     chatgpt_subscription = _detect_provider(url) == "chatgpt-subscription"
+    if allowed_tools is not None and not chatgpt_subscription:
+        # Declared-tools mode is for the Responses route only
+        # (src/stable_tools.py); anything else is sent just the callable tools.
+        keep = set(allowed_tools)
+        tools = [t for t in (tools or []) if ((t.get("function") or t).get("name") in keep)] or None
+        allowed_tools = None
     auth_retry_used = False
     status_retry_used = False
     if chatgpt_subscription:
@@ -3658,6 +3699,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 tools=tools,
                 session_id=session_id,
                 tool_choice_none=tool_choice_none,
+                allowed_tools=allowed_tools,
             )
             async for chunk in inner:
                 # Only the very first chunk can be replayed: once anything has
@@ -3767,7 +3809,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             max_tokens: int = LLMConfig.DEFAULT_MAX_TOKENS, headers: Optional[Dict] = None,
                             timeout: int = LLMConfig.STREAM_TIMEOUT, prompt_type: Optional[str] = None,
                             tools: Optional[List[Dict]] = None, session_id: Optional[str] = None,
-                            tool_choice_none: bool = False):
+                            tool_choice_none: bool = False, allowed_tools: Optional[List[str]] = None):
     """Stream LLM responses with improved error handling.
 
     Yields SSE chunks:
@@ -3815,7 +3857,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         payload = _build_chatgpt_responses_payload(
             model, messages_copy, temperature, max_tokens,
             stream=True, tools=tools, tool_choice_none=tool_choice_none,
-            target_url_hint=target_url, cache_key=session_id,
+            target_url_hint=target_url, cache_key=session_id, allowed_tools=allowed_tools,
         )
         _log_prompt_prefix(session_id, model, payload)
     else:

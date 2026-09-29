@@ -340,7 +340,24 @@ edits history mid-turn:
   rather than every round;
 - deliver mid-turn directives as a labelled **user**-role message at the tail
   (`_harness_directive`), never `role: system` — `llm_core` hoists every system
-  message into the single instructions block, rewriting the front of the prefix.
+  message into the single instructions block, rewriting the front of the prefix;
+- keep the **tools array** fixed. On the Codex backend the prefix is tools,
+  then instructions, then input, so any tool change re-reads the whole history.
+  On GPT-5.6+ over ChatGPT (`src/stable_tools.py`) a chat's tools are declared
+  once, in first-offered order, persisted across restarts and sent on every
+  request; the round's selection is named in `tool_choice: allowed_tools`
+  (`none` for a tool-free round), a withheld tool stays declared, and the
+  system prompt's tool-dependent sections follow the declared set. A note
+  beside the request lists what is callable. This is pi's single fixed tool
+  list, kept compatible with per-turn routing.
+
+**Project instructions.** Like pi, a workspace's `AGENTS.md` / `CLAUDE.md`
+files, from the repository root down to the workspace, are in the workspace
+section of the system prompt (`src/project_context.py`; nearest last, 8k
+characters a file, 12k in all), labelled as repository guidance that cannot
+change platform rules; files deeper in the tree are listed for the agent to
+read when it works there. A file that resolves outside the repository is not
+read.
 
 `[agent-cache]` diagnostics log privacy-safe hashes of the static system/schema
 prefix and compare each request history with the prior round. They report only

@@ -77,6 +77,7 @@ from src.intent_assessment import (
     proposal_reply_anchor,
 )
 from src import objective_guard
+from src import stable_tools
 from src import task_checklist
 from src.agent_tools import (
     parse_tool_blocks,
@@ -1998,7 +1999,18 @@ def _workspace_coding_rules(workspace: Optional[str]) -> str:
         "- If a command fails, use the failure output to choose the next diagnostic or patch. Do not silently stop or claim success.\n"
         "- After code changes, run the smallest relevant verification command you can infer from the repo (for example a focused test, `py_compile`, `node --check`, lint, or build). If verification cannot run, say exactly why.\n"
         "- Keep going until the requested change is actually made and checked, or state the concrete blocker."
-    )
+    ) + _project_instructions(workspace)
+
+
+def _project_instructions(workspace: Optional[str]) -> str:
+    """The repository's AGENTS.md / CLAUDE.md (src/project_context.py)."""
+    try:
+        from src.project_context import section
+
+        return section(workspace)
+    except Exception:
+        logger.debug("project instructions for %s skipped", workspace, exc_info=True)
+        return ""
 
 
 def _strip_think_blocks(text: str) -> str:
@@ -3298,6 +3310,19 @@ def _self_unblock_directive(*, has_parent: bool) -> str:
         "- If it needs something only someone else can give (an approval, a credential, a "
         "permission or tool you do not have, a choice between real options), do not repeat "
         f"your report. Reply with one line per need: {who}."
+    )
+
+
+def _callable_tools_note(route_tools) -> str:
+    """Beside the request on a stable-tools route (src/stable_tools.py): the
+    function schemas are the chat's whole declared list, the API lets only this
+    turn's selection be called, and the model should know which that is."""
+    names = sorted(set(route_tools or ()) | {"ask_user", "update_plan", "discover_tools"})
+    shown = ", ".join(f"`{n}`" for n in names[:80]) + (" …" if len(names) > 80 else "")
+    return (
+        "Tools you can call this turn: " + shown + ". The other function schemas belong to this "
+        "chat but are not callable this turn; if you need one, call `discover_tools` with its "
+        "exact name and it becomes callable."
     )
 
 
@@ -7289,6 +7314,17 @@ async def stream_agent_loop(
             )
             return _without_protection(route_messages)
 
+    def _stable_tools_route(url, mdl, route_tools) -> bool:
+        """Whether this route sends the chat's declared tools (src/stable_tools.py)."""
+        return bool(session_id) and route_tools is not None and stable_tools.route_supported(url, mdl)
+
+    def _tool_request_kwargs(url, mdl, schemas, route_state) -> Dict[str, Any]:
+        """``tools``/``allowed_tools`` for one request on one route."""
+        if route_state.get("is_api_model") and _stable_tools_route(url, mdl, route_state.get("relevant_tools")):
+            declared, callable_names = stable_tools.declare(session_id, schemas or [])
+            return {"tools": declared or None, "allowed_tools": callable_names}
+        return {"tools": schemas or None, "allowed_tools": None}
+
     async def _build_route_request_state(candidate_url, candidate_model, candidate_headers, source_messages):
         compaction_state: Dict = {}
         compacted_source = list(source_messages)
@@ -7319,6 +7355,12 @@ async def stream_agent_loop(
             headers=candidate_headers,
         )
         _compact_prompt = is_api or is_native_ollama or is_ollama_compat
+        # Stable tools (src/stable_tools.py): this route sends the chat's whole
+        # declared tool list on every request. The system prompt's
+        # tool-dependent sections (tool list, domain rules, local-machine and
+        # email notes) follow that list too, so they change only when it grows
+        # -- on the same request the tools change -- instead of every turn.
+        _stable = _stable_tools_route(candidate_url, candidate_model, route_tools) and _compact_prompt
         route_messages, route_mcp_schemas = _build_system_prompt(
             _strip_agent_injected_messages(compacted_source),
             candidate_model,
@@ -7332,7 +7374,8 @@ async def stream_agent_loop(
             # the schema list does not carry -- and drop them again next turn,
             # rewriting the system prompt both times.
             needs_admin=_needs_admin and (route_tools is None or not _compact_prompt),
-            relevant_tools=route_tools,
+            relevant_tools=(stable_tools.preview(session_id, route_tools)
+                            if _stable else route_tools),
             mcp_disabled_map=_mcp_disabled_map,
             compact=_compact_prompt,
             owner=owner,
@@ -7395,6 +7438,8 @@ async def stream_agent_loop(
         )
         if _has_parent_chat and not guide_only:
             _turn_notes.append(_PARENT_CHAT_NOTE)
+        if _stable and route_tools:
+            _turn_notes.append(_callable_tools_note(route_tools))
         for _note in _turn_notes + ([_checklist_note] if _checklist_note else []):
             _note_msg = _harness_directive(_note)
             # Marked so a fallback route's rebuild strips it and adds its own.
@@ -7406,6 +7451,7 @@ async def stream_agent_loop(
             "messages": route_messages,
             "mcp_schemas": route_mcp_schemas,
             "relevant_tools": route_tools,
+            "stable_tools": _stable,
             "is_api_model": is_api,
             "is_ollama_native": is_native_ollama,
             "ollama_openai_compat": is_ollama_compat,
@@ -8059,7 +8105,9 @@ async def stream_agent_loop(
             return {
                 "messages": request_messages,
                 "kwargs": {
-                    "tools": candidate_tools or None,
+                    # Always both keys: a fallback on another provider must not
+                    # inherit the primary route's declared list.
+                    **_tool_request_kwargs(candidate_url, candidate_model, candidate_tools, state),
                     "tool_choice_none": state["ody_doc_finetune_mode"],
                     "temperature": (
                         _ody_qwen_temperature_cap(_requested_temperature)
@@ -8148,7 +8196,7 @@ async def stream_agent_loop(
             temperature=temperature,
             max_tokens=max_tokens,
             prompt_type=prompt_type if round_num == 1 else None,
-            tools=all_tool_schemas if all_tool_schemas else None,
+            **_tool_request_kwargs(endpoint_url, model, all_tool_schemas, _active_route_state),
             tool_choice_none=_ody_doc_finetune_mode,
             timeout=agent_stream_timeout,
             session_id=session_id,

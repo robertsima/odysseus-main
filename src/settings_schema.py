@@ -1014,6 +1014,13 @@ register_all([
         group="Models", advanced=True,
     ),
     SettingSpec(
+        key="chatgpt_stable_tools", type="bool", label="Keep the tool list stable (GPT-5.6+)",
+        help=("Send a chat's tools unchanged on every request and mark which ones may be called this turn, "
+              "instead of re-sending a different list. A changed tool list makes the provider re-read the "
+              "whole conversation uncached; this keeps long agent chats cached between turns."),
+        group="Models", advanced=True,
+    ),
+    SettingSpec(
         key="image_quality", type="choice", label="Default image quality",
         help="Quality used when an image request does not specify one. Higher quality can take longer and cost more on hosted providers.",
         group="Images", choices=("low", "medium", "high", "auto"),
