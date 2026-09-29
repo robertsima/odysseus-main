@@ -211,15 +211,47 @@ def known_checkouts() -> List[str]:
         return []
 
 
+def _origin_repo_name(path: str) -> str:
+    """The repository name of a checkout's GitHub ``origin`` ("" if none).
+
+    People name a project by its repository, not its folder: on 2026-09-29 the
+    task said "Umni" and the checkout was /app/data/development/dog-trainer.
+    """
+    try:
+        from src.agent_worktree.service import _origin_slug
+
+        return (_origin_slug(path) or "").rsplit("/", 1)[-1]
+    except Exception:
+        return ""
+
+
 def _checkout_named_in(task: str, checkouts: Iterable[str]) -> Optional[str]:
-    """The one checkout whose folder name the task mentions, if exactly one."""
+    """The one checkout whose folder or GitHub repository name the task
+    mentions, if exactly one."""
     text = (task or "").casefold()
     named = []
     for path in checkouts:
-        name = os.path.basename(os.path.normpath(path)).casefold()
-        if name and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text):
+        names = {os.path.basename(os.path.normpath(path)).casefold(), _origin_repo_name(path).casefold()}
+        if any(name and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text) for name in names):
             named.append(path)
     return named[0] if len(named) == 1 else None
+
+
+def _shell_sandbox_problem(workspace: str) -> Optional[str]:
+    try:
+        from src.shell_sandbox import workspace_problem
+
+        return workspace_problem(workspace)
+    except Exception:
+        return None
+
+
+def _within(path: str, root: str) -> bool:
+    path, root = os.path.normcase(os.path.realpath(path)), os.path.normcase(os.path.realpath(root))
+    try:
+        return path == root or os.path.commonpath([path, root]) == root
+    except ValueError:
+        return False
 
 
 @dataclass
@@ -314,6 +346,24 @@ def run_preflight(
         pf.workspace, pf.workspace_source = vetted, "requested"
     elif inherited_workspace and vet_workspace(inherited_workspace):
         pf.workspace, pf.workspace_source = vet_workspace(inherited_workspace), "parent chat"
+        # A chat bound to a broad folder (on 2026-09-29, /app) runs bash on its
+        # private-vault grant; a worker without that grant can run it only in
+        # the workspace sandbox, which refuses a folder holding the app's data.
+        # The Lead Engineer worker lost bash that way. When the task names a
+        # checkout inside the chat's folder, bind the worker to it instead: a
+        # narrower workspace, and one the sandbox accepts.
+        too_broad = _shell_sandbox_problem(pf.workspace)
+        if too_broad:
+            inside = [c for c in known_checkouts() if vet_workspace(c) and _within(c, pf.workspace)]
+            chosen = _checkout_named_in(task, inside) or (
+                inside[0] if len(inside) == 1 and pf.needs_workspace else None)
+            if chosen:
+                pf.workspace = vet_workspace(chosen)
+                pf.workspace_source = f"named in the task, inside the parent chat's {inherited_workspace}"
+            elif {"bash", "python"} - unavailable:
+                pf.warnings.append(
+                    f"bash/python can run in {pf.workspace} only with the private-vault grant ({too_broad}); "
+                    "pass workspace as the repository to work on so they run sandboxed there")
     elif pf.needs_workspace:
         checkouts = [c for c in known_checkouts() if vet_workspace(c)]
         chosen = _checkout_named_in(task, checkouts) or (checkouts[0] if len(checkouts) == 1 else None)

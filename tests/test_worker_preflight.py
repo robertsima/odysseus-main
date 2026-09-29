@@ -219,3 +219,45 @@ async def test_send_to_session_hands_the_worker_its_workspace_and_tools(send_env
     assert out["preflight"]["workspace"] == checkouts[1]
     assert seen["workspace"] == checkouts[1]
     assert set(wp.READ_TOOLS) <= seen["forced_tools"]
+
+
+# ── A parent chat bound to a folder too broad for the shell sandbox ──────── #
+# 2026-09-29: the chat's workspace was /app (it runs bash on its private-vault
+# grant). The Lead Engineer worker inherited /app without that grant; the
+# sandbox refuses a folder holding the app's data, so the worker had no bash.
+
+@pytest.fixture
+def broad_parent(checkouts, monkeypatch):
+    parent = str(Path(checkouts[0]).parent)
+    monkeypatch.setattr(
+        wp, "_shell_sandbox_problem",
+        lambda ws: "the workspace contains the app's data directory" if ws == parent else None)
+    return parent
+
+
+def test_worker_gets_the_checkout_the_task_names_inside_a_too_broad_parent_workspace(checkouts, broad_parent):
+    pf = wp.run_preflight("Implement the alerts slice in other-repo and run its tests",
+                          inherited_workspace=broad_parent)
+    assert pf.ok
+    assert pf.workspace == checkouts[1]
+    assert broad_parent in pf.workspace_source
+
+
+def test_a_checkout_is_also_named_by_its_github_repository(checkouts, broad_parent, monkeypatch):
+    monkeypatch.setattr(wp, "_origin_repo_name", lambda path: "Umni" if path == checkouts[1] else "")
+    pf = wp.run_preflight("Continue the Umni request using the Lead Engineer preset",
+                          inherited_workspace=broad_parent)
+    assert pf.workspace == checkouts[1]
+
+
+def test_no_named_checkout_keeps_the_parent_workspace_and_says_why_bash_may_be_missing(broad_parent):
+    pf = wp.run_preflight("Implement the alerts slice and run the tests", inherited_workspace=broad_parent)
+    assert pf.workspace == broad_parent
+    assert any("private-vault grant" in w for w in pf.warnings)
+
+
+def test_a_workspace_the_sandbox_accepts_is_inherited_unchanged(checkouts, monkeypatch):
+    monkeypatch.setattr(wp, "_shell_sandbox_problem", lambda ws: None)
+    pf = wp.run_preflight("Implement the alerts slice in other-repo", inherited_workspace=checkouts[0])
+    assert pf.workspace == checkouts[0]
+    assert pf.workspace_source == "parent chat"
