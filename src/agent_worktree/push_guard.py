@@ -67,6 +67,70 @@ def _guard_disabled() -> bool:
     return (os.getenv(ESCAPE_HATCH_ENV) or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Remote reads typed into bash. They are not blocked (a public https remote
+# works from the shell); a failure to authenticate gets a pointer instead.
+_GIT_REMOTE_READ = re.compile(
+    # Leading VAR=value assignments too: `GIT_SSH_COMMAND='ssh -F /dev/null' git fetch`.
+    _COMMAND_START + r"(?:[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|\S*)\s+)*"
+    r"git\s+(?:-\S+(?:\s+" + _OPTION_VALUE + r")?\s+)*"
+    r"(?:fetch|pull|clone|ls-remote|remote\s+update|submodule\s+update)\b",
+    re.IGNORECASE,
+)
+# "Could not read from remote repository" is git's line for any SSH transport
+# failure (no key, no sshd, no ssh binary), so it only counts for a GitHub
+# remote, the one manage_git can reach instead.
+_AUTH_FAILURE = re.compile(
+    r"Permission denied \(publickey\)|Host key verification failed"
+    r"|could not read Username for 'https://|terminal prompts disabled"
+    r"|Authentication failed for 'https://|Could not read from remote repository"
+    r"|cannot run ssh",
+    re.IGNORECASE,
+)
+
+
+def _github_hosts() -> set:
+    try:
+        from src.agent_worktree.repository_sync import _github_hosts as hosts
+
+        return {h.casefold() for h in hosts() if h}
+    except Exception:
+        return {"github.com"}
+
+FETCH_AUTH_HINT = (
+    "The shell has no GitHub credential: no SSH key, no token, no terminal to prompt at. "
+    "Fetch or pull with manage_git (action fetch, fetch_branch or pull): it reaches GitHub over "
+    "HTTPS with Odysseus's GitHub connection, git@github.com: remotes included. Publish with "
+    "manage_agent_worktree. Do not report the repository as unreachable because of this error."
+)
+
+
+def remote_auth_hint(command: object, output: str, cwd: Optional[str] = None) -> Optional[str]:
+    """A pointer to manage_git when a git fetch/pull/clone in bash failed to
+    reach a GitHub remote, else None.
+
+    On 2026-09-29 the agent fetched a git@github.com: remote from bash, got
+    "Permission denied (publickey)", and stopped, asking the user to restore
+    SSH access; manage_git had fetched the same repository an hour before.
+    """
+    if not isinstance(command, str) or not _GIT_REMOTE_READ.search(command):
+        return None
+    if not _AUTH_FAILURE.search(output or ""):
+        return None
+    hosts = _github_hosts()
+    # A remote named in the command decides; else the repository's origin.
+    named = re.findall(r"(?:https?://(?:[^/\s@]+@)?|[\w.-]+@)([\w.-]+)[:/]", command)
+    if named:
+        return FETCH_AUTH_HINT if any(h.casefold() in hosts for h in named) else None
+    if not (cwd or _GIT_C.search(command) or _GIT_DIR.search(command) or _CD.search(command)):
+        return FETCH_AUTH_HINT if any(h in (output or "").casefold() for h in hosts) else None
+    try:
+        remote = _remote_url(target_repository(command, cwd))
+    except Exception:
+        remote = ""
+    haystack = f"{output}\n{remote}".casefold()
+    return FETCH_AUTH_HINT if any(host in haystack for host in hosts) else None
+
+
 def detect_publish_command(command: object) -> Optional[str]:
     """Return "git-push" / "gh" for a command that would contact a remote."""
     if not isinstance(command, str) or not command.strip():

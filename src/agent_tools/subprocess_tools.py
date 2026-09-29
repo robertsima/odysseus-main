@@ -463,7 +463,7 @@ class BashTool:
             if err:
                 output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
             return {
-                "output": _truncate(output, MAX_OUTPUT_CHARS) or "(no output)",
+                "output": _with_remote_auth_hint(content, output, _truncate(output, MAX_OUTPUT_CHARS)) or "(no output)",
                 "exit_code": rc or 0,
                 "tmux_session": _tmux_session_name(str(session_id), sandbox_ws),
                 **({"sandboxed": True} if sandbox_ws else {}),
@@ -501,8 +501,19 @@ class BashTool:
         err = stderr.rstrip()
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
-        output = _truncate(output, MAX_OUTPUT_CHARS)
+        output = _with_remote_auth_hint(content, output, _truncate(output, MAX_OUTPUT_CHARS))
         return {"output": output or "(no output)", "exit_code": rc or 0}
+
+
+def _with_remote_auth_hint(command: str, full_output: str, shown: str) -> str:
+    """``shown`` plus a pointer to manage_git when a git fetch/pull/clone in
+    the command failed to authenticate to GitHub (push_guard.remote_auth_hint)."""
+    from src.agent_worktree.push_guard import remote_auth_hint
+    from src.tool_execution import agent_cwd
+
+    hint = remote_auth_hint(command, full_output, agent_cwd())
+    return f"{shown}\n\n[Odysseus] {hint}" if hint else shown
+
 
 class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:

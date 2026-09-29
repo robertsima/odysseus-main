@@ -294,3 +294,69 @@ def test_bash_tool_still_runs_ordinary_commands():
     result = asyncio.run(TOOL_HANDLERS["bash"]("echo hello-from-bash", {"allow_private": True}))
     assert result["exit_code"] == 0
     assert "hello-from-bash" in result["output"]
+
+
+# ── A remote read in bash that cannot authenticate gets a pointer ────────── #
+# 2026-09-29: the agent ran `git fetch` from bash on a git@github.com: remote,
+# got "Permission denied (publickey)" and stopped, asking the user to restore
+# SSH access. manage_git had fetched the same repository an hour earlier over
+# HTTPS with Odysseus's GitHub connection.
+
+@pytest.mark.parametrize("command,output", [
+    ("GIT_SSH_COMMAND='ssh -F /dev/null' git -C /repo fetch origin main",
+     "git@github.com: Permission denied (publickey).\nfatal: Could not read from remote repository."),
+    ("git clone https://github.com/o/private.git",
+     "fatal: could not read Username for 'https://github.com': terminal prompts disabled"),
+    ("git ls-remote origin", "remote: Invalid username or password.\nfatal: Authentication failed for 'https://github.com/o/r.git/'"),
+])
+def test_failed_remote_read_points_at_manage_git(command, output):
+    hint = push_guard.remote_auth_hint(command, output)
+    assert hint and "manage_git" in hint and "fetch_branch" in hint
+
+
+@pytest.mark.parametrize("command,output", [
+    ("git fetch origin", "From github.com:o/r\n * branch main -> FETCH_HEAD"),      # it worked
+    ("git status", "Permission denied (publickey)"),                                 # not a remote read
+    ("echo git fetch", "Permission denied (publickey)"),                             # not a git command
+    ("ssh host true", "Permission denied (publickey)"),
+    # Not a GitHub remote: manage_git could not reach it either.
+    ("git fetch git@gitlab.example.com:o/r.git", "fatal: Could not read from remote repository."),
+])
+def test_no_pointer_when_the_read_worked_or_was_not_a_git_fetch(command, output):
+    assert push_guard.remote_auth_hint(command, output) is None
+
+
+def test_the_repository_origin_decides_when_the_command_names_no_remote(tmp_path):
+    repo = tmp_path / "dog-trainer"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = git@github.com:robertsima/Umni.git\n', encoding="utf-8")
+    other = tmp_path / "elsewhere"
+    (other / ".git").mkdir(parents=True)
+    (other / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = git@gitlab.example.com:o/r.git\n', encoding="utf-8")
+    assert push_guard.remote_auth_hint(f"cd {repo} && git pull --ff-only", "Host key verification failed.")
+    assert push_guard.remote_auth_hint("git fetch origin", "Host key verification failed.", cwd=str(repo))
+    assert push_guard.remote_auth_hint(f"cd {other} && git pull", "Host key verification failed.") is None
+
+
+def test_bash_result_carries_the_pointer(monkeypatch):
+    from src.agent_tools import subprocess_tools
+
+    monkeypatch.setattr(subprocess_tools, "IS_WINDOWS", False)
+    monkeypatch.setattr(subprocess_tools.shutil, "which", lambda name: None)   # the pipe path
+    monkeypatch.setattr("src.tool_execution.agent_cwd", lambda: "/tmp")
+
+    async def fake_create(command, **kwargs):
+        return object()
+
+    async def fake_stream(_process, **_kwargs):
+        return "", "git@github.com: Permission denied (publickey).", 128, False
+
+    monkeypatch.setattr(subprocess_tools, "_create_bash_subprocess", fake_create)
+    monkeypatch.setattr(subprocess_tools, "_run_subprocess_streaming", fake_stream)
+    result = asyncio.run(subprocess_tools.BashTool().execute(
+        "git -C /repo fetch origin", {"subproc_env": {}, "session_id": None, "allow_private": True}))
+    assert result["exit_code"] == 128
+    assert "Permission denied (publickey)" in result["output"]
+    assert "manage_git" in result["output"]
