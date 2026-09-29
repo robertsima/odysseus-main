@@ -163,3 +163,68 @@ def test_vault_editor_detects_external_changes(vault_routes):
         )
     assert exc.value.status_code == 409
     assert target.read_text(encoding="utf-8") == "changed in Obsidian"
+
+
+# ── create and delete from the Vault files view (2026-09-28) ────────────────
+
+def test_human_can_create_a_note_and_it_is_indexed(vault_routes):
+    vault, docs, rag, router = vault_routes
+    create = _endpoint(router, "/api/personal/vault/file", "POST")
+
+    result = create(body=personal_routes.VaultFileCreate(path="Reference/New idea", content="# New idea\n"),
+                    owner="alice")
+    assert result["success"] is True
+    assert result["path"] == "Reference/New idea.md"  # .md appended
+    assert (vault / "Reference" / "New idea.md").read_text(encoding="utf-8") == "# New idea\n"
+    assert rag.indexed and docs.refreshed == 1
+
+    # A missing folder under the vault is created.
+    nested = create(body=personal_routes.VaultFileCreate(path="Projects/2026/plan.md"), owner="alice")
+    assert (vault / "Projects" / "2026" / "plan.md").is_file() and nested["path"] == "Projects/2026/plan.md"
+
+
+def test_create_never_overwrites_and_stays_inside_the_vault(vault_routes):
+    vault, _docs, _rag, router = vault_routes
+    create = _endpoint(router, "/api/personal/vault/file", "POST")
+    for path, status in (("Private/journal.md", 409), ("../outside.md", 403), (".hidden/x.md", 400),
+                         ("Reference/.secret.md", 400), ("bad:name.md", 400)):
+        with pytest.raises(HTTPException) as exc:
+            create(body=personal_routes.VaultFileCreate(path=path, content="x"), owner="alice")
+        assert exc.value.status_code == status, path
+    assert (vault / "Private" / "journal.md").read_text(encoding="utf-8") == "private journal"
+    assert not (vault.parent / "outside.md").exists()
+
+
+def test_delete_moves_the_note_to_the_vault_trash(vault_routes):
+    vault, docs, rag, router = vault_routes
+    delete = _endpoint(router, "/api/personal/vault/file", "DELETE")
+    tree = _endpoint(router, "/api/personal/vault/tree", "GET")
+
+    result = delete(path="Private/journal.md", owner="alice")
+    assert result == {"success": True, "path": "Private/journal.md", "trashed_to": ".trash/Private/journal.md"}
+    assert not (vault / "Private" / "journal.md").exists()
+    assert (vault / ".trash" / "Private" / "journal.md").read_text(encoding="utf-8") == "private journal"
+    assert str(vault / "Private" / "journal.md") in [str(p) for p in rag.deleted]
+
+    # The trash folder is hidden from the tree.
+    listed = []
+    def walk(node):
+        for child in node.get("children", []):
+            listed.append(child["path"])
+            walk(child)
+    walk(tree(owner="alice")["tree"])
+    assert not any(p.startswith(".trash") for p in listed)
+
+    # A second note with the same path gets a numbered name in the trash.
+    (vault / "Private" / "journal.md").write_text("again", encoding="utf-8")
+    again = delete(path="Private/journal.md", owner="alice")
+    assert again["trashed_to"] == ".trash/Private/journal (2).md"
+
+
+def test_delete_refuses_paths_outside_the_vault_or_missing(vault_routes):
+    _vault, _docs, _rag, router = vault_routes
+    delete = _endpoint(router, "/api/personal/vault/file", "DELETE")
+    for path, status in (("../outside.md", 403), ("Nope/missing.md", 404), ("ignore.txt", 400)):
+        with pytest.raises(HTTPException) as exc:
+            delete(path=path, owner="alice")
+        assert exc.value.status_code == status, path

@@ -32,6 +32,18 @@ class VaultFileUpdate(BaseModel):
     modified: Optional[float] = None
 
 
+class VaultFileCreate(BaseModel):
+    path: str = Field(..., min_length=1, max_length=2000)
+    content: str = Field("", max_length=VAULT_EDITOR_MAX_BYTES)
+
+
+# Deleted vault notes move here (relative to the vault root) instead of being
+# erased. The leading dot keeps the folder out of the vault tree and out of
+# every indexer (src.index_walk.prune_index_dirs), so a trashed note is gone
+# from search but still recoverable on disk.
+VAULT_TRASH_DIR = ".trash"
+
+
 def _personal_upload_dir_for_owner(owner: str | None, *, create: bool = True) -> str:
     """Return the per-owner upload directory used for direct RAG uploads."""
     owner_segment = secure_filename((owner or "local").strip())[:80] or "local"
@@ -251,14 +263,26 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             raise HTTPException(404, "Configured vault directory is not mounted or does not exist")
         return root
 
-    def _resolve_vault_file(relative_path: str) -> Tuple[str, str]:
-        """Resolve a human-selected Markdown file inside the active vault."""
+    def _resolve_vault_file(relative_path: str, *, must_exist: bool = True) -> Tuple[str, str]:
+        """Resolve a human-selected Markdown file inside the active vault.
+
+        ``must_exist=False`` resolves a note about to be created: every path
+        segment must then be a plain visible name (no hidden folders, no
+        control characters), and a symlinked folder may not carry the new file
+        outside the vault.
+        """
         raw = str(relative_path or "").strip().replace("\\", "/")
         if not raw or raw.startswith("/") or os.path.isabs(raw):
             raise HTTPException(400, "A vault-relative file path is required")
         parts = [part for part in raw.split("/") if part not in ("", ".")]
         if any(part == ".." for part in parts):
             raise HTTPException(403, "Path must stay inside the vault")
+        if not must_exist:
+            for part in parts:
+                if part.startswith(".") or any(ord(ch) < 32 for ch in part) or len(part) > 200:
+                    raise HTTPException(400, f"{part!r} is not a usable file or folder name")
+                if any(ch in part for ch in '<>:"|?*'):
+                    raise HTTPException(400, f"{part!r} contains a character file names cannot use")
         rel = "/".join(parts)
         if os.path.splitext(rel)[1].lower() not in (".md", ".markdown"):
             raise HTTPException(400, "Only Markdown vault files can be edited")
@@ -270,9 +294,59 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             inside = False
         if not inside:
             raise HTTPException(403, "Path must stay inside the vault")
-        if not os.path.isfile(target):
+        if must_exist and not os.path.isfile(target):
             raise HTTPException(404, "Vault file not found")
         return target, rel
+
+    def _write_vault_file(target: str, payload: str) -> None:
+        """Write ``payload`` to ``target`` atomically (temp file + replace)."""
+        temp_name = None
+        try:
+            fd, temp_name = tempfile.mkstemp(prefix=".vault-edit-", suffix=".tmp", dir=os.path.dirname(target))
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, target)
+            temp_name = None
+        except PermissionError as exc:
+            raise HTTPException(
+                409,
+                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Could not save vault file: {exc}") from exc
+        finally:
+            if temp_name and os.path.exists(temp_name):
+                try:
+                    os.unlink(temp_name)
+                except OSError:
+                    pass
+
+    def _reindex_vault_file(target: str) -> bool:
+        """Re-embed one human-edited vault file now; the periodic scanner
+        retries anything that fails here. Returns whether chunks were indexed."""
+        indexed = False
+        rag = _rag()
+        if rag:
+            try:
+                rag.delete_by_source(target)
+                owner_for = getattr(rag, "owner_for_directory", None)
+                chunk_owner = owner_for(os.path.dirname(target)) if callable(owner_for) else None
+                policy = _vault_file_policy(target)
+                indexed_count, _failed = rag.index_file(
+                    target,
+                    owner=chunk_owner,
+                    sensitivity=policy["sensitivity"],
+                )
+                indexed = bool(indexed_count)
+            except Exception as exc:
+                logger.warning("Immediate re-index failed for human vault edit %s: %s", target, exc)
+        try:
+            personal_docs_manager.refresh_index()
+        except Exception as exc:
+            logger.warning("Keyword index refresh failed after human vault edit %s: %s", target, exc)
+        return indexed
 
     def _vault_file_policy(path: str) -> Dict[str, Any]:
         from src.rag_sensitivity import path_is_readonly, resolve_sensitivity
@@ -441,51 +515,10 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
                     "This file changed outside Odysseus. Reopen it before saving so those changes are not overwritten.",
                 )
 
-        temp_name = None
-        try:
-            fd, temp_name = tempfile.mkstemp(prefix=".vault-edit-", suffix=".tmp", dir=os.path.dirname(target))
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, target)
-            temp_name = None
-        except PermissionError as exc:
-            raise HTTPException(
-                409,
-                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
-            ) from exc
-        except OSError as exc:
-            raise HTTPException(500, f"Could not save vault file: {exc}") from exc
-        finally:
-            if temp_name and os.path.exists(temp_name):
-                try:
-                    os.unlink(temp_name)
-                except OSError:
-                    pass
-
+        _write_vault_file(target, payload)
         # Update the shared embedding corpus immediately. Failure here does not
         # roll back the human's file edit; the periodic scanner will retry it.
-        indexed = False
-        rag = _rag()
-        if rag:
-            try:
-                rag.delete_by_source(target)
-                owner_for = getattr(rag, "owner_for_directory", None)
-                chunk_owner = owner_for(os.path.dirname(target)) if callable(owner_for) else None
-                policy = _vault_file_policy(target)
-                indexed_count, _failed = rag.index_file(
-                    target,
-                    owner=chunk_owner,
-                    sensitivity=policy["sensitivity"],
-                )
-                indexed = bool(indexed_count)
-            except Exception as exc:
-                logger.warning("Immediate re-index failed for human vault edit %s: %s", target, exc)
-        try:
-            personal_docs_manager.refresh_index()
-        except Exception as exc:
-            logger.warning("Keyword index refresh failed after human vault edit %s: %s", target, exc)
+        indexed = _reindex_vault_file(target)
 
         return {
             "success": True,
@@ -494,6 +527,99 @@ def setup_personal_routes(personal_docs_manager, rag_manager, rag_available):
             "modified": os.path.getmtime(target),
             **_vault_file_policy(target),
         }
+
+    @router.post("/vault/file")
+    def create_vault_file(
+        body: VaultFileCreate,
+        owner: str = Depends(_require_human_user),
+    ):
+        """Create a new Markdown note in the vault from the human UI.
+
+        The Vault files view could open and edit notes but not add one
+        (2026-09-28). A missing ``.md`` is appended, missing folders under the
+        vault are created, and an existing file is never overwritten.
+        """
+        path = str(body.path or "").strip()
+        if path and os.path.splitext(path)[1].lower() not in (".md", ".markdown"):
+            path += ".md"
+        target, rel = _resolve_vault_file(path, must_exist=False)
+        if os.path.lexists(target):
+            raise HTTPException(409, f"{rel} already exists")
+        if len(body.content.encode("utf-8")) > VAULT_EDITOR_MAX_BYTES:
+            raise HTTPException(413, "Vault file is too large for the browser editor")
+        parent = os.path.dirname(target)
+        try:
+            os.makedirs(parent, exist_ok=True)
+        except PermissionError as exc:
+            raise HTTPException(
+                409,
+                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Could not create the folder for {rel}: {exc}") from exc
+        # makedirs may have followed a symlinked folder: re-check the real
+        # location before writing anything.
+        root = _vault_root()
+        try:
+            inside = os.path.commonpath([os.path.realpath(parent), root]) == root
+        except ValueError:
+            inside = False
+        if not inside:
+            raise HTTPException(403, "Path must stay inside the vault")
+        _write_vault_file(target, body.content)
+        indexed = _reindex_vault_file(target)
+        return {
+            "success": True,
+            "path": rel,
+            "name": os.path.basename(rel),
+            "content": body.content,
+            "indexed": indexed,
+            "modified": os.path.getmtime(target),
+            **_vault_file_policy(target),
+        }
+
+    @router.delete("/vault/file")
+    def delete_vault_file(
+        path: str = Query(...),
+        owner: str = Depends(_require_human_user),
+    ):
+        """Move a vault note to the vault's hidden ``.trash`` folder.
+
+        Not an erase: a slip in the UI must be recoverable, so the file keeps
+        its relative path under ``.trash`` (with " (2)", " (3)" ... when a
+        same-named note was trashed before). Its chunks leave retrieval now.
+        """
+        target, rel = _resolve_vault_file(path)
+        root = _vault_root()
+        stem, ext = os.path.splitext(rel)
+        dest_rel = f"{VAULT_TRASH_DIR}/{rel}"
+        dest = os.path.join(root, *dest_rel.split("/"))
+        n = 2
+        while os.path.lexists(dest):
+            dest_rel = f"{VAULT_TRASH_DIR}/{stem} ({n}){ext}"
+            dest = os.path.join(root, *dest_rel.split("/"))
+            n += 1
+        try:
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            os.replace(target, dest)
+        except PermissionError as exc:
+            raise HTTPException(
+                409,
+                "The host filesystem mount is read-only; make the vault mount writable for human editing.",
+            ) from exc
+        except OSError as exc:
+            raise HTTPException(500, f"Could not delete {rel}: {exc}") from exc
+        rag = _rag()
+        if rag:
+            try:
+                rag.delete_by_source(target)
+            except Exception as exc:
+                logger.warning("Could not drop chunks of deleted vault note %s: %s", target, exc)
+        try:
+            personal_docs_manager.refresh_index()
+        except Exception as exc:
+            logger.warning("Keyword index refresh failed after deleting vault note %s: %s", target, exc)
+        return {"success": True, "path": rel, "trashed_to": dest_rel}
     
     @router.post("/reload")
     async def api_personal_reload(owner: str = Depends(require_user), _admin: None = Depends(require_admin)):
