@@ -24,6 +24,7 @@ import asyncio
 import contextlib
 import contextvars
 import logging
+import re
 import time
 import uuid
 from typing import Any, Dict, List, Optional
@@ -1031,14 +1032,10 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     headline = {"completed": "finished", "incomplete": "ran out of rounds",
                 "waiting_approval": "is waiting for the user's approval"}.get(status, status)
     inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
-              + ("The worker was cut off by its round budget, so the result above is partial — "
-                 "tell the user where it stopped and what is left. " if status == "incomplete" else "")
-              + ("The worker paused on an approval card in its own chat, so the task is not done. "
-                 "Tell the user it needs their approval there; do not redo the work. "
-                 if status == "waiting_approval" else "")
-              + "Report this result to the user in one reply. Don't repeat work the worker already did, "
-              "and do not start new workers or delegate further: the user did not ask for more. "
-              "If more work is needed, say what it is and let the user decide.")
+              + ("The worker was cut off by its round budget, so the result above is partial: carry on "
+                 "from there if the follow-ups below allow it, or tell the user where it stopped and "
+                 "what is left.\n\n" if status == "incomplete" else "")
+              + _handoff_guidance(parent, worker, status, text))
     # Whether a turn was already running when this result arrived: that turn
     # built its context before the result existed, so its reply (saved after
     # this message) does not show it was read -- see _replied_after_worker_result.
@@ -1074,12 +1071,146 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
             # follow-ups on the same context.
             return
         _WAITING_PARENTS.add(parent_id)
-        task = asyncio.create_task(_continue_when_idle(manager, parent_id, parent, worker, inject_msg, owner))
+        task = asyncio.create_task(_continue_when_idle(manager, parent_id, parent, worker, inject_msg, owner,
+                                                       status))
         _PENDING_HANDOFFS.add(task)
         task.add_done_callback(_PENDING_HANDOFFS.discard)
         task.add_done_callback(lambda _t, pid=parent_id: _WAITING_PARENTS.discard(pid))
         return
-    await _continue_parent(manager, parent_id, parent, worker, owner)
+    await _continue_parent(manager, parent_id, parent, worker, owner, status)
+
+
+# ── Continuing the user's request after a hand-back ─────────────────────────
+# A finished worker used to be a dead end: the hand-back told the parent "do
+# not start new workers: the user did not ask for more", and the follow-up turn
+# had every launcher switched off. So a worker that stopped on something the
+# parent could fix (a denied tool, the wrong base, a missing workspace) was
+# only ever summarised, and the user had to say "retry" -- about 17 times on
+# 2026-09-29, for 3 delivered fixes out of 15 runs. The guard it replaced was
+# against chains of turns nobody asked for; the chain is now tied to the
+# request that started it and bounded: each follow-up that sends work out
+# again spends one of `agent_auto_continue_limit` for that request, and a new
+# message from the person starts a fresh count. A stopped (cancelled) worker
+# never continues, and neither does one paused on an approval card.
+
+# Launchers a continuation may use: send the same worker back, or start
+# another. The rest of SUBAGENT_BLOCKED_TOOLS (new chats, pipelines, session
+# admin) stays off, and the chat's own tool policy still applies.
+_CONTINUE_LAUNCH_TOOLS = frozenset({"send_to_session", "manage_agent_loadout", "delegate_to_agent",
+                                    "delegate_to_claude_code", "orchestrate_agents"})
+_CONTINUABLE_STATUSES = frozenset({"completed", "incomplete", "failed"})
+# User-role messages in a chat that are not the person's request: hand-backs,
+# mid-turn steers (part of the request they amend), publish decisions.
+_NOT_A_REQUEST = frozenset({"worker", "steer", "publish_decision"})
+
+
+def _auto_continue_limit() -> int:
+    try:
+        from src.settings import get_setting
+
+        return max(0, min(10, int(get_setting("agent_auto_continue_limit", 3))))
+    except Exception:
+        return 0
+
+
+def _request_index(history) -> int:
+    """Index of the latest message the person (not a worker) wrote, or -1."""
+    return max((i for i, m in enumerate(history)
+                if getattr(m, "role", None) == "user"
+                and (getattr(m, "metadata", None) or {}).get("source") not in _NOT_A_REQUEST),
+               default=-1)
+
+
+def _request_text(parent) -> str:
+    history = list(getattr(parent, "history", None) or [])
+    idx = _request_index(history)
+    return str(getattr(history[idx], "content", "") or "").strip() if idx >= 0 else ""
+
+
+def _followups_used(parent) -> int:
+    history = list(getattr(parent, "history", None) or [])
+    since = _request_index(history)
+    used = 0
+    for m in history[since + 1:]:
+        meta = getattr(m, "metadata", None) or {}
+        if getattr(m, "role", None) == "assistant" and meta.get("source") in ("worker_followup", "publish_followup"):
+            used += int(meta.get("continued") or 0)
+    return used
+
+
+def _continuation_budget(parent) -> int:
+    """Follow-ups this chat may still run on its own for the current request."""
+    return max(0, _auto_continue_limit() - _followups_used(parent))
+
+
+def _launches(events) -> int:
+    """How many workers a continuation's tool calls started or sent back."""
+    count = 0
+    for ev in events or []:
+        if not isinstance(ev, dict) or ev.get("exit_code") not in (0, None):
+            continue
+        tool = ev.get("tool")
+        if tool == "manage_agent_loadout":
+            count += '"action":"start"' in re.sub(r"\s+", "", str(ev.get("command") or ""))
+        elif tool in _CONTINUE_LAUNCH_TOOLS:
+            count += 1
+    return count
+
+
+def _stated_needs(text: str) -> List[tuple]:
+    """(who, what) for each `Needs user:` / `Needs parent:` line a worker ended with."""
+    from src.agent_loop import NEEDS_LINE_RE
+
+    return [(m.group(1).lower(), m.group(2)[:300]) for m in NEEDS_LINE_RE.finditer(str(text or ""))]
+
+
+def _handoff_guidance(parent, worker, status: str, text: str) -> str:
+    """What the parent's follow-up turn should do with this result.
+
+    Worded without mail-like verbs ("reply", "send"): the intent router reads
+    this message as the turn's request and offered email tools for them.
+    """
+    if status == "cancelled":
+        return ("The worker was stopped before it finished. Tell the user where it got to. "
+                "Do not start or resume workers.")
+    if status == "waiting_approval":
+        return ("The worker paused on an approval card in its own chat, so the task is not done. "
+                "Tell the user it needs their approval there; do not redo the work.")
+    needs = _stated_needs(text)
+    lines = []
+    request = _request_text(parent)
+    if request:
+        lines.append(f"The user's request this worker was serving:\n«{request[:1500]}»")
+    for who, what in needs:
+        if who == "parent":
+            lines.append(f"The worker says this chat can unblock it: {what}")
+        else:
+            lines.append(f"The worker needs from the user: {what}")
+    limit = _auto_continue_limit()
+    budget = _continuation_budget(parent) if status in _CONTINUABLE_STATUSES else 0
+    if budget > 0:
+        lines.append(
+            "If that request is now fulfilled, report the outcome to the user. If it is not, and "
+            "the next step is one you or a worker can take, take it now rather than asking the user "
+            "to retry: clear what blocked the worker (a tool, permission or workspace this chat can "
+            "grant; a wrong base, branch or path), then give this same worker the fix and have it "
+            f"carry on: `send_to_session` with session_id \"{worker.id}\" and mode \"agent\" runs it "
+            "again on its own history and worktree and returns what it did. Start a different "
+            "worker only when this one cannot do it. "
+            f"Automatic follow-ups left for this request: {budget} (each worker you start or send "
+            "back uses one). Ask the user only for what only "
+            "they can give (an approval, a credential, a choice between real options), as one "
+            "specific question.")
+    elif limit > 0 and status in _CONTINUABLE_STATUSES:
+        lines.append(
+            "The automatic follow-ups for this request are used up. Tell the user where it stands, "
+            "what is left and what you need from them. Do not start or resume workers.")
+    else:
+        lines.append(
+            "Tell the user the outcome. Don't repeat work the worker already did, and do not start "
+            "new workers or delegate further. If more work is needed, say what it is and let the "
+            f"user decide; to carry on later, this worker is session \"{worker.id}\".")
+    return "\n\n".join(lines)
 
 
 def _running_workers(parent_id: str) -> int:
@@ -1230,7 +1361,8 @@ def _result_already_read(parent, inject_msg) -> bool:
     return False
 
 
-async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_msg, owner: Optional[str]) -> None:
+async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_msg, owner: Optional[str],
+                              status: str = "completed") -> None:
     from src import agent_runs
 
     deadline = time.monotonic() + _HANDOFF_IDLE_WAIT_S
@@ -1244,22 +1376,25 @@ async def _continue_when_idle(manager, parent_id: str, parent, worker, inject_ms
             await asyncio.sleep(_HANDOFF_IDLE_POLL_S)
         if _result_already_read(parent, inject_msg):
             return
-        await _continue_parent(manager, parent_id, parent, worker, owner)
+        await _continue_parent(manager, parent_id, parent, worker, owner, status)
     except asyncio.CancelledError:
         raise
     except Exception:
         logger.warning("deferred worker hand-off to %s failed", parent_id, exc_info=True)
 
 
-async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optional[str]) -> None:
+async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optional[str],
+                           worker_status: str = "completed") -> None:
     """Run the parent chat's agent on the worker's result (it is already in
     the parent's history) and save its reply there.
 
-    This turn has no message from the user behind it, so it may summarise the
-    result but never launch anything: every worker-starting tool is denied
-    for it. Without that, a finished worker's follow-up could start new
-    workers, whose completions continued the chat again — a chain of turns
-    nobody asked for.
+    This turn carries on the request the person made. While that request has
+    follow-ups left (``_continuation_budget``) it may send the same worker
+    back or start another -- only the launchers in ``_CONTINUE_LAUNCH_TOOLS``,
+    under the chat's own policy -- and a reply that did so spends one. Once
+    they are spent, or for a stopped worker, every worker-starting tool is
+    denied and it only reports, so a chain of follow-ups never outlives the
+    request that started it.
     """
     from core.models import ChatMessage
     from src import agent_runs
@@ -1291,6 +1426,11 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
         # judgement needs the last answer and the results, not the whole chat:
         # sending the full history cost ~156k tokens per call on 2026-09-28.
         context = _judgement_context(parent) + [{"role": "user", "content": _ALREADY_ANSWERED_NOTE}]
+    # The judgement call above sees only the request, the results and the last
+    # answer; it decides whether to post, not what to do next.
+    may_continue = (not already_answered and worker_status in _CONTINUABLE_STATUSES
+                    and _continuation_budget(parent) > 0)
+    denied = set(SUBAGENT_BLOCKED_TOOLS) - (_CONTINUE_LAUNCH_TOOLS if may_continue else set())
     reply, events = "", []
     # The continuation is itself a bounded agent run, so it can be cut off the
     # same way the worker was — report that rather than closing the run green.
@@ -1306,8 +1446,9 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
                 # because a worker happened to finish.
                 subagent=False,
                 # ... but it is not a turn the user started either, so it gets
-                # no launcher at all (see the docstring).
-                disabled_tools=set(SUBAGENT_BLOCKED_TOOLS),
+                # launchers only while the request has follow-ups left (see
+                # the docstring).
+                disabled_tools=denied,
                 activity_session_id=parent_id, run_id=run_id,
                 source="session", owner=owner, outcome=followup)
         status = "incomplete" if followup.get("rounds_exhausted") else "completed"
@@ -1326,6 +1467,13 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
         await _hand_up_when_done(manager, parent_id, parent, last_reply, "completed", owner)
         return
     meta: Dict[str, Any] = {"model": parent.model, "source": "worker_followup", "worker_session": worker.id}
+    launched = _launches(events) if may_continue else 0
+    if launched:
+        # Each worker it started or sent back spends one of the request's
+        # follow-ups (_followups_used).
+        meta["continued"] = launched
+        logger.info("[worker-handoff] %s continued the request after %s (%d follow-up(s) left)",
+                    parent_id, worker.id, max(0, _continuation_budget(parent) - launched))
     if events:
         meta["tool_events"] = events
     parent.add_message(ChatMessage("assistant", reply or "(no reply)", meta))
@@ -1334,6 +1482,101 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
                           owner=owner, data={"target_session": worker.id, "steps": len(events),
                                              "result_excerpt": reply[:400]})
     await _hand_up_when_done(manager, parent_id, parent, reply, status, owner)
+
+
+# ── Publishing is a pause, not the end ──────────────────────────────────────
+# An agent that asks to publish ends its turn on "awaiting your approval".
+# The person approves in the browser and the server pushes; until 2026-09-29
+# that decision only landed in the chat's history and nothing ran. So nobody
+# checked the pull request's CI, and the user merged PR #16 and found the
+# tests still failing. Now the chat that asked carries on once, under the same
+# follow-up budget as a worker hand-back; a worker's follow-up is then handed
+# up to the chat that started it like any other result.
+
+_PUBLISH_FOLLOWUP_NOTE = (
+    "[Harness note, not from the user] The publish request above was approved and has gone out. "
+    "Carry on with the request this chat is working on: if anything is left after publication "
+    "(for example a CI run on the pull request to check, or a failure to fix on the same branch), "
+    "do it now. If nothing is left, state the outcome in one or two sentences with the pull "
+    "request link.{budget}"
+)
+
+
+def schedule_publish_followup(manager, session_id: Optional[str], owner: Optional[str],
+                              request_id: Optional[str]) -> None:
+    """Continue the chat that asked to publish, once it is idle."""
+    if not session_id or manager is None or _auto_continue_limit() <= 0:
+        return
+    task = asyncio.create_task(_publish_followup(manager, session_id, owner, request_id))
+    _PENDING_HANDOFFS.add(task)
+    task.add_done_callback(_PENDING_HANDOFFS.discard)
+
+
+def _person_wrote_after(history, predicate) -> bool:
+    """Whether the person wrote in the chat after the message ``predicate`` picks."""
+    idx = max((i for i, m in enumerate(history) if predicate(m)), default=None)
+    if idx is None:
+        return False
+    return _request_index(history) > idx
+
+
+async def _publish_followup(manager, session_id: str, owner: Optional[str], request_id: Optional[str]) -> None:
+    from core.models import ChatMessage
+    from src import agent_runs
+    from src.headless_agent import SUBAGENT_BLOCKED_TOOLS, run_headless
+
+    try:
+        deadline = time.monotonic() + _HANDOFF_IDLE_WAIT_S
+        while agent_runs.is_busy(session_id):
+            if time.monotonic() > deadline:
+                return
+            await asyncio.sleep(_HANDOFF_IDLE_POLL_S)
+        chat = manager.get_session(session_id)
+        if chat is None:
+            return
+        owner = owner or getattr(chat, "owner", None)
+        history = list(getattr(chat, "history", None) or [])
+        if _person_wrote_after(history, lambda m: (getattr(m, "metadata", None) or {}).get("request_id") == request_id
+                               and (getattr(m, "metadata", None) or {}).get("source") == "publish_decision"):
+            return  # the person's own turn already saw the decision
+        budget = _continuation_budget(chat)
+        denied = set(SUBAGENT_BLOCKED_TOOLS) - (_CONTINUE_LAUNCH_TOOLS if budget > 0 else set())
+        note = _PUBLISH_FOLLOWUP_NOTE.format(
+            budget=(f" Automatic follow-ups left for this request: {budget} (each worker you start or send "
+                    "back uses one)." if budget > 0 else " Do not start or resume workers."))
+        context = chat.get_context_messages() + [
+            {"role": "user", "content": note, "metadata": {"source": "publish_decision"}}]
+        run_id = activity.run_started(session_id, "session", "Continuing after publish approval", owner=owner,
+                                      data={"mode": "agent", "request_id": request_id})
+        followup: Dict[str, Any] = {}
+        reply, events, status = "", [], "completed"
+        try:
+            with agent_runs.track_external(session_id, source="worker", owner=owner):
+                reply, events = await run_headless(
+                    chat, context, max_rounds=_HANDOFF_MAX_ROUNDS, subagent=False,
+                    disabled_tools=denied, activity_session_id=session_id, run_id=run_id,
+                    source="session", owner=owner, outcome=followup)
+            if followup.get("stopped"):
+                status = "cancelled"
+            elif followup.get("rounds_exhausted"):
+                status = "incomplete"
+        except Exception as exc:
+            reply, status = f"Could not continue after the publish approval: {exc}", "failed"
+        meta: Dict[str, Any] = {"model": chat.model, "source": "publish_followup", "request_id": request_id}
+        launched = _launches(events) if budget > 0 else 0
+        if launched:
+            meta["continued"] = launched
+        if events:
+            meta["tool_events"] = events
+        chat.add_message(ChatMessage("assistant", reply or "(no reply)", meta))
+        manager.save_sessions()
+        activity.run_finished(session_id, "session", run_id, "Continued after publish approval", status=status,
+                              owner=owner, data={"steps": len(events), "result_excerpt": reply[:400]})
+        await _hand_up_when_done(manager, session_id, chat, reply, status, owner)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.warning("follow-up after publish approval in %s failed", session_id, exc_info=True)
 
 
 async def _hand_up_when_done(manager, chat_id: str, chat, reply: str, status: str, owner: Optional[str]) -> None:

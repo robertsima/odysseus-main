@@ -465,10 +465,12 @@ async def test_a_worker_hand_off_keeps_the_parent_chats_own_policy(monkeypatch):
     # ... and so is its approval mode, which was previously never passed at all,
     # so a chat that asks before every change executed without asking.
     assert seen["approval_mode"] == "ask_all"
-    # No one asked for this turn, so it may not launch anything: a follow-up
-    # that could start workers is how finished workers kept the chat running
-    # on its own (tests/test_worker_completion_no_runaway.py).
-    assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= set(seen["disabled_tools"])
+    # It carries on the person's request, so while that request has follow-ups
+    # left it may send the worker back or start another -- and nothing else
+    # that makes chats. When they are spent it launches nothing
+    # (tests/test_worker_completion_no_runaway.py).
+    assert {"create_session", "pipeline", "manage_session"} <= set(seen["disabled_tools"])
+    assert not agent_control._CONTINUE_LAUNCH_TOOLS & set(seen["disabled_tools"])
     # It really did run — an assertion on kwargs alone would pass on a no-op.
     assert parent.messages[-1].content == "continued"
 

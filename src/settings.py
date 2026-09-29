@@ -64,6 +64,11 @@ DEFAULT_SETTINGS = {
     # 1..4) and its refusal tells the user to raise it, but until 2026-09-28 it
     # was missing here, so /api/auth/settings dropped every save of it.
     "agent_max_worker_depth": 2,
+    # Follow-ups a chat may run on its own, per request, when a worker it
+    # started reports back without finishing: send the same worker back with
+    # the fix, or start another. 0 = report and wait for the user (the
+    # behaviour before 2026-09-29). src/agent_control._continuation_budget.
+    "agent_auto_continue_limit": 3,
 
     # Agent email safety: when True, the MCP send_email / reply_to_email
     # tools don't SMTP directly. They stage the composed message into the

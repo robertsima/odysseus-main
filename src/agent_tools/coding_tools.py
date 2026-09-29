@@ -56,6 +56,13 @@ class TodoWriteTool:
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"todos": normalized}, f, ensure_ascii=False, indent=2)
 
+        # The same list is the chat's task checklist, which later turns are
+        # shown (src.task_checklist); the file above was never read back.
+        from src import task_checklist
+
+        plan = task_checklist.from_todos(normalized)
+        task_checklist.save(ctx.get("session_id"), plan)
+
         lines = []
         for item in normalized:
             marker = {"pending": " ", "in_progress": ">", "completed": "x"}[item["status"]]
@@ -64,4 +71,5 @@ class TodoWriteTool:
             "output": "Updated todo list:\n" + ("\n".join(lines) if lines else "(empty)"),
             "exit_code": 0,
             "todos": normalized,
+            "plan_update": {"plan": plan},
         }

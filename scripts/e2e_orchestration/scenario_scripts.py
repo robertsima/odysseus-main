@@ -143,6 +143,20 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         "workers": {"": [_calls(_bash("pwd; test -e {data}/app.db && echo S-SEES-DATA || echo S-NO-DATA")),
                          _text("S-DONE scratch_shell")]},
     },
+    # The 2026-09-29 dead end: a worker stops on something the chat that
+    # started it can settle, and says so. The chat's follow-up sends the SAME
+    # worker back (send_to_session, mode agent: its own history and workspace)
+    # instead of reporting "blocked" and waiting for the user to type "retry".
+    "continue_blocked": {
+        "chat": [[_calls(_start("In umni, write the marker file. (scenario continue_blocked)",
+                                workspace="{clone}")), _ACK]],
+        "followup": [_calls(_call("send_to_session", session_id="{worker}", mode="agent",
+                                  message="Go ahead and write it. (scenario continue_blocked resumed)")),
+                     _text("S-FOLLOWUP-RESUMED continue_blocked")],
+        "workers": {"": [_calls(_bash("echo S-FIRST-RUN")),
+                         _text("Blocked before writing the marker.\nNeeds parent: the go-ahead to write it")],
+                    "resumed": [_calls(_bash("echo S-RESUMED-RUN")), _text("S-DONE continue_blocked")]},
+    },
     # A long reply still streaming when the app is stopped (redeploy).
     "slow": {
         "chat": [[_text("S-SLOW " + " ".join(f"part{i}" for i in range(120)), slow=True)]],
@@ -233,18 +247,30 @@ def scenario_turn(body: Dict[str, Any], env: Dict[str, str]) -> Optional[Dict[st
         if spec is None:
             return None
         last = users[-1] if users else ""
-        if _is_handback(last) or "[[no-update]]" in last:
+        if spec.get("followup") and _is_handback(last):
+            # A scripted follow-up; {worker} is the session the hand-back
+            # names for sending the same worker back.
+            named = re.search(r'session_id "([^"]+)"', last)
+            if named:
+                ctx["worker"] = named.group(1)
+            idx = _rounds_since_last_user(messages)
+            step = spec["followup"][min(idx, len(spec["followup"]) - 1)]
+            agent, tag = "followup", ""
+        elif _is_handback(last) or "[[no-update]]" in last:
             handed = [re.search(r"Result:\n(.*?)(?:\n\n|\Z)", u, re.S) for u in users if _is_handback(u)]
             got = [h.group(1).strip()[:200] for h in handed if h]
             return {"scenario": name, "agent": "followup", "tag": "", "round": 0, "results": results,
                     "reply": {"text": f"S-FOLLOWUP {name}: " + " | ".join(got)}, "delay": 0, "slow": False}
-        turn = sum(1 for u in users if SCENARIO_RE.search(u)) - 1
-        rounds = spec["chat"][min(turn, len(spec["chat"]) - 1)]
-        idx = _rounds_since_last_user(messages)
-        step = rounds[min(idx, len(rounds) - 1)]
-        agent, tag = "chat", ""
+        else:
+            turn = sum(1 for u in users if SCENARIO_RE.search(u)) - 1
+            rounds = spec["chat"][min(turn, len(spec["chat"]) - 1)]
+            idx = _rounds_since_last_user(messages)
+            step = rounds[min(idx, len(rounds) - 1)]
+            agent, tag = "chat", ""
     else:
-        worker_marker = next((WORKER_RE.search(u) for u in users if WORKER_RE.search(u)), None)
+        # The latest marker: a worker sent back with a new instruction runs
+        # that instruction's script ("(scenario NAME resumed)").
+        worker_marker = next((WORKER_RE.search(u) for u in reversed(users) if WORKER_RE.search(u)), None)
         if not worker_marker:
             return None
         name, tag = worker_marker.group(1), worker_marker.group(2) or ""

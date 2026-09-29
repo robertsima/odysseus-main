@@ -1007,7 +1007,10 @@ function _personaNameForTurn() {
 	      </button>
 	      <button type="button" class="plan-inline-clear">Clear</button>`;
 	    actions.querySelector('.plan-inline-execute')?.addEventListener('click', () => {
-	      const approved = _getStoredPlan() || _extractPlanText(plan);
+	      // The proposal this button sits on, first: the stored plan also holds
+	      // whatever checklist an agent last wrote with update_plan, which may
+	      // belong to another request.
+	      const approved = _extractPlanText(plan) || _getStoredPlan();
 	      if (!approved.trim()) return;
 	      _pendingApprovedPlan = approved;
 	      if (window.__odysseusSetPlanMode) window.__odysseusSetPlanMode(false);

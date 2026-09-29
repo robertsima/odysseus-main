@@ -1,14 +1,18 @@
-"""A finished worker must not set the chat running on its own.
+"""A finished worker continues the person's request, and only that far.
 
-When a worker finished, ``agent_control._hand_off`` continued the parent chat
-with a headless turn that had every launcher its chat had. Nothing the user
-typed was behind that turn, yet it could start new workers — and each of
-those, on finishing, continued the chat again. The user saw a chat that kept
-spawning workers after they had stopped talking to it.
+When a worker finished, ``agent_control._hand_off`` once continued the parent
+chat with every launcher its chat had. Nothing the user typed was behind that
+turn, yet it could start new workers -- and each of those, on finishing,
+continued the chat again: a chat that kept spawning workers after the person
+had stopped talking to it. The fix then went all the way the other way (no
+launcher ever), which made every blocked worker a dead end: on 2026-09-29 the
+user typed "retry" about 17 times for 3 delivered fixes.
 
-The rule pinned here: a completion is recorded in the parent chat and may
-produce at most one summarising reply; that reply can never launch a worker,
-and sibling workers finishing together produce one reply, not one each.
+The rule pinned here: a follow-up may send work out again (the same worker via
+send_to_session, or another) only while the request that started the chain has
+follow-ups left (``agent_auto_continue_limit``, counted per launch, reset by
+the person's next message). A stopped worker, a spent budget or a limit of 0
+means it only reports. Sibling workers finishing together produce one reply.
 """
 import json
 
@@ -77,22 +81,123 @@ def followups(monkeypatch):
     return ran
 
 
-async def test_a_completion_follow_up_can_never_launch_a_worker(followups):
+def _limit(monkeypatch, n):
+    monkeypatch.setattr(agent_control, "_auto_continue_limit", lambda: n)
+
+
+def _launch_event(tool="send_to_session", command='{"session_id": "w-1", "mode": "agent"}', exit_code=0):
+    return {"tool": tool, "command": command, "output": "ok", "exit_code": exit_code}
+
+
+async def test_with_follow_ups_disabled_a_completion_can_never_launch_a_worker(followups, monkeypatch):
+    _limit(monkeypatch, 0)
     parent = _Chat("parent")
+    parent.add_message(_Msg("user", "scout the repo"))
     await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "scout it",
                                   "Found issue #50.", "completed", "alice")
 
     assert len(followups) == 1, "one summarising reply, no more"
     assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= followups[0]["disabled_tools"]
     # The result is recorded, then summarised once.
-    assert [m.metadata.get("source") for m in parent.history] == ["worker", "worker_followup"]
+    assert [m.metadata.get("source") for m in parent.history] == [None, "worker", "worker_followup"]
     # And the model is told not to go looking for more work either.
-    assert "do not start new workers" in parent.history[0].content
+    assert "do not start new workers" in parent.history[1].content
+
+
+async def test_a_follow_up_may_send_the_same_worker_back_while_the_request_has_budget(followups, monkeypatch):
+    _limit(monkeypatch, 3)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "fix the failing Jest suite and open a PR"))
+    await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "fix it",
+                                  "Blocked: jest-expo is missing.\nNeeds parent: a workspace with dependencies",
+                                  "completed", "alice")
+
+    denied = followups[0]["disabled_tools"]
+    assert not agent_control._CONTINUE_LAUNCH_TOOLS & denied
+    # Only the launchers that carry the request on; nothing else that makes chats.
+    assert {"create_session", "pipeline", "manage_session"} <= denied
+    inject = parent.history[1].content
+    assert "fix the failing Jest suite and open a PR" in inject      # the goal, quoted
+    assert '"w-1"' in inject and "send_to_session" in inject          # resume, not respawn
+    assert "Automatic follow-ups left for this request: 3" in inject
+    assert "this chat can unblock it: a workspace with dependencies" in inject
+
+
+async def test_each_launch_spends_one_follow_up_until_none_are_left(monkeypatch):
+    _limit(monkeypatch, 2)
+    calls = []
+
+    async def fake_headless(sess, messages, **kwargs):
+        calls.append(set(kwargs.get("disabled_tools") or ()))
+        return "Sent the worker back with the fix.", [_launch_event()]
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    manager = _Manager(parent)
+    parent.add_message(_Msg("user", "fix the build"))
+    for _ in range(3):
+        await agent_control._hand_off(manager, "parent", _Worker(), "fix it", "Blocked: tests fail.",
+                                      "completed", "alice")
+
+    followups = [m for m in parent.history if m.metadata.get("source") == "worker_followup"]
+    assert [m.metadata.get("continued") for m in followups] == [1, 1, None]
+    assert not agent_control._CONTINUE_LAUNCH_TOOLS & calls[0]
+    assert not agent_control._CONTINUE_LAUNCH_TOOLS & calls[1]
+    # The third hand-back finds the request's follow-ups spent: report only.
+    assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= calls[2]
+    assert "follow-ups for this request are used up" in parent.history[-2].content
+
+
+async def test_the_persons_next_message_starts_a_fresh_count(monkeypatch):
+    _limit(monkeypatch, 1)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "fix the build"))
+    parent.add_message(_Msg("assistant", "Sent it back.", {"source": "worker_followup", "continued": 1}))
+    assert agent_control._continuation_budget(parent) == 0
+    # A hand-back or a steer is not the person's request ...
+    parent.add_message(_Msg("user", "[Worker W finished] ...", {"source": "worker"}))
+    parent.add_message(_Msg("user", "also check lint", {"source": "steer"}))
+    assert agent_control._continuation_budget(parent) == 0
+    # ... their own message is.
+    parent.add_message(_Msg("user", "ok, now also update the docs"))
+    assert agent_control._continuation_budget(parent) == 1
+
+
+async def test_a_stopped_worker_never_continues(followups, monkeypatch):
+    _limit(monkeypatch, 3)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "fix the build"))
+    await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "fix it",
+                                  "(stopped from the chat's Stop button before finishing)", "cancelled", "alice")
+    assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= followups[0]["disabled_tools"]
+    assert "Do not start or resume workers" in parent.history[1].content
+
+
+async def test_a_failed_launch_spends_nothing(monkeypatch):
+    _limit(monkeypatch, 1)
+
+    async def fake_headless(sess, messages, **kwargs):
+        return "Tried to start one.", [_launch_event("manage_agent_loadout", '{"action": "start"}', exit_code=1)]
+
+    monkeypatch.setattr(headless_agent, "run_headless", fake_headless)
+    parent = _Chat("parent")
+    parent.add_message(_Msg("user", "fix the build"))
+    await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "fix it", "Blocked.", "completed", "alice")
+    assert parent.history[-1].metadata.get("continued") is None
+    assert agent_control._continuation_budget(parent) == 1
+
+
+def test_launches_are_counted_per_call():
+    events = [_launch_event(),
+              _launch_event("manage_agent_loadout", '{"action":"start","name":"Lead Engineer"}'),
+              _launch_event("manage_agent_loadout", '{"action": "status"}'),
+              {"tool": "read_file", "command": "x", "exit_code": 0}]
+    assert agent_control._launches(events) == 2
 
 
 async def test_the_launcher_denial_reaches_the_agent_loop(monkeypatch):
     """The same property through the real ``run_headless``: the loop that
-    would execute a launcher is handed it as disabled."""
+    would execute a launcher is handed it as disabled once follow-ups are off."""
     import core.database as core_db
     import src.agent_loop as agent_loop
     import src.settings as settings
@@ -107,7 +212,8 @@ async def test_the_launcher_denial_reaches_the_agent_loop(monkeypatch):
 
     monkeypatch.setattr(agent_loop, "stream_agent_loop", fake_loop)
     monkeypatch.setattr(settings, "get_setting",
-                        lambda key, default=None: [] if key == "disabled_tools" else default)
+                        lambda key, default=None: [] if key == "disabled_tools"
+                        else 0 if key == "agent_auto_continue_limit" else default)
     monkeypatch.setattr(tool_security, "owner_is_admin_or_single_user", lambda owner: True)
     monkeypatch.setattr(core_db, "get_session_settings", lambda sid: {})
 

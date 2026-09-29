@@ -887,6 +887,21 @@ register_all([
         unit="levels",
         advanced=True,
     ),
+    SettingSpec(
+        key="agent_auto_continue_limit",
+        type="int",
+        label="Automatic follow-ups per request",
+        help=(
+            "When a worker reports back without finishing what you asked, the chat "
+            "that started it may fix what blocked it and send it back, or start "
+            "another, this many times before it stops and asks you. 0 means it "
+            "always reports back and waits."
+        ),
+        group="Agents",
+        min_value=0,
+        max_value=10,
+        unit="follow-ups",
+    ),
 
     SettingSpec(
         key="agent_approval_mode", type="choice", label="Approval prompts",

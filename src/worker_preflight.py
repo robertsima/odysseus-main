@@ -225,16 +225,86 @@ def _origin_repo_name(path: str) -> str:
         return ""
 
 
+def _is_linked_worktree(path: str) -> bool:
+    """A linked worktree's ``.git`` is a pointer file, a main checkout's a folder."""
+    return os.path.isfile(os.path.join(path, ".git"))
+
+
 def _checkout_named_in(task: str, checkouts: Iterable[str]) -> Optional[str]:
     """The one checkout whose folder or GitHub repository name the task
-    mentions, if exactly one."""
+    mentions, if exactly one.
+
+    Several checkouts can share a repository name: on 2026-09-29 "Umni" named
+    /app/data/development/dog-trainer and three worktrees of it
+    (dog-trainer-brief, -checkins, -integration), so every first launch was
+    refused. A folder the task names outright wins, then the one main checkout
+    among them.
+    """
     text = (task or "").casefold()
-    named = []
+
+    def _mentions(name: str) -> bool:
+        return bool(name) and bool(re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text))
+
+    named, by_folder = [], []
     for path in checkouts:
-        names = {os.path.basename(os.path.normpath(path)).casefold(), _origin_repo_name(path).casefold()}
-        if any(name and re.search(r"(?<![\w-])" + re.escape(name) + r"(?![\w-])", text) for name in names):
+        folder = os.path.basename(os.path.normpath(path)).casefold()
+        if _mentions(folder):
+            by_folder.append(path)
             named.append(path)
-    return named[0] if len(named) == 1 else None
+        elif _mentions(_origin_repo_name(path).casefold()):
+            named.append(path)
+    if len(named) == 1:
+        return named[0]
+    if len(by_folder) == 1:
+        return by_folder[0]
+    main = [p for p in named if not _is_linked_worktree(p)]
+    return main[0] if len(main) == 1 else None
+
+
+def _worktree_top(path: str, root: str) -> Optional[str]:
+    """The worktree folder (the one holding ``.git``) that ``path`` is in, under ``root``."""
+    current = os.path.realpath(path)
+    root = os.path.realpath(root)
+    while _within(current, root) and current != root:
+        if os.path.exists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    return None
+
+
+def _workspace_from_task_paths(task: str, checkouts: Iterable[str]) -> Optional[str]:
+    """The one checkout or managed worktree that the paths in the task point into.
+
+    A task that says "work in /app/data/agent_worktrees/_repos/umni-50d95770/fix-x"
+    or "repository /app/data/development/dog-trainer" names its workspace; it
+    was refused anyway, because only folder and repository names were read.
+    """
+    from src.tool_execution import vet_workspace
+
+    try:
+        from src.agent_worktree.ownership import managed_worktree_root
+
+        managed = managed_worktree_root()
+    except Exception:
+        managed = None
+    found: Set[str] = set()
+    for match in _LOCAL_PATH_RE.finditer(task or ""):
+        path = match.group(0).rstrip(".,;:)]}'\"`")
+        if not os.path.isabs(path):
+            continue
+        inside = [c for c in checkouts if _within(path, c)]
+        if inside:
+            # The innermost checkout: a worktree nested in a root beats the root.
+            found.add(max(inside, key=lambda c: len(os.path.realpath(c))))
+            continue
+        if managed is not None and _within(path, str(managed)):
+            top = _worktree_top(path, str(managed))
+            if top and vet_workspace(top):
+                found.add(top)
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def _shell_sandbox_problem(workspace: str) -> Optional[str]:
@@ -366,10 +436,12 @@ def run_preflight(
                     "pass workspace as the repository to work on so they run sandboxed there")
     elif pf.needs_workspace:
         checkouts = [c for c in known_checkouts() if vet_workspace(c)]
-        chosen = _checkout_named_in(task, checkouts) or (checkouts[0] if len(checkouts) == 1 else None)
+        by_path = _workspace_from_task_paths(task, checkouts)
+        chosen = by_path or _checkout_named_in(task, checkouts) or (checkouts[0] if len(checkouts) == 1 else None)
         if chosen:
             pf.workspace = vet_workspace(chosen)
-            pf.workspace_source = "named in the task" if len(checkouts) > 1 else "only checkout"
+            pf.workspace_source = ("path in the task" if by_path else
+                                   "named in the task" if len(checkouts) > 1 else "only checkout")
         else:
             pf.problems.append({
                 "code": "WORKSPACE_REQUIRED",

@@ -186,6 +186,14 @@ def setup_publish_approval_routes(session_manager=None) -> APIRouter:
         _note_in_chat(rec, f"[Publish approved by {user or 'the local user'}] Pushed {result.get('branch')} "
                            f"@ {str(result.get('head_sha') or '')[:12]}"
                            + (f"; draft PR: {url}" if url else "") + ".", user)
+        # Publishing is a step in the chat's request, not its end: the chat
+        # that asked carries on (checks the PR, reports) once it is idle.
+        try:
+            from src import agent_control
+
+            agent_control.schedule_publish_followup(session_manager, rec.get("session_id"), None, rec.get("id"))
+        except Exception:
+            logger.debug("publish approval: could not schedule the chat's follow-up", exc_info=True)
         return {"ok": True, "published": result}
 
     @router.post("/requests/{request_id}/reject")

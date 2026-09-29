@@ -1,8 +1,8 @@
-"""`update_plan` — the agent writes back to the active plan (tick done / revise).
+"""`update_plan` — the agent keeps the chat's task checklist (tick done / revise).
 
-Pure UI-control marker: `execute_tool_block` returns a `plan_update` payload the
-agent loop turns into a `plan_update` SSE event; the frontend replaces the stored
-plan and refreshes the docked plan window. No I/O, does not end the turn.
+`execute_tool_block` returns a `plan_update` payload the agent loop turns into a
+`plan_update` SSE event, and the checklist is saved on the chat
+(src.task_checklist) so later turns are shown it. Does not end the turn.
 """
 import asyncio
 import json
@@ -34,9 +34,11 @@ def test_plain_string_accepted():
     assert result["plan_update"]["plan"] == plan
 
 
-def test_empty_rejected():
+def test_empty_plan_clears_the_checklist():
     _, result = _run(json.dumps({"plan": "   "}))
-    assert "error" in result and result.get("exit_code") == 1
+    assert result.get("exit_code") == 0
+    assert result["plan_update"] == {"plan": ""}
+    assert "cleared" in result["output"].lower()
 
 
 def test_registered_everywhere():

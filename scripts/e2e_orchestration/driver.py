@@ -28,7 +28,9 @@ ADMIN_LOADOUT = "Odysseus Admin"
 WORKER_LOADOUT = "Lead Engineer"
 WORKER_TOOLS = ["manage_git", "manage_agent_worktree", "read_file", "write_file", "edit_file",
                 "apply_patch", "ls", "glob", "grep", "bash", "get_workspace"]
-ADMIN_TOOLS = ["manage_agent_loadout", "read_file", "ls", "get_workspace"]
+# send_to_session: a follow-up after a hand-back sends the same worker back
+# (scenario continue_blocked).
+ADMIN_TOOLS = ["manage_agent_loadout", "send_to_session", "read_file", "ls", "get_workspace"]
 USER_MESSAGE = ("Have the Lead Engineer add double(x) with a test to Umni in an isolated "
                 "worktree from origin/main, run the tests, and tell me what it reports. (ref E2E-ADMIN)")
 

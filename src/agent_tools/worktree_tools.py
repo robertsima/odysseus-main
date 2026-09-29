@@ -34,6 +34,32 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
     return {"error": message, "exit_code": 1, **extra}
 
 
+def _similar_request_hint(request_id: str, cfg) -> str:
+    """Open publish requests an unknown id was probably meant to be.
+
+    Ids are 32 hex characters that agents copy between chats; on 2026-09-29 a
+    parent retyped 5920c8ebbb87… as 5920c8eb87… for its worker, which then
+    reported "no approval request" and stopped. Only a hint: the lookup stays
+    exact, and publishing still needs the human's code.
+    """
+    from src.agent_worktree import approval as approval_mod
+
+    wanted = request_id.strip().lower()
+    try:
+        open_requests = [r for r in approval_mod.list_requests(cfg=cfg)
+                         if r.get("status") in ("pending", "granted")]
+    except Exception:  # noqa: BLE001 - a hint must never mask the real error
+        return ""
+    close = [r for r in open_requests
+             if wanted and (str(r.get("id", "")).startswith(wanted[:6]) or str(r.get("id", "")).endswith(wanted[-6:]))]
+    shown = close or open_requests[:3]
+    if not shown:
+        return ""
+    return (". Open requests: "
+            + "; ".join(f"{r.get('id')} ({r.get('branch')}, {r.get('status')})" for r in shown)
+            + ". Copy the id exactly.")
+
+
 # Actions that work on one named worktree, in the order an agent needs them.
 _BRANCH_ACTIONS = ("commit", "diff", "request_publish", "cleanup")
 
@@ -267,7 +293,9 @@ class AgentWorktreeTool:
             # Messages from this package are already credential-scrubbed.
             logger.warning("manage_agent_worktree %s failed: %s", action, exc)
             code = getattr(exc, "code", None)
-            return _err(f"manage_agent_worktree {action}: {exc}",
+            hint = (_similar_request_hint(str(args.get("request_id") or ""), cfg)
+                    if action in ("publish", "show_request") and "no approval request" in str(exc) else "")
+            return _err(f"manage_agent_worktree {action}: {exc}{hint}",
                         **(_next_step(code, action, branch, repository) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")

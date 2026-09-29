@@ -32,7 +32,7 @@ MODEL = "e2e-mock"
 PUBLISHER = "Publisher"
 PUBLISHER_TOOLS = ["manage_agent_worktree", "write_file", "read_file", "ls", "get_workspace"]
 ORDER = ["broad_parent", "ssh_remote", "feature_base", "interactive", "stop_worker", "stop_parent",
-         "parallel", "publish", "vault_sandboxed", "host_shell", "scratch_shell"]
+         "parallel", "continue_blocked", "publish", "vault_sandboxed", "host_shell", "scratch_shell"]
 SHELLER = "Sheller"
 SHELLER_TOOLS = ["bash", "read_file", "ls", "get_workspace"]
 
@@ -269,6 +269,30 @@ class Suite:
         text = " ".join(str(m.get("content")) for m in followups)
         self.rep.check("[parallel] exactly one summarising reply", len(followups) == 1, f"{len(followups)} replies")
         self.rep.check("[parallel] it had both results", "S-RESULT-A" in text and "S-RESULT-B" in text, text[:300])
+
+    def s_continue_blocked(self) -> None:
+        w = self.start_worker("continue_blocked",
+                              "Have the Lead Engineer write the marker in umni. (ref E2E-S:continue_blocked)",
+                              workspace=self.clone)
+        if not w:
+            return
+        self.wait_run_done(w["run_id"])
+        followups = self.wait(lambda: [m for m in self.history(w["chat"])
+                                       if (m.get("metadata") or {}).get("source") == "worker_followup"], 60) or []
+        meta = (followups[-1].get("metadata") or {}) if followups else {}
+        self.rep.check("[continue_blocked] the follow-up sent the worker back (one follow-up spent)",
+                       meta.get("continued") == 1, json.dumps(meta)[:400])
+        resumed = self.rows("continue_blocked", "worker", "resumed")
+        self.rep.check("[continue_blocked] the same worker ran again with the fix", bool(resumed),
+                       f"{len(resumed)} resumed request(s)")
+        worker_text = " ".join(str(m.get("content")) for m in self.history(w["session_id"]))
+        self.rep.check("[continue_blocked] it ran in the worker's own chat",
+                       "S-DONE continue_blocked" in worker_text, worker_text[-400:])
+        self.rep.check("[continue_blocked] no second worker was started",
+                       len(self.worker_runs("continue_blocked")) == 1, str(self.worker_runs("continue_blocked")))
+        text = " ".join(str(m.get("content")) for m in followups)
+        self.rep.check("[continue_blocked] the chat reports the finished work", "S-FOLLOWUP-RESUMED" in text,
+                       text[:300])
 
     def s_publish(self) -> None:
         self.ensure_publisher()

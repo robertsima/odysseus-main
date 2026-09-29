@@ -77,6 +77,7 @@ from src.intent_assessment import (
     proposal_reply_anchor,
 )
 from src import objective_guard
+from src import task_checklist
 from src.agent_tools import (
     parse_tool_blocks,
     strip_tool_blocks,
@@ -383,7 +384,7 @@ _AGENT_RULES = """\
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — JUST DO IT with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo or re-prompt if wrong.
 - AFTER A TOOL SUCCEEDS, do not second-guess. The success message ("Document edited: v2, 1 edit") means it worked. Reply in ONE short sentence confirming what was done. No re-checking, no replaying the diff in your head, no validation theater.
 - AFTER A TOOL FAILS (timeout, error, "Unknown action", "not found"), DO NOT GO SILENT. The user expects a follow-up: either retry with a fix (e.g. correct args, longer-running form, run `tail -f /tmp/foo.log` to see progress, split into smaller steps), OR explicitly tell them "this didn't work, want me to try X instead?". A failed tool is not a stopping condition — only a successful one is.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; you have plenty of rounds, so don't rush to quit just because you've made a few calls. There are exactly three ways to end a turn: (1) DONE — before you declare it, sanity-check that every concrete thing the user asked for actually exists or succeeded (file written, edit applied, command exited clean); then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you genuinely can't proceed (a capability is missing, permission denied, or data you can't obtain), so say plainly what's blocking you, in a sentence or two, and stop; (3) keep going with the single most useful next step. The only wrong moves are trailing off mid-task without one of these, and repeating a call you already ran.
+- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; you have plenty of rounds, so don't rush to quit just because you've made a few calls. There are exactly three ways to end a turn: (1) DONE — before you declare it, sanity-check that every concrete thing the user asked for actually exists or succeeded (file written, edit applied, command exited clean); then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — only after trying what your tools allow to clear it (install missing dependencies, fetch, restore a missing file from git history, use another tool for the same step); when what remains needs someone else (an approval, a credential, a permission, a real decision), say what's blocking you and end with one line per need, `Needs user: <what>`, then stop; (3) keep going with the single most useful next step. The only wrong moves are trailing off mid-task without one of these, and repeating a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - BULK email actions ("delete all those", "mark all as read", "archive these", "delete all spam", "mark these 19 read") → use the `bulk_email` tool ONCE with either the exact `uids` list from the latest `list_emails` result or `all_unread: true`. NEVER just say you deleted/archived/marked messages unless a delete/archive/mark/bulk email tool call succeeded. NEVER loop mark_email_read / archive_email / delete_email one message at a time — that floods the context and can blow the token budget. One bulk_email call handles the whole set.
 - Email UIDs are the values after `UID:` in tool output, not list row numbers. For example, row `1.` with `UID: 90186` must use `"90186"`, never `"1"`.
@@ -433,7 +434,7 @@ _API_AGENT_RULES = """\
 - BIAS TOWARD ACTION on edit requests. If the user says "edit out X", "remove the Y paragraph", "change Z" — call the edit tool with your best interpretation. Don't ask for clarification on minor ambiguity. The user can undo.
 - AFTER A TOOL SUCCEEDS, do not second-guess. A success response means it worked. Reply in ONE short sentence confirming what was done. No verification thinking, no re-analyzing — move on.
 - AFTER A TOOL FAILS, DO NOT GO SILENT. The user expects a follow-up: retry with a fix, run a diagnostic (`tail`, `ls`, `which`), or explicitly tell them what didn't work and what you'll try next. Failure is not a stopping condition.
-- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — you can't proceed (missing capability, permission denied, unobtainable data), so state plainly what's blocking you and stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
+- YOU DECLARE WHEN THE JOB IS DONE — not a timer. Keep taking concrete steps while the task still needs them; don't quit early just because you've made a few calls. Three ways to end a turn: (1) DONE — before declaring it, verify every concrete deliverable the user asked for actually exists or succeeded; then stop calling tools and write the final answer (that IS your "done" signal); (2) BLOCKED — only after trying what your tools allow to clear it (install missing dependencies, fetch, restore a missing file from git history, use another tool for the same step); when what remains needs someone else (an approval, a credential, a permission, a real decision), state what's blocking you and end with one line per need, `Needs user: <what>`, then stop; (3) keep going with the single most useful next step. Never trail off mid-task without (1) or (2), and never repeat a call you already ran.
 - Calendar: call `manage_calendar` with `action=list_calendars` FIRST before create/update/delete operations.
 - "Create/add/write a note" / "notes" / "todos" / "remind me to X at <time>" → use `manage_notes`. Do NOT store notes in `manage_memory`; memory is for persistent facts/preferences about the user, not note content. For reminders, include a `due_date`; for todos, use `note_type=checklist` when appropriate. `manage_tasks` is for RECURRING background AI jobs, NOT for one-off user reminders.
 - "Disable/turn off/enable/turn on <tool>" (shell, search, research, browser, documents, incognito, etc.) → call `ui_control` with `toggle <name> <on|off>`. Aliases accepted: shell→bash, search→web, deepresearch→research, documents→document_editor. NEVER record this as a memory — the user wants the toggle flipped, not a note about preferring it.
@@ -1002,7 +1003,7 @@ If the user asks for a reminder/alarm before the event, pass `reminder_minutes` 
     "pipeline": "- ```pipeline``` — Run a multi-step AI pipeline. Args (JSON) with ordered steps, each specifying a model and prompt. Use for complex workflows.",
     "ui_control": "- ```ui_control``` — Control the UI: toggle tools on/off, OPEN PANELS, open email reply drafts, switch models, change themes. Commands: `toggle <name> on/off` (names: bash/shell, web/search, research, incognito, document_editor/documents), `open_panel <name>` (panels: documents, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), `open_email_reply <uid> <folder> <reply|reply-all|ai-reply> <body text>` (opens an email compose document pre-filled with body, DOES NOT send; use this for normal “write/draft a reply saying X” requests), `set_mode agent/chat`, `switch_model <name>`, `set_theme <preset>`, `create_theme <name> <bg> <fg> <panel> <border> <accent>` (optional key=val for advanced colors AND background effects: bgPattern=<none|dots|synapse|rain|constellations|perlin-flow|petals|sparkles|embers>, bgEffectColor=#RRGGBB, bgEffectIntensity=<num>, bgEffectSize=<num>, frosted=true|false). \"open documents\" / \"open library\" / \"show gallery\" / \"open inbox\" / \"open notes\" / \"open cookbook\" all map to `open_panel <name>`. Built-in theme presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute. For any other vibe/name, use create_theme.",
     "ask_user": "- ```ask_user``` — Ask the user a multiple-choice question when the task is genuinely ambiguous and the answer changes what you do next (pick an approach, confirm an assumption, choose a target). Args (JSON): {\"question\": \"...\", \"options\": [{\"label\": \"...\", \"description\": \"...\"?}, ...], \"multi\": false?}. 2-6 options. The user gets clickable buttons; calling this ENDS your turn and their choice comes back as your next message. Prefer sensible defaults — only ask when you truly can't proceed well without their input.",
-    "update_plan": "- ```update_plan``` — While executing an approved plan, write the plan back: tick steps done or revise them. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Call it after finishing each step (mark it `- [x]`) and whenever the user asks to change the plan. The user's docked plan window updates live. Does nothing if there's no active plan.",
+    "update_plan": "- ```update_plan``` — Keep this chat's task checklist: the steps of a multi-part request, or an approved plan you are executing. Args (JSON): {\"plan\": \"- [x] done step\\n- [ ] next step\"}. Always pass the COMPLETE checklist, not a diff. Write it when you start, call it after finishing each step (mark it `- [x]`) and whenever the request changes. It is saved with the chat and shown to you on later turns while steps are open; an empty plan clears it.",
     "list_served_models": "- ```list_served_models``` — Show what the Cookbook (LLM-serving subsystem) is currently running. NO args. Use this for ANY 'what's running' / 'what's serving' / 'show my cookbook' / 'is anything up' query. DO NOT shell out (`ps aux`, `docker ps`, etc.) — this tool is the source of truth. Failed serve tasks include recent logs plus diagnosis/retry suggestions; use those suggestions to call `serve_model` again with an adjusted command when appropriate.",
     "stop_served_model": "- ```stop_served_model``` — Stop a running model server. Args (JSON): {\"session_id\": \"<from list_served_models>\"}. Use for 'kill my cookbook' / 'stop the model' / 'shut down vLLM'.",
     "tail_serve_output": "- ```tail_serve_output``` — Read the actual tmux stderr/traceback of a CURRENTLY failing cookbook task. Args (JSON): {\"session_id\": \"<from list_served_models>\", \"tail\": 150?}. **Use ONLY after** you just launched something via `serve_model` AND `list_served_models` reports YOUR new task as `crashed`/`error`. DO NOT use it on old stopped/completed download tasks (they're historical noise — won't predict whether a new launch succeeds). DO NOT call it before launching a fresh attempt. When you do call it, bump `tail` to 400+ only if the visible error references 'see root cause above'.",
@@ -1520,6 +1521,31 @@ def _latest_user_message(messages: List[Dict]) -> Optional[Dict]:
         if not _is_context_envelope(msg):
             return msg
     return last_any
+
+
+# User-role messages the harness writes into a chat on someone else's behalf:
+# a worker's hand-back, a publish decision. They are not the person's request.
+HARNESS_USER_SOURCES = frozenset({"worker", "publish_decision"})
+
+
+def _latest_user_is_harness_note(messages: List[Dict]) -> bool:
+    msg = _latest_user_message(messages)
+    return bool(msg) and (msg.get("metadata") or {}).get("source") in HARNESS_USER_SOURCES
+
+
+def _person_request_text(messages: List[Dict]) -> str:
+    """The latest request a person wrote, skipping hand-backs and publish notes.
+
+    A follow-up turn's latest user message is a worker's hand-back. Judging
+    the delegation gate on that text (under the default `explicit` policy)
+    closed every launcher, so a chat asked to "use the Lead Engineer" could
+    never send the worker back; the request behind the chain is what asked.
+    """
+    for msg in reversed(messages or []):
+        if (msg.get("role") == "user" and not _is_context_envelope(msg)
+                and (msg.get("metadata") or {}).get("source") not in HARNESS_USER_SOURCES):
+            return _user_text(msg)
+    return ""
 
 
 def _detect_admin_intent(messages: List[Dict]) -> bool:
@@ -3200,6 +3226,69 @@ def _missing_tools_to_attach(text: str, *, sent: Set[str], permitted: Set[str]) 
         if _TOOL_REFUSAL_CUE_RE.search(sentence):
             named.update(_TOOL_NAME_TOKEN_RE.findall(sentence))
     return (named & set(permitted)) - set(sent)
+
+
+_MAX_UNBLOCK_CHECKS = 1
+_MAX_CHECKLIST_NUDGES = 2
+# How a turn that stopped short opens, from the 2026-09-29 worker results:
+# "**Blocked before implementation**", "I stopped before making changes",
+# "I could not safely implement…", "The Lead Engineer couldn't proceed", "…but
+# the fix could not be verified or published". Only the opening sentence of
+# the final round counts: a finished report that mentions one check it could
+# not run ("Fixed and submitted. … I couldn't run typecheck") is not a stop.
+# A line that starts with "Blocked" anywhere counts too.
+_BLOCKED_OPENING_CHARS = 240
+_BLOCKED_OPENING_RE = re.compile(
+    r"\bblocked\b|\bi stopped\b|\bstopped (?:before|without)\b"
+    r"|\b(?:could ?not|couldn't|can't|cannot|unable to|was not able to|wasn't able to"
+    r"|did not|didn't)\s+(?:safely\s+|be\s+|yet\s+)?"
+    r"(?:proceed|continu|complet|finish|implement|verif|publish|push|establish|confirm|access|fetch"
+    r"|run|start|make|creat|appl|commit|change)\w*",
+    re.I,
+)
+_BLOCKED_LINE_RE = re.compile(r"(?m)^\W{0,4}blocked(?::|\s+(?:before|on|by|until|while|at)\b)", re.I)
+_FIRST_SENTENCE_RE = re.compile(r"^.*?(?:[.!?](?=\s)|\n|$)", re.S)
+# The lines a stopped turn names its needs with (see _self_unblock_directive);
+# the worker hand-off reads them (agent_control._stated_needs).
+NEEDS_LINE_RE = re.compile(
+    r"(?mi)^[\W_]{0,4}needs\s+(user|parent)\s*[*_]*\s*[:\-—]\s*[*_]*\s*(.+?)\s*$")
+
+
+def _reports_blocked(text: str) -> bool:
+    """Whether a final answer reports the task stopped short, and does not yet
+    say what it needs (a `Needs user:` / `Needs parent:` line)."""
+    body = re.sub(r"[*_`]", "", str(text or "").replace("’", "'")).strip()
+    if not body or NEEDS_LINE_RE.search(body):
+        return False
+    opening = _FIRST_SENTENCE_RE.match(body[:_BLOCKED_OPENING_CHARS]).group(0)
+    return bool(_BLOCKED_OPENING_RE.search(opening) or _BLOCKED_LINE_RE.search(body))
+
+
+def _self_unblock_directive(*, has_parent: bool) -> str:
+    who = ("`Needs user: <what>` for what only the user can give, or `Needs parent: <what>` for "
+           "a tool, permission or workspace the chat that started you can grant"
+           if has_parent else "`Needs user: <what>`")
+    return (
+        "Before you stop: your answer says you are blocked or stopped short. Go through each "
+        "blocker once more.\n"
+        "- If something you can do clears it, do it now and carry on with the task: install "
+        "missing dependencies, fetch or pull, restore a missing file from git history, use "
+        "another tool or approach for the same step, re-run with corrected arguments, or fix "
+        "a problem outside the task's scope when the task can't pass without it.\n"
+        "- If it needs something only someone else can give (an approval, a credential, a "
+        "permission or tool you do not have, a choice between real options), do not repeat "
+        f"your report. Reply with one line per need: {who}."
+    )
+
+
+# Beside every request in a worker's chat: its final answer goes to the chat
+# that started it, which can grant what a person would otherwise be asked for.
+_PARENT_CHAT_NOTE = (
+    "You were started by another chat, and your final answer goes back to it. If you stop short "
+    "on something that chat could give you (a tool, a permission, a workspace, a different base "
+    "or branch), end with one line per need: `Needs parent: <what>`. Use `Needs user: <what>` "
+    "only for what a person must give (an approval, a credential, a real decision)."
+)
 
 
 def _rearm_policy_settings(session_id: Optional[str], disabled_tools: Set[str], allow_private) -> Dict[str, Any]:
@@ -5722,6 +5811,17 @@ async def stream_agent_loop(
         except Exception as _policy_err:
             logger.warning("[agent] could not apply session tool policy for %s: %s", session_id, _policy_err)
     _skill_scope = _skill_scope_from_settings(_session_policy)
+    # The chat's task checklist (src.task_checklist): shown beside the request
+    # while it has open items, and kept current as update_plan/todowrite run.
+    _checklist_record = task_checklist.load(session_id, _session_policy) if session_id else None
+    _live_checklist = str((_checklist_record or {}).get("plan") or "")
+    _checklist_touched = False
+    _checklist_nudges = 0
+    # Whoever reads this turn's final answer: a person, or the chat that
+    # started this one (a worker's `Needs parent:` line is for that chat).
+    from src.agent_control import in_child_run as _in_child_run
+
+    _has_parent_chat = bool(_session_policy.get("parent_session")) or _in_child_run()
     # A loadout's own sampling wins over whatever the caller passed: the chat
     # route already resolved it, but headless workers pass the defaults.
     if _session_policy.get("agent_temperature") is not None:
@@ -5859,14 +5959,26 @@ async def stream_agent_loop(
     # no-grandchildren rule, this chat's allowlist, the owner's policy): no
     # loadout suggestion can be acted on, so none is made.
     _launcher_policy_blocked = "manage_agent_loadout" in disabled_tools
-    _gated_delegation = _delegation_gated_tools(_delegation_policy, _last_user)
+    # A follow-up turn's latest "user" message is not the person's. After a
+    # worker's hand-back, delegation was already authorised for the request
+    # behind it (the worker exists), and which launchers the follow-up may use
+    # is decided by agent_control._continue_parent's budget; `never` still
+    # means never. Other harness notes (a publish decision) are judged by the
+    # person's own latest request.
+    _latest_user_source = ((_latest_user_message(messages) or {}).get("metadata") or {}).get("source")
+    _delegation_text = (_person_request_text(messages) if _latest_user_source in HARNESS_USER_SOURCES
+                        else _last_user)
+    if _latest_user_source == "worker" and _delegation_policy != "never":
+        _gated_delegation: Set[str] = set()
+    else:
+        _gated_delegation = _delegation_gated_tools(_delegation_policy, _delegation_text)
     if "manage_agent_loadout" in _gated_delegation and _delegation_policy != "never":
         # Naming a saved agent is asking for it: "yes, start Penpot Product
         # Designer" after the loop suggested that loadout.
         try:
             from src.loadout_routing import loadout_named_in
 
-            if loadout_named_in(_spoken_user_text(_last_user)):
+            if loadout_named_in(_spoken_user_text(_delegation_text)):
                 _gated_delegation.discard("manage_agent_loadout")
         except Exception:
             logger.debug("[tool-routing] loadout-name check skipped", exc_info=True)
@@ -5949,7 +6061,12 @@ async def stream_agent_loop(
     # Tool retrieval uses the latest message by default. It may inherit recent
     # user turns only for explicit continuations ("yes", "do it", "1").
     _retrieval_query = str(_intent.get("retrieval_query") or _last_user)
-    if _explicitly_references_missing_workspace(_retrieval_query, workspace):
+    # Only a person's own words can ask for "this workspace". A worker's
+    # hand-back quotes its task ("inspect the current repo") and a
+    # continuation turn has no workspace of its own: on 2026-09-29 that
+    # replaced a finished worker's result with this canned reply.
+    if (not _latest_user_is_harness_note(messages)
+            and _explicitly_references_missing_workspace(_retrieval_query, workspace)):
         msg = (
             "No active workspace is set. Use `/workspace pick` or "
             "`/workspace set /absolute/path`, then rerun the request."
@@ -7248,10 +7365,22 @@ async def stream_agent_loop(
             # reply, and a model reading "can u do that" after a skills index
             # and a date line lost what "that" was (2026-09-27).
             _turn_notes.append(proposal_anchor_directive(_proposal_anchor))
-        for _note in _turn_notes:
+        # The chat's open task checklist (src.task_checklist). Protected from
+        # context trimming: it is what a long chat loses track of first.
+        _checklist_note = (
+            task_checklist.turn_note(_checklist_record)
+            if (_checklist_record and not plan_mode and not approved_plan and not guide_only
+                and task_checklist.open_items(_checklist_record.get("plan")))
+            else ""
+        )
+        if _has_parent_chat and not guide_only:
+            _turn_notes.append(_PARENT_CHAT_NOTE)
+        for _note in _turn_notes + ([_checklist_note] if _checklist_note else []):
             _note_msg = _harness_directive(_note)
             # Marked so a fallback route's rebuild strips it and adds its own.
             _note_msg["_agent_injected"] = "context"
+            if _note is _checklist_note:
+                _note_msg["_protected"] = True
             route_messages = _insert_before_latest_user(route_messages, _note_msg)
         return {
             "messages": route_messages,
@@ -7389,6 +7518,9 @@ async def stream_agent_loop(
     # that *can't* call the tool from looping forever.
     _intent_nudge_count = 0
     _MAX_INTENT_NUDGES = 2
+    # Self-unblock check: one extra round when a turn that did real work ends
+    # by reporting itself blocked (see _reports_blocked).
+    _unblock_checks = 0
 
     # A message the user sends mid-turn is queued as a steer and drained at the
     # TOP of a round. If it lands while the final round is already running,
@@ -8667,6 +8799,60 @@ async def stream_agent_loop(
                     + "\n\n"
                 )
                 break
+            # ── Self-unblock check ───────────────────────────────────
+            # The turn is ending on "Blocked" / "I stopped before…". In the
+            # 2026-09-29 logs most of those blockers were ones the agent could
+            # clear itself: dependencies not installed (the next worker ran
+            # `npm ci`), a missing file (the next one restored it from git
+            # history). Each cost the user a "retry". Before accepting the
+            # stop, ask once: clear it, or say exactly what is needed and from
+            # whom, as `Needs user:` / `Needs parent:` lines that the hand-off
+            # to the parent chat reads.
+            if (
+                not guide_only
+                and not _force_answer
+                and tool_events
+                and _unblock_checks < _MAX_UNBLOCK_CHECKS
+                and _reports_blocked(_strip_think_blocks(cleaned_round))
+            ):
+                _unblock_checks += 1
+                logger.info(
+                    "[agent] round %d reported blocked; self-unblock check %d/%d",
+                    round_num, _unblock_checks, _MAX_UNBLOCK_CHECKS,
+                )
+                _note = "\n\n_Checking whether that blocker can be cleared before stopping…_\n\n"
+                yield f'data: {json.dumps({"delta": _note})}\n\n'
+                full_response += _note
+                messages.append(_harness_directive(
+                    _self_unblock_directive(has_parent=_has_parent_chat)
+                ))
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
+            # ── Open checklist ───────────────────────────────────────
+            # The turn kept a task checklist (update_plan / todowrite) and is
+            # ending with steps still open, without saying what it needs. A
+            # multi-part request lost its first half that way on 2026-09-29.
+            # Ask it to carry on, at most twice a turn; a checklist from an
+            # earlier request that this turn never touched is left to the
+            # turn note.
+            if (
+                not guide_only
+                and not plan_mode
+                and not _force_answer
+                and _checklist_touched
+                and _checklist_nudges < _MAX_CHECKLIST_NUDGES
+                and task_checklist.open_items(_live_checklist)
+                and not NEEDS_LINE_RE.search(_strip_think_blocks(cleaned_round))
+            ):
+                _checklist_nudges += 1
+                logger.info(
+                    "[agent] round %d would end with %d open checklist item(s); continuing (%d/%d)",
+                    round_num, len(task_checklist.open_items(_live_checklist)),
+                    _checklist_nudges, _MAX_CHECKLIST_NUDGES,
+                )
+                messages.append(_harness_directive(task_checklist.continue_directive(_live_checklist)))
+                yield f'data: {json.dumps({"type": "agent_step", "round": round_num + 1})}\n\n'
+                continue
             # A steer that landed *during* this round would otherwise be
             # orphaned: the drain runs at the top of a round, and this is the
             # turn ending. Leaving it queued means clear_steer() below cancels
@@ -9197,6 +9383,8 @@ async def stream_agent_loop(
             # Push it to the frontend so the stored plan + docked window update
             # live. Does NOT end the turn — the agent keeps working.
             if "plan_update" in result:
+                _live_checklist = str((result.get("plan_update") or {}).get("plan") or "")
+                _checklist_touched = True
                 yield (
                     f'data: {json.dumps({"type": "plan_update", "data": result["plan_update"]})}\n\n'
                 )

@@ -249,7 +249,9 @@ def admin_followup(messages: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict
         text = _text(msg.get("content"))
         if msg.get("role") == "user" and _is_handback(text):
             handback = text
-    match = re.search(r"Result:\n(.*?)(?:\n\nThe worker |\n\nReport this result|\Z)", handback, re.S)
+    # The result ends where the harness's guidance for the follow-up begins.
+    match = re.search(r"Result:\n(.*?)(?:\n\n(?:The worker |The user's request|If that request|The automatic "
+                      r"follow-ups|Tell the user|Report this result)|\Z)", handback, re.S)
     result = (match.group(1) if match else handback).strip()
     if "E2E-WORKER-RESULT" not in result:
         return _say("E2E-MOCK-ERROR admin_followup: the hand-back does not carry the worker's result: "

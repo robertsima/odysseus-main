@@ -177,6 +177,22 @@ the model.
   policy (`session_policy_disabled_tools`) whichever caller started the
   turn, and adds tools the user names outright.
 
+- **Carrying a request through** (2026-09-29). Not a re-port of the fork's
+  continuation or targeted self-unblock; new mechanisms on upstream's loop,
+  prompted by 15 Lead Engineer runs that delivered 3 fixes for one request:
+  a turn that ran tools and stops short is asked once to clear the blocker or
+  name it (`_reports_blocked`, `Needs user:` / `Needs parent:`); a per-chat
+  task checklist (`src/task_checklist.py`, written by `update_plan` and
+  `todowrite`) is shown on later turns and holds open a turn that left its steps
+  open; a worker hand-back may send the same worker back within
+  `agent_auto_continue_limit` follow-ups per request
+  (`agent_control._continue_parent`), which the `explicit` delegation gate no
+  longer closes; an approved publish continues the chat that asked. See
+  website/agent-runtime.md, "Stopping short", "The task checklist" and
+  "Carrying a request through". Covered by `tests/test_agent_continuity.py`,
+  `tests/test_worker_completion_no_runaway.py` and the e2e scenario
+  `continue_blocked`.
+
 ## Changed behaviour until re-ported
 
 | Area | Now | Fork commits to re-port |

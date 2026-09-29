@@ -831,11 +831,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Write back to the ACTIVE PLAN: mark steps done or revise them. Use this while executing an approved plan — after you finish a step, call update_plan with the full checklist and that step marked `- [x]`; when the user asks to change the plan, call it with the revised checklist. The user's docked plan window updates live. Pass the COMPLETE checklist every time (not a diff). No effect if there is no active plan.",
+            "description": "Keep this chat's task checklist: the steps of the request you are working on, as a markdown checklist. Write it when a request has several steps (or when executing an approved plan), tick each step `- [x]` as you finish it, and rewrite it when the request changes. It is saved with the chat and shown to you on later turns until every step is ticked. Pass the COMPLETE checklist every time (not a diff); an empty plan clears it.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "plan": {"type": "string", "description": "The full updated plan as a GitHub-style markdown checklist — one step per line, `- [ ]` for pending and `- [x]` for done. Always send the whole list."}
+                    "plan": {"type": "string", "description": "The full checklist as GitHub-style markdown — one step per line, `- [ ]` for pending and `- [x]` for done. Always send the whole list; an empty string clears it."}
                 },
                 "required": ["plan"]
             }

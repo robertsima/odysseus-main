@@ -440,6 +440,8 @@ bounded — a guard that can fire indefinitely is a new way to burn the budget.
 | duplicate call | same tool, same arguments, already run this turn | answer from the memo; tell the model once | `_MAX_DUP_CALL_DIRECTIVES` = 2 |
 | missing-tool self-unblock | the round claims it lacks tools or access | re-arm the tools the claim points at | `_MAX_TOOLSET_REARMS` = 1 |
 | intent without action | the round announces an action and calls nothing | one sharp nudge to actually call it | `_MAX_INTENT_NUDGES` = 2 |
+| stopping short | a turn that ran tools ends on "Blocked…" / "I stopped before…" without naming a need | ask it to clear the blocker or name it (`Needs user:` / `Needs parent:`) | `_MAX_UNBLOCK_CHECKS` = 1 |
+| open checklist | the turn updated its task checklist and ends with steps open | ask it to carry on, tick or rewrite | `_MAX_CHECKLIST_NUDGES` = 2 |
 | runaway call | the same call signature very many times | stop the turn | fixed |
 | stall | repeated identical rounds with no answer text | stop the turn | fixed |
 | round cap | budget spent with work outstanding | emit `rounds_exhausted` with partial work | — |
@@ -496,6 +498,46 @@ never the whole registry. A full re-arm on a 140-tool install is roughly 14k
 schema tokens per remaining round and invalidates the prefix cache; and a round
 whose claims resolve to no tool name, alias, keyword, index neighbour or domain
 is very likely correct that the capability is absent.
+
+### Stopping short
+
+The rules offer three ways to end a turn: done, blocked, or keep going. On
+2026-09-29 "blocked" was the easy one — 15 Lead Engineer runs on one request
+delivered 3 fixes, none ran out of rounds, and most stops were on things the
+worker could clear itself: dependencies not installed (the next worker ran
+`npm ci`), a missing file (the next one restored it from git history). The
+rules now say to try what the tools allow first, and to end a real stop with
+one line per need: `Needs user: <what>`, or in a worker's chat `Needs parent:
+<what>` for what the chat that started it can grant (a standing note in every
+worker chat says so).
+
+`_reports_blocked` reads only the opening sentence of the final round (a
+finished report that mentions one check it could not run is not a stop) plus
+any line that starts "Blocked:" / "Blocked before…". A turn that ran tools and
+ends that way without a `Needs` line gets one more round with
+`_self_unblock_directive`: clear it and carry on, or name what is needed. A
+visible "_Checking whether that blocker can be cleared…_" separates the two
+answers in the transcript. The hand-off reads the `Needs` lines
+(`agent_control._stated_needs`).
+
+### The task checklist
+
+`update_plan` and `todowrite` write one checklist per chat
+(`src/task_checklist.py`, session setting `task_checklist`, markdown
+`- [ ]`/`- [x]`; an empty plan clears it). Until 2026-09-29 neither was read
+back: the plan lived in the browser's localStorage, the todos in a file nothing
+opened, and a two-part request ("delete the stale worktrees, then fix CI")
+lost its first half. Now:
+
+- while it has open items (and is under a week old) it is shown beside each
+  request as a harness note marked `_protected`, so context trimming keeps it;
+- a turn that updated it and is about to end with steps still open, without a
+  `Needs` line, is asked to carry on (twice at most). A checklist from an
+  earlier request that the turn never touched does not hold the turn open; the
+  note asks the model to rewrite or clear it.
+
+The browser's Execute button now prefers the plan proposal it is attached to
+over the stored plan, which may be a checklist from another request.
 
 ---
 
@@ -592,6 +634,54 @@ the reply it writes after the last one reports back
 (`agent_control._hand_up_when_done`), so the chat that started the lead gets
 the lead's final result, not "I started the implementors". A worker chat
 continuing itself keeps the depth rule too.
+
+### Carrying a request through
+
+A worker's hand-back used to be a dead end. `_hand_off` told the parent "do not
+start new workers: the user did not ask for more", and `_continue_parent` denied
+every launcher, so a worker that stopped on something the parent could fix was
+only summarised and the user typed "retry" — about 17 times on 2026-09-29. (The
+guard it replaced was real: a follow-up with every launcher kept a chat
+spawning workers after its user had gone.)
+
+A follow-up now carries on the **request** behind the chain, within a budget:
+
+- `agent_auto_continue_limit` (default 3, 0 = the old report-only behaviour)
+  follow-ups per request, counted per worker a follow-up starts or sends back
+  (`metadata.continued` on its reply) and reset by the person's next message.
+  Hand-backs, steers and publish decisions are not requests.
+- While budget is left the follow-up gets `_CONTINUE_LAUNCH_TOOLS`
+  (`send_to_session`, `manage_agent_loadout`, the delegate tools,
+  `orchestrate_agents`) under the chat's own policy; `create_session`,
+  `pipeline` and `manage_session` stay off. A stopped (`cancelled`) worker, one
+  paused on an approval card, or a spent budget: report only.
+- The hand-back quotes the person's request, the worker's `Needs` lines, the
+  follow-ups left, and the worker's session id: `send_to_session` with
+  `mode: "agent"` runs the **same** worker again on its own history and
+  workspace and returns its result in the follow-up's own turn, instead of a
+  fresh worker re-deriving everything in a new worktree.
+- Under the default `explicit` delegation policy the loop judged the gate on the
+  latest user message — the hand-back, which asks for nothing — and closed every
+  launcher. A follow-up after a worker's hand-back is not gated there (the
+  worker exists, so delegation was authorised for that request; `never` still
+  closes it); a publish decision is judged on the person's latest request.
+- A worker's hand-back quoting its task ("inspect the current repo") no longer
+  trips the "No active workspace is set" short-circuit, which on 2026-09-29
+  replaced a finished worker's successful result.
+
+**Publishing is a pause.** Approving a publish request in the browser pushes
+and writes `[Publish approved by …]` into the chat that asked; nothing ran
+after it, so nobody checked the pull request's CI. `schedule_publish_followup`
+now continues that chat once it is idle (unless the person wrote after the
+decision), under the same budget, and a worker's follow-up is handed up to the
+chat that started it. A mistyped request id gets the open requests as a hint
+(`worktree_tools._similar_request_hint`); lookup stays exact.
+
+**Launch preflight** binds the workspace a path in the task points into — a
+checkout, or a managed worktree under `agent_worktrees/_repos/<key>/<leaf>` —
+and, when a repository name matches several checkouts (the Umni checkout and
+three linked worktrees of it), the one main checkout. Every first launch on
+2026-09-29 had been refused with "no workspace is set".
 
 An agent can author loadouts too (`manage_agent_loadout`). The rule that makes
 that safe is in `src/agent_loadouts.py`: **every capability in a loadout an

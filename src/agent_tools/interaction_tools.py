@@ -58,12 +58,14 @@ class AskUserTool:
 class UpdatePlanTool:
     async def execute(self, content, ctx):
         """
-        update_plan: the agent writes back to the active plan — tick an item done
-        or revise steps (e.g. when the user asks to change something). Pure UI
-        marker: returns a `plan_update` payload the agent loop turns into a
-        `plan_update` SSE event; the frontend replaces the stored plan and refreshes
-        the docked plan window. Does NOT end the turn.
+        update_plan: write the chat's task checklist -- an approved plan being
+        executed, or the steps of any multi-part request. It is saved on the
+        chat (src.task_checklist) and shown to the agent on later turns while
+        items are open; an empty plan clears it. The `plan_update` payload also
+        becomes a `plan_update` SSE event. Does NOT end the turn.
         """
+        from src import task_checklist
+
         raw = (content or "").strip()
         plan = ""
         try:
@@ -71,24 +73,28 @@ class UpdatePlanTool:
         except (ValueError, TypeError):
             parsed = {}
 
-        if isinstance(parsed, dict) and parsed.get("plan"):
-            plan = str(parsed.get("plan", "")).strip()
+        if isinstance(parsed, dict) and "plan" in parsed:
+            plan = str(parsed.get("plan") or "").strip()
         else:
             plan = raw
 
-        if not plan:
-            return "update_plan: invalid", {
-                "error": "update_plan needs a non-empty `plan` (the full updated checklist as markdown).",
-                "exit_code": 1,
+        session_id = (ctx or {}).get("session_id")
+        if task_checklist.is_clear_request(plan):
+            task_checklist.save(session_id, "")
+            logger.info("Tool executed: update_plan: cleared")
+            return "update_plan: cleared", {
+                "plan_update": {"plan": ""},
+                "output": "Checklist cleared.",
+                "exit_code": 0,
             }
 
-        plan = plan[:8192]
-        done = plan.count("- [x]") + plan.count("- [X]")
-        total = done + plan.count("- [ ]")
+        plan = plan[:task_checklist.MAX_CHARS]
+        done, total = task_checklist.counts(plan)
+        task_checklist.save(session_id, plan)
         desc = f"update_plan: {done}/{total} done" if total else "update_plan"
         result = {
             "plan_update": {"plan": plan},
-            "output": f"Plan updated ({done}/{total} steps complete)." if total else "Plan updated.",
+            "output": (f"Checklist saved ({done}/{total} done):\n{plan}" if total else "Checklist saved."),
             "exit_code": 0,
         }
         logger.info("Tool executed: %s", desc)
