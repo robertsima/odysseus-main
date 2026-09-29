@@ -2959,7 +2959,13 @@ async function initClaudeCodeSettings() {
     } else {
       rows.push('<div class="cc-status-line" style="color:var(--red)">No Git checkout found under: ' + _e((s.repository_roots || []).join(', ') || '(no development folders)') + '</div>');
     }
-    (s.hints || []).forEach(function (h) { rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>'); });
+    // The runner warning is also one of the hints (agents read those); it is
+    // already shown in its own box next to "Default runner".
+    var shownWarning = typeof s.backend_warning === 'string' ? s.backend_warning.trim() : '';
+    (s.hints || []).forEach(function (h) {
+      if (shownWarning && String(h || '').trim() === shownWarning) return;
+      rows.push('<div class="cc-status-line cc-hint">' + _e(h) + '</div>');
+    });
     statusBox.innerHTML = rows.join('');
   }
 
