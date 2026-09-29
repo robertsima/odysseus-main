@@ -19,6 +19,23 @@ PROGRESS_INTERVAL_S = 2.0
 PROGRESS_TAIL_LINES = 12
 TMUX_CAPTURE_LINES = 2000
 
+# Set before every command in an agent's tmux pane. The pane is a real
+# terminal, so `git log` opened `less`, a git remote asked for a username and
+# `git commit` opened an editor, each waiting for a key no one would press. On
+# 2026-09-29 two runs sat in bash until a restart this way, and each later
+# command in the chat was typed into the stuck pager. Empty prompts keep them
+# out of the captured output, and without line editing bash stops echoing the
+# typed command (so output that repeats a line of it, a heredoc's, survives
+# the cleanup). (The pipe path never pages or prompts.)
+_TMUX_NONINTERACTIVE = (
+    "export PAGER=cat GIT_PAGER=cat MANPAGER=cat SYSTEMD_PAGER=cat "
+    "GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true DEBIAN_FRONTEND=noninteractive; "
+    "PS1= PS2=; set +o emacs +o vi"
+)
+# One command at a time per pane: parallel tool calls typed into the same pane
+# interleave, and a command reading its terminal swallows the next one's lines.
+_TMUX_LOCKS: Dict[str, asyncio.Lock] = {}
+
 
 async def _create_bash_subprocess(command: str, **kwargs):
     """Start the agent shell with Bash semantics on every supported OS.
@@ -170,48 +187,82 @@ async def _run_tmux_bash(
     sandbox_workspace: Optional[str] = None,
 ) -> Tuple[str, str, Optional[int], bool]:
     name = _tmux_session_name(session_id, sandbox_workspace)
+    lock = _TMUX_LOCKS.setdefault(name, asyncio.Lock())
+    async with lock:
+        return await _run_tmux_bash_locked(name, content, cwd=cwd, env=env, timeout=timeout,
+                                           progress_cb=progress_cb, sandbox_workspace=sandbox_workspace)
+
+
+async def _kill_tmux_session(name: str) -> None:
+    """End a pane whose command was stopped or timed out.
+
+    Ctrl-C does not leave a pager, an editor or a prompt, and whatever is
+    left running there receives the next command's keystrokes. A new pane
+    loses the shell's cwd and variables; that beats hanging every later call.
+    """
+    try:
+        await _run_exec("tmux", "kill-session", "-t", name, timeout=3)
+    except Exception:
+        pass
+
+
+async def _run_tmux_bash_locked(
+    name: str,
+    content: str,
+    *,
+    cwd: str,
+    env: Optional[dict],
+    timeout: float,
+    progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
+    sandbox_workspace: Optional[str] = None,
+) -> Tuple[str, str, Optional[int], bool]:
     await _ensure_tmux_session(name, cwd, env, sandbox_workspace)
 
     stamp = f"{int(time.time() * 1000)}-{abs(hash(content)) % 1000000}"
     start_marker = f"__ODYSSEUS_CMD_START_{stamp}__"
     end_prefix = f"__ODYSSEUS_CMD_END_{stamp}__:"
-    wrapped = (
-        f"printf '\\n{start_marker}\\n'\n"
-        f"{content}\n"
-        f"__ody_rc=$?\n"
-        f"printf '\\n{end_prefix}%s\\n' \"$__ody_rc\"\n"
-    )
-    for line in wrapped.splitlines():
-        await _tmux_send_line(name, line)
+    # The command reads /dev/null, not the pane: something waiting on input
+    # gets end-of-file instead of the lines typed after it.
+    head = f"{_TMUX_NONINTERACTIVE}\nprintf '\\n{start_marker}\\n'\n{{\n"
+    tail_lines = f"}} < /dev/null\n__ody_rc=$?\nprintf '\\n{end_prefix}%s\\n' \"$__ody_rc\"\n"
+    wrapped = f"{head}{content}\n{tail_lines}"
+    # Only the wrapper's own lines are scrubbed from the output; a line the
+    # command printed is kept even when it repeats a line of the command.
+    frame = head + tail_lines
+    try:
+        for line in wrapped.splitlines():
+            await _tmux_send_line(name, line)
 
-    started = time.time()
-    last_tail = ""
-    while True:
-        capture = await _tmux_capture(name)
-        body, done = _output_after_marker(capture, start_marker, end_prefix)
-        tail = "\n".join(body.splitlines()[-PROGRESS_TAIL_LINES:])
-        if progress_cb and tail != last_tail:
-            last_tail = tail
-            try:
-                await progress_cb({
-                    "elapsed_s": round(time.time() - started, 1),
-                    "tail": tail,
-                    "tmux_session": name,
-                })
-            except Exception:
-                pass
-        if done:
-            rc = _extract_marker_rc(capture, end_prefix)
-            cleaned = _clean_tmux_command_output(body, wrapped)
-            return cleaned, "", rc, False
-        if time.time() - started > timeout:
-            try:
-                await _run_exec("tmux", "send-keys", "-t", name, "C-c", timeout=3)
-            except Exception:
-                pass
-            cleaned = _clean_tmux_command_output(body, wrapped)
-            return cleaned, "", 124, True
-        await asyncio.sleep(0.5)
+        started = time.time()
+        last_tail = ""
+        while True:
+            capture = await _tmux_capture(name)
+            body, done = _output_after_marker(capture, start_marker, end_prefix)
+            tail = "\n".join(body.splitlines()[-PROGRESS_TAIL_LINES:])
+            if progress_cb and tail != last_tail:
+                last_tail = tail
+                try:
+                    await progress_cb({
+                        "elapsed_s": round(time.time() - started, 1),
+                        "tail": tail,
+                        "tmux_session": name,
+                    })
+                except Exception:
+                    pass
+            if done:
+                rc = _extract_marker_rc(capture, end_prefix)
+                cleaned = _clean_tmux_command_output(body, frame)
+                return cleaned, "", rc, False
+            if time.time() - started > timeout:
+                await _kill_tmux_session(name)
+                cleaned = _clean_tmux_command_output(body, frame)
+                return cleaned, "", 124, True
+            await asyncio.sleep(0.5)
+    except asyncio.CancelledError:
+        # Stopped: end what the pane is running so the chat's next command
+        # does not type into it.
+        await asyncio.shield(_kill_tmux_session(name))
+        raise
 
 
 def _clean_tmux_command_output(text: str, wrapped_command: str) -> str:
@@ -401,7 +452,7 @@ class BashTool:
             )
             if timed_out:
                 return {
-                    "error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — sent Ctrl-C to tmux session",
+                    "error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed (the next command starts a fresh shell)",
                     "exit_code": 124,
                     "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
                     "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),

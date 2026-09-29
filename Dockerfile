@@ -173,4 +173,7 @@ RUN chmod +x /usr/local/bin/entrypoint.sh
 EXPOSE 7000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7000"]
+# --timeout-graceful-shutdown: a browser watching a running agent keeps its
+# stream open, and uvicorn waited on it until `docker stop` killed the process,
+# so the app's shutdown (which saves running turns' partial replies) never ran.
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7000", "--timeout-graceful-shutdown", "3"]

@@ -338,15 +338,34 @@ async def subscribe(
             _schedule_evict(session_id, run)
 
 
+async def stop_all(timeout: float = 4.0) -> int:
+    """Cancel every running chat turn and wait (bounded) for each to save.
+
+    For shutdown: a turn cut off by a redeploy used to vanish, since its
+    reply is saved only when it ends. Cancelling is the Stop path, which
+    saves the partial reply as a stopped message. Returns how many ran.
+    """
+    tasks = [run.task for run in list(_RUNS.values())
+             if run.status == "running" and run.task and not run.task.done()]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.wait(tasks, timeout=timeout)
+    return len(tasks)
+
+
 def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     """Cancel the matching in-flight run (which saves its partial output).
 
     A stale browser may issue Stop after another tab has replaced the session's
     run. Once the caller knows its opaque run identity, fail closed rather than
-    cancelling that newer run.
+    cancelling that newer run. A caller that names no run (the sidebar's and
+    the Agents dashboard's Stop, ``/stop``, the Workbench) means whatever this
+    chat is doing now; refusing those left every one of them answering
+    "Nothing to stop" while the agent kept running (2026-09-29 logs).
     """
     run = _RUNS.get(session_id)
-    if not expected_run_id or run is None or run.run_id != expected_run_id:
+    if run is None or (expected_run_id and run.run_id != expected_run_id):
         return False
     if run and run.task and not run.task.done():
         run.task.cancel()

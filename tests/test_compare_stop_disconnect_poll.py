@@ -230,11 +230,57 @@ async def test_stale_run_identity_cannot_stop_replacement_run():
     second = agent_runs.start(session_id, replacement())
     await asyncio.sleep(0)
 
-    assert agent_runs.stop(session_id) is False
     assert agent_runs.stop(session_id, first.run_id) is False
     assert second.task is not None and not second.task.done()
     assert agent_runs.stop(session_id, second.run_id) is True
     await second.task
+
+
+@pytest.mark.asyncio
+async def test_stop_without_a_run_identity_stops_the_current_run():
+    # The sidebar's and the Agents dashboard's Stop, /stop and the Workbench
+    # name no run: they mean "whatever this chat is doing". Refusing them left
+    # each answering "Nothing to stop" while the agent kept going (2026-09-29).
+    session_id = "sess-detached-unnamed-stop"
+    agent_runs._RUNS.pop(session_id, None)
+    release = asyncio.Event()
+
+    async def running():
+        yield 'data: {"delta":"working"}\n\n'
+        await release.wait()
+
+    run = agent_runs.start(session_id, running())
+    await asyncio.sleep(0)
+
+    assert agent_runs.stop(session_id) is True
+    try:
+        await run.task
+    except asyncio.CancelledError:
+        pass
+    assert run.status != "running"
+    assert not agent_runs.is_active(session_id)
+    assert agent_runs.stop("sess-with-no-run") is False
+
+
+@pytest.mark.asyncio
+async def test_stop_all_ends_every_running_turn_for_shutdown():
+    # A redeploy used to kill turns mid-flight with nothing saved; shutdown now
+    # stops them first, which is the path that saves the partial reply.
+    release = asyncio.Event()
+
+    async def running():
+        yield 'data: {"delta":"working"}\n\n'
+        await release.wait()
+
+    ids = ["sess-shutdown-a", "sess-shutdown-b"]
+    for sid in ids:
+        agent_runs._RUNS.pop(sid, None)
+    runs = [agent_runs.start(sid, running()) for sid in ids]
+    await asyncio.sleep(0)
+
+    assert await agent_runs.stop_all(timeout=2) == 2
+    assert all(run.task.done() and run.status != "running" for run in runs)
+    assert await agent_runs.stop_all(timeout=2) == 0
 
 
 @pytest.mark.asyncio

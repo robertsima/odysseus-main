@@ -1373,6 +1373,16 @@ async def _startup_event():
 
 async def _shutdown_event():
     logger.info("Application shutting down...")
+    # First, while the database is still there: save what every running chat
+    # turn has so far. A turn cut off by the 2026-09-29 redeploy left no trace
+    # in its chat; after a reload it looked as if it had never run.
+    try:
+        from src import agent_runs as _agent_runs
+        _cut = await _agent_runs.stop_all()
+        if _cut:
+            logger.info("Stopped %d running chat turn(s) for shutdown; partial replies saved", _cut)
+    except Exception as e:
+        logger.warning(f"Stopping running chat turns at shutdown failed: {e}")
     try:
         from src.loop_lag import stop_monitor as _stop_loop_lag_monitor
         await _stop_loop_lag_monitor()

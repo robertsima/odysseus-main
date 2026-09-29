@@ -611,6 +611,29 @@ async def stop_run(run_id: str, *, by: str = "by the user") -> dict:
     raise ValueError(f"{source or 'This'} runs can't be stopped individually")
 
 
+async def stop_chat_work(session_id: str, *, by: str = "from the chat's Stop button") -> int:
+    """Stop the workers, sub-agents and background jobs working in a chat.
+
+    They run without a chat stream (a loadout's child chat, a worker, a
+    background follow-up), so the chat Stop found nothing to cancel: on
+    2026-09-29 five Stops on a Planning Command Center worker's chat all
+    answered "Nothing to stop" while it kept going. Returns how many stopped.
+    """
+    stopped = 0
+    for rec in activity.list_runs(limit=200, active_only=True):
+        if rec.get("source") == "odysseus" or rec.get("status") != "running":
+            continue
+        summary = rec.get("summary") or {}
+        if session_id not in (rec.get("session_id"), summary.get("target_session")):
+            continue
+        try:
+            if (await stop_run(rec["run_id"], by=by)).get("stopped"):
+                stopped += 1
+        except (LookupError, ValueError, KeyError):
+            continue
+    return stopped
+
+
 # ── wrap up (soft stop) ───────────────────────────────────────────────────
 
 WRAP_UP_TEXT = ("Wrap up now: stop starting new work, and within the next one or two rounds "
