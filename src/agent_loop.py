@@ -3086,15 +3086,24 @@ def _strip_agent_injected_messages(messages: List[Dict]) -> List[Dict]:
 # The user reads the setting's name, not this note, so the model has to carry
 # the reason across: on 2026-09-26 it answered "shell access is disabled; turn
 # on Allow private vault reads", which read as a non sequitur to the user.
-_PRIVATE_SHELL_NOTE = (
-    "bash and python are off in this chat. They are not confined to the workspace, so they "
-    "could read the user's private vault files; that is why they are tied to the chat setting "
-    "'Allow private vault reads' (Chat settings > Vault privacy), which turns on bash and "
-    "python as well as private vault reads. Use the file tools (read_file, grep, glob, ls) "
-    "instead. If the task needs a shell (running tests, builds, installs or upgrades, git "
-    "commands), tell the user both halves: the shell is off because it could read their private "
-    "vault, and turning on 'Allow private vault reads' enables bash and python for this chat "
-    "(and also lets private vault content reach this model)."
+# The shell has its own setting, separate from vault access (src/shell_access.py).
+_SHELL_OFF_NOTE = (
+    "bash and python are off for this agent: its Shell setting is Off. Use the file tools "
+    "(read_file, grep, glob, ls) instead. If the task needs a shell (tests, builds, installs, "
+    "git commands), tell the user to set Shell to Sandboxed in this chat's settings (or the "
+    "loadout's). That does not give access to their private vault."
+)
+
+_SHELL_UNAVAILABLE_NOTE = (
+    "bash and python are unavailable: this agent's shell is sandboxed and the sandbox does not "
+    "work on this server ({why}). Use the file tools instead. If the task needs a shell, tell the "
+    "user an admin can fix the sandbox or set this agent's Shell to Full server shell."
+)
+
+_SCRATCH_SHELL_NOTE = (
+    " That folder is a scratch folder: this chat's workspace cannot be sandboxed ({why}). "
+    "To work on a repository with bash, start a managed worktree or ask the user to set the "
+    "chat's workspace to that repository."
 )
 
 
@@ -5750,41 +5759,44 @@ async def stream_agent_loop(
         # public/non-admin users rather than trying to enumerate every tool.
         mcp_mgr = None
 
-    if allow_private is not True:
-        # bash/python (and MCP tools that read files) are refused at execution
-        # without the chat's private-vault grant, because they can read the
-        # vault around the file tools' checks (tool_execution). Offering them
-        # anyway cost a wasted call or two per turn on 2026-09-18, so their
-        # schemas are not sent (_filter_route_tool_schemas) and the model is
-        # told why, so it can tell the user what to switch on. Execution still
-        # refuses them on its own; hiding is not the control.
-        #
-        # With a workspace and a working bubblewrap sandbox they run confined
-        # to that workspace instead (src/shell_sandbox.py), so they stay offered.
-        from src import shell_sandbox as _shell_sandbox
+    # bash/python follow the chat's Shell setting (src/shell_access.py), no
+    # longer the vault grant: Sandboxed (default) confines them to the
+    # workspace or, when that cannot be sandboxed, a scratch folder; Full
+    # server shell runs them unrestricted; Off removes them. A shell that will
+    # be refused is not offered (a wasted call or two per turn on 2026-09-18)
+    # and the model is told why; execution still decides on its own.
+    from src import shell_access as _shell_access
+    from src import shell_sandbox as _shell_sandbox
 
-        _why = await asyncio.to_thread(_shell_sandbox.unavailable_reason, workspace)
-        _shell_sandboxed = not _why
-        _private_shell_note = bool({"bash", "python"} - disabled_tools)
-        if _private_shell_note and not _shell_sandboxed:
-            _private_shell_text = _PRIVATE_SHELL_NOTE + f" They cannot run in the workspace sandbox either: {_why}."
-        elif _private_shell_note:
-            _worktree_clause = _sandbox_worktree_clause(workspace)
+    _shell_mode = await asyncio.to_thread(_shell_access.resolve_for_session, session_id)
+    _wants_shell = bool({"bash", "python"} - disabled_tools)
+    _shell_offered = _shell_mode == "host"
+    _private_shell_note = False
+    _private_shell_text = ""
+    if _shell_mode == "sandbox":
+        _sb_ws, _not_ws, _sb_unavailable = await asyncio.to_thread(
+            _shell_access.sandbox_workspace, workspace, session_id)
+        _shell_offered = _sb_ws is not None
+        if _wants_shell and _sb_ws:
+            _worktree_clause = _sandbox_worktree_clause(_sb_ws) if not _not_ws else ""
             _private_shell_text = _SANDBOXED_SHELL_NOTE.format(
-                workspace=os.path.realpath(workspace),
+                workspace=_sb_ws,
                 network=("on" if _shell_sandbox.network_enabled() else "off"),
                 worktrees=_worktree_clause,
                 inside=" or those worktrees" if _worktree_clause else "",
-            )
-    else:
-        _private_shell_note = False
-        _shell_sandboxed = False
-    # Which gate decided bash/python this turn. Without it a turn that suddenly
-    # offers the shell (2026-09-26, turn 2) cannot be told apart: the user
-    # enabled 'Allow private vault reads', or the workspace sandbox came up.
+            ) + (_SCRATCH_SHELL_NOTE.format(why=_not_ws) if _not_ws else "")
+        elif _wants_shell:
+            _private_shell_text = _SHELL_UNAVAILABLE_NOTE.format(why=_sb_unavailable)
+        _private_shell_note = bool(_private_shell_text)
+    elif _shell_mode == "off" and _wants_shell:
+        _private_shell_text = _SHELL_OFF_NOTE
+        _private_shell_note = True
+    _shell_sandboxed = _shell_mode == "sandbox" and _shell_offered
+    # Which gate decided bash/python this turn, so a turn that suddenly offers
+    # (or loses) the shell can be told apart in the log.
     logger.info(
-        "[agent] shell gate: private_vault_grant=%s sandboxed=%s",
-        allow_private is True, _shell_sandboxed,
+        "[agent] shell gate: shell_access=%s offered=%s sandboxed=%s private_vault_grant=%s",
+        _shell_mode, _shell_offered, _shell_sandboxed, allow_private is True,
     )
 
     if plan_mode:
@@ -7416,15 +7428,18 @@ async def stream_agent_loop(
         # visibility is not authority: both the loop and dispatcher still gate
         # execution, and only a one-use server record can cross that boundary.
         # MCP tools that read files are the exception: without the private
-        # grant they are refused outright, so they are not offered.
-        if allow_private is True:
-            return schemas
+        # grant they are refused outright, so they are not offered. bash and
+        # python are offered when the Shell setting gives this chat a shell.
         from src.private_access import tool_requires_private_grant
-        _sandboxed = {"bash", "python"} if _shell_sandboxed else set()
+
+        def _keep(name: str) -> bool:
+            if name in ("bash", "python"):
+                return _shell_offered
+            return allow_private is True or not tool_requires_private_grant(name)
+
         return [
             schema for schema in schemas
-            if (schema.get("function", {}).get("name") or schema.get("name") or "") in _sandboxed
-            or not tool_requires_private_grant(schema.get("function", {}).get("name") or schema.get("name") or "")
+            if _keep(schema.get("function", {}).get("name") or schema.get("name") or "")
         ]
 
     def _tool_schemas_for_route(route_state, *, admin_tools=None):

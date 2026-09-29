@@ -1049,9 +1049,12 @@ def setup_session_routes(
                 parent = _link(settings["parent_session"])
         finally:
             db.close()
+        from src import shell_access
         return {
             "settings": settings,
             "approval_mode": session_settings.effective_approval_mode(settings),
+            # How bash/python run in this chat, separate from vault access.
+            "shell_access": shell_access.resolve(settings),
             # Empty only if approval_modes.ENFORCED is switched off; the chat
             # settings UI hides its mode controls when there is nothing to choose from.
             "approval_modes": list(approval_modes.MODES) if approval_modes.ENFORCED else [],
@@ -1078,6 +1081,8 @@ def setup_session_routes(
             raise HTTPException(400, str(exc))
         except Exception:
             raise HTTPException(400, "settings must be a JSON object")
+        from src import shell_access
+        shell_access.guard_settings_change(request, session_id, patch)
         if update_session_settings(session_id, patch) is None:
             raise HTTPException(500, "Failed to save chat settings")
         return _settings_payload(session_id)

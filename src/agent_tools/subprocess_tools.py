@@ -378,21 +378,31 @@ async def _run_subprocess_streaming(
 def _sandbox_for(ctx) -> Tuple[Optional[str], Optional[dict]]:
     """``(sandbox_workspace, refusal)`` for a bash/python call.
 
-    With the private-vault grant the shell runs as before. Without it, it runs
-    only when the dispatcher chose the workspace sandbox for this call
-    (src.shell_sandbox); otherwise it is refused.
+    Unrestricted when the dispatcher chose ``host`` for this call, sandboxed
+    when it chose a sandbox workspace, refused otherwise (fail closed).
     """
-    from src.tool_execution import get_shell_sandbox_workspace
+    from src.tool_execution import get_shell_mode, get_shell_sandbox_workspace
 
-    if isinstance(ctx, dict) and ctx.get("allow_private") is True:
+    # The dispatcher decides from the chat's Shell setting (src/shell_access.py),
+    # not from the vault grant: a vault-granted chat set to Sandboxed stays
+    # sandboxed, and one set to Full server shell runs unrestricted.
+    mode = get_shell_mode()
+    if mode == "host":
         return None, None
     sandbox_ws = get_shell_sandbox_workspace()
     if sandbox_ws:
         return sandbox_ws, None
-    from src.private_access import private_tool_denial
-
+    if mode is None and isinstance(ctx, dict) and ctx.get("allow_private") is True:
+        # A direct caller that never went through the dispatcher keeps the
+        # rule it was written for.
+        return None, None
     tool = (ctx or {}).get("tool_name") if isinstance(ctx, dict) else None
-    return None, private_tool_denial(tool if tool in ("bash", "python") else "bash")
+    return None, {
+        "error": (f"Tool '{tool if tool in ('bash', 'python') else 'bash'}' was not executed: no shell "
+                  "was granted for this call (the chat's Shell setting decides: Sandboxed, Full server "
+                  "shell or Off)."),
+        "blocked": True, "blocked_reason": "shell_not_granted", "exit_code": 1,
+    }
 
 
 class BashTool:

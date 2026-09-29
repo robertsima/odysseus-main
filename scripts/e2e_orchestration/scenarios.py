@@ -32,7 +32,9 @@ MODEL = "e2e-mock"
 PUBLISHER = "Publisher"
 PUBLISHER_TOOLS = ["manage_agent_worktree", "write_file", "read_file", "ls", "get_workspace"]
 ORDER = ["broad_parent", "ssh_remote", "feature_base", "interactive", "stop_worker", "stop_parent",
-         "parallel", "publish"]
+         "parallel", "publish", "vault_sandboxed", "host_shell", "scratch_shell"]
+SHELLER = "Sheller"
+SHELLER_TOOLS = ["bash", "read_file", "ls", "get_workspace"]
 
 
 class Suite:
@@ -66,6 +68,17 @@ class Suite:
                          "enabled_tools": PUBLISHER_TOOLS, "private_vault_access": False,
                          "max_parallel_workers": 0})
         self.client.post("/api/auth/settings", json={"agent_profiles": profiles})
+
+    def ensure_sheller(self) -> None:
+        settings = self.client.get("/api/auth/settings").json()
+        profiles = [p for p in settings.get("agent_profiles") or [] if p.get("name") != SHELLER]
+        profiles.append({"name": SHELLER, "description": "e2e shell user", "tool_access": "selected",
+                         "enabled_tools": SHELLER_TOOLS, "private_vault_access": False,
+                         "max_parallel_workers": 0})
+        self.client.post("/api/auth/settings", json={"agent_profiles": profiles})
+
+    def chat_settings(self, sid: str, patch: Dict[str, Any]) -> int:
+        return self.client.patch(f"/api/session/{sid}/settings", json=patch).status_code
 
     def chat(self, name: str, loadout: str = ADMIN_LOADOUT) -> str:
         resp = self.client.post("/api/session", data={"name": f"S {name}", "endpoint_id": self.endpoint_id,
@@ -274,6 +287,40 @@ class Suite:
         names_fix = "ODYSSEUS_AGENT_GITHUB_TOKEN" in req or "ODYSSEUS_AGENT_PUBLISH_ENABLED" in req
         self.rep.check("[publish] request_publish proceeds or names what is missing", proceeds or names_fix,
                        req[:500] or "no request_publish result")
+
+    # ── the shell, separate from vault access ─────────────────────────────
+    def _shell_chat(self, name: str, patch: Dict[str, Any]) -> str:
+        self.ensure_sheller()
+        sid = self.chat(name, loadout=SHELLER)
+        status = self.chat_settings(sid, patch)
+        self.rep.check(f"[{name}] chat settings saved {patch}", status == 200, str(status))
+        self.send(sid, f"Check the shell. (ref E2E-S:{name})", workspace=self.clone, name=name)
+        return sid
+
+    def s_vault_sandboxed(self) -> None:
+        self._shell_chat("vault_sandboxed", {"private_vault_access": True})
+        out = " ".join(self.results("vault_sandboxed", "bash", agent="chat"))
+        self.rep.check("[vault_sandboxed] vault access does not give the shell the app's data",
+                       "S-NO-DATA" in out and self.clone in out, out[:400])
+
+    def s_host_shell(self) -> None:
+        self._shell_chat("host_shell", {"shell_access": "host"})
+        out = " ".join(self.results("host_shell", "bash", agent="chat"))
+        self.rep.check("[host_shell] a full server shell without the vault grant sees the host",
+                       "S-SEES-DATA" in out, out[:400])
+
+    def s_scratch_shell(self) -> None:
+        w = self.start_worker("scratch_shell", "Have the Lead Engineer say where its shell runs. (ref E2E-S:scratch_shell)",
+                              workspace=self.root)
+        if not w:
+            return
+        self.wait_run_done(w["run_id"])
+        first = next(iter(self.rows("scratch_shell", "worker")), {})
+        self.rep.check("[scratch_shell] the worker was offered bash", "bash" in (first.get("tools") or []),
+                       f"tools: {first.get('tools')}")
+        out = " ".join(self.results("scratch_shell", "bash"))
+        self.rep.check("[scratch_shell] bash ran sandboxed in a scratch folder",
+                       "agent_workspace/sandbox" in out and "S-NO-DATA" in out, out[:400])
 
 def shutdown_begin(suite: Suite) -> int:
     """Start a slow reply and hold its stream open (a browser watching it)."""

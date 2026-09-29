@@ -382,9 +382,11 @@ def test_workspace_toolset_can_read_the_app_logs():
     assert "read_app_logs" in al._WORKSPACE_TERMINUS_TOOLS
 
 
-# ── tools refused without the private grant are not offered ──────────────
+# ── a shell that will be refused is not offered ─────────────────────────
+# Since 2026-09-29 the Shell setting (src/shell_access.py) decides bash and
+# python, not the private-vault grant.
 
-async def test_shell_tools_are_hidden_without_the_private_grant(monkeypatch):
+async def test_shell_tools_are_hidden_when_the_shell_is_off(monkeypatch):
     sent = {}
 
     async def fake_stream(_candidates, messages, **kwargs):
@@ -397,30 +399,47 @@ async def test_shell_tools_are_hidden_without_the_private_grant(monkeypatch):
     monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
     monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
     monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr("src.shell_access.resolve_for_session", lambda sid: "off")
     events = [e async for e in al.stream_agent_loop(
         "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "run the tests with bash"}],
-        relevant_tools={"bash", "python", "read_file", "grep"}, max_rounds=1, allow_private=False,
+        relevant_tools={"bash", "python", "read_file", "grep"}, max_rounds=1, allow_private=True,
     )]
     assert events
+    # The vault grant no longer turns the shell on.
     assert "bash" not in sent["tools"] and "python" not in sent["tools"]
     assert "read_file" in sent["tools"]
-    assert any("Allow private vault reads" in str(m.get("content")) for m in sent["messages"])
-    # 2026-09-26: the model relayed only the setting's name, so the user could
-    # not tell why a vault switch would give it a shell. The note must say that
-    # the switch enables bash/python and why they are tied to it.
     note = next(str(m.get("content")) for m in sent["messages"]
-                if "Allow private vault reads" in str(m.get("content")))
-    assert "enables bash and python" in note
-    assert "could read the user's private vault" in note
-    assert "Vault privacy" in note
+                if "Shell setting is Off" in str(m.get("content")))
+    assert "Sandboxed" in note and "does not give access to their private vault" in note
 
 
-def test_private_tool_denial_says_the_setting_turns_on_the_shell():
+async def test_a_full_shell_is_offered_without_the_vault_grant(monkeypatch):
+    sent = {}
+
+    async def fake_stream(_candidates, messages, **kwargs):
+        sent["tools"] = [t.get("function", {}).get("name") for t in (kwargs.get("tools") or [])]
+        yield f'data: {json.dumps({"delta": "ok"})}\n\n'
+        yield "data: [DONE]\n\n"
+
+    monkeypatch.setattr(al, "get_setting", lambda key, default=None: default, raising=False)
+    monkeypatch.setattr(al, "get_mcp_manager", lambda: None, raising=False)
+    monkeypatch.setattr(al, "blocked_tools_for_owner", lambda owner: set(), raising=False)
+    monkeypatch.setattr(al, "stream_llm_with_fallback", fake_stream, raising=False)
+    monkeypatch.setattr("src.shell_access.resolve_for_session", lambda sid: "host")
+    [e async for e in al.stream_agent_loop(
+        "https://api.openai.com/v1", "gpt-4o", [{"role": "user", "content": "run the tests with bash"}],
+        relevant_tools={"bash", "read_file"}, max_rounds=1, allow_private=False,
+    )]
+    assert "bash" in sent["tools"]
+
+
+def test_private_tool_denial_no_longer_claims_to_turn_on_the_shell():
     from src.private_access import private_tool_denial
 
-    error = private_tool_denial("bash")["error"]
+    error = private_tool_denial("mcp__filesystem__read_file")["error"]
     assert "Allow private vault reads" in error
-    assert "turns on bash, python" in error
+    assert "separate Shell setting" in error
+    assert "turns on bash" not in error
     assert "not merely repository access" in error
 
 

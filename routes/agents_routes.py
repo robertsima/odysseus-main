@@ -39,6 +39,7 @@ from fastapi.responses import StreamingResponse
 from src import agent_activity as activity
 from src import agent_control, agent_runs, tool_approvals
 from src.auth_helpers import effective_user
+from src.shell_access import resolve as _shell_mode
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +228,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "max_parallel_workers": effective_worker_limit(settings),
                 "allowed_mcp_servers": settings.get("allowed_mcp_servers", ["*"]),
                 "private_vault_access": bool(settings.get("private_vault_access", False)),
+                "shell_access": _shell_mode(settings),
             }
             # Missing means a legacy denylist-only session. Preserve that
             # distinction so the dashboard derives its access mode once;
@@ -648,7 +650,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
                      "tool_access", "enabled_tools",
                      "disabled_tools", "memory_access", "skill_access", "skill_names",
                      "model_access", "allowed_models", "delegation_policy",
-                     "max_parallel_workers", "allowed_mcp_servers", "private_vault_access")
+                     "max_parallel_workers", "allowed_mcp_servers", "private_vault_access",
+                     "shell_access")
 
     @router.get("/profiles")
     async def profiles(request: Request):
@@ -739,6 +742,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
             if not profile:
                 raise HTTPException(404, f"No loadout named {name!r}")
             patch = agent_profiles.session_patch(profile)
+            from src import shell_access
+            shell_access.guard_settings_change(request, session_id, patch)
         else:
             patch = {key: None for key in _LOADOUT_KEYS}
         saved = update_session_settings(session_id, patch)

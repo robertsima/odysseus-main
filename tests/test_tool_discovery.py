@@ -279,23 +279,28 @@ def test_memory_model_skill_and_readonly_filters():
     })["loaded_names"] == ["manage_skills"]
 
 
-def test_private_unconfined_tools_are_not_advertised_but_public_file_tools_remain():
+def test_the_shell_follows_its_setting_and_file_reading_mcp_tools_the_vault_grant():
+    # Since 2026-09-29 bash/python follow the Shell setting (src/shell_access.py):
+    # offered by default (sandboxed), hidden when Off. File-reading MCP tools
+    # still need the private-vault grant.
     names = ["bash", "python", "mcp__files__read_file", "read_file", "grep"]
     catalog = [schema(name, "Read repository files") for name in names]
     discovery = TurnToolDiscovery(catalog)
-    assert {s["function"]["name"] for s in discovery.permitted_tools()} == {"read_file", "grep"}
-    assert run(discovery, "bash")["loaded_names"] == []
-    settings = {"private_vault_access": True}
-    assert {s["function"]["name"] for s in discovery.permitted_tools(settings)} == set(names)
-    assert run(discovery, "bash", settings=settings)["loaded_names"] == ["bash"]
-    # Loaded/attached schemas are still hidden immediately after revocation.
+    assert {s["function"]["name"] for s in discovery.permitted_tools()} == {"bash", "python", "read_file", "grep"}
+    assert run(discovery, "bash")["loaded_names"] == ["bash"]
+    off = {"shell_access": "off"}
+    assert {s["function"]["name"] for s in discovery.permitted_tools(off)} == {"read_file", "grep"}
+    assert run(discovery, "bash", settings=off)["loaded_names"] == []
+    vault = {"private_vault_access": True}
+    assert {s["function"]["name"] for s in discovery.permitted_tools(vault)} == set(names)
+    # Loaded/attached schemas are still hidden immediately after the shell is turned off.
     discovery.set_attached(["bash"])
-    assert run(discovery, "bash", settings={"private_vault_access": False})["already_attached_names"] == []
+    assert run(discovery, "bash", settings=off)["already_attached_names"] == []
 
 
 def test_discovery_dispatch_does_not_escalate_from_fresh_grant(monkeypatch):
-    discovery = TurnToolDiscovery([schema("bash", "Run shell")])
-    _, result = _execute(monkeypatch, discovery, {"private_vault_access": True}, {"query": "bash"})
+    discovery = TurnToolDiscovery([schema("mcp__files__read_file", "Read files")])
+    _, result = _execute(monkeypatch, discovery, {"private_vault_access": True}, {"query": "read files"})
     assert result["loaded_names"] == []
 
 

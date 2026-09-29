@@ -900,6 +900,15 @@ def get_shell_sandbox_workspace() -> Optional[str]:
     return _shell_sandbox_workspace.get()
 
 
+# The shell mode the dispatcher decided for this bash/python call ("sandbox",
+# "host"), or None when no dispatcher decision was made (a direct caller).
+_shell_mode_var: contextvars.ContextVar = contextvars.ContextVar("agent_shell_mode", default=None)
+
+
+def get_shell_mode() -> Optional[str]:
+    return _shell_mode_var.get()
+
+
 def get_active_workspace() -> Optional[str]:
     """The folder the agent is confined to this turn, or None."""
     return _active_workspace.get()
@@ -1701,7 +1710,9 @@ async def _execute_tool_block_impl(
     # Reject tools that the user has disabled for this request
     if disabled_tools and not policy_names.isdisjoint(disabled_tools):
         desc = f"{tool}: BLOCKED"
-        if tool_requires_private_grant(tool) and allow_private is not True:
+        # The shell is no longer a vault privilege, so a disabled bash/python
+        # is just disabled; only file-reading MCP tools get the vault message.
+        if tool_requires_private_grant(tool) and tool not in ("bash", "python") and allow_private is not True:
             return desc, private_tool_denial(tool)
         result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
@@ -1934,27 +1945,43 @@ async def _execute_tool_block_impl(
     # Without the grant, bash and python may still run inside the bubblewrap
     # sandbox (src/shell_sandbox.py), which sees only the workspace and the
     # read-only system: no /app/data, no vault, no app environment.
+    #
+    # Since 2026-09-29 the shell has its own setting (src/shell_access.py):
+    # ``sandbox`` (default) runs bash/python in the sandbox whatever the vault
+    # grant says, ``host`` runs them unrestricted, ``off`` refuses them. The
+    # vault grant still gates file-reading MCP servers, which are not the shell.
     _sandbox_ws = None
-    if tool_requires_private_grant(tool) and allow_private is not True:
-        _ws = get_active_workspace()
-        _sandbox_note = ""
-        if tool in ("bash", "python"):
-            from src import shell_sandbox
+    _shell_mode = None
+    if tool in ("bash", "python"):
+        from src import shell_access
 
-            _why = await asyncio.to_thread(shell_sandbox.unavailable_reason, _ws)
-            if not _why:
-                _sandbox_ws = os.path.realpath(_ws)
-            else:
-                _sandbox_note = (" It can run without the grant only in the workspace sandbox, "
-                                 f"which is not possible here: {_why}.")
-        if _sandbox_ws is None:
-            desc = f"{tool}: BLOCKED"
-            result = private_tool_denial(tool)
-            if _sandbox_note:
-                result["error"] += _sandbox_note
-            logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
-            return desc, result
+        _shell_mode = shell_access.resolve(_agent_settings) if session_id else shell_access.DEFAULT
+        if _shell_mode == "off":
+            logger.info("Shell refused: shell_access=off tool=%s session=%r", tool, session_id)
+            return f"{tool}: BLOCKED", {
+                "error": (f"Tool '{tool}' was not executed: the shell is turned off for this agent "
+                          "(its Shell setting is Off). Use the file tools instead, or ask the user to "
+                          "set Shell to Sandboxed in the chat's or loadout's settings."),
+                "blocked": True, "blocked_reason": "shell_off", "retryable": False, "exit_code": 1,
+            }
+        if _shell_mode == "sandbox":
+            _ws, _not_ws, _unavailable = await asyncio.to_thread(
+                shell_access.sandbox_workspace, get_active_workspace(), session_id)
+            if _ws is None:
+                logger.info("Shell refused: sandbox unavailable tool=%s session=%r: %s", tool, session_id, _unavailable)
+                return f"{tool}: BLOCKED", {
+                    "error": (f"Tool '{tool}' was not executed: this agent's shell is sandboxed and the "
+                              f"sandbox does not work on this server ({_unavailable}). An admin can fix the "
+                              "sandbox or set this agent's Shell to Full server shell."),
+                    "blocked": True, "blocked_reason": "shell_sandbox_unavailable", "retryable": False,
+                    "exit_code": 1,
+                }
+            _sandbox_ws = _ws
+    elif tool_requires_private_grant(tool) and allow_private is not True:
+        logger.info("Unrestricted tool blocked without private-vault grant: tool=%s session=%r", tool, session_id)
+        return f"{tool}: BLOCKED", private_tool_denial(tool)
     _shell_sandbox_workspace.set(_sandbox_ws)
+    _shell_mode_var.set(_shell_mode)
 
 
     # Background execution: a `bash` block whose first line is the `#!bg`

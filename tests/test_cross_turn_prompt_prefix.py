@@ -74,6 +74,8 @@ def _first_round_payload(monkeypatch, messages, **kwargs):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    # A deterministic per-turn shell note (the Shell setting, src/shell_access.py).
+    monkeypatch.setattr("src.shell_access.resolve_for_session", lambda sid: "off")
     _collect(al.stream_agent_loop(
         URL, MODEL, messages, max_rounds=1, session_id=SESSION, allow_private=False, **kwargs,
     ))
@@ -124,10 +126,10 @@ def test_consecutive_turns_share_the_prefix_through_prior_history(monkeypatch):
     # The per-turn notes still reach the model, beside the request.
     for payload, marker in ((first, "- [ ] run the tests"), (second, "- [x] run the tests")):
         assert "ACTIVE PLAN" not in payload["instructions"]
-        assert "Allow private vault reads" not in payload["instructions"]
+        assert "Shell setting is Off" not in payload["instructions"]
         tail = " ".join(_texts(payload["input"][len(prior):]))
         assert "ACTIVE PLAN" in tail and marker in tail
-        assert "Allow private vault reads" in tail
+        assert "Shell setting is Off" in tail
     # The trusted email rules stay in the system prompt, on both turns.
     assert "Hard identity rule" in first["instructions"]
     # The admin tool the first turn named stays offered, and the system prompt
@@ -166,6 +168,8 @@ def _turn_payloads(monkeypatch, messages, rounds):
         yield "data: [DONE]\n\n"
 
     monkeypatch.setattr(al, "stream_llm_with_fallback", _fake_stream, raising=False)
+    # A deterministic per-turn shell note (the Shell setting, src/shell_access.py).
+    monkeypatch.setattr("src.shell_access.resolve_for_session", lambda sid: "off")
     _collect(al.stream_agent_loop(
         URL, MODEL, messages, max_rounds=len(rounds), session_id=SESSION, allow_private=False,
         relevant_tools={"read_file", "grep"},

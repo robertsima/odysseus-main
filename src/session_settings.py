@@ -83,6 +83,15 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{key} must be a string")
             out[key] = (value or "").strip()[:1000] or None
+        elif key == "shell_access":
+            from src import shell_access
+            if value is None:
+                out[key] = None
+                continue
+            mode = shell_access.normalize(value)
+            if mode is None:
+                raise ValueError(f"shell_access must be one of {', '.join(shell_access.MODES)}")
+            out[key] = mode
         elif key in (PRIVATE_VAULT_ACCESS_KEY, "workflow_readonly"):
             if not isinstance(value, bool):
                 raise ValueError(f"{key} must be a boolean")

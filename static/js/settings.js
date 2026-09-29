@@ -2753,11 +2753,13 @@ function initAgentProfilesEditor(initial) {
       policies.appendChild(field('Tools', choice('tool_access', [['all','All tools'],['selected','Selected tools'],['none','No action tools']])));
       policies.appendChild(field('MCP / integrations', choice('mcp_access', [['all','All connected'],['selected','Selected servers'],['none','None']])));
       policies.appendChild(field('Parallel workers', mk('input', 'max_parallel_workers', { type: 'number', min: '0', max: '8', placeholder: '1' })));
+      if (!p.shell_access) p.shell_access = 'sandbox';
+      policies.appendChild(field('Shell (bash, python)', choice('shell_access', [['sandbox','Sandboxed'],['host','Full server shell'],['off','Off']]), 'Sandboxed sees only the workspace (or a scratch folder): no app data, no vault. Full runs unrestricted and can read everything, the vault included. Separate from vault reads.'));
       card.appendChild(policies);
       var vault = document.createElement('label'); vault.className = 'agent-profile-private';
       var vaultCheck = document.createElement('input'); vaultCheck.type = 'checkbox'; vaultCheck.checked = !!p.private_vault_access;
       vaultCheck.addEventListener('change', function () { p.private_vault_access = vaultCheck.checked; note.textContent = 'Unsaved changes'; });
-      vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads (also enables bash and python, which could read the vault)'; vault.appendChild(vaultText); card.appendChild(vault);
+      vault.appendChild(vaultCheck); var vaultText = document.createElement('span'); vaultText.textContent = 'Allow private vault reads (private notes via retrieval and file tools; the shell is set separately above)'; vault.appendChild(vaultText); card.appendChild(vault);
       var advanced = document.createElement('details'); advanced.className = 'agent-profile-capabilities';
       var advSummary = document.createElement('summary'); advSummary.textContent = 'Capability allowlists'; advanced.appendChild(advSummary);
       var advancedGrid = document.createElement('div'); advancedGrid.className = 'agent-profile-cap-grid';
@@ -2776,7 +2778,7 @@ function initAgentProfilesEditor(initial) {
     var fresh = { name: '', description: '', model: '', model_fallbacks: [], model_access: 'current', allowed_models: [],
       max_rounds: 0, max_parallel_workers: 1, disabled_tools: [], tool_access: 'all', enabled_tools: [],
       memory_access: 'read', skill_access: 'all', skill_names: [], mcp_access: 'all', allowed_mcp_servers: [],
-      private_vault_access: false, approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
+      private_vault_access: false, shell_access: 'sandbox', approval_mode: 'inherit', delegation_policy: 'explicit', instructions: '',
       persona_name: '', temperature: null, max_tokens: null };
     profiles.push(fresh);
     openProfiles.add(fresh);

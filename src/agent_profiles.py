@@ -57,6 +57,18 @@ def _choice(raw: Any, field: str, profile: str, allowed: set, default: str) -> s
     return value
 
 
+def _shell_access(raw: Any, profile: str) -> str:
+    """``sandbox`` (default), ``host`` or ``off``; see src/shell_access.py."""
+    from src import shell_access
+
+    if raw in (None, ""):
+        return shell_access.DEFAULT
+    value = shell_access.normalize(raw)
+    if value is None:
+        raise ValueError(f"profile {profile!r}: shell_access must be one of {', '.join(shell_access.MODES)}")
+    return value
+
+
 def _optional_number(raw: Any, field: str, profile: str, lo: float, hi: float, cast):
     """A bounded number, or None (blank) meaning "use the app default"."""
     if raw is None or (isinstance(raw, str) and not raw.strip()):
@@ -132,6 +144,8 @@ def validate_profiles(value: Any) -> List[Dict[str, Any]]:
             "mcp_access": _choice(raw.get("mcp_access"), "mcp_access", name, _SELECTION_ACCESS, "all"),
             "allowed_mcp_servers": _names(raw.get("allowed_mcp_servers"), "allowed_mcp_servers", name, 100),
             "private_vault_access": bool(raw.get("private_vault_access", False)),
+            # How bash/python run, separate from vault access (src/shell_access.py).
+            "shell_access": _shell_access(raw.get("shell_access"), name),
             "approval_mode": str(raw.get("approval_mode") or "inherit").strip().lower(),
             "delegation_policy": _choice(raw.get("delegation_policy"), "delegation_policy", name, _DELEGATION, "explicit"),
             "max_parallel_workers": max(0, min(8, workers)),
@@ -204,6 +218,7 @@ def session_patch(profile: Dict[str, Any]) -> Dict[str, Any]:
         "max_parallel_workers": profile.get("max_parallel_workers", 1),
         "allowed_mcp_servers": mcp_servers,
         "private_vault_access": bool(profile.get("private_vault_access", False)),
+        "shell_access": profile.get("shell_access") or "sandbox",
     }
     if profile.get("approval_mode") != "inherit":
         patch["approval_mode"] = profile.get("approval_mode")

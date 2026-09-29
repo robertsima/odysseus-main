@@ -49,7 +49,7 @@ _FIELDS = (
     "model", "model_fallbacks", "model_access",
     "allowed_models", "tool_access", "enabled_tools", "disabled_tools", "memory_access",
     "skill_access", "skill_names", "mcp_access", "allowed_mcp_servers",
-    "private_vault_access", "approval_mode", "delegation_policy",
+    "private_vault_access", "shell_access", "approval_mode", "delegation_policy",
     "max_parallel_workers", "max_rounds",
 )
 
@@ -1023,6 +1023,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "limited to allowed_mcp_servers above"
             ),
             "private_vault_access": policy["private_vault_access"],
+            "shell_access": policy.get("shell_access") or "sandbox",
             "delegation_policy": policy["delegation_policy"],
             "max_parallel_workers": policy["max_parallel_workers"],
             "worker_limit_scope": "parent_chat (separate from provider-wide concurrent jobs)",

@@ -18,6 +18,13 @@ import uiModule from './ui.js';
 import workspaceModule from './workspace.js';
 
 const API = '';
+// How bash/python run in this chat (src/shell_access.py). Separate from vault access.
+const SHELL_INFO = {
+  sandbox: { label: 'Sandboxed', short: 'sandboxed', desc: 'Runs in a sandbox that holds only the workspace (or a scratch folder) and the system tools: no app data, no vault. The default.' },
+  host: { label: 'Full server shell', short: 'full', desc: "Runs unrestricted on the server as the app's user. It can read anything that user can, including the vault, whatever the vault setting says. Admins only." },
+  off: { label: 'Off', short: 'off', desc: 'No bash or python in this chat.' },
+};
+
 const MODE_INFO = {
   auto: { label: 'Auto', desc: 'Tools run without asking.' },
   ask_risky: { label: 'Ask for risky', desc: 'Destructive or outward-facing actions ask first: deleting files, git push, publishing, sending or deleting email, sudo.' },
@@ -145,6 +152,8 @@ function render() {
   if (s.workspace) items.push(`<span class="csl-item csl-workspace" title="${esc(`Workspace: ${s.workspace}`)}">${esc(basename(s.workspace))}</span>`);
   const off = (s.disabled_tools || []).length;
   items.push(`<button type="button" class="csl-item${off ? ' csl-attn' : ''}" data-csl="panel-tools" title="Choose which tools this chat may use">${off ? `${off} tool${off === 1 ? '' : 's'} off` : 'All tools'}</button>`);
+  const shell = d.shell_access || 'sandbox';
+  items.push(`<button type="button" class="csl-item${shell === 'host' ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${esc(SHELL_INFO[shell]?.desc || '')} Click to change.">Shell: ${esc(SHELL_INFO[shell]?.short || shell)}</button>`);
   const privateVault = s.private_vault_access === true;
   items.push(`<button type="button" class="csl-item${privateVault ? ' csl-attn' : ''}" data-csl="panel-privacy" title="${privateVault ? 'Private vault excerpts may be sent to this chat\'s model endpoint. Click to review.' : 'Private vault access is off for this chat. Click to review.'}">${privateVault ? 'Private vault on' : 'Private vault off'}</button>`);
   if (d.parent_session && d.parent_session.id) {
@@ -244,6 +253,8 @@ function renderPanel() {
   const effective = d.approval_mode || 'auto';
   const modesEnforced = Array.isArray(d.approval_modes) && d.approval_modes.length > 0;
   const privateVault = s.private_vault_access === true;
+  const shell = d.shell_access || 'sandbox';
+  const shellRows = Object.keys(SHELL_INFO).map((key) => `<label class="csp-radio"><input type="radio" name="csp-shell" value="${esc(key)}"${shell === key ? ' checked' : ''}><span><b>${esc(SHELL_INFO[key].label)}</b><small>${esc(SHELL_INFO[key].desc)}</small></span></label>`).join('');
   const off = new Set(s.disabled_tools || []);
   const globallyOff = new Set((state.tools || []).filter((t) => t.enabled === false).map((t) => t.id));
   const modeRows = ['', ...Object.keys(MODE_INFO)].map((key) => {
@@ -270,10 +281,14 @@ function renderPanel() {
     ${modesEnforced ? `<section class="csp-section"><h4>Approvals</h4>${modeRows}</section>` : ''}
     <section class="csp-section csp-privacy">
       <h4>Vault privacy</h4>
-      <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint. It also turns on the agent's shell (bash, python), which is not confined to permitted files and so could read the private vault.">
+      <label class="csp-tool" title="When enabled, private vault excerpts and explicitly read private files may be sent to this chat's model endpoint. The shell is a separate setting below.">
         <input type="checkbox" data-csp="private-vault"${privateVault ? ' checked' : ''}>
-        <span><b>Allow private vault reads</b><small>${privateVault ? 'Private excerpts may leave this machine via the selected model endpoint. The agent shell (bash, python) is on.' : 'Private vault content is hidden by default. Also enables the agent shell (bash, python), which could read the vault.'}</small></span>
+        <span><b>Allow private vault reads</b><small>${privateVault ? 'Private excerpts may leave this machine via the selected model endpoint.' : 'Private vault content is hidden by default.'} Does not change the shell.</small></span>
       </label>
+    </section>
+    <section class="csp-section csp-shell">
+      <h4>Shell (bash, python)</h4>
+      ${shellRows}
     </section>
     <section class="csp-section">
       <h4>Tools <span class="csp-count">${names.length - off.size - globallyOff.size} of ${names.length} on</span></h4>
@@ -286,8 +301,11 @@ function renderPanel() {
   }));
   panel.querySelector('[data-csp="private-vault"]')?.addEventListener('change', (e) => {
     const enabled = Boolean(e.target.checked);
-    save({ private_vault_access: enabled }, enabled ? 'Private vault reads and shell enabled for this chat' : 'Private vault reads and shell disabled for this chat');
+    save({ private_vault_access: enabled }, enabled ? 'Private vault reads enabled for this chat' : 'Private vault reads disabled for this chat');
   });
+  panel.querySelectorAll('input[name="csp-shell"]').forEach((input) => input.addEventListener('change', () => {
+    save({ shell_access: input.value }, `Shell: ${SHELL_INFO[input.value]?.label || input.value}`);
+  }));
   panel.querySelectorAll('input[data-tool]').forEach((input) => input.addEventListener('change', () => {
     const next = new Set((state.data?.settings?.disabled_tools) || []);
     if (input.checked) next.delete(input.dataset.tool); else next.add(input.dataset.tool);

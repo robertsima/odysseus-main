@@ -505,7 +505,7 @@ function configFor(row) {
     agent_profile: '', agent_instructions: '', agent_persona_name: '', agent_temperature: null, agent_max_tokens: null, agent_reasoning_effort: '',
     approval_mode: '', memory_access: 'write', skill_access: 'all', skill_names: [],
     model_access: 'all', allowed_models: [], delegation_policy: 'explicit', max_parallel_workers: 1,
-    allowed_mcp_servers: ['*'], private_vault_access: false, disabled_tools: [], tool_access: 'all',
+    allowed_mcp_servers: ['*'], private_vault_access: false, shell_access: 'sandbox', disabled_tools: [], tool_access: 'all',
   }, stored);
   base._explicitToolAccess = Object.prototype.hasOwnProperty.call(stored, 'tool_access');
   base._catalogReady = false;
@@ -541,6 +541,7 @@ function profileConfig(profile) {
     model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
     delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
     allowed_mcp_servers: mcp, private_vault_access: !!profile.private_vault_access,
+    shell_access: profile.shell_access || 'sandbox',
     disabled_tools: [...(profile.disabled_tools || [])], tool_access: profile.tool_access || 'all',
     enabled_tools: [...(profile.enabled_tools || [])],
     _catalogReady: true,
@@ -594,7 +595,8 @@ function configEditorHtml(row) {
     <div class="ag-panel-heading"><div><b>Knowledge & memory</b><span>Control persistent memory, reusable skills, and private-note retrieval.</span></div></div>
     <div class="ag-policy-grid ag-knowledge-policy"><label class="ag-field"><span>Memory</span><select class="wb-select" data-config="memory_access">${option('none','No memory',c.memory_access)}${option('read','Read only',c.memory_access)}${option('write','Read and write',c.memory_access)}</select><small>Read-only blocks add, edit and delete.</small></label>
       <label class="ag-field"><span>Skills</span><select class="wb-select" data-config="skill_access">${option('all','All skills',c.skill_access)}${option('selected','Selected skills',c.skill_access)}${option('none','No skills',c.skill_access)}</select><small>Skills add specialized procedures and instructions.</small></label></div>
-    <label class="ag-switch-card"><input type="checkbox" data-config="private_vault_access"${c.private_vault_access ? ' checked' : ''}><span><b>Private vault reads</b><small>Allow this agent to retrieve private notes, and to use bash and python (they could read the vault). Human access is unaffected.</small></span></label>
+    <label class="ag-switch-card"><input type="checkbox" data-config="private_vault_access"${c.private_vault_access ? ' checked' : ''}><span><b>Private vault reads</b><small>Allow this agent to retrieve private notes. Does not change its shell. Human access is unaffected.</small></span></label>
+    <label class="ag-field"><span>Shell (bash, python)</span><select class="wb-select" data-config="shell_access">${option('sandbox','Sandboxed',c.shell_access || 'sandbox')}${option('host','Full server shell',c.shell_access || 'sandbox')}${option('off','Off',c.shell_access || 'sandbox')}</select><small>Sandboxed: only the workspace (or a scratch folder), no app data or vault. Full: unrestricted on the server, can read everything including the vault (admins only).</small></label>
     <div class="ag-cap-grid" data-show-when="skill_access:selected"${c.skill_access === 'selected' ? '' : ' hidden'}>${capabilityChecks(catalog.skills, c.skill_names, 'skill_names')}</div>
   </div>`;
   const connectionsPanel = `<div class="ag-config-panel" data-config-panel="connections">
@@ -1020,6 +1022,7 @@ async function saveAgentConfig(row) {
     max_parallel_workers: draft.max_parallel_workers,
     allowed_mcp_servers: allowedMcp,
     private_vault_access: !!draft.private_vault_access,
+    shell_access: draft.shell_access || 'sandbox',
   };
   const result = await api(`/api/session/${encodeURIComponent(row.session_id)}/settings`, {
     method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),

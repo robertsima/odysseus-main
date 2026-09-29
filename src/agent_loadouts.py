@@ -39,6 +39,13 @@ _MEMORY_RANK = {"none": 0, "read": 1, "write": 2}
 _SELECTION_RANK = {"none": 0, "selected": 1, "all": 2}
 _MODEL_RANK = {"current": 0, "selected": 1, "all": 2}
 _DELEGATION_RANK = {"never": 0, "explicit": 1, "auto": 2}
+_SHELL_RANK = {"off": 0, "sandbox": 1, "host": 2}
+
+
+def _shell_mode(settings: Dict[str, Any]) -> str:
+    from src import shell_access
+
+    return shell_access.resolve(settings)
 # Higher is stricter. A loadout may be at least as strict as its author, never
 # looser: an agent that must ask before every change cannot author a worker
 # that runs unattended.
@@ -129,6 +136,7 @@ def caller_policy(session_id: Optional[str], owner: Optional[str]) -> Dict[str, 
         "allowed_models": set(settings.get("allowed_models") or []),
         "allowed_mcp_servers": list(settings.get("allowed_mcp_servers", ["*"]) or []),
         "private_vault_access": bool(settings.get("private_vault_access", False)),
+        "shell_access": _shell_mode(settings),
         "delegation_policy": settings.get("delegation_policy") or _POLICY_DEFAULTS["delegation_policy"],
         "max_parallel_workers": effective_worker_limit(settings),
         "approval_mode": effective_approval_mode(settings),
@@ -503,12 +511,28 @@ def capability_matrix(requested_tools, required_tools, profile: Dict[str, Any],
                            "detail": f"a worker started from this chat does not get it: {withheld[tool]['reason']}",
                            "repair": withheld[tool]["repair"]})
             continue
+        if tool in selected and tool in ("bash", "python"):
+            # The Shell setting (src/shell_access.py) decides these, not the vault grant.
+            from src import shell_access
+
+            shell_mode = shell_access.resolve(profile)
+            if shell_mode == "off":
+                denied.append({"tool": tool, "reason": "shell_off",
+                               "detail": "this loadout's Shell setting is Off",
+                               "repair": "set Shell to Sandboxed (or Full server shell) on the loadout"})
+                continue
+            effective.append(tool)
+            conditional.append({"tool": tool, "condition": (
+                "Shell: Full server shell: runs unrestricted as the app's user (it can read "
+                "everything that user can, the vault included)" if shell_mode == "host" else
+                "Shell: Sandboxed: runs in the workspace sandbox (a scratch folder when the "
+                "workspace cannot be sandboxed); no app data or vault")})
+            continue
         if tool in selected and not mcp_problem(tool):
             effective.append(tool)
             if tool_requires_private_grant(tool) and not profile.get("private_vault_access"):
                 conditional.append({"tool": tool, "condition": (
-                    "no private-vault grant: bash/python run only in the workspace sandbox; "
-                    "other private-boundary tools are refused")})
+                    "no private-vault grant: this file-reading tool is refused")})
             continue
         if tool not in known:
             reason, detail = "unknown", "no native tool or connected MCP tool has this name"
@@ -742,6 +766,12 @@ def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, 
     if prof["private_vault_access"] and not policy["private_vault_access"]:
         notes.append("private_vault_access: denied (the calling chat has no private-vault grant)")
         prof["private_vault_access"] = False
+    # A chat cannot hand out a wider shell than its own (off < sandbox < host).
+    wanted_shell = prof.get("shell_access") or "sandbox"
+    ceiling_shell = policy.get("shell_access") or "sandbox"
+    if _SHELL_RANK.get(wanted_shell, 1) > _SHELL_RANK.get(ceiling_shell, 1):
+        notes.append(f"shell_access: {wanted_shell} → {ceiling_shell} (the calling chat's own shell)")
+        prof["shell_access"] = ceiling_shell
 
     floor = policy["approval_mode"]
     current = prof["approval_mode"]
@@ -817,6 +847,8 @@ def widenings(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
     added("allowed_models")
     if after.get("private_vault_access") and not before.get("private_vault_access"):
         notes.append("private_vault_access: off → on")
+    if (after.get("shell_access") or "sandbox") != (before.get("shell_access") or "sandbox"):
+        notes.append(f"shell_access: {before.get('shell_access') or 'sandbox'} → {after.get('shell_access') or 'sandbox'}")
     try:
         old_workers = int(before.get("max_parallel_workers") or 0)
         new_workers = int(after.get("max_parallel_workers") or 0)
@@ -940,6 +972,7 @@ def summarize(profile: Dict[str, Any]) -> Dict[str, Any]:
         "mcp_access": profile["mcp_access"],
         "allowed_mcp_servers": profile["allowed_mcp_servers"],
         "private_vault_access": profile["private_vault_access"],
+        "shell_access": profile.get("shell_access") or "sandbox",
         "delegation_policy": profile["delegation_policy"],
         "approval_mode": profile["approval_mode"],
         "max_parallel_workers": profile["max_parallel_workers"],

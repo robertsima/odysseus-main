@@ -277,8 +277,15 @@ class TurnToolDiscovery:
         plan_mode = bool(settings.get("plan_mode"))
         workflow_readonly = bool(settings.get("workflow_readonly"))
         result = {}
+        from src import shell_access
+
+        shell_off = shell_access.resolve(settings) == "off"
         for name, schema in self._catalog.items():
-            if tool_requires_private_grant(name) and settings.get("private_vault_access") is not True:
+            if name in ("bash", "python"):
+                # The Shell setting decides these, not the vault grant.
+                if shell_off:
+                    continue
+            elif tool_requires_private_grant(name) and settings.get("private_vault_access") is not True:
                 continue
             aliases = email_tool_policy_names(name)
             if not aliases.isdisjoint(denied) or (allowed is not None and aliases.isdisjoint(allowed)):

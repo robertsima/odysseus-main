@@ -112,8 +112,9 @@ def test_policy_denied_and_exempt_tools_never_join_a_chunk():
     assert "search_chats" in out and "read_email" in out
 
 
-def test_the_private_vault_gate_holds_for_chunks():
-    permitted = TurnToolDiscovery(FUNCTION_TOOL_SCHEMAS).permitted_names({"private_vault_access": False})
+def test_the_shell_setting_gate_holds_for_chunks():
+    # A chat whose Shell is Off gets no bash/python through a domain chunk.
+    permitted = TurnToolDiscovery(FUNCTION_TOOL_SCHEMAS).permitted_names({"shell_access": "off"})
     chunk = _sticky_domain_chunk({"read_file"}, permitted)
     assert chunk["files"] and not chunk["files"] & {"bash", "python"}
 

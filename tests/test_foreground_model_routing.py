@@ -3324,6 +3324,9 @@ def test_agent_fallback_request_uses_candidate_context_budget(
         "_agent_route_tool_mode",
         lambda *args, **kwargs: (True, False, False),
     )
+    # Not about the shell: a full shell adds no per-turn shell note, so the
+    # counts below are the history and the prompt only.
+    monkeypatch.setattr("src.shell_access.resolve_for_session", lambda sid: "host")
 
     def fake_build(messages, model, *args, **kwargs):
         return ([{

@@ -104,7 +104,9 @@ async def test_dispatcher_carries_private_grant_into_dynamic_tools(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool", ["bash", "python", "mcp__filesystem__read_file"])
+# bash/python are no longer vault-gated (the Shell setting decides them,
+# tests/test_shell_access.py); the file-reading MCP tools still are.
+@pytest.mark.parametrize("tool", ["mcp__filesystem__read_file", "mcp__filesystem__list_directory"])
 @pytest.mark.parametrize("fresh_grant", [False, None, "true"])
 async def test_fresh_private_revocation_overrides_request_grant(monkeypatch, tool, fresh_grant):
     import src.tool_execution as execution
@@ -133,11 +135,14 @@ async def test_fresh_grant_does_not_escalate_request_or_disable_public_file_tool
         seen.append(ctx["allow_private"])
         return {"output": "public file", "exit_code": 0}
     monkeypatch.setitem(TOOL_HANDLERS, "read_file", handler)
+    # The vault grant does not give a full shell: with the default (sandboxed)
+    # Shell setting and no working sandbox, bash is refused, not run on the host.
+    monkeypatch.setattr("src.shell_access.sandbox_workspace", lambda ws, sid: (None, "", "no bwrap"))
     _, public = await execute_tool_block(ToolBlock("read_file", "README.md"), session_id="sid", owner="admin", security_context=_no_security_context())
     _, shell = await execute_tool_block(ToolBlock("bash", "git pull"), session_id="sid", owner="admin", security_context=_no_security_context())
     assert public["exit_code"] == 0
     assert seen == [False]
-    assert shell["blocked_reason"] == "private_vault_grant_required"
+    assert shell["blocked_reason"] == "shell_sandbox_unavailable"
 
 
 @pytest.mark.asyncio
@@ -145,8 +150,10 @@ async def test_sessionless_call_cannot_carry_a_private_grant(monkeypatch):
     import src.tool_execution as execution
     monkeypatch.setattr(execution, "_owner_is_admin", lambda owner: True)
     monkeypatch.setattr(execution, "_direct_fallback", lambda *a, **kw: pytest.fail("sessionless shell ran"))
+    monkeypatch.setattr("src.shell_access.sandbox_workspace", lambda ws, sid: (None, "", "no bwrap"))
+    # No session: the default sandboxed shell, never the host, whatever allow_private says.
     _, result = await execute_tool_block(ToolBlock("bash", "git pull"), owner="admin", allow_private=True, security_context=_no_security_context())
-    assert result["blocked_reason"] == "private_vault_grant_required"
+    assert result["blocked_reason"] == "shell_sandbox_unavailable"
 
 
 @pytest.mark.asyncio
@@ -171,11 +178,14 @@ async def test_standard_mcp_filesystem_names_share_discovery_and_dispatch_gate(m
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["bash", "python"])
-async def test_unrestricted_subprocesses_require_private_grant(monkeypatch, tool):
+async def test_a_chat_whose_shell_is_off_cannot_run_subprocesses(monkeypatch, tool):
+    # Since 2026-09-29 the Shell setting decides bash/python (src/shell_access.py);
+    # tests/test_shell_access.py covers the other modes.
     import src.tool_execution as execution
 
     monkeypatch.setattr(execution, "is_public_blocked_tool", lambda _tool: False)
     monkeypatch.setattr(execution, "_owner_is_admin", lambda _owner: True)
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, strict=False: {"shell_access": "off"})
 
     _desc, result = await execute_tool_block(
         ToolBlock(tool, "print('must not execute')" if tool == "python" else "echo must-not-execute"),
@@ -184,7 +194,7 @@ async def test_unrestricted_subprocesses_require_private_grant(monkeypatch, tool
         allow_private=False,security_context=_no_security_context()
     )
     assert result["exit_code"] == 1
-    assert "private vault access" in result["error"]
+    assert result["blocked_reason"] == "shell_off"
 
 
 @pytest.mark.asyncio
@@ -209,11 +219,12 @@ async def test_qualified_mcp_filesystem_read_requires_private_grant(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_background_bash_requires_private_grant(monkeypatch):
+async def test_background_bash_follows_the_shell_setting(monkeypatch):
     import src.tool_execution as execution
 
     monkeypatch.setattr(execution, "is_public_blocked_tool", lambda _tool: False)
     monkeypatch.setattr(execution, "_owner_is_admin", lambda _owner: True)
+    monkeypatch.setattr("core.database.get_session_settings", lambda sid, strict=False: {"shell_access": "off"})
 
     import src.bg_jobs as bg_jobs
     monkeypatch.setattr(bg_jobs, "launch", lambda *_args, **_kwargs: pytest.fail("background shell launched"))
@@ -221,17 +232,17 @@ async def test_background_bash_requires_private_grant(monkeypatch):
         ToolBlock("bash", "#!bg\necho must-not-launch"),
         session_id="sid",
         owner="admin",
-        allow_private=False,security_context=_no_security_context()
+        allow_private=True,security_context=_no_security_context()
     )
     assert result["exit_code"] == 1
-    assert "private vault access" in result["error"]
+    assert result["blocked_reason"] == "shell_off"
 
 
 @pytest.mark.asyncio
 async def test_direct_bash_handler_honors_resolved_context_grant():
     result = await TOOL_HANDLERS["bash"]("cat private.md", {"allow_private": False})
     assert result["exit_code"] == 1
-    assert "private vault access" in result["error"]
+    assert "no shell was granted" in result["error"]
 
 
 @pytest.mark.asyncio

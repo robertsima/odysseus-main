@@ -122,6 +122,27 @@ SCENARIOS: Dict[str, Dict[str, Any]] = {
         ],
         "workers": {},
     },
+    # The shell's own setting, separate from vault access (src/shell_access.py).
+    # A chat with the vault grant and the default Sandboxed shell: bash still
+    # cannot see the app's data.
+    "vault_sandboxed": {
+        "chat": [[_calls(_bash("pwd; test -e {data}/app.db && echo S-SEES-DATA || echo S-NO-DATA")),
+                  _text("S-DONE vault_sandboxed")]],
+        "workers": {},
+    },
+    # A chat without the vault grant, set to Full server shell: bash runs on the host.
+    "host_shell": {
+        "chat": [[_calls(_bash("test -e {data}/app.db && echo S-SEES-DATA || echo S-NO-DATA")),
+                  _text("S-DONE host_shell")]],
+        "workers": {},
+    },
+    # A worker bound to a folder the sandbox refuses, with no repository named:
+    # it still gets bash, in a scratch folder.
+    "scratch_shell": {
+        "chat": [[_calls(_start("Say where your shell runs. (scenario scratch_shell)")), _ACK]],
+        "workers": {"": [_calls(_bash("pwd; test -e {data}/app.db && echo S-SEES-DATA || echo S-NO-DATA")),
+                         _text("S-DONE scratch_shell")]},
+    },
     # A long reply still streaming when the app is stopped (redeploy).
     "slow": {
         "chat": [[_text("S-SLOW " + " ".join(f"part{i}" for i in range(120)), slow=True)]],

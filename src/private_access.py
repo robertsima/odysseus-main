@@ -44,15 +44,14 @@ def private_tool_denial(tool: str) -> dict:
     """Precise, actionable refusal; this is not a missing workspace/path."""
     return {
         "error": (
-            f"Tool '{tool}' was not executed: it can bypass private-file protections, "
-            "and this chat has no effective private vault access grant. "
+            f"Tool '{tool}' was not executed: it reads files outside Odysseus's private-file "
+            "protections, and this chat has no effective private vault access grant. "
             "This does not mean the workspace or repository path is missing. "
-            "Dedicated workspace/file tools can still operate on permitted public files. "
-            "Only the user can enable 'Allow private vault reads' in this chat's settings "
-            "(Chat settings > Vault privacy); that grants private-vault access, not merely "
-            "repository access, and it is also what turns on bash, python and file-reading "
-            "MCP tools, because they are not confined to permitted files. If you tell the user "
-            "to enable it, say it is needed because this tool could read their private vault."
+            "Dedicated workspace/file tools can still operate on permitted public files, and "
+            "bash/python follow the chat's separate Shell setting. Only the user can enable "
+            "'Allow private vault reads' in this chat's settings (Chat settings > Vault privacy); "
+            "that grants private-vault access, not merely repository access. If you tell the "
+            "user to enable it, say it is needed because this tool could read their private vault."
         ),
         "blocked": True,
         "blocked_reason": "private_vault_grant_required",
