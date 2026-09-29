@@ -19,7 +19,16 @@ def test_notes_panel_exposes_vault_tree_and_editor():
 def test_vault_editor_shows_independent_llm_policy_badges():
     assert "function _vaultPolicyLabels(file)" in SRC
     assert "[sensitivity, 'readonly']" in SRC
-    assert "applies to LLMs and agents, not your UI access" in SRC
+    assert "That limits models and agents only; you can always edit this note." in SRC
+
+
+def test_vault_view_can_create_and_delete_notes():
+    # New note form in the tree, Delete in the open file's header; delete goes
+    # to the vault's .trash through DELETE /api/personal/vault/file.
+    assert 'id="vault-new-note"' in SRC and 'id="vault-new-form"' in SRC
+    assert "async function _createVaultNote(folder, name)" in SRC
+    assert 'id="vault-file-delete"' in SRC and "method: 'DELETE'" in SRC
+    assert "moves to the vault's .trash folder" in SRC
 
 
 def test_failed_save_preserves_draft_and_external_mtime_is_sent():
