@@ -139,13 +139,16 @@ def test_the_probe_is_cached(monkeypatch):
 # ── the settings route ───────────────────────────────────────────────────
 
 def _app(admin=True):
-    from core.middleware import require_admin
-    from routes.shell_sandbox_routes import setup_shell_sandbox_routes
+    from routes import shell_sandbox_routes
 
     app = FastAPI()
-    app.include_router(setup_shell_sandbox_routes())
+    app.include_router(shell_sandbox_routes.setup_shell_sandbox_routes())
     if admin:
-        app.dependency_overrides[require_admin] = lambda: None
+        # Override the object the route module actually depends on: another
+        # test reloading core.middleware leaves a different `require_admin`
+        # there, and overriding that one let the real admin check run (the
+        # full Linux suite then got {"detail": ...} back).
+        app.dependency_overrides[shell_sandbox_routes.require_admin] = lambda: None
     return app
 
 

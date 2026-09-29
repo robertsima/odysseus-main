@@ -439,7 +439,7 @@ async def test_start_still_refuses_an_explicit_model_outside_allowed_models(stor
 async def test_the_loadouts_own_model_is_always_allowed(store, launched, monkeypatch):
     """2026-09-28: Planning Command Center named gpt-6-sol with
     allowed_models [gpt-5.6-sol] and every start was refused."""
-    monkeypatch.setattr("src.agent_tools.loadout_tools._model_problem", lambda spec, owner: None)
+    monkeypatch.setattr(loadout_tools, "_model_problem", lambda spec, owner: None)
     await _create("Planner", ["web_search"], model="gpt-6-sol", allowed_models=["gpt-5.6-sol"])
     _use_manager(monkeypatch, _Chat("chat-7", model="gpt-6-luna"))
 
