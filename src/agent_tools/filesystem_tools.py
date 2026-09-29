@@ -1308,9 +1308,16 @@ class GetWorkspaceTool:
         ws = get_active_workspace()
         checkouts = _known_checkouts()
         if ws:
+            try:
+                from src.toolchains import describe
+
+                toolchains = describe(ws)
+            except Exception:  # noqa: BLE001
+                toolchains = ""
             return {
                 "output": f"{ws}\n(File tools are confined to this folder; the shell starts "
-                          f"here but is not sandboxed and can reach outside it.)" + checkouts,
+                          f"here but is not sandboxed and can reach outside it.)"
+                          + (f"\n{toolchains}" if toolchains else "") + checkouts,
                 "exit_code": 0,
             }
         return {

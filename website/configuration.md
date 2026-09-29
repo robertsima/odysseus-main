@@ -190,7 +190,7 @@ Session cleanup is not configured through the environment.
 
 ---
 
-## PLACEMENT — stays in the environment (45)
+## PLACEMENT — stays in the environment (46)
 
 | Variable | Read at | What it controls | Verdict |
 |---|---|---|---|
@@ -219,6 +219,7 @@ Session cleanup is not configured through the environment.
 | `ODYSSEUS_INTERNAL_BASE` | `src/constants.py:126` | Explicit override for the internal base URL Odysseus uses to call its own API (e.g. behind a TLS-terminating proxy). | PLACEMENT |
 | `ODYSSEUS_INTERNAL_TOKEN` | `core/middleware.py:16` | Internal-only auth token for server-to-self calls; falls back to a random one generated at startup. Secret. | PLACEMENT |
 | `ODYSSEUS_TOOL_EXTRA_ROOTS` | `src/tool_execution.py:211` | Extra filesystem roots the agent's file tools may touch, beyond `DATA_DIR` and temp. Explicitly documented as "declared by the DEPLOYMENT rather than post-boot admin state" so a bind-mounted workspace arrives already permitted. | PLACEMENT |
+| `ODYSSEUS_TOOLCHAINS_DIR` | `src/toolchains.py` | Where the extra language toolchains for agent shells live (`node/<major>`, `java/<major>`, `maven`); the image puts them in `/opt/toolchains`, and the bash sandbox mounts that folder read-only. Override for a native install that keeps them elsewhere. | PLACEMENT |
 | `ODYSSEUS_MCP_ALLOWED_COMMANDS` | `src/agent_tools/admin_tools.py:140` | Comma-separated allowlist of extra shell commands permitted as stdio MCP servers. Empty by default; a per-host trust decision. | PLACEMENT |
 | `ODYSSEUS_ENABLE_HOST_DOCKER` | `src/host_docker_access.py:8` | Opt-in for mounting/using the host Docker socket from inside the container. High-trust, deployment-level (given in the task brief as the reference PLACEMENT example). | PLACEMENT |
 | `ODYSSEUS_DISABLE_MCP` | `src/builtin_mcp.py:235` | Global kill switch for all built-in MCP servers, for environments where the MCP subprocess model doesn't work. | PLACEMENT |

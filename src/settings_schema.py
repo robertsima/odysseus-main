@@ -932,6 +932,14 @@ register_all([
         group="Agents", advanced=True,
     ),
     SettingSpec(
+        key="shell_sandbox_package_cache", type="bool", label="Keep package caches",
+        help=("Keeps npm, Maven, Gradle and pip downloads between sandboxed shells, one cache "
+              "per repository (its worktrees share it), so installing dependencies in a fresh "
+              "worktree takes seconds instead of minutes. Stored under the data folder in "
+              "agent_cache/."),
+        group="Agents", advanced=True,
+    ),
+    SettingSpec(
         key="agent_tool_budget", type="int", label="Tools per turn",
         help=("The most tools one agent turn is offered. Broad messages match many "
               "keyword domains; past this limit the domains retrieval agrees with "

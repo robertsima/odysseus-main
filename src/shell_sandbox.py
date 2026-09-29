@@ -98,15 +98,50 @@ def network_enabled() -> bool:
     return bool(value)
 
 
-def sandbox_env(base: Optional[Mapping[str, str]] = None) -> Dict[str, str]:
-    """The allowlisted environment the sandboxed shell runs with."""
+# Build and test tools run as they do in CI: once, without prompts, update
+# notices or progress bars. On 2026-09-29 npm's "new major version available"
+# notice on stderr was recorded as the error of a failed `npm ci`.
+QUIET_ENV = {
+    "CI": "true",                                   # jest runs once, not in watch mode
+    "NPM_CONFIG_UPDATE_NOTIFIER": "false",
+    "NPM_CONFIG_FUND": "false",
+    "NPM_CONFIG_AUDIT": "false",
+    "NO_UPDATE_NOTIFIER": "1",
+    "MAVEN_ARGS": "--batch-mode --no-transfer-progress",
+}
+
+
+def sandbox_env(base: Optional[Mapping[str, str]] = None, *, workspace: Optional[str] = None) -> Dict[str, str]:
+    """The allowlisted environment the sandboxed shell runs with.
+
+    With a ``workspace``, PATH and JAVA_HOME put first the toolchain its
+    manifests ask for (src/toolchains.py): Node 24 for an ``engines`` range
+    the app's own Node 22 does not meet, the JDK a ``pom.xml`` names.
+    """
     source = dict(base if base is not None else os.environ)
     env = {k: v for k, v in source.items()
            if k in _ENV_ALLOW or k.startswith(_ENV_ALLOW_PREFIXES)}
     env.setdefault("PATH", "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
     env.setdefault("LANG", "C.UTF-8")
+    for key, value in QUIET_ENV.items():
+        env.setdefault(key, value)
+    if workspace:
+        try:
+            from src.toolchains import shell_env
+
+            env.update(shell_env(workspace, env.get("PATH")))
+        except Exception:  # noqa: BLE001 - a toolchain hint must never stop the shell
+            logger.debug("toolchain env for %s failed", workspace, exc_info=True)
     env["HOME"] = SANDBOX_HOME
     env["TMPDIR"] = "/tmp"
+    # Java does not read $HOME: user.home comes from the passwd entry (/app for
+    # the image's user), which the sandbox hides. Maven, its wrapper and Gradle
+    # then kept their downloads in a folder that vanished with the shell, so
+    # the package cache stayed empty and every build downloaded everything
+    # again (seen in the 2026-09-29 verification run). Point them at HOME.
+    env.setdefault("MAVEN_OPTS", f"-Duser.home={SANDBOX_HOME}")
+    env.setdefault("MAVEN_USER_HOME", f"{SANDBOX_HOME}/.m2")
+    env.setdefault("GRADLE_USER_HOME", f"{SANDBOX_HOME}/.gradle")
     # The persistent tmux pane runs an interactive bash; with a clean
     # environment its default prompt ("bash-5.2$ ") lands in every output.
     env["PS1"] = ""
@@ -127,6 +162,83 @@ def _system_mounts() -> List[str]:
     return args
 
 
+def _toolchain_mounts() -> List[str]:
+    """Extra language toolchains (Node 24, JDK 21, Maven), read-only. Mounted
+    after the scratch /tmp so a toolchain folder under /tmp is not hidden."""
+    try:
+        from src.toolchains import root as _toolchain_root
+
+        tools = _toolchain_root()
+        if os.path.isdir(tools):
+            # At the path PATH names (src/toolchains), whatever it links to.
+            return ["--ro-bind", os.path.realpath(tools), tools]
+    except Exception:  # noqa: BLE001
+        pass
+    return []
+
+
+# ── package caches ──────────────────────────────────────────────────────────
+#
+# The sandbox's HOME is a fresh tmpfs, so every new worker and worktree ran
+# `npm ci` (or a Maven build) against an empty cache and downloaded the whole
+# dependency tree again. These folders are kept under the data folder, one set
+# per repository -- its managed worktrees share it -- and bound in at HOME.
+# Per repository, not shared: npm checks package integrity on install, but
+# Maven trusts what is in ~/.m2, so one project's build must not be able to
+# plant jars another project then runs.
+PACKAGE_CACHE_SETTING = "shell_sandbox_package_cache"
+PACKAGE_CACHES = {"npm": ".npm", "m2": ".m2", "gradle": ".gradle", "cache": ".cache"}
+
+
+def package_cache_enabled() -> bool:
+    value = _setting(PACKAGE_CACHE_SETTING, True)
+    if isinstance(value, str):
+        return value.strip().lower() not in {"0", "false", "off", "no"}
+    return bool(value)
+
+
+def _cache_key(workspace: str) -> str:
+    """The repository a workspace (or one of its worktrees) belongs to."""
+    import hashlib
+    from pathlib import Path
+
+    ws = os.path.realpath(workspace)
+    repo = ws
+    try:
+        from src.agent_worktree.ownership import git_common_dir
+
+        common = git_common_dir(Path(ws))
+        if common is not None and common.name == ".git":
+            repo = str(common.parent)
+    except Exception:  # noqa: BLE001
+        pass
+    label = "".join(c if c.isalnum() or c in "-_." else "_" for c in os.path.basename(repo))[:40] or "root"
+    return f"{label}-{hashlib.sha256(repo.encode('utf-8')).hexdigest()[:12]}"
+
+
+def package_cache_dir(workspace: str) -> str:
+    from src import constants
+
+    return os.path.join(constants.DATA_DIR, "agent_cache", _cache_key(workspace))
+
+
+def package_cache_binds(workspace: str) -> List[str]:
+    """``--bind`` arguments for the repository's package caches (made on first use)."""
+    if not package_cache_enabled():
+        return []
+    base = package_cache_dir(workspace)
+    args: List[str] = []
+    for name, rel in PACKAGE_CACHES.items():
+        path = os.path.join(base, name)
+        try:
+            os.makedirs(path, mode=0o700, exist_ok=True)
+        except OSError:
+            logger.debug("package cache %s unavailable", path, exc_info=True)
+            continue
+        args += ["--bind", path, f"{SANDBOX_HOME}/{rel}"]
+    return args
+
+
 def _procfs_mode() -> bool:
     """Whether the probe found a fresh /proc mountable (True until it has run)."""
     return _probe.get("procfs") is not False
@@ -134,12 +246,15 @@ def _procfs_mode() -> bool:
 
 def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, str]] = None,
                extra_ro_binds: Optional[Mapping[str, str]] = None, new_session: bool = True,
-               procfs: Optional[bool] = None, worktrees: bool = True) -> List[str]:
+               procfs: Optional[bool] = None, worktrees: bool = True,
+               package_cache: bool = False) -> List[str]:
     """``inner`` wrapped in bwrap: runs in ``workspace`` and sees only that,
     the workspace repository's managed worktrees, the read-only system and
     its own scratch space. ``extra_ro_binds`` maps host paths to where they
     appear inside (a background job's script). ``procfs`` None follows the
-    probe: an empty /proc where Docker refuses a fresh one."""
+    probe: an empty /proc where Docker refuses a fresh one.
+    ``package_cache`` binds the repository's npm/Maven/Gradle/pip caches at
+    HOME (``package_cache_binds``); the agent's shells ask for it."""
     bwrap = shutil.which("bwrap") or "bwrap"
     ws = os.path.realpath(workspace)
     if procfs is None:
@@ -148,7 +263,7 @@ def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, s
     # PID 1 of the sandbox's PID namespace, so its own environment is readable
     # inside at /proc/1/environ; --clearenv would clean only the child and
     # leave every API key in the app's environment one `cat` away.
-    clean = [f"{key}={value}" for key, value in sandbox_env(env).items()]
+    clean = [f"{key}={value}" for key, value in sandbox_env(env, workspace=ws).items()]
     args = [shutil.which("env") or "/usr/bin/env", "-i", *clean,
             bwrap, "--die-with-parent", "--unshare-all"]
     if network_enabled():
@@ -165,6 +280,9 @@ def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, s
              "--tmpfs", "/tmp", "--dir", SANDBOX_HOME,
              "--dir", "/var", "--tmpfs", "/var/tmp",
              "--bind", ws, ws]
+    args += _toolchain_mounts()
+    if package_cache:
+        args += package_cache_binds(ws)
     for tree in (workspace_worktrees(ws) if worktrees else ()):
         args += ["--bind", tree, tree]
     args += ["--chdir", ws]

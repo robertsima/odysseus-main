@@ -136,14 +136,25 @@ async def _run(tool, content, workspace):
 async def test_without_the_grant_the_shell_runs_sandboxed(tool, content, tmp_path, monkeypatch, captured_exec):
     monkeypatch.setattr(sb, "unavailable_reason", lambda ws: "")
     monkeypatch.setattr(sb, "network_enabled", lambda: True)
+    from src import constants
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "data"))
     import src.tool_execution as te
     monkeypatch.setattr(te, "get_mcp_manager", lambda: None)
 
-    _, result = await _run(tool, content, str(tmp_path))
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    _, result = await _run(tool, content, str(ws))
     assert result.get("exit_code") == 0, result
     argv = captured_exec["argv"]
     assert argv[:2] == [argv[0], "-i"] and any(os.path.basename(a).startswith("bwrap") for a in argv)
-    assert _flag_pairs(argv, "--bind") == [(os.path.realpath(str(tmp_path)),) * 2]
+    binds = _flag_pairs(argv, "--bind")
+    # The workspace, read-write at its own path ...
+    assert binds[0] == (os.path.realpath(str(ws)),) * 2
+    # ... and otherwise only the repository's package caches, at the sandbox's
+    # HOME (src/shell_sandbox.package_cache_binds). Nothing else of the host.
+    for src, dest in binds[1:]:
+        assert dest.startswith(sb.SANDBOX_HOME + "/"), dest
+        assert os.path.realpath(src).startswith(os.path.realpath(str(tmp_path / "data" / "agent_cache")))
 
 
 async def test_without_the_grant_or_a_sandbox_the_shell_is_refused_with_why(tmp_path, monkeypatch, captured_exec):
@@ -160,8 +171,9 @@ async def test_without_the_grant_or_a_sandbox_the_shell_is_refused_with_why(tmp_
 # ── background jobs ───────────────────────────────────────────────────────
 
 def test_background_job_command_runs_inside_the_sandbox(tmp_path, monkeypatch):
-    from src import bg_jobs
+    from src import bg_jobs, constants
 
+    monkeypatch.setattr(constants, "DATA_DIR", str(tmp_path / "data"))   # its package caches
     monkeypatch.setattr(bg_jobs, "_JOBS_DIR", tmp_path / "jobs")
     monkeypatch.setattr(bg_jobs, "find_bash", lambda: "/bin/bash")
     monkeypatch.setattr(bg_jobs, "_load", lambda: {})

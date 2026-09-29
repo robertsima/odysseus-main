@@ -121,7 +121,7 @@ def launch(command: str, session_id: str, cwd: Optional[str] = None,
             inner_script = "/tmp/.odysseus-job.sh"
             runner = " ".join(shlex.quote(a) for a in shell_sandbox.build_argv(
                 ["/bin/bash", inner_script], workspace=sandbox_workspace,
-                extra_ro_binds={str(cmd_path): inner_script}))
+                extra_ro_binds={str(cmd_path): inner_script}, package_cache=True))
         script_path.write_text(
             f"{runner} > {lp} 2>&1\n"
             f"echo $? > {xp}\n",

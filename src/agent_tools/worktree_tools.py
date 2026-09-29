@@ -34,6 +34,25 @@ def _err(message: str, **extra: Any) -> Dict[str, Any]:
     return {"error": message, "exit_code": 1, **extra}
 
 
+def _setup_plan(worktree: Any) -> Dict[str, Any]:
+    """What the worktree needs before its tests run (src/toolchains.setup_plan)."""
+    path = worktree.get("path") if isinstance(worktree, dict) else None
+    if not path:
+        return {}
+    try:
+        from src.toolchains import setup_plan
+
+        plan = dict(setup_plan(str(path)))
+    except Exception:  # noqa: BLE001 - a hint must never fail the start
+        logger.debug("worktree setup plan failed for %s", path, exc_info=True)
+        return {}
+    if plan.get("install_first"):
+        plan["note"] = ("Run install_first in your shell before any test: the worktree is a fresh "
+                        "checkout without dependencies. Package caches persist per repository, so "
+                        "repeat installs are quick.")
+    return plan
+
+
 def _similar_request_hint(request_id: str, cfg) -> str:
     """Open publish requests an unknown id was probably meant to be.
 
@@ -229,7 +248,13 @@ class AgentWorktreeTool:
                     base=_text_arg(args, "base") or None,
                     expected_base=_text_arg(args, "expected_base") or None,
                 )
-                return {"exit_code": 0, "worktree": worktree}
+                out: Dict[str, Any] = {"exit_code": 0, "worktree": worktree}
+                # A fresh worktree has no node_modules: its tests failed with
+                # "jest: not found" until someone thought to run `npm ci`.
+                setup = _setup_plan(worktree)
+                if setup:
+                    out["setup"] = setup
+                return out
 
             if action == "commit":
                 return {

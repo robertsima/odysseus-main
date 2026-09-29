@@ -262,6 +262,10 @@ DEFAULT_SETTINGS = {
     # from the network entirely (pip, npm and git fetch then fail too).
     "shell_sandbox": "auto",
     "shell_sandbox_network": True,
+    # Package caches (~/.npm, ~/.m2, ~/.gradle, ~/.cache) kept per repository
+    # across sandboxed shells, so a fresh worktree's `npm ci` or Maven build
+    # does not download everything again (src/shell_sandbox.package_cache_binds).
+    "shell_sandbox_package_cache": True,
     # Named sub-agent worker profiles (src/agent_profiles.py).
     "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the

@@ -132,13 +132,23 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
         from src import shell_sandbox
 
         pane = shell_sandbox.build_argv(["/bin/bash", "--noprofile", "--norc"],
-                                        workspace=sandbox_workspace, env=env, new_session=False)
+                                        workspace=sandbox_workspace, env=env, new_session=False,
+                                        package_cache=True)
     else:
+        # The full server shell: the same toolchain choice as the sandbox
+        # (src/toolchains.py), from the folder it starts in.
+        try:
+            from src.toolchains import shell_env
+
+            tool_env = shell_env(cwd, (env or os.environ).get("PATH"))
+        except Exception:  # noqa: BLE001
+            tool_env = {}
         pane = [
             "env",
             f"TERM={env.get('TERM', 'xterm-256color') if env else 'xterm-256color'}",
             f"COLUMNS={env.get('COLUMNS', '120') if env else '120'}",
             f"LINES={env.get('LINES', '40') if env else '40'}",
+            *(f"{key}={value}" for key, value in tool_env.items()),
             "/bin/bash",
             "--noprofile",
             "--norc",
@@ -485,7 +495,7 @@ class BashTool:
 
                 proc = await asyncio.create_subprocess_exec(
                     *shell_sandbox.build_argv(["/bin/bash", "-c", content], workspace=sandbox_ws,
-                                              env=_subproc_env),
+                                              env=_subproc_env, package_cache=True),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=sandbox_ws,
@@ -541,7 +551,8 @@ class PythonTool:
             # would not exist inside it.
             if not os.path.realpath(argv[0]).startswith("/usr/"):
                 argv[0] = "python3"
-            argv = shell_sandbox.build_argv(argv, workspace=sandbox_ws, env=_subproc_env)
+            argv = shell_sandbox.build_argv(argv, workspace=sandbox_ws, env=_subproc_env,
+                                            package_cache=True)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,

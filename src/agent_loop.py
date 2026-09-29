@@ -3142,6 +3142,26 @@ _SANDBOXED_SHELL_NOTE = (
 )
 
 
+def _sandbox_toolchain_clause(workspace: str) -> str:
+    """The toolchains the sandbox put on PATH for this workspace, and its caches.
+
+    Workers kept reporting "Node 24 was not available" and never tried the
+    Java build (2026-09-29); the shell now picks the project's toolchain
+    (src/toolchains.py) and keeps package caches, and the model is told so.
+    """
+    try:
+        from src import shell_sandbox
+        from src.toolchains import describe
+
+        line = describe(workspace)
+        cached = shell_sandbox.package_cache_enabled()
+    except Exception:  # noqa: BLE001
+        return ""
+    return ((" " + line if line else "")
+            + (" Package caches (npm, Maven, Gradle, pip) persist between shells for this repository, "
+               "so installing dependencies again is quick." if cached else ""))
+
+
 def _sandbox_worktree_clause(workspace: str) -> str:
     """The part of the sandbox note that names the managed worktrees it binds.
 
@@ -5884,7 +5904,7 @@ async def stream_agent_loop(
                 network=("on" if _shell_sandbox.network_enabled() else "off"),
                 worktrees=_worktree_clause,
                 inside=" or those worktrees" if _worktree_clause else "",
-            ) + (_SCRATCH_SHELL_NOTE.format(why=_not_ws) if _not_ws else "")
+            ) + _sandbox_toolchain_clause(_sb_ws) + (_SCRATCH_SHELL_NOTE.format(why=_not_ws) if _not_ws else "")
         elif _wants_shell:
             _private_shell_text = _SHELL_UNAVAILABLE_NOTE.format(why=_sb_unavailable)
         _private_shell_note = bool(_private_shell_text)

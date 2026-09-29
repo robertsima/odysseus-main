@@ -677,6 +677,40 @@ decision), under the same budget, and a worker's follow-up is handed up to the
 chat that started it. A mistyped request id gets the open requests as a hint
 (`worktree_tools._similar_request_hint`); lookup stays exact.
 
+**Running a project's own tests.** Umni's backend needs Java 21 and its app
+Node >=24.3; the image had no JDK and only the Node 22 Odysseus itself runs
+on, every fresh worktree failed with `jest: not found`, and each worker
+downloaded the whole npm tree again (the sandbox's HOME is a fresh tmpfs). Now:
+
+- the image carries extra toolchains in `/opt/toolchains` (`node/24`,
+  `java/21`, `maven`; `ODYSSEUS_TOOLCHAINS_DIR`), mounted read-only in the
+  sandbox. `src/toolchains.py` reads the workspace's manifests (`engines`,
+  `.nvmrc`, `.node-version`, `.tool-versions`, `pom.xml`, `build.gradle`,
+  `.java-version`, `.sdkmanrc`, two folders deep) and puts the best match
+  first on PATH, with JAVA_HOME; nothing asked for keeps the default Node. A
+  version nothing installed meets is reported, not faked. `get_workspace`
+  says which were chosen;
+- the agent's shells bind per-repository package caches (`~/.npm`, `~/.m2`,
+  `~/.gradle`, `~/.cache`) from `<data>/agent_cache/<repo>-<hash>`; a managed
+  worktree shares its repository's (`shell_sandbox_package_cache`). Per
+  repository because Maven trusts what is in `~/.m2`;
+- `manage_agent_worktree start` returns `setup`: `install_first` commands for
+  every package without `node_modules`, the test commands (`npm test`,
+  `./mvnw test`, `./gradlew test`), the toolchain line, and a note when the
+  build uses Testcontainers, which needs Docker the sandbox does not have. The
+  commands run in the agent's shell, never in the app: install scripts are the
+  project's code;
+- the sandbox runs tools as CI does: `CI=true`, no npm update/fund/audit
+  notices, `MAVEN_ARGS=--batch-mode --no-transfer-progress`. Java takes
+  `user.home` from passwd (`/app`, hidden in the sandbox), not `$HOME`, so
+  `MAVEN_OPTS=-Duser.home=…`, `MAVEN_USER_HOME` and `GRADLE_USER_HOME` point
+  Maven, its wrapper and Gradle at the cached HOME; without them the `~/.m2`
+  cache stayed empty.
+
+Verified on the image's base with Umni itself, through `build_argv`: `npm ci`
+plus `npm test` on Node 24 (14 suites, 40 tests) and `./mvnw test` on JDK 21
+(392 tests); a second Maven run fell from 47 s to 31 s on the warm cache.
+
 **Launch preflight** binds the workspace a path in the task points into — a
 checkout, or a managed worktree under `agent_worktrees/_repos/<key>/<leaf>` —
 and, when a repository name matches several checkouts (the Umni checkout and

@@ -2,6 +2,14 @@
 # Use the official multi-architecture distribution, not Debian's older Node.
 FROM node:22.23.2-bookworm-slim AS node-distribution
 
+# Toolchains for the projects agents build and test, not for the app itself
+# (src/toolchains.py picks one per workspace from package.json engines, .nvmrc,
+# pom.xml, build.gradle ...). They live under /opt/toolchains, which the bash
+# sandbox mounts read-only; the app keeps Node 22 on the default PATH.
+FROM node:24.21.0-bookworm-slim AS node24-distribution
+FROM eclipse-temurin:21.0.12_8-jdk AS jdk21-distribution
+FROM maven:3.9.16-eclipse-temurin-21 AS maven-distribution
+
 # ---- builder: patch + build wheels for Real-ESRGAN's broken-on-3.14 deps ----
 # basicsr/gfpgan/facexlib read their version via exec()+locals()['__version__'],
 # which raises KeyError on Python 3.13+ (PEP 667). Build patched wheels here so
@@ -59,11 +67,28 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     gosu \
     bubblewrap \
+    fontconfig \
     libgl1 \
     libglib2.0-0t64 \
     libxcb1 \
     libmagic1 \
     && rm -rf /var/lib/apt/lists/*
+
+# fontconfig is what the JDK below needs to find fonts (PDF and image
+# generation in a Java project's tests), as the official Temurin image has it.
+
+# Agent toolchains (see the stages at the top). Node 24 keeps its npm next to
+# it, so `node/24/bin` first on PATH gives node, npm and npx of that release.
+COPY --from=node24-distribution /usr/local/bin/node /opt/toolchains/node/24/bin/node
+COPY --from=node24-distribution /usr/local/lib/node_modules/npm/ /opt/toolchains/node/24/lib/node_modules/npm/
+COPY --from=jdk21-distribution /opt/java/openjdk/ /opt/toolchains/java/21/
+COPY --from=maven-distribution /usr/share/maven/ /opt/toolchains/maven/
+RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /opt/toolchains/node/24/bin/npm \
+    && ln -s ../lib/node_modules/npm/bin/npx-cli.js /opt/toolchains/node/24/bin/npx \
+    && /opt/toolchains/node/24/bin/node --version \
+    && PATH=/opt/toolchains/node/24/bin:$PATH npm --version \
+    && /opt/toolchains/java/21/bin/java -version \
+    && JAVA_HOME=/opt/toolchains/java/21 /opt/toolchains/maven/bin/mvn --version
 
 # libgl1/libglib2.0-0t64/libxcb1 are runtime shared libs (libGL.so.1,
 # libglib-2.0/libgthread, libxcb.so.1) that opencv-python (cv2) loads. The
