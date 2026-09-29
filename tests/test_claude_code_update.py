@@ -393,7 +393,7 @@ async def test_auto_update_is_off_by_default(monkeypatch, tmp_path):
 
 
 def _enable_auto_update(monkeypatch):
-    """Settings > Tools > Claude Code > auto-update on (the only switch)."""
+    """Settings › Claude Code › Auto-update Claude Code on (the only switch)."""
     monkeypatch.setattr(cct, "_setting",
                         lambda key, default=None: True if key == "claude_code_auto_update" else default)
 

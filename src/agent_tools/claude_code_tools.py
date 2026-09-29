@@ -354,7 +354,7 @@ def _describe_candidates() -> str:
                 "Pass one of these, or omit repository to use the default.")
     return (f"Approved roots: {roots}, but no Git checkout was found under them. "
             "Clone or mount one there, or set CLAUDE_CODE_REPOSITORY_ROOTS / "
-            "Settings > Agents > Claude Code repository roots.")
+            "Settings › Agents › Development folders.")
 
 
 def _approved_repository(value: str) -> Path:
@@ -807,7 +807,7 @@ def backend_warning() -> Optional[str]:
         return None
     return ("Claude Code is set to run on the cloud runner, but the cloud runner has no repository "
             "configured, so delegations run locally on this machine. Add the repositories Claude may "
-            "work on (or * with a hub repository) under Settings > Tools > Claude Code > Cloud runner, "
+            "work on (or * with a hub repository) under Settings › Claude Code › Cloud runner, "
             "or set it back to run on this machine.")
 
 
@@ -1127,7 +1127,7 @@ def _version_tuple(text: Any) -> Optional[tuple[int, int, int]]:
 
 
 def _auto_update_enabled() -> bool:
-    # Settings > Tools > Claude Code only. A CLAUDE_CODE_AUTO_UPDATE fallback
+    # Settings › Claude Code only. A CLAUDE_CODE_AUTO_UPDATE fallback
     # used to sit here, but `claude_code_auto_update` always has a default
     # (False) in DEFAULT_SETTINGS, so the environment variable was never
     # consulted; it was removed on 2026-09-28 rather than documented as a
@@ -1388,7 +1388,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return {"error": _tool_error(
             f"binary unavailable at {binary}, so there is nothing to update. Install Claude Code there first "
-            "(see integrations/claude/README.md) or set Settings > Agent Tools > Claude Code binary."), "exit_code": 1}
+            "(see integrations/claude/README.md) or set Settings › Claude Code › Advanced › Binary."), "exit_code": 1}
     if _UPDATE_STATE["running"]:
         return {"error": _tool_error("an update is already running; call action=status in a minute"),
                 "update_in_progress": True, "exit_code": 1}
@@ -1461,7 +1461,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
                     hints.append(
                         f"The native updater installed {launcher_version} at {launcher}, but the configured binary "
                         f"{binary} is a separate copy it never updates, and switching the setting failed "
-                        f"({problem}). Set Settings > Agent Tools > Claude Code binary (manage_settings key "
+                        f"({problem}). Set Settings › Claude Code › Advanced › Binary (manage_settings key "
                         f"claude_code_binary) to {launcher}; no further update is needed.")
         if code == 0:
             others = await _other_installs(binary, env, (Path(rebound["from"]),) if rebound else ())
@@ -1606,16 +1606,16 @@ async def status_report() -> dict:
     ready = bool(info["available"] and not info["error"] and auth.get("logged_in"))
     hints: list[str] = []
     if not info["available"]:
-        hints.append("Install Claude Code or set Settings > Agents > Claude Code binary (CLAUDE_CODE_BINARY).")
+        hints.append("Install Claude Code or set Settings › Claude Code › Advanced › Binary (CLAUDE_CODE_BINARY).")
     elif info["error"]:
         hints.append(info["error"])
     if info["available"] and auth.get("logged_in") is False:
-        hints.append("The binary is not signed in. Ask the admin to open Settings > Agent Tools > Claude Code "
-                     "delegation > Sign in and complete the sign-in in their browser (no SSH needed; the "
+        hints.append("The binary is not signed in. Ask the admin to open Settings › Claude Code "
+                     "› Sign in and complete the sign-in in their browser (no SSH needed; the "
                      "agent cannot do this step). Alternatively run `claude auth login` as the container "
                      "user (HOME=%s), or provide ANTHROPIC_API_KEY. "
-                     "To avoid signing in inside the container, use the cloud runner instead: Settings > Tools > "
-                     "Claude Code > Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
+                     "To avoid signing in inside the container, use the cloud runner instead: Settings › "
+                     "Claude Code › Cloud runner runs Claude Code in GitHub Actions with the credential kept in "
                      "the repository's secrets." % _claude_home())
     if info["available"] and "--permission-prompts" not in info["flags"]:
         hints.append("Claude Code is older than 2.1.259; upgrade (action=update) for --permission-prompts none "
@@ -1630,7 +1630,7 @@ async def status_report() -> dict:
             f"The callback token file {callback_status.get('token_file')} blocks delegation: {token_problem}. "
             "It must be a regular file, mode 0600 on POSIX (or protected by a "
             "restricted ACL on Windows), owned by the Odysseus process user "
-            "(Settings > Agent Tools > Claude Code > Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
+            "(Settings › Claude Code › Advanced › Callback token file / CLAUDE_CODE_ODYSSEUS_TOKEN_FILE). "
             "Fix it, or clear the callback URL and token file to delegate without the callback."
         )
     update_required = None

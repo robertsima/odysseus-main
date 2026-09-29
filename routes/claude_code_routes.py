@@ -58,8 +58,8 @@ def _require_admin_browser(request: Request) -> str:
                                  "not with an API token.")
     headers = getattr(request, "headers", None) or {}
     if headers.get(INTERNAL_TOOL_HEADER) or getattr(request.state, "current_user", None) == INTERNAL_TOOL_USER:
-        raise HTTPException(403, "Claude Code sign-in cannot be driven by an agent tool; use Settings > Tools > "
-                                 "Claude Code > Sign in.")
+        raise HTTPException(403, "Claude Code sign-in cannot be driven by an agent tool; use Settings › "
+                                 "Claude Code › Sign in.")
     owner = require_user(request)
     require_admin(request)
     return owner
@@ -72,7 +72,7 @@ def setup_claude_code_routes() -> APIRouter:
     async def get_status(request: Request):
         """Preflight for the integration: binary, sign-in state (no token is
         read), approved repositories, callback configuration, live task
-        count. Drives the Settings > Agent Tools > Claude Code card and the chat
+        count. Drives the Settings › Claude Code tab and the chat
         tool's action=status."""
         _require_claude_code_scope(request, CLAUDE_CODE_READ_SCOPES)
         return await status_report()

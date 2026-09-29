@@ -209,8 +209,8 @@ def _binary_argv() -> list[str]:
 def _binary_ready() -> Optional[str]:
     binary = cct.binary_path()
     if not binary.is_file() or not os.access(binary, os.X_OK):
-        return (f"Claude Code binary unavailable at {binary}. Install it or set Settings > Tools > "
-                "Claude Code > Binary path first.")
+        return (f"Claude Code binary unavailable at {binary}. Install it or set Settings › "
+                "Claude Code › Advanced › Binary first.")
     return None
 
 

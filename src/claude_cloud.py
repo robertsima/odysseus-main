@@ -285,7 +285,7 @@ async def dispatch(repository: str, prompt: str, *, base_branch: str = "", owner
     if repo is None:
         allowed = ", ".join(repositories()) or "none configured"
         raise CloudError(f"{repository!r} is not an allowlisted cloud repository ({allowed}). "
-                         "Add it (or * for any repository) under Settings › Tools › Claude Code › "
+                         "Add it (or * for any repository) under Settings › Claude Code › "
                          "Cloud runner.")
     prompt = str(prompt or "").strip()
     if not prompt or len(prompt) > MAX_PROMPT_CHARS:
@@ -552,7 +552,7 @@ async def status() -> Dict[str, Any]:
     hub_row: Optional[Dict[str, Any]] = None
     if not configured():
         hints.append("Add the repositories Claude may work on (or * for any repository) under "
-                     "Settings › Tools › Claude Code › Cloud runner.")
+                     "Settings › Claude Code › Cloud runner.")
     if allows_any_repository() and not hub:
         hints.append("* (any repository) needs a hub repository; without one, each repository "
                      "needs its own copy of the workflow.")

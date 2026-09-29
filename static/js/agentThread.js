@@ -10,8 +10,8 @@
  *     worker · 1 failed". The timeline under it starts collapsed (only a
  *     still-running call stays visible, so live progress shows); the summary
  *     is the disclosure that opens it, with Expand all / Collapse all;
- *   - automatic folding after `chat_tool_fold_after` calls (Settings > Tools
- *     > Agent; default 12; 0 = never): the first two and the last three nodes
+ *   - automatic folding after `chat_tool_fold_after` calls (Settings › Appearance
+ *     › Chat display; default 12; 0 = never): the first two and the last three nodes
  *     stay visible, the rest collapse into one "… N more" row. The newest
  *     (running) node is always in the visible tail while streaming.
  *

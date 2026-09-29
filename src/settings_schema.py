@@ -664,7 +664,7 @@ register_all([
     SettingSpec(
         key="claude_code_backend", type="choice", label="Claude Code runs on",
         help=("Where a delegation that names no backend runs. The cloud runner needs at least one "
-              "repository under Settings › Tools › Claude Code › Cloud runner; without one every "
+              "repository under Settings › Claude Code › Cloud runner; without one every "
               "delegation still runs locally."),
         group="Agents", choices=("local", "cloud"),
         choice_labels=("This machine", "Cloud runner (GitHub Actions)"), advanced=True,
