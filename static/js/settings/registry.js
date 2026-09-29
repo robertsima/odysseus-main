@@ -110,6 +110,18 @@ export const SETTINGS_PANELS = Object.freeze([
     ],
   }),
   definePanel({
+    id: 'builtin',
+    label: 'Built-in',
+    group: 'communications',
+    adminOnly: true,
+    aliases: ['built-in', 'builtins'],
+    keywords: [
+      'built-in', 'builtin', 'included', 'bundled', 'todoist', 'github', 'lotus',
+      'browser', 'pi worker', 'memory', 'rag', 'searxng', 'ntfy', 'chromadb',
+      'services', 'tool servers',
+    ],
+  }),
+  definePanel({
     id: 'reminders',
     label: 'Notifications',
     group: 'communications',

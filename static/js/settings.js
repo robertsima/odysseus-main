@@ -1451,6 +1451,87 @@ async function initWorkspaceSettings() {
   if (window._isAdmin && status && status.offsetParent !== null) refreshSandboxStatus();
 }
 
+/* ── Built-in integrations tab ── */
+// The integrations Odysseus ships with (GET /api/mcp/builtin) and the services
+// beside it in Docker (GET /api/diagnostics/services). Built-ins run in memory,
+// not in the MCP servers table, so until 2026-09-28 no Settings page showed
+// whether Todoist, GitHub, Lotus or the browser were actually up.
+function initBuiltinIntegrations() {
+  var panel = document.querySelector('[data-settings-panel="builtin"]');
+  if (!panel) return;
+  var list = el('builtin-intg-list');
+  var services = el('builtin-services-list');
+  var _e = function (s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); };
+  var SERVICE_LABELS = {
+    chromadb: ['Vector store', 'ChromaDB: holds the embeddings behind vault and memory search.'],
+    searxng: ['Web search', 'SearXNG: the self-hosted search engine behind web search and research.'],
+    ntfy: ['Push notifications', 'ntfy: delivers reminders and alerts to your phone.'],
+  };
+
+  function row(name, desc, pill, pillClass, hint) {
+    return '<div class="builtin-row">'
+      + '<div class="builtin-main"><b>' + _e(name) + '</b><span class="builtin-desc">' + _e(desc) + '</span>'
+      + (hint ? '<span class="builtin-hint">' + _e(hint) + '</span>' : '') + '</div>'
+      + '<span class="cc-pill ' + pillClass + '">' + _e(pill) + '</span></div>';
+  }
+
+  async function load() {
+    try {
+      var r = await fetch('/api/mcp/builtin', { credentials: 'same-origin' });
+      var data = await r.json();
+      if (!r.ok) throw new Error(data.detail || data.error || ('HTTP ' + r.status));
+      if (data.disabled) {
+        list.innerHTML = '<div class="builtin-empty">Built-in tool servers are switched off (ODYSSEUS_DISABLE_MCP is set).</div>';
+      } else {
+        list.innerHTML = (data.integrations || []).map(function (it) {
+          if (it.status === 'connected') {
+            return row(it.name, it.description, 'Running · ' + it.tool_count + (it.tool_count === 1 ? ' tool' : ' tools'), 'ok', '');
+          }
+          if (it.needs) {
+            // Its setting is present, yet it never started: the reason is in
+            // the startup log (e.g. a GITHUB_PERSONAL_ACCESS_TOKEN that is
+            // not a GitHub PAT, or a missing binary).
+            return row(it.name, it.description, 'Not started', 'bad',
+              it.error || (it.needs + ' is set, but it did not start. System › Logs says why.'));
+          }
+          if (it.status === 'not_configured') {
+            return row(it.name, it.description, 'Not set up', 'off', it.enable || ('Needs ' + it.needs + ' in the container environment.'));
+          }
+          if (it.status === 'error') {
+            return row(it.name, it.description, 'Error', 'bad', it.error || 'Failed to start; see System › Logs.');
+          }
+          return row(it.name, it.description, 'Stopped', 'bad', 'Not running. Restart Odysseus; if it stays stopped, check System › Logs.');
+        }).join('');
+      }
+    } catch (e) {
+      list.innerHTML = '<div class="builtin-empty">Could not load built-in integrations: ' + _e(e.message || e) + '</div>';
+    }
+    try {
+      var s = await fetch('/api/diagnostics/services', { credentials: 'same-origin' });
+      var health = await s.json();
+      if (!s.ok) throw new Error(health.detail || health.error || ('HTTP ' + s.status));
+      var rows = (health.services || []).filter(function (svc) { return SERVICE_LABELS[svc.name]; });
+      services.innerHTML = rows.length ? rows.map(function (svc) {
+        var label = SERVICE_LABELS[svc.name];
+        var ok = svc.status === 'ok';
+        return row(label[0], label[1], ok ? 'Healthy' : (svc.status || 'unknown'), ok ? 'ok' : 'bad', ok ? '' : (svc.detail || ''));
+      }).join('') : '<div class="builtin-empty">No bundled services reported.</div>';
+    } catch (e) {
+      services.innerHTML = '<div class="builtin-empty">Could not check services: ' + _e(e.message || e) + '</div>';
+    }
+  }
+
+  panel.addEventListener('click', function (ev) {
+    var link = ev.target.closest('[data-open-settings]');
+    if (!link) return;
+    ev.preventDefault();
+    open(link.dataset.openSettings);
+  });
+  var refresh = el('builtin-refresh');
+  if (refresh) refresh.addEventListener('click', load);
+  _onPanelActivated('builtin', load);
+}
+
 /* ── Appearance: chat display ── */
 async function initChatDisplaySettings() {
   var foldInput = el('set-chatFoldAfter');
@@ -3316,6 +3397,7 @@ function initAll() {
   initClaudeCodeSettings();
   initWorkbenchSettings();
   initChatDisplaySettings();
+  initBuiltinIntegrations();
   initContextProfiles();
   initAppearance();
   initShortcuts();

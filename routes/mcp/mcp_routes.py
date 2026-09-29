@@ -155,6 +155,30 @@ def setup_mcp_routes(mcp_manager: McpManager):
         finally:
             db.close()
 
+    @router.get("/builtin")
+    def list_builtin(request: Request):
+        """The integrations Odysseus ships with, and whether each is running.
+
+        Built-ins are started in memory at boot, not stored in the MCP servers
+        table, so /servers never listed them (Settings › Built-in).
+        """
+        require_admin(request)
+        from src.builtin_mcp import MCP_DISABLED, builtin_catalog
+
+        rows = []
+        for entry in builtin_catalog():
+            status = mcp_manager.get_server_status(entry["id"]) or {}
+            state = status.get("status", "disconnected")
+            if state != "connected" and not entry["configured"]:
+                state = "not_configured"
+            rows.append({
+                **entry,
+                "status": state,
+                "tool_count": status.get("tool_count", 0) if state == "connected" else 0,
+                "error": status.get("error") if state == "error" else None,
+            })
+        return {"disabled": bool(MCP_DISABLED), "integrations": rows}
+
     @router.post("/servers")
     async def add_server(
         request: Request,

@@ -245,7 +245,7 @@
        real request is discarded and the font fetched a second time. -->
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
-  <link rel="stylesheet" href="/static/style.css?v=20260928notes1">
+  <link rel="stylesheet" href="/static/style.css?v=20260929builtin1">
   <link rel="stylesheet" href="/static/skill-import-review.css">
   <link rel="modulepreload" href="/static/app.js?v=20260928settingsux1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260928settingsux1">
@@ -1596,6 +1596,10 @@
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
             <span>Connections</span>
           </button>
+          <button class="settings-nav-item admin-only" data-settings-tab="builtin">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>
+            <span>Built-in</span>
+          </button>
           <button class="settings-nav-item" data-settings-tab="reminders">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
             <span>Notifications</span>
@@ -2760,6 +2764,24 @@
         </div>
 
 
+        <!-- ═══ BUILT-IN TAB ═══ -->
+        <!-- What Odysseus ships with (tool servers started at boot, and the
+             services beside it in Docker), apart from what the user added
+             under Connections. Filled by initBuiltinIntegrations. -->
+        <div data-settings-panel="builtin" class="hidden">
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg>Built-in integrations</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Tool servers Odysseus ships with. They start on their own; one marked <b>Not set up</b> needs a value in the container environment first. Accounts and servers you add yourself are under <a href="#" data-open-settings="integrations" style="color:var(--accent, var(--red))">Connections</a>.</div>
+            <div id="builtin-intg-list" class="builtin-list"><div class="builtin-empty">Loading…</div></div>
+          </div>
+          <div class="admin-card">
+            <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><rect x="2" y="4" width="20" height="6" rx="1.5"/><rect x="2" y="14" width="20" height="6" rx="1.5"/><path d="M6 7h.01M6 17h.01"/></svg>Bundled services</h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Services that run next to Odysseus in Docker.</div>
+            <div id="builtin-services-list" class="builtin-list"><div class="builtin-empty">Loading…</div></div>
+            <div style="text-align:right;padding-top:8px;"><button type="button" class="btn btn-secondary" id="builtin-refresh">Refresh</button></div>
+          </div>
+        </div>
+
         <!-- ═══ ADVANCED TAB (id "capabilities") ═══ -->
         <!-- What this install can do, and the declared settings that configure
              it. Rendered from /api/capabilities + /api/settings/schema by
@@ -2998,7 +3020,7 @@
 <script type="module" src="/static/js/search-chat.js"></script>
 <script type="module" src="/static/js/theme.js"></script>
 <script type="module" src="/static/js/censor.js"></script>
-<script type="module" src="/static/js/settings.js?v=20260928settingsux2"></script>
+<script type="module" src="/static/js/settings.js?v=20260929builtin1"></script>
 <script type="module" src="/static/js/capabilitiesPanel.js?v=20260928settingsux1"></script>
 <script type="module" src="/static/js/assistant.js"></script>
 <script type="module" src="/static/app.js?v=20260928settingsux1"></script>  <!-- app.js must be LAST -->

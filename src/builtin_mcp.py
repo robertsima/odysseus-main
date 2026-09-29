@@ -83,6 +83,53 @@ _OPTIONAL_BUILTIN_ENV = {
     "pi_worker": "ODYSSEUS_PI_WORKER_HOST",
 }
 
+# What each built-in integration is, for Settings › Built-in (2026-09-28: the
+# built-ins run in memory, not in the MCP servers table, so no Settings page
+# showed them at all). `needs` is the container environment variable the
+# integration cannot work without; `enable` says how to turn an optional one on.
+BUILTIN_CATALOG = (
+    {"id": "memory", "name": "Memory", "kind": "tool server",
+     "description": "Long-term facts and preferences the assistant remembers about you."},
+    {"id": "rag", "name": "Knowledge (RAG)", "kind": "tool server",
+     "description": "Searches your indexed vault and documents for context."},
+    {"id": "email", "name": "Email", "kind": "tool server",
+     "description": "Reads, drafts and sends mail through the accounts under Connections."},
+    {"id": "image_gen", "name": "Image generation", "kind": "tool server",
+     "description": "Generates and edits images with an Image-type model endpoint."},
+    {"id": "lotus", "name": "Lotus", "kind": "tool server",
+     "description": "Wellbeing journal: mood summaries and low-energy patterns (access set under Privacy & data)."},
+    {"id": "todoist", "name": "Todoist", "kind": "tool server", "needs": "TODOIST_API_TOKEN",
+     "description": "Reads and updates your Todoist tasks.",
+     "enable": "Set TODOIST_API_TOKEN in the container environment (compose), then restart."},
+    {"id": "pi_worker", "name": "Windows Pi worker", "kind": "tool server", "needs": "ODYSSEUS_PI_WORKER_HOST",
+     "description": "Runs coding tasks on your Windows machine over SSH.",
+     "enable": "Set ODYSSEUS_PI_WORKER_HOST and ODYSSEUS_PI_WORKER_IDENTITY_FILE in the container environment, then restart."},
+    {"id": "builtin_browser", "name": "Browser", "kind": "tool server",
+     "description": "Headless Chromium the agent drives to read and use web pages."},
+    {"id": "github_read", "name": "GitHub (read)", "kind": "tool server", "needs": "GITHUB_PERSONAL_ACCESS_TOKEN",
+     "description": "Reads repositories, issues, pull requests and Actions runs.",
+     "enable": "Set GITHUB_PERSONAL_ACCESS_TOKEN (a GitHub PAT, ghp_/github_pat_) in the container environment, then restart."},
+    {"id": "github_write", "name": "GitHub (write)", "kind": "tool server", "needs": "ODYSSEUS_GITHUB_MCP_WRITE",
+     "description": "Comments, reviews and edits issues and pull requests (never pushes code).",
+     "enable": "Set ODYSSEUS_GITHUB_MCP_WRITE=1 as well as the GitHub token, then restart."},
+)
+
+
+def builtin_catalog() -> list[dict]:
+    """The built-in integrations with whether their required setting is present."""
+    rows = []
+    for entry in BUILTIN_CATALOG:
+        row = dict(entry)
+        needed = row.get("needs")
+        value = os.environ.get(needed, "").strip() if needed else ""
+        if needed == GITHUB_MCP_WRITE_ENV:
+            configured = value.lower() in ("1", "true", "yes") and bool(os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip())
+        else:
+            configured = bool(value) if needed else True
+        row["configured"] = configured
+        rows.append(row)
+    return rows
+
 # NPX-based built-in servers (run via npx, not Python)
 _BUILTIN_NPX_SERVERS = {
     "builtin_browser": {
