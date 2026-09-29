@@ -32,6 +32,7 @@ const PRIV_LABELS = {
   can_use_research: 'Deep research',
   can_generate_images: 'Image generation',
   can_manage_memory: 'Memory & skills',
+  can_approve_publish: 'Approve agent publishes (own chats)',
 };
 
 async function loadUsers() {

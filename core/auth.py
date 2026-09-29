@@ -29,6 +29,9 @@ DEFAULT_PRIVILEGES = {
     "can_use_research": True,
     "can_generate_images": True,
     "can_manage_memory": True,
+    # Approve (and so publish) a change an agent in one of the user's own
+    # chats asked to push. Admins can approve any request.
+    "can_approve_publish": False,
     "max_messages_per_day": 0,
     "allowed_models": [],
     "allowed_models_restricted": False,

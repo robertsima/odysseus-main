@@ -380,10 +380,8 @@ def guidance(kind: str) -> str:
         "     Work inside the worktree path it returns, not in any other checkout.",
         '  2. manage_agent_worktree {"action": "commit", "message": "..."}',
         '  3. manage_agent_worktree {"action": "request_publish", "title": "...", "body": "..."}',
-        "  4. Show the operator the changed-file list and the approval command it "
-        "returns, then wait for them to give you an approval code.",
-        '  5. manage_agent_worktree {"action": "publish", "request_id": "...", '
-        '"approval_code": "<code from the operator>"}',
+        "  4. Tell the user it is waiting for approval: the chat shows the publish",
+        "     request, and approving it there pushes the branch and opens the PR.",
         "",
         f"Branches live under {BRANCH_PREFIX}. Committing locally in bash is fine; "
         "publishing is not.",

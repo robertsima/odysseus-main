@@ -43346,3 +43346,44 @@ details.admin-ep-advanced[open] > summary { opacity: 0.8; }
 @media (max-width: 620px) {
   .settings-labels-wide .settings-row-hint { margin-left: 0; }
 }
+
+/* ── Publish requests waiting for a person (publishApprovals.js) ── */
+.publish-approvals { max-width: 800px; width: 100%; margin: 0 auto 6px; padding: 0 8px; box-sizing: border-box; font-size: 12px; }
+.publish-approvals[hidden] { display: none; }
+.pa-row { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 4px 8px; margin-top: 4px; background: var(--panel); border: 1px solid var(--warn); border-radius: 8px; }
+.pa-badge { flex: none; padding: 1px 7px; border-radius: 999px; background: color-mix(in srgb, var(--warn) 22%, transparent); color: var(--warn); font-weight: 600; }
+.pa-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg); font-weight: 600; }
+.pa-meta { flex: none; color: color-mix(in srgb, var(--fg) 65%, transparent); }
+.pa-warn { color: var(--warn); }
+.pa-ok { color: var(--green); }
+.pa-btn { height: 26px; padding: 0 10px; border: 1px solid var(--border); border-radius: 6px; background: transparent; color: var(--fg); font: inherit; cursor: pointer; }
+.pa-btn:hover { background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.pa-btn:disabled { opacity: 0.5; cursor: default; }
+.pa-btn-primary { border-color: var(--warn); background: var(--warn); color: #1d1f21; font-weight: 600; }
+.pa-btn-primary:hover { background: var(--warn); filter: brightness(1.1); }
+.pa-modal { position: fixed; inset: 0; z-index: 10050; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.55); }
+.pa-modal.hidden { display: none; }
+.pa-dialog { width: min(920px, 100%); max-height: calc(100vh - 32px); overflow: auto; background: var(--bg); color: var(--fg); border: 1px solid var(--border); border-radius: 12px; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5); }
+.pa-body { padding: 16px 18px; font-size: 13px; }
+.pa-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.pa-kicker { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--warn); }
+.pa-h { margin: 2px 0 4px; font-size: 16px; }
+.pa-x { width: 28px; height: 28px; border: 0; border-radius: 6px; background: transparent; color: var(--fg); font-size: 20px; cursor: pointer; }
+.pa-section { margin: 12px 0; }
+.pa-label { margin-bottom: 4px; font-weight: 600; }
+.pa-text { white-space: pre-wrap; padding: 8px; border: 1px solid var(--border); border-radius: 6px; }
+.pa-sensitive { padding: 8px; border: 1px solid var(--warn); border-radius: 6px; }
+.pa-files { display: flex; flex-wrap: wrap; gap: 4px; }
+.pa-files code, .pa-meta code, .pa-sensitive code { padding: 0 4px; border-radius: 4px; background: color-mix(in srgb, var(--fg) 8%, transparent); }
+.pa-diff { max-height: 45vh; overflow: auto; margin: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); font-size: 12px; line-height: 1.45; white-space: pre; }
+.pa-d-add { color: var(--green); }
+.pa-d-del { color: var(--red); }
+.pa-d-hunk { color: var(--accent, #61afef); }
+.pa-d-file { font-weight: 600; }
+.pa-note { margin: 8px 0; }
+.pa-check { display: flex; align-items: center; gap: 6px; margin: 8px 0; }
+.pa-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+@media (max-width: 600px) {
+  .pa-row { flex-wrap: wrap; }
+  .pa-meta { flex-basis: 100%; }
+}

@@ -951,6 +951,10 @@ app.include_router(setup_workbench_routes())
 # Agents dashboard: owner-scoped fleet view, steer/stop/launch.
 from routes.agents_routes import setup_agents_routes
 app.include_router(setup_agents_routes(session_manager))
+# Approving an agent's publish request in the browser (admins, or users with
+# the can_approve_publish privilege for their own chats).
+from routes.publish_approval_routes import setup_publish_approval_routes
+app.include_router(setup_publish_approval_routes(session_manager))
 
 from routes.vault.vault_routes import setup_vault_routes
 app.include_router(setup_vault_routes())

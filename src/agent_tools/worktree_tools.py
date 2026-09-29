@@ -230,14 +230,16 @@ class AgentWorktreeTool:
                     requested_by=str(ctx.get("owner") or "") or None,
                     cfg=cfg,
                     repository=repository or None,
+                    session_id=str(ctx.get("session_id") or "") or None,
                 )
                 return {
                     "exit_code": 0,
                     "request": view,
                     "note": (
-                        "Nothing has been pushed. Show the operator the file list "
-                        "and the approval command, then wait for them to hand back "
-                        "an approval code."
+                        "Nothing has been pushed. Tell the user the change is waiting for "
+                        "approval: the chat shows a publish request they can review, and "
+                        "approving it there pushes the branch and opens the draft PR. Do not "
+                        "ask for an approval code and do not call publish yourself."
                     ),
                 }
 

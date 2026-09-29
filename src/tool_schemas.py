@@ -365,8 +365,10 @@ FUNCTION_TOOL_SCHEMAS = [
                 "pushes to that repository's own GitHub origin), 'list_requests', 'show_request', "
                 "'cleanup' (remove a clean worktree; its branch is deleted only if another ref still "
                 "holds its commits). Pass the same repository on later calls, or a name unique "
-                "across repositories. You cannot approve your own change: ask the operator to run "
-                "the approval command and paste the code back to you."
+                "across repositories. You cannot approve your own change: after request_publish "
+                "a person approves it in the Odysseus UI (the chat shows the request), which also "
+                "pushes it and opens the draft PR. Call publish only with a code the user pastes "
+                "from the operator CLI."
             ),
             "parameters": {
                 "type": "object",

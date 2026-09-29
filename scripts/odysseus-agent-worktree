@@ -21,6 +21,11 @@ auth, secrets, or MCP permissions, `approve` refuses until you pass
 
 The code is printed once and never stored in plaintext. Paste it to the agent;
 it is spent the moment the push is attempted.
+
+The same decision can be made in the Odysseus UI: the chat that asked shows the
+publish request, and "Approve and publish" there (an admin, or a user with the
+"Approve agent publishes" privilege for their own chats) publishes at once
+without a code ever reaching the agent.
 """
 
 from __future__ import annotations

@@ -1105,6 +1105,7 @@ async def request_publish(
     requested_by: Optional[str] = None,
     cfg: Optional[WorktreeConfig] = None,
     repository: Optional[str] = None,
+    session_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Freeze the change and record an approval request. Publishes nothing."""
     cfg = cfg or load_config()
@@ -1154,15 +1155,18 @@ async def request_publish(
         sensitive_digest=summary["sensitive_digest"],
         remote_state=remote_state,
         requested_by=requested_by,
+        session_id=session_id,
         cfg=cfg,
     )
     view = approval_mod.public_view(record)
     view["remote_state"] = remote_state
     view["sensitive_summary"] = summary["sensitive_summary"]
     view["next_step"] = (
-        "A human must approve on the host: "
+        "A person must approve it: in the Odysseus UI (this chat shows the publish request "
+        "with Review; approving there also publishes), or on the host with "
         f"scripts/odysseus-agent-worktree approve {record['id']}"
         + (" --allow-sensitive" if summary["sensitive"] else "")
+        + ". You cannot approve it yourself."
     )
     return view
 
@@ -1313,6 +1317,56 @@ async def _publish_locked(
         cfg.repo_slug, branch, live["head_sha"][:12], pr.get("number"),
     )
     return {"request_id": request_id, **details}
+
+
+# ── approving in the browser ─────────────────────────────────────────────────
+
+REVIEW_PATCH_MAX_BYTES = 300_000
+
+
+async def review_patch(request_id: str, *, cfg: Optional[WorktreeConfig] = None) -> Dict[str, Any]:
+    """What a publish request would push, for the person approving it: the
+    approved commit's diff against the branch's base, read from its worktree."""
+    cfg = cfg or load_config()
+    stored = approval_mod.get_request(request_id, cfg=cfg)
+    head = str(stored.get("head_sha") or "")
+    if not is_valid_sha(head):
+        raise WorktreeError("the request names no valid commit")
+    rcfg, resolved, path = await _started(cfg, str(stored.get("branch") or ""), stored.get("repository"))
+    base = await _base_ref(rcfg, path, resolved)
+    res = await _git(rcfg, ["diff", "--no-color", "--no-ext-diff", "--no-textconv", f"{base}...{head}"],
+                     cwd=path)
+    text = res.stdout or ""
+    return {"base": base, "head_sha": head, "patch": text[:REVIEW_PATCH_MAX_BYTES],
+            "truncated": len(text) > REVIEW_PATCH_MAX_BYTES}
+
+
+async def approve_and_publish(
+    request_id: str,
+    *,
+    approver: str,
+    allow_sensitive: bool = False,
+    cfg: Optional[WorktreeConfig] = None,
+) -> Dict[str, Any]:
+    """Grant a request and publish it at once, for a person in the Odysseus UI.
+
+    Same checks as the operator CLI's ``approve`` followed by the agent's
+    ``publish``, but the one-time code never leaves this function: nothing
+    the agent can read ever holds it. A failed push leaves the grant unused,
+    so approving again retries.
+    """
+    cfg = cfg or load_config()
+    stored = approval_mod.get_request(request_id, cfg=cfg)
+    target = await repository_config(cfg, stored.get("repository"))
+    blockers = publish_blockers(target)
+    if blockers:
+        raise WorktreeError("publishing is not available: " + "; ".join(blockers))
+    try:
+        code, _record = approval_mod.grant(request_id, allow_sensitive=allow_sensitive,
+                                           granted_by=approver, cfg=cfg)
+    except approval_mod.ApprovalError as exc:
+        raise WorktreeError(str(exc))
+    return await publish(request_id, code, cfg=cfg)
 
 
 # ── cleanup ──────────────────────────────────────────────────────────────────

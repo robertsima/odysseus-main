@@ -1112,6 +1112,9 @@
     </script>
     <div id="chat-history" class="chat-history" role="log" aria-live="polite"></div>
 
+    <!-- Changes an agent in this chat asked to publish, waiting for a person (publishApprovals.js) -->
+    <div id="publish-approvals" class="publish-approvals" aria-live="polite" hidden></div>
+
     <!-- Live sub-agents / Claude Code jobs / background jobs of this chat (workbench.js) -->
     <div id="agent-strip" class="agent-strip" aria-live="polite" hidden></div>
 
@@ -2997,6 +3000,7 @@
 <script type="module" src="/static/js/markdown.js"></script>
 <script type="module" src="/static/js/dragSort.js"></script>
 <script type="module" src="/static/js/sessions.js"></script>
+<script type="module" src="/static/js/publishApprovals.js"></script>
 <script type="module" src="/static/js/memory.js?v=20260722memoryloading1"></script>
 <script type="module" src="/static/js/skills.js"></script>
 <script type="module" src="/static/js/tourHints.js"></script>

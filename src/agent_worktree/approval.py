@@ -236,6 +236,9 @@ def public_view(record: Dict, cfg: Optional[WorktreeConfig] = None) -> Dict:
         "head_sha": record.get("head_sha"),
         "base_branch": record.get("base_branch"),
         "title": record.get("title"),
+        "body": record.get("body") or "",
+        # The chat whose agent asked, so the UI can show the request there.
+        "session_id": record.get("session_id"),
         "created_at": record.get("created_at"),
         "expires_at": record.get("expires_at"),
         "changed_files": record.get("changed_files") or [],
@@ -272,6 +275,7 @@ def create_request(
     remote_state: str = "unknown",
     requested_by: Optional[str] = None,
     repository: Optional[str] = None,
+    session_id: Optional[str] = None,
     cfg: Optional[WorktreeConfig] = None,
 ) -> Dict:
     cfg = cfg or load_config()
@@ -297,6 +301,7 @@ def create_request(
         # to this so a branch that moved underneath the approval is rejected.
         "remote_state": remote_state,
         "requested_by": requested_by,
+        "session_id": session_id,
         "grant": None,
         "published": None,
     }

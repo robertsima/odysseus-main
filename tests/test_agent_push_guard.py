@@ -258,9 +258,12 @@ def test_the_operator_can_turn_the_guard_off(monkeypatch):
 def test_the_message_names_the_tool_and_the_steps():
     text = push_guard.guidance("git-push")
     assert "manage_agent_worktree" in text
-    for action in ("start", "commit", "request_publish", "publish"):
+    for action in ("start", "commit", "request_publish"):
         assert action in text
-    assert "approval_code" in text
+    # A person approves in the UI, which publishes; the agent no longer asks
+    # for a code to call publish with.
+    assert "approving it there pushes the branch" in text
+    assert "approval_code" not in text
 
 
 def test_the_message_lists_blockers_and_stops_the_hunt(monkeypatch):
