@@ -151,6 +151,41 @@ def _text_arg(args: dict, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _worktree_path_as_name(cfg, branch: str, repository: str) -> tuple[str, str]:
+    """Read ``repository=<a managed worktree's own path>`` as that worktree.
+
+    A worker standing in its worktree passes the path it works in; on
+    2026-09-29 `diff` and `status` were refused for exactly that ("'name' is
+    required", "only physical checkouts ..."). A worktree under
+    ``_repos/<key>/<leaf>`` is named by its leaf and belongs to the main
+    repository its verified `.git` pointer names. Anything else is returned
+    unchanged, so every other path keeps its existing checks.
+    """
+    import os
+
+    from src.agent_worktree.config import REPOSITORY_WORKTREE_DIR
+    from src.agent_worktree.validation import is_inside
+
+    if not repository:
+        return branch, repository
+    path = os.path.realpath(repository)
+    group = os.path.dirname(path)
+    if (
+        not is_inside(path, cfg.worktree_root)
+        or os.path.basename(os.path.dirname(group)) != REPOSITORY_WORKTREE_DIR
+        or not os.path.isfile(os.path.join(path, ".git"))
+    ):
+        return branch, repository
+    try:
+        from src.agent_worktree.repository_sync import linked_worktree_main
+
+        main = str(linked_worktree_main(path))
+    except Exception:  # noqa: BLE001 - unverifiable: let the normal checks refuse it
+        return branch, repository
+    leaf = os.path.basename(path).replace("__", "/")
+    return (branch or leaf), main
+
+
 def _default_repository_refusal(cfg) -> Dict[str, Any] | None:
     """Refuse a repository-less start when the run is bound to another project.
 
@@ -220,6 +255,8 @@ class AgentWorktreeTool:
         cfg = load_config()
         branch = str(args.get("branch") or args.get("name") or "").strip()
         repository = _text_arg(args, "repository")
+        if action != "start":
+            branch, repository = _worktree_path_as_name(cfg, branch, repository)
 
         if action in _BRANCH_ACTIONS and not branch:
             return _err(f"manage_agent_worktree {action}: 'name' is required",

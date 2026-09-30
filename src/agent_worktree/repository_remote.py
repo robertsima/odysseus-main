@@ -58,10 +58,64 @@ FETCH_ATTEMPTS = 3
 FETCH_RETRY_DELAYS_S = (2.0, 5.0)
 
 
+_HEADS = b"refs/heads/"
+_BRANCHES_NAMED_MAX = 12
+
+
+def _default_branch_ref(refs) -> Optional[bytes]:
+    """The branch the remote's HEAD points at, read off the advertised refs.
+
+    Symrefs are not passed to `determine_wants`, so this matches HEAD's commit
+    against the branches; when several share it (a fresh `dev` level with
+    `main`), main/master win, and either way the commit fetched is the same.
+    """
+    head = refs.get(b"HEAD")
+    if not head:
+        return None
+    matches = sorted(
+        name for name, oid in refs.items() if name.startswith(_HEADS) and oid == head
+    )
+    for preferred in (_HEADS + b"main", _HEADS + b"master"):
+        if preferred in matches:
+            return preferred
+    return matches[0] if matches else None
+
+
+def _missing_branch_error(remote_ref: bytes, refs) -> RepositorySyncError:
+    """`missing_remote_branch`, naming the branch and the ones that do exist.
+
+    "the requested remote branch does not exist" alone was returned to a
+    plain `fetch` 16 times between 2026-09-29 and 2026-09-30: the checkout's
+    branch still tracked a branch deleted after its pull request merged, and
+    every worker opened by failing the same call without learning which
+    branch was missing or what to fetch instead.
+    """
+    name = remote_ref[len(_HEADS):].decode(errors="replace")
+    default = _default_branch_ref(refs)
+    branches = sorted(
+        ref[len(_HEADS):].decode(errors="replace")
+        for ref in refs
+        if ref.startswith(_HEADS) and ref != default
+    )
+    if default:
+        branches.insert(0, default[len(_HEADS):].decode(errors="replace") + " (default)")
+    shown = ", ".join(branches[:_BRANCHES_NAMED_MAX])
+    if len(branches) > _BRANCHES_NAMED_MAX:
+        shown += f" (+{len(branches) - _BRANCHES_NAMED_MAX} more)"
+    exc = RepositorySyncError(
+        "missing_remote_branch",
+        f"the remote has no branch {name!r} (a branch is often deleted once its pull "
+        f"request merges); branches there: {shown or 'none'}. Use fetch_branch with "
+        "remote_branch=<one of those> to update that branch's remote-tracking ref.",
+    )
+    exc.default_ref = default
+    return exc
+
+
 def _fetch_exact(repo: Repo, url: str, remote_ref: bytes, token: Optional[str]):
     def wants(refs, depth=None):
         if remote_ref not in refs:
-            _fail("missing_remote_branch", "the requested remote branch does not exist")
+            raise _missing_branch_error(remote_ref, refs)
         oid = refs[remote_ref]
         return [] if oid in repo.object_store else [oid]
 
@@ -98,16 +152,28 @@ def _fetch_sync(path, token=None):
     with Repo(str(path)) as repo:
         _local_ref, branch, remote, merge_ref, raw_url = _branch_upstream(repo)
         url = _https_url(raw_url)
-        oid = _fetch_exact(repo, url, merge_ref, token)
+        # A plain fetch means "bring the remote's news in". When the branch's
+        # upstream is gone (merged and deleted), fetch the remote's default
+        # branch instead and say so, rather than failing the same call on every
+        # worker that opens on this checkout.
+        fetched = merge_ref
+        try:
+            oid = _fetch_exact(repo, url, merge_ref, token)
+        except RepositorySyncError as exc:
+            fallback = getattr(exc, "default_ref", None)
+            if exc.code != "missing_remote_branch" or not fallback or fallback == merge_ref:
+                raise
+            oid = _fetch_exact(repo, url, fallback, token)
+            fetched = fallback
         _validate_tree(repo, oid)
-        suffix = merge_ref[len(b"refs/heads/") :]
+        suffix = fetched[len(b"refs/heads/") :]
         tracking = b"refs/remotes/" + remote.encode() + b"/" + suffix
         try:
             old = repo.refs[tracking]
         except KeyError:
             old = None
         repo.refs[tracking] = oid
-        return {
+        result = {
             "ok": True,
             "action": "fetch",
             "repository": str(path),
@@ -118,6 +184,15 @@ def _fetch_sync(path, token=None):
             "after": oid.decode(),
             "updated": old != oid,
         }
+        if fetched != merge_ref:
+            missing = merge_ref[len(b"refs/heads/") :].decode(errors="replace")
+            result["upstream_missing"] = missing
+            result["note"] = (
+                f"{branch} tracks {remote}/{missing}, which no longer exists on "
+                f"{remote}; fetched {remote}/{suffix.decode()} (the default branch) "
+                "instead. The checkout itself is unchanged."
+            )
+        return result
 
 
 def _fetch_branch_sync(path, token=None, remote=None, remote_branch=None):

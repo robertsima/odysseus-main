@@ -390,6 +390,74 @@ def test_fetch_updates_only_remote_tracking_ref(checkout, monkeypatch):
     reopened.close()
 
 
+def test_missing_remote_branch_names_it_and_the_branches_that_exist(monkeypatch):
+    refs = {
+        b"HEAD": b"1" * 40,
+        b"refs/heads/main": b"1" * 40,
+        b"refs/heads/dev": b"2" * 40,
+    }
+
+    class _Client:
+        def fetch(self, path, repo, determine_wants):
+            determine_wants(refs)
+
+    monkeypatch.setattr(rr, "_client", lambda url, token: (_Client(), "/o/r"))
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._fetch_exact(
+            SimpleNamespace(object_store=set()), "https://github.com/o/r",
+            b"refs/heads/fix-ci", None,
+        )
+    assert exc.value.code == "missing_remote_branch"
+    message = str(exc.value)
+    assert "'fix-ci'" in message
+    assert "main (default), dev" in message
+    assert "fetch_branch" in message
+    assert exc.value.default_ref == b"refs/heads/main"
+
+
+def test_fetch_falls_back_to_the_default_branch_when_the_upstream_was_deleted(
+    checkout, monkeypatch
+):
+    # 2026-09-29/30: the Umni checkout's branch tracked a branch deleted after
+    # its PR merged, and every worker's opening `fetch` failed on it.
+    path, branch = checkout
+    with porcelain.open_repo(str(path)) as repo:
+        head = repo.refs[b"HEAD"]
+    asked = []
+
+    def fetch_exact(repo, url, ref, token):
+        asked.append(ref)
+        if ref == b"refs/heads/" + branch:
+            exc = rs.RepositorySyncError("missing_remote_branch", "gone")
+            exc.default_ref = b"refs/heads/trunk"
+            raise exc
+        return head
+
+    monkeypatch.setattr(rr, "_fetch_exact", fetch_exact)
+    result = rr._fetch_sync(path)
+    assert asked == [b"refs/heads/" + branch, b"refs/heads/trunk"]
+    assert result["remote_branch"] == "trunk"
+    assert result["upstream_missing"] == branch.decode()
+    assert "no longer exists" in result["note"]
+    with porcelain.open_repo(str(path)) as repo:
+        assert repo.refs[b"refs/remotes/origin/trunk"] == head
+        assert repo.refs[b"HEAD"] == head
+
+
+def test_fetch_without_a_known_default_still_reports_the_missing_branch(
+    checkout, monkeypatch
+):
+    path, _branch = checkout
+
+    def fetch_exact(repo, url, ref, token):
+        raise rs.RepositorySyncError("missing_remote_branch", "gone")
+
+    monkeypatch.setattr(rr, "_fetch_exact", fetch_exact)
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        rr._fetch_sync(path)
+    assert exc.value.code == "missing_remote_branch"
+
+
 def test_fetch_branch_returns_live_lease_target(checkout, monkeypatch):
     path, _branch = checkout
     with porcelain.open_repo(str(path)) as repo:

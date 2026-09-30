@@ -404,6 +404,22 @@ async def test_tool_refuses_a_repositoryless_start_from_another_projects_workspa
     assert _branches(world["source"]) == {"dev"}
 
 
+async def test_tool_reads_a_worktree_path_given_as_repository_as_that_worktree(world):
+    # 2026-09-29: a worker passed the worktree it stood in as `repository` and
+    # `diff` answered "'name' is required".
+    started = await _tool({"action": "start", "name": "fix-ci", "repository": str(world["umni"]),
+                           "base": "origin/main"})
+    assert started["exit_code"] == 0, started
+    path = started["worktree"]["path"]
+    (Path(path) / "fix.py").write_text("fixed = True\n")
+    committed = await _tool({"action": "commit", "repository": path, "message": "fix ci"})
+    assert committed["exit_code"] == 0, committed
+    assert committed["result"]["committed"] is True
+    diff = await _tool({"action": "diff", "repository": path})
+    assert diff["exit_code"] == 0, diff
+    assert diff["diff"]["changed_files"] == ["fix.py"]
+
+
 async def test_tool_cleanup_action_and_remove_stays_forbidden(world):
     started = await _tool({"action": "start", "name": "tmp", "repository": str(world["umni"]),
                            "base": "origin/main"})

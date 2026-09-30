@@ -72,7 +72,26 @@ be the configured `ODYSSEUS_AGENT_SOURCE_REPO`, whose managed worktrees live
 under the worktree root). Write actions, `fetch` and `pull` on a linked worktree
 are refused with `linked_worktree_read_only`, naming the main repository to run
 them in: the write paths assume a physical `.git` directory, and refs and
-objects are shared with the main checkout anyway.
+objects are shared with the main checkout anyway. When the path is one of
+`manage_agent_worktree`'s own worktrees (under the worktree root), the refusal
+names the call that does work there instead:
+`manage_agent_worktree action=commit repository=<main> name=<leaf>`, then
+`request_publish`. The generic advice ("use manage_agent_worktree for an
+isolated worktree") sent workers already standing in one to start another; on
+2026-09-29 six stage/commit/fetch calls in managed Umni worktrees failed that
+way. `manage_agent_worktree` itself also accepts such a worktree's own path as
+`repository` and reads it as that worktree (`name` = its leaf, `repository` =
+its main checkout), which is what a worker working inside it passes.
+
+**A plain `fetch` whose upstream is gone.** `fetch` updates the tracking ref of
+the checkout's upstream. When that branch no longer exists on the remote
+(deleted once its pull request merged), `fetch` fetches the remote's default
+branch instead and says so (`upstream_missing`, `note`); the checkout is not
+touched. Between 2026-09-29 and 2026-09-30 the Umni checkout's branch tracked
+such a branch and every worker opened with the same failed fetch, 16 in all,
+told only "the requested remote branch does not exist". `fetch_branch` for a
+branch that does not exist still fails, but now names it and lists the
+branches the remote has, default first.
 
 Private GitHub repositories use `GITHUB_PERSONAL_ACCESS_TOKEN` only when the
 current chat permits the `github_read` integration; sessionless calls are

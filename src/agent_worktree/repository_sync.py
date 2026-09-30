@@ -364,6 +364,19 @@ def _private_check(resolved: Path) -> None:
 LINKED_READ_ONLY_ACTIONS = frozenset({"status", "log", "diff", "branches", "remotes"})
 
 
+def _managed_worktree_name(path: Path) -> str | None:
+    """manage_agent_worktree's `name` for a worktree it created, else None."""
+    try:
+        from src.agent_worktree.config import load_config
+
+        root = Path(load_config().worktree_root)
+    except Exception:  # noqa: BLE001 - only improves an error message
+        return None
+    if path == root or not _inside(path, root):
+        return None
+    return path.name.replace("__", "/")
+
+
 def _validate_path(raw, *, allow_linked: bool = False) -> Path:
     if not isinstance(raw, (str, os.PathLike)) or not str(raw).strip():
         _fail("invalid_path", "repository is required")
@@ -411,6 +424,20 @@ def _validate_path(raw, *, allow_linked: bool = False) -> Path:
             _approve_main_repository(main)
             if allow_linked:
                 return resolved
+            managed = _managed_worktree_name(resolved)
+            if managed:
+                # The generic advice below ("use manage_agent_worktree for an
+                # isolated worktree") sent workers already standing in one to
+                # start another; on 2026-09-29 six stage/commit/fetch calls in
+                # managed Umni worktrees failed that way.
+                _fail(
+                    "linked_worktree_read_only",
+                    f"{resolved} is a managed worktree of {main}; manage_git only reads it ("
+                    + ", ".join(sorted(LINKED_READ_ONLY_ACTIONS)) + "). Commit it with "
+                    f"manage_agent_worktree action=commit repository={main} name={managed} "
+                    "message=<...>, then action=request_publish to ask for the push. Fetch "
+                    f"with manage_git on {main}; run tests and builds with bash in the worktree.",
+                )
             _fail(
                 "linked_worktree_read_only",
                 f"{resolved} is a linked worktree of {main}. Linked worktrees support only "

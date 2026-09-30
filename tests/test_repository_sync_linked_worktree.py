@@ -87,6 +87,25 @@ async def test_write_actions_on_a_linked_worktree_name_the_main_repository(linke
     assert str(main.resolve()) in str(exc.value)
 
 
+async def test_writes_in_a_managed_worktree_point_at_its_commit_action(roots, monkeypatch):
+    # 2026-09-29: workers standing in a managed Umni worktree were told to go
+    # and start an isolated worktree; they needed the commit call for this one.
+    main = _main_repo(roots / "dog-trainer")
+    managed = roots / "agent_worktrees" / "_repos" / "umni-1234" / "fix-ci"
+    managed.parent.mkdir(parents=True)
+    _git(main, "worktree", "add", "-q", "-b", "agent/umni/fix-ci", str(managed))
+    monkeypatch.setenv("ODYSSEUS_AGENT_WORKTREE_ROOT", str(roots / "agent_worktrees"))
+    (managed / "new.txt").write_text("x\n", encoding="utf-8")
+    with pytest.raises(rs.RepositorySyncError) as exc:
+        await repository_local.execute_local("stage", str(managed), paths=["new.txt"])
+    assert exc.value.code == "linked_worktree_read_only"
+    message = str(exc.value)
+    assert "managed worktree" in message
+    assert "manage_agent_worktree action=commit" in message
+    assert "name=fix-ci" in message
+    assert str(main.resolve()) in message
+
+
 async def test_repositories_listing_reports_linked_worktrees(linked):
     main, worktree = linked
     rows = {Path(row["repository"]): row for row in await rs.list_repositories()}
