@@ -237,3 +237,17 @@ def test_saved_penpot_mcp_server_supplies_url_and_token(monkeypatch, tmp_path):
 
     assert (cfg.base_url, cfg.token) == ("http://192.168.1.122:9001", "secret")
     assert "Penpot" in cfg.source
+
+
+def test_hostnames_resolving_to_private_addresses_are_refused(monkeypatch):
+    table = {"evil.example": "10.0.0.5", "v6.example": "::ffff:127.0.0.1", "ok.example": "93.184.216.34"}
+
+    async def fake_resolve(host, port):
+        return [table.get(host, host)]
+
+    monkeypatch.setattr(ps, "_resolve", fake_resolve)
+    for url in ("http://evil.example/x.svg", "http://v6.example/x.svg", "http://127.0.0.1/x.svg",
+                "http://169.254.169.254/latest", "http://[::1]/x.svg"):
+        with pytest.raises(ps.PenpotError, match="private"):
+            run(ps._assert_public(url))
+    run(ps._assert_public("https://ok.example/x.svg"))

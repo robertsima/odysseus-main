@@ -24,9 +24,11 @@ Network and file changes live here; the MCP server in
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
+import socket
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -705,21 +707,58 @@ async def fetch_icon(icon: str) -> Tuple[str, Optional[str]]:
     return svg, credit
 
 
-def _public_host_ok(url: str) -> None:
-    host = (urlparse(url).hostname or "").lower()
-    if urlparse(url).scheme not in ("http", "https") or not host:
+def _ip_is_public(addr: str) -> bool:
+    ip = ipaddress.ip_address(addr.split("%")[0])
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+        ip = ip.ipv4_mapped
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
+async def _resolve(host: str, port: int) -> List[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+async def _assert_public(url: str) -> None:
+    """Refuse a URL unless every address its host resolves to is public."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
         raise PenpotError("svg url must be http(s)")
-    blocked = ("localhost", "127.", "0.0.0.0", "10.", "192.168.", "169.254.", "[::1]")
-    if host.endswith(".local") or host.endswith(".internal") or host.startswith(blocked) or \
-            re.match(r"^172\.(1[6-9]|2\d|3[01])\.", host):
+    if host == "localhost" or host.endswith((".local", ".internal", ".localhost")):
+        raise PenpotError("svg url points at a private address; only public URLs are fetched")
+    try:
+        addrs = await _resolve(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    except OSError as exc:
+        raise PenpotError(f"cannot resolve {host}: {exc}") from exc
+    if not addrs or not all(_ip_is_public(a) for a in addrs):
         raise PenpotError("svg url points at a private address; only public URLs are fetched")
 
 
-async def fetch_svg_url(url: str) -> str:
-    _public_host_ok(url)
-    resp = await _get(url)
+async def fetch_svg_url(url: str, max_bytes: int = 2_000_000) -> str:
+    """Fetch a public SVG. Redirects are followed by hand so each hop is
+    re-validated (a public URL must not bounce us to an internal one)."""
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=False,
+                                 headers={"User-Agent": "Odysseus-PenpotStudio/1.0"}) as http:
+        for _ in range(5):
+            await _assert_public(url)
+            try:
+                resp = await http.get(url)
+            except httpx.HTTPError as exc:
+                raise PenpotError(f"could not fetch {url}: {type(exc).__name__}: {exc}") from exc
+            if resp.is_redirect and resp.headers.get("location"):
+                url = str(resp.url.join(resp.headers["location"]))
+                continue
+            break
+        else:
+            raise PenpotError("too many redirects fetching the svg url")
+    if resp.status_code >= 400:
+        raise PenpotError(f"{url} answered HTTP {resp.status_code}")
+    if len(resp.content) > max_bytes:
+        raise PenpotError("that SVG is too large to import")
     text = resp.text
-    if "<svg" not in text[:4000].lower() and "<svg" not in text.lower():
+    if "<svg" not in text.lower():
         raise PenpotError("that URL did not return SVG markup (an HTML page, not the raw .svg file?)")
     return text
 
