@@ -670,6 +670,14 @@ register_all([
         choice_labels=("This machine", "Cloud runner (GitHub Actions)"), advanced=True,
     ),
     SettingSpec(
+        key="claude_code_test_commands", type="bool", label="Claude Code may run tests",
+        help=("Delegated Claude Code runs may run the repository's own tests and builds (npm "
+              "scripts, Maven, Gradle, pytest; in the root folder and one level down) and are told "
+              "which. These run the project's code as the Claude Code process, outside the agent's "
+              "sandbox. Off: Claude Code only reads, edits and commits, and the agent tests."),
+        group="Agents", advanced=True,
+    ),
+    SettingSpec(
         key="claude_code_max_concurrent_tasks", type="int", label="Claude Code task slots",
         help="Delegated Claude Code runs that may execute at once. 0 uses CLAUDE_CODE_MAX_CONCURRENT_TASKS or the built-in default.",
         group="Agents", min_value=0, max_value=16, unit="tasks", advanced=True,
@@ -938,6 +946,14 @@ register_all([
               "worktree takes seconds instead of minutes. Stored under the data folder in "
               "agent_cache/."),
         group="Agents", advanced=True,
+    ),
+    SettingSpec(
+        key="bash_idle_timeout_seconds", type="int", label="Stop silent commands after",
+        help=("An agent's bash command that prints nothing for this long is stopped, and the "
+              "agent is told why and how to rerun it: with more time for that one command, "
+              "without quiet flags, or in the background. A command that keeps printing runs up "
+              "to an hour. 0 = only the hour limit."),
+        group="Agents", min_value=0, max_value=3600, unit="seconds", advanced=True,
     ),
     SettingSpec(
         key="agent_tool_budget", type="int", label="Tools per turn",

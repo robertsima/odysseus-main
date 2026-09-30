@@ -330,7 +330,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "ask_teacher": "Ask a more capable model for help with a difficult problem. Escalate complex tasks.",
     "pipeline": "Run a multi-step AI pipeline with multiple models. Chain tasks together in sequence.",
     "list_models": "List all available AI models and their endpoints.",
-    "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'). Use for 'rename my chats', 'rename this chat', 'archive/delete a chat'.",
+    "manage_session": "Chat management: rename, archive, delete, or fork chats (the UI calls these 'chats'; internally 'sessions'), see what your chats and agents are doing right now (action running: the tool each is running, for how long, its last output) and stop one (action stop). Use for 'rename my chats', 'archive/delete a chat', 'is that agent stuck', 'what is the other chat doing', 'stop that agent'.",
     "manage_memory": "Memory management: list, add, edit, delete, or search persistent memories. For facts about the USER (their name, preferences, where they live). NOT for info about ANOTHER person — addresses, phones, emails belonging to a contact go in manage_contact, not memory.",
     "manage_skills": "Skill management: add, update, publish, or search reusable skills/presets.",
     "manage_tasks": "Scheduled task management: list, create, edit, delete, pause, resume, or run cron tasks.",
@@ -777,6 +777,12 @@ class ToolIndex:
                    "delete session", "fork chat", "fork session",
                    "name the chats", "name my chats", "rename them"}):
             {"list_sessions", "manage_session"},
+        # Another chat's agent: is it stuck, what is it doing, stop it. The
+        # admin agent asked this on 2026-09-30 had no tool that could look.
+        frozenset({"stuck", "standing by", "still running", "is it running", "running bash",
+                   "what is it doing", "what's it doing", "other chat", "other agent",
+                   "stop that agent", "stop the agent", "kill that", "hung", "frozen"}):
+            {"list_sessions", "manage_session", "message_agent"},
         frozenset({"recurring", "every day", "every hour", "every morning",
                    "every evening", "every night", "every week", "each morning",
                    "daily task", "background task", "scheduled task", "schedule a",

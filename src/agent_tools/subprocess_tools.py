@@ -6,12 +6,18 @@ import shutil
 import sys
 import time
 import collections
-from typing import Optional, Callable, Awaitable, Tuple, Dict
+from typing import Any, Optional, Callable, Awaitable, Tuple, Dict
 from core.platform_compat import IS_WINDOWS, find_bash
 from src.constants import SHELL_OUTPUT_CHARS as MAX_OUTPUT_CHARS
 
-DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
+DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour, for a command that keeps printing
 DEFAULT_PYTHON_TIMEOUT = 60 * 60
+# A bash command that prints nothing for this long is stopped (setting
+# bash_idle_timeout_seconds; a call may pass `idle_timeout`). On 2026-09-30 a
+# `./mvnw -q test` whose integration test hung printed nothing for 43 minutes
+# and the agent waited, on its way to the hour limit, until the user stopped
+# the turn. Quiet commands meant to run long go in the background (`#!bg`).
+DEFAULT_BASH_IDLE_TIMEOUT = 60
 
 logger = logging.getLogger(__name__)
 
@@ -211,12 +217,17 @@ async def _run_tmux_bash(
     timeout: float,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     sandbox_workspace: Optional[str] = None,
-) -> Tuple[str, str, Optional[int], bool]:
+    idle_timeout: Optional[float] = None,
+) -> Tuple[str, str, Optional[int], str]:
+    """``(output, stderr, exit code, stopped)``; ``stopped`` is "" when the
+    command finished, "timeout" past ``timeout``, "idle" after
+    ``idle_timeout`` seconds without new output."""
     name = _tmux_session_name(session_id, sandbox_workspace)
     lock = _TMUX_LOCKS.setdefault(name, asyncio.Lock())
     async with lock:
         return await _run_tmux_bash_locked(name, content, cwd=cwd, env=env, timeout=timeout,
-                                           progress_cb=progress_cb, sandbox_workspace=sandbox_workspace)
+                                           progress_cb=progress_cb, sandbox_workspace=sandbox_workspace,
+                                           idle_timeout=idle_timeout)
 
 
 async def _kill_tmux_session(name: str) -> None:
@@ -241,7 +252,8 @@ async def _run_tmux_bash_locked(
     timeout: float,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
     sandbox_workspace: Optional[str] = None,
-) -> Tuple[str, str, Optional[int], bool]:
+    idle_timeout: Optional[float] = None,
+) -> Tuple[str, str, Optional[int], str]:
     await _ensure_tmux_session(name, cwd, env, sandbox_workspace)
 
     stamp = f"{int(time.time() * 1000)}-{abs(hash(content)) % 1000000}"
@@ -261,10 +273,14 @@ async def _run_tmux_bash_locked(
 
         started = time.time()
         last_tail = ""
+        last_body = None
+        last_output = started
         while True:
             capture = await _tmux_capture(name)
             body, done, clipped = _output_after_marker(capture, start_marker, end_prefix)
-            tail = "\n".join(body.splitlines()[-PROGRESS_TAIL_LINES:])
+            if body != last_body:
+                last_body, last_output = body, time.time()
+            tail ="\n".join(body.splitlines()[-PROGRESS_TAIL_LINES:])
             if progress_cb and tail != last_tail:
                 last_tail = tail
                 try:
@@ -280,11 +296,14 @@ async def _run_tmux_bash_locked(
                 cleaned = _clean_tmux_command_output(body, frame)
                 if clipped:
                     cleaned = _clipped_output_note(cleaned) + cleaned
-                return cleaned, "", rc, False
-            if time.time() - started > timeout:
+                return cleaned, "", rc, ""
+            now = time.time()
+            stopped = ("timeout" if now - started > timeout
+                       else "idle" if idle_timeout and now - last_output > idle_timeout else "")
+            if stopped:
                 await _kill_tmux_session(name)
                 cleaned = _clean_tmux_command_output(body, frame)
-                return cleaned, "", 124, True
+                return cleaned, "", 124, stopped
             await asyncio.sleep(0.5)
     except asyncio.CancelledError:
         # Stopped: end what the pane is running so the chat's next command
@@ -319,11 +338,14 @@ async def _run_subprocess_streaming(
     *,
     timeout: float,
     progress_cb: Optional[Callable[[Dict], Awaitable[None]]] = None,
-) -> Tuple[str, str, Optional[int], bool]:
+    idle_timeout: Optional[float] = None,
+) -> Tuple[str, str, Optional[int], str]:
+    """``(stdout, stderr, exit code, stopped)``, ``stopped`` as in _run_tmux_bash."""
     started = time.time()
     stdout_full: list[str] = []
     stderr_full: list[str] = []
     tail = collections.deque(maxlen=PROGRESS_TAIL_LINES)
+    last_output = [started]
 
     async def _reader(stream, full_buf, label: str):
         if stream is None:
@@ -333,6 +355,7 @@ async def _run_subprocess_streaming(
             if not line:
                 break
             decoded = line.decode("utf-8", errors="replace").rstrip("\n")
+            last_output[0] = time.time()
             full_buf.append(decoded)
             if label == "err":
                 tail.append(f"! {decoded}")
@@ -356,19 +379,29 @@ async def _run_subprocess_streaming(
     rd_err = asyncio.create_task(_reader(proc.stderr, stderr_full, "err"))
     prog_task = asyncio.create_task(_progress_emitter()) if progress_cb else None
 
-    timed_out = False
+    timed_out = ""
     try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-    except asyncio.TimeoutError:
-        timed_out = True
-        try:
-            proc.kill()
-        except Exception:
-            pass
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=2)
-        except Exception:
-            pass
+        while True:
+            now = time.time()
+            if now - started > timeout:
+                timed_out = "timeout"
+            elif idle_timeout and now - last_output[0] > idle_timeout:
+                timed_out = "idle"
+            if timed_out:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2)
+                except Exception:
+                    pass
+                break
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=min(1.0, max(0.05, timeout - (now - started))))
+                break
+            except asyncio.TimeoutError:
+                continue
     except asyncio.CancelledError:
         try:
             proc.kill()
@@ -445,8 +478,15 @@ class BashTool:
         sandbox_ws, refusal = _sandbox_for(ctx)
         if refusal is not None:
             return refusal
+        requested_idle = None
         if isinstance(content, dict):
+            requested_idle = content.get("idle_timeout")
             content = str(content.get("command") or content.get("cmd") or content.get("code") or "")
+        if requested_idle is None:
+            from src.tool_execution import get_tool_options
+
+            requested_idle = get_tool_options().get("idle_timeout")
+        idle_timeout = bash_idle_timeout(requested_idle)
 
         # A push from here cannot authenticate: the shell tool carries no git
         # credential by design, and the publishing credential lives only in the
@@ -488,14 +528,16 @@ class BashTool:
                 timeout=DEFAULT_BASH_TIMEOUT,
                 progress_cb=progress_cb,
                 sandbox_workspace=sandbox_ws,
+                idle_timeout=idle_timeout,
             )
             if timed_out:
                 return {
-                    "error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed (the next command starts a fresh shell)",
+                    "error": _stopped_message(timed_out, idle_timeout, fresh_shell=True),
                     "exit_code": 124,
                     "stdout": _truncate(stdout, MAX_OUTPUT_CHARS),
                     "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
                     "tmux_session": _tmux_session_name(str(session_id), sandbox_ws),
+                    "stopped": timed_out,
                 }
             output = stdout.rstrip()
             err = stderr.rstrip()
@@ -533,15 +575,51 @@ class BashTool:
             proc,
             timeout=DEFAULT_BASH_TIMEOUT,
             progress_cb=progress_cb,
+            idle_timeout=idle_timeout,
         )
         if timed_out:
-            return {"error": f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed", "exit_code": 124, "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS)}
+            return {"error": _stopped_message(timed_out, idle_timeout), "exit_code": 124,
+                    "stdout": _truncate(stdout, MAX_OUTPUT_CHARS), "stderr": _truncate(stderr, MAX_OUTPUT_CHARS),
+                    "stopped": timed_out}
         output = stdout.rstrip()
         err = stderr.rstrip()
         if err:
             output = (output + "\nSTDERR: " + err).strip() if output else "STDERR: " + err
         output = _with_remote_auth_hint(content, output, _truncate(output, MAX_OUTPUT_CHARS))
         return {"output": output or "(no output)", "exit_code": rc or 0}
+
+
+def bash_idle_timeout(requested: Any = None) -> Optional[float]:
+    """Seconds a bash command may print nothing, or None for no limit.
+
+    A call's ``idle_timeout`` wins (at least 10 s, at most the hour limit);
+    otherwise the setting bash_idle_timeout_seconds (60 by default, 0 = off).
+    """
+    try:
+        if requested not in (None, ""):
+            value = float(requested)
+            return None if value <= 0 else max(10.0, min(float(DEFAULT_BASH_TIMEOUT), value))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from src.settings import get_setting
+
+        value = float(get_setting("bash_idle_timeout_seconds", DEFAULT_BASH_IDLE_TIMEOUT))
+    except (TypeError, ValueError):
+        value = float(DEFAULT_BASH_IDLE_TIMEOUT)
+    return None if value <= 0 else min(float(DEFAULT_BASH_TIMEOUT), value)
+
+
+def _stopped_message(stopped: str, idle_timeout: Optional[float], fresh_shell: bool = False) -> str:
+    shell = " (the next command starts a fresh shell)" if fresh_shell else ""
+    if stopped == "idle":
+        return (f"bash: stopped after {int(idle_timeout or 0)}s without any new output — process killed{shell}. "
+                "If it was working, it was working silently: run it again without quiet flags (-q, --quiet, "
+                "--silent) so it reports progress, pass a larger `idle_timeout` for this one command, or start "
+                "it in the background with `#!bg` as the first line and check on it with manage_bg_jobs. If "
+                "it hung (a test waiting on a service or a network call), fix that before running it again; "
+                "for Maven or Gradle tests also set a per-test timeout, e.g. -Dsurefire.timeout=300.")
+    return f"bash: timed out after {DEFAULT_BASH_TIMEOUT}s — process killed{shell}"
 
 
 def _with_remote_auth_hint(command: str, full_output: str, shown: str) -> str:

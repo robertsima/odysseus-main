@@ -909,6 +909,15 @@ def get_shell_mode() -> Optional[str]:
     return _shell_mode_var.get()
 
 
+# Options of the tool call being executed, besides its content (a block's
+# ``options``, e.g. bash's ``idle_timeout``). Set for every call.
+_tool_options_var: contextvars.ContextVar = contextvars.ContextVar("agent_tool_options", default=None)
+
+
+def get_tool_options() -> Dict[str, Any]:
+    return dict(_tool_options_var.get() or {})
+
+
 def get_active_workspace() -> Optional[str]:
     """The folder the agent is confined to this turn, or None."""
     return _active_workspace.get()
@@ -1984,6 +1993,7 @@ async def _execute_tool_block_impl(
         return f"{tool}: BLOCKED", private_tool_denial(tool)
     _shell_sandbox_workspace.set(_sandbox_ws)
     _shell_mode_var.set(_shell_mode)
+    _tool_options_var.set(getattr(block, "options", None) or None)
 
 
     # Background execution: a `bash` block whose first line is the `#!bg`

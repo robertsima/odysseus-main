@@ -861,6 +861,46 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
     if action == "list":
         return await list_sessions(_list_filter, session_id, owner=owner)
 
+    # What the user's chats are doing right now, and stopping one of them
+    # (src/chat_work.py): the running tool and its output, not only whether
+    # a chat is one of this chat's own workers.
+    if action in ("running", "status", "activity", "busy", "stop"):
+        from src.chat_work import describe_rows, running_chats, stop_chat
+
+        owned = _session_manager.get_sessions_for_user(owner)
+        target = ""
+        if target_sid and target_sid.lower() not in ("all", "*"):
+            target = session_id if target_sid.lower() == "current" and session_id else \
+                resolve_session_ref(_session_manager, target_sid, owner=owner)
+            if target not in owned:
+                return {"error": session_not_found_error(_session_manager, target_sid, owner=owner,
+                                                         caller=session_id), "exit_code": 1}
+        if action != "stop":
+            rows = running_chats(owner, owned)
+            if target:
+                rows = [r for r in rows if r["session_id"] == target]
+                if not rows:
+                    name = getattr(owned.get(target), "name", "") or target
+                    return {"action": "running", "session_id": target,
+                            "results": f"{name} ({target}) is not working right now: no running turn or worker."}
+            return {"action": "running", "results": describe_rows(rows), "running": rows}
+        if not target:
+            return {"error": "stop needs the session_id of the chat to stop (see action 'running')", "exit_code": 1}
+        if target == session_id:
+            return {"error": "stop: that is this chat's own turn; end your turn instead (the user can press Stop)",
+                    "exit_code": 1}
+        stopped = await stop_chat(target, by=f"by the agent in chat {session_id or '?'}")
+        name = getattr(owned.get(target), "name", "") or target
+        if not stopped["turn_stopped"] and not stopped["workers_stopped"]:
+            return {"action": "stop", "session_id": target,
+                    "results": f"{name} ({target}) was not working; nothing to stop."}
+        what = ", ".join(filter(None, [
+            "its running turn" if stopped["turn_stopped"] else "",
+            f"{stopped['workers_stopped']} worker/job(s)" if stopped["workers_stopped"] else "",
+        ]))
+        return {"action": "stop", "session_id": target, **stopped,
+                "results": f"Stopped {what} in {name} ({target}). What it had done so far is saved in that chat."}
+
     if not target_sid:
         return {"error": "Need a session_id (or 'current' for the active chat)", "exit_code": 1}
 

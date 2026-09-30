@@ -178,6 +178,58 @@ def get_run_id(session_id: str) -> Optional[str]:
     return r.run_id if r else None
 
 
+def describe(session_id: str) -> Optional[Dict]:
+    """What a chat's running turn is doing now, read off its own event stream.
+
+    ``round``, ``tools_finished``, and for a tool still running its name,
+    command, how long it has run and the last output it printed. Another
+    chat's agent had no way to see this: on 2026-09-30 the admin agent,
+    asked about a chat 43 minutes into a silent bash call, could only answer
+    that the chat was not one of its workers.
+    """
+    run = get_active_run(session_id)
+    if run is None:
+        return None
+    now = time.time()
+    rnd, finished, running, tail = 1, 0, [], ""
+    for ev in list(run.buffer):
+        for line in str(ev).splitlines():
+            if not line.startswith("data: ") or line.startswith("data: [DONE]"):
+                continue
+            try:
+                data = json.loads(line[6:])
+            except ValueError:
+                continue
+            kind = data.get("type") if isinstance(data, dict) else None
+            if kind == "agent_step":
+                try:
+                    rnd = max(rnd, int(data.get("round") or 1))
+                except (TypeError, ValueError):
+                    pass
+            elif kind == "tool_start":
+                running.append(data)
+                tail = ""
+            elif kind == "tool_progress":
+                tail = str(data.get("tail") or tail)
+            elif kind == "tool_output":
+                finished += 1
+                match = next((r for r in running if r.get("tool") == data.get("tool")), None)
+                if match is not None:
+                    running.remove(match)
+    out: Dict = {"session_id": session_id, "run_id": run.run_id, "started_at": run.started_at,
+                 "elapsed_s": round(now - run.started_at), "round": rnd, "tools_finished": finished}
+    if running:
+        current = running[-1]
+        out["tool"] = str(current.get("tool") or "")
+        out["command"] = str(current.get("full_command") or current.get("command") or "")[:400]
+        try:
+            out["tool_elapsed_s"] = round(now - float(current["started_at"]))
+        except (KeyError, TypeError, ValueError):
+            pass
+        out["output_tail"] = tail[-1500:]
+    return out
+
+
 def get_active_run(session_id: str) -> Optional[_Run]:
     """Return the exact active run currently registered for a session."""
     r = _RUNS.get(session_id)

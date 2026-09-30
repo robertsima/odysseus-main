@@ -63,7 +63,7 @@ async def _run(cmd, timeout=5):
 async def test_commands_run_without_pagers_prompts_or_terminal_input(tmux):
     out, _, rc, timed_out = await _run("git log")
 
-    assert (out, rc, timed_out) == ("result line", 0, False)
+    assert (out, rc, timed_out) == ("result line", 0, "")
     typed = "\n".join(tmux.sent)
     for setting in ("PAGER=cat", "GIT_PAGER=cat", "GIT_TERMINAL_PROMPT=0", "GIT_EDITOR=true"):
         assert setting in typed
@@ -94,7 +94,7 @@ async def test_a_stopped_command_ends_its_pane(tmux):
 async def test_a_timed_out_command_ends_its_pane(tmux):
     tmux.finish = False
     _, _, rc, timed_out = await _run("sleep 600", timeout=0.2)
-    assert (rc, timed_out) == (124, True)
+    assert (rc, timed_out) == (124, "timeout")
     assert tmux.killed == [st._tmux_session_name("chat-1")]
 
 
@@ -133,7 +133,7 @@ async def test_output_longer_than_the_pane_keeps_still_finishes(tmux, monkeypatc
     monkeypatch.setattr(st, "_tmux_capture", capture)
     out, _, rc, timed_out = await _run("seq 1 4000", timeout=3)
 
-    assert (rc, timed_out) == (0, False)
+    assert (rc, timed_out) == (0, "")
     lines = out.splitlines()
     assert "first lines are gone" in lines[0] and "last 1401" in lines[0]
     assert lines[1] == "2600" and lines[-1] == "4000"
@@ -151,3 +151,33 @@ def test_marker_parsing():
     assert st._output_after_marker(f"x\ny\n{end}3\n", start, end) == ("x\ny", True, True)
     # Another command's end marker does not count.
     assert st._output_after_marker("x\n__ODYSSEUS_CMD_END_2__:0\n", start, end)[1] is False
+
+
+@pytest.mark.asyncio
+async def test_a_silent_command_is_stopped_after_the_idle_limit(tmux):
+    """`./mvnw -q test` with a hung integration test printed nothing for 43
+    minutes on 2026-09-30 while the agent waited for the hour limit."""
+    tmux.finish = False
+    out, _, rc, stopped = await st._run_tmux_bash("mvn -q test", session_id="chat-1", cwd="/tmp", env=None,
+                                                  timeout=30, idle_timeout=0.6)
+    assert (rc, stopped) == (124, "idle")
+    assert tmux.killed == [st._tmux_session_name("chat-1")]
+
+
+@pytest.mark.asyncio
+async def test_output_keeps_a_command_alive_past_the_idle_limit(tmux, monkeypatch):
+    calls = {"n": 0}
+
+    async def capture(name):
+        calls["n"] += 1
+        typed = "\n".join(tmux.sent)
+        start = re.search(r"__ODYSSEUS_CMD_START_[^_]+__", typed).group(0)
+        end = re.search(r"(__ODYSSEUS_CMD_END_[^_]+__:)", typed).group(1)
+        lines = "\n".join(f"step {i}" for i in range(calls["n"]))
+        return f"\n{start}\n{lines}\n" + (f"{end}0\n" if calls["n"] >= 5 else "")
+
+    monkeypatch.setattr(st, "_tmux_capture", capture)
+    out, _, rc, stopped = await st._run_tmux_bash("build", session_id="chat-1", cwd="/tmp", env=None,
+                                                  timeout=30, idle_timeout=0.8)
+    assert (rc, stopped) == (0, "")
+    assert out.splitlines()[-1] == "step 4"

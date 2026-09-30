@@ -89,11 +89,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools.",
+            "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools. A command that prints nothing for 60 seconds is stopped: don't pass quiet flags (-q, --silent) to builds and tests, raise `idle_timeout` for a command that is quiet for longer, or start a long job in the background with `#!bg` as its first line.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to execute"}
+                    "command": {"type": "string", "description": "The shell command to execute"},
+                    "idle_timeout": {"type": "integer", "description": "Seconds this command may print nothing before it is stopped (default 60, max 3600). Raise it only for a command known to be quiet for long stretches, e.g. a test suite that prints once per test class."}
                 },
                 "required": ["command"]
             }
@@ -759,16 +760,16 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_session",
-            "description": "Manage a chat: rename, archive, unarchive, delete, mark important, truncate history, or fork it. (The UI calls these 'chats'; 'session' is the internal term.) For destructive actions like delete, call list_sessions first and pass the exact id returned there; never invent ids.",
+            "description": "Manage a chat: rename, archive, unarchive, delete, mark important, truncate history, or fork it; see what your chats are doing right now (running: each working chat's running tool, its command, how long, and its last output) and stop one (stop). (The UI calls these 'chats'; 'session' is the internal term.) Use running when the user asks whether an agent is stuck or busy, instead of starting another one. For destructive actions like delete, call list_sessions first and pass the exact id returned there; never invent ids.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["rename", "archive", "unarchive", "delete", "important", "unimportant", "truncate", "fork"],
-                               "description": "The action to perform"},
-                    "session_id": {"type": "string", "description": "Exact target chat id from list_sessions, or 'current' for the active chat where supported"},
+                    "action": {"type": "string", "enum": ["rename", "archive", "unarchive", "delete", "important", "unimportant", "truncate", "fork", "running", "stop"],
+                               "description": "The action to perform. running: session_id optional ('all' or omitted = every working chat). stop: stops that chat's running turn and its workers."},
+                    "session_id": {"type": "string", "description": "Exact target chat id from list_sessions (or running), or 'current' for the active chat where supported"},
                     "value": {"type": "string", "description": "Action parameter: new name (rename), keep_count (truncate/fork)"}
                 },
-                "required": ["action", "session_id"]
+                "required": ["action"]
             }
         }
     },
@@ -1448,6 +1449,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
                     "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only"]}, "description": "start only: what the task needs. A worker that cannot meet a need is refused before it starts, with the fix."},
                     "extra_tools": {"type": "array", "items": {"type": "string"}, "description": "start only: exact tool names this ONE worker gets on top of its loadout (limited to what this chat may use). Use this when a task needs a tool the loadout lacks; the saved loadout stays unchanged. An update that adds tools or access to a saved loadout is refused unless the user asked for it."},
+                    "parallel": {"type": "boolean", "description": "start only: true to start this loadout even though it is already working in another chat. Without it, start refuses and lists that chat, so an agent the user refers to is checked (manage_session running) or messaged instead of duplicated."},
                     "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."},
                     "names": {"type": "array", "items": {"type": "string"}, "description": "export only: loadouts to export. Omit for all."},
                     "document": {"type": "object", "description": "import only: the JSON document an export returned ({\"format\": \"odysseus-agent-profiles\", \"version\": 1, \"profiles\": [...]})."},
@@ -2027,6 +2029,10 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
     # Convert structured args back to the text format each tool expects
     if tool_type == "bash":
         content = args.get("command", "")
+        if args.get("idle_timeout") not in (None, ""):
+            from src.tool_types import ToolBlockWithOptions
+
+            return ToolBlockWithOptions(tool_type, content, {"idle_timeout": args.get("idle_timeout")})
     elif tool_type == "python":
         content = args.get("code", "")
     elif tool_type == "web_search":

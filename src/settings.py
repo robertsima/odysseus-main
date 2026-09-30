@@ -270,6 +270,16 @@ DEFAULT_SETTINGS = {
     # across sandboxed shells, so a fresh worktree's `npm ci` or Maven build
     # does not download everything again (src/shell_sandbox.package_cache_binds).
     "shell_sandbox_package_cache": True,
+    # An agent's bash command that prints nothing for this many seconds is
+    # stopped and the agent told why (a call can ask for longer with
+    # `idle_timeout`, or run in the background with `#!bg`). 0 = no limit; a
+    # command still stops after an hour. See src/agent_tools/subprocess_tools.py.
+    "bash_idle_timeout_seconds": 60,
+    # Delegated Claude Code runs may run the checkout's own tests and builds
+    # (npm scripts, Maven, Gradle, pytest; root and one folder down), found and
+    # granted per run (claude_code_tools.project_test_rules). They run project
+    # code outside the sandbox, as the Claude Code process.
+    "claude_code_test_commands": True,
     # Named sub-agent worker profiles (src/agent_profiles.py).
     "agent_profiles": [],
     # Soft input-token budget for the agent loop. The DEFAULT value (6000) is the

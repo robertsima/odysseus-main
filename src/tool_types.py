@@ -60,3 +60,15 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "app_api", "discover_tools"} | BUILTIN_EMAIL_TOOLS
 
 ToolBlock = namedtuple("ToolBlock", ["tool_type", "content"])
+
+
+class ToolBlockWithOptions(ToolBlock):
+    """A ToolBlock that also carries call options its tool reads besides the
+    content, e.g. bash's ``idle_timeout``. It compares, unpacks and prints as
+    the plain two-field ToolBlock; the executor hands ``options`` to the tool
+    (src.tool_execution.get_tool_options)."""
+
+    def __new__(cls, tool_type, content, options=None):
+        block = super().__new__(cls, tool_type, content)
+        block.options = dict(options or {})
+        return block

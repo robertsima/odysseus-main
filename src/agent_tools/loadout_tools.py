@@ -1326,6 +1326,32 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "exit_code": 1,
             }
 
+    # The same loadout already working in another chat (a person's chat
+    # running it, or a worker another chat started). On 2026-09-30 the admin
+    # agent, told about "the implement feature and open pr engineer", started
+    # a second Lead Engineer instead of looking at the one already 40 minutes
+    # into its task. Its own workers do not count: those are parallel work
+    # this chat chose. `parallel: true` starts it anyway.
+    if started_profile is not None and not args.get("parallel"):
+        from src.chat_work import describe_rows, running_chats
+
+        busy = [r for r in running_chats(owner)
+                if str(r.get("profile") or "").casefold() == started_profile["name"].casefold()
+                and r.get("session_id") != session_id and r.get("parent_session") != session_id]
+        if busy:
+            return {
+                "error": (
+                    f"start: {started_profile['name']} is already working in another chat. If the user means "
+                    "that agent, check on it (manage_session running), tell it something (message_agent) or "
+                    "stop it (manage_session stop) instead of starting a copy. To start another one for "
+                    "separate work, call start again with parallel: true.\n" + describe_rows(busy[:5])
+                ),
+                "blocked": True,
+                "blocked_reason": "same_loadout_running",
+                "running": busy[:5],
+                "exit_code": 1,
+            }
+
     # One-off tools for this run only. A parent whose worker lacks a tool for
     # the task at hand used to widen the SAVED loadout to get past it
     # (2026-09-28: "Memory Data Structure Innovator" went from [web_search] to

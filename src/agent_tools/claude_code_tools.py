@@ -104,10 +104,29 @@ _SAFE_TEST_RUNNERS = (r"pytest|python -m pytest|npm test|pnpm test|yarn test"
 # Anchored to that exact script path so the rule cannot widen into
 # arbitrary python.
 _CALLBACK_HELPER = r"python3 (?:~|/)[^\s()]*/skills/odysseus/scripts/odysseus_api\.py"
+# A folder inside the checkout as a test command names it: relative, no
+# `..`, nothing a shell treats specially.
+_REL_DIR = r"(?!.*\.\.)[A-Za-z0-9_][A-Za-z0-9_./-]{0,120}"
+# The same runners pointed at a project in a subfolder. Claude Code starts at
+# the checkout's root and may not `cd`, so a monorepo's `backend/` or
+# `mobile/` tests could not run at all: on 2026-09-30 Opus reported "the
+# wrapper lives only in backend/ ... and changing directory isn't permitted".
+_SUBDIR_TEST_RUNNERS = (
+    rf"npm --prefix {_REL_DIR} (?:test|run (?:test|typecheck|type-check|lint|build))"
+    rf"|pnpm (?:-C|--dir) {_REL_DIR} (?:run )?(?:test|typecheck|type-check|lint|build)"
+    rf"|yarn --cwd {_REL_DIR} (?:test|typecheck|type-check|lint|build)"
+    rf"|(?:\./)?{_REL_DIR}/mvnw -f {_REL_DIR}/pom\.xml (?:test|verify|compile)"
+    rf"|mvn -f {_REL_DIR}/pom\.xml (?:test|verify|compile)"
+    rf"|(?:\./)?{_REL_DIR}/gradlew -p {_REL_DIR} (?:test|check|build)"
+    rf"|gradle -p {_REL_DIR} (?:test|check|build)"
+)
 SAFE_TOOL = re.compile(
     rf"^(Read|Glob|Grep|Edit|Write"
     rf"|Bash\(git (?:{_SAFE_GIT_SUBCOMMANDS})(?::\*)?\)"
-    rf"|Bash\((?:{_SAFE_TEST_RUNNERS})(?::\*)?\)"
+    rf"|Bash\((?:{_SAFE_TEST_RUNNERS}|{_SUBDIR_TEST_RUNNERS})(?::\*)?\)"
+    # Exactly `cd <folder>`, so `cd backend && ./mvnw test` passes as two
+    # allowed steps; the command after it must be allowed on its own.
+    rf"|Bash\(cd {_REL_DIR}\)"
     rf"|Bash\({_CALLBACK_HELPER}(?::\*)?\))$"
 )
 # Deny rules passed as ``--disallowedTools`` on every run, whatever the
@@ -533,6 +552,85 @@ def _claude_config_dir() -> str:
     return os.environ.get("CLAUDE_CONFIG_DIR", "").strip() or os.path.join(_claude_home(), ".claude")
 
 
+_TEST_SCAN_SKIP = frozenset({"node_modules", "target", "build", "dist", "out", "vendor", "venv",
+                             "__pycache__", "coverage"})
+_REL_DIR_RE = re.compile(rf"^{_REL_DIR}$")
+
+
+def project_test_rules(repository: Any) -> tuple[list[str], list[str]]:
+    """``(allow rules, commands)`` for the checkout's own tests and builds.
+
+    Delegation promises Claude Code may test its work, but the default
+    allowlist named no test runner, so a run that was not handed one could
+    execute nothing ("every command that runs something was denied
+    automatically", 2026-09-30). These are the projects at the checkout's
+    root and one folder down: npm scripts (test, typecheck, lint, build),
+    Maven, Gradle and pytest, each in the form that works from the root and
+    as `cd <folder>` plus the plain runner. ``commands`` are the ones to name
+    to Claude.
+    """
+    root = Path(repository)
+    rules: list[str] = []
+    commands: list[str] = []
+
+    def allow(rule: str, command: Optional[str] = None) -> None:
+        if SAFE_TOOL.fullmatch(rule) and rule not in rules:
+            rules.append(rule)
+        if command and command not in commands:
+            commands.append(command)
+
+    try:
+        subdirs = sorted(e.name for e in root.iterdir()
+                         if e.is_dir() and not e.name.startswith(".") and e.name not in _TEST_SCAN_SKIP
+                         and _REL_DIR_RE.match(e.name))[:40]
+    except OSError:
+        return [], []
+    for rel in ["", *subdirs]:
+        path = root / rel if rel else root
+        runners: list[str] = []
+        try:
+            scripts = json.loads((path / "package.json").read_text(encoding="utf-8")).get("scripts") or {}
+        except (OSError, ValueError, AttributeError):
+            scripts = {}
+        for name in ("test", "typecheck", "type-check", "lint", "build"):
+            if isinstance(scripts, dict) and name in scripts:
+                run = "test" if name == "test" else f"run {name}"
+                runners.append(f"npm {run}")
+                if rel:
+                    allow(f"Bash(npm --prefix {rel} {run}:*)", f"npm --prefix {rel} {run}")
+        if (path / "pom.xml").is_file():
+            wrapper = (path / "mvnw").is_file()
+            for goal in ("test", "verify", "compile"):
+                if wrapper:
+                    runners.append(f"./mvnw {goal}")
+                runners.append(f"mvn {goal}")
+                if rel:
+                    if wrapper:
+                        allow(f"Bash(./{rel}/mvnw -f {rel}/pom.xml {goal}:*)")
+                    allow(f"Bash(mvn -f {rel}/pom.xml {goal}:*)")
+            if rel:
+                commands.append(f"cd {rel} && {'./mvnw' if wrapper else 'mvn'} test")
+        if (path / "build.gradle").is_file() or (path / "build.gradle.kts").is_file():
+            wrapper = (path / "gradlew").is_file()
+            for task in ("test", "check", "build"):
+                runners.append(f"{'./gradlew' if wrapper else 'gradle'} {task}")
+                if rel:
+                    allow(f"Bash({f'./{rel}/gradlew' if wrapper else 'gradle'} -p {rel} {task}:*)")
+            if rel:
+                commands.append(f"cd {rel} && {'./gradlew' if wrapper else 'gradle'} test")
+        if any((path / f).is_file() for f in ("pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini", "conftest.py")):
+            runners += ["pytest", "python -m pytest"]
+            if rel:
+                commands.append(f"pytest {rel}")
+        if not runners:
+            continue
+        if rel:
+            allow(f"Bash(cd {rel})")
+        for runner in runners:
+            allow(f"Bash({runner}:*)", None if rel else runner)
+    return rules, commands
+
+
 def default_tools() -> list[str]:
     """The default allowlist, plus the Odysseus callback helper when the
     callback is configured (otherwise the helper is unreachable and Claude
@@ -929,6 +1027,17 @@ def _parse_args(args: dict, tool_name: str = _DEFAULT_TOOL_NAME) -> dict:
         source = "" if requested_model else " (from the claude_code_model setting)"
         return {"error": _tool_error(f"{model_error}{source}", prefix), "error_kind": "invalid_model",
                 "exit_code": 1}
+    if _flag_setting("claude_code_test_commands", True):
+        # The checkout's own tests and builds, granted on every delegation
+        # (project_test_rules), and named in the prompt so Claude runs them
+        # in a form the allowlist accepts instead of guessing and being denied.
+        test_rules, test_commands = project_test_rules(repository)
+        tools = tools + [rule for rule in test_rules if rule not in tools]
+        if test_commands:
+            prompt = (f"{prompt}\n\n[Odysseus] Test and build commands you may run in this checkout (the "
+                      f"shell starts at its root): {', '.join(f'`{c}`' for c in test_commands[:12])}. "
+                      "Other commands that run code are denied; run the relevant checks before you finish "
+                      "and say which, if any, you could not run.")
     parsed = {"repository": repository, "prompt": prompt, "timeout": timeout, "tools": tools, "model": model}
     if raw_model and model != raw_model:
         if model:
@@ -2067,6 +2176,17 @@ async def _run_claude_process(
         child_env = _claude_environment()
     except ValueError as exc:
         return {"error": _tool_error(str(exc), _RUN_CONTEXT.get().get("tool_name")), "exit_code": 1}
+    # The toolchains the sandboxed shell uses for this checkout (Node, JDK,
+    # Maven under /opt/toolchains, src/toolchains.py): the server's own PATH
+    # has no java, so a granted `./mvnw test` still could not start. CI=true
+    # keeps test runners out of watch mode and interactive prompts.
+    try:
+        from src.toolchains import shell_env
+
+        child_env.update(shell_env(str(repository), child_env.get("PATH")))
+    except Exception:  # noqa: BLE001 - a missing toolchain must not stop the run
+        logger.debug("claude_code: toolchain environment unavailable", exc_info=True)
+    child_env.setdefault("CI", "true")
     ctx = dict(_RUN_CONTEXT.get() or {})
     run_id = ctx.get("task_id") or activity.new_run_id("claude_code")
     title = _run_title(prompt, ctx.get("label"))

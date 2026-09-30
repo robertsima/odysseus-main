@@ -392,6 +392,25 @@ pane's 2,000 lines; the output then starts with a note that its first lines
 are gone and how to capture all of it. (Waiting for the start marker held a
 finished command until the hour-long timeout.)
 
+A bash command that prints nothing for 60 seconds is stopped
+(`bash_idle_timeout_seconds`; 0 turns it off, and a command that keeps printing
+still stops after an hour). The result says it went silent and how to rerun it:
+without quiet flags, with a larger `idle_timeout` for that one call (a bash
+argument, 10 s to an hour, carried on the block as `ToolBlockWithOptions`), or
+in the background with `#!bg`. On 2026-09-30 a `./mvnw -q test` whose
+integration test hung printed nothing for 43 minutes while the agent waited.
+
+Delegated Claude Code runs may run the checkout's own tests and builds
+(`claude_code_test_commands`, on by default). `project_test_rules` finds npm
+scripts (test, typecheck, lint, build), Maven, Gradle and pytest projects at the
+checkout's root and one folder down, grants each in a form that works from the
+root (`npm --prefix mobile test`, `./backend/mvnw -f backend/pom.xml test`, or
+`cd backend` followed by the plain runner), and names the commands in the
+prompt. The run gets the sandbox's toolchains (Node, JDK, Maven) on its PATH and
+`CI=true`. These run project code as the Claude Code process, outside the
+agent's sandbox; with the setting off, Claude Code reads, edits and commits and
+the agent tests.
+
 ### 4.2 The execution ledger
 
 `src/context_compactor.py` collapses *completed* tool exchanges into a compact
@@ -894,6 +913,18 @@ A chat turn runs detached from the browser tab (`src/agent_runs.py`).
 - **Replaced.** A message sent while the chat's turn runs stops that turn and
   waits (bounded) for its partial reply to be saved before storing the new
   message (`agent_runs.stop_and_wait`), so the history reads in order.
+
+### Seeing and stopping other chats
+
+`manage_session` action `running` lists every chat turn and delegated run of the
+user's that is working now, with the tool each is running, its command, how long
+it has run and its last output (read off the turn's own event stream,
+`agent_runs.describe`); action `stop` stops a chat's running turn and the
+workers and jobs working for it (never the calling chat's own turn). An agent
+asked whether another chat is stuck can look and act instead of answering that
+the chat is not one of its workers. `manage_agent_loadout start` refuses to
+start a loadout that is already working in another chat (not one of this
+chat's own workers) and lists that chat, unless called with `parallel: true`.
 
 ### Fleet lifecycle and navigation
 
