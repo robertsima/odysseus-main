@@ -159,21 +159,37 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
     await _run_exec("tmux", "send-keys", "-t", name, "stty -echo", "C-m", timeout=5)
 
 
-def _output_after_marker(capture: str, start_marker: str, end_marker: str) -> Tuple[str, bool]:
+def _output_after_marker(capture: str, start_marker: str, end_marker: str) -> Tuple[str, bool, bool]:
+    """``(output, finished, clipped)`` of one command in a pane capture.
+
+    The end marker alone says the command finished: its stamp is unique and
+    it is printed last. The start marker can be gone, since a pane keeps
+    about 2000 lines and a command that printed more pushes it out; the
+    output is then everything before the end marker and ``clipped`` is set.
+    Waiting for the start marker instead held a finished command until the
+    hour-long timeout: on 2026-09-29 a run sat 23 minutes on one bash call
+    whose output had scrolled past it.
+    """
     lines = capture.splitlines()
     start_idx = -1
     for idx, line in enumerate(lines):
         if line.strip() == start_marker:
             start_idx = idx
-    if start_idx < 0:
-        return capture, False
     end_idx = -1
     for idx in range(start_idx + 1, len(lines)):
         if lines[idx].strip().startswith(end_marker):
             end_idx = idx
+    clipped = start_idx < 0
     if end_idx < 0:
-        return "\n".join(lines[start_idx + 1:]), False
-    return "\n".join(lines[start_idx + 1:end_idx]), True
+        return "\n".join(lines[start_idx + 1:]), False, clipped
+    return "\n".join(lines[start_idx + 1:end_idx]), True, clipped
+
+
+def _clipped_output_note(output: str) -> str:
+    kept = len(output.splitlines())
+    return (f"[Odysseus] The command printed more than the terminal keeps: its first lines are "
+            f"gone and the last {kept} are below. To see all of it, run it again with the output "
+            f"sent to a file (`... > /tmp/out.log 2>&1`) and read or grep that file.\n")
 
 
 def _extract_marker_rc(capture: str, end_marker: str) -> int:
@@ -247,7 +263,7 @@ async def _run_tmux_bash_locked(
         last_tail = ""
         while True:
             capture = await _tmux_capture(name)
-            body, done = _output_after_marker(capture, start_marker, end_prefix)
+            body, done, clipped = _output_after_marker(capture, start_marker, end_prefix)
             tail = "\n".join(body.splitlines()[-PROGRESS_TAIL_LINES:])
             if progress_cb and tail != last_tail:
                 last_tail = tail
@@ -262,6 +278,8 @@ async def _run_tmux_bash_locked(
             if done:
                 rc = _extract_marker_rc(capture, end_prefix)
                 cleaned = _clean_tmux_command_output(body, frame)
+                if clipped:
+                    cleaned = _clipped_output_note(cleaned) + cleaned
                 return cleaned, "", rc, False
             if time.time() - started > timeout:
                 await _kill_tmux_session(name)
@@ -417,7 +435,8 @@ def _sandbox_for(ctx) -> Tuple[Optional[str], Optional[dict]]:
 
 class BashTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import agent_cwd, _truncate
+        from src.tool_execution import agent_cwd
+        from src.tool_utils import _truncate_middle as _truncate
         # An unrestricted shell can read an absolute vault path or walk into it
         # through a command substitution, so prompt-only guidance is not a
         # privacy boundary. Missing context is denied too: a caller must carry
@@ -537,7 +556,8 @@ def _with_remote_auth_hint(command: str, full_output: str, shown: str) -> str:
 
 class PythonTool:
     async def execute(self, content: str, ctx: dict) -> dict:
-        from src.tool_execution import agent_cwd, _truncate
+        from src.tool_execution import agent_cwd
+        from src.tool_utils import _truncate_middle as _truncate
         sandbox_ws, refusal = _sandbox_for(dict(ctx or {}, tool_name="python") if isinstance(ctx, dict) else ctx)
         if refusal is not None:
             return refusal

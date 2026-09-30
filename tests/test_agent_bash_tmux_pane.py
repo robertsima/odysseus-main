@@ -117,3 +117,37 @@ async def test_one_command_at_a_time_per_pane(tmux, monkeypatch):
     monkeypatch.setattr(st, "_tmux_send_line", counting_send)
     await asyncio.gather(*(_run(f"echo {i}") for i in range(3)))
     assert peak == 1
+
+
+@pytest.mark.asyncio
+async def test_output_longer_than_the_pane_keeps_still_finishes(tmux, monkeypatch):
+    """A pane keeps about 2000 lines. Output past that pushed the start
+    marker out, the runner waited for it, and a finished command held its
+    run until the hour-long timeout (a 23-minute stall on 2026-09-29)."""
+    async def capture(name):
+        typed = "\n".join(tmux.sent)
+        end = re.search(r"(__ODYSSEUS_CMD_END_[^_]+__:)", typed)
+        tail = "\n".join(str(n) for n in range(2600, 4001))
+        return f"{tail}\n{end.group(1)}0\n" if end else ""
+
+    monkeypatch.setattr(st, "_tmux_capture", capture)
+    out, _, rc, timed_out = await _run("seq 1 4000", timeout=3)
+
+    assert (rc, timed_out) == (0, False)
+    lines = out.splitlines()
+    assert "first lines are gone" in lines[0] and "last 1401" in lines[0]
+    assert lines[1] == "2600" and lines[-1] == "4000"
+
+
+def test_marker_parsing():
+    start, end = "__ODYSSEUS_CMD_START_1__", "__ODYSSEUS_CMD_END_1__:"
+    # Before the command has printed anything.
+    assert st._output_after_marker("", start, end) == ("", False, True)
+    # Running, start marker visible.
+    assert st._output_after_marker(f"old\n{start}\na\nb", start, end) == ("a\nb", False, False)
+    # Finished.
+    assert st._output_after_marker(f"old\n{start}\na\n{end}0\n", start, end) == ("a", True, False)
+    # Finished, start marker scrolled out.
+    assert st._output_after_marker(f"x\ny\n{end}3\n", start, end) == ("x\ny", True, True)
+    # Another command's end marker does not count.
+    assert st._output_after_marker("x\n__ODYSSEUS_CMD_END_2__:0\n", start, end)[1] is False

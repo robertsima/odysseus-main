@@ -1396,6 +1396,13 @@ def setup_chat_routes(
             allowed_models=_allowed_models_for_request(request),
         )
 
+        # A message sent while this chat's turn is still running replaces it
+        # (agent_runs.start). Stop that turn first so its partial reply is
+        # saved before this message rather than after it.
+        if session and not compare_mode and agent_runs.is_active(session):
+            if await agent_runs.stop_and_wait(session):
+                logger.info("[chat] session=%s: a new message replaced the running turn", session)
+
         # Build shared context (stream path uses enhanced_message for context preface)
         ctx = await build_chat_context(
             sess, request, chat_handler, chat_processor,
@@ -2432,6 +2439,9 @@ def setup_chat_routes(
                 # ── Agent mode: full agent loop with tools ──
                 _agent_rounds = 0
                 _agent_tool_calls = 0
+                # Tool calls and round texts so far, saved if the turn is stopped.
+                from src.turn_trail import TurnTrail
+                _trail = TurnTrail()
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None
@@ -2537,6 +2547,7 @@ def setup_chat_routes(
                                                 chunk = f"data: {json.dumps(data)}\n\n"
                                             _text_segment_break = False
                                         full_response += _delta_text
+                                        _trail.text(_delta_text)
                                         _stream_set(session, partial=full_response)
                                     yield chunk
                                 elif data.get("type") == "steer_applied":
@@ -2567,6 +2578,7 @@ def setup_chat_routes(
                                     "ask_user",
                                     "plan_update",
                                 ):
+                                    _trail.event(data)
                                     if data.get("type") in ("agent_step", "tool_start", "tool_output"):
                                         _text_segment_break = True
                                     if data.get("type") == "agent_step":
@@ -2728,8 +2740,13 @@ def setup_chat_routes(
                     # outer finally from running and left _active_streams
                     # with a stale entry).
                     try:
-                        if full_response and not incognito:
-                            logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars)", session, len(full_response))
+                        # A turn stopped part-way keeps its tool calls and says
+                        # what it was running (src/turn_trail.py).
+                        _trail_note, _trail_events, _trail_texts = _trail.stopped_record()
+                        if (full_response or _trail_events) and not incognito:
+                            logger.info("Client disconnected mid-stream for session %s, saving partial response (%d chars, %d tool calls)%s",
+                                        session, len(full_response), len(_trail_events),
+                                        f" {_trail_note}" if _trail_note else "")
                             _stopped_content2, _stopped_md2 = clean_thinking_for_save(
                                 full_response,
                                 {
@@ -2754,6 +2771,11 @@ def setup_chat_routes(
                                     ],
                                 },
                             )
+                            if _trail_note:
+                                _stopped_content2 = f"{_stopped_content2.rstrip()}\n\n{_trail_note}".strip()
+                            if _trail_events:
+                                _stopped_md2["tool_events"] = _trail_events
+                                _stopped_md2["round_texts"] = _trail_texts
                             sess.add_message(ChatMessage("assistant", _stopped_content2, metadata=_stopped_md2))
                             session_manager.save_sessions()
                     except Exception:

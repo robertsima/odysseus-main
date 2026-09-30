@@ -8,7 +8,7 @@
 import Storage from './storage.js';
 import uiModule from './ui.js';
 import sessionModule from './sessions.js';
-import chatRenderer from './chatRenderer.js?v=20260928subagentui1';
+import chatRenderer from './chatRenderer.js?v=20260929resumerun1';
 import chatStream from './chatStream.js?v=20260819approvalcontrol1';
 import { renderDiffCard } from './diffView.js';
 import agentThread from './agentThread.js?v=20260928subagentui1';
@@ -704,11 +704,30 @@ function _personaNameForTurn() {
 
   function _syncForegroundStreamGlobals() {
     const active = _getForegroundStreamState();
-    isStreaming = !!active;
+    // A tab reloaded during a run rejoins it through resumeStream; that run
+    // is this chat's live turn too, so Stop and steering reach it.
+    isStreaming = !!active || _resumedRunIsForeground();
     currentAbort = active ? active.abortCtrl : null;
     currentHolder = active ? active.holder : null;
-    _setForegroundChatBusy(!!active || !!_sendInFlight);
+    _setForegroundChatBusy(isStreaming || !!_sendInFlight);
     return active;
+  }
+
+  function _resumedRunIsForeground() {
+    try {
+      const sid = sessionModule && sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId();
+      return !!(sid && _resumingStreams.has(sid));
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /** Give the composer back once a rejoined run ends or the chat is left. */
+  function _releaseResumedComposer(drain = true) {
+    _syncForegroundStreamGlobals();
+    const btn = document.querySelector('.send-btn');
+    if (!isStreaming && btn && btn.dataset.mode === 'streaming') updateSubmitButton('idle', btn);
+    if (drain && !isStreaming) _drainQueuedAgentRequests();
   }
 
   function _touchStreamActivity(sessionId) {
@@ -5265,6 +5284,9 @@ function _personaNameForTurn() {
     if (!active || !active.abortCtrl) {
       // Not streaming — fall through to abort
       abortCurrentRequest();
+      // A rejoined run (resumeStream) held the composer. Its reader lets go
+      // on its next event, which can be seconds away; free the composer now.
+      if (sessionId && _resumingStreams.has(sessionId)) _releaseResumedComposer();
       return;
     }
     // Detachment deliberately keeps the network stream alive, but the outgoing
@@ -5316,6 +5338,105 @@ function _personaNameForTurn() {
    * reloaded from the DB so its full render stays faithful. Returns true if it
    * attached, false to let the caller fall back to spinner+poll.
    */
+  /**
+   * The tool a rejoined run is running, under its replayed text.
+   *
+   * A reload replays the run's text but not its tool cards (the full thread
+   * renders from the saved record when the run ends). Before this card, a
+   * tool that was running vanished on reload: on 2026-09-29 a bash call had
+   * been going for 23 minutes and the reloaded chat showed only a
+   * "Generating response..." spinner. Shows the running tool with its
+   * command, time since it started and live output, and how many tool calls
+   * have finished.
+   */
+  function _createResumeActivity(anchor) {
+    const esc = uiModule.esc;
+    const wrap = document.createElement('div');
+    wrap.className = 'agent-thread streaming resume-activity';
+    wrap.style.display = 'none';
+    const countEl = document.createElement('div');
+    countEl.className = 'resume-activity-count';
+    countEl.style.cssText = 'font-size:12px;opacity:0.7;margin:4px 0 0 18px;';
+    wrap.appendChild(countEl);
+    anchor.after(wrap);
+
+    const running = [];   // tool_start events not answered yet, oldest first
+    let finished = 0;
+    let node = null;
+    let ticker = null;
+    const fmt = (s) => (s < 60 ? `${Math.floor(s)}s`
+      : `${Math.floor(s / 60)}m ${String(Math.floor(s % 60)).padStart(2, '0')}s`);
+
+    const clearNode = () => {
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      if (node && node.parentNode) node.remove();
+      node = null;
+    };
+    const showNode = (ev) => {
+      clearNode();
+      node = document.createElement('div');
+      node.className = 'agent-thread-node running';
+      node.dataset.tool = ev.tool || '';
+      const cmdHtml = ev.command ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
+      node.innerHTML = '<div class="agent-thread-dot"></div><div class="agent-thread-header">' +
+        '<span class="agent-thread-icon">▶</span><span class="agent-thread-elapsed"></span>' +
+        `<span class="agent-thread-tool">${esc(ev.tool || 'tool')}</span></div>` +
+        `<div class="agent-thread-content">${cmdHtml}</div>`;
+      wrap.insertBefore(node, countEl);
+      // The server's start time: a replayed tool_start arrives long after it
+      // was sent. Without one, count from now.
+      const startedMs = Number(ev.started_at) > 0 ? Number(ev.started_at) * 1000 : Date.now();
+      const elapsedEl = node.querySelector('.agent-thread-elapsed');
+      const tick = () => { elapsedEl.textContent = fmt(Math.max(0, (Date.now() - startedMs) / 1000)); };
+      tick();
+      ticker = setInterval(tick, 1000);
+      if (ev._tail) setTail(ev._tail);
+    };
+    const setTail = (tail) => {
+      if (!node) return;
+      let tailEl = node.querySelector('.agent-thread-tail');
+      if (!tailEl) {
+        tailEl = document.createElement('pre');
+        tailEl.className = 'agent-thread-tail';
+        tailEl.style.cssText = 'margin:4px 0 0;padding:6px 8px;font-size:11px;background:rgba(0,0,0,0.18);border-radius:4px;max-height:140px;overflow:auto;white-space:pre-wrap;opacity:0.85;';
+        node.querySelector('.agent-thread-content').appendChild(tailEl);
+      }
+      tailEl.textContent = tail;
+      tailEl.scrollTop = tailEl.scrollHeight;
+    };
+    const render = () => {
+      countEl.textContent = finished ? `${finished} tool call${finished === 1 ? '' : 's'} finished` : '';
+      const current = running[running.length - 1];
+      if (!current) clearNode();
+      else if (!node || node._ev !== current) { showNode(current); node._ev = current; }
+      wrap.style.display = (finished || current) ? '' : 'none';
+    };
+
+    return {
+      event(json) {
+        if (json.type === 'tool_start') {
+          running.push(json);
+        } else if (json.type === 'tool_output') {
+          finished += 1;
+          const idx = running.findIndex((ev) => ev.tool === json.tool);
+          if (idx >= 0) running.splice(idx, 1);
+        } else if (json.type === 'tool_progress') {
+          const current = running[running.length - 1];
+          const tail = String(json.tail || '').trim();
+          if (current && tail) { current._tail = tail; if (node && node._ev === current) setTail(tail); }
+          return;
+        } else {
+          return;
+        }
+        render();
+      },
+      stop() {
+        clearNode();
+        if (wrap.parentNode) wrap.remove();
+      },
+    };
+  }
+
   export async function resumeStream(sessionId, replaceHolder = null) {
     if (!sessionId) return false;
     if (hasActiveStream(sessionId)) return false;
@@ -5356,7 +5477,19 @@ function _personaNameForTurn() {
     const spinner = spinnerModule.create('Generating response...', 'right');
     holder.querySelector('.body').appendChild(spinner.createElement());
     spinner.start();
+    const activity = _createResumeActivity(contentDiv);
     uiModule.scrollHistory();
+
+    // This tab rejoins the run like the tab that sent it: the composer shows
+    // Stop, and a message typed now is steered into the run (or queued after
+    // it). Before, a reload left the composer idle and the next message
+    // replaced the running turn: on 2026-09-29 "did you get stuck?" ended a
+    // run 23 minutes into a bash call.
+    const submitBtnEl = document.querySelector('.send-btn');
+    if (submitBtnEl && !_activeStreams.has(sessionId) &&
+        sessionModule.getCurrentSessionId && sessionModule.getCurrentSessionId() === sessionId) {
+      updateSubmitButton('streaming', submitBtnEl);
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -5375,7 +5508,10 @@ function _personaNameForTurn() {
 
     const cleanup = () => {
       try { spinner.destroy(); } catch (_) {}
+      activity.stop();
       _resumingStreams.delete(sessionId);
+      // Queued messages go after the canonical reload below.
+      _releaseResumedComposer(false);
     };
 
     const renderDelta = () => {
@@ -5503,6 +5639,7 @@ function _personaNameForTurn() {
                      json.type === 'research_progress' || json.type === 'research_sources' ||
                      json.type === 'research_findings' || json.type === 'research_done') {
             rich = true;
+            activity.event(json);
           }
         }
       }
@@ -5527,6 +5664,7 @@ function _personaNameForTurn() {
       errorDiv.textContent = `[Error: ${replayError.message}]`;
       contentDiv.appendChild(errorDiv);
       uiModule.scrollHistory();
+      _drainQueuedAgentRequests();
       return true;
     }
 
@@ -5539,6 +5677,7 @@ function _personaNameForTurn() {
       const meta_ = metricsData ? Object.assign({ model }, metricsData) : { model };
       chatRenderer.addMessage('assistant', roundText, model, meta_);
       uiModule.scrollHistory();
+      _drainQueuedAgentRequests();
       return true;
     }
 
@@ -5549,8 +5688,12 @@ function _personaNameForTurn() {
     if (metricsData) {
       chatRenderer.recordSessionMetricsCost(metricsData, sessionId);
     }
-    if (onThisSession) sessionModule.selectSession(sessionId);
-    else sessionModule.loadSessions();
+    if (onThisSession) {
+      try { await sessionModule.selectSession(sessionId); } catch (_) {}
+      _drainQueuedAgentRequests();
+    } else {
+      sessionModule.loadSessions();
+    }
     return true;
   }
 

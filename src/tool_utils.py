@@ -57,6 +57,24 @@ def _truncate(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
     return text
 
 
+def _truncate_middle(text: str, limit: int = MAX_OUTPUT_CHARS) -> str:
+    """Like ``_truncate``, but keep the start and the end of the text.
+
+    For a command's output: a build or test run puts its failures and its
+    summary last, so keeping only the start showed the model dependency
+    downloads and hid whether the tests passed.
+    """
+    if not isinstance(text, str):
+        text = "" if text is None else str(text)
+    if len(text) <= limit:
+        return text
+    head = limit * 3 // 10
+    tail = limit - head
+    omitted = len(text) - head - tail
+    return (f"{text[:head]}\n... ({omitted} chars omitted of {len(text)}; the start and "
+            f"the end are kept) ...\n{text[-tail:]}")
+
+
 def _parse_tool_args(content):
     """Parse a tool-call argument blob.
 

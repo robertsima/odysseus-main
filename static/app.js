@@ -11,7 +11,7 @@ import modelsModule from './js/models.js?v=20260715startupcalm2';
 import ragModule from './js/rag.js';
 import presetsModule from './js/presets.js';
 import searchModule from './js/search.js';
-import chatModule from './js/chat.js?v=20260928settingsux1';
+import chatModule from './js/chat.js?v=20260929resumerun1';
 import compareModule from './js/compare/index.js?v=20260819approvalcontrol1';
 import documentModule from './js/document.js?v=20260928docedittarget1';
 import searchChatModule from './js/search-chat.js';
@@ -23,7 +23,7 @@ import {
   settleSessionHydration
 } from './js/startupShell.js';
 import markdownModule from './js/markdown.js';
-import chatRenderer from './js/chatRenderer.js?v=20260928subagentui1';
+import chatRenderer from './js/chatRenderer.js?v=20260929resumerun1';
 import sessionModule from './js/sessions.js';
 import memoryModule from './js/memory.js?v=20260722memoryloading1';
 // Versioned like the other modules: this one was imported bare, so a browser

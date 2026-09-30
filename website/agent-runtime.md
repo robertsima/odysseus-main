@@ -382,6 +382,14 @@ an excerpt plus a `toolout-…` reference. `recall_tool_output` retrieves the
 full text on demand. The inline limit comes from the context profile
 (§4.3).
 
+Before that, `bash` and `python` cap a command's output at 10,000 characters,
+keeping the first 30% and the last 70%: a build or test run prints its
+failures and its summary last. In the agent's tmux pane a command is finished
+when its end marker appears, even if its start marker has scrolled out of the
+pane's 2,000 lines; the output then starts with a note that its first lines
+are gone and how to capture all of it. (Waiting for the start marker held a
+finished command until the hour-long timeout.)
+
 ### 4.2 The execution ledger
 
 `src/context_compactor.py` collapses *completed* tool exchanges into a compact
@@ -829,6 +837,27 @@ retrieval and peer-agent envelopes do not count as human turns or enter follow-u
 intent retrieval. Tail guidance preserves earlier unfinished requests unless the
 user changes or cancels them. `[agent-steer]` logs IDs, delivery state and added
 tool names without copying the instruction text.
+
+### A turn that is stopped, replaced or rejoined
+
+A chat turn runs detached from the browser tab (`src/agent_runs.py`).
+
+- **Rejoined.** A tab opened or reloaded during a run replays it
+  (`resumeStream`) and holds the composer as the sending tab did: Stop ends
+  that run, and a message typed now is steered into it (or queued after it).
+  Under the replayed text a card shows the tool running now, with its command,
+  live output and the time since the server started it (`started_at` on
+  `tool_start`), plus how many tool calls have finished. The full thread
+  renders from the saved record when the run ends.
+- **Stopped part-way** (Stop, a replacing message, a restart). The chat route
+  follows the run's events (`src/turn_trail.py`), so the saved reply keeps its
+  tool calls and round texts. A tool still running is saved as a stopped card,
+  and the reply ends with a note the next turn reads, for example
+  ``[Turn stopped while `bash` had been running for 23 min: `npm test`. 27 tool
+  calls had finished.]``. Before, only the visible text was kept.
+- **Replaced.** A message sent while the chat's turn runs stops that turn and
+  waits (bounded) for its partial reply to be saved before storing the new
+  message (`agent_runs.stop_and_wait`), so the history reads in order.
 
 ### Fleet lifecycle and navigation
 

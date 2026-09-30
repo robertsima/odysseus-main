@@ -7692,6 +7692,7 @@ async def stream_agent_loop(
                         "full_command": approved_display,
                         "round": 0,
                         "approved": True,
+                        "started_at": time.time(),
                     }
                 )
                 + "\n\n"
@@ -9234,8 +9235,10 @@ async def stream_agent_loop(
                         block.tool_type,
                     )
             else:
+                # started_at: a tab reloaded mid-call shows from it how long
+                # the tool has been running.
                 yield (
-                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num})}\n\n'
+                    f'data: {json.dumps({"type": "tool_start", "tool": block.tool_type, "command": cmd_display, "full_command": full_command, "round": round_num, "started_at": time.time()})}\n\n'
                 )
 
                 # Streaming progress for long-running tools (bash, python).

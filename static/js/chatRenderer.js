@@ -2753,7 +2753,9 @@ export function addMessage(role, content, modelName, metadata) {
           }
           for (const ev of roundTools) {
             if (ev.ask_user && !ev.ask_user.resolved) pendingAskUser = ev.ask_user;
-            const ok = (ev.exit_code === 0 || ev.exit_code == null);
+            // Still running when its turn was stopped (src/turn_trail.py).
+            const stopped = !!ev.stopped;
+            const ok = !stopped && (ev.exit_code === 0 || ev.exit_code == null);
             let outHtml = '';
             if (ev.output && ev.output.trim()) {
               outHtml = `<details class="agent-tool-output"><summary>Output</summary><pre>${esc(ev.output)}</pre></details>`;
@@ -2766,11 +2768,13 @@ export function addMessage(role, content, modelName, metadata) {
             // so it survives reload, matching the live stream.
             const evDiffHtml = (ev.diff && ev.diff.text) ? renderDiffCard(ev.diff) : '';
             const node = document.createElement('div');
-            node.className = 'agent-thread-node' + (ok ? '' : ' error');
+            node.className = 'agent-thread-node' + (ok || stopped ? '' : ' error');
             node.dataset.tool = ev.tool || '';
             // Hide the raw JSON command when a diff says it better (same as live).
             const evCmdHtml = (ev.command && !(ev.diff && ev.diff.text)) ? `<pre class="agent-thread-cmd">${esc(ev.command)}</pre>` : '';
-            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${ok ? '\u2713' : '\u2717'}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${ok ? 'done' : 'failed'}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
+            const evIcon = stopped ? '\u25A0' : (ok ? '\u2713' : '\u2717');
+            const evStatus = stopped ? 'stopped' : (ok ? 'done' : 'failed');
+            node.innerHTML = `<div class="agent-thread-dot"></div><div class="agent-thread-header"><span class="agent-thread-icon">${evIcon}</span><span class="agent-thread-tool">${esc(ev.tool)}</span><span class="agent-thread-status">${evStatus}</span><span class="agent-thread-chevron">\u25B6</span></div><div class="agent-thread-content">${evCmdHtml}${outHtml}${evDiffHtml}</div>`;
             // Click handling is delegated globally \u2014 see chat.js init.
             threadWrap.appendChild(node);
           }

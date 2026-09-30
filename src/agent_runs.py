@@ -354,6 +354,23 @@ async def stop_all(timeout: float = 4.0) -> int:
     return len(tasks)
 
 
+async def stop_and_wait(session_id: str, timeout: float = 10.0) -> bool:
+    """Stop the chat's running turn and wait (bounded) until it has saved.
+
+    For a new message that replaces a running turn. ``start`` cancels the old
+    run too, but only after the new message is in the history, so the old
+    turn's partial reply was stored below the message that replaced it: on
+    2026-09-29 "did you get stuck?" was followed by the stuck turn's own
+    text. Returns whether a turn was running.
+    """
+    run = get_active_run(session_id)
+    if run is None or run.task is None or run.task.done():
+        return False
+    run.task.cancel()
+    await asyncio.wait({run.task}, timeout=timeout)
+    return True
+
+
 def stop(session_id: str, expected_run_id: Optional[str] = None) -> bool:
     """Cancel the matching in-flight run (which saves its partial output).
 
