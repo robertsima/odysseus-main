@@ -130,13 +130,23 @@ def turn_note(record: Dict[str, Any]) -> str:
     )
 
 
-def continue_directive(plan: str) -> str:
-    """Asked of a turn about to end while the checklist it updated has open items."""
+def continue_directive(plan: str, *, has_parent: bool = False) -> str:
+    """Asked of a turn about to end while the checklist it updated has open items.
+
+    ``has_parent``: a worker's open item may need what the chat that started it
+    can grant, so it is offered `Needs parent:` as the self-unblock check does.
+    """
     remaining = open_items(plan)
     shown = "\n".join(f"- [ ] {text}" for text in remaining[:12])
+    needs = (
+        "If an item needs something, end with one line per need: `Needs parent: <what>` for a "
+        "tool, permission or workspace the chat that started you can grant, or `Needs user: "
+        "<what>` for what only a person can give."
+        if has_parent
+        else "If an item needs the user, end with one line per need: `Needs user: <what>`."
+    )
     return (
         "Your task checklist still has open items:\n" + shown + "\n\n"
         "Carry on with the next one now. If they are already done, tick them with `update_plan`; "
-        "if they no longer apply, rewrite or clear the checklist. If an item needs the user, end "
-        "with one line per need: `Needs user: <what>`."
+        "if they no longer apply, rewrite or clear the checklist. " + needs
     )

@@ -37,7 +37,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from src import agent_activity as activity
-from src import agent_control, agent_runs, tool_approvals
+from src import agent_control, agent_runs, open_needs, tool_approvals
 from src.auth_helpers import effective_user
 from src.shell_access import resolve as _shell_mode
 
@@ -227,6 +227,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
             latest = next((e for e in reversed(events)
                            if e.get("kind") in ("tool_start", "tool_result", "message", "status", "run_started")), None)
             settings = get_session_settings(sid)
+            # A turn that ended on `Needs user:` lines is waiting on a person,
+            # not finished (src/open_needs.py); running and approvals win.
+            needs = open_needs.read(settings)
+            if needs and status in ("finished", "idle", "stopped"):
+                status = "needs_input"
             hidden_runs = {str(run_id) for run_id in (settings.get("hidden_agent_runs") or [])}
             own_ids = {c.get("run_id") for c in children}
             children = children + [c for c in delegated.get(sid, []) if c.get("run_id") not in own_ids]
@@ -281,6 +286,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
                              for c in sorted(children, key=lambda c: c.get("started_at") or 0, reverse=True)[:12]],
                 "children_running": len(live_children),
                 "pending_approvals": pending.get(sid, 0),
+                "needs": needs,
                 # `steer_queued` is unchanged and still means "waiting for a
                 # turn to pick it up" — it just no longer has to stand in for
                 # the whole story, because `steer` carries the recent messages
@@ -302,11 +308,13 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "is_current": sid == current_session,
                 "config": config,
             })
-        order = {"waiting_approval": 0, "running": 1, "failed": 2, "finished": 3, "stopped": 4, "idle": 5}
+        order = {"waiting_approval": 0, "needs_input": 0, "running": 1, "failed": 2, "finished": 3,
+                 "stopped": 4, "idle": 5}
         rows.sort(key=lambda r: (order.get(r["status"], 9), -(r.get("latest_ts") or r.get("started_at") or 0)))
         totals = {
             "running": sum(1 for r in rows if r["status"] == "running"),
             "waiting_approval": sum(1 for r in rows if r["status"] == "waiting_approval"),
+            "needs_input": sum(1 for r in rows if r["status"] == "needs_input"),
             "workers_running": sum(r["children_running"] for r in rows),
             "finished_24h": sum(1 for r in rows if r["status"] in ("finished",)),
             "failed_24h": sum(1 for r in rows if r["status"] == "failed"),
@@ -471,6 +479,22 @@ def setup_agents_routes(session_manager) -> APIRouter:
         _require_owned(request, session_id)
         return {"session_id": session_id,
                 **agent_control.steer_status(session_id, limit=max(1, min(int(limit or 50), 200)))}
+
+    @router.get("/sessions/{session_id}/checklist")
+    async def checklist(request: Request, session_id: str):
+        """The chat's task checklist (src/task_checklist.py), for the panel
+        above the composer. The live copy arrives as `plan_update` events; this
+        is what a chat shows when it is opened or reloaded."""
+        _require_owned(request, session_id)
+        from src import task_checklist
+
+        record = task_checklist.load(session_id)
+        if not record:
+            return {"session_id": session_id, "plan": "", "items": [], "done": 0, "total": 0}
+        plan = str(record.get("plan") or "")
+        done, total = task_checklist.counts(plan)
+        return {"session_id": session_id, "plan": plan, "items": task_checklist.items(plan),
+                "done": done, "total": total, "updated_at": record.get("updated_at")}
 
     @router.get("/approvals")
     async def approvals(request: Request):

@@ -111,6 +111,26 @@ async def test_overview_includes_the_current_open_chat_without_agent_history(env
     assert out["rows"][0]["config"]["delegation_policy"] == "explicit"
 
 
+async def test_a_chat_that_ended_on_a_need_is_listed_as_needing_the_user(env, monkeypatch):
+    # It used to read "Finished" while its hand-back said "Needs user: ...".
+    _mgr, eps = env
+    import core.database as db
+
+    with agent_runs.track_external("a1", source="subagent", owner="alice"):
+        pass
+    needs = {"open_needs": {"needs": ["approve publish request 5ca5dd15"], "at": 1.0}}
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: needs if sid == "a1" else {})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    row = out["rows"][0]
+    assert row["status"] == "needs_input"
+    assert row["needs"] == ["approve publish request 5ca5dd15"]
+    assert out["totals"]["needs_input"] == 1
+
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: {})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    assert out["rows"][0]["status"] == "finished" and out["rows"][0]["needs"] == []
+
+
 async def test_overview_round_trips_persona_and_explicit_tool_policy(env, monkeypatch):
     _mgr, eps = env
     import core.database as db

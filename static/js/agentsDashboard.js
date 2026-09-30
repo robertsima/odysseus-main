@@ -26,6 +26,10 @@ const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</
 const STATUS = {
   waiting_approval: ['Needs approval', 'warn'], running: ['Running', 'run'], failed: ['Failed', 'bad'],
   finished: ['Finished', 'ok'], stopped: ['Stopped', 'warn'], idle: ['Idle', ''],
+  // A turn that ended on `Needs user:` lines or a question to the user
+  // (src/open_needs.py). It used to show as Finished, so the one thing the
+  // user had to do sat hidden inside a collapsed hand-back.
+  needs_input: ['Needs your input', 'warn'],
   // A worker that spent its round budget with the task unfinished
   // (agent_control.launch_worker). Its result is partial work to resume from,
   // not a failure — without this entry pill() fell through to the raw status
@@ -150,7 +154,9 @@ async function refresh() {
     if (state.archiveView) overviewArgs.set('archived', 'true');
     const overviewRequest = apiPoll(`/api/agents/overview${overviewArgs.size ? `?${overviewArgs}` : ''}`);
     const [ov, ap] = await Promise.all([overviewRequest, apiPoll('/api/agents/approvals')]);
-    state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
+    const previousRows = state.rows;
+    state.rows = ov.rows || []; state.totals = ov.totals || {};
+    notifyTransitions(previousRows, state.rows); state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
     state.profileProblems = ov.profile_problems || [];
     // A loadout changed elsewhere (the composer's Agents menu, Settings, a
     // loadout edit propagating to its chats) replaced the stored config, but
@@ -236,6 +242,34 @@ function notifyFor(ev) {
   n.onclick = () => { window.focus(); if (d.approval_id) open({ select: ev.session_id }); else window.sessionModule?.selectSession?.(ev.session_id); n.close(); };
   setTimeout(() => n.close(), 15000);
 }
+/** In a hidden tab the feed is closed (see init), so `notifyFor` hears
+ *  nothing: compare two overview polls instead and announce what changed
+ *  that the user has to act on or was waiting for. Rows the tab never saw
+ *  running are left alone, so opening the page does not replay history. */
+const TRANSITIONS = {
+  needs_input: (r) => ['Needs your input', `${r.name}: ${(r.needs || [])[0] || 'waiting for you'}`],
+  waiting_approval: (r) => ['Approval needed', `${r.name} is waiting for an approval`],
+  finished: (r) => ['Agent finished', r.name],
+  failed: (r) => ['Agent failed', r.name],
+};
+function notifyTransitions(before, after) {
+  if (!document.hidden || !before?.length) return;
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  const was = new Map(before.map((r) => [r.session_id, r.status]));
+  for (const r of after) {
+    const make = TRANSITIONS[r.status];
+    const prev = was.get(r.session_id);
+    if (!make || !prev || prev === r.status) continue;
+    if ((r.status === 'finished' || r.status === 'failed') && prev !== 'running') continue;
+    const key = `st:${r.session_id}:${r.status}:${r.finished_at || ''}`;
+    if (_notified.has(key)) continue;
+    _notified.add(key);
+    const [title, body] = make(r);
+    const n = new Notification(title, { body: String(body).slice(0, 180), tag: key });
+    n.onclick = () => { window.focus(); window.sessionModule?.selectSession?.(r.session_id); n.close(); };
+    setTimeout(() => n.close(), 15000);
+  }
+}
 function disconnect() { if (state.es) { try { state.es.close(); } catch (_) {} state.es = null; } }
 let _refreshTimer = null;
 function scheduleRefresh() { if (_refreshTimer) return; _refreshTimer = setTimeout(() => { _refreshTimer = null; refresh(); }, 400); }
@@ -255,8 +289,10 @@ async function loadHistory(sid) {
     state.events.set(sid, list);
   }
 }
+/** Rows waiting on the user: tool approvals plus stated needs. */
+function needsYou(r) { return r.status === 'waiting_approval' || r.status === 'needs_input'; }
 function updateBadges() {
-  const attention = (state.totals.waiting_approval || 0);
+  const attention = (state.totals.waiting_approval || 0) + (state.totals.needs_input || 0);
   const running = (state.totals.running || 0);
   const badge = $('rail-agents-badge');
   if (badge) {
@@ -282,9 +318,9 @@ async function loadCatalog() {
 // The six status groups this replaced put "Failed / Finished / Stopped / Workers
 // & recent" under four separate headers that all mean "not running".
 const BUCKETS = [
-  ['attention', 'Needs you', (r) => r.status === 'waiting_approval'],
+  ['attention', 'Needs you', (r) => needsYou(r)],
   ['active', 'Active', (r) => r.status === 'running'],
-  ['recent', 'Recent', (r) => r.status !== 'waiting_approval' && r.status !== 'running'],
+  ['recent', 'Recent', (r) => !needsYou(r) && r.status !== 'running'],
 ];
 
 /** Whether the Workbench shortcut is worth offering. Workbench is admin-gated
@@ -307,7 +343,7 @@ function liveHtml() {
 
 function triageHtml() {
   const t = state.totals;
-  const counts = { attention: t.waiting_approval || 0, active: t.running || 0, recent: null };
+  const counts = { attention: (t.waiting_approval || 0) + (t.needs_input || 0), active: t.running || 0, recent: null };
   const seg = BUCKETS.map(([key, label]) => {
     const n = counts[key];
     const on = state.bucket === key;
@@ -486,7 +522,7 @@ function descendants(row, kids, seen = new Set([row.session_id])) {
   });
   return out;
 }
-function isLiveAgent(row) { return row.status === 'running' || row.status === 'waiting_approval'; }
+function isLiveAgent(row) { return row.status === 'running' || needsYou(row); }
 /** A card plus the workers under it: live (or selected) ones always, the rest
  *  only while the parent is unfolded. */
 function treeHtml(row, kids, seen = new Set()) {
@@ -775,15 +811,19 @@ function rowHtml(r, nest = {}) {
   ].filter(Boolean).join(' · ');
   const blocked = r.pending_approvals
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
+  // What it is waiting for, in its own words (the first `Needs user:` line).
+  const need = r.status === 'needs_input' && (r.needs || []).length
+    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''}</div>` : '';
   const children = (r.children || []).slice(0, 5);
   const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
-  return `<div class="ag-row ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${status === 'waiting_approval' ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
+  return `<div class="ag-row ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${needsYou(r) ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
     <div class="ag-card-beacon" aria-hidden="true"></div>
     <div class="ag-card-avatar">${robotHtml(r)}</div>
     <div class="ag-card-copy">
       <div class="ag-row-top"><button type="button" class="ag-row-name ag-card-select" data-ag="select-agent" data-sid="${esc(r.session_id)}" aria-pressed="${sel ? 'true' : 'false'}" title="Inspect ${esc(r.name)}">${esc(r.name)}</button>${dur ? `<span class="ag-row-dur" data-started="${r.started_at}">${esc(dur)}</span>` : ''}</div>
       <div class="ag-card-status">${pill(status)}${blocked}</div>
+      ${need}
       <div class="ag-row-sub">${meta ? `<span class="ag-row-meta-inline">${meta}</span>` : ''}${r.latest ? `<span class="ag-row-latest" title="${esc(r.latest)}">${esc(latestText(r))}</span>` : '<span class="ag-row-latest">Standing by</span>'}</div>
       ${crew}
       ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
@@ -1694,9 +1734,18 @@ function init() {
   refresh();
   // Every 5 s while the room is open, 20 s while it is closed. The interval
   // used to be read once, at load, when the room was always closed.
+  // A hidden tab polls once a minute, and only when it may notify: that is
+  // how a worker finishing (or stopping on a need) reaches a user who left
+  // the tab, without holding a connection open (notifyTransitions).
+  let lastHiddenPoll = 0;
   const poll = () => {
     state.pollTimer = setTimeout(() => {
       if (document.visibilityState === 'visible') refresh();
+      else if ('Notification' in window && Notification.permission === 'granted'
+               && Date.now() - lastHiddenPoll >= 60000) {
+        lastHiddenPoll = Date.now();
+        refresh();
+      }
       poll();
     }, state.open ? 5000 : 20000);
   };
@@ -1704,6 +1753,9 @@ function init() {
   let hiddenTimer = null;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
+      // The feed stays up for 30 s and notifies meanwhile; the hidden poll
+      // takes over a minute after hiding, so the two never announce twice.
+      lastHiddenPoll = Date.now();
       if (!hiddenTimer) hiddenTimer = setTimeout(() => { hiddenTimer = null; if (document.hidden) disconnect(); }, 30000);
       return;
     }

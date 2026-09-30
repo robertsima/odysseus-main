@@ -246,16 +246,27 @@ export function handleUIControl(uiData) {
   }
 }
 
+/** The first `Needs user: <what>` line of a reply (the agent's stop protocol), or ''. */
+export function firstUserNeed(text) {
+  var m = /^[\W_]{0,4}needs\s+user\s*[*_]*\s*[:\-—]\s*[*_]*\s*(.+?)\s*$/im.exec(String(text || ''));
+  return m ? m[1] : '';
+}
+
 /**
- * Notify user when a background stream completes.
+ * Notify the user when a stream completes in a hidden tab or another chat.
+ * `text` is the reply: one that ends on a need says what is needed.
  */
-export function notifyStreamComplete(sessionId, query) {
+export function notifyStreamComplete(sessionId, query, text) {
   var isHidden = document.hidden;
   var isOtherSession = sessionModule && sessionModule.getCurrentSessionId() !== sessionId;
   if (!isHidden && !isOtherSession) return;
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
-  var body = query ? 'Response to "' + query.substring(0, 60) + '" is ready' : 'Your chat response has completed';
-  var notification = new Notification('Response Complete', {
+  var need = firstUserNeed(text);
+  var title = need ? 'Needs your input' : 'Response Complete';
+  var body = need
+    ? need.substring(0, 140)
+    : (query ? 'Response to "' + query.substring(0, 60) + '" is ready' : 'Your chat response has completed');
+  var notification = new Notification(title, {
     body: body,
     tag: 'stream-' + sessionId,
   });

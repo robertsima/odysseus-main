@@ -41943,6 +41943,7 @@ body.theme-frosted .modal {
 .workbench-diff-content,
 .agent-run-card,
 .agent-strip,
+.task-checklist,
 .chat-status-line,
 .chat-settings-panel,
 .approval-card,
@@ -42220,6 +42221,27 @@ table.wb-diff tr.wb-hunk:first-child td.wb-hunk-cell { border-top: 0; }
 /* Agents strip — the chat's live sub-agents / Claude Code jobs / background
    jobs, directly above the composer (workbench.js renderAgentStrip). */
 .agent-strip { max-width: 800px; width: 100%; margin: 0 auto 6px; padding: 0 8px; box-sizing: border-box; font-size: 12px; }
+/* The agent's task checklist for the open chat (taskChecklist.js). */
+.task-checklist { max-width: 800px; width: 100%; margin: 0 auto 6px; padding: 0 8px; box-sizing: border-box; font-size: 12px; }
+.task-checklist[hidden] { display: none; }
+.tc-head { display: flex; align-items: center; padding: 3px 4px; background: var(--panel); border: 1px solid var(--wb-line); border-radius: var(--wb-r, 8px); }
+.task-checklist .tc-head:has(+ .tc-list:not([hidden])) { border-radius: var(--wb-r, 8px) var(--wb-r, 8px) 0 0; }
+.tc-toggle { display: flex; flex: 1 1 auto; min-width: 0; align-items: center; gap: 7px; height: 22px; margin: 0; padding: 0 6px; border: 0; border-radius: var(--wb-r-sm, 6px); background: transparent; color: var(--fg); font: inherit; font-size: 12px; cursor: pointer; text-align: left; }
+.tc-toggle:hover { background: var(--wb-hover); }
+.tc-caret { display: inline-block; transition: transform 0.12s ease; color: var(--wb-muted); }
+.tc-toggle[aria-expanded="true"] .tc-caret { transform: rotate(90deg); }
+.tc-label { font-weight: 600; }
+.tc-count { flex: none; color: var(--wb-muted); font-variant-numeric: tabular-nums; }
+.tc-now { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wb-muted); }
+.tc-list { list-style: none; margin: 0; padding: 4px 8px 6px; max-height: 180px; overflow-y: auto; background: var(--panel); border: 1px solid var(--wb-line); border-top: 0; border-radius: 0 0 var(--wb-r, 8px) var(--wb-r, 8px); }
+.tc-list[hidden] { display: none; }
+.tc-item { display: flex; gap: 8px; padding: 2px 0; line-height: 1.4; }
+.tc-mark { flex: none; width: 12px; text-align: center; color: var(--wb-muted); }
+.tc-text { min-width: 0; overflow-wrap: anywhere; }
+.tc-done .tc-text { color: var(--wb-muted); text-decoration: line-through; }
+.tc-done .tc-mark { color: var(--wb-ok); }
+.tc-current .tc-text { font-weight: 600; }
+.tc-current .tc-mark { color: var(--wb-run); }
 .agent-strip[hidden] { display: none; }
 .agent-strip > * { background: var(--panel); }
 .agent-strip-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 4px; border: 1px solid var(--wb-line); border-radius: var(--wb-r) var(--wb-r) 0 0; }
@@ -42457,6 +42479,8 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-row-meta-inline { flex: 0 0 auto; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--wb-faint); font-family: var(--wb-mono); }
 .ag-row-latest { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--wb-mono); font-size: 11px; color: var(--wb-muted); }
 .ag-row-attn { flex: 0 0 auto; color: var(--wb-warn); font-weight: 600; }
+.ag-row-need { margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--wb-warn); }
+.ag-row-need-label { font-weight: 600; }
 .ag-row.attn { border-color: color-mix(in srgb, var(--wb-warn) 55%, var(--border)); box-shadow: inset 2px 0 0 var(--wb-warn); }
 .ag-row.attn.active { box-shadow: inset 2px 0 0 var(--wb-warn), inset 0 0 0 1px color-mix(in srgb, var(--wb-accent) 35%, transparent); }
 .ag-group-attn { margin-bottom: 4px; }

@@ -3191,7 +3191,7 @@ function _personaNameForTurn() {
                 bgDone.accumulated = accumulated;
                 if (_isBg) {
                   try {
-                    _notifyStreamComplete(streamSessionId, streamQuery);
+                    _notifyStreamComplete(streamSessionId, streamQuery, accumulated);
                     _insertStreamDoneToast(streamSessionId, streamQuery);
                   } catch (toastErr) {
                     console.warn('[bg-stream] Toast/notification error:', toastErr);
@@ -3209,6 +3209,13 @@ function _personaNameForTurn() {
                 // will detect 'completed' and reload history cleanly
                 break;
               }
+              // The chat on screen finished while its tab was hidden: say so
+              // (notifyStreamComplete does nothing when the tab is visible).
+              // Only background streams notified before, so a long agent turn
+              // in a tab the user had left finished silently.
+              try {
+                _notifyStreamComplete(streamSessionId, streamQuery, accumulated);
+              } catch (_) {}
               // Force-close thinking if still open (model never output boundary)
               if (isThinking) {
                 isThinking = false;
@@ -4208,10 +4215,16 @@ function _personaNameForTurn() {
 
               } else if (json.type === 'plan_update') {
                 if (_isBg) continue;
-                // Agent wrote back to the plan (ticked a step / revised). Update
-                // the stored plan + live-refresh the docked plan window.
+                // Agent wrote back to the plan (ticked a step / revised). Keep
+                // the stored plan for Execute, and show it live in the
+                // checklist above the composer (taskChecklist.js).
                 const _pu = (json.data && json.data.plan) ? json.data.plan : '';
                 if (_pu) _setStoredPlan(_pu);
+                try {
+                  document.dispatchEvent(new CustomEvent('odysseus:plan-update', {
+                    detail: { sessionId: sessionModule.getCurrentSessionId(), plan: _pu },
+                  }));
+                } catch (_) {}
 
               } else if (json.type === 'agent_step') {
                 _closeOpenThinkingMarkup(_isBg);
