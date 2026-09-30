@@ -261,3 +261,13 @@ def test_a_workspace_the_sandbox_accepts_is_inherited_unchanged(checkouts, monke
     pf = wp.run_preflight("Implement the alerts slice in other-repo", inherited_workspace=checkouts[0])
     assert pf.workspace == checkouts[0]
     assert pf.workspace_source == "parent chat"
+
+
+def test_no_workspace_requirement_overrides_the_repository_wording_heuristic(checkouts):
+    task = "Continue the mockup and read the icons in the source code for reference"
+    assert not wp.run_preflight(task).ok
+    pf = wp.run_preflight(task, requires=["no_workspace"])
+    assert pf.ok and not pf.needs_workspace and not pf.needs_write
+    assert not wp.run_preflight(task, requires=["no_workspace", "workspace"]).ok
+    refusal = wp.run_preflight(task).blocked_payload()["error"]
+    assert "no_workspace" in refusal

@@ -34,3 +34,17 @@ def test_errors_come_back_as_instructions_not_exceptions(monkeypatch):
     assert "missing required argument(s): page_id, nodes" in out.text
     (out,) = asyncio.run(server.call_tool("nope", {}))
     assert "Unknown tool" in out.text
+
+
+def test_skill_naming_connected_mcp_tools_is_not_reported_as_naming_nothing():
+    from src.skill_toolsets import skill_declared_tools
+
+    class Manager:
+        def get_all_tools(self):
+            return [{"qualified_name": "mcp__penpot_studio__build_design", "server_id": "penpot_studio",
+                     "server_name": "Built-in: Penpot Studio"}]
+
+    skill = {"requires_toolsets": ["mcp__penpot_studio__build_design", "mcp__gone__tool"]}
+    tools, unknown = skill_declared_tools([skill], set(), Manager())
+    assert tools == {"mcp__penpot_studio__build_design"}
+    assert unknown == {"mcp__gone__tool"}

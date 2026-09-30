@@ -68,6 +68,11 @@ def skill_declared_tools(skills, disabled_tools, mcp_mgr=None) -> Tuple[Set[str]
     except Exception:
         known = set()
     mcp_index = _mcp_toolset_index(mcp_mgr)
+    # Exact qualified MCP tool names ("mcp__penpot_studio__build_design"):
+    # known_tool_names() lists native tools only, so these fell through to
+    # "names nothing" (2026-09-30: the Penpot designer's skill preflight read
+    # DEGRADED although every tool it named was connected and callable).
+    mcp_tool_names: Set[str] = set().union(*mcp_index.values()) if mcp_index else set()
     tools: Set[str] = set()
     unknown: Set[str] = set()
     disabled = disabled_tools or set()
@@ -75,7 +80,7 @@ def skill_declared_tools(skills, disabled_tools, mcp_mgr=None) -> Tuple[Set[str]
         for name in (skill.get("requires_toolsets") or []):
             if not name or name in disabled:
                 continue
-            if not known or name in known:
+            if not known or name in known or name in mcp_tool_names:
                 tools.add(name)
                 continue
             key = str(name).strip().casefold()

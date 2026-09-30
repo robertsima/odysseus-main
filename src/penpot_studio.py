@@ -311,6 +311,77 @@ def _collect_text_nodes(nodes: Iterable[Any], out: List[dict], depth: int = 0) -
         _collect_text_nodes(node.get("children"), out, depth + 1)
 
 
+_COMMON_KEYS = {"type", "name", "x", "y", "opacity", "shadow", "blur"}
+_BOX = {"w", "h", "width", "height"}
+_SHAPES = ("frame", "board", "rect", "rectangle", "ellipse", "circle")
+_ALLOWED_KEYS = {
+    "frame": _COMMON_KEYS | _BOX | {"fill", "fill_opacity", "radius", "stroke", "clip", "children"},
+    "rect": _COMMON_KEYS | _BOX | {"fill", "fill_opacity", "radius", "stroke"},
+    "ellipse": _COMMON_KEYS | _BOX | {"size", "fill", "fill_opacity", "stroke"},
+    "text": _COMMON_KEYS | {"text", "size", "weight", "family", "color", "align", "valign", "w", "width",
+                            "line_height", "letter_spacing", "uppercase", "italic"},
+    "icon": _COMMON_KEYS | _BOX | {"icon", "svg", "url", "size", "color", "stroke_color", "recolor"},
+    "path": _COMMON_KEYS | _BOX | {"d", "viewbox", "color", "stroke_color", "recolor"},
+    "group": _COMMON_KEYS | {"children"},
+}
+_ALLOWED_KEYS["board"] = _ALLOWED_KEYS["frame"]
+_ALLOWED_KEYS["rectangle"] = _ALLOWED_KEYS["rect"]
+_ALLOWED_KEYS["circle"] = _ALLOWED_KEYS["ellipse"]
+_ALLOWED_KEYS["svg"] = _ALLOWED_KEYS["icon"]
+
+_ALIASES = {
+    "font_size": "size", "fontsize": "size", "font_family": "family", "font": "family", "fontfamily": "family",
+    "font_weight": "weight", "fontweight": "weight", "text_align": "align", "textalign": "align",
+    "fill_color": "fill", "background": "fill", "text_color": "color", "font_color": "color",
+    "border_radius": "radius", "corner_radius": "radius", "lineheight": "line_height",
+    "letterspacing": "letter_spacing", "content": "text", "view_box": "viewbox", "icon_name": "icon",
+    "stroke_colour": "stroke_color", "colour": "color",
+}
+_CAMEL = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def normalize_nodes(nodes: Any, ignored: List[str], depth: int = 0) -> Any:
+    """Accept the spellings a model reaches for (fontSize, font_family, ...) and
+    report the fields that mean nothing, instead of silently dropping them.
+
+    On 2026-09-30 a designer's text came out as Work Sans 16px because its
+    style fields were not ones the builder reads, and nothing said so.
+    """
+    if not isinstance(nodes, list):
+        return nodes
+    out = []
+    for raw in nodes:
+        if not isinstance(raw, dict) or depth > MAX_DEPTH:
+            out.append(raw)
+            continue
+        node: Dict[str, Any] = {}
+        for key, value in raw.items():
+            k = _CAMEL.sub("_", str(key)).lower()
+            node[_ALIASES.get(k, k)] = value
+        kind = str(node.get("type", "")).lower()
+        if node.pop("font_style", None) == "italic":
+            node["italic"] = True
+        if node.pop("text_transform", None) == "uppercase":
+            node["uppercase"] = True
+        if kind in ("icon", "svg", "path") and "fill" in node and "color" not in node:
+            node["color"] = node.pop("fill")
+        if kind in _SHAPES:
+            width = node.pop("stroke_width", None)
+            scolor = node.pop("stroke_color", None)
+            if "stroke" not in node and (scolor or width):
+                node["stroke"] = {"color": scolor or "#000000", "width": width or 2}
+        allowed = _ALLOWED_KEYS.get(kind)
+        if allowed:
+            extra = sorted(k for k in node if k not in allowed)
+            if extra:
+                label = node.get("name") or node.get("text") or ""
+                ignored.append(f"{kind} {label!r}: ignored unknown field(s) {', '.join(extra)}".replace(" ''", ""))
+        if isinstance(node.get("children"), list):
+            node["children"] = normalize_nodes(node["children"], ignored, depth + 1)
+        out.append(node)
+    return out
+
+
 class _Builder:
     """Turns a declarative node tree into ``add-obj`` changes."""
 
@@ -601,6 +672,8 @@ async def build_tree(client: PenpotClient, file_id: str, page_id: str,
         raise PenpotError("'nodes' must be a non-empty list")
     file = await client.get_file(file_id)
     parent, origin = _find_parent(file, page_id, parent_id)
+    ignored: List[str] = []
+    nodes = normalize_nodes(nodes, ignored)
     texts: List[dict] = []
     _collect_text_nodes(nodes, texts)
     measured: Dict[int, penpot_text.Measured] = {}
@@ -618,7 +691,7 @@ async def build_tree(client: PenpotClient, file_id: str, page_id: str,
         "text_measured_in_browser": bool(texts) and builder.inexact_text == 0,
         "warnings": ([f"{builder.inexact_text} text node(s) were sized by estimate (no browser or font "
                       "available to measure); they may look stretched or squeezed until opened in Penpot"]
-                     if builder.inexact_text else []) + [f"svg: {n}" for n in builder.notes],
+                     if builder.inexact_text else []) + [f"svg: {n}" for n in builder.notes] + ignored,
     }
 
 
@@ -659,16 +732,42 @@ async def _get(url: str, *, params: Optional[dict] = None, timeout: float = 20.0
     return resp
 
 
-async def search_icons(query: str, prefix: Optional[str] = None, limit: int = 24) -> dict:
-    """Search open icon sets. Returns ids like ``game-icons:spartan-helmet`` plus
-    each set's licence so the designer can attribute correctly."""
-    params: Dict[str, Any] = {"query": query, "limit": max(1, min(int(limit), 64))}
+async def _search_once(query: str, prefix: Optional[str], limit: int) -> dict:
+    params: Dict[str, Any] = {"query": query, "limit": limit}
     if prefix:
         params["prefix"] = prefix
-    data = (await _get(f"{ICONIFY_API}/search", params=params)).json()
-    collections = data.get("collections") or {}
+    return (await _get(f"{ICONIFY_API}/search", params=params)).json()
+
+
+async def search_icons(query: str, prefix: Optional[str] = None, limit: int = 24) -> dict:
+    """Search open icon sets. Returns ids like ``game-icons:spartan-helmet`` plus
+    each set's licence so the designer can attribute correctly.
+
+    Iconify matches every word, so "greek soldier helmet" finds nothing while
+    "helmet" finds dozens (the 2026-09-30 designer concluded there were no
+    distinct helmet profiles). When a multi-word query is thin, each word is
+    searched too and ids matching more words come first.
+    """
+    limit = max(1, min(int(limit), 64))
+    data = await _search_once(query, prefix, limit)
+    icons = list(data.get("icons", []))
+    collections = dict(data.get("collections") or {})
+    total = data.get("total", 0)
+    words = [w for w in re.split(r"[\s,]+", query.lower()) if len(w) > 2]
+    broadened = False
+    if len(icons) < limit and len(words) > 1:
+        found = {i: sum(w in i for w in words) for i in icons}
+        for word in words:
+            extra = await _search_once(word, prefix, limit)
+            collections.update(extra.get("collections") or {})
+            for i in extra.get("icons", []):
+                found.setdefault(i, sum(w in i for w in words))
+        icons = sorted(found, key=lambda i: -found[i])[:limit]
+        broadened = True
     sets = {}
     for pfx, info in collections.items():
+        if not any(i.startswith(pfx + ":") for i in icons):
+            continue
         lic = info.get("license") or {}
         author = info.get("author") or {}
         sets[pfx] = {
@@ -677,7 +776,11 @@ async def search_icons(query: str, prefix: Optional[str] = None, limit: int = 24
             "attribution_required": _needs_attribution(lic),
             "monotone": not info.get("palette", False),
         }
-    return {"icons": data.get("icons", []), "total": data.get("total", 0), "sets": sets}
+    out = {"icons": icons, "total": total, "sets": sets}
+    if broadened:
+        out["note"] = ("no icon matched every word; results match at least one word, best matches first. "
+                       "Try single words, or pass 'set' (e.g. 'game-icons') to browse one library.")
+    return out
 
 
 def _needs_attribution(lic: dict) -> bool:
@@ -692,7 +795,14 @@ async def fetch_icon(icon: str) -> Tuple[str, Optional[str]]:
         raise PenpotError(f"icon {icon!r} must look like 'game-icons:spartan-helmet' "
                           "(use penpot_search_icons to find ids)")
     prefix, name = m.groups()
-    svg = (await _get(f"{ICONIFY_API}/{prefix}/{name}.svg")).text
+    try:
+        svg = (await _get(f"{ICONIFY_API}/{prefix}/{name}.svg")).text
+    except PenpotError as exc:
+        if "404" in str(exc):
+            raise PenpotError(
+                f"icon {icon} does not exist. Icon ids are exact: use search_icons "
+                f"(query '{name.split('-')[-1]}', set '{prefix}') and copy an id it returns.") from exc
+        raise
     if "<svg" not in svg:
         raise PenpotError(f"icon {icon} does not exist (Iconify returned no drawing)")
     credit = None

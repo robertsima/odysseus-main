@@ -23,7 +23,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set
 
 READ_TOOLS = ("get_workspace", "read_file", "grep", "glob", "ls")
 WRITE_TOOLS = ("write_file", "edit_file", "apply_patch")
-REQUIREMENTS = ("workspace", "write", "read_only")
+REQUIREMENTS = ("workspace", "write", "read_only", "no_workspace")
 
 # Unmistakable LOCAL repository work: code, tests, git, paths, file names.
 #
@@ -398,8 +398,19 @@ def run_preflight(
         })
         return pf
     read_only = "read_only" in wanted
-    pf.needs_write = "write" in wanted or (not read_only and task_needs_write(task))
-    pf.needs_workspace = "workspace" in wanted or pf.needs_write or task_needs_workspace(task)
+    if {"workspace", "no_workspace"} <= wanted:
+        pf.problems.append({
+            "code": "CONFLICTING_REQUIREMENT",
+            "message": "requires lists both 'workspace' and 'no_workspace'; pick one",
+        })
+        return pf
+    # An explicit "no_workspace" overrides the wording heuristic: a design or
+    # research task can mention code, paths or repositories without needing a
+    # checkout (2026-09-30: a Penpot task was refused as "repository work").
+    no_workspace = "no_workspace" in wanted
+    pf.needs_write = "write" in wanted or (not read_only and not no_workspace and task_needs_write(task))
+    pf.needs_workspace = "workspace" in wanted or pf.needs_write or (
+        not no_workspace and task_needs_workspace(task))
     unavailable = set(unavailable_tools or ())
 
     if explicit_workspace:
@@ -447,7 +458,8 @@ def run_preflight(
                 "code": "WORKSPACE_REQUIRED",
                 "message": ("the task works on a repository but no workspace is set; "
                             + ("pass workspace as one of: " + ", ".join(checkouts[:8]) if checkouts else
-                               "no checkout is available under the configured repository roots")),
+                               "no checkout is available under the configured repository roots")
+                            + "; if the task needs no files (design, research), pass requires: ['no_workspace']"),
                 "candidates": checkouts,
                 "required_fields": ["workspace"],
                 "next_action": ({"retry_with": {"workspace": checkouts[0]}, "choose_from": checkouts}

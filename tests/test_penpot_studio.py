@@ -251,3 +251,47 @@ def test_hostnames_resolving_to_private_addresses_are_refused(monkeypatch):
         with pytest.raises(ps.PenpotError, match="private"):
             run(ps._assert_public(url))
     run(ps._assert_public("https://ok.example/x.svg"))
+
+
+def test_model_style_field_spellings_are_accepted_and_unknown_fields_reported():
+    client = FakeClient()
+    result = run(ps.build_tree(client, "f1", PAGE, [
+        {"type": "frame", "w": 200, "h": 100, "strokeColor": "#000", "strokeWidth": 3, "children": [
+            {"type": "text", "text": "Hi", "fontSize": 30, "fontFamily": "Space Grotesk", "fontWeight": 800,
+             "textColor": "#ff0000", "letterSpaceing": 2},
+        ]}]))
+    board, text = (c["obj"] for c in client.applied[0])
+    assert board["strokes"][0]["stroke-width"] == 3.0
+    leaf = text["position-data"][0]
+    assert leaf["font-size"] == "30" and leaf["font-family"] == "Space Grotesk"
+    assert leaf["font-weight"] == "800" and leaf["fills"][0]["fill-color"] == "#ff0000"
+    assert any("letter_spaceing" in w and "ignored" in w for w in result["warnings"])
+
+
+def test_thin_multi_word_icon_search_is_broadened_word_by_word(monkeypatch):
+    calls = []
+
+    async def fake_once(query, prefix, limit):
+        calls.append(query)
+        table = {"greek helmet": {"icons": [], "collections": {}},
+                 "greek": {"icons": ["game-icons:greek-temple"],
+                           "collections": {"game-icons": {"name": "Game Icons", "license": {"title": "CC BY 3.0"}}}},
+                 "helmet": {"icons": ["game-icons:helmet", "game-icons:greek-helmet"],
+                            "collections": {"game-icons": {"name": "Game Icons", "license": {"title": "CC BY 3.0"}}}}}
+        return table[query]
+
+    monkeypatch.setattr(ps, "_search_once", fake_once)
+    result = run(ps.search_icons("greek helmet"))
+    assert calls == ["greek helmet", "greek", "helmet"]
+    assert result["icons"][0] == "game-icons:greek-helmet"  # matches both words: first
+    assert "note" in result and result["sets"]["game-icons"]["attribution_required"] is True
+
+
+def test_missing_icon_error_says_to_search(monkeypatch):
+    async def gone(url, **kw):
+        raise ps.PenpotError(f"{url} answered HTTP 404")
+
+    monkeypatch.undo()  # use the real fetch_icon, not the autouse fake
+    monkeypatch.setattr(ps, "_get", gone)
+    with pytest.raises(ps.PenpotError, match="search_icons"):
+        run(ps.fetch_icon("game-icons:centurion-helmet"))
