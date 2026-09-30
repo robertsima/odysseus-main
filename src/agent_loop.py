@@ -5893,6 +5893,11 @@ async def stream_agent_loop(
         if tool_policy.disable_mcp:
             mcp_mgr = None
     guide_only = bool(tool_policy and tool_policy.mode == "guide_only")
+    if session_id and not guide_only and not _is_teacher_run:
+        # A new turn means the last one's wait for a person is over; the end
+        # of this turn records a fresh need if there still is one.
+        from src import open_needs as _open_needs
+        _open_needs.clear(session_id)
     public_blocked_tools = blocked_tools_for_owner(owner)
     if delegated_credential:
         # owner is the admin who minted the token, so the call above returns

@@ -57,9 +57,39 @@ def record(session_id: Optional[str], final_text: Optional[str]) -> List[str]:
     return needs
 
 
-def read(settings: Optional[Dict[str, Any]]) -> List[str]:
-    """The needs stored in a chat's settings (empty when there are none)."""
+def clear(session_id: Optional[str]) -> bool:
+    """Drop the chat's recorded needs. True when there was something to drop.
+
+    Called when a new turn STARTS in the chat: whatever it was waiting on has
+    been answered (or overtaken), and a turn that still needs a person records
+    that again when it ends. Clearing only at the end left a worker that
+    stopped, errored or was cancelled mid-turn showing "Needs your input" for
+    good after the person had answered (2026-09-30).
+    """
+    if not session_id:
+        return False
+    try:
+        from core.database import get_session_settings, update_session_settings
+
+        if not (get_session_settings(session_id) or {}).get(KEY):
+            return False
+        update_session_settings(session_id, {KEY: None})
+        return True
+    except Exception:
+        logger.debug("open needs: could not clear for %s", session_id, exc_info=True)
+        return False
+
+
+def read(settings: Optional[Dict[str, Any]], since: Optional[float] = None) -> List[str]:
+    """The needs stored in a chat's settings (empty when there are none).
+
+    ``since`` is when the chat's latest turn began: needs recorded before it
+    were overtaken by that turn (answered, or the turn died before it could
+    clear them), so they are not open.
+    """
     record_ = (settings or {}).get(KEY)
     if not isinstance(record_, dict):
+        return []
+    if since and (record_.get("at") or 0) and float(record_["at"]) < float(since):
         return []
     return [str(item) for item in (record_.get("needs") or []) if str(item).strip()][:MAX_NEEDS]

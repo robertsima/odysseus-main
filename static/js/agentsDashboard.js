@@ -870,7 +870,7 @@ function rowHtml(r, nest = {}) {
     ? `<span class="ag-row-attn">${r.pending_approvals} approval${r.pending_approvals === 1 ? '' : 's'}</span>` : '';
   // What it is waiting for, in its own words (the first `Needs user:` line).
   const need = r.status === 'needs_input' && (r.needs || []).length
-    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''}</div>` : '';
+    ? `<div class="ag-row-need" title="${esc(r.needs.join('\n'))}"><span class="ag-row-need-label">Needs:</span> ${esc(r.needs[0])}${r.needs.length > 1 ? ` (+${r.needs.length - 1})` : ''} <button type="button" class="wb-btn wb-btn-sm wb-btn-ghost ag-need-clear" data-ag="clear-needs" data-sid="${esc(r.session_id)}" title="Already answered (in another chat, or outside Odysseus)? Clear this request">Mark answered</button></div>` : '';
   const children = (r.children || []).slice(0, 5);
   const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
@@ -1510,6 +1510,11 @@ async function onClick(e) {
       state.events.delete(b.dataset.sid);
       state.selected = null;
       uiModule.showToast('Restored — available in chat history', 'success');
+      await refresh();
+    } else if (act === 'clear-needs') {
+      b.disabled = true;
+      await post(`/api/agents/sessions/${encodeURIComponent(b.dataset.sid)}/needs/clear`);
+      uiModule.showToast('Marked answered', 'success');
       await refresh();
     } else if (act === 'hide-run') {
       b.disabled = true;

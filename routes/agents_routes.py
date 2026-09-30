@@ -44,6 +44,20 @@ from src.shell_access import resolve as _shell_mode
 logger = logging.getLogger(__name__)
 
 _RECENT_S = 24 * 3600
+
+_ACTIVITY_TO_RUN_STATUS = {"running": "running", "completed": "done", "done": "done", "failed": "error",
+                           "error": "error", "blocked": "error", "cancelled": "stopped", "stopped": "stopped"}
+
+
+def _run_from_activity(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """A chat-run-shaped record for a chat known only from its activity record."""
+    if not rec:
+        return {}
+    status = _ACTIVITY_TO_RUN_STATUS.get(str(rec.get("status") or ""))
+    if not status:
+        return {}
+    return {"status": status, "started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
+            "source": rec.get("source")}
 _LIVE_SOURCES = {"session", "claude_code", "bg_job", "pipeline", "worktree"}
 
 
@@ -201,6 +215,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
         # under the parent). They are listed, but do not make the parent
         # itself read as running.
         delegated: Dict[str, list] = {}
+        # Chats that other chats started (a `send_to_session` sub-agent, a
+        # loadout worker), keyed by the child: who started it, and its latest
+        # run. A child chat whose own run record had aged out of memory was
+        # dropped from the fleet while its parent's "Child workers" list still
+        # named it, so the tree under the parent was missing agents that the
+        # Overview tab listed (2026-09-30).
+        link_parent: Dict[str, str] = {}
+        target_runs: Dict[str, Dict[str, Any]] = {}
         for rec in activity.list_runs(limit=400):
             sid = rec.get("session_id")
             if rec.get("source") == "odysseus":
@@ -213,6 +235,14 @@ def setup_agents_routes(session_manager) -> APIRouter:
             parent_sid = (rec.get("summary") or {}).get("parent_session")
             if parent_sid and parent_sid != sid and parent_sid in owned:
                 delegated.setdefault(parent_sid, []).append(rec)
+            target = str((rec.get("summary") or {}).get("target_session") or "")
+            if target and target in owned:
+                starter = parent_sid if parent_sid and parent_sid != target else (sid if sid != target else None)
+                if starter and starter in owned:
+                    link_parent.setdefault(target, starter)
+                    prev = target_runs.get(target)
+                    if prev is None or (rec.get("started_at") or 0) > (prev.get("started_at") or 0):
+                        target_runs[target] = rec
         pending: Dict[str, int] = {}
         for rec in tool_approvals.tool_approval_store.pending_for_sessions(owner=user, session_ids=set(owned)):
             pending[rec.session_id] = pending.get(rec.session_id, 0) + 1
@@ -222,7 +252,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
         profiles_by_name = {p["name"].casefold(): p for p in profiles}
 
         rows = []
-        visible_ids = set(chat_runs) | set(by_session) | set(pending) | set(delegated)
+        visible_ids = set(chat_runs) | set(by_session) | set(pending) | set(delegated) | set(link_parent)
         if show_archived:
             # An archive is a recovery surface, not a recent-activity view:
             # show every stored archived agent chat, even if its last run aged
@@ -235,7 +265,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             sess = owned.get(sid)
             if sess is None:
                 continue
-            run = chat_runs.get(sid) or {}
+            run = chat_runs.get(sid) or _run_from_activity(target_runs.get(sid))
             children = by_session.get(sid, [])
             live_children = [c for c in children if c.get("status") == "running"]
             if pending.get(sid):
@@ -252,7 +282,7 @@ def setup_agents_routes(session_manager) -> APIRouter:
             settings = get_session_settings(sid)
             # A turn that ended on `Needs user:` lines is waiting on a person,
             # not finished (src/open_needs.py); running and approvals win.
-            needs = open_needs.read(settings)
+            needs = open_needs.read(settings, since=run.get("started_at"))
             if needs and status in ("finished", "idle", "stopped"):
                 status = "needs_input"
             hidden_runs = {str(run_id) for run_id in (settings.get("hidden_agent_runs") or [])}
@@ -292,6 +322,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 config["tool_access"] = settings.get("tool_access")
             if "enabled_tools" in settings:
                 config["enabled_tools"] = settings.get("enabled_tools") or []
+            parent_of = settings.get("parent_session") or link_parent.get(sid)
+            if parent_of == sid:
+                parent_of = None
             rows.append({
                 "session_id": sid,
                 "name": getattr(sess, "name", "") or sid,
@@ -327,8 +360,8 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 # (crew_members.agent_profile) — unlike `config`, which is this
                 # one chat's copy of a loadout. Absent for an ordinary chat.
                 "crew": crew_roles.get(sid),
-                "parent_session": settings.get("parent_session"),
-                "parent_name": getattr(owned.get(settings.get("parent_session")), "name", None),
+                "parent_session": parent_of,
+                "parent_name": getattr(owned.get(parent_of), "name", None),
                 "hidden_run_ids": sorted(hidden_runs),
                 "approval_mode": settings.get("approval_mode"),
                 "is_current": sid == current_session,
@@ -632,6 +665,13 @@ def setup_agents_routes(session_manager) -> APIRouter:
             raise HTTPException(500, "Could not archive this chat")
         return {"ok": True, "session_id": session_id, "archived": True,
                 "message": "Archived. Its chat and run history are preserved."}
+
+    @router.post("/sessions/{session_id}/needs/clear")
+    async def clear_needs(request: Request, session_id: str):
+        """Mark a chat's "Needs your input" as answered (for a question the
+        person settled somewhere other than in that chat)."""
+        _require_owned(request, session_id)
+        return {"ok": True, "session_id": session_id, "cleared": open_needs.clear(session_id)}
 
     @router.post("/sessions/{session_id}/unarchive")
     async def unarchive_session(request: Request, session_id: str):

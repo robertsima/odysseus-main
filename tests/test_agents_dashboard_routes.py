@@ -118,7 +118,7 @@ async def test_a_chat_that_ended_on_a_need_is_listed_as_needing_the_user(env, mo
 
     with agent_runs.track_external("a1", source="subagent", owner="alice"):
         pass
-    needs = {"open_needs": {"needs": ["approve publish request 5ca5dd15"], "at": 1.0}}
+    needs = {"open_needs": {"needs": ["approve publish request 5ca5dd15"], "at": __import__("time").time() + 60}}
     monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: needs if sid == "a1" else {})
     out = await eps[("GET", "/api/agents/overview")](_req())
     row = out["rows"][0]
@@ -490,3 +490,54 @@ async def test_a_loadout_workers_run_is_listed_under_its_parent_not_itself(env):
     assert [c["title"] for c in rows["a1"]["children"]] == ["Worker · Scout · dig"]
     assert rows["a1"]["status"] == "idle"          # the parent's own turn is not running
     assert rows["w1"]["status"] == "running" and rows["w1"]["children"] == []
+
+
+async def test_a_worker_chat_named_by_its_parents_child_list_is_a_fleet_row_under_it(env):
+    # The Overview tab listed the worker (from the parent's activity) while the
+    # fleet tree had no row for it once its own run record was gone.
+    mgr, eps = env
+    mgr.sessions["c1"] = _Sess("c1", "Designer worker")
+    run_id = act.run_started("a1", "session", "Sub-agent · designer", owner="alice",
+                             data={"target_session": "c1"})
+    act.run_finished("a1", "session", run_id, "done", status="completed", owner="alice",
+                     data={"target_session": "c1"})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    rows = {r["session_id"]: r for r in out["rows"]}
+    assert set(rows) == {"a1", "c1"}
+    assert rows["c1"]["parent_session"] == "a1" and rows["c1"]["parent_name"] == "Alice chat"
+    assert rows["c1"]["status"] == "finished"
+    assert rows["a1"]["parent_session"] is None
+
+
+async def test_needs_recorded_before_the_chats_latest_turn_are_not_open(env, monkeypatch):
+    # The person answered: a turn began after the need was recorded, even if
+    # that turn died before it could clear it.
+    _mgr, eps = env
+    import core.database as db
+
+    with agent_runs.track_external("a1", source="subagent", owner="alice"):
+        pass
+    started = agent_runs.list_runs({"a1"})[0]["started_at"]
+    stale = {"open_needs": {"needs": ["pick a base branch"], "at": started - 60}}
+    fresh = {"open_needs": {"needs": ["pick a base branch"], "at": started + 60}}
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: stale if sid == "a1" else {})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    assert out["rows"][0]["status"] == "finished" and out["rows"][0]["needs"] == []
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: fresh if sid == "a1" else {})
+    out = await eps[("GET", "/api/agents/overview")](_req())
+    assert out["rows"][0]["status"] == "needs_input"
+
+
+async def test_needs_can_be_marked_answered_for_an_owned_chat_only(env, monkeypatch):
+    _mgr, eps = env
+    import core.database as db
+    from fastapi import HTTPException
+
+    store = {"open_needs": {"needs": ["pick a branch"], "at": 1.0}}
+    monkeypatch.setattr(db, "get_session_settings", lambda sid, **kwargs: dict(store))
+    monkeypatch.setattr(db, "update_session_settings",
+                        lambda sid, patch: [store.pop(k, None) for k, v in patch.items() if v is None])
+    out = await eps[("POST", "/api/agents/sessions/{session_id}/needs/clear")](_req(), "a1")
+    assert out["cleared"] is True and "open_needs" not in store
+    with pytest.raises(HTTPException):
+        await eps[("POST", "/api/agents/sessions/{session_id}/needs/clear")](_req(), "b1")
