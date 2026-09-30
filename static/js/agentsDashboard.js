@@ -137,6 +137,8 @@ function hashUnit(value) {
 }
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
+  // Role describes the stable identity archetype, not the live status class.
+  // Runtime sources map to primary/worker; named loadouts remain specialists.
   const source = String(agent?.source || agent?.kind || '').toLowerCase();
   const identity = String(agent?.name || '').toLowerCase();
   const role = source === 'odysseus' || identity === 'odysseus' || identity === 'agamemnon' || identity === 'primary'
