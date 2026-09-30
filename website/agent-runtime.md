@@ -926,6 +926,19 @@ the chat is not one of its workers. `manage_agent_loadout start` refuses to
 start a loadout that is already working in another chat (not one of this
 chat's own workers) and lists that chat, unless called with `parallel: true`.
 
+### Where the user runs the app
+
+Coding chats are told that a problem in a running app may be on another machine
+than the server, to ask once where and how it runs, to suspect installed
+packages that no longer match the lockfile when something broke after pulling
+(and lead with a clean reinstall), and that Expo/React Native web errors carry
+their message in the browser console, not the terminal. A publish request whose
+change touches a lockfile or build manifest (`package-lock.json`, `pom.xml`,
+`build.gradle`, `requirements.txt`, ...) gets a "Dependencies changed" section in
+the PR body with the reinstall per folder, and the agent is told to pass it on
+(`src/agent_worktree/dependencies.py`). On 2026-09-29 a PR bumped Expo without
+saying so, and the user's app broke on stale node_modules.
+
 ### Fleet lifecycle and navigation
 
 Every opening of the Control Room (rail, sidebar, Ctrl+Shift+A, `/agents`, a

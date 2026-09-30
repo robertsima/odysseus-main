@@ -1999,6 +1999,24 @@ def _workspace_coding_rules(workspace: Optional[str]) -> str:
         "- If a command fails, use the failure output to choose the next diagnostic or patch. Do not silently stop or claim success.\n"
         "- After code changes, run the smallest relevant verification command you can infer from the repo (for example a focused test, `py_compile`, `node --check`, lint, or build). If verification cannot run, say exactly why.\n"
         "- Keep going until the requested change is actually made and checked, or state the concrete blocker."
+        # From 2026-09-30: an app looked broken on the user's PC after an agent
+        # PR bumped Expo; the agent checked the source on this server for an
+        # hour of turns while the first paste already said "update available:
+        # 57.0.22 → ~57.0.26" (stale node_modules).
+        "\n- When the user reports a problem in a running app, it may run on another machine than this server. "
+        "Ask once, early, where and how they run it (machine, folder, command). The checkout and test runs here "
+        "show the source, not what their build is running.\n"
+        "- \"It worked before and broke after pulling\" most often means the installed packages no longer match "
+        "the lockfile. Compare the versions their output shows (Expo's \"update available: X → Y\", `npm ls` "
+        "errors) with the lockfile and lead with a clean reinstall in the project's folder (remove "
+        "node_modules, then `npm ci`) before hunting for a code bug.\n"
+        "- Expo and React Native web errors show only a location and call stack in the terminal (\"Web ERROR\"); "
+        "the message itself is in the browser's developer console. Ask for that once instead of more terminal "
+        "output.\n"
+        "- When a change of yours alters dependency versions (package.json, a lockfile, pom.xml, build.gradle, "
+        "requirements, pyproject), say so in your report and the PR: whoever runs the app must reinstall after "
+        "pulling (`npm ci` in that folder, a Maven/Gradle refresh, `pip install -r ...`).\n"
+        "- When the evidence points to one likely cause, name it and give the fix; one caveat is enough."
     ) + _project_instructions(workspace)
 
 

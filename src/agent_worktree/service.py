@@ -1127,6 +1127,15 @@ async def request_publish(
     if not summary["changed_files"]:
         raise WorktreeError("branch has no changes relative to the base branch")
 
+    # A change to a lockfile or build manifest means whoever runs the app must
+    # reinstall after pulling; the PR says so, and the agent is told to.
+    from src.agent_worktree.dependencies import dependency_changes, reinstall_note
+
+    deps = dependency_changes(summary["changed_files"])
+    note = reinstall_note(deps)
+    if note and "Dependencies changed" not in (body or ""):
+        body = f"{(body or '').rstrip()}\n\n{note}".strip()
+
     from src.agent_worktree.github import GitHubError, resolve_token
 
     try:
@@ -1161,6 +1170,14 @@ async def request_publish(
     view = approval_mod.public_view(record)
     view["remote_state"] = remote_state
     view["sensitive_summary"] = summary["sensitive_summary"]
+    if deps:
+        view["dependency_changes"] = deps
+        view["dependency_note"] = (
+            "This change alters dependencies: "
+            + "; ".join(f"{d['kind']} in {d['folder']}" for d in deps)
+            + ". The PR body says to reinstall after pulling; tell the user too ("
+            + "; ".join(f"`{d['command']}` in {d['folder']}" for d in deps) + ")."
+        )
     view["next_step"] = (
         "A person must approve it: in the Odysseus UI (this chat shows the publish request "
         "with Review; approving there also publishes), or on the host with "
