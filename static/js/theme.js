@@ -16,7 +16,9 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
-  dark:       { bg:'#282c34', fg:'#9cdef2', panel:'#111111', border:'#355a66', red:'#e06c75' },
+  // `dark` is the stable legacy theme ID; its visual palette is Agamemnon.
+  dark:       { bg:'#111417', fg:'#f7f8fa', panel:'#1b2127', border:'#647180', red:'#f0c45a', advanced: { sidebarBg:'#171c21', brandColor:'#f0c45a', brandMixTo:'#f0c45a', userBubbleBg:'#202931', inputBg:'#202931', inputBorder:'#647180', sendBtnBg:'#f0c45a', sendBtnHover:'#d9ad44', toggleActive:'#f0c45a' } },
+  odysseus:   { bg:'#211f1c', fg:'#f2eee5', panel:'#171614', border:'#554b36', red:'#c99a45' },
   light:      { bg:'#f0ebe3', fg:'#5a5248', panel:'#faf6f0', border:'#d4cdc2', red:'#c47d5a' },
   midnight:   { bg:'#0d1117', fg:'#c9d1d9', panel:'#161b22', border:'#30363d', red:'#f85149' },
   paper:      { bg:'#faf8f5', fg:'#3b3836', panel:'#ffffff', border:'#d5d0c8', red:'#c5ac4a' },
@@ -296,8 +298,7 @@ export function applyColors(colors) {
     s.setProperty(css, adv[key] || defaults[key]);
   }
 
-  // Update favicon to match theme accent color
-  _updateFavicon(colors.red || '#e06c75');
+  // The route icon is product identity, not a theme accent.
 }
 
 // Per-route SVG shape registry — kept in sync with the inline favicon
@@ -649,7 +650,7 @@ export function initThemeUI() {
         <span style="background:${c.fg}"></span>
         <span style="background:${c.red}"></span>
       </div>
-      ${name === 'dark' ? 'original' : (name === 'gpt' ? 'GPT' : name)}
+      <span class="theme-swatch-name">${name === 'dark' ? 'Agamemnon' : (name === 'odysseus' ? 'Odysseus' : (name === 'gpt' ? 'GPT' : name))}</span>
     </div>
   `).join('');
 

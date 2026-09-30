@@ -6,7 +6,7 @@
   <title>Agamemnon</title>
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%23e06c75'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%23e06c75' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%23e06c75' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="manifest" href="/static/manifest.json">
-  <meta name="theme-color" content="#211f1c">
+  <meta name="theme-color" content="#111417">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <!-- Disable iOS / Android auto-linkifying of numbers (phone/date/address)
@@ -19,6 +19,16 @@
   (function(){
     try {
       var t = JSON.parse(localStorage.getItem('odysseus-theme'));
+      // An absent local preference gets the Agamemnon first-paint palette;
+      // explicit saved/server themes continue through the existing sync path.
+      if (!t || !t.colors) {
+        var ds = document.documentElement.style;
+        ds.setProperty('--bg', '#111417'); ds.setProperty('--fg', '#f7f8fa');
+        ds.setProperty('--panel', '#1b2127'); ds.setProperty('--border', '#647180');
+        ds.setProperty('--red', '#f0c45a'); ds.setProperty('--brand-color', '#f0c45a');
+        var dmeta = document.querySelector('meta[name="theme-color"]');
+        if (dmeta) dmeta.setAttribute('content', '#111417');
+      }
       if (t && t.colors) {
         var s = document.documentElement.style;
         var c = t.colors;
@@ -38,10 +48,7 @@
         // there during load and the bar "switches" colour once the app boots.
         var mtc = document.querySelector('meta[name="theme-color"]');
         if (mtc && c.bg) mtc.setAttribute('content', c.bg);
-        // Update favicon to match accent color
-        var ac = c.red || '#e06c75';
-        var fav = document.querySelector("link[rel='icon']");
-        if (fav) fav.href = 'data:image/svg+xml,' + encodeURIComponent("<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 4L16 22L6 22Z' fill='" + ac + "'/><path d='M16 8L16 22L24 22Z' fill='" + ac + "' opacity='0.6'/><path d='M4 24Q10 20 16 24Q22 28 28 24' stroke='" + ac + "' stroke-width='2.5' fill='none' stroke-linecap='round'/></svg>");
+
         // Derive syntax highlighting colors from theme
         function h2hsl(hex) {
           hex = hex.replace('#','');
@@ -255,8 +262,8 @@
 </head>
 <body>
   <!-- Loading overlay — hides all flashing until app is ready -->
-  <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#282c34);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
-    <div id="loader-wave" style="color:color-mix(in srgb, #9cdef2 62%, var(--brand-color,var(--red,#e06c75)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
+  <div id="app-loader" style="position:fixed;inset:0;z-index:99999;background:var(--bg,#111417);display:flex;align-items:center;justify-content:center;flex-direction:column;gap:8px;transition:opacity .3s">
+    <div id="loader-wave" style="color:color-mix(in srgb, #f7f8fa 62%, var(--brand-color,var(--red,#f0c45a)));font-family:monospace;font-size:11px;opacity:.5;position:relative;padding-top:10px;line-height:1;white-space:pre">▁▂▃</div>
   </div>
   <script nonce="{{CSP_NONCE}}">
   (function(){
