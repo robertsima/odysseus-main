@@ -267,7 +267,7 @@ _register(
 
 # ── The fork's tools, classified the way the closest upstream tool is ───────
 _register(
-    {"audit_emails", "read_app_logs", "recall_tool_output", "search_documents"},
+    {"audit_emails", "read_app_logs", "recall_tool_output", "recall_chat_history", "search_documents"},
     ToolEffect.READ_PRIVATE,
     # Mail bodies, application logs, stored earlier tool output and vault
     # excerpts are all content the server did not author (as vault_search).

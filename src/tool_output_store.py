@@ -394,7 +394,9 @@ def list_recent(session_id: Optional[str] = None, limit: int = 20) -> List[Dict[
         record = load_record(name[: -len(".json")])
         if not record:
             continue
-        if session_id and record.get("session_id") and record["session_id"] != session_id:
+        # A chat lists only its own outputs. A record with no chat (ledger
+        # offloads before 2026-09-29) used to be listed in every chat.
+        if session_id and record.get("session_id") != session_id:
             continue
         out.append(record)
     out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)

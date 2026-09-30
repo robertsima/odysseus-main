@@ -64,9 +64,10 @@ class _FakeSessionManager:
     def save_sessions(self):
         self.saved = True
 
-    def replace_messages(self, session_id, messages):
+    def replace_messages(self, session_id, messages, archive_reason=None):
         if session_id != self.session.id:
             return False
+        self.archive_reason = archive_reason
         self.replaced_messages = list(messages)
         self.session.history = list(messages)
         self.session.message_count = len(messages)

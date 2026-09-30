@@ -49,6 +49,11 @@ ALWAYS_AVAILABLE = frozenset({
     # to call this, so a turn where tool selection had not surfaced it would
     # be pointing at a tool that is not in its schema list.
     "recall_tool_output",
+    # The way back to this chat's own earlier messages: compaction archives
+    # them, a long turn trims them out of the request, and earlier turns'
+    # tool results are never replayed. The compaction summary and the trim
+    # note name this tool, so it has to be in the schema list.
+    "recall_chat_history",
     # The user's own notes/vault. Previously reachable only through a literal
     # phrase ("my notes", "my vault", "obsidian", ...), so "summarize what I
     # logged about X" or any follow-up in an ongoing conversation could not
@@ -344,6 +349,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "recall_tool_output": "Read back a large tool result that was moved out of the conversation. Oversized tool output (long logs, whole files, big API responses) is kept only as a head/tail excerpt naming a `toolout-...` reference; pass just the ref to get the whole stored text back (paged with offset when very large), or add a query to search it. Use for \"the rest of that output\", \"what did the log say about X\", \"show me more of that file\" — never re-run the command to see what was trimmed.",
     "search_documents": "Semantic/vector search over the user's personal documents, vault, notes, journal entries, voice logs, and uploaded files using the ChromaDB embedding index. Answers questions ABOUT the content of the user's own documents — what did I write about X, find my notes on Y, what does my vault say about Z. Returns the relevant excerpts and their file paths. This is the correct tool instead of read_file/bash/cat over the personal documents directory, which floods context with whole files.",
     "search_chats": "Search past session transcripts across chats.",
+    "recall_chat_history": "Read back this chat's own earlier messages, including ones no longer in your context: messages compaction moved to the chat's archive, messages a long turn trimmed out of the request, and the tool calls and outputs of earlier turns (only their final text is replayed). No arguments: an overview. `query`: search every message and tool output of this chat. `message` (#index or id, with `before`/`after`): read messages in full. `start`/`count`: read a range. Use it instead of asking the user to repeat something or re-running a command whose output you had.",
     "ask_user": "Ask the user a multiple-choice question to get a decision or clarification. Use this when the task is genuinely ambiguous and the answer changes what you do next — pick between approaches, confirm an assumption, choose among options — instead of guessing. Provide a clear `question` and 2-6 `options` (each with a short `label`, optional `description`). Omit `multi`/keep it false unless the question explicitly permits choosing multiple options. Calling this ENDS your turn: the user sees clickable buttons and their choice arrives as your next message. Don't use it for things you can decide from context or sensible defaults, or for irreversible-action confirmation if a dedicated flow exists.",
     "update_plan": "Keep this chat's task checklist (the steps of a multi-part request, or an approved plan being executed): write it when you start, tick steps done `- [x]` as you finish them, revise it when the request changes. Always pass the COMPLETE markdown checklist (`- [ ]` / `- [x]`), not a diff. Saved with the chat and shown on later turns while steps are open; an empty plan clears it.",
     "ui_control": "Control the UI and toggle tools on/off. Use this to turn off / turn on / disable / enable individual tools and features: shell (bash), search (web), research, browser, documents, incognito. Open panels (documents library, gallery, email inbox, sessions, notes, memories/brain, skills, settings, cookbook) via `open_panel <name>`. Use `open_email_reply <uid> <folder> reply <body text>` (or structured body) to open an email reply draft document without sending. USE THIS whenever the user says to write/draft a reply or tells you what to say — opening an empty draft or sending immediately is wrong. Body can continue on subsequent lines for multi-line replies. Also switches between chat/agent modes, changes the current model, and applies/creates themes.",
@@ -743,6 +749,11 @@ class ToolIndex:
                    "truncated output", "stored output", "toolout-",
                    "recall the output", "more of that file", "trimmed output"}):
             {"recall_tool_output"},
+        frozenset({"earlier in this chat", "earlier in the chat", "earlier in our conversation",
+                   "what did i say", "what did you say", "you said earlier", "i said earlier",
+                   "we discussed", "scroll back", "chat history", "archived messages",
+                   "compacted", "before compaction"}):
+            {"recall_chat_history"},
         frozenset({"note", "todo", "reminder", "remind", "checklist", "remember to"}):
             {"manage_notes"},
         # Wellbeing / mood check-ins (Lotus). "plan my day/week" is here on

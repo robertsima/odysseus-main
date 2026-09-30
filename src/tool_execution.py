@@ -1788,12 +1788,14 @@ async def _execute_tool_block_impl(
         # spellings AND the `mcp__<server>__<tool>` / `mcp__<server>__*` /
         # `mcp__*` grants an allowlist uses to name runtime-generated MCP tools,
         # which a literal set-membership test cannot.
-        from src.tool_policy import allowlist_permits as _allowlist_permits
+        from src.tool_policy import SELF_SCOPED_TOOLS as _SELF_SCOPED_TOOLS, allowlist_permits as _allowlist_permits
 
         _tool_access = _agent_settings.get("tool_access", "all")
         _enabled = set(_agent_settings.get("enabled_tools") or [])
-        # A selected-tools agent may still search its own bindings.
-        _discovery_selected_ok = tool == "discover_tools" and _tool_access == "selected" and bool(_enabled)
+        # A selected-tools agent keeps the tools that touch only its own
+        # state: its bindings, its chat's moved-out messages and tool output,
+        # its task checklist (tool_policy.SELF_SCOPED_TOOLS).
+        _discovery_selected_ok = tool in _SELF_SCOPED_TOOLS and _tool_access == "selected" and bool(_enabled)
         if not _allowlist_permits(tool, _tool_access, _enabled) and not _discovery_selected_ok:
             return f"{tool}: BLOCKED", {
                 "error": f"Tool '{tool}' is not in this agent's tool allowlist "

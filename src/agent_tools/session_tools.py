@@ -984,13 +984,16 @@ async def manage_session(content: str, session_id: Optional[str] = None, owner: 
                     pass
             # Keep the newest N, as the result has always said. This used to
             # call truncate_messages, which keeps the FIRST N and deletes the
-            # rest of the conversation.
+            # rest of the conversation. The older messages leave the chat's
+            # context but are archived, not deleted (src/chat_archive.py).
             try:
-                deleted = _session_manager.keep_last_messages(target_sid, keep_count)
+                moved = _session_manager.keep_last_messages(target_sid, keep_count,
+                                                            archive_reason="agent_truncate")
             except Exception as e:
                 return {"error": f"Failed to truncate session '{target_sid}': {e}", "exit_code": 1}
             return {"action": "truncate", "session_id": target_sid,
-                    "results": f"Session truncated to last {keep_count} messages ({deleted} older deleted)"}
+                    "results": (f"Session truncated to last {keep_count} messages ({moved} older moved to "
+                                "the chat's archive; recall_chat_history reads them)")}
 
         elif action == "fork":
             db_sess = _session_query(db).first()

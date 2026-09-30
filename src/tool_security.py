@@ -123,6 +123,8 @@ PLAN_MODE_READONLY_TOOLS = {
     "web_search",
     "web_fetch",
     "search_chats",
+    # This chat's own earlier messages and tool output; reads only.
+    "recall_chat_history",
     "list_models",
     "list_sessions",
     # Read-only email tools. list_email_accounts must be here because the

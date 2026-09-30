@@ -73,6 +73,10 @@ FASTEMBED_CACHE_DIR = os.getenv("FASTEMBED_CACHE_PATH") or os.path.join(DATA_DIR
 # Agent tool output limits (single source of truth — imported by tool_execution.py,
 # tool_implementations.py, agent_tools.py, and any other module that needs them)
 MAX_OUTPUT_CHARS = 10_000       # cap for bash/python/web_search/web_fetch output
+# bash/python keep more, start and end: the agent loop moves any result past
+# its inline limit to the tool-output store and shows an excerpt, so the rest
+# stays readable (recall_tool_output) instead of being cut off at 10k.
+SHELL_OUTPUT_CHARS = 60_000
 MAX_READ_CHARS = 20_000         # cap for read_file / document preview
 MAX_DIFF_LINES = 400            # cap for edit_file unified-diff display
 

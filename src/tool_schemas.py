@@ -573,6 +573,57 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "recall_chat_history",
+            "description": (
+                "Read back this chat's own earlier messages, including ones no "
+                "longer in your context. Nothing said in this chat is deleted: "
+                "compaction moves older messages to the chat's archive, a long "
+                "turn trims older messages out of the request, and earlier "
+                "turns' tool calls and outputs are stored but not replayed "
+                "(only their final text is). This reads all of it, in order. "
+                "No arguments: an overview (message count, what is archived, "
+                "the earliest messages). `query`: search every message and "
+                "tool output of this chat. `message`: one message in full, by "
+                "its #index or id from a search or overview, with `before` / "
+                "`after` for its neighbours. `start` and `count`: a range. Use "
+                "it instead of asking the user to repeat something, and "
+                "instead of re-running a command whose output you had."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "Words to find in this chat's messages and tool outputs (all matches are ranked; exact phrases rank first).",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "A message to read in full: its #index (e.g. \"#12\") or id.",
+                    },
+                    "before": {
+                        "type": "integer",
+                        "description": "With `message`: how many earlier messages to include (max 40).",
+                    },
+                    "after": {
+                        "type": "integer",
+                        "description": "With `message`: how many later messages to include (max 40).",
+                    },
+                    "start": {
+                        "type": "integer",
+                        "description": "Read a range from this #index (0 is the chat's first message).",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "With `start`: how many messages (default 10, max 40).",
+                    },
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_documents",
             "description": (
                 "Semantic search over the user's indexed personal documents "

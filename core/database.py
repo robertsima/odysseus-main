@@ -291,6 +291,33 @@ class ChatMessage(Base):
     )
 
 
+class ArchivedChatMessage(Base):
+    """A chat message moved out of the chat's live history, not deleted.
+
+    Compaction replaces older messages with a summary. It used to delete them,
+    so nothing the summary left out could be looked up again. They are moved
+    here instead, with the id and timestamp they had, and the agent reads them
+    with ``recall_chat_history`` (src/chat_archive.py). The live history stays
+    what the model is sent, so loading, paging and counting a chat are
+    unchanged. Deleting the chat deletes these rows too.
+    """
+    __tablename__ = "chat_message_archive"
+
+    id = Column(String, primary_key=True)
+    session_id = Column(String, ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    role = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    meta_data = Column("metadata", Text, nullable=True)
+    timestamp = Column(DateTime, nullable=True)
+    archived_at = Column(DateTime, default=utcnow_naive)
+    # Why it left the live history: "compaction" or "agent_truncate".
+    reason = Column(String, nullable=True)
+
+    __table_args__ = (
+        Index('ix_archive_session_time', 'session_id', 'timestamp'),
+    )
+
+
 class UsageLedgerEntry(Base, TimestampMixin):
     """Content-free accounting for one completed assistant turn.
 

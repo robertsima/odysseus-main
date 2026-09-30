@@ -17,7 +17,10 @@ from typing import Dict, Optional
 
 from sqlalchemy import func
 
-from .database import Session as DbSession, ChatMessage as DbChatMessage, Document as DbDocument, SessionLocal, utcnow_naive
+from .database import (
+    Session as DbSession, ChatMessage as DbChatMessage, ArchivedChatMessage as DbArchivedMessage,
+    Document as DbDocument, SessionLocal, utcnow_naive,
+)
 from .models import Session, ChatMessage
 from src.attachment_refs import persistable_message_content
 from src.upload_handler import reserve_message_upload_references
@@ -407,11 +410,13 @@ class SessionManager:
         finally:
             db.close()
 
-    def keep_last_messages(self, session_id: str, keep_last: int) -> int:
+    def keep_last_messages(self, session_id: str, keep_last: int, *, archive_reason: Optional[str] = None) -> int:
         """Delete all but the newest ``keep_last`` messages; return how many were deleted.
 
         What `/truncate N` promises ("deletes older messages, keeps the last
         N"); it used to call truncate_messages, which keeps the FIRST N.
+        With ``archive_reason`` (an agent trimming its own chat) the older
+        messages are moved to the archive instead of deleted.
         """
         session = self.get_session(session_id)
         keep_last = max(0, int(keep_last))
@@ -422,6 +427,8 @@ class SessionManager:
             ).order_by(DbChatMessage.timestamp).all()
             doomed = db_messages[:max(0, len(db_messages) - keep_last)]
             doomed_ids = {str(m.id) for m in doomed}
+            if archive_reason:
+                self._archive_rows(db, doomed, archive_reason)
             for msg in doomed:
                 db.delete(msg)
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()
@@ -488,8 +495,33 @@ class SessionManager:
         finally:
             db.close()
 
-    def replace_messages(self, session_id: str, messages: list) -> bool:
-        """Replace a session's persisted and in-memory history atomically."""
+    @staticmethod
+    def _archive_rows(db, rows, reason: str) -> int:
+        """Copy ``rows`` (live message rows) into the archive, in the same
+        transaction that deletes them from the live history."""
+        archived = 0
+        for row in rows:
+            if db.get(DbArchivedMessage, row.id) is not None:
+                continue
+            db.add(DbArchivedMessage(
+                id=row.id,
+                session_id=row.session_id,
+                role=row.role,
+                content=row.content or "",
+                meta_data=row.meta_data,
+                timestamp=row.timestamp,
+                reason=reason,
+            ))
+            archived += 1
+        return archived
+
+    def replace_messages(self, session_id: str, messages: list, *, archive_reason: Optional[str] = None) -> bool:
+        """Replace a session's persisted and in-memory history atomically.
+
+        With ``archive_reason`` (compaction), the rows the new history no
+        longer holds are moved to the archive instead of deleted: every row
+        whose id is not the ``_db_id`` of a message being kept.
+        """
         session = self.get_session(session_id)
         db = SessionLocal()
         try:
@@ -515,8 +547,31 @@ class SessionManager:
                         f"Referenced upload is no longer available: {missing_upload_id}"
                     )
 
-            db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
             now = datetime.now(timezone.utc)
+            stamps = [now + timedelta(microseconds=i) for i in range(len(messages))]
+            if archive_reason:
+                rows = db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).all()
+                by_id = {str(row.id): row for row in rows}
+                kept = {
+                    str((getattr(m, "metadata", None) or {}).get("_db_id") or "")
+                    for m in messages
+                }
+                moved = self._archive_rows(db, [row for row in rows if str(row.id) not in kept], archive_reason)
+                if moved:
+                    logger.info("Archived %d message(s) of session %s (%s)", moved, session_id, archive_reason)
+                # Kept messages keep their time, and a new one (the summary)
+                # goes just before the next kept one, so the archived and live
+                # rows read back in the order they were written.
+                following = None
+                for i in range(len(messages) - 1, -1, -1):
+                    row = by_id.get(str((messages[i].metadata or {}).get("_db_id") or ""))
+                    if row is not None and row.timestamp is not None:
+                        following = row.timestamp
+                        stamps[i] = following
+                    elif following is not None:
+                        following = following - timedelta(microseconds=1)
+                        stamps[i] = following
+            db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
             for i, message in enumerate(messages):
                 msg_id = str(uuid.uuid4())
                 db_message = DbChatMessage(
@@ -527,7 +582,7 @@ class SessionManager:
                     # persisted transcript and search index.
                     content=persistable_message_content(message.content, message.metadata),
                     meta_data=json.dumps(message.metadata) if message.metadata else None,
-                    timestamp=now + timedelta(microseconds=i),
+                    timestamp=stamps[i],
                 )
                 db.add(db_message)
                 if message.metadata is None:
@@ -752,8 +807,9 @@ class SessionManager:
                 {DbDocument.session_id: None}, synchronize_session=False
             )
 
-            # Delete messages
+            # Delete messages, and the ones compaction archived
             db.query(DbChatMessage).filter(DbChatMessage.session_id == session_id).delete()
+            db.query(DbArchivedMessage).filter(DbArchivedMessage.session_id == session_id).delete()
 
             # Delete session
             db_session = db.query(DbSession).filter(DbSession.id == session_id).first()

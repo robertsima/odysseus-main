@@ -24,7 +24,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              "manage_agent_worktree", "manage_git", "read_app_logs", "inspect_runtime",
              "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
              "create_document", "update_document", "edit_document",
-             "search_chats", "search_documents", "recall_tool_output",
+             "search_chats", "search_documents", "recall_tool_output", "recall_chat_history",
              "chat_with_model", "create_session", "list_sessions",
              "send_to_session",
              "pipeline",

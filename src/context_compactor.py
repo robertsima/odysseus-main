@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.model_context import get_context_length, estimate_tokens
 from src.llm_core import llm_call_async
@@ -608,7 +608,10 @@ async def maybe_compact(
 
     summary_msg = {
         "role": "system",
-        "content": f"[Conversation summary — earlier messages were compacted]\n{summary}",
+        "content": (
+            f"[Conversation summary — earlier messages were compacted]\n{summary}"
+            f"\n\n{archive_note(len(older))}"
+        ),
         "metadata": {"compacted": True, "compaction_count": compaction_count + 1},
     }
 
@@ -624,6 +627,7 @@ async def maybe_compact(
             "split_point": split_point,
             "summary": summary,
             "system_msg_count": len(system_msgs),
+            "compaction_count": compaction_count + 1,
             "applied": False,
         })
     if persist:
@@ -667,11 +671,13 @@ def apply_compaction_state(session, compaction_state: Optional[Dict[str, Any]]) 
     summary = state.get("summary")
     split_point = state.get("split_point")
     system_msg_count = state.get("system_msg_count", 0)
+    compaction_count = state.get("compaction_count")
     _update_session_history(
         session,
         split_point,
         summary,
         system_msg_count=system_msg_count if isinstance(system_msg_count, int) else 0,
+        compaction_count=compaction_count if isinstance(compaction_count, int) else 1,
     )
     state["applied"] = True
     return True
@@ -706,50 +712,82 @@ def apply_compaction_state_for_session(
     return apply_compaction_state(session, compaction_state) if session else False
 
 
+def archive_note(count: int) -> str:
+    """The line under a compaction summary that says where the originals went."""
+    return (
+        f"({count} earlier message{'s' if count != 1 else ''} of this chat were moved to its archive, "
+        "not deleted: `recall_chat_history` searches and reads them, tool results included.)"
+    )
+
+
+def _compaction_split(history: List[Any], split_point: int) -> Tuple[List[Any], List[Any], List[Any]]:
+    """``(prefix, older, recent)`` of a chat's stored history.
+
+    ``prefix`` is its leading system messages (persona, preset) minus earlier
+    summaries; ``older`` the first ``split_point`` conversation messages, with
+    the earlier summaries and any system note among them; ``recent`` the rest.
+    Counted over the stored history itself. The offset used to be the number
+    of system messages in the *request*, most of which (the prompt preface)
+    are not stored, so the cut landed that many messages late and the first
+    conversation messages were kept as if they were the system prefix.
+    """
+    prefix: List[Any] = []
+    older: List[Any] = []
+    recent: List[Any] = []
+    seen = 0
+    leading = True
+    for msg in history:
+        role = getattr(msg, "role", None)
+        if leading and role == "system":
+            (older if _is_compaction_summary(msg) else prefix).append(msg)
+            continue
+        leading = False
+        if seen < split_point:
+            older.append(msg)
+            if role != "system":
+                seen += 1
+        else:
+            recent.append(msg)
+    return prefix, older, recent
+
+
 def _update_session_history(session, split_point: int, summary: str,
                             system_msg_count: int = 0,
                             compaction_count: int = 1):
-    """Update the in-memory session history after compaction.
+    """Replace the chat's older messages with the summary, archiving them.
 
-    `split_point` is the index in `convo_msgs` (system-stripped). The
-    in-memory `session.history` includes leading system messages, so the
-    actual recent-history slice starts at `system_msg_count + split_point`.
-    Prepending `session.history[:system_msg_count]` to the new history
-    preserves persona, preset, and RAG system messages that would
-    otherwise be dropped.
+    `split_point` counts conversation (non-system) messages, as in
+    `maybe_compact`. The messages before it, and earlier summaries, move to
+    the chat's archive (``chat_message_archive``) instead of being deleted,
+    and `recall_chat_history` reads them. `system_msg_count` is accepted for
+    plans made before this change and is not used (see `_compaction_split`).
     """
     if not session or not hasattr(session, "history"):
         return
 
-    effective_split = system_msg_count + split_point
-    if effective_split >= len(session.history):
+    prefix, older, recent = _compaction_split(list(session.history), split_point)
+    if not recent or not older:
         return
-
-    # Keep the recent messages, prepend summary AND the leading system
-    # messages so the system prompt survives compaction.
-    system_prefix = [
-        msg for msg in session.history[:system_msg_count]
-        if not _is_compaction_summary(msg)
-    ]
-    recent_history = session.history[effective_split:]
+    archived = sum(1 for m in older if not _is_compaction_summary(m))
     summary = normalize_compaction_summary(summary)
     summary_msg = ChatMessage(
         role="system",
-        content=f"[Conversation summary]\n{summary}",
+        content=f"[Conversation summary]\n{summary}\n\n{archive_note(archived)}",
         metadata={
             "compacted": True,
             "summarized_count": split_point,
+            "archived_count": archived,
             "compaction_count": compaction_count,
         },
     )
-    new_history = system_prefix + [summary_msg] + recent_history
+    new_history = prefix + [summary_msg] + recent
     try:
         from core.models import get_session_manager_instance
         manager = get_session_manager_instance()
     except Exception:
         manager = None
     if manager and getattr(session, "id", None):
-        if manager.replace_messages(session.id, new_history):
+        if manager.replace_messages(session.id, new_history, archive_reason="compaction"):
             return
     session.history = new_history
 

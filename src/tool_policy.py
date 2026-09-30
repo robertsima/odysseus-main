@@ -345,20 +345,31 @@ def denied_by_allowlist(
         text = str(name).strip()
         if text and not allowlist_permits(text, tool_access, enabled_tools):
             denied.add(text)
-    # `discover_tools` is the one exception, and it is not a hole: the
-    # execution gate in :mod:`src.tool_execution` admits it for an agent with a
-    # non-empty `selected` allowlist, so that the agent can read back its own
-    # bindings instead of guessing. The offer and the enforcement have to agree
-    # (website/design-patterns.md), so the inversion must not deny what execution
-    # will run -- otherwise the tool is hidden from every schema list while
-    # still being callable. An explicit `disabled_tools` entry still wins.
+    # SELF_SCOPED_TOOLS are the exception, and they are not a hole: the execution
+    # gate in :mod:`src.tool_execution` admits them for an agent with a
+    # non-empty `selected` allowlist. The offer and the enforcement have to
+    # agree (website/design-patterns.md), so the inversion must not deny what
+    # execution will run -- otherwise the tool is hidden from every schema list
+    # while still being callable. An explicit `disabled_tools` entry still wins.
     if (
         str(tool_access or "").strip().lower() == "selected"
         and _allowlist_entries(enabled_tools)
-        and "discover_tools" not in explicit
     ):
-        denied.discard("discover_tools")
+        denied -= SELF_SCOPED_TOOLS - explicit
     return denied
+
+
+# Tools a role with a tool allowlist keeps whatever the list says: each
+# touches only this agent's own state, never a new capability.
+# `discover_tools` reads its own bindings; `recall_tool_output` and
+# `recall_chat_history` read back this chat's tool output and messages that
+# the harness moved out of context (the excerpt or summary left in their place
+# names them); `update_plan` keeps this chat's task checklist, which the
+# harness shows on later turns and uses to carry a request through. A
+# loadout's allowlist written before these existed denied them: on
+# 2026-09-29 the Lead Engineer, the main coding loadout, had neither the
+# checklist nor a way back to its offloaded output.
+SELF_SCOPED_TOOLS = frozenset({"discover_tools", "recall_tool_output", "recall_chat_history", "update_plan"})
 
 
 def connected_mcp_tool_names() -> Set[str]:

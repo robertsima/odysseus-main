@@ -28,6 +28,7 @@ from .git_tools import GitTool
 from .introspection_tools import InspectRuntimeTool
 from .document_tools import CreateDocumentTool, UpdateDocumentTool, EditDocumentTool, SuggestDocumentTool, ManageDocumentTool
 from .rag_tools import SearchDocumentsTool, RecallToolOutputTool
+from src.chat_archive import RecallChatHistoryTool
 from .interaction_tools import AskUserTool, UpdatePlanTool
 from .model_interaction_tools import ChatWithModelTool, AskTeacherTool, ListModelsTool, MessageAgentTool
 from .bg_job_tools import ManageBgJobsTool
@@ -64,6 +65,7 @@ TOOL_HANDLERS = {
     "manage_documents": ManageDocumentTool().execute,
     "search_documents": SearchDocumentsTool().execute,
     "recall_tool_output": RecallToolOutputTool().execute,
+    "recall_chat_history": RecallChatHistoryTool().execute,
     "get_workspace": GetWorkspaceTool().execute,
     "ask_user": AskUserTool().execute,
     "update_plan": UpdatePlanTool().execute,

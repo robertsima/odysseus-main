@@ -8,7 +8,7 @@ import time
 import collections
 from typing import Optional, Callable, Awaitable, Tuple, Dict
 from core.platform_compat import IS_WINDOWS, find_bash
-from src.constants import MAX_OUTPUT_CHARS
+from src.constants import SHELL_OUTPUT_CHARS as MAX_OUTPUT_CHARS
 
 DEFAULT_BASH_TIMEOUT = 60 * 60     # 1 hour
 DEFAULT_PYTHON_TIMEOUT = 60 * 60

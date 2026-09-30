@@ -69,7 +69,7 @@ from src.tool_approvals import (
     document_content_digest,
     tool_approval_store,
 )
-from src.tool_utils import _truncate, get_mcp_manager
+from src.tool_utils import _truncate, _truncate_middle, get_mcp_manager
 from src.tool_schemas import compact_function_tool_schemas
 from src.intent_assessment import (
     anchored_retrieval_query,
@@ -3670,6 +3670,53 @@ def _sticky_trim(dropped_by_route: Dict[tuple, Set[Any]], key, route_messages, t
     Responses route (all system messages merge into `instructions`) each flip
     re-billed the whole request.
     """
+    trimmed = _sticky_trim_cut(dropped_by_route, key, route_messages, trim)
+    return _with_history_note(route_messages, trimmed, dropped_by_route.get(key) or set())
+
+
+def _history_note_message(message: Dict, count: int) -> Optional[Dict]:
+    note = (f"[{count} earlier message{'s' if count != 1 else ''} of this chat are left out of "
+            "the context here. They are stored: `recall_chat_history` searches and reads them.]")
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        return {**message, "content": f"{note}\n\n{content}"}
+    if isinstance(content, list):
+        return {**message, "content": [{"type": "text", "text": note}, *content]}
+    if not content and message.get("role") == "assistant":
+        return {**message, "content": note}
+    return None
+
+
+def _with_history_note(route_messages: List[Dict], trimmed: List[Dict], dropped_ids: Set[int]) -> List[Dict]:
+    """Say where the turn's history was cut, on the first kept message after the cut.
+
+    A trim used to drop messages silently: the model saw a conversation that
+    skipped ahead and had no idea there was more to look up. The note sits on
+    the message right after the gap, which stays the same while the cut
+    stays (see _sticky_trim), so it does not move the cached prefix.
+    """
+    if not dropped_ids or not trimmed:
+        return trimmed
+    position = {id(m): i for i, m in enumerate(trimmed)}
+    gap = False
+    for m in route_messages:
+        if id(m) in dropped_ids:
+            gap = True
+            continue
+        if gap and id(m) in position and isinstance(m, dict) and m.get("role") != "system":
+            # Never the newest message: that is the request being answered,
+            # and it reaches the model as written.
+            if position[id(m)] == len(trimmed) - 1:
+                return trimmed
+            noted = _history_note_message(m, len(dropped_ids))
+            if noted is None:
+                return trimmed
+            i = position[id(m)]
+            return trimmed[:i] + [noted] + trimmed[i + 1:]
+    return trimmed
+
+
+def _sticky_trim_cut(dropped_by_route: Dict[tuple, Set[Any]], key, route_messages, trim):
     from src.context_compactor import is_truncated_system_message, truncate_system_message
 
     system_key = ("system-trim",) + tuple(key if isinstance(key, tuple) else (key,))
@@ -4654,6 +4701,7 @@ def _append_tool_results(
     round_reasoning: str = "",
     tool_result_records: Optional[list] = None,
     ledger_budget: int = 0,
+    session_id: Optional[str] = None,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -4797,7 +4845,10 @@ def _append_tool_results(
             if _ledger_prompt < ledger_budget * _LEDGER_PRESSURE_RATIO:
                 return
             _ledger_rewind = _ledger_prompt >= ledger_budget * _LEDGER_REWIND_RATIO
-        _ledger_stats = compact_tool_exchanges(messages, rewind=_ledger_rewind)
+        # The chat's id goes on each stored original, so recall_tool_output
+        # lists it in this chat only (it was stored with none and listed in
+        # every chat).
+        _ledger_stats = compact_tool_exchanges(messages, rewind=_ledger_rewind, session_id=session_id)
         if _ledger_stats.get("entries"):
             logger.info(
                 "[agent] execution ledger: %s exchange(s) in %s round(s) compacted, "
@@ -9478,11 +9529,13 @@ async def stream_agent_loop(
                 # empty) stdout/stderr; fall back to the error so the "timed
                 # out" reason reaches the UI instead of a blank result.
                 raw = result["stdout"] or result["stderr"] or result.get("error", "")
-                output_text = _truncate(raw)
+                output_text = _truncate_middle(raw)
             elif "output" in result:
-                # bash / python canonical result: {"output": ..., "exit_code": ...}
+                # bash / python canonical result: {"output": ..., "exit_code": ...}.
+                # The card (and the saved tool event) keeps the start and the
+                # end: a test run's summary is last.
                 raw = result["output"] or ""
-                output_text = _truncate(raw)
+                output_text = _truncate_middle(raw)
             elif "response" in result:
                 # AI interaction tools (chat_with_model, send_to_session)
                 label = result.get("model", result.get("session_name", "AI"))
@@ -9847,7 +9900,8 @@ async def stream_agent_loop(
                              tool_result_records=tool_result_records,
                              ledger_budget=_ledger_budget_for_round(
                                  _ledger_route.get("budget"), _last_route_context_length or context_length,
-                             ))
+                             ),
+                             session_id=session_id)
 
         # Duplicate-call correction, delivered after the round's tool results so
         # it reads as a reply to the repeat it is about. Capped by

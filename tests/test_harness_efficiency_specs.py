@@ -36,7 +36,7 @@ from src.agent_loop import (
 )
 from src.llm_core import _build_chatgpt_responses_payload
 from src.tool_index import ToolIndex, ALWAYS_AVAILABLE
-from src.tool_policy import known_tool_names
+from src.tool_policy import SELF_SCOPED_TOOLS, known_tool_names
 from src.tool_security import BUILTIN_EMAIL_TOOLS
 
 
@@ -677,12 +677,13 @@ def _pinned_payload(text, pinned, disabled, reassert=True):
 
 def test_a_role_allowlist_is_bound_whole_instead_of_being_reselected():
     pinned = _pinned_policy_toolset(_role_disabled_tools(MARKETING_LOADOUT))
-    # The loadout's own list, plus `discover_tools`. The execution gate admits
-    # that one for any non-empty `selected` allowlist so an agent can read back
-    # its own bindings instead of guessing, so the inversion must not deny it
-    # either -- otherwise the tool is hidden from every schema list while still
-    # being callable, which is the phantom-tool failure the other way round.
-    assert pinned == set(MARKETING_LOADOUT["enabled_tools"]) | {"discover_tools"}
+    # The loadout's own list, plus the self-scoped tools (tool_policy
+    # SELF_SCOPED_TOOLS: its bindings, its task checklist, its chat's moved-out
+    # output and messages). The execution gate admits those for any non-empty
+    # `selected` allowlist, so the inversion must not deny them either --
+    # otherwise the tool is hidden from every schema list while still being
+    # callable, which is the phantom-tool failure the other way round.
+    assert pinned == set(MARKETING_LOADOUT["enabled_tools"]) | SELF_SCOPED_TOOLS
     # The ambient tools survive: the pin neither drops one the policy allows
     # nor adds one back that the policy denies.
     assert set(ALWAYS_AVAILABLE) <= pinned
@@ -743,7 +744,7 @@ def test_a_pinned_role_does_not_drag_in_an_unrelated_domain():
     # Subset, not equality: a name with no native schema, or a tool whose
     # capability is not configured on this host, is withheld by the same
     # builder for reasons that have nothing to do with the pin.
-    assert sent <= set(MARKETING_LOADOUT["enabled_tools"]) | {"discover_tools"}
+    assert sent <= set(MARKETING_LOADOUT["enabled_tools"]) | SELF_SCOPED_TOOLS
     assert {"create_document", "ask_user"} <= sent
 
 

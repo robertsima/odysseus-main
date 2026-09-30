@@ -382,9 +382,11 @@ an excerpt plus a `toolout-…` reference. `recall_tool_output` retrieves the
 full text on demand. The inline limit comes from the context profile
 (§4.3).
 
-Before that, `bash` and `python` cap a command's output at 10,000 characters,
-keeping the first 30% and the last 70%: a build or test run prints its
-failures and its summary last. In the agent's tmux pane a command is finished
+`bash` and `python` keep up to 60,000 characters of a command's output (the
+first 30% and the last 70% past that), so the stored copy is whole and the
+excerpt shows the end, where a build or test run prints its failures and its
+summary. They used to cut at 10,000 before the store saw it. The tool card
+and the saved tool event keep the start and the end of 10,000. In the agent's tmux pane a command is finished
 when its end marker appears, even if its start marker has scrolled out of the
 pane's 2,000 lines; the output then starts with a note that its first lines
 are gone and how to capture all of it. (Waiting for the start marker held a
@@ -433,12 +435,46 @@ The window itself is resolved per model. A headless worker resolves its own
 — `balanced` — and truncated tool output at half what a chat on the same model
 got.
 
-Trimming (`trim_for_context`) is the last resort: it *drops* messages, where
-the ledger keeps their facts and a recall pointer. Automatic compaction is
-governed by [`specs/bounded-recursive-compaction.md`](../specs/bounded-recursive-compaction.md) —
+Trimming (`trim_for_context`) is the last resort: it leaves messages out of
+the request, where the ledger keeps their facts and a recall pointer. Automatic
+compaction is governed by [`specs/bounded-recursive-compaction.md`](../specs/bounded-recursive-compaction.md) —
 prior summaries are replaced by the consolidated one, never accumulated.
 
-### 4.4 Discovery and learning overhead
+### 4.4 Nothing said is deleted
+
+Every way a message leaves the model's context keeps it readable
+(`src/chat_archive.py`):
+
+| What | Where the message goes | What the model is told |
+|---|---|---|
+| Compaction (automatic, or the Compact button) | Moved to `chat_message_archive` with its id and time; the live history is the persona, the summary, the recent tail | The summary ends with how many messages were archived and that `recall_chat_history` reads them |
+| Trimming within a turn | Stays in the chat, left out of the request | A note on the first kept message after the gap (not the newest message), fixed while the cut stays so the cached prefix holds |
+| Earlier turns' tool calls | Stored with the reply (`tool_events`), never replayed | The tool's description says so |
+| The agent's own `manage_session truncate` | Moved to the archive | The result says so |
+| A user's edit, regenerate or `/truncate` | Deleted, as asked | — |
+
+`recall_chat_history` reads the chat's archived and live messages together,
+oldest first, with each message's tool calls and output: an overview with no
+arguments, a ranked search with `query`, one message with `message` (#index or
+id, plus `before`/`after`), or a range with `start`/`count`. It reads only the
+chat it runs in. Deleting a chat deletes its archive.
+
+Compaction used to count its cut from the number of system messages in the
+*request*, most of which (the prompt preface) are not stored, so it cut late and
+kept the first conversation messages as if they were the persona; it now counts
+over the stored history. The manual Compact button used to drop the persona
+too.
+
+A loadout's tool allowlist no longer removes `discover_tools`,
+`recall_tool_output`, `recall_chat_history` or `update_plan`
+(`tool_policy.SELF_SCOPED_TOOLS`): each touches only the agent's own state. The
+Lead Engineer's allowlist predated them, so it had no task checklist and no way
+back to its offloaded output. An explicit `disabled_tools` entry still removes
+them. Execution-ledger originals are stored with the chat's id, and the output
+store lists only the chat's own records (they were stored with none and listed
+in every chat).
+
+### 4.5 Discovery and learning overhead
 
 `app_api` endpoint discovery is paged (default 25, maximum 50, with an additional
 serialized-size bound). `filter`, `offset` and `next_offset` let the model narrow

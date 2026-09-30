@@ -82,3 +82,18 @@ def test_under_budget_nothing_is_touched():
     state = {}
     assert _sticky_trim(state, ("u", "m"), history, lambda msgs: trim_for_context(msgs, BUDGET)) is history
     assert state == {}
+
+
+def test_a_cut_is_noted_where_it_is_and_the_note_stays_put():
+    """A trim used to drop history silently. The note goes on the first kept
+    message after the gap, the same one every round while the cut stays, and
+    the user's request is left as written."""
+    requests = _run(True, rounds=40)
+    noted = [r for r in requests if any("left out of the context here" in str(m.get("content")) for m in r)]
+    assert noted, "a turn this long must have been cut"
+    for req in noted:
+        notes = [m for m in req if "left out of the context here" in str(m.get("content"))]
+        assert len(notes) == 1 and "recall_chat_history" in notes[0]["content"]
+        assert any(m.get("content") == "Research the issue and report." for m in req)
+    # Between cuts the note does not move, so the cached prefix holds.
+    assert _cache_breaks(requests) <= _cache_breaks(_run(False, rounds=40))

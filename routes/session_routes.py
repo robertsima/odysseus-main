@@ -1101,15 +1101,26 @@ def setup_session_routes(
         if len(history) < 6:
             raise HTTPException(400, "Not enough messages to compact")
 
+        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, _is_compaction_summary, archive_note
+
         # Keep a small recent tail verbatim. The prior half-chat/20-message
         # tail made manual compaction look like it did nothing on normal chats.
-        recent_keep = min(8, max(4, len(history) // 4))
-        older = history[:-recent_keep]
-        recent = history[-recent_keep:]
+        # The leading system messages (persona, preset) stay; earlier
+        # summaries are folded into the new one.
+        prefix = []
+        for m in history:
+            if _message_role(m) != "system":
+                break
+            if not _is_compaction_summary(m):
+                prefix.append(m)
+        kept_prefix = {id(m) for m in prefix}
+        body = [m for m in history if id(m) not in kept_prefix]
+        recent_keep = min(8, max(4, len(body) // 4))
+        older = body[:-recent_keep]
+        recent = body[-recent_keep:]
         if not older:
             raise HTTPException(400, "Nothing old enough to compact")
 
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT
         from src.endpoint_resolver import resolve_endpoint
         from src.llm_core import llm_call_async
 
@@ -1147,17 +1158,21 @@ def setup_session_routes(
             logger.error("Manual compaction failed: %s", e)
             raise HTTPException(500, "Compaction failed")
 
+        archived = sum(1 for m in older if not _is_compaction_summary(m))
         summary_msg = ChatMessage(
             role="system",
-            content=f"[Conversation summary]\n{summary}",
+            content=f"[Conversation summary]\n{summary}\n\n{archive_note(archived)}",
             metadata={
                 "compacted": True,
                 "summarized_count": len(older),
+                "archived_count": archived,
                 "timestamp": utcnow_naive().isoformat(),
             },
         )
-        new_history = [summary_msg] + recent
-        if not session_manager.replace_messages(session_id, new_history):
+        # The older messages move to the chat's archive instead of being
+        # deleted; recall_chat_history reads them.
+        new_history = prefix + [summary_msg] + recent
+        if not session_manager.replace_messages(session_id, new_history, archive_reason="compaction"):
             raise HTTPException(500, "Failed to save compacted history")
 
         return {
