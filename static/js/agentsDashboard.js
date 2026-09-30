@@ -102,13 +102,24 @@ function hashUnit(value) {
 }
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
-  const hue = hashUnit(key) % 360;
+  // Identity is stable across runs and separate from the live status class.
+  // Named runtime sources map to role archetypes; loadout names remain
+  // individualized as specialists without encoding status in their emblem.
+  const source = String(agent?.source || agent?.kind || '').toLowerCase();
+  const role = source === 'odysseus' || /^(odysseus|agamemnon|primary)$/.test(String(agent?.name || '').toLowerCase())
+    ? 'primary'
+    : source === 'claude_code' || source === 'session' || source === 'pipeline' || source === 'bg_job' || source === 'worktree'
+      ? 'worker' : 'specialist';
   const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
   const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
-  return `<span class="ag-bot ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" style="--ag-bot-h:${hue}" aria-hidden="true">
-    <span class="ag-bot-antenna"><i></i></span>
-    <span class="ag-bot-head"><i class="ag-bot-eye"></i><i class="ag-bot-eye"></i><b></b></span>
-    <span class="ag-bot-body"><i></i><small>${unit}</small></span>
+  return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" aria-hidden="true">
+    <svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
+      <path class="ag-seal-shield" d="M16 2.5 28 7v8.2c0 7-4.8 11.8-12 14.3C8.8 27 4 22.2 4 15.2V7z"/>
+      <path class="ag-seal-helm" d="M8.5 16.8a7.5 7.5 0 0 1 15 0v2h-15z"/>
+      <path class="ag-seal-brow" d="M7.5 17.8h17M16 9v8.8"/>
+      ${role === 'worker' ? '<path class="ag-seal-glyph" d="m11 21 5 2 5-2"/>' : role === 'specialist' ? '<circle class="ag-seal-glyph" cx="16" cy="22" r="1.7"/>' : '<path class="ag-seal-glyph" d="m13 21 3-2 3 2"/>'}
+    </svg>
+    <span class="ag-seal-unit">${unit}</span>
   </span>`;
 }
 // ── data ──────────────────────────────────────────────────────────────────

@@ -42247,7 +42247,16 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-crew-line { position: absolute; left: 0; right: 5px; top: 8px; height: 1px; background: color-mix(in srgb, var(--fg) 18%, transparent); }
 .ag-card-crew > b { position: relative; padding: 2px 4px; border-radius: 8px; background: var(--panel); color: var(--wb-muted); font-size: 8px; }
 
-.ag-bot { --bot-color: hsl(var(--ag-bot-h) 62% 58%); position: relative; display: inline-flex; flex-direction: column; align-items: center; width: 42px; height: 52px; padding-top: 5px; flex: 0 0 auto; box-sizing: content-box; transform-origin: 50% 100%; }
+.ag-bot { --bot-color: var(--wb-accent); position: relative; display: inline-flex; flex-direction: column; align-items: center; width: 42px; height: 42px; flex: 0 0 auto; box-sizing: content-box; transform-origin: 50% 100%; }
+.ag-seal-mark { display: block; width: 42px; height: 42px; overflow: visible; }
+.ag-seal-shield { fill: color-mix(in srgb, var(--panel) 86%, var(--wb-accent)); stroke: color-mix(in srgb, var(--wb-accent) 72%, var(--border)); stroke-width: 1.4; stroke-linejoin: round; }
+.ag-seal-helm { fill: color-mix(in srgb, var(--wb-accent) 22%, var(--panel)); stroke: var(--fg); stroke-width: 1.15; stroke-linejoin: round; }
+.ag-seal-brow { fill: none; stroke: var(--wb-accent); stroke-width: 1.7; stroke-linecap: square; }
+.ag-seal-glyph { fill: none; stroke: var(--fg); stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.ag-seal-specialist .ag-seal-helm { stroke-dasharray: 2 1; }
+.ag-seal-worker .ag-seal-brow { stroke-width: 2.2; }
+.ag-seal-unit { position: absolute; bottom: 1px; right: 2px; color: var(--fg); font: 5px/1 var(--wb-mono); opacity: .8; }
+.ag-bot-antenna, .ag-bot-head, .ag-bot-body { display: none; }
 .ag-bot-antenna { position: relative; width: 2px; height: 8px; background: color-mix(in srgb, var(--bot-color) 70%, var(--fg)); }
 .ag-bot-antenna i { position: absolute; left: -3px; top: -5px; width: 8px; height: 8px; border-radius: 50%; background: var(--bot-color); box-shadow: 0 0 9px var(--bot-color); }
 .ag-bot-head { position: relative; display: flex; align-items: center; justify-content: center; gap: 9px; width: 40px; height: 26px; border: 1px solid color-mix(in srgb, var(--bot-color) 58%, var(--border)); border-radius: 10px 10px 8px 8px; background: linear-gradient(155deg, color-mix(in srgb, var(--bot-color) 22%, var(--panel)), var(--bg)); box-shadow: inset 0 -6px 8px rgba(0,0,0,.11), 0 3px 8px rgba(0,0,0,.12); }
@@ -42261,11 +42270,11 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 .ag-bot-body i { width: 5px; height: 5px; border-radius: 50%; background: var(--bot-color); opacity: .8; }
 .ag-bot-body small { position: absolute; right: 2px; bottom: 0; color: color-mix(in srgb, var(--fg) 38%, transparent); font: 5px/1 var(--wb-mono); }
 .ag-bot-running { animation: ag-bot-work 1.8s ease-in-out infinite; }
-.ag-bot-running .ag-bot-antenna i { animation: ag-beacon .9s ease-in-out infinite; }
+.ag-bot-running .ag-seal-mark { animation: ag-seal-pulse .9s ease-in-out infinite alternate; }
 .ag-bot-waiting_approval { animation: ag-bot-wait 1.2s ease-in-out infinite; }
-.ag-bot-waiting_approval .ag-bot-eye, .ag-bot-waiting_approval .ag-bot-antenna i { background: var(--wb-warn); box-shadow: 0 0 8px var(--wb-warn); }
-.ag-bot-failed .ag-bot-eye, .ag-bot-failed .ag-bot-antenna i { background: var(--wb-bad); box-shadow: 0 0 7px var(--wb-bad); }
-.ag-bot-finished .ag-bot-eye, .ag-bot-finished .ag-bot-antenna i { background: var(--wb-ok); box-shadow: 0 0 6px var(--wb-ok); }
+.ag-bot-waiting_approval .ag-seal-shield { stroke: var(--wb-warn); stroke-dasharray: 2 1; }
+.ag-bot-failed .ag-seal-shield { stroke: var(--wb-bad); stroke-width: 2; }
+.ag-bot-finished .ag-seal-shield { stroke: var(--wb-ok); }
 .ag-bot-idle { opacity: .68; filter: saturate(.55); }
 .ag-bot-mini { width: 28px; height: 32px; transform: scale(.56); margin: -5px -4px; }
 .ag-bot-micro { position: relative; width: 18px; height: 22px; transform: scale(.38); margin: -6px -5px; padding: 5px 3px 1px; border-radius: 50%; background: var(--panel); }
@@ -42277,6 +42286,7 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
 @keyframes ag-bot-work { 0%,100% { transform: translateY(0) rotate(-.5deg); } 50% { transform: translateY(-3px) rotate(.5deg); } }
 @keyframes ag-bot-work-hero { 0%,100% { transform: scale(1.16) translateY(0) rotate(-.5deg); } 50% { transform: scale(1.16) translateY(-3px) rotate(.5deg); } }
 @keyframes ag-bot-wait { 0%,100% { transform: translateX(-1px); } 50% { transform: translateX(1px); } }
+@keyframes ag-seal-pulse { from { opacity: .8; } to { opacity: 1; } }
 @keyframes ag-bot-wait-hero { 0%,100% { transform: scale(1.16) translateX(-1px); } 50% { transform: scale(1.16) translateX(1px); } }
 @keyframes ag-beacon { 0%,100% { opacity: 1; } 50% { opacity: .28; } }
 @keyframes ag-card-scan { 0%,55% { transform: translateX(-120%); } 85%,100% { transform: translateX(120%); } }
