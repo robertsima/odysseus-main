@@ -58,6 +58,21 @@ def test_agent_fleet_uses_animated_robot_personification_with_reduced_motion():
     assert ".ag-bot, .ag-bot-antenna i, .ag-card-beacon, .ag-bot-card::after { animation: none !important; }" in STYLE
 
 
+def test_agent_seals_encode_role_separately_from_status():
+    assert "ag-seal-${role}" in AGENTS
+    assert "identity === 'agamemnon'" in AGENTS
+    assert "? 'worker' : 'specialist'" in AGENTS
+    assert 'aria-hidden="true">\n    <svg class="ag-seal-mark"' in AGENTS
+    assert "focusable=\"false\"" in AGENTS
+    assert "role === 'worker' ? '<path class=\"ag-seal-glyph\"" in AGENTS
+    assert "role === 'specialist' ? '<circle class=\"ag-seal-glyph\"" in AGENTS
+    assert ".ag-seal-primary .ag-seal-glyph" in STYLE
+    assert ".ag-seal-specialist .ag-seal-helm" in STYLE
+    assert ".ag-seal-worker .ag-seal-brow" in STYLE
+    for status in ("waiting_approval", "failed", "finished"):
+        assert f".ag-bot-{status} .ag-seal-shield" in STYLE
+
+
 def test_steering_messages_show_their_state_and_age():
     """A queued steer that silently never lands is the failure the steering
     log exists to expose, so the detail pane must show what became of each
@@ -221,8 +236,8 @@ def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():
 
 def test_robot_layout_reserves_room_for_antennae_and_scaled_hero():
     assert ".ag-card-avatar { min-height: 60px" in STYLE
-    # Match the base selector, not a density-specific descendant override.
-    assert "padding-top: 5px" in STYLE.split("\n.ag-bot {", 1)[1].split("}", 1)[0]
+    # The seal is a square mark now; the older antenna layout needed top space.
+    assert "height: 42px" in STYLE.split("\n.ag-bot {", 1)[1].split("}", 1)[0]
     assert 'class="ag-console-robot-bay"' in AGENTS
     assert ".ag-console-hero { position: relative; display: grid; grid-template-columns: 86px minmax(0, 1fr) auto" in STYLE
     assert ".ag-console-robot-bay { width: 86px; height: 82px" in STYLE
