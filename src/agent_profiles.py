@@ -9,8 +9,11 @@ delegation policy, worker concurrency and a round budget. Profiles live in the
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 MAX_PROFILES = 40
 # A round budget is a safety stop, not a work allowance, and counting rounds was
@@ -297,12 +300,48 @@ def propagate_profile_edits(old_profiles: Any, new_profiles: List[Dict[str, Any]
 
 
 def load_profiles() -> List[Dict[str, Any]]:
+    return load_profiles_with_problems()[0]
+
+
+def load_profiles_with_problems() -> tuple:
+    """``(profiles, problems)``: every saved loadout that validates, and why
+    each other one was left out.
+
+    Saving validates the whole list strictly, but loading used to as well: one
+    loadout that no longer validated (a rule tightened after it was saved)
+    emptied every picker, and launching any loadout by name then failed with
+    "no agent profile named X". Loading now keeps the good ones.
+    """
     try:
         from src.settings import get_setting
 
-        return validate_profiles(get_setting("agent_profiles", []) or [])
+        raw = get_setting("agent_profiles", []) or []
     except Exception:
-        return []
+        return [], []
+    try:
+        return validate_profiles(raw), []
+    except ValueError:
+        pass
+    if not isinstance(raw, list):
+        return [], ["The saved loadouts are not a list."]
+    profiles: List[Dict[str, Any]] = []
+    problems: List[str] = []
+    seen = set()
+    for i, item in enumerate(raw[:MAX_PROFILES]):
+        label = str(item.get("name") or f"#{i + 1}") if isinstance(item, dict) else f"#{i + 1}"
+        try:
+            valid = validate_profiles([item])[0]
+        except ValueError as exc:
+            problems.append(f"{label}: {exc}")
+            continue
+        if valid["name"].casefold() in seen:
+            problems.append(f"{label}: duplicate name")
+            continue
+        seen.add(valid["name"].casefold())
+        profiles.append(valid)
+    if problems:
+        logger.warning("Loadouts left out because they do not validate: %s", "; ".join(problems))
+    return profiles, problems
 
 
 def get_profile(name: str) -> Optional[Dict[str, Any]]:

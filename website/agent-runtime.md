@@ -897,6 +897,23 @@ A chat turn runs detached from the browser tab (`src/agent_runs.py`).
 
 ### Fleet lifecycle and navigation
 
+Every opening of the Control Room (rail, sidebar, Ctrl+Shift+A, `/agents`, a
+notification, auto-open) starts from the fleet with nothing filtered; the
+editor, archive, History view and launch form are where an action takes you,
+not where the next opening starts (`resetView`). Launch worker is in the
+header of every view and opens the form beside the fleet, with one button per
+loadout, the last-used loadout and the open chat as defaults, and a check that
+the worker has a model before anything is sent. The form closes after a
+launch; a failure is shown in the form and as a toast. History lists every
+agent chat (Agent mode, a loadout, or a worker), newest activity first and
+searchable, with Continue and "New with <loadout>"
+(`GET /api/agents/history`). A loadout that no longer validates is left out and
+named in the form instead of emptying every picker. The rail, sidebar and
+shortcut bring a room covered by another window forward instead of closing it.
+Auto-open follows the room's own event stream, so it covers loadout workers
+(whose runs name their parent chat) and works without admin rights;
+`workbench_auto_open` still turns it off.
+
 The Control Room separates Overview, Activity and Steering, and opens loadouts
 in a dedicated editor. The default compact fleet is paginated, with persistent
 Open chat and Stop actions, a larger-card option, and per-agent steering drafts.

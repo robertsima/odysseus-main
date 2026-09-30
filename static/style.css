@@ -42640,6 +42640,22 @@ div.ag-convo-tool { cursor: default; }
 .ag-field .wb-select, .ag-field .wb-input { width: 100%; max-width: 100%; box-sizing: border-box; }
 .ag-launch-actions { display: flex; align-items: center; gap: 10px; }
 .ag-launch-msg { font-size: 11.5px; color: var(--wb-muted); }
+/* Launch form: one button per loadout, and loadouts left out as invalid. */
+.ag-launch-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.ag-launch-problem { color: var(--wb-bad); }
+/* Control Room → History: every agent chat, newest activity first. */
+.ag-history { display: flex; flex-direction: column; min-height: 0; flex: 1; overflow: hidden; }
+.ag-history-body { flex: 1; min-height: 0; overflow: auto; padding: 6px 9px 10px; display: flex; flex-direction: column; gap: 8px; }
+.ag-history-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.ag-history-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border: 1px solid var(--wb-line); border-radius: var(--wb-r-sm); background: var(--bg); }
+.ag-history-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.ag-history-name { font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-history-meta { font-size: 11px; color: var(--wb-muted); overflow-wrap: anywhere; }
+.ag-history-meta code { font-size: 10.5px; }
+.ag-history-actions { display: flex; flex-wrap: wrap; gap: 6px; flex-shrink: 0; }
+@media (max-width: 600px) {
+  .ag-history-item { flex-direction: column; align-items: stretch; }
+}
 .agents-dashboard button { margin-top: 0; }
 .rail-agents-badge { position: absolute; top: 2px; right: 2px; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 999px; font-size: 9px; line-height: 14px; text-align: center; color: #fff; background: var(--hl-function, #61afef); font-variant-numeric: tabular-nums; }
 .rail-agents-badge.attn { background: var(--warn); color: #111; }

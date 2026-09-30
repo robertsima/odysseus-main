@@ -19,7 +19,7 @@ import Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { applyEdgeDock } from './modalSnap.js';
-import { nextToolWindowZ } from './toolWindowZOrder.js';
+import { nextToolWindowZ, topToolWindowZ } from './toolWindowZOrder.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -74,6 +74,16 @@ const state = {
   // { messages, total, loading, error, fetchedAt }.
   conversations: new Map(),
   archiveView: false,
+  // Every agent chat this user has, however old (GET /api/agents/history):
+  // the fleet lists a chat only while it runs or shortly after.
+  historyView: false,
+  history: { items: [], total: 0, q: '', loading: false, error: '' },
+  // The launch form's loadout and parent when a preset button or History row
+  // chose them (null: the defaults in launchHtml).
+  launchProfile: null, launchParent: null,
+  // Saved loadouts left out because they no longer validate (the overview's
+  // profile_problems), shown in the launch form instead of an empty picker.
+  profileProblems: [],
   detailDrafts: new Map(),
   // Parent session ids whose worker chats are unfolded under them in Recent.
   expandedParents: new Set(),
@@ -90,7 +100,11 @@ async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts));
   let body = null;
   try { body = await r.json(); } catch (_) {}
-  if (!r.ok) { const e = new Error((body && (body.detail || body.error)) || `${r.status}`); e.status = r.status; throw e; }
+  if (!r.ok) {
+    // A 500 has no JSON body; "500" alone told the user nothing.
+    const e = new Error((body && (body.detail || body.error)) || `The server answered ${r.status}${r.statusText ? ` ${r.statusText}` : ''}`);
+    e.status = r.status; throw e;
+  }
   return body;
 }
 // Reads fired by our own timers, not by the user. The header keeps the
@@ -137,6 +151,15 @@ async function refresh() {
     const overviewRequest = apiPoll(`/api/agents/overview${overviewArgs.size ? `?${overviewArgs}` : ''}`);
     const [ov, ap] = await Promise.all([overviewRequest, apiPoll('/api/agents/approvals')]);
     state.rows = ov.rows || []; state.totals = ov.totals || {}; state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
+    state.profileProblems = ov.profile_problems || [];
+    // A loadout changed elsewhere (the composer's Agents menu, Settings, a
+    // loadout edit propagating to its chats) replaced the stored config, but
+    // the editor's cached draft still showed the old one. Drop a draft that
+    // holds no edits of the user's once the server's copy has moved on.
+    for (const row of state.rows) {
+      const draft = state.configDrafts.get(row.session_id);
+      if (draft && !draft._dirty && draft._source !== JSON.stringify(row.config || {})) state.configDrafts.delete(row.session_id);
+    }
     state.approvals = ap.approvals || [];
     state.error = '';
     if (state.selected && !state.rows.some((r) => r.session_id === state.selected)) state.selected = null;
@@ -169,9 +192,25 @@ function connect() {
     list.push(ev); if (list.length > 400) list.splice(0, list.length - 400);
     state.events.set(ev.session_id, list);
     notifyFor(ev);
+    maybeAutoOpen(ev);
     if (['run_started', 'run_finished', 'status', 'note'].includes(ev.kind)) scheduleRefresh();
     else if (state.open && ev.session_id === state.selected) renderDetail();
   };
+}
+/** Show the room for delegated work the open chat just started.
+ *
+ * This used to hang off the Workbench's event stream, which is admin-only and
+ * files a loadout worker's run under the worker's own chat, so the room
+ * opened for a sub-agent or Claude Code but not for a worker, and never for a
+ * non-admin. This stream is the owner's, and a worker's run names its parent.
+ * `workbench_auto_open` (Settings) still turns it off. */
+const AUTO_OPEN_SOURCES = new Set(['claude_code', 'session', 'pipeline', 'bg_job', 'worktree']);
+function maybeAutoOpen(ev) {
+  if (ev.kind !== 'run_started' || !AUTO_OPEN_SOURCES.has(ev.source)) return;
+  if (window.__odysseusAgentsAutoOpen === false) return;
+  const cur = window.sessionModule?.getCurrentSessionId?.();
+  if (!cur || (ev.session_id !== cur && ev.data?.parent_session !== cur)) return;
+  openForRun();
 }
 /** Desktop notifications for the two things worth interrupting for: an agent
  *  blocked on an approval, and a worker finishing — only when the user isn't
@@ -194,7 +233,7 @@ function notifyFor(ev) {
   const viewing = !document.hidden && (state.open || window.sessionModule?.getCurrentSessionId?.() === ev.session_id);
   if (viewing && !d.approval_id) return;
   const n = new Notification(title, { body: String(body).slice(0, 180), tag: key });
-  n.onclick = () => { window.focus(); if (d.approval_id) { state.selected = ev.session_id; open(); } else window.sessionModule?.selectSession?.(ev.session_id); n.close(); };
+  n.onclick = () => { window.focus(); if (d.approval_id) open({ select: ev.session_id }); else window.sessionModule?.selectSession?.(ev.session_id); n.close(); };
   setTimeout(() => n.close(), 15000);
 }
 function disconnect() { if (state.es) { try { state.es.close(); } catch (_) {} state.es = null; } }
@@ -298,23 +337,31 @@ function render() {
   if (!root || !state.open) return;
   const surface = $('agents-dashboard-body');
   if (!surface) return;
-  const archiveToggle = `<button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">${state.archiveView ? 'Back to fleet' : 'Archived'}</button>`;
-  const headActions = state.archiveView ? archiveToggle : `${archiveToggle}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
+  // The same header in every view, with Launch always in it. The archive and
+  // loadout-editor views used to have no Launch button, and since the room
+  // reopened in whatever view it was left in, launching a worker could look
+  // impossible until the user found the way back to the fleet.
+  const aside = state.archiveView || state.historyView || state.configOpen;
+  const viewButtons = aside
+    ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="fleet-view">← Fleet</button>'
+    : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button>';
+  const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
+  const viewTitle = state.configOpen ? 'Agent loadout' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
   // button doing exactly what the title bar's maximize button does.
   surface.innerHTML = `
     <div class="ag-head">
-      ${state.configOpen
-        ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="config-back">← Monitoring</button>'
+      ${aside
+        ? `<span class="wb-group-title">${esc(viewTitle)}</span>`
         : `<div class="ag-triage">${triageHtml()}</div>`}
       <div class="ag-head-actions">
         ${liveHtml()}
-        ${state.configOpen ? '' : headActions}
+        ${headActions}
       </div>
     </div>
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
-    ${state.configOpen ? loadoutWorkspaceHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
+    ${state.configOpen ? loadoutWorkspaceHtml() : state.historyView ? historyHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
       <aside class="ag-fleet wb-card ${state.compactFleet ? 'ag-fleet-compact' : 'ag-fleet-expanded'}">
         <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-density" aria-pressed="${state.compactFleet}" title="${state.compactFleet ? 'Use larger cards' : 'Use compact cards'}">${state.compactFleet ? 'Compact' : 'Large'}</button></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
@@ -323,7 +370,8 @@ function render() {
       <section class="ag-detail wb-card" id="ag-detail"></section>
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
-  if (!state.configOpen) renderDetail();
+  if (state.historyView) bindHistorySearch();
+  else if (!state.configOpen) renderDetail();
   else {
     const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
     const selectedAgent = state.rows.find((item) => item.session_id === state.selected) || state.rows[0];
@@ -336,6 +384,76 @@ function render() {
     }
   }
   $('ag-filter')?.addEventListener('input', (e) => { state.filter = e.target.value; state.fleetPage = 0; renderFleetOnly(); });
+}
+/** The History view: every agent chat, newest activity first, with Continue. */
+function historyHtml() {
+  const h = state.history;
+  const rel = (iso) => {
+    const t = Date.parse(iso || '');
+    if (!t) return '';
+    const s = Math.max(0, (Date.now() - t) / 1000);
+    return s < 3600 ? `${Math.max(1, Math.round(s / 60))}m ago` : s < 86400 ? `${Math.round(s / 3600)}h ago` : `${Math.round(s / 86400)}d ago`;
+  };
+  const meta = (c) => [
+    `${c.profile ? `<span class="wb-chip">${esc(c.profile)}</span>` : ''}${c.parent_name ? ` ↳ from ${esc(c.parent_name)}` : ''}`.trim(),
+    `${esc(String(c.message_count))} messages`,
+    esc(rel(c.last_active)),
+    c.workspace ? `<code>${esc(c.workspace)}</code>` : '',
+  ].filter(Boolean).join(' · ');
+  const items = h.items.map((c) => `<li class="ag-history-item">
+      <div class="ag-history-main">
+        <span class="ag-history-name" title="${esc(c.name)}">${esc(c.name)}</span>
+        <span class="ag-history-meta">${meta(c)}</span>
+      </div>
+      <div class="ag-history-actions">
+        ${isCurrentChat(c.id) ? '<span class="wb-hint">This chat</span>' : `<button type="button" class="wb-btn wb-btn-sm wb-btn-primary" data-ag="open-chat" data-sid="${esc(c.id)}">Continue</button>`}
+        ${c.profile ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="launch-preset" data-profile="${esc(c.profile)}" title="Launch a new worker with this loadout">New with ${esc(c.profile)}</button>` : ''}
+      </div>
+    </li>`).join('');
+  const body = h.error ? `<div class="wb-empty">${esc(h.error)}</div>`
+    : h.loading && !h.items.length ? '<div class="wb-empty">Loading…</div>'
+    : h.items.length ? `<ul class="ag-history-list">${items}</ul>${h.total > h.items.length ? `<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-more">Show more (${h.items.length} of ${h.total})</button>` : ''}`
+    : `<div class="wb-empty">${h.q ? 'No agent chat matches.' : 'No agent chats yet.'}</div>`;
+  return `<div class="ag-history wb-card">
+    <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-history-q" placeholder="Search by name, loadout or workspace…" value="${esc(h.q)}" aria-label="Search agent chats"></div>
+    <div class="ag-history-body" data-wb-scroll="history">${body}</div>
+  </div>`;
+}
+async function loadHistoryList({ more = false } = {}) {
+  const h = state.history;
+  h.loading = true; h.error = '';
+  const offset = more ? h.items.length : 0;
+  try {
+    const args = new URLSearchParams({ limit: '40', offset: String(offset) });
+    if (h.q.trim()) args.set('q', h.q.trim());
+    const r = await api(`/api/agents/history?${args}`);
+    h.items = more ? h.items.concat(r.chats || []) : (r.chats || []);
+    h.total = r.total || h.items.length;
+  } catch (err) {
+    h.error = err.message || 'Agent chats are unavailable';
+  } finally {
+    h.loading = false;
+  }
+  if (!state.open || !state.historyView) return;
+  const body = $('agents-dashboard')?.querySelector('.ag-history');
+  if (!body) { render(); return; }
+  // Re-render the list only, so the search box keeps its focus and caret.
+  const q = $('ag-history-q');
+  const hadFocus = document.activeElement === q;
+  const caret = q ? q.selectionStart : null;
+  body.outerHTML = historyHtml();
+  const nextQ = bindHistorySearch();
+  if (nextQ && hadFocus) { nextQ.focus({ preventScroll: true }); if (caret != null) nextQ.setSelectionRange(caret, caret); }
+}
+let _historySearchTimer = null;
+function bindHistorySearch() {
+  const q = $('ag-history-q');
+  q?.addEventListener('input', (e) => {
+    state.history.q = e.target.value;
+    clearTimeout(_historySearchTimer);
+    _historySearchTimer = setTimeout(() => loadHistoryList(), 250);
+  });
+  return q;
 }
 function filteredRows() {
   const q = state.filter.trim().toLowerCase();
@@ -509,6 +627,10 @@ function configFor(row) {
   }, stored);
   base._explicitToolAccess = Object.prototype.hasOwnProperty.call(stored, 'tool_access');
   base._catalogReady = false;
+  // What the draft was built from, so refresh() can tell a stale copy (see
+  // there) from one the user is editing (_dirty).
+  base._source = JSON.stringify(stored);
+  base._dirty = false;
   finalizeToolConfig(base);
   state.configDrafts.set(row.session_id, base);
   return base;
@@ -868,17 +990,33 @@ function eventHtml(ev) {
   const lvl = ev.level === 'error' || ev.kind === 'error' ? ' err' : ev.level === 'warning' ? ' warn' : '';
   return `<div class="wb-ev no-src${lvl}"><span class="wb-ev-time">${fmtTime(ev.ts)}</span><span class="wb-ev-kind">${KIND_ICON[ev.kind] || '·'}</span><div class="wb-ev-body"><span class="wb-ev-title">${chip(ev.source)} ${esc(ev.title || '')}</span>${ev.detail ? `<details class="wb-disclosure"><summary>Detail</summary><pre>${esc(ev.detail)}</pre></details>` : ''}</div></div>`;
 }
+const LAST_PROFILE_KEY = 'odysseus-agents-last-profile';
+function lastProfile() {
+  try { return localStorage.getItem(LAST_PROFILE_KEY) || ''; } catch (_) { return ''; }
+}
 function launchHtml() {
-  const opts = state.profiles.map((p) => `<option value="${esc(p.name)}">${esc(p.name)}${p.description ? ` — ${esc(p.description)}` : ''}</option>`).join('');
-  const chats = state.chats.map((c) => `<option value="${esc(c.id)}"${c.id === state.selected ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+  // Defaults the user would pick anyway: the loadout asked for (a preset
+  // button) or the one launched last, and the chat that is open as the one to
+  // report to. The parent used to default to whatever row was selected.
+  const wanted = state.launchProfile || lastProfile();
+  const profile = state.profiles.some((p) => p.name === wanted) ? wanted : (state.profiles[0]?.name || '');
+  const cur = window.sessionModule?.getCurrentSessionId?.();
+  const parent = state.launchParent ?? (state.chats.some((c) => c.id === cur) ? cur : '');
+  const opts = state.profiles.map((p) => `<option value="${esc(p.name)}"${p.name === profile ? ' selected' : ''}>${esc(p.name)}${p.description ? ` — ${esc(p.description)}` : ''}</option>`).join('');
+  const chats = state.chats.map((c) => `<option value="${esc(c.id)}"${c.id === parent ? ' selected' : ''}>${esc(c.name)}</option>`).join('');
+  const presets = state.profiles.slice(0, 8).map((p) => `<button type="button" class="wb-btn wb-btn-sm${p.name === profile ? ' wb-btn-primary' : ' wb-btn-ghost'}" data-ag="launch-preset" data-profile="${esc(p.name)}" title="${esc(p.description || p.name)}">${esc(p.name)}</button>`).join('');
+  const problems = state.profileProblems.length
+    ? `<p class="wb-hint ag-launch-problem">Left out (no longer valid, fix in Settings › Agents): ${state.profileProblems.map((t) => esc(t)).join('; ')}</p>` : '';
   return `<div class="ag-launch-head"><span class="wb-group-title">Launch a worker</span><button type="button" class="wb-icon-btn" data-ag="launch-close" aria-label="Close">✕</button></div>
-    <label class="ag-field"><span>Profile</span><select id="ag-profile" class="wb-select"><option value="">No profile (parent chat's model, all tools)</option>${opts}</select></label>
+    ${presets ? `<div class="ag-launch-presets" role="group" aria-label="Loadouts">${presets}</div>` : ''}
+    <label class="ag-field"><span>Loadout</span><select id="ag-profile" class="wb-select"><option value="">No loadout (the reporting chat's model, all tools)</option>${opts}</select></label>
     <label class="ag-field"><span>Task</span><textarea id="ag-task" class="wb-input ag-textarea" rows="5" placeholder="The whole task — the worker starts with no other context."></textarea></label>
-    <label class="ag-field"><span>Report to chat</span><select id="ag-parent" class="wb-select"><option value="">None (standalone)</option>${chats}</select></label>
+    <label class="ag-field"><span>Report to chat</span><select id="ag-parent" class="wb-select"><option value=""${parent ? '' : ' selected'}>None (standalone)</option>${chats}</select></label>
     <label class="ag-field"><span>Model override</span><input id="ag-model" class="wb-input" placeholder="optional, e.g. qwen3 or model@endpoint"></label>
     <label class="ag-field"><span>Workspace</span><input id="ag-workspace" class="wb-input" placeholder="optional checkout path; default: the parent chat's, or the one the task names"></label>
-    <div class="ag-launch-actions"><button type="button" class="wb-btn wb-btn-primary" data-ag="launch-go">Launch</button><span class="ag-launch-msg" id="ag-launch-msg"></span></div>
-    ${state.profiles.length ? '' : '<p class="wb-hint">No profiles yet — define workers under Settings › Workbench › Agent profiles.</p>'}`;
+    <div class="ag-launch-actions"><button type="button" class="wb-btn wb-btn-primary" data-ag="launch-go">Launch</button><span class="ag-launch-msg" id="ag-launch-msg" role="status"></span></div>
+    ${problems}
+    ${state.profiles.length ? '' : '<p class="wb-hint">No loadouts yet — define them under Settings › Agents.</p>'}`;
 }
 
 function syncConfigVisibility(editor, draft) {
@@ -929,6 +1067,7 @@ function onConfigChange(e) {
     draft.agent_instructions = src.instructions || '';
     if (src.temperature != null) draft.agent_temperature = src.temperature;
     if (src.max_tokens) draft.agent_max_tokens = src.max_tokens;
+    draft._dirty = true;
     render();
     const msg = $('ag-config-msg');
     if (msg) msg.textContent = `Copied ${src.name}. Not saved yet.`;
@@ -940,7 +1079,7 @@ function onConfigChange(e) {
     // Choosing a preset loads its whole loadout. Recording only the name left
     // every field as it was, and saving then stored the old settings under
     // the new preset's label.
-    state.configDrafts.set(row.session_id, profileConfig(profile));
+    state.configDrafts.set(row.session_id, Object.assign(profileConfig(profile), { _dirty: true }));
     render();
     const msg = $('ag-config-msg');
     if (msg) msg.textContent = `Loaded ${profile.name} — unsaved`;
@@ -970,6 +1109,7 @@ function onConfigChange(e) {
       draft.disabled_tools = (draft.disabled_tools || []).filter((name) => name !== e.target.value);
     }
   }
+  draft._dirty = true;
   syncConfigVisibility(editor, draft);
   const msg = $('ag-config-msg');
   if (msg) msg.textContent = 'Unsaved changes';
@@ -1033,6 +1173,7 @@ async function saveAgentConfig(row) {
   row.approval_mode = result.approval_mode;
   state.configDrafts.set(row.session_id, Object.assign({}, draft, row.config, {
     tool_access: draft.tool_access, enabled_tools: draft.enabled_tools || [], mcp_access: draft.mcp_access,
+    _source: JSON.stringify(row.config), _dirty: false,
   }));
   return result;
 }
@@ -1064,11 +1205,42 @@ async function onClick(e) {
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
     else if (act === 'archive-view') {
       state.archiveView = !state.archiveView;
+      state.historyView = false; state.configOpen = false;
       state.selected = null; state.filter = ''; state.bucket = 'all'; state.fleetPage = 0;
       await refresh();
     }
-    else if (act === 'launch') { state.launchOpen = true; render(); $('ag-task')?.focus(); }
-    else if (act === 'launch-close') { state.launchOpen = false; render(); }
+    else if (act === 'fleet-view' || act === 'config-back') {
+      const leavingArchive = state.archiveView;
+      state.configOpen = false; state.historyView = false; state.archiveView = false;
+      render();
+      if (leavingArchive) await refresh();
+    }
+    else if (act === 'history-view') {
+      state.historyView = true; state.configOpen = false; state.launchOpen = false;
+      render();
+      await loadHistoryList();
+    }
+    else if (act === 'history-more') { await loadHistoryList({ more: true }); }
+    else if (act === 'launch' || act === 'launch-preset') {
+      // From any view: the form lives beside the fleet. A preset button keeps
+      // what was typed and sets the loadout.
+      const typed = $('ag-task')?.value || '';
+      const parentChoice = $('ag-parent')?.value;
+      if (act === 'launch-preset') {
+        state.launchProfile = b.dataset.profile || null;
+        if (parentChoice !== undefined) state.launchParent = parentChoice;
+      } else if (!state.launchOpen) {
+        state.launchProfile = null; state.launchParent = null;
+      }
+      const leavingArchive = state.archiveView;
+      state.configOpen = false; state.historyView = false; state.archiveView = false;
+      state.launchOpen = true;
+      render();
+      const ta = $('ag-task');
+      if (ta) { ta.value = typed; ta.focus(); }
+      if (leavingArchive) await refresh();
+    }
+    else if (act === 'launch-close') { state.launchOpen = false; state.launchProfile = null; state.launchParent = null; render(); }
     else if (act === 'bucket') {
       // Toggle: clicking the active bucket clears the filter, so the control
       // can always get you back to everything without a separate "All" chip.
@@ -1129,7 +1301,15 @@ async function onClick(e) {
       if (!row) return;
       b.disabled = true;
       const msg = $('ag-config-msg'); if (msg) msg.textContent = 'Saving…';
-      await saveAgentConfig(row);
+      try {
+        await saveAgentConfig(row);
+      } catch (err) {
+        // The editor view is not refreshed by a poll, so a failed save left
+        // the button disabled with "Saving…" on it.
+        b.disabled = false;
+        if (msg) msg.textContent = `Not saved: ${err.message || err}`;
+        throw err;
+      }
       uiModule.showToast(`Loadout saved for ${row.name}`, 'success');
       state.configOpen ? render() : renderDetail();
     }
@@ -1188,15 +1368,36 @@ async function onClick(e) {
       await sendToChat(b.dataset.sid, text, { open: true });
     } else if (act === 'launch-go') {
       const task = ($('ag-task')?.value || '').trim();
+      const profile = $('ag-profile')?.value || '';
+      const parent = $('ag-parent')?.value || '';
+      const model = ($('ag-model')?.value || '').trim();
       const msg = $('ag-launch-msg');
-      if (!task) { if (msg) msg.textContent = 'Describe the task first.'; return; }
+      if (!task) { if (msg) msg.textContent = 'Describe the task first.'; $('ag-task')?.focus(); return; }
+      const chosen = state.profiles.find((p) => p.name === profile);
+      if (!parent && !model && (!chosen || !chosen.model)) {
+        // The server would refuse this with an error worded for the tool API.
+        if (msg) msg.textContent = chosen
+          ? `${chosen.name} has no model of its own: pick a chat to report to (the worker uses its model) or enter a model override.`
+          : 'Choose a loadout, a chat to report to (the worker uses its model) or a model override.';
+        return;
+      }
       b.disabled = true; if (msg) msg.textContent = 'Launching…';
       try {
-        const r = await post('/api/agents/launch', { task, profile: $('ag-profile')?.value || '', parent_session: $('ag-parent')?.value || '', model: $('ag-model')?.value || '', workspace: $('ag-workspace')?.value || '' });
-        state.launchOpen = false; state.selected = r.session_id; state.events.delete(r.session_id);
+        const r = await post('/api/agents/launch', { task, profile, parent_session: parent, model, workspace: $('ag-workspace')?.value || '' });
+        try { if (profile) localStorage.setItem(LAST_PROFILE_KEY, profile); } catch (_) {}
+        state.launchOpen = false; state.launchProfile = null; state.launchParent = null;
+        state.selected = r.session_id; state.events.delete(r.session_id);
+        state.bucket = 'all'; state.filter = ''; state.fleetPage = 0;
         uiModule.showToast(`Worker started: ${r.session_name}`, 'success');
+        // A refresh redraws only the fleet and the detail pane, so the form
+        // used to stay on screen with its button disabled and "Launching…".
+        render();
         await refresh();
-      } catch (err) { if (msg) msg.textContent = err.message; b.disabled = false; }
+      } catch (err) {
+        if (msg) msg.textContent = err.message || String(err);
+        uiModule.showToast(`Worker not started: ${err.message || err}`, 'error');
+        b.disabled = false;
+      }
     }
   } catch (err) {
     uiModule.showToast(err.message || String(err), 'error');
@@ -1207,6 +1408,11 @@ async function onClick(e) {
  *  becomes a normal turn with the chat's own settings. */
 async function sendToChat(sid, text, { open = true } = {}) {
   if (open) await selectChat(sid);
+  // The composer's Agent/Chat mode is global: a message sent to an agent chat
+  // while the composer was in Chat mode reached it without its tools.
+  const row = state.rows.find((r) => r.session_id === sid);
+  const agentBtn = $('mode-agent-btn');
+  if (row && (row.profile || row.parent_session) && agentBtn && !agentBtn.classList.contains('active')) agentBtn.click();
   const ta = $('message');
   if (!ta) throw new Error('Chat composer is unavailable');
   ta.value = text;
@@ -1278,19 +1484,40 @@ function bringToFront() {
   const root = $(MODAL_ID); if (!root) return;
   root.style.zIndex = String(nextToolWindowZ({ exclude: root, current: root.style.zIndex }));
 }
-export function open({ focus = true, auto = false } = {}) {
+/** Where a fresh opening starts, whatever was on screen when it last closed.
+ *
+ * The room kept one set of view state for its whole life, so every entry
+ * point (rail, sidebar, shortcut, /agents, a notification, auto-open) showed
+ * whatever the last action left behind: the loadout editor, the archive (no
+ * Launch button in either), a half-used launch form, a filter hiding every
+ * agent. User preferences (card density, fleet width, dock side) persist;
+ * where to look does not. */
+function resetView(view = null) {
+  state.configOpen = view === 'config';
+  state.archiveView = view === 'archive';
+  state.historyView = view === 'history';
+  state.launchOpen = view === 'launch';
+  state.launchProfile = null; state.launchParent = null;
+  state.bucket = 'all'; state.filter = ''; state.fleetPage = 0; state.detailTab = 'overview';
+}
+export function open({ focus = true, auto = false, select = null, view = null } = {}) {
   const root = $('agents-dashboard'); if (!root) return;
   if (!auto) state.dismissed = false;
   registerWithManager();
   if (Modals.isMinimized(MODAL_ID)) { Modals.restore(MODAL_ID); return; }
-  if (!state.open) returnFocus = document.activeElement;
+  const fresh = !state.open;
+  if (fresh) returnFocus = document.activeElement;
+  if (fresh || view) resetView(view);
   state.open = true;
   root.hidden = false;
   root.classList.remove('hidden');
   bringToFront();
   if ('Notification' in window && Notification.permission === 'default') { try { Notification.requestPermission(); } catch (_) {} }
   const cur = window.sessionModule?.getCurrentSessionId?.();
-  if (cur && state.rows.some((r) => r.session_id === cur)) state.selected = cur;
+  // A caller that names an agent (a notification) gets that one selected;
+  // otherwise a fresh opening shows the chat the user is in.
+  if (select) state.selected = select;
+  else if (fresh && cur && state.rows.some((r) => r.session_id === cur)) state.selected = cur;
   render(); refresh(); connect();
   if (focus) root.focus({ preventScroll: true });
   if (!state.tick) state.tick = setInterval(() => {
@@ -1319,7 +1546,21 @@ export function close() {
   if (Modals.isRegistered(MODAL_ID)) Modals.close(MODAL_ID);
   else hideWindow();
 }
+/** Whether the room is the top tool window (nothing drawn over it). */
+function isFrontMost(root) {
+  const z = parseInt(getComputedStyle(root).zIndex, 10);
+  return !Number.isFinite(z) || z >= topToolWindowZ({ exclude: root });
+}
 export function toggle() {
+  // The rail button, the sidebar entry and Ctrl+Shift+A closed a room that
+  // was open behind another window, so the first press seemed to do nothing
+  // and the second one opened it. Bring it forward instead.
+  const root = $(MODAL_ID);
+  if (state.open && root && !Modals.isMinimized(MODAL_ID) && !isFrontMost(root)) {
+    bringToFront();
+    root.focus({ preventScroll: true });
+    return;
+  }
   if (Modals.toggle(MODAL_ID)) return;
   state.open ? close() : open();
 }
@@ -1451,7 +1692,15 @@ function init() {
   // in the chat that launched a worker never got to ask about it (2026-09-17).
   if (!document.hidden) connect();
   refresh();
-  state.pollTimer = setInterval(() => { if (document.visibilityState === 'visible') refresh(); }, state.open ? 5000 : 20000);
+  // Every 5 s while the room is open, 20 s while it is closed. The interval
+  // used to be read once, at load, when the room was always closed.
+  const poll = () => {
+    state.pollTimer = setTimeout(() => {
+      if (document.visibilityState === 'visible') refresh();
+      poll();
+    }, state.open ? 5000 : 20000);
+  };
+  poll();
   let hiddenTimer = null;
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {

@@ -1570,6 +1570,9 @@ async function probeSettings() {
     const s = await r.json();
     state.enabled = s.workbench_enabled !== false;
     state.autoOpen = s.workbench_auto_open !== false;
+    // The Agents room opens itself from its own stream (agentsDashboard.js
+    // maybeAutoOpen); it reads the setting from here.
+    window.__odysseusAgentsAutoOpen = state.autoOpen;
     if (!state.enabled) { hideRail(); disconnect(); }
   } catch (_) {}
 }
@@ -1585,10 +1588,10 @@ export async function init() {
   watchSession();
   watchVisibility();
   if (!state.enabled) return;
-  // A sub-process run starting in this chat (Claude Code, a sub-agent…)
-  // opens the Agents panel, not this window, so the user sees the work as it
-  // happens. The Workbench opens only when asked for.
-  document.addEventListener('workbench:run-started', () => { if (state.autoOpen) window.agentsDashboard?.openForRun?.(); });
+  // A sub-process run starting in this chat opens the Agents room, not this
+  // window; the room does that from its own stream (agentsDashboard.js
+  // maybeAutoOpen), which also sees workers and works without admin rights.
+  // The Workbench opens only when asked for.
   document.addEventListener('odysseus:history-rendered', (e) => {
     if (e.detail && e.detail.sessionId === state.sessionId) restoreChatCards();
   });

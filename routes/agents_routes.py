@@ -110,6 +110,30 @@ def setup_agents_routes(session_manager) -> APIRouter:
         except Exception:
             return {}
 
+    def _recent_chats(user: Optional[str], owned: Dict[str, Any], limit: int) -> list:
+        """The launch form's "Report to chat" list, most recently active first.
+
+        It was the first ``limit`` owned chats in no particular order, so the
+        chat the user was just in could be missing from it.
+        """
+        ordered: list = []
+        try:
+            from core.database import SessionLocal, Session as DbSession
+            db = SessionLocal()
+            try:
+                query = db.query(DbSession.id).filter(DbSession.archived == False)  # noqa: E712
+                if user is not None:
+                    query = query.filter(DbSession.owner == user)
+                ordered = [row.id for row in query.order_by(DbSession.last_message_at.desc()).limit(limit * 2)]
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("recent chat order unavailable", exc_info=True)
+        ids = [sid for sid in ordered if sid in owned]
+        seen = set(ids)
+        ids += [sid for sid, s in owned.items() if sid not in seen and not getattr(s, "archived", False)]
+        return [{"id": sid, "name": getattr(owned[sid], "name", "") or sid} for sid in ids[:limit]]
+
     # Identifies this router's answers in the shared poll cache (tests and
     # embedders build several routers over different session managers).
     _poll_ns = object()
@@ -141,6 +165,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
         # Endpoint functions are also called directly by a few embedders and
         # tests, where FastAPI's Query default is still a Query object.  Only
         # the literal boolean True opts into the archive view (see overview).
+        # The launch form reports to a live chat whichever view is open; in
+        # the archive view `owned` below holds only archived chats.
+        live_chats = {sid: sess for sid, sess in owned.items() if not getattr(sess, "archived", False)}
         if show_archived:
             owned.update(_archived_owned(user))
         owned = {sid: sess for sid, sess in owned.items()
@@ -287,10 +314,11 @@ def setup_agents_routes(session_manager) -> APIRouter:
         from src import agent_profiles
 
         from src.agent_tools.claude_code_tools import configured_concurrency
-        return {"now": now, "rows": rows, "totals": totals, "profiles": agent_profiles.load_profiles(),
+        profiles, profile_problems = agent_profiles.load_profiles_with_problems()
+        return {"now": now, "rows": rows, "totals": totals, "profiles": profiles,
+                "profile_problems": profile_problems,
                 "provider_limits": {"claude_code": configured_concurrency()},
-                "chats": [{"id": s.id, "name": getattr(s, "name", "") or s.id} for s in owned.values()
-                          if not getattr(s, "archived", False)][:200]}
+                "chats": _recent_chats(user, live_chats, 200)}
 
     @router.get("/catalog")
     async def catalog(request: Request):
@@ -768,6 +796,79 @@ def setup_agents_routes(session_manager) -> APIRouter:
         except ValueError as exc:
             # A preflight refusal (WorkerBlocked) reads as the reason and the
             # fix, e.g. which checkout to pick.
-            raise HTTPException(400, str(exc))
+            raise HTTPException(400, _launch_error_text(str(exc)))
+        except RuntimeError as exc:
+            raise HTTPException(503, f"The worker could not be started: {exc}")
+
+    def _launch_error_text(text: str) -> str:
+        """The launcher's errors are worded for the tool API; say them for the form."""
+        if "needs a profile with a model or a calling chat" in text:
+            return ("The worker has no model to run on. Choose a loadout that has a model, pick a "
+                    "chat to report to (the worker uses its model), or enter a model override.")
+        if text.startswith("no agent profile named"):
+            return (f"{text[0].upper()}{text[1:]}. It may have been renamed or deleted, or it no longer "
+                    "validates; check Settings › Agents.")
+        if text == "task is empty":
+            return "Describe the task first."
+        return text
+
+    @router.get("/history")
+    async def history(request: Request, q: str = Query(default=""), limit: int = Query(default=40),
+                      offset: int = Query(default=0)):
+        """This owner's agent chats, most recently active first, however old.
+
+        The fleet lists a chat only while it runs or for a while after, so an
+        agent chat from yesterday could be reached only through the sidebar.
+        These are chats that ran in Agent mode, carry a loadout, or are a
+        worker (``parent_session``); ``q`` filters by name, loadout or task.
+        """
+        user, owned = _owned(request)
+        limit = max(1, min(int(limit or 40), 100))
+        offset = max(0, int(offset or 0))
+        needle = str(q or "").strip().casefold()
+        try:
+            from core.database import SessionLocal, Session as DbSession
+            db = SessionLocal()
+            try:
+                query = db.query(
+                    DbSession.id, DbSession.name, DbSession.model, DbSession.mode, DbSession.settings_json,
+                    DbSession.last_message_at, DbSession.updated_at, DbSession.message_count,
+                ).filter(DbSession.archived == False)  # noqa: E712
+                if user is not None:
+                    query = query.filter(DbSession.owner == user)
+                rows = query.order_by(DbSession.last_message_at.desc()).limit(2000).all()
+            finally:
+                db.close()
+        except Exception:
+            logger.debug("agent history query failed", exc_info=True)
+            rows = []
+        names = {row.id: (row.name or row.id) for row in rows}
+        items = []
+        for row in rows:
+            if row.id not in owned and user is not None:
+                continue
+            try:
+                settings = json.loads(row.settings_json) if row.settings_json else {}
+            except (TypeError, ValueError):
+                settings = {}
+            settings = settings if isinstance(settings, dict) else {}
+            profile = str(settings.get("agent_profile") or "")
+            parent = str(settings.get("parent_session") or "")
+            if row.mode != "agent" and not profile and not parent:
+                continue
+            item = {
+                "id": row.id, "name": row.name or row.id, "model": row.model or "",
+                "profile": profile, "parent_session": parent,
+                "parent_name": names.get(parent, "") if parent else "",
+                "message_count": int(row.message_count or 0),
+                "last_active": (row.last_message_at or row.updated_at).isoformat()
+                if (row.last_message_at or row.updated_at) else "",
+                "workspace": str(settings.get("workspace") or ""),
+            }
+            if needle and needle not in " ".join(
+                    (item["name"], item["profile"], item["parent_name"], item["workspace"])).casefold():
+                continue
+            items.append(item)
+        return {"chats": items[offset:offset + limit], "total": len(items), "offset": offset, "limit": limit}
 
     return router
