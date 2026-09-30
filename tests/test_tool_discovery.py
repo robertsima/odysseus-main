@@ -235,6 +235,32 @@ def test_none_and_selected_profiles_and_email_aliases():
     })["loaded_names"] == []
 
 
+def test_selected_allowlist_mcp_wildcards_are_honoured():
+    """The Lead Engineer grants GitHub reads as `mcp__github_read__*`. A
+    set-membership check matched no real tool name, so discover_tools called
+    every GitHub read tool denied and the agent could not check the CI of the
+    PR it had just opened (2026-09-30)."""
+    gh = [schema("mcp__github_read__actions_list", "List GitHub Actions workflow runs", {"readOnlyHint": True}),
+          schema("mcp__github_read__pull_request_read", "Read a GitHub pull request", {"readOnlyHint": True}),
+          schema("mcp__github_write__create_pull_request", "Create a GitHub pull request", {"readOnlyHint": False})]
+    lead = {"tool_access": "selected", "enabled_tools": ["bash", "mcp__github_read__*"]}
+    result = run(TurnToolDiscovery(CATALOG + gh), "github actions pull request", settings=lead)
+    assert set(result["loaded_names"]) == {"mcp__github_read__actions_list", "mcp__github_read__pull_request_read"}
+    anything = run(TurnToolDiscovery(CATALOG + gh), "social profile",
+                   settings={"tool_access": "selected", "enabled_tools": ["mcp__*"]})
+    assert "mcp__social__get-profile" in anything["loaded_names"]
+    # A tool the allowlist names neither literally nor by wildcard stays out.
+    assert "mcp__github_write__create_pull_request" not in json.dumps(result)
+
+
+def test_selected_allowlist_keeps_self_scoped_tools():
+    catalog = CATALOG + [schema("update_plan", "Keep the task checklist"),
+                         schema("recall_chat_history", "Read this chat's earlier messages")]
+    result = run(TurnToolDiscovery(catalog), "update_plan recall_chat_history",
+                 settings={"tool_access": "selected", "enabled_tools": ["web_search"]})
+    assert {"update_plan", "recall_chat_history"} <= set(result["loaded_names"])
+
+
 def test_mcp_server_allowlist_and_runtime_revocation_are_fresh():
     discovery = TurnToolDiscovery(CATALOG)
     denied = run(discovery, "social profile", settings={"allowed_mcp_servers": []})

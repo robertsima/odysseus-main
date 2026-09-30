@@ -262,9 +262,18 @@ class TurnToolDiscovery:
             return {}
 
         allowed = None if self._allowed is None else set(self._allowed)
-        if mode == "selected":
-            # Positive allowlist is authoritative even if inventory changed.
-            allowed = enabled if allowed is None else allowed & enabled
+        # A `selected` allowlist is authoritative even if the inventory
+        # changed, and is read by the rule execution applies
+        # (tool_policy.allowlist_permits). A set-membership test here missed
+        # every MCP tool granted as `mcp__<server>__*` or `mcp__*`: on
+        # 2026-09-30 the Lead Engineer, granted `mcp__github_read__*`, was told
+        # its GitHub PR and Actions tools were denied and could not check the
+        # CI of the PR it had just opened. The self-scoped tools are kept by
+        # any non-empty allowlist, as in the offer and at execution.
+        from src.tool_policy import SELF_SCOPED_TOOLS, allowlist_permits
+
+        selected = mode == "selected"
+        keeps_self_scoped = selected and bool(enabled)
 
         allowed_servers = settings.get("allowed_mcp_servers")
         server_ceiling = None
@@ -289,6 +298,9 @@ class TurnToolDiscovery:
                 continue
             aliases = email_tool_policy_names(name)
             if not aliases.isdisjoint(denied) or (allowed is not None and aliases.isdisjoint(allowed)):
+                continue
+            if selected and not allowlist_permits(name, "selected", enabled) and not (
+                    keeps_self_scoped and name in SELF_SCOPED_TOOLS):
                 continue
             match = _MCP_NAME.match(name)
             if match and server_ceiling is not None and match.group(1) not in server_ceiling:
