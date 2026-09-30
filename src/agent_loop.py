@@ -5696,6 +5696,11 @@ def _gated_mcp_names(mcp_mgr, disabled_map) -> Optional[Set[str]]:
         return None
 
 
+# Below this window the schema block is a real share of every request (local
+# models, typically uncached), so native schemas use the lean prose level.
+_LEAN_SCHEMA_WINDOW_TOKENS = 65536
+
+
 def _tool_schemas_for_round(
     *,
     force_answer: bool,
@@ -5708,6 +5713,7 @@ def _tool_schemas_for_round(
     last_user: str,
     admin_tools: Optional[Set[str]] = None,
     mcp_gated_names: Optional[Set[str]] = None,
+    context_length: Optional[int] = None,
 ) -> List[Dict]:
     """Return the exact schema list sent for one model round.
 
@@ -5807,8 +5813,12 @@ def _tool_schemas_for_round(
     # would leave the two disagreeing about what was sent.
     selected = _withhold_unavailable_tools(selected)
     # Canonical schemas remain the execution contract. Native provider payloads
-    # omit repeated parameter prose while preserving every JSON constraint.
-    return compact_function_tool_schemas(selected) if is_api_model else selected
+    # clip prose while preserving every JSON constraint; a small window gets
+    # the lean level (see src/tool_schemas.py for what each level keeps).
+    if not is_api_model:
+        return selected
+    lean = bool(context_length) and int(context_length) < _LEAN_SCHEMA_WINDOW_TOKENS
+    return compact_function_tool_schemas(selected, lean=lean)
 
 
 async def stream_agent_loop(
@@ -7734,6 +7744,7 @@ async def stream_agent_loop(
             # Recomputed per call (not once per turn) so a mid-loop MCP
             # reconnect is reflected immediately rather than a round later.
             mcp_gated_names=_gated_mcp_names(mcp_mgr, _mcp_disabled_map),
+            context_length=route_state.get("context_length") or context_length,
         )
         # Append-only across rounds and turns: see `_sticky_order_schemas`.
         return _sticky_order_schemas(session_id, _filter_route_tool_schemas(schemas))

@@ -30,23 +30,93 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
 }
 
 
-def _strip_schema_descriptions(value):
-    """Remove prose from a JSON schema while retaining its entire shape."""
+# What a native model reads about a tool is its schema: the text-fence prompt
+# lists only names on these routes. The first compaction (2026-09-09, when a
+# chat's tool list still changed every turn and schemas were 38-81% of prompt
+# tokens) kept the text before the first ". " (at most 220 chars) and dropped
+# every parameter description, so `bash` arrived as "Run a shell command (full
+# access)", `ask_user` and `web_fetch` were cut at "(e.g", and "default 60, max
+# 3600" style facts never reached a model. With the tool list held fixed and
+# cached (src/stable_tools.py; 91% cache hits on 2026-09-30) that prose is paid
+# at the cached rate, so the standard level keeps the leading whole sentences
+# of each description and each parameter's first sentences. The lean level is
+# for small windows (local models), where the whole schema block is uncached
+# context: the tool's first sentences and no parameter prose.
+_COMPACT_TOOL_DESCRIPTION_CHARS = 400
+_COMPACT_PARAM_DESCRIPTION_CHARS = 160
+_LEAN_TOOL_DESCRIPTION_CHARS = 220
+# A period after these is not the end of a sentence.
+_ABBREVIATIONS = ("e.g", "i.e", "etc", "vs", "approx", "incl", "cf", "no", "min", "max")
+_UNTRIMMED_TOOLS = frozenset({"manage_git", "manage_agent_worktree"})
+
+
+def _sentence_ends(text: str):
+    """Indexes just past each sentence end in ``text`` (". ", "! ", "? ", "\n")."""
+    for i, ch in enumerate(text):
+        nxt = text[i + 1] if i + 1 < len(text) else " "
+        if ch == "\n":
+            yield i
+        elif ch in ".!?" and nxt.isspace():
+            word = text[max(0, text.rfind(" ", 0, i) + 1):i].lstrip("(").lower()
+            if ch == "." and word in _ABBREVIATIONS:
+                continue
+            yield i + 1
+
+
+def _clip_prose(text: str, limit: int) -> str:
+    """Whole sentences of ``text`` that fit ``limit``; one cut sentence if none do."""
+    text = " ".join(str(text or "").split()) if "\n" not in str(text or "") else str(text).strip()
+    if len(text) <= limit:
+        return text
+    cut = 0
+    for end in _sentence_ends(text):
+        if end > limit:
+            break
+        cut = end
+    if cut:
+        return text[:cut].strip()
+    head = text[: limit - 1].rsplit(" ", 1)[0].rstrip(" ,;:(")
+    return head + "…"
+
+
+def _compact_schema_prose(value, limit: int, *, is_properties: bool = False):
+    """Clip (``limit`` > 0) or drop (``limit`` == 0) prose in a JSON schema in
+    place, keeping its entire shape.
+
+    Keys of a ``properties`` mapping are parameter NAMES, so a parameter
+    literally called ``description`` (calendar notes, a skill's summary, an
+    issue body on an MCP server) is a schema, never prose to remove. The
+    previous stripper popped it and the parameter vanished from the payload.
+    """
     if isinstance(value, dict):
-        value.pop("description", None)
-        for child in value.values():
-            _strip_schema_descriptions(child)
+        if is_properties:
+            for child in value.values():
+                _compact_schema_prose(child, limit)
+            return
+        prose = value.get("description")
+        if isinstance(prose, str):
+            if limit > 0:
+                value["description"] = _clip_prose(prose, limit)
+            else:
+                value.pop("description")
+        for key, child in list(value.items()):
+            if key != "description":
+                _compact_schema_prose(child, limit, is_properties=(key == "properties"))
     elif isinstance(value, list):
         for child in value:
-            _strip_schema_descriptions(child)
+            _compact_schema_prose(child, limit)
 
 
-def compact_function_tool_schemas(schemas):
+def compact_function_tool_schemas(schemas, *, lean: bool = False):
     """Return compact provider-payload copies without changing callable shape.
 
-    Canonical schemas remain the execution contract. Most property prose can
-    be omitted, but multi-action Git tools need their action/field mapping.
+    Canonical schemas remain the execution contract. Descriptions keep their
+    leading whole sentences, which carry what the tool is for and when to use
+    it; multi-action Git tools keep all of their action/field mapping. ``lean``
+    is the small-window level: shorter descriptions and no parameter prose.
     """
+    tool_limit = _LEAN_TOOL_DESCRIPTION_CHARS if lean else _COMPACT_TOOL_DESCRIPTION_CHARS
+    param_limit = 0 if lean else _COMPACT_PARAM_DESCRIPTION_CHARS
     compact = []
     for schema in schemas or []:
         item = copy.deepcopy(schema)
@@ -54,14 +124,16 @@ def compact_function_tool_schemas(schemas):
         if not isinstance(fn, dict):
             compact.append(item)
             continue
+        if fn.get("name") in _UNTRIMMED_TOOLS:
+            compact.append(item)
+            continue
         description = str(fn.get("description") or "").strip()
         if description:
-            fn["description"] = description.split(". ", 1)[0].strip()[:220]
-        # Nested object/array schemas are common in MCP tools.  Strip only
-        # explanatory prose recursively: ``type``, ``required``, ``enum``,
-        # ``items``, and every other JSON-schema constraint stay intact.
-        if fn.get("name") not in {"manage_git", "manage_agent_worktree"}:
-            _strip_schema_descriptions(fn.get("parameters"))
+            fn["description"] = _clip_prose(description, tool_limit)
+        # Nested object/array schemas are common in MCP tools. Only prose is
+        # clipped: ``type``, ``required``, ``enum``, ``items``, and every other
+        # JSON-schema constraint stay intact.
+        _compact_schema_prose(fn.get("parameters"), param_limit)
         compact.append(item)
     return compact
 
@@ -89,7 +161,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (full access). Prefer a dedicated tool whenever one fits the job (reading, writing, editing, searching, or listing files); use bash only for what no dedicated tool covers (installs, git, builds, running programs, system info). Do NOT create or edit files via bash redirects/heredocs/sed -- use the dedicated file tools. A command that prints nothing for 60 seconds is stopped: don't pass quiet flags (-q, --silent) to builds and tests, raise `idle_timeout` for a command that is quiet for longer, or start a long job in the background with `#!bg` as its first line.",
+            "description": "Run a shell command (on the host or in a workspace sandbox, as this chat's shell note says). Use it for installs, builds, tests, git and programs; read, write, edit, search and list files with the file tools, not redirects, heredocs or sed. A command silent for 60 s is stopped: drop -q/--silent from builds and tests, raise `idle_timeout`, or make `#!bg` its first line to run it in the background.",
             "parameters": {
                 "type": "object",
                 "properties": {

@@ -1640,6 +1640,23 @@ def _reasoning_replay_enabled(url: str, model: str) -> bool:
         return True
 
 
+# OpenAI's Codex guide says models from gpt-5.3-codex on label assistant
+# message items with `phase` (commentary / final_answer) and that a harness
+# dropping it on replay degrades them. build_responses_input does not replay
+# it yet; this records, once per model and phase, whether the backend in use
+# actually emits it, so the next step can be decided from logs
+# (website/harness-sweep-2026-09-30.md).
+_RESPONSES_PHASES_SEEN: set = set()
+
+
+def _note_responses_phase(model: str, phase) -> None:
+    key = (str(model or ""), str(phase or ""))
+    if key in _RESPONSES_PHASES_SEEN or len(_RESPONSES_PHASES_SEEN) > 64:
+        return
+    _RESPONSES_PHASES_SEEN.add(key)
+    logger.info("[responses-phase] model=%s emits message phase=%s (not replayed)", key[0], key[1])
+
+
 def _disable_encrypted_reasoning(url: str) -> None:
     host = _host_key(url or "")
     if host not in _RESPONSES_NO_ENCRYPTED_REASONING:
@@ -4046,6 +4063,8 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             _resp_slot(data.get("output_index"))["arguments"] = data["arguments"]
                     elif evt == "response.output_item.done":
                         item = data.get("item") or {}
+                        if item.get("type") == "message" and item.get("phase"):
+                            _note_responses_phase(model, item.get("phase"))
                         if item.get("type") == "reasoning":
                             # Only useful when it carries encrypted_content:
                             # with store=false a bare reasoning id refers to

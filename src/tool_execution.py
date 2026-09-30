@@ -2351,6 +2351,12 @@ _FORMATTER_HANDLED_KEYS = {
     # Document tools: the summary line is printed first; the candidate list
     # is already spelled out in the error text.
     "document_summary", "document_candidates", "needs_document_id",
+    # discover_tools: the loop attaches the loaded schemas itself, so the
+    # model receives them as callable tools next round. Printed here they
+    # were the same schemas again as up to 8,000 chars of JSON per call
+    # (116 calls in the three days to 2026-09-30); `output` already names
+    # what was loaded, attached and denied.
+    "loaded_tools", "discovery", "continue_same_turn",
 }
 
 
@@ -2408,6 +2414,13 @@ def format_tool_result(description: str, result: Dict) -> str:
         elif action == "edit":
             parts.append(f'Document edited: "{result.get("title", "")}" (v{result.get("version", "?")}, {result.get("applied", 0)} edit(s) applied)')
     elif "error" in result:
+        parts.append(f"**Error:** {result['error']}")
+    # An error beside output (a command stopped after printing, a fetch cut
+    # short) used to be dropped: the branches above show the output and
+    # `error` is a handled key, so the reason never reached the model.
+    if result.get("error") and not any(
+        part.startswith(("**Error:**", "Error:")) for part in parts[1:]
+    ):
         parts.append(f"**Error:** {result['error']}")
 
     # Surface any additional structured payload (events, tasks, notes, calendars,
