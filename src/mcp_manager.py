@@ -28,6 +28,7 @@ _BUILTIN_FUNCTION_CALLING_SERVERS = {
     "pi_worker",
     "github_read",
     "github_write",
+    "penpot_studio",
 }
 
 
@@ -1849,6 +1850,7 @@ class McpManager:
             "pi_worker",
             "github_read",
             "github_write",
+            "penpot_studio",
         }
 
     def get_tool_input_schema(self, qualified_name: str) -> Optional[Dict]:

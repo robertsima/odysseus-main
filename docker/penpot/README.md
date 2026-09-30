@@ -100,3 +100,36 @@ done
 ```
 
 Use the first URL that prints `HTTP 401` as `PENPOT_API_URL`.
+
+## Penpot Studio: designing with real artwork and seeing the result
+
+The stdio Penpot MCP above can only create rectangles, circles, text and
+frames, and every shape lands on the page's root frame (nothing nests). The
+built-in **Penpot Studio** server (`mcp_servers/penpot_studio_server.py`,
+Settings > Built-in) adds what a designer agent needs. It reuses the Penpot
+URL and access token saved for the Penpot MCP server, so nothing is
+configured twice.
+
+| Tool | What it does |
+| --- | --- |
+| `search_icons` | Searches Iconify's open icon sets (200k+ icons; `game-icons` has helmets, swords, soldiers) and reports each set's licence. |
+| `build_design` | Writes a nested tree (boards, rects, ellipses, text, icons/SVG, paths) in one update. Positions are relative to the parent. Icons become editable, recolourable vector paths. Text is measured in headless Chromium with the real Google font and stored with its layout data; without that, Penpot's viewer and exporter draw no text at all. |
+| `move_shapes` | Re-parents existing shapes into a frame or group. |
+| `inspect_design` | Reads a file/page/board (sizes, fills, strokes, text, fonts, palette) and reports OVERFLOW, OVERLAP and NO-RENDER problems. |
+| `render_preview` | Screenshots a board in Penpot's own viewer (Chromium, real fonts) through a short-lived view-only share link that is deleted afterwards, and returns the image. |
+
+Requirements: the Odysseus container needs Chromium (already in the image) and
+internet access for Google Fonts and `api.iconify.design`; `PENPOT_API_URL`
+must be an address the container can reach (the NAS LAN IP, not localhost).
+The exporter is not used: it only accepts a browser login session, not the
+access token the MCP uses.
+
+To give the **Penpot Product Designer** loadout these tools, import
+`penpot-product-designer.loadout.json` in the Control Room (Loadouts >
+Import, mode *merge*/*replace*). It grants `mcp__penpot_studio__*`, swaps the
+old instructions for a read-build-look-fix workflow and adds the bundled
+`penpot-design-workflow` skill. A worker cannot widen its own loadout, so this
+one step is done by you.
+
+Licences: CC BY icon sets (e.g. `game-icons`) need an attribution line;
+`build_design` returns it.

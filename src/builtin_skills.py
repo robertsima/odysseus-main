@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 _BUNDLED_SKILLS = (
     ("dev", "local-pi-delegation", ["delegation", "local-model", "pi", "qwen", "coding", "context-efficiency"], ["linux", "windows"], ["mcp__pi_worker__run_pi_task"]),
     ("general", "harness-context-and-tool-routing", ["harness", "tool-routing", "context", "paths", "reliability"], ["linux", "windows", "macos"], []),
+    ("design", "penpot-design-workflow", ["design", "penpot", "mockup", "icons", "neo-brutalism", "visual-verification"], ["linux", "windows", "macos"], [
+        "mcp__penpot_studio__build_design", "mcp__penpot_studio__render_preview", "mcp__penpot_studio__inspect_design", "mcp__penpot_studio__search_icons",
+    ]),
     ("dev", "claude-code-delegation", ["delegation", "claude-code", "coding", "multi-agent", "worktree"], ["linux", "windows", "macos"], ["delegate_to_claude_code"]),
 )
 

@@ -77,6 +77,7 @@ _BUILTIN_SERVERS = {
     "todoist":    ("mcp_servers/todoist_server.py",    "Built-in: Todoist"),
     "lotus":      ("mcp_servers/lotus_server.py",      "Built-in: Lotus"),
     "pi_worker":  ("mcp_servers/pi_worker_server.py",  "Built-in: Windows Pi Worker"),
+    "penpot_studio": ("mcp_servers/penpot_studio_server.py", "Built-in: Penpot Studio"),
 }
 
 _OPTIONAL_BUILTIN_ENV = {
@@ -104,6 +105,9 @@ BUILTIN_CATALOG = (
     {"id": "pi_worker", "name": "Windows Pi worker", "kind": "tool server", "needs": "ODYSSEUS_PI_WORKER_HOST",
      "description": "Runs coding tasks on your Windows machine over SSH.",
      "enable": "Set ODYSSEUS_PI_WORKER_HOST and ODYSSEUS_PI_WORKER_IDENTITY_FILE in the container environment, then restart."},
+    {"id": "penpot_studio", "name": "Penpot Studio", "kind": "tool server",
+     "description": "Builds nested Penpot designs with real vector icons, reads designs back with a layout check, "
+                    "and renders boards to an image. Uses the Penpot MCP server's URL and access token."},
     {"id": "builtin_browser", "name": "Browser", "kind": "tool server",
      "description": "Headless Chromium the agent drives to read and use web pages."},
     {"id": "github_read", "name": "GitHub (read)", "kind": "tool server", "needs": "GITHUB_PERSONAL_ACCESS_TOKEN",
