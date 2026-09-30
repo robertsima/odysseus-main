@@ -4,7 +4,7 @@ A profile is a reusable worker loadout the agent can delegate to through
 ``send_to_session`` (``profile`` argument): instructions, primary/fallback
 models, tool/skill/MCP allowlists, memory and vault access, approvals,
 delegation policy, worker concurrency and a round budget. Profiles live in the
-``agent_profiles`` setting and are edited in Settings › Workbench.
+``agent_profiles`` setting and are edited in the Agent Control Room (Loadouts).
 """
 
 from __future__ import annotations
@@ -297,6 +297,114 @@ def propagate_profile_edits(old_profiles: Any, new_profiles: List[Dict[str, Any]
         if patch and update_session_settings(session_id, patch) is not None:
             updated[name] = updated.get(name, 0) + 1
     return updated
+
+
+# What the Control Room calls each chat setting a loadout writes, for "based on
+# Lead Engineer (2 changes)". Settings that are one control on screen share a
+# label, so tool_access + enabled_tools read as one change ("tools").
+CHANGE_LABELS = {
+    "agent_instructions": "instructions",
+    "agent_persona_name": "persona name",
+    "agent_temperature": "temperature",
+    "agent_max_tokens": "max tokens",
+    "agent_reasoning_effort": "reasoning effort",
+    "tool_access": "tools",
+    "enabled_tools": "tools",
+    "disabled_tools": "denied tools",
+    "memory_access": "memory",
+    "skill_access": "skills",
+    "skill_names": "skills",
+    "model_access": "models",
+    "allowed_models": "models",
+    "delegation_policy": "delegation",
+    "max_parallel_workers": "worker limit",
+    "allowed_mcp_servers": "MCP connections",
+    "private_vault_access": "vault access",
+    "shell_access": "shell",
+    "approval_mode": "approvals",
+}
+
+
+def _comparable(value: Any) -> Any:
+    """One spelling per meaning: blank, None and [] are all "not set"; lists
+    compare as sets; numbers compare as numbers."""
+    if value is None or value == "" or value == []:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, (list, tuple, set)):
+        return tuple(sorted({str(item).strip() for item in value if str(item).strip()})) or None
+    if isinstance(value, str):
+        return value.strip() or None
+    return value
+
+
+def loadout_changes(profile: Dict[str, Any], settings: Dict[str, Any]) -> List[str]:
+    """What a chat changed from the loadout it is based on, as labels.
+
+    The chat holds a copy of the loadout (`session_patch`), and the Control
+    Room edits that copy. Each key the copy no longer matches is a change;
+    `approval_mode` is compared too, with a loadout's "inherit" and a chat
+    without one both meaning "the global default".
+    """
+    patch = session_patch(profile)
+    patch.setdefault("approval_mode", None)
+    labels: List[str] = []
+    for key, label in CHANGE_LABELS.items():
+        ours = settings.get(key)
+        theirs = patch.get(key)
+        if key == "approval_mode":
+            ours = None if ours in (None, "", "inherit") else ours
+        if _comparable(ours) != _comparable(theirs) and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def profile_from_session(base: Dict[str, Any], settings: Dict[str, Any]) -> Dict[str, Any]:
+    """A loadout that gives a chat exactly ``settings``: the inverse of
+    `session_patch`, for "Save to loadout" in the Control Room.
+
+    What a chat does not store is kept from ``base``: the name, description,
+    worker model and fallbacks, and the round budget. Validate the result with
+    `validate_profiles` before storing it.
+    """
+    allowed_mcp = [str(s) for s in (settings.get("allowed_mcp_servers") or []) if str(s).strip()]
+    if "*" in allowed_mcp:
+        mcp_access, mcp_servers = "all", []
+    elif allowed_mcp:
+        mcp_access, mcp_servers = "selected", allowed_mcp
+    else:
+        mcp_access, mcp_servers = "none", []
+    approval = str(settings.get("approval_mode") or "").strip().lower() or "inherit"
+    return {
+        "name": base.get("name"),
+        "description": base.get("description") or "",
+        "model": base.get("model") or "",
+        "model_fallbacks": list(base.get("model_fallbacks") or []),
+        "max_rounds": base.get("max_rounds", DEFAULT_ROUNDS),
+        "instructions": settings.get("agent_instructions") or "",
+        "persona_name": settings.get("agent_persona_name") or "",
+        "temperature": settings.get("agent_temperature"),
+        "max_tokens": settings.get("agent_max_tokens"),
+        "reasoning_effort": settings.get("agent_reasoning_effort") or "",
+        "disabled_tools": list(settings.get("disabled_tools") or []),
+        "tool_access": settings.get("tool_access") or "all",
+        "enabled_tools": list(settings.get("enabled_tools") or []),
+        "memory_access": settings.get("memory_access") or "read",
+        "skill_access": settings.get("skill_access") or "all",
+        "skill_names": list(settings.get("skill_names") or []),
+        "mcp_access": mcp_access,
+        "allowed_mcp_servers": mcp_servers,
+        "model_access": settings.get("model_access") or "current",
+        "allowed_models": list(settings.get("allowed_models") or []),
+        "delegation_policy": settings.get("delegation_policy") or "explicit",
+        "max_parallel_workers": settings.get("max_parallel_workers", 1),
+        "private_vault_access": bool(settings.get("private_vault_access", False)),
+        "shell_access": settings.get("shell_access") or "sandbox",
+        "approval_mode": approval,
+    }
 
 
 def load_profiles() -> List[Dict[str, Any]]:

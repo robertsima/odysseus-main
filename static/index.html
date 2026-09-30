@@ -2182,20 +2182,10 @@
             </div>
           </div>
 
-          <div class="admin-card" id="set-agentProfilesCard" data-setting-key="agent_profiles">
-            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span class="agent-profiles-title" style="margin:0;font-size:inherit;">Agent profiles</span><span style="flex:1"></span><button type="button" class="admin-btn-sm" id="set-agentOpenControlRoom" style="font-size:11px;font-weight:normal;">Open Agent Control Room</button></h2>
-            <div class="admin-toggle-sub" style="margin-bottom:8px">Reusable agent loadouts: what an agent may do (tools, skills, MCP connections, memory, private-vault access, approvals, delegation, worker limits, models) and how it sounds (persona name, personality, temperature, reply length). Pick one for a chat from the composer&rsquo;s Agents menu in Agent mode, or in the Agent Control Room. Saving here also updates the chats already using a profile: each setting a chat has not changed for itself takes the new value. Workers already running a task keep the profile they started with, and a chat's persona and voice are never overwritten. The shared prompt in the Prompt window is used only by chats and agents without a profile.</div>
-            <div id="set-agentProfiles" class="agent-profiles"></div>
-            <div class="agent-profiles-actions">
-              <button type="button" class="ats-btn" id="set-agentProfileAdd">Add profile</button>
-              <button type="button" class="ats-btn" id="set-agentProfileSave">Save profiles</button>
-              <button type="button" class="ats-btn" id="set-agentProfileExport" title="Download the saved profiles as a JSON file. Credentials pasted into a profile's text are redacted.">Export</button>
-              <button type="button" class="ats-btn" id="set-agentProfileImport" title="Load profiles from an exported JSON file. Each one is validated like a normal save.">Import</button>
-              <select id="set-agentProfileImportMode" class="settings-select" style="max-width:220px" title="What Import does with profiles that already exist" aria-label="Import mode"><option value="merge">Merge, overwrite same names</option><option value="rename">Merge, keep both</option><option value="replace">Replace all profiles</option></select>
-              <input type="file" id="set-agentProfileImportFile" accept=".json,application/json" hidden>
-              <span id="set-agentProfileMsg" class="admin-toggle-sub"></span>
-            </div>
-            <div id="set-agentProfileImportReport" class="admin-toggle-sub" style="margin-top:6px" hidden></div>
+          <div class="admin-card" id="set-agentProfilesCard">
+            <h2 style="display:flex;align-items:center;gap:8px;"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:5px;opacity:0.6"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg><span class="agent-profiles-title" style="margin:0;font-size:inherit;">Loadouts</span><span style="flex:1"></span><button type="button" class="admin-btn-sm" id="set-agentOpenControlRoom" style="font-size:11px;font-weight:normal;">Open Agent Control Room</button></h2>
+            <div class="admin-toggle-sub" style="margin-bottom:8px">Loadouts (agent profiles) are reusable agent definitions: what an agent may do (tools, skills, MCP connections, memory, private-vault access, approvals, delegation, worker limits, models) and how it sounds. They are made, changed, deleted, imported and exported in the Agent Control Room, beside the chats that use them: each chat's settings show which loadout they are based on and what that chat changed.</div>
+            <button type="button" class="ats-btn" id="set-agentOpenLoadouts">Open Loadouts</button>
           </div>
 
           <div class="admin-card">

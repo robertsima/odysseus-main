@@ -15,6 +15,7 @@
  */
 
 import uiModule from './ui.js';
+import { mountLoadoutsEditor } from './agentLoadouts.js';
 import Modals from './modalManager.js';
 import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
@@ -68,6 +69,8 @@ const state = {
   providerLimits: {},
   events: new Map(), es: null, pollTimer: null, tick: null, launchOpen: false, filter: '',
   catalog: null, configOpen: false, configTab: 'general', configDrafts: new Map(),
+  // The loadout library (agentLoadouts.js), and whether this user may change it.
+  loadoutsView: false, canEditLoadouts: false,
   fleetWidth: Number(localStorage.getItem('odysseus-agents-fleet-width') || 380),
   error: '', refreshing: false, refreshQueued: false,
   // Triage bucket: 'all' | 'attention' | 'active' | 'recent' (see BUCKETS).
@@ -158,6 +161,7 @@ async function refresh() {
     state.rows = ov.rows || []; state.totals = ov.totals || {};
     notifyTransitions(previousRows, state.rows); state.profiles = ov.profiles || []; state.chats = ov.chats || []; state.providerLimits = ov.provider_limits || {};
     state.profileProblems = ov.profile_problems || [];
+    state.canEditLoadouts = !!ov.can_edit_loadouts;
     // A loadout changed elsewhere (the composer's Agents menu, Settings, a
     // loadout edit propagating to its chats) replaced the stored config, but
     // the editor's cached draft still showed the old one. Drop a draft that
@@ -377,12 +381,12 @@ function render() {
   // loadout-editor views used to have no Launch button, and since the room
   // reopened in whatever view it was left in, launching a worker could look
   // impossible until the user found the way back to the fleet.
-  const aside = state.archiveView || state.historyView || state.configOpen;
+  const aside = state.archiveView || state.historyView || state.configOpen || state.loadoutsView;
   const viewButtons = aside
     ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="fleet-view">← Fleet</button>'
-    : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button>';
+    : '<button type="button" class="wb-btn wb-btn-ghost" data-ag="history-view" title="Every agent chat, however old">History</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="archive-view">Archived</button><button type="button" class="wb-btn wb-btn-ghost" data-ag="loadouts-view" title="The reusable agent definitions chats and workers are based on">Loadouts</button>';
   const headActions = `${viewButtons}<button type="button" class="wb-btn wb-btn-primary" data-ag="launch">Launch worker</button>${!aside && workbenchAvailable() ? '<button type="button" class="wb-btn wb-btn-ghost" data-ag="workbench" title="Repository changes, commits and PRs">Workbench</button>' : ''}`;
-  const viewTitle = state.configOpen ? 'Agent loadout' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
+  const viewTitle = state.configOpen ? "This chat's settings" : state.loadoutsView ? 'Loadouts' : state.historyView ? 'Agent chats' : state.archiveView ? 'Archived agents' : '';
   // One header row. It used to carry a second window title ("Mission floor",
   // under a title bar already reading "Agent Control Room"), and an Expand
   // button doing exactly what the title bar's maximize button does.
@@ -397,7 +401,7 @@ function render() {
       </div>
     </div>
     <div class="ag-refresh-error" id="ag-refresh-error" role="status"${state.error ? '' : ' hidden'}>${esc(state.error)}</div>
-    ${state.configOpen ? loadoutWorkspaceHtml() : state.historyView ? historyHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
+    ${state.configOpen ? loadoutWorkspaceHtml() : state.loadoutsView ? loadoutsViewHtml() : state.historyView ? historyHtml() : `<div class="ag-body" style="--ag-fleet-width:${Math.max(250, state.fleetWidth || 380)}px">
       <aside class="ag-fleet wb-card ${state.compactFleet ? 'ag-fleet-compact' : 'ag-fleet-expanded'}">
         <div class="ag-fleet-tools"><input type="search" class="wb-input" id="ag-filter" placeholder="Filter units…" value="${esc(state.filter)}" aria-label="Filter agents"><button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="fleet-density" aria-pressed="${state.compactFleet}" title="${state.compactFleet ? 'Use larger cards' : 'Use compact cards'}">${state.compactFleet ? 'Compact' : 'Large'}</button></div>
         <div class="ag-fleet-list" data-wb-scroll="fleet">${fleetHtml()}</div>
@@ -407,6 +411,7 @@ function render() {
       ${state.launchOpen ? `<aside class="ag-launch wb-card" id="ag-launch">${launchHtml()}</aside>` : ''}
     </div>`}`;
   if (state.historyView) bindHistorySearch();
+  else if (state.loadoutsView) mountLoadouts();
   else if (!state.configOpen) renderDetail();
   else {
     const pluginPicker = surface.querySelector('[data-ag-plugin-picker]');
@@ -682,41 +687,24 @@ function capabilityChecks(items, selected, key, labelKey = 'name') {
     return `<label class="ag-cap-check" title="${esc(item.description || '')}"><input type="checkbox" data-config-list="${key}" value="${esc(value)}"${enabled.has(value) ? ' checked' : ''}><span>${esc(label)}</span></label>`;
   }).join('');
 }
-function profileConfig(profile) {
-  const mcp = profile.mcp_access === 'none' ? [] : profile.mcp_access === 'selected' ? (profile.allowed_mcp_servers || []) : ['*'];
-  return {
-    // `mcp_access` must be carried explicitly. saveAgentConfig() reads it to
-    // decide what to persist, and defaults to ['*'] — every connected server —
-    // when it is missing. Without this line, applying a preset that grants no
-    // MCP access (or a narrowed list) rendered correctly, then saved as full
-    // access: the editor showed one policy and the server stored another.
-    mcp_access: profile.mcp_access || 'all',
-    agent_profile: profile.name || '', agent_instructions: profile.instructions || '',
-    agent_persona_name: profile.persona_name || '', agent_temperature: profile.temperature ?? null, agent_max_tokens: profile.max_tokens ?? null,
-    agent_reasoning_effort: profile.reasoning_effort || '',
-    approval_mode: profile.approval_mode === 'inherit' ? '' : (profile.approval_mode || ''),
-    memory_access: profile.memory_access || 'read', skill_access: profile.skill_access || 'all', skill_names: [...(profile.skill_names || [])],
-    model_access: profile.model_access || 'current', allowed_models: [...(profile.allowed_models || [])],
-    delegation_policy: profile.delegation_policy || 'explicit', max_parallel_workers: profile.max_parallel_workers ?? 1,
-    allowed_mcp_servers: mcp, private_vault_access: !!profile.private_vault_access,
-    shell_access: profile.shell_access || 'sandbox',
-    disabled_tools: [...(profile.disabled_tools || [])], tool_access: profile.tool_access || 'all',
-    enabled_tools: [...(profile.enabled_tools || [])],
-    _catalogReady: true,
-  };
+function basisText(row) {
+  const basis = row.loadout;
+  if (!basis) return 'no loadout';
+  if (!basis.exists) return `based on ${basis.name} (deleted)`;
+  const n = (basis.changes || []).length;
+  return `based on ${basis.name}${n ? ` (${n} change${n === 1 ? '' : 's'})` : ''}`;
 }
 function loadoutSummaryHtml(row) {
   const c = configFor(row);
   const mcp = c.allowed_mcp_servers?.includes('*') ? 'all connections' : `${c.allowed_mcp_servers?.length || 0} connections`;
   return `<button type="button" class="ag-loadout-summary" data-ag="config-toggle">
-    <span class="ag-loadout-glyph" aria-hidden="true">⌬</span><span><b>Agent loadout</b><small>${esc(c.agent_profile || 'custom')} · ${esc(c.delegation_policy)} delegation · ${esc(c.memory_access)} memory · ${esc(mcp)}</small></span><i>Open editor</i>
+    <span class="ag-loadout-glyph" aria-hidden="true">⌬</span><span><b>This chat's settings</b><small>${esc(basisText(row))} · ${esc(c.delegation_policy)} delegation · ${esc(c.memory_access)} memory · ${esc(mcp)}</small></span><i>Open editor</i>
   </button>`;
 }
 function configEditorHtml(row) {
   const c = configFor(row);
   const catalog = state.catalog;
   if (!catalog) return '<div class="ag-loadout-editor"><div class="wb-empty">Loading capabilities…</div></div>';
-  const profileOptions = state.profiles.map((p) => option(p.name, `${p.name}${p.description ? ` — ${p.description}` : ''}`, c.agent_profile)).join('');
   const disabled = new Set(c.disabled_tools || []);
   const toolSelected = c.tool_access === 'all' ? catalog.tools.map((t) => t.name)
     : c.tool_access === 'none' ? [] : (c.enabled_tools || catalog.tools.filter((t) => !disabled.has(t.name)).map((t) => t.name));
@@ -770,11 +758,70 @@ function configEditorHtml(row) {
   const roleOptions = state.profiles.map((p) => option(p.name, p.name, row.crew?.agent_profile || '')).join('');
   const rolePicker = row.crew ? `<label class="ag-preset-role"><span>Role profile</span><select class="wb-select" data-ag-crew-profile data-sid="${esc(row.session_id)}"><option value="">No linked role</option>${roleOptions}</select><small>Applies to ${esc(row.crew.name || 'this agent')} everywhere — chat and its scheduled tasks.</small></label>` : '';
   return `<div class="ag-loadout-editor" data-session="${esc(row.session_id)}">
-    <div class="ag-preset-row"><label><span>Start from preset</span><select class="wb-select" data-config="agent_profile"><option value="">Custom loadout</option>${profileOptions}</select></label>${rolePicker}<small>Choosing a preset loads its settings; this agent keeps its own copy once saved.</small></div>
+    ${basisHtml(row, c)}
+    ${rolePicker ? `<div class="ag-preset-row">${rolePicker}</div>` : ''}
     <div class="ag-config-tabs" role="tablist" aria-label="Loadout sections">${tabButton('general','Behavior',`${c.delegation_policy} delegation`)}${tabButton('tools','Tools',c.tool_access === 'all' ? 'all available' : `${toolSelected.length} enabled`)}${tabButton('knowledge','Knowledge',`${c.memory_access} memory`)}${tabButton('connections','Models & MCP',c.model_access === 'current' ? 'current model' : c.model_access)}</div>
     <div class="ag-config-panel-scroll">${panels[tab] || generalPanel}</div>
     <div data-ag-plugin-picker></div>
-    <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save loadout</button></div>
+    <div class="ag-config-actions"><span id="ag-config-msg"></span><button type="button" class="wb-btn wb-btn-primary" data-ag="save-config">Save this chat's settings</button></div>
+  </div>`;
+}
+
+// The loadout library. Its editor keeps unsaved edits in its own DOM, so the
+// view re-inserts the same host on every render instead of rebuilding it.
+let loadoutsHost = null;
+let loadoutsEditor = null;
+function loadoutsViewHtml() {
+  return `<section class="ag-loadouts-view wb-card">
+    <p class="ag-loadouts-intro">Loadouts are reusable agent definitions: persona, worker model, tools, skills,
+    connections, memory, approvals and delegation. A chat or worker based on one keeps its own copy, which you
+    change in that agent's settings. Saving a loadout here also updates the chats based on it, for each setting
+    a chat has not changed itself; running workers keep what they started with.</p>
+    <div data-ag-loadouts-host></div>
+  </section>`;
+}
+function mountLoadouts() {
+  const slot = document.querySelector('[data-ag-loadouts-host]');
+  if (!slot) return;
+  if (!loadoutsHost || !loadoutsEditor?.isDirty()) {
+    loadoutsHost = document.createElement('div');
+    loadoutsHost.className = 'ag-loadouts-editor';
+    loadoutsEditor = mountLoadoutsEditor(loadoutsHost, {
+      profiles: state.profiles,
+      canEdit: state.canEditLoadouts,
+      onSaved: (profiles) => { state.profiles = profiles; scheduleRefresh(); },
+    });
+  }
+  slot.replaceWith(loadoutsHost);
+}
+
+/** "This chat's settings — based on Lead Engineer (2 changes)", with the
+ *  actions that move settings between the chat and its loadout. The chat
+ *  editor and the loadout library used to be two near-identical forms with no
+ *  word on which one you were in: editing a chat read as editing the loadout,
+ *  and the reverse. */
+function basisHtml(row, c) {
+  const basis = row.loadout || null;
+  const changes = basis?.changes || [];
+  const dirty = !!c._dirty;
+  const options = state.profiles.map((p) => option(p.name, p.name, basis?.name || '')).join('');
+  const missing = basis && !basis.exists ? `<option value="${esc(basis.name)}" selected>${esc(basis.name)} (deleted)</option>` : '';
+  const count = !basis ? '' : !basis.exists ? '<span class="ag-basis-count">— that loadout no longer exists</span>'
+    : `<span class="ag-basis-count" title="${esc(changes.length ? `Changed here: ${changes.join(', ')}` : 'Same as the loadout')}">(${changes.length ? `${changes.length} change${changes.length === 1 ? '' : 's'}` : 'no changes'})</span>`;
+  const unsaved = dirty ? '<span class="ag-basis-unsaved">· unsaved edits</span>' : '';
+  const adminOnly = state.canEditLoadouts ? '' : ' title="Only an admin can change loadouts"';
+  const same = !changes.length && !dirty;
+  const actions = basis?.exists
+    ? `<button type="button" class="wb-btn wb-btn-sm wb-btn-ghost" data-ag="reset-to-loadout"${same ? ' disabled title="This chat already matches the loadout"' : ''}>Reset to loadout</button>
+       <button type="button" class="wb-btn wb-btn-sm" data-ag="save-to-loadout"${!state.canEditLoadouts ? ` disabled${adminOnly}` : same ? ' disabled title="Nothing to save: this chat matches the loadout"' : ''}>Save to loadout</button>`
+    : `<button type="button" class="wb-btn wb-btn-sm" data-ag="save-as-loadout"${!state.canEditLoadouts ? ` disabled${adminOnly}` : ''}>Save as new loadout…</button>`;
+  return `<div class="ag-basis">
+    <div class="ag-basis-line"><b>This chat's settings</b><span>— based on</span>
+      <select class="wb-select" data-ag-basis aria-label="Loadout this chat is based on"><option value=""${basis ? '' : ' selected'}>no loadout (this chat only)</option>${options}${missing}</select>
+      ${count}${unsaved}
+      <span class="ag-basis-actions">${actions}</span>
+    </div>
+    <small>Edits here change this chat only. <b>Save to loadout</b> makes them the loadout's settings for every chat based on it; <b>Reset to loadout</b> puts this chat back on the loadout.</small>
   </div>`;
 }
 
@@ -1113,18 +1160,14 @@ function onConfigChange(e) {
     if (msg) msg.textContent = `Copied ${src.name}. Not saved yet.`;
     return;
   }
-  const field = e.target.dataset.config;
-  const profile = field === 'agent_profile' && state.profiles.find((item) => item.name === e.target.value);
-  if (profile) {
-    // Choosing a preset loads its whole loadout. Recording only the name left
-    // every field as it was, and saving then stored the old settings under
-    // the new preset's label.
-    state.configDrafts.set(row.session_id, Object.assign(profileConfig(profile), { _dirty: true }));
-    render();
-    const msg = $('ag-config-msg');
-    if (msg) msg.textContent = `Loaded ${profile.name} — unsaved`;
+  if (e.target.matches('[data-ag-basis]')) {
+    switchBasis(row, e.target.value).catch((err) => {
+      uiModule.showToast(`Could not switch loadout: ${err.message || err}`, 'error');
+      render();
+    });
     return;
   }
+  const field = e.target.dataset.config;
   const draft = configFor(row);
   if (field) {
     // Optional numbers (temperature, max tokens) read blank as "app default".
@@ -1151,8 +1194,57 @@ function onConfigChange(e) {
   }
   draft._dirty = true;
   syncConfigVisibility(editor, draft);
+  refreshBasis(row);
   const msg = $('ag-config-msg');
   if (msg) msg.textContent = 'Unsaved changes';
+}
+/** Re-render only the "based on" line: an edit enables Reset and Save to
+ *  loadout without rebuilding the form under the user's cursor. */
+function refreshBasis(row) {
+  const box = document.querySelector('.ag-loadout-editor .ag-basis');
+  if (box) box.outerHTML = basisHtml(row, configFor(row));
+}
+async function confirmAction(text, { title = 'Confirm', confirmText = 'Confirm', danger = false } = {}) {
+  try {
+    return await (uiModule.styledConfirm
+      ? uiModule.styledConfirm(text, { title, confirmText, cancelText: 'Cancel', danger })
+      : Promise.resolve(window.confirm(text)));
+  } catch (_) { return false; }
+}
+/** Put the chat on `name` (or detach it on the next save when blank). */
+async function switchBasis(row, name) {
+  const draft = configFor(row);
+  if (!name) {
+    draft.agent_profile = '';
+    draft._dirty = true;
+    render();
+    const msg = $('ag-config-msg'); if (msg) msg.textContent = 'Not based on a loadout once saved';
+    return;
+  }
+  const changes = row.loadout?.changes || [];
+  if ((draft._dirty || changes.length) && !(await confirmAction(
+    `Switch ${row.name} to the loadout “${name}”? This chat's current settings are replaced by the loadout's.`,
+    { title: 'Switch loadout', confirmText: 'Switch' }))) { render(); return; }
+  await applyLoadout(row, name);
+  uiModule.showToast(`${row.name} now runs on ${name}`, 'success');
+}
+async function applyLoadout(row, name) {
+  await post(`/api/agents/sessions/${encodeURIComponent(row.session_id)}/loadout`, { profile: name });
+  state.configDrafts.delete(row.session_id);
+  document.dispatchEvent(new CustomEvent('odysseus:loadout-changed', { detail: { sessionId: row.session_id } }));
+  await refresh();
+  render();
+}
+async function saveToLoadout(row, { newName = '' } = {}) {
+  // Unsaved edits in the form are this chat's first, then the loadout's.
+  if (configFor(row)._dirty) await saveAgentConfig(row);
+  const result = await post(`/api/agents/sessions/${encodeURIComponent(row.session_id)}/save-to-loadout`,
+    newName ? { new_name: newName } : {});
+  state.configDrafts.delete(row.session_id);
+  await refresh();
+  render();
+  const others = result.chats_updated ? `; ${result.chats_updated} other chat${result.chats_updated === 1 ? '' : 's'} updated` : '';
+  uiModule.showToast(result.created ? `Created the loadout ${result.profile.name}` : `Saved to ${result.profile.name}${others}`, 'success');
 }
 async function saveAgentConfig(row) {
   const draft = configFor(row);
@@ -1245,18 +1337,47 @@ async function onClick(e) {
     else if (act === 'refresh') { b.disabled = true; await refresh(); if (b.isConnected) b.disabled = false; }
     else if (act === 'archive-view') {
       state.archiveView = !state.archiveView;
-      state.historyView = false; state.configOpen = false;
+      state.historyView = false; state.configOpen = false; state.loadoutsView = false;
       state.selected = null; state.filter = ''; state.bucket = 'all'; state.fleetPage = 0;
       await refresh();
     }
+    else if (act === 'loadouts-view') {
+      state.loadoutsView = true;
+      state.configOpen = false; state.historyView = false; state.archiveView = false; state.launchOpen = false;
+      render();
+    }
+    else if (act === 'save-to-loadout' || act === 'reset-to-loadout' || act === 'save-as-loadout') {
+      const row = state.rows.find((item) => item.session_id === state.selected);
+      if (!row) return;
+      const name = row.loadout?.name || '';
+      const changes = row.loadout?.changes || [];
+      const dirty = !!configFor(row)._dirty;
+      const what = changes.length ? ` (${changes.join(', ')})` : '';
+      if (act === 'reset-to-loadout') {
+        if (!(await confirmAction(`Reset ${row.name} to the loadout “${name}”? This chat's changes${what}${dirty ? ' and your unsaved edits' : ''} are discarded.`,
+          { title: 'Reset to loadout', confirmText: 'Reset', danger: true }))) return;
+        await applyLoadout(row, name);
+        uiModule.showToast(`${row.name} reset to ${name}`, 'success');
+      } else if (act === 'save-to-loadout') {
+        if (!(await confirmAction(`Save ${row.name}'s settings${what} to the loadout “${name}”? Other chats based on ${name} take on each changed setting they have not changed themselves; running workers keep theirs.${dirty ? ' Your unsaved edits are saved to this chat first.' : ''}`,
+          { title: 'Save to loadout', confirmText: 'Save to loadout' }))) return;
+        await saveToLoadout(row);
+      } else {
+        const newName = await (uiModule.styledPrompt
+          ? uiModule.styledPrompt(`Name the new loadout made from ${row.name}'s settings.`, { title: 'Save as new loadout', placeholder: 'researcher', confirmText: 'Create', maxLength: 40 })
+          : Promise.resolve(window.prompt('Name for the new loadout')));
+        if (!newName) return;
+        await saveToLoadout(row, { newName });
+      }
+    }
     else if (act === 'fleet-view' || act === 'config-back') {
       const leavingArchive = state.archiveView;
-      state.configOpen = false; state.historyView = false; state.archiveView = false;
+      state.configOpen = false; state.historyView = false; state.archiveView = false; state.loadoutsView = false;
       render();
       if (leavingArchive) await refresh();
     }
     else if (act === 'history-view') {
-      state.historyView = true; state.configOpen = false; state.launchOpen = false;
+      state.historyView = true; state.configOpen = false; state.launchOpen = false; state.loadoutsView = false;
       render();
       await loadHistoryList();
     }
@@ -1273,7 +1394,7 @@ async function onClick(e) {
         state.launchProfile = null; state.launchParent = null;
       }
       const leavingArchive = state.archiveView;
-      state.configOpen = false; state.historyView = false; state.archiveView = false;
+      state.configOpen = false; state.historyView = false; state.archiveView = false; state.loadoutsView = false;
       state.launchOpen = true;
       render();
       const ta = $('ag-task');
@@ -1320,7 +1441,7 @@ async function onClick(e) {
     }
     else if (act === 'open-chat') { await openChat(b.dataset.sid); }
     else if (act === 'config-toggle') {
-      state.configOpen = true;
+      state.configOpen = true; state.loadoutsView = false;
       state.configTab = 'general';
       render();
       try { await Promise.all([loadCatalog(), loadPersonaSources()]); } catch (err) { uiModule.showToast(err.message || 'Capabilities unavailable', 'error'); }
@@ -1350,7 +1471,9 @@ async function onClick(e) {
         if (msg) msg.textContent = `Not saved: ${err.message || err}`;
         throw err;
       }
-      uiModule.showToast(`Loadout saved for ${row.name}`, 'success');
+      uiModule.showToast(`Saved ${row.name}'s settings`, 'success');
+      // The change count against its loadout is the server's to say.
+      await refresh();
       state.configOpen ? render() : renderDetail();
     }
     else if (act === 'inspect-run') {
@@ -1534,6 +1657,7 @@ function bringToFront() {
  * where to look does not. */
 function resetView(view = null) {
   state.configOpen = view === 'config';
+  state.loadoutsView = view === 'loadouts';
   state.archiveView = view === 'archive';
   state.historyView = view === 'history';
   state.launchOpen = view === 'launch';
@@ -1766,6 +1890,8 @@ function init() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init); else init();
 
-const agentsDashboard = { open, openForRun, close, toggle, refresh, editLoadout };
+/** The loadout library (the composer's Agents menu, Settings › Agents). */
+export function openLoadouts() { open({ view: 'loadouts' }); }
+const agentsDashboard = { open, openForRun, close, toggle, refresh, editLoadout, openLoadouts };
 window.agentsDashboard = agentsDashboard;
 export default agentsDashboard;

@@ -357,25 +357,32 @@ def test_profile_transfer_routes_are_admin_only(client, store, who, method, path
     assert store["writes"] == 0
 
 
-# ── the Settings UI ──────────────────────────────────────────────────────────
+# ── the loadout library UI (Agent Control Room › Loadouts) ─────────────────────
 
-def test_profile_editor_has_export_and_import_controls():
+def test_settings_points_to_the_loadout_library():
+    # The editor moved out of Settings (2026-09-30); Settings links to it.
     index = (ROOT / "static/index.html").read_text(encoding="utf-8")
-    actions = index.split('<div class="agent-profiles-actions">', 1)[1].split("</div>", 1)[0]
-    for control in ('id="set-agentProfileExport"', 'id="set-agentProfileImport"',
-                    'id="set-agentProfileImportMode"', 'id="set-agentProfileImportFile"'):
-        assert control in actions
-    assert 'type="file" id="set-agentProfileImportFile" accept=".json,application/json" hidden' in actions
-    assert 'id="set-agentProfileImportReport"' in index
+    card = index.split('id="set-agentProfilesCard"', 1)[1].split('<div class="admin-card"', 1)[0]
+    assert 'id="set-agentOpenLoadouts"' in card
+    assert 'id="set-agentProfiles"' not in index
+    settings = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
+    assert "function initAgentProfilesEditor(" not in settings
+    assert "agentsDashboard.openLoadouts()" in settings
 
 
 def test_profile_editor_wires_the_transfer_routes():
-    js = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
-    transfer = js.split("function initAgentProfilesTransfer(", 1)[1].split("\nasync function ", 1)[0]
-    assert "'/api/agents/profiles/export'" in transfer
-    assert "'/api/agents/profiles/import'" in transfer
-    assert "rename_conflicts: mode === 'rename'" in transfer
-    assert "replaceProfiles(body.profiles)" in transfer
-    assert "report.errors" in transfer and "report.warnings" in transfer
-    editor = js.split("function initAgentProfilesEditor(", 1)[1].split("function initAgentProfilesTransfer(", 1)[0]
-    assert "initAgentProfilesTransfer(note," in editor
+    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
+    assert "'/api/agents/profiles/export'" in js
+    assert "'/api/agents/profiles/import'" in js
+    assert "rename_conflicts: mode === 'rename'" in js
+    assert "replaceProfiles(body.profiles)" in js
+    assert "report.errors" in js and "report.warnings" in js
+    assert "fileInput.accept = '.json,application/json'" in js
+
+
+def test_deleting_a_loadout_asks_first():
+    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
+    remove = js.split("const remove = button('Delete');", 1)[1].split("head.appendChild(remove);", 1)[0]
+    assert "await ask(" in remove and "danger: true" in remove
+    assert remove.index("await ask(") < remove.index("profiles.splice(")
+    assert "if (!ok) return;" in remove

@@ -47,6 +47,25 @@ _RECENT_S = 24 * 3600
 _LIVE_SOURCES = {"session", "claude_code", "bg_job", "pipeline", "worktree"}
 
 
+def _loadout_basis(settings: Dict[str, Any], profiles_by_name: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """``{"name", "exists", "changes"}`` for a chat based on a loadout, else None.
+
+    ``changes`` names what the chat's own copy no longer shares with the
+    loadout (src/agent_profiles.loadout_changes); a loadout deleted since has
+    ``exists: False`` and no changes to count against.
+    """
+    name = str((settings or {}).get("agent_profile") or "").strip()
+    if not name:
+        return None
+    profile = profiles_by_name.get(name.casefold())
+    if profile is None:
+        return {"name": name, "exists": False, "changes": []}
+    from src import agent_profiles
+
+    return {"name": profile["name"], "exists": True,
+            "changes": agent_profiles.loadout_changes(profile, settings or {})}
+
+
 def setup_agents_routes(session_manager) -> APIRouter:
     router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -152,14 +171,15 @@ def setup_agents_routes(session_manager) -> APIRouter:
 
         key_session = current_session if isinstance(current_session, str) else None
         snapshot = dict(owned)
+        can_edit = _can_edit_loadouts(request)
         return await coalesced(
-            ("agents.overview", _poll_ns, user, key_session, show_archived),
-            lambda: _overview_sync(user, snapshot, current_session, show_archived),
+            ("agents.overview", _poll_ns, user, key_session, show_archived, can_edit),
+            lambda: _overview_sync(user, snapshot, current_session, show_archived, can_edit),
             ttl=0,
         )
 
     def _overview_sync(user: Optional[str], owned: Dict[str, Any], current_session: Optional[str],
-                       show_archived: bool) -> Dict[str, Any]:
+                       show_archived: bool, can_edit_loadouts: bool = False) -> Dict[str, Any]:
         # Keep cleanup recoverable: archived chats are intentionally absent
         # from the normal fleet, but can be requested by an archive browser.
         # Endpoint functions are also called directly by a few embedders and
@@ -197,6 +217,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
         for rec in tool_approvals.tool_approval_store.pending_for_sessions(owner=user, session_ids=set(owned)):
             pending[rec.session_id] = pending.get(rec.session_id, 0) + 1
         from core.database import get_session_settings
+        from src import agent_profiles
+        profiles, profile_problems = agent_profiles.load_profiles_with_problems()
+        profiles_by_name = {p["name"].casefold(): p for p in profiles}
 
         rows = []
         visible_ids = set(chat_runs) | set(by_session) | set(pending) | set(delegated)
@@ -287,6 +310,9 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "children_running": len(live_children),
                 "pending_approvals": pending.get(sid, 0),
                 "needs": needs,
+                # The loadout this chat's settings are a copy of, and what the
+                # chat changed from it: "based on Lead Engineer (2 changes)".
+                "loadout": _loadout_basis(settings, profiles_by_name),
                 # `steer_queued` is unchanged and still means "waiting for a
                 # turn to pick it up" — it just no longer has to stand in for
                 # the whole story, because `steer` carries the recent messages
@@ -319,12 +345,10 @@ def setup_agents_routes(session_manager) -> APIRouter:
             "finished_24h": sum(1 for r in rows if r["status"] in ("finished",)),
             "failed_24h": sum(1 for r in rows if r["status"] == "failed"),
         }
-        from src import agent_profiles
-
         from src.agent_tools.claude_code_tools import configured_concurrency
-        profiles, profile_problems = agent_profiles.load_profiles_with_problems()
         return {"now": now, "rows": rows, "totals": totals, "profiles": profiles,
                 "profile_problems": profile_problems,
+                "can_edit_loadouts": can_edit_loadouts,
                 "provider_limits": {"claude_code": configured_concurrency()},
                 "chats": _recent_chats(user, live_chats, 200)}
 
@@ -718,6 +742,15 @@ def setup_agents_routes(session_manager) -> APIRouter:
                               "delegation_policy": p.get("delegation_policy", "explicit")}
                              for p in agent_profiles.load_profiles()]}
 
+    def _can_edit_loadouts(request: Request) -> bool:
+        try:
+            _require_profile_admin(request)
+            return True
+        except HTTPException:
+            return False
+        except Exception:
+            return False
+
     def _require_profile_admin(request: Request) -> str:
         """The same gate as saving profiles through ``POST /api/auth/settings``:
         an admin in a browser session (or the single-user deployment). A bearer
@@ -802,6 +835,59 @@ def setup_agents_routes(session_manager) -> APIRouter:
         if saved is None:
             raise HTTPException(500, "Could not save the chat's loadout")
         return {"ok": True, "agent_profile": saved.get("agent_profile")}
+
+    @router.post("/sessions/{session_id}/save-to-loadout")
+    async def save_to_loadout(request: Request, session_id: str):
+        """Make this chat's settings the settings of a loadout.
+
+        Body: ``{}`` saves into the loadout the chat is based on;
+        ``{"new_name": "..."}`` creates a loadout from the chat and bases the
+        chat on it. Admin only, like editing loadouts anywhere else. Other chats
+        based on the loadout take on each changed setting they have not changed
+        themselves (``propagate_profile_edits``), exactly as a save of the
+        loadout list does.
+        """
+        _require_owned(request, session_id)
+        _require_profile_admin(request)
+        from core.database import get_session_settings, update_session_settings
+        from src import agent_loadouts, agent_profiles
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        settings = get_session_settings(session_id) or {}
+        new_name = str((body or {}).get("new_name") or "").strip()
+        old_list = agent_profiles.load_profiles()
+        if new_name:
+            if any(p["name"].casefold() == new_name.casefold() for p in old_list):
+                raise HTTPException(409, f"A loadout named {new_name!r} already exists")
+            base = {"name": new_name}
+            index = len(old_list)
+        else:
+            name = str(settings.get("agent_profile") or "").strip()
+            if not name:
+                raise HTTPException(400, "This chat is not based on a loadout; give the new loadout a name")
+            index = next((i for i, p in enumerate(old_list) if p["name"].casefold() == name.casefold()), None)
+            if index is None:
+                raise HTTPException(404, f"No loadout named {name!r}")
+            base = old_list[index]
+        candidate = agent_profiles.profile_from_session(base, settings)
+        new_list = old_list[:index] + [candidate] + old_list[index + 1:]
+        try:
+            saved = agent_profiles.validate_profiles(new_list)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+        agent_loadouts._write(saved)
+        profile = saved[index]
+        if new_name:
+            update_session_settings(session_id, {"agent_profile": profile["name"]})
+            updated: Dict[str, int] = {}
+        else:
+            updated = agent_profiles.propagate_profile_edits(old_list, saved)
+        logger.info("[agent-profiles] %s loadout %r from chat %s; other chats updated: %s",
+                    "created" if new_name else "saved", profile["name"], session_id[:8], updated or 0)
+        return {"ok": True, "profile": profile, "created": bool(new_name),
+                "chats_updated": sum(updated.values())}
 
     @router.post("/launch")
     async def launch(request: Request):

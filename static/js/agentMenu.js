@@ -341,10 +341,8 @@ function onMenuKey(e) {
 }
 
 function openLoadoutSettings() {
-  if (typeof window.adminModule?.open !== 'function') return;
-  window.adminModule.open('tools');
-  setTimeout(() => $('set-agentProfiles')?.closest('.settings-col, [data-settings-panel]')
-    ?.querySelector('.agent-profiles-title')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 150);
+  // Loadouts are managed in the Agent Control Room (agentLoadouts.js).
+  if (typeof window.agentsDashboard?.openLoadouts === 'function') window.agentsDashboard.openLoadouts();
 }
 
 // ── wiring ────────────────────────────────────────────────────────────────

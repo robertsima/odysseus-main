@@ -739,6 +739,32 @@ tools, skills, memory access, MCP access, delegation policy, approvals, worker
 limit, round budget. It is a reusable starting point; the persisted per-chat
 settings are the effective policy.
 
+**Two layers, one place (2026-09-30).** A chat based on a loadout holds a copy
+of it (`session_patch`). Both are edited in the Agent Control Room, and each
+says which it is:
+
+- **Loadouts** (header button; `static/js/agentLoadouts.js`) is the library:
+  create, change, delete, import and export. It moved here from Settings ›
+  Agents, which now links to it. Deleting asks first; the delete takes effect
+  on *Save loadouts*. Saving carries policy edits into the chats based on a
+  loadout, for each setting a chat has not changed itself
+  (`propagate_profile_edits`); running workers keep theirs.
+- **This chat's settings** (the chat editor) reads "based on Lead Engineer
+  (2 changes)". The count is `agent_profiles.loadout_changes`: each setting,
+  by the label the editor shows, where the chat's copy no longer matches the
+  loadout. **Reset to loadout** re-applies the loadout's copy
+  (`POST /api/agents/sessions/{id}/loadout`); **Save to loadout** makes the
+  chat's settings the loadout's (`POST …/save-to-loadout`, admin only, the
+  inverse `profile_from_session`, keeping what a chat does not hold: name,
+  description, worker model and fallbacks, round budget), and with a name it
+  creates a new loadout from a chat that has none. Both ask first. Choosing
+  another loadout in that line applies it on the server, the same copy a launch
+  makes, so the count starts from zero.
+
+Before this, the two were near-identical forms in different windows, the chat
+editor's button said "Save loadout" while saving only the chat, and editing
+one read as editing the other.
+
 Starting a worker (`agent_control.launch_worker`) creates a fresh chat, applies
 the profile via `session_patch`, and runs it headless and detached. Progress
 appears on the worker's own activity feed and on its parent's.

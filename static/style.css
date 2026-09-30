@@ -42591,6 +42591,32 @@ body.ag-split-resizing { cursor: col-resize !important; user-select: none !impor
    shares, so the link reads as a second field rather than a new panel. */
 .ag-preset-row .ag-preset-role { grid-column: 1 / -1; }
 .ag-preset-row .ag-preset-role small { color: var(--wb-faint); font-size: 10px; }
+/* "This chat's settings — based on <loadout> (N changes)" above the chat
+   editor, with the actions that move settings between chat and loadout. */
+.ag-basis { display: flex; flex-direction: column; gap: 5px; margin-bottom: 12px; padding: 9px 10px; border: 1px solid var(--wb-line); border-radius: 8px; background: var(--bg); }
+.ag-basis-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; }
+.ag-basis-line > span { color: var(--wb-muted); }
+.ag-basis-line .wb-select { width: auto; max-width: 220px; }
+.ag-basis-count { color: var(--wb-muted); }
+.ag-basis-unsaved { color: var(--wb-warn); }
+.ag-basis-actions { display: inline-flex; gap: 6px; margin-left: auto; }
+.ag-basis small { color: var(--wb-faint); font-size: 10px; }
+/* The loadout library (agentLoadouts.js) as a Control Room view. */
+.ag-loadouts-view { display: flex; flex: 1; min-height: 0; flex-direction: column; overflow: auto; padding: 12px 14px; }
+.ag-loadouts-intro { margin: 0 0 10px; max-width: 760px; color: var(--wb-muted); font-size: 12px; line-height: 1.45; }
+/* The chat-markdown details/summary look (string-colour tint, flex row) is
+   global; the library's rows are plain cards like the rest of the room. */
+.ag-loadouts-editor details.agent-profile-item { margin: 0 0 6px; background: var(--bg); border: 1px solid var(--wb-line); }
+.ag-loadouts-editor details.agent-profile-item[open] { background: var(--bg); }
+.ag-loadouts-editor details.agent-profile-item > summary { display: grid; grid-template-columns: 12px minmax(110px, auto) 1fr; gap: 2px 10px; align-items: baseline; padding: 8px 10px; background: transparent; border-bottom: 0; color: var(--fg); font-weight: 400; font-size: 12px; }
+.ag-loadouts-editor details.agent-profile-item > summary:hover { background: var(--wb-hover); }
+.ag-loadouts-editor details.agent-profile-item > summary::before { color: var(--wb-muted); font-size: 9px; }
+.ag-loadouts-editor details.agent-profile-item[open] > summary { border-bottom: 1px solid var(--wb-line); }
+.ag-loadouts-editor .agent-profile-summary-desc { grid-column: 2 / -1; }
+.ag-loadouts-editor details.agent-profile-capabilities { background: transparent; border-color: var(--wb-line); }
+.ag-loadouts-editor details.agent-profile-capabilities > summary { background: transparent; border-bottom: 0; color: var(--wb-muted); font-weight: 400; }
+/* `details[open] summary::before` turns every nested arrow, closed or not. */
+.ag-loadouts-editor details.agent-profile-capabilities:not([open]) > summary::before { transform: none; }
 .ag-policy-grid { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 10px; }
 .ag-policy-grid .ag-field { padding: 7px; border: 1px solid var(--wb-line); border-radius: 8px; background: var(--bg); }
 .ag-policy-grid .ag-field > span { color: var(--fg); font-weight: 650; }

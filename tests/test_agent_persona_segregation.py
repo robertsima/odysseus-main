@@ -115,7 +115,7 @@ def test_workers_get_the_loadout_voice_even_when_called_with_defaults(monkeypatc
 def test_browser_keeps_the_shared_prompt_out_of_loadout_agents():
     chat = (ROOT / "static/js/chat.js").read_text(encoding="utf-8")
     menu = (ROOT / "static/js/agentMenu.js").read_text(encoding="utf-8")
-    settings_js = (ROOT / "static/js/settings.js").read_text(encoding="utf-8")
+    loadouts_js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
     dashboard = (ROOT / "static/js/agentsDashboard.js").read_text(encoding="utf-8")
     style = (ROOT / "static/style.css").read_text(encoding="utf-8")
     # Inject text and the persona label come from the loadout in that case.
@@ -123,9 +123,9 @@ def test_browser_keeps_the_shared_prompt_out_of_loadout_agents():
     assert chat.count("_personaNameForTurn()") >= 3
     assert "export function sharedPersonaSuppressed()" in menu
     assert "body.composer-agent-mode.loadout-voice #character-indicator-btn" in style
-    # Both editors can set each agent's voice.
+    # Both editors (the loadout library and a chat's settings) set its voice.
     for key in ("persona_name", "'temperature'", "'max_tokens'", "Start from persona"):
-        assert key in settings_js
+        assert key in loadouts_js
     for key in ('data-config="agent_persona_name"', 'data-config="agent_temperature"', "agent_max_tokens: draft.agent_max_tokens"):
         assert key in dashboard
     assert "odysseus:loadout-changed" in dashboard and "odysseus:loadout-changed" in menu

@@ -105,14 +105,30 @@ def test_header_publishes_each_fleet_count_once():
     assert 'class="ag-hist"' in AGENTS
 
 
-def test_applying_a_preset_keeps_its_mcp_policy_through_save():
-    """profileConfig() fed saveAgentConfig(), which falls back to ['*'] when
-    mcp_access is missing — a preset granting no connections used to save as
-    'every connection'."""
-    profile_config = AGENTS.split("function profileConfig(profile)", 1)[1].split("function loadoutSummaryHtml", 1)[0]
-    assert "mcp_access: profile.mcp_access || 'all'," in profile_config
+def test_switching_a_chats_loadout_uses_the_servers_copy():
+    """Picking a loadout for a chat used to copy it in the browser
+    (profileConfig), which had to repeat session_patch's MCP rules and did not
+    always (a preset granting no connections once saved as every connection).
+    It now applies the loadout on the server, the same copy a launch makes, so
+    "based on X (N changes)" starts from zero."""
+    assert "function profileConfig(" not in AGENTS
+    switch = AGENTS.split("async function applyLoadout(row, name)", 1)[1].split("async function saveToLoadout", 1)[0]
+    assert "/loadout`, { profile: name }" in switch
     save = AGENTS.split("async function saveAgentConfig(row)", 1)[1].split("// ── actions", 1)[0]
     assert "draft.mcp_access === 'none'" in save
+
+
+def test_the_chat_editor_says_what_it_edits():
+    """Two near-identical forms, the chat's copy and the loadout library, and
+    nothing said which one you were in (2026-09-30)."""
+    basis = AGENTS.split("function basisHtml(row, c)", 1)[1].split("function loadoutWorkspaceHtml()", 1)[0]
+    assert "This chat's settings" in basis and "based on" in basis
+    assert 'data-ag="save-to-loadout"' in basis and 'data-ag="reset-to-loadout"' in basis
+    assert "change${changes.length === 1 ? '' : 's'}" in basis
+    actions = AGENTS.split("else if (act === 'save-to-loadout' || act === 'reset-to-loadout'", 1)[1].split("else if (act === 'fleet-view'", 1)[0]
+    assert actions.count("await confirmAction(") == 2
+    assert "/save-to-loadout`" in AGENTS
+    assert 'data-ag="loadouts-view"' in AGENTS and "mountLoadoutsEditor(" in AGENTS
 
 
 def test_explicit_tool_policy_survives_dashboard_load_and_save():
@@ -219,7 +235,7 @@ def test_archive_view_clears_active_only_filter():
 
 
 def test_each_agent_has_a_dedicated_server_backed_capability_loadout():
-    for token in ("Agent loadout", "delegation_policy", "memory_access", "skill_access",
+    for token in ("This chat's settings", "delegation_policy", "memory_access", "skill_access",
                   "model_access", "allowed_mcp_servers", "private_vault_access", "save-config"):
         assert token in AGENTS
     assert "'/api/agents/catalog'" in AGENTS
