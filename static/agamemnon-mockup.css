@@ -73,8 +73,12 @@ html[data-theme="dark"] .ag-card{box-sizing:border-box;min-height:300px;border:2
 html[data-theme="dark"] .ag-group:first-child .ag-card:first-child{border-color:var(--ag-gold)!important}
 html[data-theme="dark"] .ag-group-attn .ag-card,html[data-theme="dark"] .ag-card.attn,html[data-theme="dark"] .ag-card-failed{border-color:var(--ag-coral)!important}
 html[data-theme="dark"] .ag-card-avatar{align-self:start}
-html[data-theme="dark"] .ag-seal-mark{width:58px;height:58px;stroke:var(--ag-gold);fill:none;stroke-width:1.7}
+html[data-theme="dark"] .ag-seal-mark{display:none}
+html[data-theme="dark"] .ag-trojan-mark{display:block;width:58px;height:58px;color:var(--agent-model-color,var(--ag-gold));filter:drop-shadow(0 0 8px color-mix(in srgb,var(--agent-model-color,var(--ag-gold)) 18%,transparent))}
 html[data-theme="dark"] .ag-seal-unit{color:var(--ag-muted)}
+html[data-theme="dark"] .ag-agent-identity{display:flex;align-items:flex-start;gap:14px}
+html[data-theme="dark"] .ag-agent-identity>.ag-trojan-mark{display:block;flex:0 0 42px;width:42px;height:42px;color:var(--agent-model-color,var(--ag-gold))}
+html[data-theme="dark"] .ag-agent-identity>dl{flex:1;min-width:0}
 html[data-theme="dark"] .ag-row-name{font:700 17px/1.25 'Space Grotesk';text-transform:uppercase;letter-spacing:.05em}
 html[data-theme="dark"] .ag-detail,html[data-theme="dark"] .ag-launch{box-sizing:border-box;width:100%;margin-top:28px;min-height:240px;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important}
 html[data-theme="dark"] .ag-launch{display:block}

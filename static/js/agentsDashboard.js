@@ -21,6 +21,7 @@ import { makeWindowDraggable } from './windowDrag.js';
 import { snapModalToZone } from './tileManager.js';
 import { applyEdgeDock } from './modalSnap.js';
 import { nextToolWindowZ, topToolWindowZ } from './toolWindowZOrder.js';
+import { resolveAgamemnonModelIdentity } from './agamemnonIdentity.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
@@ -141,6 +142,7 @@ function agentMarksUrl() {
   const script = Array.from(document.scripts).find(item => item.src.includes('agentsDashboard.js'));
   return new URL('../branding/agamemnon-agent-marks.svg', script?.src || document.baseURI).href;
 }
+
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
   // Role describes the stable identity archetype, not the live status class.
@@ -158,8 +160,11 @@ function robotHtml(agent, size = '') {
   const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
   const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
   const emblem = role === 'primary' ? 'command' : role === 'scout' ? 'scout' : role === 'reviewer' || role === 'specialist' ? 'review' : 'implement';
-  return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" aria-hidden="true">
-    <svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
+  const modelIdentity = resolveAgamemnonModelIdentity(agent?.model || agent?.config?.model, agent?.source || agent?.kind);
+  return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" data-model-family="${modelIdentity.family}" style="--agent-model-color:${modelIdentity.color}" aria-hidden="true">
+    <svg class="ag-trojan-mark" viewBox="0 0 64 64" focusable="false">
+      <use href="${agentMarksUrl()}#trojan"/>
+    </svg><svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
       <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"/>
     </svg><span class="ag-seal-unit">${unit}</span>
   </span>`;

@@ -1,4 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" color="#d7b35a">
+  <!--
+    The Agamemnon identity uses one generic soldier instead of job pictograms.
+    Its helmet is the exact Penpot crest path, scaled into a calm bust silhouette.
+    `currentColor` lets the application assign model identity without creating a
+    misleading icon taxonomy for roles that do not have a complete art family.
+  -->
+  <symbol id="trojan" viewBox="0 0 64 64">
+    <g transform="translate(0 4) scale(1.6253968254)"><path fill="currentColor" d="M19.6875 0C8.81425857543945 0 0 8.8143920898438 0 19.6875c0 3.5860595703125.93950271606445 6.9478759765625 2.61474609375 9.84375H14.765625l2.61474609375-5.3064575195312C14.42667007446289 23.2596435546875 12.3046875 20.5027465820312 12.3046875 17.2265625c0-4.0774536132812 3.30536651611328-7.3828125 7.3828125-7.3828125s7.3828125 3.3053588867188 7.3828125 7.3828125V19.6875H39.375C39.375 8.8143920898438 30.56074142456055 0 19.6875 0ZM19.34149169921875 12.3046875c-2.582294464111328.1820068359375-4.582271575927734 2.33319091796875-4.57586669921875 4.921875 0 2.71826171875 2.20359802246094 4.921875 4.921875 4.921875s4.921875-2.20361328125 4.921875-4.921875c.00338363647461-1.3676147460938-.56239318847656-2.6749267578125-1.56168365478516-3.6085815429688-.999290466308594-.9336547851562-2.34199523925781-1.409423828125-3.70619964599609-1.3132934570312Z"/></g>
+    <path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="square" d="M32 24v14l-5 4m5-4 6 1"/>
+    <path fill="currentColor" fill-opacity=".34" d="M16.3 43.6h31.4c6.1 2.8 10.2 8.8 10.7 16.4H5.6c.5-7.6 4.6-13.6 10.7-16.4Z"/>
+    <path fill="none" stroke="currentColor" stroke-width="2" d="M19 44.1c2.8 5 7.5 7.6 13 7.6s10.2-2.6 13-7.6"/>
+  </symbol>
+  <use href="#trojan"/>
   <symbol id="command" viewBox="0 0 32 32">
     <path d="M16 7v18M10 13l6-6 6 6M10 19l6 6 6-6"/>
   </symbol>

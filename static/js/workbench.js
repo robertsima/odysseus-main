@@ -32,6 +32,7 @@ import { snapModalToZone } from './tileManager.js';
 import { applyRightDock } from './modalSnap.js';
 import { renderDiffText, renderFileTable, parseUnifiedDiff, diffStats } from './diffView.js';
 import { isCardOpen, setCardOpen } from './cardState.js?v=20260928subagentui1';
+import { applyAgamemnonModelIdentity } from './agamemnonIdentity.js';
 
 const PREFS_KEY = 'odysseus-workbench-prefs';
 const MAX_EVENTS = 1500;
@@ -793,6 +794,7 @@ function renderAgamemnonRunControl(runs) {
   title.textContent = `RUN ${String(run.run_id || '').slice(0, 8).toUpperCase()} / ${String(run.status || 'running').replaceAll('_', ' ').toUpperCase()}`;
   set('ag-run-summary-meta', `${plural(events.length, 'recorded event')} · ${plural(run.tools || 0, 'tool')} · last update ${fmtTime((events.at(-1) || {}).ts || run.started_at)}`);
   set('ag-run-agent', SOURCE_LABEL[run.source] || run.source || 'Agent');
+  applyAgamemnonModelIdentity($('ag-run-agent-mark'), run.model || run.data?.model, run.source);
   set('ag-run-started', fmtTime(run.started_at) || '—');
   set('ag-run-status', String(run.status || 'running').replaceAll('_', ' '));
   set('ag-run-activity-note', isLive(run.status) ? 'Live activity is being recorded.' : 'This durable activity remains inspectable; interrupted activity is not shown as resumable.');

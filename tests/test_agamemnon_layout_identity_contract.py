@@ -13,6 +13,7 @@ THEME = (ROOT / "static/js/theme.js").read_text()
 HTML = (ROOT / "static/index.html").read_text()
 LOGIN = (ROOT / "static/login.html").read_text()
 STYLE = (ROOT / "static/style.css").read_text()
+MOCKUP_STYLE = (ROOT / "static/agamemnon-mockup.css").read_text()
 
 HELMET_DOME = "M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5"
 HELMET_CREST = "M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z"
@@ -97,14 +98,26 @@ def test_permanent_helmet_logo_is_unconditional_across_every_palette():
     assert "M16 4L16 22L6 22Z" not in LOGIN
 
 
-def test_agent_role_marks_use_the_shared_four_role_artwork():
+def test_agamemnon_agents_use_one_model_colored_trojan_artwork_family():
     dashboard = (ROOT / "static/js/agentsDashboard.js").read_text()
     marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text()
-    for role in ("command", "implement", "scout", "review"):
-        assert f"'{role}'" in dashboard
-        assert f'id="{role}"' in marks
+    assert 'id="trojan"' in marks
+    assert 'fill="currentColor"' in marks
+    assert 'href="${agentMarksUrl()}#trojan"' in dashboard
+    identity = (ROOT / "static/js/agamemnonIdentity.js").read_text()
+    assert "resolveAgamemnonModelIdentity" in dashboard
+    assert "matchIdentity(model) || matchIdentity(source)" in identity
+    for family in ("anthropic", "openai", "google", "mistral", "local", "default"):
+        assert f"'{family}'" in identity
+    assert "--agent-model-color:${modelIdentity.color}" in dashboard
+    assert 'data-model-family="${modelIdentity.family}"' in dashboard
+    # The legacy role symbols remain available only for the unchanged
+    # Odysseus presentation; Agamemnon CSS selects the generic Trojan mark.
+    assert 'html[data-theme="dark"] .ag-seal-mark{display:none}' in MOCKUP_STYLE
+    assert 'html[data-theme="dark"] .ag-trojan-mark{display:block' in MOCKUP_STYLE
     assert "agamemnon-agent-marks.svg" in dashboard
-    assert "ag-seal-glyph-${emblem}" in dashboard
+    assert 'id="ag-chat-agent-mark"' in HTML
+    assert 'id="ag-run-agent-mark"' in HTML
     assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()
     assert "icons/icon-192.png" in (ROOT / "static/manifest.json").read_text()
     assert '"background_color": "#111417"' in (ROOT / "static/manifest.json").read_text()
