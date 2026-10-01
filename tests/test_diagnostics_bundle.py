@@ -448,3 +448,109 @@ def test_read_app_logs_bundle_action_writes_zip(tmp_path, monkeypatch):
         assert fh.read() == b"PK-fake"
     assert calls[0]["include_messages"] is False
     assert calls[0]["session_ids"] == [SID] and calls[0]["minutes"] == 15
+
+
+# ── skills ───────────────────────────────────────────────────────────────── #
+
+def _write_skill(root, category, name, owner, body="Do the thing.", source="taught", extra=None):
+    d = root / "skills" / category / name
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: d\ncategory: {category}\nsource: {source}\n"
+        f"owner: {owner}\n---\n\n## When to Use\n{body}\n", encoding="utf-8")
+    for rel in (extra or []):
+        f = d / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("SUPPORT-FILE-CONTENT", encoding="utf-8")
+
+
+@pytest.fixture
+def skills_env(env, monkeypatch):
+    from services.memory.skills import SkillsManager
+    from src import agent_profiles
+
+    root = env / "data"
+    root.mkdir()
+    monkeypatch.setattr(bundle_mod, "_skills_manager", lambda: SkillsManager(str(root)))
+    (env / "logs" / "app.log").write_text(
+        f"{_stamp()} - x - INFO - [agent-loadout] start loadout=Lead run=subagent-0123456789 child={SID}\n",
+        encoding="utf-8")
+    profiles = {"Lead": {"name": "Lead", "skill_access": "selected", "skill_names": ["alpha", "ghost"]}}
+    monkeypatch.setattr(bundle_mod, "resolve_loadouts", lambda names, limit=20: (["Lead"], []))
+    monkeypatch.setattr(bundle_mod, "loadout_record", lambda name, owner=None: {"name": name})
+    monkeypatch.setattr(agent_profiles, "get_profile", lambda n: profiles.get(n))
+    return root, profiles
+
+
+def test_loadout_skills_written_and_missing_listed(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "alice", extra=["references/notes.md"])
+    zf = _open(_build(minutes=60).data)
+    assert "skills/dev__alpha.md" in zf.namelist()
+    assert "Do the thing." in zf.read("skills/dev__alpha.md").decode()
+    info = json.loads(zf.read("manifest.json"))["discovery"]["skills"]
+    assert info["missing"] == ["ghost"]
+    assert info["included"][0]["supporting_files"] == ["references/notes.md"]
+    assert "SUPPORT-FILE-CONTENT" not in _all_text(zf)
+    assert "skills" in json.loads(zf.read("manifest.json"))["privacy"]
+    assert "skills/" in zf.read("README.txt").decode()
+
+
+def test_skills_are_owner_scoped(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "bob", body="BOBS-PRIVATE-SKILL")
+    zf = _open(_build(minutes=60).data)
+    assert not [n for n in zf.namelist() if n.startswith("skills/")]
+    assert "BOBS-PRIVATE-SKILL" not in _all_text(zf)
+    assert "alpha" in json.loads(zf.read("manifest.json"))["discovery"]["skills"]["missing"]
+
+
+def test_bundled_skill_named_by_loadout_is_included(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "", source="bundled")
+    zf = _open(_build(minutes=60).data)
+    assert "skills/dev__alpha.md" in zf.namelist()
+
+
+def test_skill_size_cap_is_recorded(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "alice", body="x" * (bundle_mod.MAX_SKILL_BYTES * 2))
+    result = _build(minutes=60)
+    zf = _open(result.data)
+    assert len(zf.read("skills/dev__alpha.md")) <= bundle_mod.MAX_SKILL_BYTES
+    manifest = json.loads(zf.read("manifest.json"))
+    assert any(t["path"] == "skills/dev__alpha.md" for t in manifest["truncated"])
+    assert manifest["discovery"]["skills"]["included"][0]["truncated"] is True
+
+
+def test_skill_text_is_redacted(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "alice", body=f"use api_key={PLANTED_KEY} and Authorization: Bearer {PLANTED_KEY}")
+    zf = _open(_build(minutes=60).data)
+    text = zf.read("skills/dev__alpha.md").decode()
+    assert PLANTED_KEY not in text and "***" in text
+
+
+def test_skills_all_returns_the_owners_skills_only(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "dev", "alpha", "alice")
+    _write_skill(root, "ops", "zeta", "alice")
+    _write_skill(root, "ops", "other", "bob")
+    _write_skill(root, "dev", "stock", "", source="bundled")
+    zf = _open(_build(minutes=60, skills="all").data)
+    names = {n for n in zf.namelist() if n.startswith("skills/")}
+    assert names == {"skills/dev__alpha.md", "skills/ops__zeta.md"}
+
+
+def test_requested_skill_not_in_any_loadout(skills_env):
+    root, _ = skills_env
+    _write_skill(root, "ops", "zeta", "alice")
+    zf = _open(_build(minutes=60, skills="zeta, nope").data)
+    assert "skills/ops__zeta.md" in zf.namelist()
+    assert "nope" in json.loads(zf.read("manifest.json"))["discovery"]["skills"]["missing"]
+
+
+def test_bundle_route_passes_skills_through(monkeypatch):
+    client, calls = _client(monkeypatch, gate=_allow)
+    assert client.get("/api/diagnostics/bundle?skills=a,b&skills=all").status_code == 200
+    assert calls[0]["skills"] == ["a,b", "all"]

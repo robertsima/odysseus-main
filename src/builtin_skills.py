@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -52,10 +54,70 @@ def _bundled_source(app_root: str, category: str, name: str) -> str:
     return os.path.join(app_root, "skills", name)
 
 
+# Fields that reach the model when a skill is indexed or injected. Metadata the
+# seeder reconciles or usage bookkeeping updates (source, status, uses, ...) is
+# deliberately not compared.
+_PROMPT_VISIBLE_FIELDS = (
+    "name", "title", "description", "when_to_use", "procedure", "pitfalls",
+    "verification", "problem", "solution", "steps", "body_extra",
+)
+
+
+# Digests of every SKILL.md body any release has shipped, per skill name. Built
+# from git history by scripts/update_bundled_skill_history.py. It is how the
+# seeder tells "the operator never touched this, it is just an older release"
+# (safe to upgrade) from "someone edited it" (leave alone).
+_HISTORY_PATH = ("skills", ".bundled-history.json")
+_customised_logged: set[str] = set()
+
+
+def skill_digest(text: str, path: str | None = None) -> str:
+    """SHA-256 of a SKILL.md's prompt-visible content, stable across installs.
+
+    The installed file is not the repository file: the seeder rewrites it via
+    `Skill.to_markdown()` (new frontmatter, re-flowed body), and checkouts on
+    Windows may carry CRLF. Hashing raw bytes would call every install
+    "edited". So the text is parsed, round-tripped once through to_markdown()
+    (the same normalization `is_shipped_skill` uses) and only the prompt-visible
+    fields are hashed, with line endings folded to LF. Metadata the seeder or
+    usage bookkeeping rewrites (source, status, uses, ...) cannot change it.
+    """
+    skill = Skill.from_markdown(text.replace("\r\n", "\n"), path=path)
+    skill = Skill.from_markdown(skill.to_markdown(), path=path)
+    payload = {
+        field: getattr(skill, field, None) for field in _PROMPT_VISIBLE_FIELDS
+    }
+    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def skill_file_digest(path: str) -> str:
+    with open(path, encoding="utf-8") as handle:
+        return skill_digest(handle.read(), path=path)
+
+
+def load_bundled_history(app_root: str) -> dict[str, list[str]]:
+    try:
+        with open(os.path.join(app_root, *_HISTORY_PATH), encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return {k: list(v) for k, v in data.items() if isinstance(v, list)} if isinstance(data, dict) else {}
+
+
 def seed_bundled_skills(skills_manager) -> list[str]:
-    """Install and reconcile bundled skills without replacing their body."""
+    """Install bundled skills, upgrade unedited ones, and reconcile metadata.
+
+    2026-10-01: the body used to be kept forever once installed, so a revised
+    bundled skill never reached an existing server, and `is_shipped_skill`
+    (exactly-current only) stopped trusting every unedited install the moment
+    the repository copy changed. Now an installed body whose digest appears in
+    the release history is an old, unedited release and is replaced by the
+    current one; anything else is an operator/agent edit and is kept.
+    """
     installed: list[str] = []
     app_root = get_app_root()
+    history = load_bundled_history(app_root)
     for category, name, tags, platforms, requires_toolsets in _BUNDLED_SKILLS:
         source = _bundled_source(app_root, category, name)
         destination = os.path.join(skills_manager.skills_root, category, name)
@@ -80,8 +142,25 @@ def seed_bundled_skills(skills_manager) -> list[str]:
         # Odysseus supports richer skill-index metadata than the portable
         # SKILL.md schema. Reconcile metadata on every startup so copies made
         # by older releases (which were incorrectly stamped source=user and
-        # assigned to one account) become globally readable. Preserve the
-        # operator-editable instruction body and reference files.
+        # assigned to one account) become globally readable. Customised
+        # bodies and reference files are preserved (see the upgrade above).
+        try:
+            current_digest = skill_file_digest(os.path.join(source, "SKILL.md"))
+            installed_digest = skill_file_digest(skill_path)
+        except Exception:
+            current_digest = installed_digest = ""
+        if installed_digest and installed_digest != current_digest:
+            if installed_digest in history.get(name, ()):
+                # Unedited older release: replace the whole directory so
+                # supporting files (references/, agents/) move with the body.
+                shutil.rmtree(destination)
+                shutil.copytree(source, destination)
+                with open(skill_path, encoding="utf-8") as handle:
+                    skill = Skill.from_markdown(handle.read(), path=skill_path)
+                logger.info("upgraded bundled skill %s", name)
+            elif name not in _customised_logged:
+                _customised_logged.add(name)
+                logger.info("bundled skill %s is customised; not upgraded", name)
         skill.category = category
         skill.tags = tags
         skill.platforms = platforms
@@ -95,15 +174,6 @@ def seed_bundled_skills(skills_manager) -> list[str]:
         installed.append(name)
         logger.info("Installed/reconciled bundled skill: %s", name)
     return installed
-
-
-# Fields that reach the model when a skill is indexed or injected. Metadata the
-# seeder reconciles or usage bookkeeping updates (source, status, uses, ...) is
-# deliberately not compared.
-_PROMPT_VISIBLE_FIELDS = (
-    "name", "title", "description", "when_to_use", "procedure", "pitfalls",
-    "verification", "problem", "solution", "steps", "body_extra",
-)
 
 
 def is_shipped_skill(entry) -> bool:

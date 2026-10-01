@@ -1,23 +1,22 @@
-# AI Mind Documentation Policy
+# AI Mind documentation policy
 
 ## Boundary
 
-Write accepted delegation records only to the `AI Mind` folder of the user's knowledge base. Never write, move, or delete content in `Vault Mind` or `Journal`.
+Write accepted delegation records only to the `AI Mind` folder of the user's knowledge base. `Vault Mind` and `Journal` content is never written, moved or deleted.
 
-`AI Mind` is a folder inside the personal-documents tree that `search_documents` indexes — not a bound workspace and not under `/app/workspace`. `record_pi_task` already knows where it is; when you touch another `AI Mind` note yourself, take its path from a `search_documents` result rather than building one from the folder name.
+`AI Mind` sits inside the personal-documents tree that `search_documents` indexes. It is not a bound workspace and not under `/app/workspace`. `record_pi_task` already knows where it is. For another `AI Mind` note you update yourself, take the path from a `search_documents` result, never from the folder name.
 
-The standard note is `AI Mind/Local Model Delegation.md`. `record_pi_task` owns the append operation and uses a fixed filename beneath the configured documentation root.
+The standard note is `AI Mind/Local Model Delegation.md`. `record_pi_task` owns the append and uses a fixed filename beneath the configured documentation root.
 
-## Acceptance Record
+## Acceptance record
 
-Record only after the primary harness has inspected the result and judged it sufficient. Include:
-
+Record only after you inspected the result and judged it sufficient. Include:
 - project and short task title;
 - concise outcome;
 - files changed;
-- tests or checks reviewed by the harness;
+- tests or checks you reviewed;
 - known limitations or follow-up.
 
-Do not store chain-of-thought, credentials, private data, large diffs, pasted source files, or raw command logs. A record should be useful for later orientation without recreating the implementation conversation.
+Keep out chain-of-thought, credentials, private data, large diffs, pasted source files and raw command logs. The record should orient a later session without recreating the implementation conversation.
 
-When a more specific existing `AI Mind` note should also be updated, use Odysseus's normal file tools (`edit_file`, `write_file`) on the path `search_documents` returns for it, after the acceptance record. Preserve the note's existing structure and keep the summary brief.
+When a more specific existing `AI Mind` note also needs updating, use `edit_file` or `write_file` on the path `search_documents` returns for it, after the acceptance record. Keep the note's structure and the summary brief.

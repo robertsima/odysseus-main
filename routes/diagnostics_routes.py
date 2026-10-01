@@ -96,18 +96,20 @@ def setup_diagnostics_routes(
         session: Optional[List[str]] = Query(None),
         include_messages: bool = False,
         max_lines: Optional[int] = None,
+        skills: Optional[List[str]] = Query(None),
     ) -> Response:
         """Zip of recent redacted logs plus the configuration of every chat,
         worker, and loadout they mention (src/diagnostics_bundle.py).
         ``session`` may repeat or be comma-separated; those chats are always
-        included, with their parent and child workers."""
+        included, with their parent and child workers. ``skills`` (repeatable
+        or comma-separated, or ``all``) adds skills no loadout names."""
         owner = _require_diagnostics_reader(request, include_messages=include_messages)
         from src import diagnostics_bundle
 
         result = await diagnostics_bundle.build_bundle(
             minutes=minutes, session_ids=session, include_messages=include_messages,
             max_lines=max_lines or diagnostics_bundle.DEFAULT_MAX_LINES, owner=owner,
-            rag_manager=rag_manager, memory_vector=memory_vector,
+            rag_manager=rag_manager, memory_vector=memory_vector, skills=skills,
         )
         logger.info(
             "[diagnostics] bundle built for %s: %d file(s), %d byte(s), %d session(s), messages=%s, errors=%d",

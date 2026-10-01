@@ -154,3 +154,28 @@ logo "extremely basic" and the sprites "the same image in different colors".
 
 Still to check after deploy: a `render_preview` of a mockup board returns the
 board (not an error); grep rounds take well under a second.
+
+## Skills and loadouts pass (writing-for-agents)
+
+The bundled Odysseus skills were rewritten against the writing-for-agents rules:
+descriptions front-load their trigger and lost 25-80% of their length (they sit
+in every turn's skills index); steps gained checkable completion criteria;
+prohibitions became positive targets; branch-only material moved to
+`references/` files behind pointers. Behaviour and guardrails are unchanged.
+
+A revised bundled skill used to stay in the repo: the seeder copied a skill once
+and never replaced its body, and an install that no longer matched the repo
+lost the shipped-skill gate exemption. `skills/.bundled-history.json` now lists
+the digest of every body each skill has shipped (prompt-visible fields, after the
+seeder's own re-serialisation); on start an install whose digest is in that
+history is upgraded, and an edited one is kept. After editing a bundled
+SKILL.md, run `python scripts/update_bundled_skill_history.py`; a test fails
+until you do.
+
+The diagnostics bundle now carries `skills/`: the SKILL.md of every skill the
+bundled loadouts name (owner-scoped, redacted, capped), and any others requested
+with `skills=a,b` or `skills=all`. The user's own skills are not readable
+through the API token, so this is how they get reviewed.
+
+The twelve loadouts' instructions were revised the same way (user data, applied
+by importing `odysseus-loadouts-2026-10-01-revised.json`).

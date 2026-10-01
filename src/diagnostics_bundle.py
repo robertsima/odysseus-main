@@ -57,6 +57,10 @@ MAX_RUN_CANDIDATES = 200
 MESSAGES_PER_SESSION = 20
 MESSAGE_CHARS = 4000
 MAX_BUNDLE_BYTES = 20 * 1024 * 1024  # uncompressed, across every file
+MAX_SKILL_BYTES = 64 * 1024          # one skills/<category>__<name>.md
+MAX_SKILLS_BYTES = 2 * 1024 * 1024   # the whole skills/ section
+MAX_SKILLS = 120
+MAX_SKILL_SUPPORT_FILES = 100
 _MANIFEST_RESERVE = 512 * 1024
 # A rotated log is 5 MB; this only guards a log someone pointed elsewhere.
 _READ_BYTES = 32 * 1024 * 1024
@@ -114,6 +118,11 @@ HOW_TO_READ = [
     "last_turn (tools called, exit codes, models per round). No message text unless the bundle was "
     "built with include_messages.",
     "loadouts/<name>.json: the portable loadout export plus readiness as a worker of a top-level chat.",
+    "skills/<category>__<name>.md: the installed SKILL.md of every skill the included loadouts name (or that "
+    "the request asked for with skills=a,b / skills=all), as the generating account sees it, plus the names "
+    "(not contents) of the skill's supporting files. Skills named but not installed are listed under "
+    "discovery.skills.missing. Skills are included even without include_messages: they are configuration, "
+    "and contain whatever their author wrote.",
     "system/: Claude Code status, MCP servers (connection state only), service health, scheduler "
     "lanes, and the settings store with secrets masked.",
 ]
@@ -642,6 +651,142 @@ def loadout_record(name: str, owner: Optional[str] = None) -> Dict[str, Any]:
     return rec
 
 
+# ── skills ──────────────────────────────────────────────────────────────── #
+
+def _skills_manager():
+    from services.memory.skills import SkillsManager
+    from src.constants import DATA_DIR
+
+    return SkillsManager(DATA_DIR)
+
+
+def _split_names(value: Any) -> List[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        value = [value]
+    out: List[str] = []
+    for item in value:
+        for part in str(item or "").split(","):
+            part = part.strip()
+            if part and len(part) <= 120 and part not in out:
+                out.append(part)
+    return out[:MAX_SKILLS]
+
+
+def _supporting_files(skill_dir: str) -> List[str]:
+    names: List[str] = []
+    for root, _dirs, files in os.walk(skill_dir, followlinks=False):
+        for fname in files:
+            rel = os.path.relpath(os.path.join(root, fname), skill_dir).replace(os.sep, "/")
+            if rel != "SKILL.md":
+                names.append(rel)
+    return sorted(names)[:MAX_SKILL_SUPPORT_FILES]
+
+
+def collect_skills(bundle: "_Bundle", loadout_skills: Dict[str, Any], requested: List[str],
+                   owner: Optional[str]) -> Dict[str, Any]:
+    """Write skills/<category>__<name>.md for the skills the bundle should show.
+
+    2026-10-01: a review of the owner's loadouts stalled because the skills
+    they name are owner-scoped and unreadable through the API token, while
+    skill text steers an agent as much as loadout instructions do. The same
+    visibility rule as ``SkillsManager.read_skill_md`` applies (the owner's
+    skills plus bundled ones), so the bundle never shows another user's skill.
+    ``skills=all`` means all of the owner's own skills, not every bundled one.
+    """
+    wanted: Dict[str, List[str]] = {}  # casefolded name -> why it is here
+    spelling: Dict[str, str] = {}
+    all_requested = any(r.casefold() == "all" for r in requested)
+    for lname, spec in loadout_skills.items():
+        for n in (spec if isinstance(spec, list) else []):
+            wanted.setdefault(n.casefold(), []).append(f"loadout:{lname}")
+            spelling.setdefault(n.casefold(), n)
+    for n in requested:
+        if n.casefold() != "all":
+            wanted.setdefault(n.casefold(), []).append("requested")
+            spelling.setdefault(n.casefold(), n)
+
+    manager = _skills_manager()
+    found: Dict[str, Tuple[Any, str]] = {}  # casefolded name -> (Skill, SKILL.md path)
+    owned: List[Tuple[Any, str]] = []
+    for path in manager._iter_skill_files():
+        sk = manager._read_skill(path)
+        if not sk:
+            continue
+        bundled = sk.source == "bundled"
+        if not bundled and (sk.owner or "") != (owner or ""):
+            continue  # owner scoping: never another user's skill
+        key = sk.name.casefold()
+        if not bundled:
+            owned.append((sk, path))
+        # An owner's own copy wins over a bundled one of the same name.
+        if key not in found or (found[key][0].source == "bundled" and not bundled):
+            found[key] = (sk, path)
+
+    selected: Dict[str, Tuple[Any, str]] = {}
+    reasons: Dict[str, List[str]] = {}
+    for key, why in wanted.items():
+        if key in found:
+            selected[key] = found[key]
+            reasons[key] = why
+    if all_requested:
+        for sk, path in owned:
+            key = sk.name.casefold()
+            if key not in selected or selected[key][0].source == "bundled":
+                selected[key] = (sk, path)
+            reasons.setdefault(key, []).append("requested:all")
+    missing = sorted(spelling[key] for key in wanted if key not in found)
+
+    included: List[Dict[str, Any]] = []
+    section = 0
+    for key in sorted(selected)[:MAX_SKILLS]:
+        sk, path = selected[key]
+        entry: Dict[str, Any] = {"name": sk.name, "category": sk.category, "source": sk.source,
+                                 "owner": sk.owner, "why": sorted(set(reasons.get(key, [])))}
+        out_path = f"skills/{_safe_filename(sk.category, 'general')}__{_safe_filename(sk.name, 'skill')}.md"
+        try:
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            # Redact before clipping: a clip could leave half of a key that no
+            # pattern recognises. Whole-text redaction, not per-line, so a long
+            # line is not silently cut either.
+            text = redact_text(text)
+            raw = text.encode("utf-8")
+            limit = min(MAX_SKILL_BYTES, max(0, MAX_SKILLS_BYTES - section), bundle._room())
+            if len(raw) > limit:
+                bundle.truncated.append({"path": out_path, "reason": "skill size cap",
+                                         "bytes": len(raw), "kept": limit})
+                entry["truncated"] = True
+                marker = b"\n\n[... truncated by the diagnostics bundle ...]\n"
+                raw = raw[:max(0, limit - len(marker))].decode("utf-8", "ignore").encode("utf-8") + marker
+                if limit < len(marker):
+                    entry["error"] = "skills section size cap reached"
+                    included.append(entry)
+                    continue
+            entry["path"] = out_path
+            entry["bytes"] = len(raw)
+            entry["supporting_files"] = _supporting_files(os.path.dirname(path))
+            bundle.add_raw(out_path, raw)
+            section += len(raw)
+        except Exception as exc:
+            entry["error"] = _err_text(exc)
+            bundle.errors.append({"component": out_path, "error": _err_text(exc)})
+        included.append(entry)
+    if len(selected) > MAX_SKILLS:
+        bundle.truncated.append({"path": "skills/", "reason": f"more than {MAX_SKILLS} skills",
+                                 "skills_dropped": len(selected) - MAX_SKILLS})
+    return {
+        "note": ("Skills are configuration and are included whether or not include_messages is set. "
+                 "They contain whatever the owner wrote into them, redacted by pattern only."),
+        "visible_to": owner,
+        "requested": requested,
+        "loadout_skills": loadout_skills,
+        "included": included,
+        "missing": missing,
+    }
+
+
 # ── system ──────────────────────────────────────────────────────────────── #
 
 def mcp_servers() -> Dict[str, Any]:
@@ -849,7 +994,8 @@ class BundleResult:
 
 
 def _collect_sync(bundle: _Bundle, *, minutes: float, max_lines: int, ids: List[str],
-                  include_messages: bool, owner: Optional[str]) -> Dict[str, Any]:
+                  include_messages: bool, owner: Optional[str],
+                  skills: Optional[List[str]] = None) -> Dict[str, Any]:
     logs = bundle.guard("logs", collect_logs, minutes, max_lines, bundle.errors) or []
     found = bundle.guard("discovery", discover, logs, ids, errors=bundle.errors) or {
         "sessions": [], "sessions_not_found": [], "runs": [], "loadout_mentions": [],
@@ -890,6 +1036,20 @@ def _collect_sync(bundle: _Bundle, *, minutes: float, max_lines: int, ids: List[
         if rec is not None:
             bundle.add_component(f"loadouts/{_safe_filename(name, 'loadout')}.json", rec)
 
+    # Skills of every loadout in the bundle ("all" access is noted, not expanded),
+    # plus any the request named.
+    loadout_skills: Dict[str, Any] = {}
+    try:
+        from src import agent_profiles
+
+        for name in loadouts:
+            profile = agent_profiles.get_profile(name) or {}
+            loadout_skills[name] = (list(profile.get("skill_names") or [])
+                                    if profile.get("skill_access", "all") != "all" else "all")
+    except Exception as exc:
+        bundle.errors.append({"component": "skills/loadouts", "error": _err_text(exc)})
+    skills_info = bundle.guard("skills", collect_skills, bundle, loadout_skills, skills or [], owner)
+
     for path, fn, args in (("system/mcp_servers.json", mcp_servers, ()),
                            ("system/scheduler.json", scheduler_state, (owner,)),
                            ("system/settings.json", settings_snapshot, ())):
@@ -914,6 +1074,7 @@ def _collect_sync(bundle: _Bundle, *, minutes: float, max_lines: int, ids: List[
         "runs_mentioned": found.get("runs") or [],
         "loadouts": loadouts,
         "loadouts_not_found": loadouts_missing,
+        "skills": skills_info,
     }
 
 
@@ -929,9 +1090,11 @@ async def _guard_async(bundle: _Bundle, component: str, coro) -> Any:
 async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAULT_MAX_LINES,
                        session_ids: Any = None, include_messages: bool = False,
                        owner: Optional[str] = None, rag_manager: Any = None, memory_vector: Any = None,
-                       include_health: bool = True, max_bytes: int = MAX_BUNDLE_BYTES) -> BundleResult:
+                       include_health: bool = True, max_bytes: int = MAX_BUNDLE_BYTES,
+                       skills: Any = None) -> BundleResult:
     """Build the zip. Never raises for a component failure; see manifest.errors."""
     minutes_v, lines_v, ids = _clamp_minutes(minutes), _clamp_lines(max_lines), _normalize_ids(session_ids)
+    skill_req = _split_names(skills)
     now_local = datetime.now()
     generated_at = datetime.now(timezone.utc).replace(microsecond=0)
     bundle = _Bundle(max_bytes=max(_MANIFEST_RESERVE * 2, int(max_bytes)))
@@ -957,7 +1120,7 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
 
     contents = await asyncio.to_thread(
         _collect_sync, bundle, minutes=minutes_v, max_lines=lines_v, ids=ids,
-        include_messages=bool(include_messages), owner=owner)
+        include_messages=bool(include_messages), owner=owner, skills=skill_req)
 
     privacy = {
         "include_messages": bool(include_messages),
@@ -966,6 +1129,9 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
             "contain private vault content, email, or anything else the chat saw. Share with care."
             if include_messages else
             "Not included. Session files carry configuration and a content-free last-turn summary only."),
+        "skills": "INCLUDED: skills/ holds the SKILL.md text of the skills the loadouts name (and any "
+                  "requested), whether or not include_messages is set. Skills are configuration and may "
+                  "contain whatever the owner wrote into them.",
     }
     manifest = {
         "format": FORMAT,
@@ -980,7 +1146,8 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
         "runtime": {"python": sys.version.split()[0], "platform": platform.platform(),
                     "machine": platform.machine(), "pid": os.getpid()},
         "request": {"session_ids": ids, "include_messages": bool(include_messages),
-                    "max_lines_per_log": lines_v, "max_bytes": bundle.max_bytes},
+                    "max_lines_per_log": lines_v, "max_bytes": bundle.max_bytes,
+                    "skills": skill_req},
         "privacy": privacy,
         "redaction": REDACTION_NOTICE,
         "how_to_read": HOW_TO_READ,
@@ -992,7 +1159,7 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
     readme = "\n".join(
         ["Odysseus diagnostics bundle", "=" * 27, "",
          f"Generated {manifest['generated_at']} covering the last {minutes_v:g} minutes.", "",
-         privacy["message_content"], "", REDACTION_NOTICE, "", "How to read this:"]
+         privacy["message_content"], "", privacy["skills"], "", REDACTION_NOTICE, "", "How to read this:"]
         + [f"- {line}" for line in HOW_TO_READ]
         + ["", f"{len(bundle.errors)} component error(s), {len(bundle.truncated)} truncation(s): "
            "see manifest.json."]
@@ -1007,6 +1174,8 @@ async def build_bundle(*, minutes: Any = DEFAULT_MINUTES, max_lines: Any = DEFAU
         "log_lines": sum(int(log.get("written_lines") or 0) for log in contents["logs"]),
         "sessions": [s["id"] for s in contents["sessions"]],
         "loadouts": contents["loadouts"],
+        "skills": [e.get("path") for e in ((contents.get("skills") or {}).get("included") or []) if e.get("path")],
+        "skills_missing": (contents.get("skills") or {}).get("missing") or [],
         "include_messages": bool(include_messages),
         "errors": bundle.errors,
         "truncated": bundle.truncated,

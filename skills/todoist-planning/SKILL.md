@@ -1,133 +1,95 @@
 ---
 name: todoist-planning
-description: Plan work with Todoist through Odysseus using the Eisenhower Matrix, weekly planning, nightly next-day planning, GTD capture/clarify/organize/reflect/engage, Cal Newport-style value-driven focus, Kaizen small improvements, and Justin Sung-inspired high-leverage productivity principles such as Pareto distribution, task management over time management, Parkinson's Law constraints, and focusing on the few actions that drive most outcomes. Use when the user asks to plan a day/week/sprint, connect priorities to values, break down vague goals, turn conversation notes into tasks, schedule follow-ups, create or prioritize Todoist tasks, or prepare an executive-function-friendly next-action plan using the built-in Todoist MCP tool and Odysseus calendar sync.
+description: Planning with Todoist: a day, week, next day or sprint plan, breaking vague goals into next actions, turning notes into tasks, prioritizing, scheduling follow-ups.
 ---
 
-# Todoist Planning
+# Todoist planning
 
-Use this skill to turn messy intent into a small, realistic Todoist plan. Planning is not rushed busyness; it is the practice of connecting core values to daily actions and choosing intentional execution.
-
-For exact Todoist/Odysseus command details and framework notes, read [references/todoist-odysseus.md](references/todoist-odysseus.md) when you need to call Todoist or explain the planning model.
-
-Optional planning templates live in `assets/templates/`. Use them when the user asks for a reusable weekly plan, nightly plan, or capture worksheet.
+Turn messy intent into a small, realistic Todoist plan that connects values to daily actions. Call Todoist through `mcp__todoist__todoist`; command shapes, CLI facts and calendar behaviour are in [references/todoist-odysseus.md](references/todoist-odysseus.md).
 
 ## Workflow
 
-1. Capture and clarify.
-   Empty the user's mental RAM into candidate tasks. Convert vague items into outcomes and next actions. If there is enough context, make reasonable assumptions and proceed.
+1. **Capture and clarify.** Turn the user's open loops into candidate tasks, and vague items into outcomes and next actions. With enough context, assume reasonably and proceed.
+2. **Inspect Todoist** when planning against current commitments: `{"args":["today","--json"]}`, `upcoming`, `inbox` or `task list`, as the plan needs.
+3. **Sort with the Eisenhower Matrix before scheduling:**
+   - urgent + important: do today or assign a concrete slot;
+   - important + not urgent: schedule deep work and protect it;
+   - urgent + not important: delegate, automate, batch or time-box;
+   - not urgent + not important: delete, defer or park.
+4. **Apply the leverage checks** (below) to find the few tasks that matter.
+5. **Connect to values.** When priorities are unclear, ask which life or work value the plan serves. A few meaningful commitments beat a crowded list.
+6. **Write each task as a next action**: a verb-led title, visible, concrete, easy to start. Add a due date only when it helps, a priority only when it changes behavior, and a description for context, acceptance criteria, links or a checklist.
+7. **Fit capacity.** One day holds 1-3 anchor tasks, 2-5 small tasks and an explicit buffer. Label the excess later, parking lot or waiting.
+8. **Create tasks only when the user asked or clearly consented.** Otherwise present the proposed list first.
+9. After creating dated tasks, tell the user Odysseus Calendar shows them after Todoist calendar sync.
 
-2. Inspect Todoist when planning against current commitments.
-   Use `mcp__todoist__todoist` with `{"args":["today","--json"]}`, `{"args":["upcoming","--json"]}`, `{"args":["inbox","--json"]}`, or `{"args":["task","list","--json"]}`.
+## Leverage checks
 
-3. Sort with the Eisenhower Matrix before scheduling.
-   Classify work as:
-   - urgent + important: do today or assign a concrete slot
-   - important + not urgent: schedule deep work and protect it
-   - urgent + not important: delegate, automate, batch, or time-box
-   - not urgent + not important: delete, defer, or park
+Run these before adding tasks (Justin Sung-style: manage tasks, not time):
+- Pareto: which small subset of tasks produces most of the outcome?
+- Bottleneck: which task makes the rest easier or unnecessary?
+- One key task: what deserves undivided attention today?
+- Task clarity: is the task itself clarified, or are we only moving time blocks around?
+- Parkinson's Law: what constraint stops this task expanding? Give high-leverage and ambiguous tasks a clear time limit.
+- Activity versus outcome: does this task create the result or only stand in for progress?
 
-4. Apply the high-leverage filter.
-   Use Justin Sung-style productivity thinking: not all tasks have equal yield. Ask which 20% of actions are likely to create 80% of the useful result, which task is the one key task, and what work is merely activity. Combine Pareto with Parkinson's Law by giving high-leverage tasks clear constraints instead of letting them expand indefinitely.
+## Cadence
 
-5. Connect tasks to values.
-   Ask which life/work value the plan serves when priorities are unclear. Prefer a few meaningful commitments over a crowded list.
-
-6. Convert goals into next actions.
-   Each Todoist task should be visible, concrete, and easy to start. Prefer:
-   - A verb-led title.
-   - A due date only when it helps.
-   - Priority only when it changes behavior.
-   - A description for context, acceptance criteria, links, or a checklist.
-
-7. Keep plans capacity-aware.
-   For one day, usually choose 1-3 anchor tasks, 2-5 small tasks, and an explicit buffer. If the list is larger, label excess as later, parking lot, or waiting.
-
-8. Create tasks only when the user asked for creation or clearly consented.
-   Otherwise present the proposed task list first.
-
-9. After creating dated Todoist tasks, mention that Odysseus Calendar can show them after Todoist calendar sync.
-
-## Planning Cadence
-
-Weekly planning:
+Weekly plan:
 - Review last week and current Todoist commitments.
-- Choose 2-4 outcomes that would make the week meaningful.
-- Use Eisenhower to decide what to do, schedule, delegate/batch, and drop.
-- Identify the week's 20% leverage tasks: the few actions that unlock disproportionate outcomes, reduce repeated friction, or make other tasks unnecessary.
-- Create dated tasks only for real commitments; keep someday/maybe work undated or parked.
+- Choose 2-4 outcomes that make the week meaningful.
+- Eisenhower-sort the pool into do, schedule, delegate or batch, and drop.
+- Name the week's leverage tasks (the few that unlock disproportionate outcomes or remove repeated friction).
+- Date tasks only for real commitments, and leave someday/maybe work undated or parked.
 - Reserve deep-work blocks for important + not urgent work.
-- Set time constraints for ambiguous work so Parkinson's Law works for the user rather than against them.
 
-Nightly next-day planning:
-- Pull `today`, `upcoming`, and inbox if needed.
-- Choose tomorrow's 1-3 anchors.
-- Name the one key task that matters most.
+Nightly plan:
+- Pull `today`, `upcoming` and, if needed, the inbox.
+- Choose tomorrow's 1-3 anchors and the one key task.
 - Pick the first visible next action for each anchor.
 - Move or soften stale due dates so tomorrow is believable.
 - End with one "start here" task.
 
-## Executive-Function-Friendly Planning
+## Executive-function-friendly wording
 
-Favor low-friction wording:
-- "Start by opening..." instead of "Finish..."
-- "Draft rough outline" instead of "Write final proposal"
-- "Send one message asking for..." instead of "Resolve..."
+Phrase tasks to lower the start cost: "Start by opening..." for "Finish...", "Draft rough outline" for "Write final proposal", "Send one message asking for..." for "Resolve...".
 
-Use smaller task slices when the user sounds overwhelmed, stuck, avoidant, or tired:
-- 2-minute starter task
-- next physical action
-- "good enough" version
-- recovery/admin task
-- follow-up task with a date
+When the user sounds overwhelmed, stuck, avoidant or tired, slice smaller: a 2-minute starter, the next physical action, a "good enough" version, a recovery or admin task, a dated follow-up. Keep the tone neutral and aimed at motion.
 
-Avoid moralizing, scolding, or productivity theater. The plan should create motion, not shame.
+Kaizen: change the system by one small adjustment at a time (one checklist, label, reminder or wording change) instead of rebuilding the user's setup.
 
-Use Kaizen: improve the system by one small adjustment at a time. Do not rebuild the user's entire productivity setup when one checklist, label, reminder, or wording change would reduce friction.
+## Creating tasks
 
-## Justin Sung-Inspired Leverage Checks
-
-Use these checks before adding tasks:
-- Pareto: Which small subset of tasks produces most of the outcome?
-- Bottleneck: Which task, if done, makes the rest easier or unnecessary?
-- One-key-task focus: What deserves undivided attention today?
-- Task management over time management: Is the task itself clarified enough, or are we only moving time blocks around?
-- Parkinson's Law: What constraint would prevent this task from expanding?
-- Activity vs outcome: Is this task a proxy for progress, or does it directly create the result?
-
-## Todoist Creation Patterns
-
-Use structured add when fields are obvious:
+Structured add when the fields are clear:
 
 ```json
 {"args":["task","add","Draft rough outline","--due","tomorrow","--priority","p2","--json"]}
 ```
 
-Use quick add when natural language is clearer:
+Quick add when natural language is clearer:
 
 ```json
 {"args":["task","quickadd","Draft rough outline tomorrow p2 #Writing","--json"]}
 ```
 
-Batch conceptually, but call the tool safely. If creating multiple tasks, keep each command simple and report what was created.
+For several tasks, issue one simple command each and report what was created.
 
-## Output Shape
+## Output shape
 
-When planning without writing:
+Planning without writing:
 - Eisenhower matrix summary
-- High-leverage 20% callout
-- Weekly or tomorrow anchors
-- Small next actions
-- Waiting/delegate/batch items
-- Parking lot/drop list
-- One Kaizen improvement
+- leverage callout
+- weekly or tomorrow anchors
+- small next actions
+- waiting, delegate and batch items
+- parking lot and drop list
+- one Kaizen improvement
 
-When writing to Todoist:
-- State the created tasks, due dates, and priorities.
-- State anything intentionally left uncreated.
-- Offer the next single action.
+Writing to Todoist:
+- the created tasks with due dates and priorities
+- anything intentionally left uncreated
+- the next single action
 
-## Optional Templates
+## Templates
 
-Use `assets/templates/weekly-plan.md` for weekly planning sessions.
-Use `assets/templates/nightly-plan.md` for next-day planning.
-Use `assets/templates/capture-clarify.md` when the user needs to empty and clarify a messy task pile before scheduling.
+Offer them when the user wants a reusable artifact: `assets/templates/weekly-plan.md`, `assets/templates/nightly-plan.md`, and `assets/templates/capture-clarify.md` (emptying and clarifying a messy task pile before scheduling).
