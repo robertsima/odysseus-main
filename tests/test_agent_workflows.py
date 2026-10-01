@@ -826,7 +826,7 @@ async def test_run_record_names_failed_checks_and_open_questions(runtime, monkey
                   "synthesis branch not_started")
     assert obligation in report
     assert "open questions — Buyers: Buyers: pricing unknown" in report
-    assert "do not fill the gaps from memory" in report
+    assert "Present only what the branches returned" in report
     assert obligation in runtime.parent.history[-1].content
     assert not workflows.clean_record(record)
 

@@ -1815,9 +1815,8 @@ def setup_chat_routes(
                     set_session_mode(session, "research_pending")
                     ctx.messages.insert(0, {"role": "system", "content":
                         "The user wants to start deep web research. Before searching, ask 2-3 brief "
-                        "clarifying questions to understand exactly what they want to know. For example: "
-                        "what aspects matter most, are they comparing to something, what's their context "
-                        "(moving, traveling, curiosity). Be conversational. Keep it short."
+                        "questions about what the user wants to know: the aspects that matter most and "
+                        "their context. Keep it short and conversational."
                     })
                     if foreground_policy.enabled:
                         getattr(ctx, "route_messages", ctx.messages).insert(0, dict(ctx.messages[0]))

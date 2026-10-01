@@ -283,8 +283,9 @@ async def test_status_wait_is_bounded_and_says_the_run_is_still_going(store, run
     assert time.monotonic() - started < 3
     assert result["running"] == 1
     assert "still running" in result["response"]
-    # The worker's result arrives by itself; the parent is told not to spin.
-    assert "hand" in result["response"].lower()
+    # The worker's result arrives by itself; the parent may do other work or block.
+    assert "returns to this chat" in result["response"]
+    assert "wait_seconds" in result["response"]
 
 
 async def test_re_checking_a_running_worker_backs_off_instead_of_spinning(store, runs, monkeypatch):
@@ -298,6 +299,6 @@ async def test_re_checking_a_running_worker_backs_off_instead_of_spinning(store,
     assert "waited_seconds" not in first
     second = await manage_agent_loadout(body, "chat-7", owner="u")
     assert second["waited_seconds"] >= 0.2
-    assert "do not keep checking" in second["response"]
+    assert "end your turn only when nothing else is left" in second["response"]
     # Nothing new happened, so the loop's stall detector sees the same state.
     assert first["progress_key"] == second["progress_key"]

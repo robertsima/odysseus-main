@@ -78,10 +78,10 @@ def _read_tools() -> frozenset:
 # Kept as a module attribute so tests and callers can read the effective set.
 _READ_TOOLS = _read_tools()
 _HANDOFF = (
-    "Return a JSON handoff with findings, evidence (source URLs and what each supports), "
-    "assumptions, open_questions, validation_actions, and drafts when requested. "
-    "Distinguish observed evidence from inference. Never claim a tool ran unless it did. "
-    "This is read-only research: do not publish, send, modify files, or delegate."
+    "This is read-only research. Done when each finding has a source URL that supports it and each "
+    "open question is listed in open_questions. Return a JSON handoff with findings, evidence "
+    "(source URLs and what each supports), assumptions, open_questions, validation_actions, and "
+    "drafts when requested. Mark each claim observed or inferred, and report only tool calls that ran."
 )
 
 
@@ -538,7 +538,8 @@ def render_record(record):
             + ". Tell the user plainly that it is partial"
             + (": failed or unstarted branches — " + "; ".join(branches[:6]) if branches else "")
             + ("; open questions — " + "; ".join(questions[:6]) if questions else "")
-            + ". Do not describe it as complete research, and do not fill the gaps from memory."
+            + ". Present only what the branches returned, and resume the workflow (action resume, "
+              "retry_children for the failed branches) when the request needs the missing parts."
         )
     else:
         lines.append("All checks passed. Worker claims are still unverified: attribute findings to their sources.")

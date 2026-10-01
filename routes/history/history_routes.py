@@ -15,8 +15,6 @@ from src.topic_analyzer import analyze_topics
 from src.upload_handler import reserve_message_upload_references
 from src.tool_approval_scopes import sanitize_client_message_metadata
 from routes.session_routes import (
-    _message_role,
-    _message_text,
     _reject_compact_during_active_run,
     _verify_session_owner,
 )
@@ -897,7 +895,6 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
 
         try:
             from src.model_context import estimate_tokens, get_context_length
-            from src.llm_core import llm_call_async
             from src.endpoint_resolver import resolve_endpoint
 
             if len(session.history) < 6:
@@ -914,32 +911,22 @@ def setup_history_routes(session_manager, upload_handler=None) -> APIRouter:
             older = session.history[:-keep_count]
             recent = session.history[-keep_count:]
 
-            # Build text to summarize
-            convo_text = "\n".join(
-                f"{_message_role(m).upper()}: "
-                f"{_message_text(m)[:2000]}"
-                for m in older
-            )
-
             # Use utility model if available
             util_url, util_model, util_headers = resolve_endpoint("utility", owner=owner or None)
             compact_url = util_url or session.endpoint_url
             compact_model = util_model or session.model
             compact_headers = util_headers if util_url else session.headers
 
-            from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, normalize_compaction_summary
+            from src.context_compactor import summarize_for_compaction
             compaction_count = sum(1 for m in session.history if isinstance(m, ChatMessage) and "[Conversation summary" in (m.content or ""))
-            sys_prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace("{count}", str(len(older))).replace("{n}", str(compaction_count + 1))
-            summary = await llm_call_async(
-                compact_url, compact_model,
-                [
-                    {"role": "system", "content": sys_prompt},
-                    {"role": "user", "content": convo_text},
-                ],
-                temperature=0.2, max_tokens=1024,
-                headers=compact_headers, timeout=30,
+            # Same path as auto and manual compaction. A prior summary left in
+            # `older` is folded in by the shared source builder instead of
+            # appearing as a raw SYSTEM: line.
+            summary = await summarize_for_compaction(
+                compact_url, compact_model, compact_headers, older,
+                generation=compaction_count + 1,
+                timeout=30,
             )
-            summary = normalize_compaction_summary(summary)
 
             # Replace session history: summary as system message + recent messages
             # System message holds the full summary for AI context

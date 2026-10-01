@@ -50,13 +50,12 @@ TOOLS = [
     Tool(
         name="search_icons",
         description=(
-            "Search open icon libraries (200k+ icons: game-icons has helmets, swords and soldiers; tabler, "
-            "lucide, phosphor, material, etc.) for real vector artwork. Returns ids like "
-            "'game-icons:spartan-helmet' and each set's licence; use an id as a build_design icon node. "
-            "Attribution is required for CC BY sets, and build_design reports the credit line to add. "
-            "For a logo, emblem or illustration in code, a page or a file, DO NOT hand-draw SVG paths: search "
-            "here, then call again with ids=[...] (max 6) to get each icon's full standalone <svg> markup plus "
-            "its licence, author, source URL and an attribution line to paste into ACKNOWLEDGMENTS."
+            "Search 200k open vector icons (game-icons has helmets, swords and soldiers; tabler, lucide, "
+            "phosphor, material) and return ids like 'game-icons:spartan-helmet' with each set's licence; "
+            "an id is a build_design icon node. For a logo, emblem or illustration in code, a page or a "
+            "file, search here, then call again with ids=[...] (max 6) for each icon's standalone <svg> "
+            "markup, licence, author, source URL and the attribution line to paste into ACKNOWLEDGMENTS. "
+            "CC BY sets need that credit; build_design reports it."
         ),
         inputSchema={
             "type": "object",
@@ -65,7 +64,7 @@ TOOLS = [
                 "set": {"type": "string", "description": "Optional icon-set prefix to search within, e.g. 'game-icons', 'tabler', 'lucide'."},
                 "limit": {"type": "integer", "description": "Max results (default 24, max 64)."},
                 "ids": {"type": "array", "items": {"type": "string"},
-                        "description": "Icon ids from a search (e.g. 'game-icons:spartan-helmet'). Returns their full SVG markup and licence/attribution instead of searching (query is still required but ignored then; repeat what you searched). Max 6 per call."},
+                        "description": "Icon ids from a search (e.g. 'game-icons:spartan-helmet'). Returns their full SVG markup and licence/attribution instead of searching; the server requires `query` on every call, so repeat your search words. Max 6 per call."},
             },
             "required": ["query"],
         },
@@ -133,10 +132,9 @@ TOOLS = [
     Tool(
         name="render_preview",
         description=(
-            "Render a board to an image so you can see it (Penpot's own renderer, real fonts). Use it after "
-            "building and again after each fix; look for overlap, clipping, unreadable contrast, broken "
-            "icons. Returns the screenshot, or an error if Penpot's viewer showed its error page (never an error image).Mints a short-lived view-only link that is deleted afterwards. "
-            "The board must be a top-level frame."
+            "See a board: renders a top-level frame with Penpot's own renderer and real fonts. Use it after "
+            "building and after each fix, and look for overlap, clipping, low contrast and broken icons. "
+            "An error means Penpot's viewer showed its error page; no error image is ever returned."
         ),
         inputSchema={
             "type": "object",

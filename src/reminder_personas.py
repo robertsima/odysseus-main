@@ -51,10 +51,31 @@ PERSONAS = {
 }
 
 
+# One-line voice per persona. The full PERSONAS text above is written for chat
+# (Socrates: "Never answer directly. Respond only with questions"), and it
+# fought the one-line reminder job and the unattended scheduled-task job. The
+# reminder and task prompts take only this line, as a voice for the final
+# message. Same keys as PERSONAS (tests enforce it). 2026-10-01 audit A4-16.
+VOICES = {
+    "socrates": "Socratic: sharp, curious, probing. Lead with a question where one fits.",
+    "razor": "Blunt and exact. The fewest words that work.",
+    "nietzsche": "Aphoristic and forceful, in Nietzsche's spirit: discipline, courage, self-overcoming.",
+    "spark": "Playful and quick-witted, warm, with one clever turn of phrase.",
+    "odysseus": "Composed and noble, a strategist's calm. Plain modern words.",
+}
+
+REMINDER_OPEN = "<<<REMINDER>>>"
+REMINDER_CLOSE = "<<<END>>>"
+
 _DEFAULT_SYNTHESIS_TONE = (
     "You write short, warm, one-line reminders. The user has set a note for "
-    "themselves and the moment to remember has arrived. Keep it under 18 "
-    "words. Be human, gentle, and direct — never robotic."
+    "themselves and the moment to remember has arrived. Be human, gentle, and "
+    "direct."
+)
+
+_OUTPUT_CONTRACT = (
+    "Write the reminder in under 18 words, between "
+    f"{REMINDER_OPEN} and {REMINDER_CLOSE}. Nothing else."
 )
 
 
@@ -63,16 +84,23 @@ def synthesis_system_prompt(persona_id: str) -> str:
 
     Falls back to the warm-neutral baseline when the id is empty, unknown,
     or refers to a custom (client-only) character we don't have on file.
+    The reply is marked with REMINDER_OPEN/REMINDER_CLOSE so the route reads
+    the reminder from the markers instead of guessing which line is the answer.
     """
-    persona = (persona_id or "").strip().lower()
-    persona_prompt = PERSONAS.get(persona)
-    if persona_prompt:
-        # Persona drives the voice; the synthesis-instruction stays attached
-        # so the model knows it's writing a short reminder, not a chat reply.
-        return (
-            persona_prompt
-            + "\n\n"
-            + "You are now writing a single one-line reminder for the user. "
-              "Keep it under 18 words and in the voice above."
-        )
-    return _DEFAULT_SYNTHESIS_TONE
+    voice = VOICES.get((persona_id or "").strip().lower())
+    if voice:
+        return f"{_DEFAULT_SYNTHESIS_TONE}\nVoice: {voice}\n{_OUTPUT_CONTRACT}"
+    return f"{_DEFAULT_SYNTHESIS_TONE}\n{_OUTPUT_CONTRACT}"
+
+
+def extract_marked_reminder(text: str) -> str | None:
+    """Return the text of the last marked reminder in a reply, or None.
+
+    None means the model ignored the markers; the caller then falls back to
+    its line-filtering heuristics.
+    """
+    if not text or REMINDER_OPEN not in text:
+        return None
+    tail = text.rsplit(REMINDER_OPEN, 1)[1]
+    body = tail.split(REMINDER_CLOSE, 1)[0].strip()
+    return body or None

@@ -640,8 +640,9 @@ async def stop_chat_work(session_id: str, *, by: str = "from the chat's Stop but
 
 # ── wrap up (soft stop) ───────────────────────────────────────────────────
 
-WRAP_UP_TEXT = ("Wrap up now: stop starting new work, and within the next one or two rounds "
-                "return your result from what you already have, noting anything left unfinished.")
+WRAP_UP_TEXT = ("Wrap up now: stop new work and, within one or two rounds, send your report (Outcome, "
+                "Changed, Checked, Open) with every unfinished item under Open, so the same worker can "
+                "resume from them.")
 
 
 def wrap_up(run_id: str, *, owner: Optional[str] = None) -> dict:
@@ -1070,10 +1071,11 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
         return
     headline = {"completed": "finished", "incomplete": "ran out of rounds",
                 "waiting_approval": "is waiting for the user's approval"}.get(status, status)
-    inject = (f"[Worker {worker.name} {headline}]\nTask: {task[:1500]}\n\nResult:\n{text[:12000]}\n\n"
-              + ("The worker was cut off by its round budget, so the result above is partial: carry on "
-                 "from there if the follow-ups below allow it, or tell the user where it stopped and "
-                 "what is left.\n\n" if status == "incomplete" else "")
+    # The brief ends with the person's request, and _handoff_guidance repeats
+    # that request in full, so the task shows only its opening here.
+    inject = (f"[Worker {worker.name} {headline}]\nTask (brief): {_brief_opening(task)}\n\nResult:\n{text[:12000]}\n\n"
+              + ("The worker was cut off by its round budget, so the result above is partial. The same "
+                 "worker resumes from there (guidance below).\n\n" if status == "incomplete" else "")
               + _handoff_guidance(parent, worker, status, text))
     # Whether a turn was already running when this result arrived: that turn
     # built its context before the result existed, so its reply (saved after
@@ -1212,6 +1214,11 @@ def _stated_needs(text: str) -> List[tuple]:
     return [(m.group(1).lower(), m.group(2)[:300]) for m in NEEDS_LINE_RE.finditer(str(text or ""))]
 
 
+def _brief_opening(task: str, limit: int = 400) -> str:
+    task = str(task or "")
+    return task if len(task) <= limit else task[:limit].rstrip() + " ..."
+
+
 def _handoff_guidance(parent, worker, status: str, text: str) -> str:
     """What the parent's follow-up turn should do with this result.
 
@@ -1219,11 +1226,11 @@ def _handoff_guidance(parent, worker, status: str, text: str) -> str:
     this message as the turn's request and offered email tools for them.
     """
     if status == "cancelled":
-        return ("The worker was stopped before it finished. Tell the user where it got to. "
-                "Do not start or resume workers.")
+        return ("The user stopped this worker. Report where it got to and what is left; the user decides "
+                f"whether to continue (the worker is session \"{worker.id}\").")
     if status == "waiting_approval":
         return ("The worker paused on an approval card in its own chat, so the task is not done. "
-                "Tell the user it needs their approval there; do not redo the work.")
+                "Tell the user it needs their approval there; the worker continues from that card.")
     needs = _stated_needs(text)
     lines = []
     request = _request_text(parent)
@@ -1238,26 +1245,25 @@ def _handoff_guidance(parent, worker, status: str, text: str) -> str:
     budget = _continuation_budget(parent) if status in _CONTINUABLE_STATUSES else 0
     if budget > 0:
         lines.append(
-            "If that request is now fulfilled, report the outcome to the user. If it is not, and "
-            "the next step is one you or a worker can take, take it now rather than asking the user "
-            "to retry: clear what blocked the worker (a tool, permission or workspace this chat can "
-            "grant; a wrong base, branch or path), then give this same worker the fix and have it "
-            f"carry on: `send_to_session` with session_id \"{worker.id}\" and mode \"agent\" runs it "
-            "again on its own history and worktree and returns what it did. Start a different "
-            "worker only when this one cannot do it. "
+            "Check the worker's claim against its evidence (the diff, the test output, the pull "
+            "request) and against the request above, part by part. Every part met: report the outcome "
+            "and what you checked. A part missing: give this same worker the fix, `send_to_session` "
+            f"with session_id \"{worker.id}\" and mode \"agent\", which runs it again on its own history "
+            "and worktree and returns what it did; start a different worker only when this one cannot "
+            "do it. When the status is failed or the worker states needs, first clear what blocked it "
+            "(a tool, permission or workspace this chat can grant; a wrong base, branch or path). "
             f"Automatic follow-ups left for this request: {budget} (each worker you start or send "
-            "back uses one). Ask the user only for what only "
-            "they can give (an approval, a credential, a choice between real options), as one "
-            "specific question.")
+            "back uses one). Ask the user only for what only they can give (an approval, a "
+            "credential, a choice between real options), as one specific question.")
     elif limit > 0 and status in _CONTINUABLE_STATUSES:
         lines.append(
-            "The automatic follow-ups for this request are used up. Tell the user where it stands, "
-            "what is left and what you need from them. Do not start or resume workers.")
+            "This request has used its automatic follow-ups. Report where it stands, what is left, and "
+            "the one thing you need from the user to continue "
+            f"(the worker is session \"{worker.id}\").")
     else:
         lines.append(
-            "Tell the user the outcome. Don't repeat work the worker already did, and do not start "
-            "new workers or delegate further. If more work is needed, say what it is and let the "
-            f"user decide; to carry on later, this worker is session \"{worker.id}\".")
+            "Report the outcome and what is left; the user decides whether to continue "
+            f"(the worker is session \"{worker.id}\").")
     return "\n\n".join(lines)
 
 
@@ -1543,10 +1549,10 @@ async def _continue_parent(manager, parent_id: str, parent, worker, owner: Optio
 
 _PUBLISH_FOLLOWUP_NOTE = (
     "[Harness note, not from the user] The publish request above was approved and has gone out. "
-    "Carry on with the request this chat is working on: if anything is left after publication "
-    "(for example a CI run on the pull request to check, or a failure to fix on the same branch), "
-    "do it now. If nothing is left, state the outcome in one or two sentences with the pull "
-    "request link.{budget}"
+    "Carry on with the request this chat is working on: check the pull request's CI run and fix a "
+    "failure on the same branch, along with anything else left after publication. When CI is green "
+    "and nothing else in the request is open, state the outcome in one or two sentences with the "
+    "pull request link.{budget}"
 )
 
 

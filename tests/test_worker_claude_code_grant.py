@@ -275,7 +275,7 @@ async def test_refusal_names_the_one_next_step(store, monkeypatch):
     result = await manage_agent_loadout(_update(BASE_TOOLS + ["manage_git"]), "chat-7", owner="u")
     assert result["blocked_reason"] == "update_would_widen_loadout"
     assert "repeat" not in result
-    assert "ask_user" in result["error"] and "Do not retry this update until they answer" in result["error"]
+    assert "ask_user" in result["error"] and "After a yes, send the update once" in result["error"]
     assert "Lead Engineer" in result["next_action"]["ask_user"]
     assert "manage_git" in result["next_action"]["ask_user"]
 

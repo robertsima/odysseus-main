@@ -134,8 +134,7 @@ def stale_objective_refusal(tool: str, content: Any, approved: Iterable[str]) ->
         return None
     approved_summary = " / ".join(_clip(part, 240) for part in approved_parts[:2])
     return (
-        f"Not run. This task («{_clip(task, 160)}») doesn't match what the user just approved "
-        f"(«{approved_summary}»). Confirm with ask_user or work on the approved proposal; do not "
-        "resume an older task the user did not name in this turn. If this call really is part "
-        "of the approved proposal, say in one sentence how, then make it again."
+        f"Not run: this task («{_clip(task, 160)}») shares nothing with what the user just approved "
+        f"(«{approved_summary}»). Work on the approved proposal, or confirm with ask_user. If this "
+        "call is part of it, say in one sentence how, then make it again."
     )

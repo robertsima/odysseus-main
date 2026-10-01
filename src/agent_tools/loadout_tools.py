@@ -414,7 +414,8 @@ def _assistant_text(message: Any) -> str:
 # redesign") the user never set, and none of the user's own words reached any
 # worker. The person's latest request goes to the worker verbatim, under the
 # brief, so the worker can see what was actually asked.
-_REQUEST_HEADER = "The person's request, in their own words (context for the brief above):"
+_REQUEST_HEADER = ("The person's request, in their own words. It is the scope: where the brief above and this "
+                   "differ, this wins, and your work is done when it is met:")
 _REQUEST_CLIP = 2000
 _ROOT_WALK_LIMIT = 8
 
@@ -620,16 +621,15 @@ def _widening_refusal(name: str, widened: Dict[str, Any],
                      f"{name!r} would need {gains}, and let the chat that started you ask the user.")
     else:
         next_step = (f"Next step, once: ask the user with ask_user whether {name!r} should permanently gain "
-                     f"{gains}. Do not retry this update until they answer; after a yes, send it once.")
+                     f"{gains}. After a yes, send the update once.")
     why = (f"the user named {', '.join(t for t in tools if t not in auth.unnamed)} but not "
            f"{', '.join(auth.unnamed)}" if auth.unnamed else "the user has not asked for that in this chat")
     extra = (f" For the task at hand you do not need the change: start the worker with "
              f"extra_tools={json.dumps(tools[:12])}, which applies to that one run only." if tools else "")
     return {
         "error": (
-            f"update: {name!r} was not saved. It widens a saved loadout (" + "; ".join(widened["notes"])
-            + f"), and {why}. " + next_step + extra
-            + " Narrowing it, or changing its wording, model or round budget, needs no approval."
+            f"update: {name!r} was not saved; it would widen the saved loadout ("
+            + "; ".join(widened["notes"]) + f"), and {why}. " + next_step + extra
         ),
         "blocked": True,
         "blocked_reason": "update_would_widen_loadout",
@@ -637,7 +637,7 @@ def _widening_refusal(name: str, widened: Dict[str, Any],
         **({"not_named_by_user": auth.unnamed} if auth.unnamed else {}),
         "next_action": ({"report_to_parent": True} if auth.worker else
                         {"ask_user": f"May I permanently give the {name} loadout {gains}?",
-                         "then": "stop; do not retry the update until the user answers"}),
+                         "then": "wait for the answer; after a yes, send the update once"}),
         **({"suggested_start": {"action": "start", "name": name, "extra_tools": tools}} if tools else {}),
         "exit_code": 1,
     }
@@ -922,8 +922,9 @@ async def _status(args: Dict[str, Any], session_id: Optional[str],
         f"{len(rows)} worker run(s) for this chat"
         + (f" with loadout {loadout!r}" if loadout else "")
         + f"; {running} still running."
-        + (f" Cut off before finishing: {', '.join(cut_off)} — these did NOT finish their task; "
-           "restart them with a narrower task rather than reporting their partial work as done."
+        + (f" Cut off before finishing: {', '.join(cut_off)}. The task is not done. Resume the same worker "
+           "with send_to_session (mode agent), telling it to continue from what is left, and keep the "
+           "person's full request as its scope."
            if cut_off else "")
         + " A result_excerpt is the worker's own claim, not verified work."
     )
@@ -935,9 +936,9 @@ async def _status(args: Dict[str, Any], session_id: Optional[str],
         )
     if running:
         response += (
-            f" Still running{f' after waiting {waited:g}s' if waited else ''}. Its result is handed back to "
-            "this chat automatically when it finishes, so do not keep checking: end your turn and tell the "
-            f"user, or call status again with wait_seconds (up to {MAX_STATUS_WAIT_S}) to block until it is done."
+            f" Still running{f' after waiting {waited:g}s' if waited else ''}. Its result returns to this "
+            "chat when it finishes. Do separate work, or call status with wait_seconds "
+            f"(up to {MAX_STATUS_WAIT_S}) to block until it is done; end your turn only when nothing else is left."
         )
     out: Dict[str, Any] = {"response": response, "runs": rows, "running": running, "exit_code": 0}
     if loadout:
@@ -1663,17 +1664,16 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         wrap_up = int(result.get("max_rounds") or 0) if name and one_off is None else 0
     except (TypeError, ValueError):
         wrap_up = 0
-    wrap_note = (f"; at round {wrap_up} it is asked to wrap up and hand back what it has, "
-                 "including what is left" if wrap_up > 0 else "")
+    wrap_note = (f" This saved loadout stops at round {wrap_up} and hands back what is left; you then "
+                 "resume the same worker." if wrap_up > 0 else "")
     return {
         "response": (
             f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
-            f"with these tools: {tool_note}. It runs until the task is done — a round count never "
-            f"cuts it off{wrap_note} — and it runs detached, so its progress appears on this chat's activity feed "
-            "and in action='status'. If those tools cannot do the task you just described, stop it "
-            "and fix the loadout instead of waiting for the result." + extra_note + stale_note + gap_note
-            + " Its result is handed back to this chat automatically when it finishes, so there is no need "
-            "to poll: end your turn, or use action='status' with wait_seconds to block until it is done."
+            f"with these tools: {tool_note}. It runs detached; progress shows on this chat's activity feed "
+            f"and in action='status'.{wrap_note} If these tools cannot do the task, stop it and fix the "
+            "loadout." + extra_note + stale_note + gap_note
+            + " Its result returns to this chat when it finishes: end your turn, or use action='status' "
+            "with wait_seconds to block until it is done."
         ),
         "preflight": preflight,
         **{key: value for key, value in result.items() if key != "preflight"},

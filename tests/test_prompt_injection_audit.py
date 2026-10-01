@@ -159,7 +159,7 @@ def test_email_style_hardcoded_rules_stay_in_system_role(monkeypatch):
     )
 
     sys_text = _sys_role_text(out)
-    assert "Hard identity rule" in sys_text, (
+    assert "Email identity rule" in sys_text, (
         "Hardcoded identity rules must remain in the trusted system prompt."
     )
 

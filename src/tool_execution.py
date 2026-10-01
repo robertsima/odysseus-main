@@ -711,6 +711,10 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False,
     return resolved
 
 
+_SENSITIVE_PATH_NEXT_STEP = "Keys and credentials stay closed to tools; ask the user to paste the part you need."
+_OUTSIDE_ROOTS_NEXT_STEP = "; call get_workspace for the folders you may use, or pass a path inside one"
+
+
 def _with_attachment_hint(raw_path: str, message: str) -> str:
     """Make the refusal of an upload path say why, and what IS readable.
 
@@ -803,7 +807,8 @@ def _resolve_tool_path_unguarded(raw_path: str, allow_private: bool = False,
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
-            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename. "
+            f"{_SENSITIVE_PATH_NEXT_STEP}"
         )
     if _is_app_state_path(resolved):
         raise ValueError(
@@ -828,7 +833,8 @@ def _resolve_tool_path_unguarded(raw_path: str, allow_private: bool = False,
         if attachment is not None:
             return attachment
     raise ValueError(
-        f"path '{raw_path}' is outside the allowed roots" + _personal_docs_suggestion(raw_path)
+        f"path '{raw_path}' is outside the allowed roots" + _OUTSIDE_ROOTS_NEXT_STEP
+        + _personal_docs_suggestion(raw_path)
     )
 
 
@@ -859,7 +865,8 @@ def _resolve_workspace_worktree_path(workspace: str, raw_path: str,
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
-            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename. "
+            f"{_SENSITIVE_PATH_NEXT_STEP}"
         )
     if _is_app_state_path(resolved):
         raise ValueError(
@@ -891,7 +898,8 @@ def _resolve_lineage_attachment_path(raw_path: str, allow_private: bool = False)
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
-            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename. "
+            f"{_SENSITIVE_PATH_NEXT_STEP}"
         )
     if _is_app_state_path(resolved):
         raise ValueError(
@@ -921,7 +929,8 @@ def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> s
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
-            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename. "
+            f"{_SENSITIVE_PATH_NEXT_STEP}"
         )
     if _is_app_state_path(resolved):
         raise ValueError(
@@ -932,7 +941,8 @@ def _resolve_personal_docs_path(raw_path: str, allow_private: bool = False) -> s
     if not _is_under_personal_docs(resolved):
         raise ValueError(
             f"path '{raw_path}' is outside the workspace and outside the "
-            f"personal documents directory" + _personal_docs_suggestion(raw_path)
+            f"personal documents directory; use a path inside the workspace (get_workspace shows it)"
+            + _personal_docs_suggestion(raw_path)
         )
     return resolved
 
@@ -955,7 +965,8 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
             f"path '{raw_path}' is inside a sensitive directory "
-            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename. "
+            f"{_SENSITIVE_PATH_NEXT_STEP}"
         )
     if _is_app_state_path(resolved):
         raise ValueError(
@@ -973,7 +984,7 @@ def _resolve_tool_path_in_workspace(workspace: str, raw_path: str, allow_private
             if os.path.commonpath([os.path.normcase(resolved), nbase]) != nbase:
                 raise ValueError
         except ValueError:
-            raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace})")
+            raise ValueError(f"path '{raw_path}' is outside the workspace ({workspace}); use a path inside it")
     return resolved
 
 
@@ -1795,7 +1806,7 @@ async def _execute_tool_block_impl(
     if not policy_names.isdisjoint(fresh_global_disabled):
         logger.info("Tool blocked by fresh global revocation: tool=%s", tool)
         return f"{tool}: BLOCKED", {
-            "error": f"Tool '{tool}' is disabled by the current global settings.",
+            "error": f"Tool '{tool}' is disabled by the current global settings. Continue without it and tell the user it is turned off.",
             "blocked": True,
             "blocked_reason": "fresh_global_disabled",
             "exit_code": 1,
@@ -1834,7 +1845,7 @@ async def _execute_tool_block_impl(
         # is just disabled; only file-reading MCP tools get the vault message.
         if tool_requires_private_grant(tool) and tool not in ("bash", "python") and allow_private is not True:
             return desc, private_tool_denial(tool)
-        result = {"error": f"Tool '{tool}' is disabled by user.", "exit_code": 1}
+        result = {"error": f"Tool '{tool}' is disabled by user. Continue without it and tell the user it is turned off.", "exit_code": 1}
         logger.info(f"Tool blocked by user: {tool}")
         return desc, result
 
@@ -1866,7 +1877,7 @@ async def _execute_tool_block_impl(
         if not policy_names.isdisjoint(_fresh_disabled):
             logger.info("Tool blocked by fresh session revocation: session=%s tool=%s", session_id, tool)
             return f"{tool}: BLOCKED", {
-                "error": f"Tool '{tool}' is disabled by this agent's current settings.",
+                "error": f"Tool '{tool}' is disabled by this agent's current settings. Continue without it and tell the user it is turned off.",
                 "blocked": True,
                 "blocked_reason": "fresh_session_disabled",
                 "exit_code": 1,
@@ -1919,7 +1930,8 @@ async def _execute_tool_block_impl(
         if not _allowlist_permits(tool, _tool_access, _enabled) and not _discovery_selected_ok:
             return f"{tool}: BLOCKED", {
                 "error": f"Tool '{tool}' is not in this agent's tool allowlist "
-                         "(its selected tool bindings).",
+                         "(its selected tool bindings). Finish the step with a tool you have, "
+                         f"or report to the chat that started you that you need '{tool}'.",
                 "exit_code": 1,
             }
         _allowed_mcp = _agent_settings.get("allowed_mcp_servers")
@@ -2000,7 +2012,7 @@ async def _execute_tool_block_impl(
     if tool_policy and any(tool_policy.blocks(name) for name in policy_names):
         desc = f"{tool}: BLOCKED"
         result = {
-            "error": f"Execution of tool '{tool}' is forbade by the active guide-only policy.",
+            "error": f"Execution of tool '{tool}' is forbidden by the active guide-only policy. Answer in text instead.",
             "exit_code": 1,
         }
         logger.warning("Tool policy blocked tool=%s", tool)
@@ -2008,7 +2020,7 @@ async def _execute_tool_block_impl(
 
     if tool in _ADMIN_TOOLS and not _owner_is_admin(owner):
         desc = f"{tool}: BLOCKED"
-        result = {"error": f"Tool '{tool}' requires an admin user.", "exit_code": 1}
+        result = {"error": f"Tool '{tool}' requires an admin user. Say what you needed so an admin can do it.", "exit_code": 1}
         logger.warning("Admin tool blocked for non-admin owner=%r tool=%s", owner, tool)
         return desc, result
 
@@ -2435,7 +2447,7 @@ async def _execute_tool_block_impl(
     else:
         desc = f"unknown: {tool}"
         result = {
-            "error": f"Unknown tool: {tool}",
+            "error": f"Unknown tool: {tool}. Call discover_tools with what you need, or use a name from your tool list.",
             "exit_code": 1
         }
 

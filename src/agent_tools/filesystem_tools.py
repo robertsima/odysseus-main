@@ -24,6 +24,25 @@ def run_with_policy_snapshot(fn):
     return _run(fn)
 _CODENAV_MAX_LINE = 400
 _GREP_TIMEOUT_SECONDS = 20
+_GREP_TIMED_OUT = "grep: timed out"
+
+
+def _grep_timeout_result(partial: list, root: str) -> dict:
+    """A timed-out search still returns the hits found before the deadline.
+
+    On 2026-10-01 17 of 185 grep calls ended as the bare words "grep: timed
+    out", which dropped every match already collected and gave the model
+    nothing to change.
+    """
+    advice = (
+        f"the search of {root} stopped after {_GREP_TIMEOUT_SECONDS} s. "
+        "Narrow `path` to the folder that matters, add a `glob` such as '*.py', or search a literal string."
+    )
+    if not partial:
+        return {"error": f"grep: timed out: {advice}", "exit_code": 1}
+    out = "\n".join(ln[:_CODENAV_MAX_LINE] for ln in partial)
+    out += f"\n... [grep stopped early with {len(partial)} matches so far: {advice}]"
+    return {"output": out, "exit_code": 0}
 _GREP_STDERR_PREFIX = 20_000
 
 
@@ -275,7 +294,7 @@ class EditFileTool:
             return {"error": f"edit_file: {path}: {e}", "exit_code": 1}
 
         if status == "not_found":
-            return {"error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.", "exit_code": 1}
+            return {"error": f"edit_file: old_string not found in {path}. {_nearest_text_hint(original, old)}", "exit_code": 1}
         if status.startswith("not_unique"):
             n = status.split(":", 1)[1]
             return {"error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.", "exit_code": 1}
@@ -317,6 +336,14 @@ def _personal_docs_hint(path: str, size: int) -> str:
         "questions about the vault, prefer `search_documents` — it returns only "
         "the relevant excerpts. Reading whole notes keeps them in context for the "
         "rest of the conversation."
+    )
+
+
+def _truncation_notice(next_line: int) -> str:
+    """The tail of a read cut at MAX_READ_CHARS: says where and how to go on."""
+    return (
+        f"\n... [truncated at {MAX_READ_CHARS} chars; "
+        f"call read_file again with offset={next_line} to continue]"
     )
 
 
@@ -364,14 +391,14 @@ class ReadFileTool:
                             n += 1
                             budget -= len(line)
                             if budget <= 0:
-                                out.append(f"\n... [truncated at {MAX_READ_CHARS} chars]")
+                                out.append(_truncation_notice(i + 1))
                                 break
                     return "".join(out)
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     return f.read(MAX_READ_CHARS + 1)
             data = await asyncio.to_thread(_read)
         except FileNotFoundError:
-            return {"error": f"read_file: {path}: not found", "exit_code": 1}
+            return {"error": f"read_file: {path}: not found (find it with glob or ls)", "exit_code": 1}
         except PermissionError:
             return {"error": f"read_file: {path}: permission denied", "exit_code": 1}
         except IsADirectoryError:
@@ -379,7 +406,8 @@ class ReadFileTool:
         except OSError as e:
             return {"error": f"read_file: {path}: {e}", "exit_code": 1}
         if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
-            data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
+            shown = data[:MAX_READ_CHARS]
+            data = shown + _truncation_notice(shown.count("\n") + 1)
         hint = _personal_docs_hint(path, len(data))
         if hint:
             data = data + "\n\n" + hint
@@ -598,6 +626,39 @@ def _parse_agent_patch(patch_text: str) -> List[Dict[str, Any]]:
         raise ValueError(f"unexpected patch line: {line!r}")
     return ops
 
+def _hunk_ambiguous(label: str, idx: int, occurrences: int) -> str:
+    return (
+        f"{label}: hunk {idx} context matched {occurrences} times: add unchanged lines "
+        "around the change until it is unique, or use edit_file with replace_all"
+    )
+
+
+def _nearest_text_hint(original: str, wanted: str) -> str:
+    """Why `wanted` is not in `original`, and the closest text that is.
+
+    A bare "not found" cost the model a re-read round (2026-10-01 audit: 12 of
+    66 edit_file calls and 8 of 22 apply_patch calls failed). Say whether only
+    whitespace differs, else show the nearest line of the file.
+    """
+    def squash(text: str) -> str:
+        return " ".join(text.split())
+
+    wanted_squashed = squash(wanted)
+    if wanted_squashed and wanted_squashed in squash(original):
+        return ("The text exists but whitespace or indentation differs; "
+                "copy it exactly from the file.")
+    first = next((ln.strip() for ln in wanted.splitlines() if ln.strip()), "")
+    if first:
+        import difflib
+
+        candidates = [(n, ln.strip()) for n, ln in enumerate(original.splitlines(), 1) if ln.strip()]
+        close = difflib.get_close_matches(first, [text for _, text in candidates], n=1, cutoff=0.6)
+        if close:
+            number = next(n for n, text in candidates if text == close[0])
+            return f"Closest line in the file is {number}: {close[0][:160]!r}. Copy the text exactly."
+    return "No similar line exists in the file; re-read it, then copy the text exactly."
+
+
 def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str:
     updated = original
     for idx, hunk in enumerate(hunks, 1):
@@ -614,15 +675,18 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
         if old_text and old_text in updated:
             occurrences = updated.count(old_text)
             if occurrences != 1:
-                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+                raise ValueError(_hunk_ambiguous(label, idx, occurrences))
             updated = updated.replace(old_text, new_text, 1)
         elif old_text + "\n" in updated:
             occurrences = updated.count(old_text + "\n")
             if occurrences != 1:
-                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+                raise ValueError(_hunk_ambiguous(label, idx, occurrences))
             updated = updated.replace(old_text + "\n", new_text + "\n", 1)
         else:
-            raise ValueError(f"{label}: hunk {idx} context not found")
+            raise ValueError(
+                f"{label}: hunk {idx} context not found: re-read the file and copy the "
+                f"context lines exactly, whitespace included. {_nearest_text_hint(updated, old_text)}"
+            )
     return updated
 
 _OUTLINE_MAX_DEPTH = 4
@@ -935,6 +999,8 @@ class GrepTool:
         except ValueError as e:
             return {"error": f"grep: {e}", "exit_code": 1}
 
+        hits_so_far: list[list[str]] = []
+
         def _grep():
             import multiprocessing
             import queue
@@ -1014,6 +1080,7 @@ class GrepTool:
             base = real_root if os.path.isdir(real_root) else os.path.dirname(real_root)
             deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
             lines: list[str] = []
+            hits_so_far.append(lines)
 
             def parse_rg_result(raw: str) -> Optional[str]:
                 try:
@@ -1120,7 +1187,7 @@ class GrepTool:
                     stdout_thread.join()
                     stderr_thread.join()
                 if timed_out:
-                    return "grep: timed out"
+                    return _GREP_TIMED_OUT
                 if not capped and return_code not in (0, 1):
                     detail = "".join(stderr_prefix).strip()
                     return f"grep: {detail or f'process exited {return_code}'}"
@@ -1210,12 +1277,12 @@ class GrepTool:
                     while len(lines) < max_hits:
                         remaining = deadline - time.monotonic()
                         if remaining <= 0:
-                            error = "grep: timed out"
+                            error = _GREP_TIMED_OUT
                             break
                         try:
                             record = output.get(timeout=remaining)
                         except queue.Empty:
-                            error = "grep: timed out"
+                            error = _GREP_TIMED_OUT
                             break
                         if record is None:
                             # Pipe closed without a "done": the worker died.
@@ -1330,7 +1397,7 @@ class GrepTool:
                 while len(lines) < max_hits:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        error = "grep: timed out"
+                        error = _GREP_TIMED_OUT
                         break
                     try:
                         # Keep queue waits short enough to observe a spawn
@@ -1382,6 +1449,9 @@ class GrepTool:
             return lines, None
 
         lines, err = await asyncio.to_thread(run_with_policy_snapshot, _grep)
+        if err == _GREP_TIMED_OUT:
+            partial = [ln for found in hits_so_far for ln in found]
+            return _grep_timeout_result(partial, root)
         if err:
             return {"error": err, "exit_code": 1}
         if not lines:

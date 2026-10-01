@@ -26,6 +26,29 @@ _FRESH_EMPTY_SESSION_GRACE = timedelta(minutes=10)
 _FRESH_SESSION_GRACE = _FRESH_EMPTY_SESSION_GRACE
 
 
+def build_auto_sort_prompt(session_list, existing_folders):
+    """Build the prompt that groups chats into folders.
+
+    One copy for the Tidy button (routes/session_routes.py) and the scheduled
+    sweep. 2026-10-01 (prompt audit A4-17): the two routes carried verbatim
+    copies that never named the folders already in use, so each batch invented
+    fresh names and repeated Tidy fragmented the list ("Cooking", "Recipes",
+    "Food Ideas"). Existing folders now go in the prompt.
+    """
+    names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
+    folders = [f for f in (existing_folders or []) if f]
+    existing = ", ".join(json.dumps(f) for f in folders) if folders else "none yet"
+    return (
+        "Group these chat sessions into folders by topic.\n\n"
+        f"Existing folders: {existing}\n\n"
+        "Put each chat in an existing folder when it fits, otherwise create a folder named in 2-4 words. "
+        "Every chat gets a folder. Use the 8-character ids exactly as given. "
+        "Reply with raw JSON only, in this shape:\n"
+        '{"folders": {"Folder Name": ["id_prefix1", "id_prefix2"], "Other Folder": ["id_prefix3"]}}\n\n'
+        f"Sessions (id_prefix: name):\n{{\n{names_text}\n}}"
+    )
+
+
 def _utcnow_naive() -> datetime:
     """Return naive UTC for existing session DateTime columns."""
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -172,18 +195,8 @@ async def run_auto_sort(owner: str, skip_llm: bool = False, delete_throwaway: bo
         if not url:
             return f"Cleaned {deleted_empty + deleted_throwaway} sessions. No model endpoint available for sorting."
 
-        names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
-        prompt = (
-            "You are a session organizer. Group these chat sessions into folders by topic.\n\n"
-            "Rules:\n"
-            "- Be aggressive about grouping — put EVERY session in a folder\n"
-            "- Use short folder names (2-4 words max)\n"
-            "- Use the 8-char ID prefixes exactly as given\n"
-            "- Output ONLY raw JSON, no markdown fences, no explanation\n\n"
-            "Required JSON format:\n"
-            '{"folders": {"Folder Name": ["id_prefix1", "id_prefix2"], "Other Folder": ["id_prefix3"]}}\n\n'
-            f"Sessions (id_prefix: name):\n{{\n{names_text}\n}}"
-        )
+        existing_folders = sorted({s["current_folder"] for s in session_list if s["current_folder"]})
+        prompt = build_auto_sort_prompt(session_list, existing_folders)
 
         try:
             # 16384 (was 4096): large folder JSON + reasoning-model thinking

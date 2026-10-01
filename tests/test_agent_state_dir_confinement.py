@@ -989,7 +989,9 @@ def test_no_rg_worker_is_terminated_at_deadline(tmp_path, monkeypatch):
             '{"pattern": "(a+)+$", "path": ""}', {}
         ))
 
-    assert result == {"error": "grep: timed out", "exit_code": 1}
+    assert result["exit_code"] == 1
+    assert result["error"].startswith("grep: timed out: the search of ")
+    assert "Narrow `path`" in result["error"]
     assert time.monotonic() - started < 3
 
 
@@ -1190,7 +1192,9 @@ def test_no_rg_fallback_worker_process_is_gone_after_a_timeout(tmp_path, monkeyp
 
     result = _grep(tmp_path, '{"pattern": "(a+)+$", "path": ""}')
 
-    assert result == {"error": "grep: timed out", "exit_code": 1}
+    assert result["exit_code"] == 1
+    assert result["error"].startswith("grep: timed out: the search of ")
+    assert "Narrow `path`" in result["error"]
     assert len(started_processes) == 1
     assert started_processes[0].poll() is not None, "worker must be killed at the deadline"
 

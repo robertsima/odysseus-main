@@ -93,7 +93,7 @@ def test_extraction_request_never_appends_raw_tool_output(monkeypatch):
         tool_events=[{"tool": "bash", "output": "PRIVATE-TOOL-OUTPUT", "exit_code": 0}],
     ))
     assert len(captured) == 2
-    assert "Execution outcome metadata" in captured[1]["content"]
+    assert "Tools used, in order" in captured[1]["content"]
     assert "PRIVATE-TOOL-OUTPUT" not in captured[1]["content"]
 
 

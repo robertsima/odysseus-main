@@ -26,7 +26,15 @@ from core.session_manager import SessionManager
 from src.request_models import MemoryAddRequest
 from core.database import SessionLocal
 from src.llm_core import llm_call_async
-from services.memory.memory_extractor import audit_memories
+from services.memory.memory_extractor import (
+    MANUAL_CONTEXT_WINDOW,
+    MANUAL_EXTRACT_SYSTEM_PROMPT,
+    MEMORY_CATEGORIES,
+    _parse_extraction_json,
+    audit_memories,
+    build_extraction_messages,
+)
+from services.memory.extraction_context import conversation_for_extraction
 from src.auth_helpers import get_current_user, require_user
 from src.endpoint_resolver import resolve_endpoint
 from src.task_endpoint import resolve_task_endpoint
@@ -245,17 +253,13 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             raise HTTPException(404, "Session not found")
         _assert_session_owner(sess, _owner(request))
 
-        system_msg = {
-            "role": "system",
-            "content": (
-                "You are a helpful assistant. Analyze the entire conversation history provided and extract any "
-                "useful factual statements, contacts, addresses, phone numbers, or other information that the user "
-                "might want to remember for future interactions. Return each piece of information as a JSON object "
-                "with a 'text' field. For example: [{'text': 'Alice lives at 123 Main St'}, {'text': 'Bob works at Acme Corp'}]. "
-                "Only include information that is specific and likely to be useful later."
-            ),
-        }
-        messages = [system_msg] + sess.get_context_messages()
+        # Same message shape as the auto extractor: one transcript to analyze,
+        # not the chat replayed as live turns (2026-10-01 audit A4-10; the replay
+        # made reasoning models continue the conversation and return nothing).
+        window = conversation_for_extraction(sess.get_context_messages(), limit=MANUAL_CONTEXT_WINDOW)
+        if not window:
+            return {"suggestions": []}
+        messages = build_extraction_messages(window, MANUAL_EXTRACT_SYSTEM_PROMPT)
 
         t_url, t_model, t_headers = resolve_task_endpoint(
             sess.endpoint_url, sess.model, sess.headers, owner=_owner(request)
@@ -267,17 +271,14 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
                 t_model,
                 messages,
                 temperature=0.2,
-                max_tokens=500,
+                # Reasoning models think before the JSON; 500 cut it off.
+                max_tokens=4096,
                 headers=t_headers,
             )
-            try:
-                suggestions = json.loads(suggestion_text)
-                if isinstance(suggestions, list):
-                    suggestions = [s if isinstance(s, str) else s.get("text", "") for s in suggestions]
-                else:
-                    suggestions = []
-            except json.JSONDecodeError:
-                suggestions = [line.strip() for line in suggestion_text.splitlines() if line.strip()]
+            suggestions = [
+                s if isinstance(s, str) else str(s.get("text", "")) if isinstance(s, dict) else ""
+                for s in _parse_extraction_json(suggestion_text)
+            ]
 
             return {"suggestions": [s for s in suggestions if s]}
         except Exception as e:
@@ -449,7 +450,7 @@ def setup_memory_routes(memory_manager: MemoryManager, session_manager: SessionM
             "- Focus on personal, memorable information\n"
             "- If there are no useful facts, return an empty array\n\n"
             "Return a JSON array of objects with 'text' and 'category' fields.\n"
-            "Categories: 'identity', 'preference', 'fact', 'contact', 'project', 'goal'\n\n"
+            "Categories: " + ", ".join(f"'{c}'" for c in MEMORY_CATEGORIES) + "\n\n"
             "Return ONLY valid JSON, no markdown fences."
         )
 

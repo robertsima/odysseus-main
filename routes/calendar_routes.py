@@ -1968,7 +1968,6 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         from src.user_time import (
             clear_user_time_context,
             current_datetime_prompt,
-            now_user_local,
             set_user_tz_name,
             set_user_tz_offset,
         )
@@ -1986,30 +1985,26 @@ def setup_calendar_routes(upload_handler=None) -> APIRouter:
         if not url or not model:
             return {"ok": False, "error": "No LLM endpoint configured"}
 
-        now = now_user_local()
-        now_iso = now.strftime("%Y-%m-%dT%H:%M:%S")
-        # The model gets only the schema it needs to fill out; we re-validate
-        # everything client-side too.
+        # 2026-10-01 (A4-13): the date block already carries today, the local
+        # clock and the zone, so the old second "current timestamp" line is gone.
+        # The 60-minute default lives in the code below, not in the prompt.
         system_prompt = (
             current_datetime_prompt()
-            + "You are a calendar event parser. Read the user's one-line "
-            "description and emit STRICT JSON describing the event. "
-            f"The current user-local timestamp is {now_iso}. "
-            + "Resolve relative dates (\"tomorrow\", \"friday\", \"next monday\", "
-              "\"in 30 minutes\") against today. Default duration is 60 minutes "
-              "when no end time is given. If the text mentions a date with no "
-              "time, treat it as an all-day event.\n\n"
-              "Output ONLY this JSON shape, nothing else:\n"
-              "{\n"
-              '  "summary": "<event title, capitalized>",\n'
-              '  "dtstart": "<YYYY-MM-DDTHH:MM:00>",\n'
-              '  "dtend":   "<YYYY-MM-DDTHH:MM:00>",\n'
-              '  "all_day": <true|false>,\n'
-              '  "location": "<place or empty>",\n'
-              '  "description": "",\n'
-              '  "confidence": <0.0-1.0>\n'
-              "}\n"
-              "For all-day events use \"YYYY-MM-DD\" (no time) for both fields."
+            + "Parse the user's one-line description into one calendar event as "
+            "strict JSON. Resolve relative dates and times (\"tomorrow\", "
+            "\"friday\", \"next monday\", \"in 30 minutes\") against the date and "
+            "time above. A date with no time is an all-day event.\n\n"
+            "Output only this JSON shape:\n"
+            "{\n"
+            '  "summary": "<event title, capitalized>",\n'
+            '  "dtstart": "<YYYY-MM-DDTHH:MM:00>",\n'
+            '  "dtend":   "<YYYY-MM-DDTHH:MM:00, or empty when no end time is stated>",\n'
+            '  "all_day": <true|false>,\n'
+            '  "location": "<place or empty>",\n'
+            '  "description": "",\n'
+            '  "confidence": <0.0-1.0>\n'
+            "}\n"
+            "For all-day events use \"YYYY-MM-DD\" (no time) for both fields."
         )
 
         try:

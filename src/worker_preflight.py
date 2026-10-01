@@ -547,10 +547,11 @@ def run_preflight(
         else:
             pf.problems.append({
                 "code": "WORKSPACE_REQUIRED",
-                "message": ("the task works on a repository but no workspace is set; "
-                            + ("pass workspace as one of: " + ", ".join(checkouts[:8]) if checkouts else
-                               "no checkout is available under the configured repository roots")
-                            + "; if the task needs no files (design, research), pass requires: ['no_workspace']"),
+                "message": (("Pass workspace=<one of: " + ", ".join(checkouts[:8]) + ">; this chat has none "
+                             "and the task works on a repository" if checkouts else
+                             "No checkout is available under the configured repository roots, so the task "
+                             "has no repository to work in")
+                            + ". If the task needs no files (design, research), pass requires: ['no_workspace']."),
                 "candidates": checkouts,
                 "required_fields": ["workspace"],
                 "next_action": ({"retry_with": {"workspace": checkouts[0]}, "choose_from": checkouts}
@@ -581,7 +582,9 @@ def run_preflight(
                 "code": "WRITE_NOT_ALLOWED",
                 "message": "the task asks for changes but the worker has no file-writing tool",
                 "next_action": {"enable_tools": list(WRITE_TOOLS),
-                                "or": "restate the task as read-only (requires: ['read_only'])"},
+                                "do": "start a loadout with file-writing tools (e.g. Lead Engineer); use "
+                                      "requires: ['read_only'] only when the person asked for analysis "
+                                      "without changes"},
             })
         pf.forced_tools.update(writable)
     # Applies whatever "requires" says: no_workspace and read_only describe files,

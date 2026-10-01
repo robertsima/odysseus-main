@@ -125,7 +125,7 @@ def test_active_plan_note_pins_checklist():
     note = build_active_plan_note(plan)
     assert "ACTIVE PLAN" in note
     assert plan in note               # the actual checklist is embedded
-    assert "IN ORDER" in note         # execution guidance present
+    assert "in order" in note         # execution guidance present
     # Empty input → no note (so we never inject a blank pin).
     assert build_active_plan_note("") == ""
     assert build_active_plan_note("   ") == ""

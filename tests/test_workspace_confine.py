@@ -445,8 +445,8 @@ def test_workspace_coding_mode_prompt_is_injected(monkeypatch):
     system_text = "\n\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
     assert "## Workspace coding mode" in system_text
     assert "Active workspace: `/tmp/example-repo`" in system_text
-    assert "call `todowrite`" in system_text
-    assert "Change repo files with `apply_patch`" in system_text
+    assert "call `todowrite`" not in system_text  # the checklist habit is update_plan, in the base rules
+    assert "Use `apply_patch` for edits that belong together" in system_text
 
 
 # ── browse route is admin-gated ─────────────────────────────────────────

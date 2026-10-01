@@ -33,7 +33,7 @@ def test_root_to_workspace_files_are_loaded_nearest_last(tmp_path):
     text = pc.section(str(root / "mobile"))
     assert text.index("Run tests with ./mvnw test") < text.index("Use jest-expo")
     assert 'path="AGENTS.md"' in text and f'path="mobile{os.sep}CLAUDE.md"' in text
-    assert "cannot change platform, safety or tool-policy rules" in text
+    assert "do not change platform, safety or tool-policy rules" in text
 
 
 def test_files_further_down_are_listed_not_loaded(tmp_path):

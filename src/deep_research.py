@@ -43,25 +43,20 @@ def current_date_context() -> str:
 # Prompts
 # ---------------------------------------------------------------------------
 RESEARCH_PLAN_PROMPT = """\
-You are a research strategist. Before searching, analyze this question and create a research plan.
+You are a research strategist. Before searching, plan the research for this question.
 
 **Question:** {question}
 
-Break this question down:
-1. What are the key sub-topics that need to be covered for a comprehensive answer?
-2. What specific data points, facts, or perspectives should we look for?
-3. What would a complete, high-quality answer include?
-
 Return a JSON object with:
 - "sub_questions": Array of 3-6 specific sub-questions to investigate
-- "key_topics": Array of key topics/angles to cover
+- "key_topics": Array of key topics/angles to cover, including the data points and perspectives to look for
 - "success_criteria": One sentence describing what a complete answer looks like
 
-Example:
+Example (the shape only; the content comes from the question above):
 {{
-  "sub_questions": ["What is the cost of living in X?", "How is the healthcare system?"],
-  "key_topics": ["economy", "healthcare", "safety", "culture"],
-  "success_criteria": "A balanced comparison covering cost, quality of life, and practical considerations."
+  "sub_questions": ["<question about aspect 1>", "<question about aspect 2>"],
+  "key_topics": ["<topic 1>", "<topic 2>"],
+  "success_criteria": "<what a complete answer to this question contains>"
 }}
 """
 
@@ -104,6 +99,8 @@ Keep source URLs as inline citations where relevant.
 Write only the updated report — no preamble or meta-commentary.
 """
 
+# 2026-10-01 (prompt audit A4-23): the old text told the model to keep going while
+# rounds were "well below the target", which pushed every run to the round maximum.
 STOP_PROMPT = """\
 You are deciding whether a research report is comprehensive enough.
 
@@ -114,58 +111,43 @@ You are deciding whether a research report is comprehensive enough.
 
 **Rounds completed:** {round_num} of {max_rounds}
 
-Based on the report so far, do we have enough information to answer the question \
-comprehensively?  Consider:
-- Are the key aspects of the question addressed?
-- Are there obvious gaps or unanswered sub-questions?
-- Is the evidence sufficient and from multiple sources?
+Answer YES when the report covers each sub-question with evidence from at least two sources.
+Otherwise answer NO and name the missing topic.
 
-If rounds completed is well below the target, prefer continuing unless the \
-report is already exhaustive.
-
-Reply with ONLY "YES" or "NO" followed by a brief one-sentence reason.
-Example: "YES — The report covers all major aspects with evidence from multiple sources."
-Example: "NO — We still lack information about the economic impact."
+Reply with "YES" or "NO" followed by a one-sentence reason.
 """
 
+# 2026-10-01 (prompt audit A4-5): the old prompt demanded "at MINIMUM 1500 words"
+# next to "state evidence gaps rather than inventing detail to meet a word
+# target", and its category blocks overrode the summary-first layout in capitals.
+# Length now follows the evidence and each category block says it replaces the layout.
 FINAL_REPORT_PROMPT = """\
-Write a **long, detailed, comprehensive** research report answering this question:
+Write a research report that answers the question below.
 
-**Question:** {question}
+Question: {question}
 
-**All collected evidence and analysis:**
+Evidence:
 {report}
 
-Requirements:
-- Write at MINIMUM 1500 words — this should be a thorough, magazine-quality article
-- Use clear ## headings and ### subheadings to organize into logical sections
-- Each section should have multiple detailed paragraphs, not just bullet points
-- Synthesize and analyze the information — explain WHY things matter, draw comparisons, provide context
-- Include specific data points, numbers, and statistics from the evidence
-- Include source URLs as inline citations [like this](url)
-- Note where sources agree and where they disagree
-- Use only facts supported by the collected evidence; state evidence gaps rather than inventing detail to meet a word target
-- Add a brief executive summary at the top
-- End with a clear conclusion that directly answers the question
-- Write in an engaging, informative style — not dry or robotic
+Open with a 3-5 sentence summary. Then use ## sections that analyze the evidence: why each point matters, where sources agree and disagree, comparisons. Support each claim with a source link [name](url) and quote figures exactly as the evidence gives them. Close with a conclusion that answers the question directly. Length follows the evidence, usually 1000 to 2000 words; where evidence is missing, name the gap in one sentence.
 """
 
 CATEGORY_PROMPTS = {
-    "product": """IMPORTANT FORMAT OVERRIDE — this is a PRODUCT research report:
-- Structure as a RANKED LIST of products/options (best first)
-- For EACH product include: name as ### heading, approximate price, 2-3 sentence summary, **Pros:** bullet list, **Cons:** bullet list, **Where to buy:** URLs as links
+    "product": """Layout for a product report (replaces the summary-first layout above):
+- Structure as a ranked list of products/options, best first
+- For each product include: name as ### heading, approximate price, 2-3 sentence summary, **Pros:** bullet list, **Cons:** bullet list, **Where to buy:** URLs as links
 - Start with a quick-compare markdown table of top picks (columns: Name, Price, Best For, Rating)
 - End with a ## Verdict section picking Best Overall and Best Value
 - Still include source citations inline""",
 
-    "comparison": """IMPORTANT FORMAT OVERRIDE — this is a COMPARISON report:
-- Create a ## Comparison Table as a markdown table comparing ALL options across key criteria (rows = criteria, columns = options)
+    "comparison": """Layout for a comparison report (replaces the summary-first layout above):
+- Create a ## Comparison Table as a markdown table comparing every option across key criteria (rows = criteria, columns = options)
 - Use checkmarks, ratings, or short values in cells
 - Write a ## section per option with its strengths, weaknesses, and ideal use case
 - End with ## Best For verdicts (e.g., "**Best for small teams:** Option A because...")
 - Include a ## Shared Considerations section for things that apply to all options""",
 
-    "howto": """IMPORTANT FORMAT OVERRIDE — this is a HOW-TO guide:
+    "howto": """Layout for a how-to guide (replaces the summary-first layout above):
 - Start with ## Quick Guide — a super concise numbered list (one line per step, no details, just the action). Example: 1. Install X  2. Run Y  3. Configure Z
 - Then ## Prerequisites listing what's needed before starting
 - Then the detailed steps: ## Step 1: ..., ## Step 2: ...
@@ -174,7 +156,7 @@ CATEGORY_PROMPTS = {
 - End with ## Common Mistakes section
 - Add estimated time and difficulty level near the top""",
 
-    "factcheck": """IMPORTANT FORMAT OVERRIDE — this is a FACT-CHECK report:
+    "factcheck": """Layout for a fact-check report (replaces the summary-first layout above):
 - Start with ## The Claim restating what's being checked
 - Create ## Evidence For and ## Evidence Against sections
 - Each piece of evidence should be a ### with source name, what it found, and how strong the evidence is
@@ -690,8 +672,10 @@ class DeepResearcher:
                 parsed["url"] = url
                 parsed["title"] = title or page.get("title", "")
                 parsed["og_image"] = page.get("og_image", "")
-                # Skip findings where the LLM says the page is useless
-                if is_low_quality(parsed.get("summary", "")):
+                # Skip pages the model marks irrelevant (A4-4). Older replies and
+                # weaker models omit the flag, so the boilerplate check on the
+                # summary text stays as the fallback.
+                if parsed.get("relevant") is False or is_low_quality(parsed.get("summary", "")):
                     logger.info(f"Skipping low-quality extraction from {url}")
                     return None
                 return parsed
@@ -700,7 +684,6 @@ class DeepResearcher:
                 "url": url,
                 "title": title or page.get("title", ""),
                 "og_image": page.get("og_image", ""),
-                "rational": "LLM extraction (raw)",
                 "evidence": response[:3000],
                 "summary": response[:500],
             }
@@ -810,8 +793,7 @@ class DeepResearcher:
             if attempt:
                 recovery_prompt += (
                     "\n\nThe previous generation failed. Write a concise, non-repetitive report "
-                    "using only the evidence above. Evidence quality takes priority over the "
-                    "word-count target. State any gaps explicitly."
+                    "using only the evidence above. State any gaps explicitly."
                 )
             self.final_report_metadata["attempts"] += 1
             try:
@@ -858,7 +840,7 @@ class DeepResearcher:
                             "- Include specific data, numbers, and comparisons from the evidence\n"
                             "- Explain context and significance — don't just list facts\n"
                             "- Use ## headings and ### subheadings\n"
-                            "- Target at least 1000 words\n"
+                            "- Aim for about 1000 words where the evidence supports it\n"
                             "Write the full expanded report now."
                         },
                     ],

@@ -42,6 +42,12 @@ _REQUIRED_NATIVE_TOOL_ARGS = {
 # of each description and each parameter's first sentences. The lean level is
 # for small windows (local models), where the whole schema block is uncached
 # context: the tool's first sentences and no parameter prose.
+#
+# 2026-10-01: 29 native tools had text past these budgets, so the model read a
+# clipped copy nobody had reviewed (the routing rule sat after the cut).
+# Descriptions are now written to fit, with the routing text first, and
+# tests/test_tool_schema_budget.py fails when one does not: the clip is a
+# safety net for MCP tools, and for native tools the source is what ships.
 _COMPACT_TOOL_DESCRIPTION_CHARS = 400
 _COMPACT_PARAM_DESCRIPTION_CHARS = 160
 _LEAN_TOOL_DESCRIPTION_CHARS = 220
@@ -145,11 +151,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "discover_tools",
-            "description": "Find and load a small number of permitted tools for this turn when the currently attached tools do not cover the task. Discovery is read-only and does not execute a discovered tool.",
+            "description": "Attach tools that are not in your list: describe what you need ('read a Todoist task', 'render a Penpot board'). Matches are callable on your next round, at most 8.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "minLength": 1, "maxLength": 500},
+                    "query": {"type": "string", "minLength": 1, "maxLength": 500, "description": "The capability you need, in plain words."},
                     "max_results": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
                 },
                 "required": ["query"],
@@ -161,12 +167,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command (on the host or in a workspace sandbox, as this chat's shell note says). Use it for installs, builds, tests, git and programs; read, write, edit, search and list files with the file tools, not redirects, heredocs or sed. A command silent for 60 s is stopped: drop -q/--silent from builds and tests, raise `idle_timeout`, or make `#!bg` its first line to run it in the background.",
+            "description": "Run a shell command (on the host or in a workspace sandbox, per this chat's shell note): installs, builds, tests, git, programs. Make `#!bg` the first line to run a long command in the background.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "The shell command to execute"},
-                    "idle_timeout": {"type": "integer", "description": "Seconds this command may print nothing before it is stopped (default 60, max 3600). Raise it only for a command known to be quiet for long stretches, e.g. a test suite that prints once per test class."}
+                    "command": {"type": "string", "description": "The shell command to run"},
+                    "idle_timeout": {"type": "integer", "description": "Seconds of silence before the command is stopped (default 60, max 3600). Raise it for quiet builds."}
                 },
                 "required": ["command"]
             }
@@ -190,7 +196,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "web_search",
-            "description": "Quick single web lookup for a fact or current event mid-task. NOT for 'research X' / 'do research on X' — those are deep-research jobs; use trigger_research instead.",
+            "description": "Quick lookup of one fact or current event. Longer 'research X' jobs go to deep research (trigger_research) when it is available.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -205,12 +211,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": "Fetch and read the text content of a specific URL the user names (e.g. 'check example.com', 'what's on this page <url>'). Use when you already have a concrete URL/domain. NOT for open-ended searches (use web_search) or 'research X' jobs (use trigger_research). Downloads are size-budgeted; a '[partial content: ...]' notice in the result means the body was cut short and you can re-call with full=true for the rest.",
+            "description": "Fetch a known URL as readable text (HTML, JSON, SVG, plain text). A '[partial content: ...]' notice means the body was cut short; call again with full=true for the rest. To find pages, use web_search.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "The URL or domain to fetch (http/https; a bare domain like example.com is fine)"},
-                    "full": {"type": "boolean", "description": "Raise the download budget to the hard cap for large pages/files. Use only after a result reported partial content."}
+                    "full": {"type": "boolean", "description": "Raise the download budget to the hard cap. Use it after a result reported partial content."}
                 },
                 "required": ["url"]
             }
@@ -220,7 +226,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "read_file",
-            "description": "Read a file from disk. Optionally read a line range with offset/limit for large files.",
+            "description": "Read a file: its first 20,000 characters, or lines offset to offset+limit. When the result says truncated, call again with offset set to the line it names.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -236,7 +242,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search file contents for a regular expression across a directory tree (uses ripgrep when available, respecting .gitignore). Returns file:line:match. PREFER this over `bash grep/rg` for code search — confined to the allowed roots, structured output. In an unfamiliar tree, run `ls` with depth first and pass the narrowest `path`; a search rooted above the data directory does not search user data.",
+            "description": "Search file contents by regex (ripgrep, .gitignore respected). Returns file:line:match, at most 200 hits. Pass the narrowest `path` and a `glob` for a large tree.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -254,7 +260,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "glob",
-            "description": "Find files by glob pattern (recursive), newest first. e.g. '**/*.py'. PREFER this over `bash find/ls` for locating files — confined to the allowed roots. To learn a tree's layout use `ls` with depth instead of a broad '**/*' glob, then glob inside the folder that matters.",
+            "description": "Find files by glob (recursive), newest first, at most 200. To see a tree's layout, use `ls` with depth, then glob inside the folder that matters.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -269,7 +275,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ls",
-            "description": "List the entries of a directory (folders first, then files with sizes). With depth 2-4 it returns a folder outline instead: the directory tree with file counts, skipping build/vendor/cache folders. Use the outline as the first look at an unfamiliar codebase, then grep/glob the folder that matters. PREFER this over `bash ls`/`find` — confined to the allowed roots.",
+            "description": "List a directory (dotfiles hidden, at most 200 entries). depth 2-4 returns a folder outline with file counts, skipping build, vendor and cache folders; use it as the first look at an unfamiliar tree.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -284,15 +290,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "preview_file",
-            "description": "Render an HTML, SVG, PNG, JPEG, WebP or GIF file from the workspace (or its worktree) and return a screenshot you can SEE. Use it to check what a page, icon, logo or SVG you changed actually looks like, and compare it with the reference image or the request BEFORE saying visual work is done: passing tests and plausible-looking markup do not show that the shape is right (an 'Agamemnon helmet' SVG once passed every string check and drew headphones). Read-only; remote network access is blocked, so pages that need the backend or CDN assets render partially. Same path rules as read_file.",
+            "description": "See your output: renders an HTML, SVG or raster file from the workspace or its worktree to a screenshot. Open it before reporting visual work done and compare it with the reference image or the request, since passing tests do not show the shape is right. Read-only; network is blocked, so backend and CDN content renders partially.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "path": {"type": "string", "description": "File to render (relative to the workspace, or absolute inside it): .html, .svg, .png, .jpg, .webp, .gif"},
-                    "width": {"type": "integer", "description": "Viewport width in px (optional; default 1280, SVG 512, max 2560)"},
-                    "height": {"type": "integer", "description": "Viewport height in px (optional; default 800, SVG 512, max 2560)"},
-                    "color_scheme": {"type": "string", "enum": ["light", "dark"], "description": "prefers-color-scheme to emulate (optional; default light). Check both when the page has a dark theme."},
-                    "scale": {"type": "integer", "description": "Device pixel ratio 1-4 (optional; default 1). Use 2-4 to inspect small assets such as icons; with width/height 256 an SVG renders at 256 px."}
+                    "path": {"type": "string", "description": "File to render (workspace-relative, or absolute inside it): .html, .svg, .png, .jpg, .webp, .gif"},
+                    "width": {"type": "integer", "description": "Viewport width in px (default 1280, SVG 512, max 2560)"},
+                    "height": {"type": "integer", "description": "Viewport height in px (default 800, SVG 512, max 2560)"},
+                    "color_scheme": {"type": "string", "enum": ["light", "dark"], "description": "prefers-color-scheme to emulate (default light). Check both when the page has a dark theme."},
+                    "scale": {"type": "integer", "description": "Device pixel ratio 1-4 (default 1). Use 2-4 for small assets such as icons."}
                 },
                 "required": ["path"]
             }
@@ -302,7 +308,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "get_workspace",
-            "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
+            "description": "Return the absolute path of the active workspace folder. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user says 'the project', 'the code' or 'this folder' without a path, instead of asking.",
             "parameters": {"type": "object", "properties": {}, "required": []}
         }
     },
@@ -310,7 +316,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Write/save a file to disk",
+            "description": "Create or overwrite a file on disk. To change part of an existing file, use edit_file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -325,7 +331,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_file",
-            "description": "Edit a file ON DISK by exact string replacement (home folder, project files, any real path like ~/sweden.txt or /path/to/file). This is the right tool for files on disk — NOT edit_document (that's for editor-panel documents). PREFER this over bash (sed/echo) — it shows a diff. old_string must match the file exactly and be unique (or set replace_all). Use write_file to create a new file.",
+            "description": "Replace exact text in a file on disk. `old_string` must match once, indentation included, or set replace_all. write_file creates a new file; edit_document edits editor-panel documents.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -342,13 +348,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "apply_patch",
-            "description": "Apply a multi-file source-code patch to disk. Use for real project files in the workspace when several edits belong together. Patch must use *** Begin Patch / *** End Patch with Add File, Update File, or Delete File sections. Prefer this over bash redirects/heredocs/sed.",
+            "description": "Apply related edits across files in one patch (*** Begin Patch ... *** End Patch with Add File, Update File and Delete File sections). Each hunk's context lines must match the file exactly once.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "patch_text": {
                         "type": "string",
-                        "description": "Patch text beginning with *** Begin Patch and ending with *** End Patch"
+                        "description": "The whole patch, from *** Begin Patch to *** End Patch"
                     }
                 },
                 "required": ["patch_text"]
@@ -388,21 +394,7 @@ FUNCTION_TOOL_SCHEMAS = [
             # Action-dependent optional fields must not become all-required.
             "strict": False,
             "description": (
-                "Scoped Git workflows (including pull/push): send only fields used by the chosen action; omit unused fields. "
-                "Git workflows in approved local checkouts (configured roots and the active workspace's checkout): repositories, status, diff, log, "
-                "branches, remotes, clone, init, stage, unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, "
-                "stash_list/create/apply/pop, push, merge, reset, rebase, set_upstream. "
-                "No shell/private-vault grant needed. "
-                "Use absolute repository paths from repositories. Stage explicit relative files; "
-                "commit uses local identity or supplied author. Pull/merge fast-forward only. "
-                "After first push, set_upstream can bind the current branch to its fetched/pushed "
-                "remote_branch on an existing configured remote; never replaces an upstream. "
-                "Push/merge/history rewrites require fresh confirmation bound to exact revisions. "
-                "Policy refuses every delete (branches, remote branches, stashes), force push and discard of work; no approval re-enables them. Reset refuses dirty trees and reset/rebase leave recovery refs; rebase aborts on conflicts. "
-                "Clone accepts only GitHub HTTPS sources into approved roots. No arbitrary commands or remote URL changes. "
-                "Linked worktrees (.git is a file) support only status, log, diff, branches and remotes; "
-                "run other actions in the main_repository status reports. "
-                "Odysseus self-publishing still uses manage_agent_worktree."
+                "Git in approved local checkouts, no shell needed; send only the fields the chosen action uses. Start with action=repositories for the absolute paths. Read: status, diff, log, branches, remotes. Change: stage (explicit relative paths), unstage, commit, branch, tag, switch, fetch, fetch_branch, pull, pull_with_restore, stash_list/create/apply/pop, push, merge, reset, rebase, set_upstream, clone, init. Pull and merge are fast-forward only. Push, merge, reset and rebase need expected_head and a fresh human confirmation. Policy refuses every delete (branches, remote branches, stashes), force push and discarding work. reset refuses a dirty tree and rebase aborts on conflict. set_upstream binds the current branch to its pushed remote_branch and never replaces an upstream. clone takes GitHub HTTPS sources only. diff covers the whole tree and is capped at 256 KB; for one file run `git diff -- <path>` in bash. Linked worktrees (.git is a file) allow only the read actions; commit there with manage_agent_worktree. Publishing a change for review also goes through manage_agent_worktree."
             ),
             "parameters": {
                 "type": "object",
@@ -437,29 +429,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "name": "manage_agent_worktree",
             "strict": False,
             "description": (
-                "Choose an action and omit unused fields; repo_list needs only action, repo_status/repo_pull also need repository. "
-                "List/status/fast-forward pull approved local Git repositories (repo_list, "
-                "repo_status, repo_pull; linked worktrees are listed with their main_repository), "
-                "or manage a human-gated publishing worktree. "
-                "repo_status/repo_pull require an absolute repository path from repo_list; "
-                "repo_pull uses ONLY its configured GitHub upstream and refuses dirty or "
-                "diverged checkouts. No shell or private-vault grant is needed. "
-                "Isolated worktrees: WITHOUT 'repository' they are made of the Odysseus source "
-                "checkout (branches agent/odysseus/*); for ANY other project pass repository=<absolute "
-                "checkout path from repo_list> (branches agent/<repo>/*, worktree under "
-                "agent_worktrees/_repos/). 'start' takes name (the new task name), base (where it "
-                "starts: origin/main, a branch or a SHA; never pass a base as name/branch) and "
-                "optionally expected_base (full SHA; start refuses if base resolves elsewhere). "
-                "Other actions: 'status', 'diff' (changed files plus which are sensitive), 'commit', "
-                "'request_publish' (freeze the change and ask a human to approve it; pushes NOTHING), "
-                "'publish' (needs request_id plus an approval_code a human generated on the host; "
-                "pushes to that repository's own GitHub origin), 'list_requests', 'show_request', "
-                "'cleanup' (remove a clean worktree; its branch is deleted only if another ref still "
-                "holds its commits). Pass the same repository on later calls, or a name unique "
-                "across repositories. You cannot approve your own change: after request_publish "
-                "a person approves it in the Odysseus UI (the chat shows the request), which also "
-                "pushes it and opens the draft PR. Call publish only with a code the user pastes "
-                "from the operator CLI."
+                "Isolated, human-gated publishing worktree for a repository; send only the fields the chosen action uses. start (name = task name, base = origin/main, a branch or a SHA) makes branch agent/<repo>/<name>; status, diff and commit work in it; request_publish freezes the change; a person approves it in the Odysseus UI (pushes nothing); show_request and list_requests follow it; cleanup removes a clean worktree. Pass `repository` (absolute path from manage_git repositories) for any project, and the same value on later calls; omit it only for the Odysseus source checkout. publish needs a request_id and an approval_code a person gives you; you cannot approve your own change. repo_list, repo_status and repo_pull are legacy: use manage_git."
             ),
             "parameters": {
                 "type": "object",
@@ -469,11 +439,11 @@ FUNCTION_TOOL_SCHEMAS = [
                         "enum": ["status", "start", "commit", "diff", "request_publish",
                                  "publish", "list_requests", "show_request", "cleanup",
                                  "repo_list", "repo_status", "repo_pull"],
-                        "description": "Operation to perform (default: status)"
+                        "description": "Default status. repo_list, repo_status and repo_pull are legacy; use manage_git for repository listing and sync."
                     },
-                    "repository": {"type": "string", "description": "Absolute local checkout path from repo_list; not a URL. repo_status/repo_pull: the checkout. Worktree actions: the project the worktree belongs to (omit only for the Odysseus source checkout)"},
-                    "name": {"type": "string", "description": "Task name; becomes agent/odysseus/<name>, or agent/<repo>/<name> with repository"},
-                    "branch": {"type": "string", "description": "Full agent branch, when it already exists. Never a base such as origin/main"},
+                    "repository": {"type": "string", "description": "Absolute checkout path from manage_git repositories, not a URL. Omit only for the Odysseus source checkout."},
+                    "name": {"type": "string", "description": "start only: task name; the branch becomes agent/<repo>/<name> (agent/odysseus/<name> without repository)"},
+                    "branch": {"type": "string", "description": "Full agent branch, when it already exists. Not a base such as origin/main"},
                     "base": {"type": "string", "description": "start only: existing ref or commit the new branch starts from (origin/main, a branch, or a SHA). Default: the configured base (Odysseus) or origin/HEAD"},
                     "expected_base": {"type": "string", "description": "start only: full commit SHA base must resolve to; start refuses on mismatch"},
                     "message": {"type": "string", "description": "Commit message (action=commit)"},
@@ -494,14 +464,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "read_app_logs",
             "description": (
-                "Read Odysseus's own application logs to debug or troubleshoot the running app. "
-                "action='list' enumerates available log files; action='tail' returns the last N "
-                "lines of one, optionally filtered by substring or minimum level; action='trace' with "
-                "id (a workflow-, run or session ID) gathers every app-log line mentioning it across "
-                "rotated logs plus that ID's activity run records; action='bundle' writes a diagnostics "
-                "zip (recent logs plus the config of the chats, workers and loadouts they mention, this "
-                "chat included, never message text) under the data dir and returns its path, for the "
-                "admin to download or share. Credential material is redacted before you see it."
+                "Read Odysseus's own application logs to debug the running app. list shows the log files; tail returns the last lines of one (filter by substring or level); trace with an id (workflow, run or session) gathers every line and run record that mentions it; bundle writes a diagnostics zip (logs plus configs, never message text) and returns its path. Credentials are redacted."
             ),
             "parameters": {
                 "type": "object",
@@ -525,7 +488,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "create_document",
-            "description": "Create a new document in the editor panel. Use this when the user asks to write, create, build, make, or generate code, scripts, programs, games, apps, or any long-form or structured content that is more than a short paragraph, AND there is no already-open document/email draft that the request refers to. If an email compose draft is open, edit that draft instead of creating another document. NEVER put large generated content directly in chat — use this tool instead.",
+            "description": "Create a new document in the editor panel for code, scripts, apps, games or any long-form or structured content longer than a short paragraph, when no open document or email draft is the target. If an email compose draft is open, edit that draft instead. Put large generated content here, not in chat.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -541,11 +504,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "edit_document",
-            "description": "Edit a document in the editor panel (created via create_document) — NOT a file on disk. Targets the document open in this chat, or the one named by document_id; pass document_id whenever the document is not the one open here. For files on disk (home folder, project files, anything with a path like ~/x.txt or /path/to/file) use edit_file instead. Targeted find-and-replace with multiple FIND/REPLACE pairs per call; use for any edit smaller than a full rewrite. Do NOT send the whole file back via update_document for small edits.",
+            "description": "Edit a document in the editor panel (not a file on disk; use edit_file for paths like ~/x.txt). Targets the document open in this chat, or the one named by document_id. Send FIND/REPLACE pairs, several per call, for any edit smaller than a full rewrite.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
+                    "document_id": {"type": "string", "description": "Document id from manage_documents list, or its #document-<id> link. Required unless the document is open in this chat's editor. Titles are not unique."},
                     "edits": {
                         "type": "array",
                         "description": "List of find/replace edits (first match only per edit)",
@@ -571,7 +534,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
+                    "document_id": {"type": "string", "description": "Document id from manage_documents list, or its #document-<id> link. Required unless the document is open in this chat's editor. Titles are not unique."},
                     "suggestions": {
                         "type": "array",
                         "description": "List of suggested changes with reasons",
@@ -598,7 +561,7 @@ FUNCTION_TOOL_SCHEMAS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "document_id": {"type": "string", "description": "Id of the document to change: the id from manage_documents list, or its #document-<id> link. Optional only when the document is open in this chat's editor; otherwise required. Do not rely on titles, several documents can share one."},
+                    "document_id": {"type": "string", "description": "Document id from manage_documents list, or its #document-<id> link. Required unless the document is open in this chat's editor. Titles are not unique."},
                     "content": {"type": "string", "description": "Complete new document content"}
                 },
                 "required": ["content"]
@@ -610,18 +573,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "recall_tool_output",
             "description": (
-                "Read back a tool result that was too large to keep in the "
-                "conversation. When an earlier tool produced a lot of output, "
-                "only its head and tail were kept inline and the full text was "
-                "stored under a `toolout-...` reference named in that excerpt. "
-                "Pass just that `ref` to get the whole stored output back; a "
-                "very large one comes in pages, so call again with the `offset` "
-                "each page names until it says End of output. Add a `query` to "
-                "search a large output for one part instead. Page through the "
-                "stored result rather than re-running the tool or repeating the "
-                "same query — the data is already captured, and once you have "
-                "read it all there is nothing more to fetch. Omit `ref` and "
-                "`query` to list what is stored."
+                "Read back a tool result too large to keep in the conversation (only its head and tail stayed inline; the full text is stored under the `toolout-...` ref in that excerpt). Pass `ref` for the whole stored output (long ones page: call again with the `offset` each page names) or add `query` to search it; page through it rather than re-running the tool. No arguments lists what is stored."
             ),
             "parameters": {
                 "type": "object",
@@ -666,19 +618,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "recall_chat_history",
             "description": (
-                "Read back this chat's own earlier messages, including ones no "
-                "longer in your context. Nothing said in this chat is deleted: "
-                "compaction moves older messages to the chat's archive, a long "
-                "turn trims older messages out of the request, and earlier "
-                "turns' tool calls and outputs are stored but not replayed "
-                "(only their final text is). This reads all of it, in order. "
-                "No arguments: an overview (message count, what is archived, "
-                "the earliest messages). `query`: search every message and "
-                "tool output of this chat. `message`: one message in full, by "
-                "its #index or id from a search or overview, with `before` / "
-                "`after` for its neighbours. `start` and `count`: a range. Use "
-                "it instead of asking the user to repeat something, and "
-                "instead of re-running a command whose output you had."
+                "Read this chat's own earlier messages, including ones compacted out of your context. No arguments: an overview. `query`: search every message and tool output. `message`: one message in full by #index or id, with `before`/`after` neighbours. `start` and `count`: a range. Use it instead of asking the user to repeat something or re-running a command."
             ),
             "parameters": {
                 "type": "object",
@@ -717,16 +657,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "search_documents",
             "description": (
-                "Semantic search over the user's indexed personal documents "
-                "(vault, notes, journal, uploaded files) using the ChromaDB "
-                "embedding index. THIS IS THE DEFAULT WAY TO ANSWER A QUESTION "
-                "ABOUT THE USER'S DOCUMENTS. Returns the relevant excerpts plus "
-                "the file path each came from. Do not read, cat, or loop over "
-                "files in the personal documents directory to answer a question "
-                "— a single note can be tens of thousands of characters and "
-                "stays in context for the rest of the conversation. Use "
-                "read_file with offset/limit on a returned path only when an "
-                "excerpt is genuinely insufficient."
+                "Semantic search over the user's indexed personal documents (vault, notes, journal, uploaded files). The default way to answer a question about them: returns relevant excerpts with the file path of each. Read a whole file (read_file with offset/limit on a returned path) only when an excerpt is not enough."
             ),
             "parameters": {
                 "type": "object",
@@ -806,15 +737,15 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "send_to_session",
-            "description": "Send a new message to an existing live chat and get that chat model's response. mode='agent' lets that chat's agent work the message with its own tools (files, shell, web) as a sub-agent and returns its final answer; mode='chat' (default) is a single model reply. Do not use this to retrieve, read, summarize, or inspect old chats; use search_chats or list_sessions for past chat evidence.",
+            "description": "Send a message to an existing live chat and get its model's response. mode='agent' lets that chat's agent work the message with its own tools as a sub-agent and returns its final answer; mode='chat' (default) is one model reply. To read or search old chats, use search_chats or list_sessions instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "The id of the chat to send the message to, or \"new\" to start a fresh sub-agent chat for this task"},
                     "message": {"type": "string", "description": "The message to send (for a new sub-agent: the complete task, since it starts with no context)"},
                     "mode": {"type": "string", "enum": ["chat", "agent"], "description": "chat = one model reply (default); agent = run the target chat's agent with tools as a sub-agent"},
-                    "profile": {"type": "string", "description": "Optional agent profile name (Settings › Workbench): the worker's instructions, model, tool limits and round budget (the round at which it wraps up and hands back what it has). Implies mode=agent, and requires session_id 'new' — a loadout's whole policy (memory, skills, MCP, vault, delegation) is written onto the chat it creates, so it is never applied to a chat the user already owns. The result says which happened in profile_scope."},
-                    "workspace": {"type": "string", "description": "agent mode: the checkout the sub-agent's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
+                    "profile": {"type": "string", "description": "Agent profile name (Settings > Workbench). Implies mode=agent and requires session_id 'new'; profile_scope in the result says what happened."},
+                    "workspace": {"type": "string", "description": "agent mode: the checkout the sub-agent's file tools work in (a path from get_workspace). Required when this chat has none and the task touches a repository."},
                     "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only", "no_workspace"]}, "description": "agent mode: what the task needs. The sub-agent is refused before it starts, with the fix, when a need cannot be met."}
                 },
                 "required": ["session_id", "message"]
@@ -850,7 +781,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_session",
-            "description": "Manage a chat: rename, archive, unarchive, delete, mark important, truncate history, or fork it; see what your chats are doing right now (running: each working chat's running tool, its command, how long, and its last output) and stop one (stop). (The UI calls these 'chats'; 'session' is the internal term.) Use running when the user asks whether an agent is stuck or busy, instead of starting another one. For destructive actions like delete, call list_sessions first and pass the exact id returned there; never invent ids.",
+            "description": "Manage a chat: rename, archive, unarchive, delete, mark important, truncate, fork; `running` shows what each working chat is doing (tool, command, duration, last output) and `stop` halts one. Use running when the user asks whether an agent is stuck or busy, instead of starting another. For delete, pass the exact id from list_sessions.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -867,7 +798,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_memory",
-            "description": "Manage the user's memory system: list, add, edit, delete, or search memories. Memories persist across sessions.",
+            "description": "Memory: durable facts, events, contacts and preferences that outlive this chat. add when the user states something to remember or a lasting preference; search before asking the user for something they may already have told you; edit or delete by memory_id from list or search.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -900,13 +831,13 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ui_control",
-            "description": "Control the user interface. Actions: toggle (turn tools on/off), open_panel (open a modal: documents/library, gallery, email, sessions, notes, memories/brain, skills, settings, cookbook), open_email_reply (open an email reply draft document; DOES NOT send. For 'write/draft a reply saying X', include body with the drafted reply), set_mode, switch_model, set_theme (built-in presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (CREATE any custom theme with a name + colors object — pick distinctive, evocative hex colors that match the requested aesthetic, NOT generic defaults. The theme auto-applies after creation). When a user asks for ANY theme not in the built-in preset list, ALWAYS use create_theme.",
+            "description": "Control the UI: toggle tools, open_panel, open_email_reply (opens a draft, does not send; put the drafted text in body), set_mode, switch_model, get_toggles, set_theme (presets: dark, light, midnight, paper, cyberpunk, retrowave, forest, ocean, ume, copper, terminal, organs, lavender, gpt, claude, cute), create_theme (name plus hex colors, for any theme not in the presets; applies at once).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["toggle", "open_panel", "open_email_reply", "set_mode", "switch_model", "set_theme", "create_theme", "get_toggles"],
                                "description": "The UI action. Use set_theme for presets, create_theme to build a custom theme with any hex colors"},
-                    "name": {"type": "string", "description": "For toggle: web, bash, research, incognito, document_editor (aliases: shell, search, deepresearch, documents). For open_panel: documents, gallery, email, sessions, notes, brain/memories, skills, settings, cookbook. For open_email_reply: email UID. For set_theme: a preset theme name. For create_theme: the custom theme name."},
+                    "name": {"type": "string", "description": "toggle: web, bash, research, incognito, document_editor. open_panel: documents, gallery, email, sessions, notes, brain, skills, settings, cookbook."},
                     "value": {"type": "string", "description": "Value: on/off for toggle, agent/chat for set_mode, model name for switch_model, theme name for set_theme, or folder for open_email_reply"},
                     "uid": {"type": "string", "description": "Email UID for open_email_reply"},
                     "folder": {"type": "string", "description": "Email folder for open_email_reply (default INBOX)"},
@@ -946,24 +877,24 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "ask_user",
-            "description": "Ask the user a multiple-choice question to get a decision or clarification when the task is genuinely ambiguous and the answer changes what you do next (e.g. pick between approaches, confirm an assumption, choose a target). The user sees clickable option buttons; calling this ENDS your turn and their selection arrives as your next message. Prefer sensible defaults over asking — only ask when you truly cannot proceed well without the user's input. Do NOT use it to confirm irreversible/destructive actions that have a dedicated confirmation flow.",
+            "description": "Ask a multiple-choice question when the answer changes what you do next and a default would be a guess (approach, assumption, target). Calling it ends your turn; the user's pick arrives as the next message. Destructive actions have their own confirmation flow.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question": {"type": "string", "description": "The question to ask. Be specific and self-contained."},
+                    "question": {"type": "string", "description": "Specific and self-contained."},
                     "options": {
                         "type": "array",
-                        "description": "2-6 choices. Each is an object with a short `label` and an optional `description` explaining the trade-off.",
+                        "description": "2-6 choices, each a short `label` with an optional one-line `description`.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "label": {"type": "string", "description": "Concise choice text the user clicks (1-5 words)."},
-                                "description": {"type": "string", "description": "Optional one-line explanation of this choice."}
+                                "label": {"type": "string", "description": "Choice text, 1-5 words."},
+                                "description": {"type": "string", "description": "One-line trade-off."}
                             },
                             "required": ["label"]
                         }
                     },
-                    "multi": {"type": "boolean", "description": "Set true ONLY when the question explicitly allows choosing more than one option. Otherwise omit it or set false. Default false."}
+                    "multi": {"type": "boolean", "description": "True when several options may be picked."}
                 },
                 "required": ["question", "options"]
             }
@@ -973,11 +904,11 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "update_plan",
-            "description": "Keep this chat's task checklist: the steps of the request you are working on, as a markdown checklist. Write it when a request has several steps (or when executing an approved plan), tick each step `- [x]` as you finish it, and rewrite it when the request changes. It is saved with the chat and shown to you on later turns until every step is ticked. Pass the COMPLETE checklist every time (not a diff); an empty plan clears it.",
+            "description": "Keep this chat's task checklist as markdown. Write it when a request has several steps or an approved plan is running, tick each step `- [x]` as you finish it, rewrite it when the request changes. It is shown to you on later turns until every step is ticked. Send the complete checklist every time; an empty plan clears it.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "plan": {"type": "string", "description": "The full checklist as GitHub-style markdown — one step per line, `- [ ]` for pending and `- [x]` for done. Always send the whole list; an empty string clears it."}
+                    "plan": {"type": "string", "description": "The full checklist, one step per line: `- [ ]` pending, `- [x]` done. An empty string clears it."}
                 },
                 "required": ["plan"]
             }
@@ -987,7 +918,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_tasks",
-            "description": "Manage scheduled/automated tasks: list, create, edit, delete, pause, resume, or run tasks. Use this for ANY recurring/scheduled request ('every morning…', 'each day at 7:30', 'daily summarize…') — create a task rather than doing it once. Task types: llm (AI runs a prompt), research (runs the deep-research pipeline on a question), or action (built-in automation). Triggers can be time-based or event-based.",
+            "description": "Manage scheduled tasks: list, create, edit, delete, pause, resume, run. Use it for any recurring request ('every morning...', 'daily at 7:30') instead of doing it once. Types: llm (runs a prompt), research (deep-research on a question), action (built-in automation). Triggers are time-based or event-based.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1014,7 +945,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "trigger_event": {"type": "string", "enum": ["session_created", "message_sent", "document_created", "memory_added", "research_completed", "email_received", "skill_added"],
                                       "description": "Event name (for trigger_type=event)"},
                     "trigger_count": {"type": "integer", "description": "Fire every N events (for trigger_type=event)"},
-                    "output_target": {"type": "string", "description": "Where results go. Defaults to 'session' (results land in a dedicated chat session the user reads) — this is the right choice for 'summarize for me' / 'send to me'. Do NOT go hunting for the user's email address; only use an email MCP tool name here if the user explicitly asked to be emailed AND an address is already known."}
+                    "output_target": {"type": "string", "description": "Where results go (default 'session': a dedicated chat the user reads). Use an email tool name only when the user asked to be emailed and an address is known."}
                 },
                 "required": ["action"]
             }
@@ -1024,7 +955,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_calendar",
-            "description": "Manage calendar events: list events in a date range, create, update, delete. Each event can carry a tag/category (event_type) and importance level. Resolve relative dates like today/tomorrow against the 'Current date and time' system context, then pass ISO 8601 datetimes in the user's local wall time; for all-day events set all_day=true and pass YYYY-MM-DD. For event reminders/alarms, pass reminder_minutes; the tool creates the Odysseus note reminder, so do not also call manage_notes for the same reminder. Do not set rrule for single-occurrence requests such as 'next Wednesday only'; use rrule only when the user explicitly wants recurrence.",
+            "description": "Manage calendar events: list_events in a date range, create_event, update_event, delete_event, list_calendars. Resolve relative dates against the 'Current date and time' context, then pass ISO 8601 datetimes in the user's local time (all_day=true with YYYY-MM-DD). reminder_minutes creates the reminder note, so skip manage_notes for it. Set rrule only when the user asks for recurrence.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1038,14 +969,14 @@ FUNCTION_TOOL_SCHEMAS = [
                     "description": {"type": "string", "description": "Event description / notes"},
                     "location": {"type": "string", "description": "Event location"},
                     "uid": {"type": "string", "description": "Event UID (for update/delete)"},
-                    "calendar_href": {"type": "string", "description": "Which calendar to use: the id returned by list_calendars (NOT a remote CalDAV URL). A calendar name or a short id prefix also resolves. On create_event it selects the target calendar and defaults to the first one; on list_events it restricts results to that single calendar."},
+                    "calendar_href": {"type": "string", "description": "Calendar id from list_calendars (a name or short id prefix also works; not a CalDAV URL). Default: the first calendar on create, all on list."},
                     "calendar": {"type": "string", "description": "Alias for calendar_href; same id, name or short-id prefix."},
-                    "start": {"type": "string", "description": "list_events range start (ISO datetime). Use this for month/week requests after resolving the date range; do not pass a loose query string. Prefer start; backend also accepts start_time, start_date, range_start, from, dtstart, since."},
-                    "end": {"type": "string", "description": "list_events range end (ISO datetime). Use this for month/week requests after resolving the date range; defaults to +14 days only when no range is requested. Prefer end; backend also accepts end_time, end_date, range_end, to, dtend, until."},
+                    "start": {"type": "string", "description": "list_events range start (ISO datetime). Resolve month or week requests to a range first; a loose query string does not work."},
+                    "end": {"type": "string", "description": "list_events range end (ISO datetime). Defaults to +14 days when no range is given."},
                     "event_type": {"type": "string", "description": "Tag / category for the event. Common values: work, personal, health, travel, meal, social, admin, other. Aliases accepted: tag, category, type."},
                     "importance": {"type": "string", "enum": ["low", "normal", "high", "critical"], "description": "Priority level (defaults to 'normal')"},
                     "reminder_minutes": {"type": "integer", "description": "For create_event: create an Odysseus reminder this many minutes before the event, e.g. 5 for 'reminder 5 min before'."},
-                    "rrule": {"type": "string", "description": "Recurrence rule in iCalendar RRULE format, e.g. 'FREQ=WEEKLY;BYDAY=MO' for weekly on Monday. Use with create_event or update_event. For update_event, pass an explicit empty string to remove recurrence and make the event single-occurrence."}
+                    "rrule": {"type": "string", "description": "iCalendar RRULE, e.g. 'FREQ=WEEKLY;BYDAY=MO'. On update_event an empty string removes recurrence."}
                 },
                 "required": ["action"]
             }
@@ -1055,7 +986,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_notes",
-            "description": "Manage notes and checklists (Google Keep-style): list, view, add, update, delete, toggle_item. Use list/search to find candidate notes, then view with the note id when you need the full body. IMPORTANT: For to-do lists / checklists, set note_type='checklist' and pass the items as the `checklist_items` array — do NOT serialize them into `content` as plain text. For freeform notes, use note_type='note' and put the body in `content`. `due_date` accepts natural language like 'tomorrow at 9am' (parsed in the user's timezone) and fires a notification — do not also create a calendar event for the same reminder.",
+            "description": "Manage notes and checklists: list, search, view, add, update, delete, toggle_item. Find a note with list or search, then view it by id for the full body. A to-do list is note_type='checklist' with the items in `checklist_items`, never in `content`; a freeform note is note_type='note' with `content`. due_date fires a notification, so skip a calendar event for the same reminder.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1067,7 +998,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "title": {"type": "string", "description": "Note title (for add/update)"},
                     "content": {"type": "string", "description": "Freeform body text. Use this for note_type='note'. Do NOT use this for checklists — pass `checklist_items` instead."},
                     "note_type": {"type": "string", "enum": ["note", "checklist"],
-                                  "description": "'note' = freeform text in `content`. 'checklist' = structured to-do items in `checklist_items`. Defaults to 'checklist' if checklist_items is supplied, else 'note'."},
+                                  "description": "'note' = freeform text in `content`. 'checklist' = to-do items in `checklist_items`. Defaults to checklist when checklist_items is given, else note."},
                     "checklist_items": {"type": "array",
                                         "items": {"type": "object",
                                                   "properties": {
@@ -1091,7 +1022,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_wellbeing",
-            "description": "Consult the user's private Lotus wellbeing data (their own daily mood/energy check-ins) for planning and observations. Summary and patterns return aggregate counts, averages, trends, and time-of-day/weekday energy buckets with sample sizes. Private check-in notes are never returned. Use `patterns` when planning a day or week, `summary` for 'how have I been lately', `latest` for the newest check-in fields except its note, and `preferences` for reminder setup. Use `log_checkin` ONLY when the user explicitly asks to record how they feel. Report figures as observations with their sample size; never diagnose or give clinical advice. Available only on endpoint scopes the user enables under Settings > Privacy.",
+            "description": "The user's private Lotus wellbeing data (mood and energy check-ins). patterns for planning a day or week, summary for 'how have I been lately', latest for the newest check-in (its note stays private), preferences for reminder setup; aggregates carry sample sizes. log_checkin only when the user asks to record how they feel. No diagnosis. Needs the endpoint scope enabled in Settings > Privacy.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1152,39 +1083,27 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "manage_skills",
             "description": (
-                "Read or modify the user's skill library. Skills are SKILL.md files "
-                "(YAML frontmatter + structured body: When to Use / Procedure / "
-                "Pitfalls / Verification) and follow a draft → published lifecycle. "
-                "The skills index (every skill's name + one-line description) is already in "
-                "your context when skills exist, and skills matched to the request are injected "
-                "in full — do not 'list' to see what exists, and do not 'view' a skill whose "
-                "procedure is already in your context. 'view' loads full SKILL.md content; pass "
-                "names=[...] to load several skills in ONE call instead of one call per skill. "
-                "'view_ref' loads a sub-file. "
-                "Use 'patch' for surgical text edits and 'edit' for full rewrites. "
-                "'publish' once you've verified the procedure works. For add, "
-                "always provide an explicit name slug and only tell the user the "
-                "exact name returned by the tool."
+                "Skills: view full SKILL.md procedures (names=[...] loads several in one call; the skills index is already in your context, so list is rarely needed), or save a new or changed skill: add, edit (full content), patch (old_string to new_string), publish once the procedure has worked. Report the name the tool returns."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "publish", "delete", "search"], "description": "list = name+description summary; view = full SKILL.md; view_ref = sub-file under the skill dir; add = create; edit = full rewrite (content); patch = old_string→new_string; publish = flip status; delete; search = relevance match on published skills."},
-                    "name": {"type": "string", "description": "Slug/name of the skill. Required for add/view_ref/edit/patch/publish/delete (view accepts name or names). For add, choose the exact kebab-case name the user should see and report only the returned name."},
+                    "action": {"type": "string", "enum": ["list", "view", "view_ref", "add", "edit", "patch", "publish", "delete", "search"], "description": "view | view_ref | search | add | edit | patch | publish | list | delete. add needs a kebab-case name."},
+                    "name": {"type": "string", "description": "Skill slug. Required except for list and search (view also takes names). For add, use kebab-case and report the returned name."},
                     "names": {"type": "array", "items": {"type": "string"}, "description": "For view: several skill names to load in one call (preferred over repeated single-name views)."},
-                    "path": {"type": "string", "description": "Sub-path under the skill directory for view_ref (e.g. 'references/example.md')."},
-                    "description": {"type": "string", "description": "One-line summary surfaced in the skills index (for add)."},
-                    "category": {"type": "string", "description": "Organizational grouping like 'dev', 'email', 'system' (for add)."},
-                    "when_to_use": {"type": "string", "description": "Trigger conditions in plain English (for add)."},
-                    "procedure": {"type": "array", "items": {"type": "string"}, "description": "Numbered steps (for add)."},
-                    "pitfalls": {"type": "array", "items": {"type": "string"}, "description": "Known failure modes + recovery (for add)."},
-                    "verification": {"type": "array", "items": {"type": "string"}, "description": "How to confirm the procedure succeeded (for add)."},
-                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Keyword tags (for add)."},
-                    "platforms": {"type": "array", "items": {"type": "string"}, "description": "Restrict to OSes (for add)."},
-                    "requires_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide unless these toolsets are active (for add)."},
-                    "fallback_for_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide when these toolsets are active (for add)."},
+                    "path": {"type": "string", "description": "Sub-path under the skill directory, for view_ref."},
+                    "description": {"type": "string", "description": "One-line summary for the skills index."},
+                    "category": {"type": "string", "description": "Grouping such as 'dev', 'email', 'system'."},
+                    "when_to_use": {"type": "string", "description": "Trigger conditions in plain English."},
+                    "procedure": {"type": "array", "items": {"type": "string"}, "description": "Numbered steps."},
+                    "pitfalls": {"type": "array", "items": {"type": "string"}, "description": "Known failure modes and recovery."},
+                    "verification": {"type": "array", "items": {"type": "string"}, "description": "How to confirm the procedure worked."},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Keyword tags."},
+                    "platforms": {"type": "array", "items": {"type": "string"}, "description": "Restrict to these OSes."},
+                    "requires_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide unless these toolsets are active."},
+                    "fallback_for_toolsets": {"type": "array", "items": {"type": "string"}, "description": "Hide when these toolsets are active."},
                     "status": {"type": "string", "enum": ["draft", "published"], "description": "Defaults to 'draft' on add."},
-                    "version": {"type": "string", "description": "Semver-ish, e.g. '1.0.0' (for add)."},
+                    "version": {"type": "string", "description": "Semver-ish, e.g. '1.0.0'."},
                     "confidence": {"type": "number", "description": "0-1 (for add/publish)."},
                     "content": {"type": "string", "description": "Full SKILL.md text (for edit)."},
                     "old_string": {"type": "string", "description": "Exact substring to replace (for patch). Must appear exactly once."},
@@ -1295,7 +1214,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "action": {"type": "string", "enum": ["list", "get", "set", "delete", "disable_tool", "enable_tool", "list_tools"]},
                     "key": {"type": "string", "description": "Setting key (for get/set/delete)"},
                     "value": {"description": "Setting value (for set) — can be string, number, boolean, or object"},
-                    "tool": {"type": "string", "description": "Tool name to disable/enable (for disable_tool/enable_tool). Accepts aliases: shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email — or a raw tool name like 'bash' or 'web_search'."}
+                    "tool": {"type": "string", "description": "Tool to turn off or on: an alias (shell, search, browser, documents, memory, skills, images, tasks, notes, calendar, email) or a raw name like 'bash'."}
                 },
                 "required": ["action"]
             }
@@ -1310,7 +1229,7 @@ FUNCTION_TOOL_SCHEMAS = [
                 "type": "object",
                 "properties": {
                     "repo_id": {"type": "string", "description": "HuggingFace repo (e.g. 'Qwen/Qwen3-8B')"},
-                    "host": {"type": "string", "description": "Target server — use the friendly NAME from list_cookbook_servers (e.g. 'gpu-box', 'workstation') or a raw user@host. Omit to use the cookbook's selected default server."},
+                    "host": {"type": "string", "description": "Cookbook server NAME from list_cookbook_servers (e.g. 'gpu-box') or user@host. Omit for the cookbook's selected default."},
                     "local": {"type": "boolean", "description": "Force download to THIS machine (localhost) instead of the default remote server."},
                     "include": {"type": "string", "description": "Glob filter for specific files (e.g. '*Q4_K_M*')"},
                 },
@@ -1322,12 +1241,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "serve_model",
-            "description": "Start serving a model with vLLM, SGLang, llama.cpp, Ollama, MLX Image, or Diffusers. If `host` is omitted, defaults to the cookbook's selected server (not localhost). For MLX image models on Apple Silicon use `python3 scripts/mlx_image_server.py --model <repo> --port 8100`; for non-MLX image/inpainting/diffusion models use `python3 scripts/diffusion_server.py --model <repo> --port 8100`. Never serve image models with `mlx_lm.server`; that is only for text/chat MLX models. After launching, call list_served_models to check readiness/errors; if it reports a diagnosis with retry suggestions, retry via serve_model using the suggested adjusted cmd.",
+            "description": "Start serving a model (vLLM, SGLang, llama.cpp, Ollama, MLX Image, Diffusers). Omitted `host` means the cookbook's selected server, not localhost. Image models use scripts/mlx_image_server.py (Apple Silicon) or scripts/diffusion_server.py (other), never mlx_lm.server. Then call list_served_models for readiness; on a failure it returns a diagnosis, and you retry serve_model with its adjusted cmd.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "repo_id": {"type": "string", "description": "Model repo (e.g. 'Qwen/Qwen3-8B')"},
-                    "cmd": {"type": "string", "description": "Full serve command (e.g. 'vllm serve <repo> --port 8000 --tp 2', 'python3 -m sglang.launch_server --model-path <repo> --port 30000', for MLX image models: 'python3 scripts/mlx_image_server.py --model <repo> --port 8100', or for non-MLX image models: 'python3 scripts/diffusion_server.py --model <repo> --port 8100')"},
+                    "cmd": {"type": "string", "description": "Full serve command, e.g. 'vllm serve <repo> --port 8000 --tp 2' or 'python3 scripts/diffusion_server.py --model <repo> --port 8100'"},
                     "host": {"type": "string", "description": "Target server — friendly NAME from list_cookbook_servers (e.g. 'gpu-box', 'workstation') or raw user@host. Omit to use the cookbook's selected default."},
                     "local": {"type": "boolean", "description": "Force serve on THIS machine instead of the default remote server."},
                 },
@@ -1361,12 +1280,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "tail_serve_output",
-            "description": "Read the last N lines of a cookbook serve/download task's tmux pane. Use ONLY in this exact sequence: (1) the user asked to serve a model, (2) you launched it via serve_model, (3) list_served_models reports the NEW task as crashed/error, (4) call tail_serve_output on the new sessionId to find the root cause, (5) call serve_model again with adjusted flags. DO NOT call this on old stopped/completed download tasks — they are historical and won't tell you anything about the current attempt. DO NOT investigate past failures before launching; the environment may have changed since.",
+            "description": "Read the last lines of a cookbook serve or download task's tmux pane. Use it after you launched a model with serve_model and list_served_models reports that NEW task as crashed or errored; read the root cause, then call serve_model again with adjusted flags. Old stopped tasks are history and say nothing about the current attempt.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "Tmux session id from list_served_models (e.g. 'serve-abc12345', 'cookbook-a1b2c3d4')."},
-                    "tail": {"type": "integer", "description": "How many lines of pane scrollback to fetch (default 300, max 4000). Bump this if the error in the visible tail references an earlier line ('see root cause above')."},
+                    "tail": {"type": "integer", "description": "Lines of scrollback to fetch (default 300, max 4000). Raise it when the error points to an earlier line."},
                 },
                 "required": ["session_id"]
             }
@@ -1479,7 +1398,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "app_api",
-            "description": "Generic loopback to allowed internal Odysseus endpoints. Use this when there's no named tool for what the user wants. Hits the same routes the UI buttons hit (cookbook, gallery, library/documents, memory, notes, calendar, tasks, settings, themes, research, compare, etc.). action='endpoints' returns a compact paginated OpenAPI discovery page: use `filter` first, then `limit` (1-50, default 25) and `offset` to page. action='call' (default) takes method+path+body. Sensitive auth/user/admin/shell paths and host-control Cookbook mutation routes are blocked for safety. Do not use for shell commands; use named command tooling instead. Do not use for package installs, engine rebuilds, PID signalling, or email account discovery; use list_email_accounts for email accounts because /api/email/accounts is owner-filtered in tool context.",
+            "description": "Loopback to the internal Odysseus endpoints the UI uses (cookbook, gallery, library, memory, notes, calendar, tasks, settings, themes, research), for what no named tool covers. action='endpoints' pages the OpenAPI list (filter, then limit/offset); action='call' (default) takes method, path, body. Auth, user, admin, shell, install and email-account paths are blocked.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1500,51 +1419,51 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "manage_agent_loadout",
-            "description": "Define reusable worker loadouts and start workers with them. A loadout is a named policy — instructions, model, tools, skills, memory, MCP connections, delegation, approvals, worker limit — that a fresh worker chat runs under. action=capabilities first: a loadout you create is intersected with THIS chat's own policy, so you cannot grant a worker anything you lack, and any narrowing is reported back. action=start launches a detached worker in a new chat that reports to this one, and returns the model, tool bindings and round budget it actually got — check those against the task before waiting on a result. action=status reports what those workers did. A loadout whose tools all fall outside this chat's policy is refused rather than stored, because its workers could only report that they were blocked.",
+            "description": "Workers: start launches one detached worker chat per task, status shows what it did (wait_seconds blocks until it finishes), stop ends it. Also manages reusable loadouts (named policies, limited to this chat's own). A finished worker's result is handed back here and kept in result_ref, readable with recall_tool_output. The worker has not seen this conversation, so `task` carries the full brief.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop", "export", "import"], "description": "Default list. export = the saved loadouts (all, or 'names') as a portable JSON document. import = store a document from export ('document', 'mode'); each loadout is clamped to this chat's policy exactly as create is. stop = actually stop a worker this chat started (run_id from start/status; or worker_session); use it when the user says to stop/cancel a worker, not message_agent. capabilities = the ceiling a loadout authored here may reach. preflight = READY/DEGRADED/BLOCKED for a saved loadout right now: each tool's state, selected skills' dependencies, document-index currency, indexed vs raw private access, web lookup, with the repair for each failure. start = launch a worker: REQUIRES 'task' (optionally 'name'), e.g. {\"action\":\"start\",\"name\":\"Auditor\",\"task\":\"Review X and report Y\"}. status = what the workers this chat started actually did, including which ran out of rounds; pass run_id to watch one run and wait_seconds to block until it finishes (a worker's result is also handed back to this chat automatically, so never poll status in a loop). A finished run's row has result_ref: its whole result, read with recall_tool_output — never ask a finished worker to repeat its result. Use status instead of searching logs or guessing."},
-                    "detail": {"type": "boolean", "description": "capabilities ONLY: include the complete allowed tool-name list. Omit for the compact count/examples summary. Not a start parameter."},
+                    "action": {"type": "string", "enum": ["list", "get", "capabilities", "preflight", "create", "update", "delete", "start", "status", "stop", "export", "import"], "description": "start (needs task) | status | stop | list | get | capabilities | preflight | create | update | delete | export | import. Default list."},
+                    "detail": {"type": "boolean", "description": "capabilities only: include the complete allowed tool-name list."},
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
-                    "task": {"type": "string", "description": "REQUIRED for start: the whole assignment, in full. The worker begins with no other context — it has not seen this conversation. A start without task does nothing."},
+                    "task": {"type": "string", "description": "Required for start: the whole assignment. The worker has not seen this conversation."},
                     "description": {"type": "string", "description": "One line explaining when to use this loadout."},
                     "instructions": {"type": "string", "description": "System instructions the worker starts with: its personality and way of working."},
-                    "persona_name": {"type": "string", "description": "Name the worker answers as. Each loadout keeps its own persona; the user's shared persona never applies to it."},
+                    "persona_name": {"type": "string", "description": "Name the worker answers as."},
                     "temperature": {"type": "number", "description": "0-2 sampling temperature for this loadout. Omit for the app default."},
                     "max_tokens": {"type": "integer", "description": "Reply length cap for this loadout (0 = server decides). Omit for the app default."},
                     "model": {"type": "string", "description": "Model for the worker. Omit to inherit."},
                     "model_fallbacks": {"type": "array", "items": {"type": "string"}},
                     "model_access": {"type": "string", "enum": ["current", "selected", "all"], "description": "Whether the worker may switch model."},
                     "allowed_models": {"type": "array", "items": {"type": "string"}},
-                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"], "description": "Use 'selected' and name enabled_tools. 'all' is refused for agent-authored loadouts: it would grant every tool this chat has, including shell, email and posting. Omitted = the read-only set."},
-                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Every tool name the worker may call when tool_access=selected, MCP included. \"@read_only\" expands to every read-only tool this chat can grant; use mcp__<server>__<tool> for one MCP tool, mcp__<server>__* for a whole server, mcp__* for all of them. Anything not listed is denied, including tools added later."},
+                    "tool_access": {"type": "string", "enum": ["all", "selected", "none"], "description": "create/update: 'selected' with enabled_tools; 'all' is refused. Omitted = the read-only set."},
+                    "enabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Tool names allowed when tool_access=selected; '@read_only', mcp__<server>__<tool> and mcp__<server>__* work. Else denied."},
                     "disabled_tools": {"type": "array", "items": {"type": "string"}, "description": "Extra tools to deny on top of tool_access."},
-                    "required_tools": {"type": "array", "items": {"type": "string"}, "description": "create/update: exact tool names the mission cannot do without (added to enabled_tools). If any is denied, unknown, or on a disconnected or disallowed MCP server, nothing is saved and the reason is returned. The result's capabilities matrix (READY/DEGRADED/BLOCKED) lists every tool's state."},
+                    "required_tools": {"type": "array", "items": {"type": "string"}, "description": "create/update: tools the mission needs; if any is denied or unknown, nothing is saved."},
                     "memory_access": {"type": "string", "enum": ["none", "read", "write"]},
                     "skill_access": {"type": "string", "enum": ["all", "selected", "none"]},
                     "skill_names": {"type": "array", "items": {"type": "string"}},
                     "mcp_access": {"type": "string", "enum": ["all", "selected", "none"]},
                     "allowed_mcp_servers": {"type": "array", "items": {"type": "string"}},
-                    "private_vault_access": {"type": "boolean", "description": "Private vault notes (retrieval and file tools). Granted only if this chat already has it. Does not affect the shell."},
-                    "shell_access": {"type": "string", "enum": ["sandbox", "host", "off"], "description": "How bash/python run: sandbox (default; workspace or a scratch folder, no app data or vault), host (unrestricted server shell; only if this chat has it), off."},
+                    "private_vault_access": {"type": "boolean", "description": "Private vault notes. Granted only if this chat has it."},
+                    "shell_access": {"type": "string", "enum": ["sandbox", "host", "off"], "description": "How bash/python run: sandbox (default), host (only if this chat has it), off."},
                     "approval_mode": {"type": "string", "enum": ["inherit", "auto", "ask_risky", "ask_all"], "description": "Never looser than this chat's own mode."},
                     "delegation_policy": {"type": "string", "enum": ["never", "explicit", "auto"]},
                     "max_parallel_workers": {"type": "integer", "description": "0-8, capped at this chat's own limit."},
-                    "max_rounds": {"type": "integer", "description": "Round budget for the worker (0 = no budget, the default; at most 200). A positive number is the round at which the worker is asked to wrap up and hand back what it has, including what is left; it is never cut off mid-task."},
-                    "parent_session": {"type": "string", "description": "start only: leave unset. The worker reports to this chat (the only other accepted value is one of this chat's own workers)."},
-                    "run_id": {"type": "string", "description": "stop/status: the worker run to stop or watch (from start/status). Omit when exactly one worker is running."},
-                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 300, "description": "status only: block up to this many seconds, returning as soon as the watched run finishes. Use this instead of calling status repeatedly."},
+                    "max_rounds": {"type": "integer", "description": "Round at which the worker wraps up and hands back what it has (0 = no budget; max 200)."},
+                    "parent_session": {"type": "string", "description": "start only: leave unset."},
+                    "run_id": {"type": "string", "description": "stop/status: the worker run (from start/status). Omit when exactly one runs."},
+                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 300, "description": "status only: block up to this long for the watched run to finish."},
                     "worker_session": {"type": "string", "description": "stop only: the worker's chat id, instead of run_id."},
-                    "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path get_workspace lists). Omit to use this chat's workspace, or the checkout the task names."},
-                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only", "no_workspace"]}, "description": "start only: what the task needs. A worker that cannot meet a need is refused before it starts, with the fix."},
-                    "extra_tools": {"type": "array", "items": {"type": "string"}, "description": "start only: exact tool names this ONE worker gets on top of its loadout (limited to what this chat may use). Use this when a task needs a tool the loadout lacks; the saved loadout stays unchanged. An update that adds tools or access to a saved loadout is refused unless the user asked for it."},
-                    "parallel": {"type": "boolean", "description": "start only: true to start this loadout even though it is already working in another chat. Without it, start refuses and lists that chat, so an agent the user refers to is checked (manage_session running) or messaged instead of duplicated."},
-                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default. Sending a field empty leaves it unchanged; naming it here unsets it."},
+                    "workspace": {"type": "string", "description": "start only: the checkout the worker's file tools work in (a path from get_workspace). Required when this chat has none and the task touches a repository."},
+                    "requires": {"type": "array", "items": {"type": "string", "enum": ["workspace", "write", "read_only", "no_workspace"]}, "description": "start only: what the task needs; an unmet need refuses the start, with the fix."},
+                    "extra_tools": {"type": "array", "items": {"type": "string"}, "description": "start only: tools this ONE worker gets beyond its loadout (within this chat's policy)."},
+                    "parallel": {"type": "boolean", "description": "start only: true to start a loadout already working in another chat."},
+                    "clear": {"type": "array", "items": {"type": "string"}, "description": "update only: field names to reset to their default."},
                     "names": {"type": "array", "items": {"type": "string"}, "description": "export only: loadouts to export. Omit for all."},
-                    "document": {"type": "object", "description": "import only: the JSON document an export returned ({\"format\": \"odysseus-agent-profiles\", \"version\": 1, \"profiles\": [...]})."},
-                    "mode": {"type": "string", "enum": ["merge", "replace"], "description": "import only: merge (default) adds new loadouts and overwrites same-named ones; replace makes the document the whole list."},
-                    "rename_conflicts": {"type": "boolean", "description": "import merge only: store a same-named loadout under a new name instead of overwriting."}
+                    "document": {"type": "object", "description": "import only: the JSON document an export returned."},
+                    "mode": {"type": "string", "enum": ["merge", "replace"], "description": "import only: merge (default) or replace the whole list."},
+                    "rename_conflicts": {"type": "boolean", "description": "import merge only: rename a same-named loadout instead of overwriting."}
                 },
                 "required": ["action"]
             }
@@ -1554,23 +1473,23 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "orchestrate_agents",
-            "description": "Run a real research workflow: scoped specialist agents followed by synthesis. Use when the user asks for multiple research agents, not generic coding delegation or one deep-research job. A small task is one specialist and no synthesis; add specialists only for branches that are independent of each other, and a synthesis agent only when their results must be reconciled. start creates visible child chats and a trace, and returns a preflight row per agent (model, bindings, MCP server health, credential state); wait/status collects their actual handoffs and a structured `record` (objective, selected agents, result summary with its source, raw outputs, artifacts, verification performed, unresolved issues). An agent with preflight blockers cannot do its branch's work — never report that branch as researched. Loading a skill is not execution. Tools must be exact native/qualified MCP names from discovery; research workers cannot write to integrations. Omit a specialist model to inherit the current model; otherwise use an exact configured model ID. Only report completion after status=completed; queued/running means unfinished.",
+            "description": "Run a research workflow: scoped read-only specialist agents, then an optional synthesis agent. A small task is one specialist and no synthesis. start returns a preflight row per agent; a blocked agent cannot do its branch, so never report that branch as researched. wait and status return the handoffs and a structured `record`. Report completion only after status=completed.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel", "resume"], "description": "resume: start a new workflow from a finished one that did not complete, reusing its completed research handoffs and launching only synthesis (or the stages/retry_children named)."},
+                    "action": {"type": "string", "enum": ["start", "status", "wait", "cancel", "resume"], "description": "resume starts a new workflow from a finished incomplete one, reusing completed handoffs and launching only synthesis (or the named stages/retry_children)."},
                     "task": {"type": "string", "description": "Overall objective, deliverables and constraints; start only."},
                     "specialists": {"type": "array", "minItems": 1, "maxItems": 8, "items": {
                         "type": "object", "properties": {
                             "name": {"type": "string"}, "task": {"type": "string"},
-                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only bindings: any read-only native tool this chat itself may use (web_search, web_fetch, read_file, grep, glob, ls, get_workspace, search_documents, search_chats, vault_get/vault_search, read_app_logs, list_/read_ email tools, manage_skills, ...). Tools that write, send, publish or delegate (bash, write_file, apply_patch, send_email, orchestrate_agents, ...) are rejected and the whole start fails — use the worker launcher for work that must change something. The rejection lists the full supported set. MCP bindings must be exact mcp__serverId__tool names taken from discovery, on a connected server, and read-only."},
+                            "tools": {"type": "array", "items": {"type": "string"}, "description": "Exact read-only tool names (web_search, read_file, grep, ...) or mcp__server__tool. A write tool fails the start; the rejection lists the full supported set."},
                             "skills": {"type": "array", "items": {"type": "string"}},
                             "model": {"type": "string", "description": "Optional exact configured model ID, for example gpt-5.6-luna. Omit to inherit the parent model; do not send 'default' or a display label."},
                             "required": {"type": "boolean", "description": "Whether synthesis must wait for a completed, evidence-backed result from this branch. Defaults to true."},
                             "max_rounds": {"type": "integer", "minimum": 0, "maximum": 200, "description": "Advisory round budget for this specialist (0 = unlimited; at most 200). It does not stop a run: the tool-call limit, stall detection and timeouts do."}
                         }, "required": ["name", "task", "tools"]
                     }},
-                    "synthesis": {"type": "object", "description": "Optional synthesis agent; receives actual specialist handoffs, including failures and evidence. State exact output requirements (e.g. market map and ten drafts).", "properties": {
+                    "synthesis": {"type": "object", "description": "Optional synthesis agent; gets the specialists' handoffs, failures included. State the exact output required.", "properties": {
                         "name": {"type": "string"}, "task": {"type": "string"},
                         "model": {"type": "string", "description": "Optional exact configured model ID; omit to inherit."}, "skills": {"type": "array", "items": {"type": "string"}}
                     }},
@@ -1579,7 +1498,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 60},
                     "allow_partial_synthesis": {"type": "boolean", "description": "start only. Defaults false. When true, synthesis may run with missing required branches but must label its result provisional and identify the gaps."},
                     "retries": {"type": "integer", "minimum": 0, "maximum": 1, "description": "Optional bounded retry of failed read-only specialists; default 0."},
-                    "persist_document": {"description": "start/resume. true or {title}: after a normal finish, save the final result (the synthesis, or a lone specialist's) as one editor document owned by this chat, and read it back. Workers stay read-only; this uses this chat's own create_document permission. The record's editor_documents_created lists what was actually saved; handoff artifacts are worker chats, not documents.", "anyOf": [{"type": "boolean"}, {"type": "object", "properties": {"title": {"type": "string"}}}]},
+                    "persist_document": {"description": "start/resume: true or {title}. Saves the final result as one editor document owned by this chat; the record lists it in editor_documents_created.", "anyOf": [{"type": "boolean"}, {"type": "object", "properties": {"title": {"type": "string"}}}]},
                     "stages": {"type": "array", "items": {"type": "string", "enum": ["synthesis", "research"]}, "description": "resume only. Which stages launch again; default [synthesis]. research relaunches only branches that did not complete."},
                     "retry_children": {"type": "array", "items": {"type": "string"}, "description": "resume only. Exact agent names to launch again even if they completed."}
                 }, "required": ["action"]
@@ -1590,7 +1509,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_agent",
-            "description": "Hand a bounded coding task to the administrator-selected provider. The provider may be the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with that provider. Use status/list_repositories/run/start/poll/cancel/list as supported by the selected provider. For repository-wide audits or multi-file work, prefer action=start and then poll with wait_seconds; reserve action=run for short bounded tasks.",
+            "description": "Hand a bounded coding task to the administrator-selected provider (the local Claude Code CLI or a connected remote coding-agent MCP tool; authentication and billing stay with it). Actions: status, list_repositories, run, start, poll, cancel, list, as the provider supports. For repository-wide audits or multi-file work use action=start, then poll with wait_seconds; run is for short tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1599,7 +1518,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "prompt": {"type": "string", "description": "Bounded coding task instructions."},
                     "allowed_tools": {"type": "array", "items": {"type": "string"}},
                     "timeout_seconds": {"type": "integer"},
-                    "model": {"type": "string", "description": "Optional, provider-specific; omit to use the provider's configured default. The local Claude Code CLI provider accepts only Claude models: an alias (opus, sonnet, haiku, fable, opusplan) or a Claude model ID such as claude-opus-5-5, claude-sonnet-5, claude-fable-5-1, claude-haiku-4-5-20251001 (append [1m] for 1M context); it rejects gpt-*, o3, gemini and other providers' models. A remote MCP coding agent takes its own model names."},
+                    "model": {"type": "string", "description": "Optional, provider-specific; omit for its default. Claude Code takes Claude aliases (opus, sonnet) or IDs such as claude-opus-5-5."},
                     "task_id": {"type": "string"},
                     "wait_seconds": {"type": "integer"},
                     "label": {"type": "string"}
@@ -1612,22 +1531,22 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "delegate_to_claude_code",
-            "description": "Hand a bounded coding task to the locally installed Claude Code CLI (a coding agent, NOT a chat model — do not use chat_with_model/list_models for it) inside an approved Git repository/worktree. Claude may inspect, edit, test, and commit, but cannot push or run arbitrary shell. Call action=status first when unsure whether Claude Code is installed, signed in, or which repositories are approved; action=list_repositories lists them. action=run waits for the result; action=start returns a task_id to poll/cancel so you can keep working (or run several repositories in parallel). For repository-wide audits or multi-file work, prefer action=start followed by poll with wait_seconds; reserve action=run for short bounded tasks. To wait, poll with wait_seconds instead of sleeping in bash. If a run reports that Claude Code is too old for the model (error_kind claude_code_outdated), call action=update, then retry; never install or update Claude Code from bash. Cloud runner: when the operator has allowlisted GitHub repositories (status shows them under `cloud`), pass repository as \"owner/repo\" (or via=\"cloud\") and Claude Code runs in GitHub Actions with the operator's own credential, pushing a claude/odysseus-* branch and a draft PR; prefer start + poll, it takes minutes.",
+            "description": "Claude Code CLI as a coding agent for a bounded task in an approved repository: it inspects, edits, tests and commits, never pushes. Call action=status first when unsure it is installed. action=start returns a task_id to poll with wait_seconds (use it for repository-wide audits and multi-file work); run waits for short jobs. A GitHub owner/repo goes to the cloud runner and returns a draft PR.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories", "update"], "description": "Default run. status = preflight (binary, sign-in, approved repositories, callback). list_repositories = approved checkouts. start/poll/cancel/list = background task lifecycle. update = upgrade the configured Claude Code binary with its own updater (admin; refused while a delegation runs)."},
-                    "repository": {"type": "string", "description": "Absolute path to an approved Git repository/worktree (from action=list_repositories), or an allowlisted GitHub \"owner/repo\" for the cloud runner. Omit or pass 'auto' to use the configured default / the only approved checkout."},
-                    "via": {"type": "string", "enum": ["local", "cloud"], "description": "local = the Claude Code binary in this container; cloud = Claude Code in GitHub Actions on an allowlisted repository. Omit to decide from the repository and settings."},
+                    "action": {"type": "string", "enum": ["run", "start", "poll", "cancel", "list", "status", "list_repositories", "update"], "description": "Default run. status = preflight; list_repositories; start/poll/cancel/list = background tasks; update = fix claude_code_outdated (admin)."},
+                    "repository": {"type": "string", "description": "Absolute path from list_repositories, or an allowlisted GitHub owner/repo for the cloud runner. Omit for the default checkout."},
+                    "via": {"type": "string", "enum": ["local", "cloud"], "description": "local = this container; cloud = GitHub Actions on an allowlisted repository. Omit to decide from the repository."},
                     "base_branch": {"type": "string", "description": "cloud only: branch to start from (default: the repository's default branch)."},
                     "prompt": {"type": "string", "description": "Task instructions for Claude Code (run/start). State the objective, likely files, constraints, and how to verify."},
-                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Optional narrower Claude permission list. Omit for the defaults. Accepted: Read, Glob, Grep, Edit, Write, Bash(git status|diff|log|show|branch|rev-parse|add|commit:*), Bash(pytest|npm test|pnpm test|yarn test|./gradlew test|mvn test:*)."},
+                    "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "Narrower permission list; omit for defaults. Accepted: Read, Glob, Grep, Edit, Write, Bash(git ...), Bash(<test runner>:*)."},
                     "timeout_seconds": {"type": "integer", "description": "Maximum runtime, 30-1800 seconds (default 900)."},
-                    "model": {"type": "string", "description": "Optional Claude model for this job; omit to use the configured default. Claude Code runs Claude models only: an alias (opus, sonnet, haiku, fable, opusplan) or a Claude model ID such as claude-opus-5-5, claude-sonnet-5, claude-fable-5-1, claude-haiku-4-5-20251001 (append [1m] for 1M context). Spellings like 'opus-5.5' are normalised; gpt-*, o3, gemini and other providers' models are rejected."},
+                    "model": {"type": "string", "description": "A Claude alias (opus, sonnet, haiku, fable) or ID such as claude-opus-5-5; omit for the default. gpt-*, o3 and gemini are rejected."},
                     "task_id": {"type": "string", "description": "Task id for poll/cancel."},
                     "wait_seconds": {"type": "integer", "description": "poll only: block up to this many seconds (max 600) for the task to finish. Use this rather than bash sleep."},
                     "label": {"type": "string", "description": "Short name for a background task (start)."},
-                    "version": {"type": "string", "description": "update only: latest, stable, or an exact version such as 2.1.280. Omit for the install's default."}
+                    "version": {"type": "string", "description": "update only: latest, stable or an exact version. Omit for the default."}
                 },
                 "required": []
             }
@@ -1781,12 +1700,12 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "audit_emails",
-            "description": "Search and summarize a whole mailbox in ONE call. This is the right tool for any 'go through my inbox and report on X' task (job application confirmations, interview requests, rejections, 'what came in this month') -- it replaces paging list_emails a few messages at a time, which cannot reach older mail and burns an agent round per page. The search runs ON THE IMAP SERVER so it reaches the entire mailbox rather than only the newest few hundred messages: pass `query` (Gmail search syntax on Gmail accounts, e.g. 'subject:(application OR applying) OR from:linkedin.com'; supports from:, subject:, OR, newer_than:, has:) and/or `since`/`before` dates; on non-Gmail accounts `keywords` and the dates are translated to standard IMAP criteria. The result leads with a `summary` block -- counts by sender domain, by month, by keyword, total matched, unique senders, date range -- computed over EVERY matched message; report totals from that block and do NOT count digest rows, which are a capped sample. Pass summarize=true for a broad sweep where you only need the numbers plus a few examples. Read-only; does not replace read_email when you need one message's full content (e.g. to reply to it).",
+            "description": "Search and summarize a whole mailbox in one call: for 'go through my inbox and report on X'. The IMAP server runs the search, so it reaches all mail; pass `query` (Gmail syntax) and/or since/before, or keywords elsewhere. The result leads with a `summary` (counts by domain, month, keyword over every match); report totals from it, not from the capped digest rows. Read-only.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "folder": {"type": "string", "description": "IMAP folder to scan (default: INBOX)"},
-                    "query": {"type": "string", "description": "Server-side search. On Gmail accounts this is raw Gmail query syntax (from:, subject:, OR, newer_than:, has:) run via X-GM-RAW over the whole mailbox. Ignored on non-Gmail accounts, which use keywords/since/before instead."},
+                    "query": {"type": "string", "description": "Gmail accounts only: raw Gmail search syntax (from:, subject:, OR, newer_than:, has:), run over the whole mailbox. Other accounts use keywords/since/before."},
                     "keywords": {"type": "array", "items": {"type": "string"}, "description": "Terms to match in subject or body. Used to build the server-side search where possible, applied as a client-side filter otherwise. Max 12."},
                     "since": {"type": "string", "description": "Only messages on/after this date, ISO YYYY-MM-DD. Runs server-side."},
                     "before": {"type": "string", "description": "Only messages before this date, ISO YYYY-MM-DD. Runs server-side."},
@@ -1907,7 +1826,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "message_agent",
-            "description": "Tell another RUNNING agent something now, without waiting for a reply — the opposite of send_to_session. send_to_session blocks your turn until the target produces one response and the target can only ever answer, never speak first; message_agent queues the message and returns immediately, and it lands before the target's next round, tagged as coming from you (not from its user, so it won't be mistaken for a user instruction). Use it to steer, warn, or hand off a status update to a peer doing its own independent work ('don't also fix that, I'm on it', 'done, here's the result') — not to delegate a task and wait for the outcome (use send_to_session for that). A peer that wants to answer calls message_agent right back naming your session, so a back-and-forth is possible with neither side blocked. Limited to a few sends per turn and to sessions you own; refused with a reason (not an error) when the limit is hit or the target belongs to someone else.",
+            "description": "Tell another RUNNING agent something now, without waiting for a reply (send_to_session blocks until the target answers). The message lands before the target's next round, tagged as coming from you. Use it to steer, warn or hand a status to a peer doing independent work; to delegate a task and wait for the outcome, use send_to_session. A few sends per turn, to sessions you own.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -1940,19 +1859,7 @@ FUNCTION_TOOL_SCHEMAS = [
         "function": {
             "name": "inspect_runtime",
             "description": (
-                "Explain why a scheduled task behaved the way it did, and where a "
-                "configuration value came from. action='tasks' lists the tasks you own "
-                "with the scheduler lane each one lands in and why. action='task' with a "
-                "task_id returns the last few runs: the prompt each actually sent (which "
-                "differs from the stored prompt, because the system half is composed at "
-                "run time), whether each run succeeded, errored, was skipped or was "
-                "aborted and what aborted it, the tool calls it made including email "
-                "tools, the tool/approval policy it ran under, the circuit-breaker "
-                "verdict for its endpoint, and every occasion the scheduler decided not "
-                "to run it at all. action='config' says whether a setting's effective "
-                "value comes from an environment variable, data/settings.json, your own "
-                "preferences or the code default. Read-only. Credentials are never "
-                "returned, and the result is data about your own tasks only."
+                "Explain why a scheduled task behaved as it did and where a setting's value came from. action='tasks' lists your tasks with their scheduler lane. action='task' with task_id returns recent runs: the prompt actually sent, outcome (and what aborted it), tool calls, policy. action='config' names a setting's source (env, settings.json, preferences, code default). Read-only."
             ),
             "parameters": {
                 "type": "object",

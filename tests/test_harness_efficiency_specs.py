@@ -335,7 +335,7 @@ async def test_audit_syncs_instead_of_rebuilding(monkeypatch):
             calls["saved"] = entries
 
     async def fake_llm(*args, **kwargs):
-        return '[{"id": "1", "text": "User likes tea", "category": "preference"}]'
+        return '{"merge": [{"keep_id": "1", "drop_ids": ["2"], "text": "User likes tea"}], "drop": []}'
 
     monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm)
     monkeypatch.setattr(me, "_load_tidy_state", lambda m: {})

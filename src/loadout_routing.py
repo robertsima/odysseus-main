@@ -154,6 +154,6 @@ def routing_note(suggestions: List[Dict[str, Any]], *, may_launch: bool) -> str:
             "telling the user you lack the tools. Do it yourself when your own tools suffice."
         )
     return head + (
-        "This chat only starts agents when the user asks. Do not claim you lack the tools: say which "
-        "loadout fits and ask whether to start it (they can reply with its name)."
+        "This chat starts agents only when the user asks. Name the loadout that fits and ask whether "
+        "to start it; they can reply with its name."
     )

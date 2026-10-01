@@ -267,7 +267,7 @@ def test_generic_words_are_not_distinctive():
 ])
 def test_the_incident_launches_are_refused(tool, args):
     message = stale_objective_refusal(tool, json.dumps(args), APPROVED)
-    assert message and "doesn't match what the user just approved" in message
+    assert message and "shares nothing with what the user just approved" in message
     assert "ask_user" in message
 
 
@@ -324,8 +324,8 @@ def test_loop_refuses_the_stale_launch_once(monkeypatch):
     )
     assert calls == []  # never executed
     outputs = [e for e in events if e.get("type") == "tool_output"]
-    assert outputs and "doesn't match what the user just approved" in json.dumps(outputs[0])
-    assert "doesn't match what the user just approved" in json.dumps(sent[1])
+    assert outputs and "shares nothing with what the user just approved" in json.dumps(outputs[0])
+    assert "shares nothing with what the user just approved" in json.dumps(sent[1])
 
 
 def test_loop_lets_the_identical_call_through_the_second_time(monkeypatch):
@@ -338,10 +338,10 @@ def test_loop_lets_the_identical_call_through_the_second_time(monkeypatch):
     )
     outputs = [json.dumps(e) for e in events if e.get("type") == "tool_output"]
     assert len(outputs) == 2
-    assert "doesn't match what the user just approved" in outputs[0]
+    assert "shares nothing with what the user just approved" in outputs[0]
     # Refused once, not every time: the repeat goes on to the normal gates
     # (here the approval gate), so a genuine sub-task is delayed, never blocked.
-    assert "doesn't match what the user just approved" not in outputs[1]
+    assert "shares nothing with what the user just approved" not in outputs[1]
     assert any(e.get("type") == "ask_user" for e in events)
 
 
@@ -356,7 +356,7 @@ def test_loop_does_not_check_an_ordinary_turn(monkeypatch):
         [(None, STALE_START), ("Started.", None)],
         relevant_tools={"manage_agent_worktree"},
     )
-    assert "doesn't match what the user just approved" not in json.dumps(events)
+    assert "shares nothing with what the user just approved" not in json.dumps(events)
 
 
 # ── a mid-task correction carries a re-check ────────────────────────────────
@@ -384,8 +384,10 @@ def test_user_steer_is_followed_by_a_recheck_directive(monkeypatch, _steer_queue
     steer_idx = texts.index("[Mid-task instruction from the user] You can use other models outside of claude")
     directive = texts[steer_idx + 1]
     assert directive.startswith("[Harness directive — from the runtime, not the user]")
-    assert "correction mid-task" in directive and "outside of claude" in directive
-    assert "Re-check your objective before the next tool call" in directive
+    # The steer is the message just above; the directive does not quote it again.
+    assert "outside of claude" not in directive
+    assert "changes the objective" in directive and "next tool call" in directive
+    assert "change course now" in directive
 
 
 # ── loadout status honours name ─────────────────────────────────────────────
