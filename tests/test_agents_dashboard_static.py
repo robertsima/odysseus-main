@@ -66,8 +66,14 @@ def test_agent_seals_encode_role_separately_from_status():
     assert "/review|critic|audit|quality/" in AGENTS
     assert 'aria-hidden="true">\n    <svg class="ag-seal-mark"' in AGENTS
     assert "focusable=\"false\"" in AGENTS
-    for emblem in ("command", "scout", "review", "implement"):
-        assert f"'{emblem}'" in AGENTS
+    # Since PR #40 the role glyph is a symbol of the Agamemnon agent-marks
+    # sprite (from the Penpot mockup), picked by role and never by status.
+    assert "role === 'primary' ? 'command' : role === 'scout' ? 'scout'" in AGENTS
+    assert "role === 'reviewer' || role === 'specialist' ? 'review' : 'implement'" in AGENTS
+    assert '<use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"' in AGENTS
+    marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text(encoding="utf-8")
+    for emblem in ("command", "scout", "implement", "review"):
+        assert f'id="{emblem}"' in marks
     assert ".ag-seal-primary .ag-seal-glyph" in STYLE
     assert "agamemnon-agent-marks.svg" in AGENTS
 
