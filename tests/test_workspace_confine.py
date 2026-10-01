@@ -276,8 +276,12 @@ async def test_subprocess_cwd_is_workspace_e2e(ws, admin, monkeypatch):
     """python tool runs with cwd = workspace (OS-agnostic probe)."""
     # Unrestricted Python is available only when the chat explicitly grants
     # private-vault reads; without that grant it could open an absolute vault
-    # path outside the workspace before the file-tool policy runs.
-    monkeypatch.setattr("core.database.get_session_settings", lambda sid, **kw: {"private_vault_access": True})
+    # path outside the workspace before the file-tool policy runs. Since
+    # 2026-09-29 the shell also has its own grant (src/shell_access.py) whose
+    # default is the bubblewrap sandbox, which CI's runner does not have: this
+    # test is about the working directory, so it asks for the host shell.
+    monkeypatch.setattr("core.database.get_session_settings",
+                        lambda sid, **kw: {"private_vault_access": True, "shell_access": "host"})
     _, r = await execute_tool_block(
         _block("python", "import os; print(os.getcwd())"),
         owner="a", session_id="workspace-chat", workspace=ws, allow_private=True,
