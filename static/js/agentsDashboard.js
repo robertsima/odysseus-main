@@ -135,6 +135,12 @@ function hashUnit(value) {
   for (const ch of String(value || 'agent')) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
   return Math.abs(hash >>> 0);
 }
+function agentMarksUrl() {
+  // Resolve beside this script so deployments mounted below a URL prefix keep
+  // using the same-origin static assets instead of escaping to the domain root.
+  const script = Array.from(document.scripts).find(item => item.src.includes('agentsDashboard.js'));
+  return new URL('../branding/agamemnon-agent-marks.svg', script?.src || document.baseURI).href;
+}
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
   // Role describes the stable identity archetype, not the live status class.
@@ -147,12 +153,13 @@ function robotHtml(agent, size = '') {
       ? 'worker' : 'specialist';
   const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
   const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
+  const emblem = role === 'primary' ? 'command' : role === 'worker' ? 'implement' : 'review';
   return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" aria-hidden="true">
     <svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
       <path class="ag-seal-shield" d="M16 2.5 28 7v8.2c0 7-4.8 11.8-12 14.3C8.8 27 4 22.2 4 15.2V7z"/>
       <path class="ag-seal-helm" d="M8.5 16.8a7.5 7.5 0 0 1 15 0v2h-15z"/>
       <path class="ag-seal-brow" d="M7.5 17.8h17M16 9v8.8"/>
-      ${role === 'worker' ? '<path class="ag-seal-glyph" d="m11 21 5 2 5-2"/>' : role === 'specialist' ? '<circle class="ag-seal-glyph" cx="16" cy="22" r="1.7"/>' : '<path class="ag-seal-glyph" d="m13 21 3-2 3 2"/>'}
+      <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}" x="4" y="4" width="24" height="24" transform="scale(0.75) translate(5.33 5.33)"/>
     </svg><span class="ag-seal-unit">${unit}</span>
   </span>`;
 }
