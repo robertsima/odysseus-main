@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
   <title>Agamemnon</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M16 4L16 22L6 22Z' fill='%23e06c75'/%3E%3Cpath d='M16 8L16 22L24 22Z' fill='%23e06c75' opacity='0.6'/%3E%3Cpath d='M4 24Q10 20 16 24Q22 28 28 24' stroke='%23e06c75' stroke-width='2.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5' fill='none' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5' fill='none' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M13.3 18.5V27M18.7 18.5V27' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z' fill='%23e06c75'/%3E%3C/svg%3E">
   <link rel="manifest" href="/static/manifest.json">
   <meta name="theme-color" content="#111417">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -17,8 +17,15 @@
   <script nonce="{{CSP_NONCE}}">
   window._odysseusLoadTime = Date.now();
   (function(){
+    // Root theme identity, set before CSS paints so the Agamemnon-specific
+    // sidebar/rail layout (scoped to html[data-theme="dark"] in style.css)
+    // never flashes the wrong composition on load. Defaults to Agamemnon
+    // (DEFAULT_THEME in theme.js) and is corrected below once the saved
+    // theme name is known.
+    document.documentElement.setAttribute('data-theme', 'dark');
     try {
       var t = JSON.parse(localStorage.getItem('odysseus-theme'));
+      if (t && t.name) document.documentElement.setAttribute('data-theme', t.name);
       // An absent local preference gets the Agamemnon first-paint palette;
       // explicit saved/server themes continue through the existing sync path.
       if (!t || !t.colors) {
@@ -822,6 +829,15 @@
     <div class="sidebar-header">
       <button class="sidebar-hamburger" id="sidebar-toggle-btn" title="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="New chat">
+        <!-- Permanent brand mark — a Trojan helmet. Shape never changes with
+             the active palette (only `currentColor` does), so it stays the
+             app's identity across every theme, including custom ones. -->
+        <svg class="brand-crest-icon sidebar-brand-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <path d="M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M13.3 18.5V27M18.7 18.5V27" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+          <path d="M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z" fill="currentColor"/>
+        </svg>
         <span class="sidebar-brand-title">Agamemnon</span>
       </div>
     </div>
@@ -1076,7 +1092,7 @@
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
       <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
     <div id="welcome-screen">
-      <div class="welcome-name"><svg class="welcome-boat" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 4L16 22L6 22Z" fill="currentColor"/><path d="M16 8L16 22L24 22Z" fill="currentColor" opacity="0.6"/><path d="M4 24Q10 20 16 24Q22 28 28 24" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round"/></svg>Agamemnon</div>
+      <div class="welcome-name"><svg class="welcome-boat brand-crest-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.3 18.5V27M18.7 18.5V27" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z" fill="currentColor"/></svg>Agamemnon</div>
       <div class="welcome-sub" id="welcome-sub">New chat ready.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">

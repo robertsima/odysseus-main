@@ -11,7 +11,7 @@
 
 // Selector map: UI customization key → CSS selector(s) for its target(s).
 export const UI_VIS_MAP = {
-  'sidebar-brand':       '.sidebar-brand-title',
+  'sidebar-brand':       '.sidebar-brand-title, .sidebar-brand-icon',
   'sidebar-new-chat':    '#sidebar-new-chat-btn',
   'sidebar-search':      '#sidebar-search-btn',
   'sessions-section':   '#sessions-section',

@@ -265,6 +265,15 @@ function generateHarmonyColors(accentHex, harmonyType, mode) {
   };
 }
 
+// Root theme identity — independent of the palette CSS variables. Layout
+// rules (sidebar composition, icon-rail grouping) read this attribute
+// instead of a palette color, so a custom theme built from Agamemnon's
+// colors doesn't accidentally pick up Agamemnon's navigation layout, and a
+// recolored Agamemnon still gets its own layout.
+export function applyThemeIdentity(name) {
+  document.documentElement.setAttribute('data-theme', name || DEFAULT_THEME);
+}
+
 export function applyColors(colors) {
   const s = document.documentElement.style;
   s.setProperty('--bg', colors.bg);
@@ -346,7 +355,10 @@ function _updateFavicon(fg) {
   if (routeShape) {
     svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>${routeShape.split('__C__').join(fg)}</svg>`;
   } else {
-    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M16 4L16 22L6 22Z' fill='${fg}'/><path d='M16 8L16 22L24 22Z' fill='${fg}' opacity='0.6'/><path d='M4 24Q10 20 16 24Q22 28 28 24' stroke='${fg}' stroke-width='2.5' fill='none' stroke-linecap='round'/></svg>`;
+    // Trojan helmet — the permanent app mark (see .brand-crest-icon in
+    // index.html / login.html), recolored with `fg` but never swapped for
+    // a different shape.
+    svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><path d='M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5' fill='none' stroke='${fg}' stroke-width='2.4' stroke-linecap='round'/><path d='M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5' fill='none' stroke='${fg}' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/><path d='M13.3 18.5V27M18.7 18.5V27' stroke='${fg}' stroke-width='2.4' stroke-linecap='round'/><path d='M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z' fill='${fg}'/></svg>`;
   }
   const href = 'data:image/svg+xml,' + encodeURIComponent(svg);
   let link = document.querySelector("link[rel='icon']");
@@ -491,6 +503,7 @@ export function save(name, colors, opts) {
   obj.updated_at = Date.now();
   Storage.setJSON(LS_KEY, obj);
   writePref(THEME_PREF, obj, obj.updated_at);
+  applyThemeIdentity(name);
 }
 
 /** The account's theme, unwrapped from the serverPrefs envelope. Older builds
@@ -698,6 +711,15 @@ export function initThemeUI() {
     return opts;
   }
   function _saveFull(name, colors) { save(name, colors, _getOpts()); }
+  // Writing into the transient 'custom' slot is a storage-bucket choice, not
+  // a theme switch — unlike a swatch click or "Save as", it must not stomp
+  // the root identity attribute (e.g. drop Agamemnon's layout) just because
+  // save() always re-syncs identity to whatever `name` it was given.
+  function _saveFullKeepIdentity(name, colors) {
+    const _identity = document.documentElement.getAttribute('data-theme');
+    save(name, colors, _getOpts());
+    applyThemeIdentity(_identity);
+  }
 
   // Click handlers for all swatches (preset + custom) across both grids
   const allGrids = [grid, userGrid].filter(Boolean);
@@ -761,6 +783,7 @@ export function initThemeUI() {
   // Init color pickers from current theme and apply syntax colors
   const currentColors = saved ? saved.colors : THEMES[DEFAULT_THEME];
   applyColors(currentColors);
+  applyThemeIdentity(saved ? saved.name : DEFAULT_THEME);
   syncPickers(currentColors);
 
   // Reference colors for per-picker reset (the theme you started from)
@@ -879,7 +902,7 @@ export function initThemeUI() {
         });
         _saveFull(_activeName, colors);
       } else {
-        _saveFull('custom', colors);
+        _saveFullKeepIdentity('custom', colors);
       }
       _flashAutosaved();
       grid.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'));
@@ -942,6 +965,7 @@ export function initThemeUI() {
       Storage.remove(LS_KEY);
       const colors = THEMES[DEFAULT_THEME];
       applyColors(colors);
+      applyThemeIdentity(DEFAULT_THEME);
       syncPickers(colors);
       applyFontDensity(DEFAULT_FONT, DEFAULT_DENSITY);
       applyBgPattern('none');
@@ -1027,7 +1051,7 @@ export function initThemeUI() {
         });
         _saveFull(_activeName, base);
       } else {
-        _saveFull('custom', base);
+        _saveFullKeepIdentity('custom', base);
       }
       _flashAutosaved();
       grid.querySelectorAll('.theme-swatch').forEach(s => s.classList.remove('active'));
@@ -1044,7 +1068,7 @@ export function initThemeUI() {
       const base = readCurrentColors();
       delete base.advanced;
       applyColors(base);
-      _saveFull('custom', base);
+      _saveFullKeepIdentity('custom', base);
       syncAdvancedPickers(base);
       syncResetButtons();
     });
