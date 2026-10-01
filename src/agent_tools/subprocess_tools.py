@@ -139,7 +139,8 @@ async def _ensure_tmux_session(name: str, cwd: str, env: Optional[dict],
 
         pane = shell_sandbox.build_argv(["/bin/bash", "--noprofile", "--norc"],
                                         workspace=sandbox_workspace, env=env, new_session=False,
-                                        package_cache=True)
+                                        package_cache=True,
+                                        extra_ro_binds=_attachment_binds())
     else:
         # The full server shell: the same toolchain choice as the sandbox
         # (src/toolchains.py), from the folder it starts in.
@@ -436,6 +437,22 @@ async def _run_subprocess_streaming(
         timed_out,
     )
 
+def _attachment_binds() -> dict:
+    """Read-only binds of the files attached to this chat and its parents.
+
+    A worker's sandbox shows only its workspace, so on 2026-10-01 it could not
+    even unzip the Penpot export the user had attached to the chat that started
+    it. Only the lineage's own files are bound (src/attachment_access.py), at
+    the path the model was given, never their directory.
+    """
+    try:
+        from src.attachment_access import sandbox_read_only_binds
+
+        return sandbox_read_only_binds()
+    except Exception:  # noqa: BLE001 - no attachments beats no shell
+        return {}
+
+
 def _sandbox_for(ctx) -> Tuple[Optional[str], Optional[dict]]:
     """``(sandbox_workspace, refusal)`` for a bash/python call.
 
@@ -556,7 +573,8 @@ class BashTool:
 
                 proc = await asyncio.create_subprocess_exec(
                     *shell_sandbox.build_argv(["/bin/bash", "-c", content], workspace=sandbox_ws,
-                                              env=_subproc_env, package_cache=True),
+                                              env=_subproc_env, package_cache=True,
+                                              extra_ro_binds=_attachment_binds()),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                     cwd=sandbox_ws,
@@ -650,7 +668,8 @@ class PythonTool:
             if not os.path.realpath(argv[0]).startswith("/usr/"):
                 argv[0] = "python3"
             argv = shell_sandbox.build_argv(argv, workspace=sandbox_ws, env=_subproc_env,
-                                            package_cache=True)
+                                            package_cache=True,
+                                            extra_ro_binds=_attachment_binds())
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdout=asyncio.subprocess.PIPE,

@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 from .subprocess_tools import BashTool, PythonTool
 from .web_tools import WebSearchTool, WebFetchTool
 from .filesystem_tools import ReadFileTool, WriteFileTool, EditFileTool, ApplyPatchTool, LsTool, GlobTool, GrepTool, GetWorkspaceTool
+from .preview_tools import PreviewFileTool
 from .coding_tools import TodoWriteTool
 from .claude_code_tools import ClaudeCodeTool
 from .delegation_tools import DelegationTool
@@ -58,6 +59,7 @@ TOOL_HANDLERS = {
     "ls": LsTool().execute,
     "glob": GlobTool().execute,
     "grep": GrepTool().execute,
+    "preview_file": PreviewFileTool().execute,
     "create_document": CreateDocumentTool().execute,
     "update_document": UpdateDocumentTool().execute,
     "edit_document": EditDocumentTool().execute,

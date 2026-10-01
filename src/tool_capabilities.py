@@ -98,7 +98,7 @@ _register(
     result_integrity=ResultIntegrity.EXTERNAL_UNTRUSTED,
 )
 _register(
-    {"get_workspace", "glob", "grep", "ls", "read_file"},
+    {"get_workspace", "glob", "grep", "ls", "preview_file", "read_file"},
     ToolEffect.READ_WORKSPACE,
     result_integrity=ResultIntegrity.WORKSPACE_UNTRUSTED,
 )

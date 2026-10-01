@@ -130,9 +130,16 @@ def _is_handback(text: str) -> bool:
     return bool(re.search(r"\[Worker [^\]]*\]\s*\nTask:", text or ""))
 
 
+# Since 2026-10-01 a worker's task ends with the person's request quoted
+# verbatim (loadout_tools.person_request_for_worker), which carries the ADMIN's
+# marker; classify on the brief alone.
+PERSON_REQUEST_RE = re.compile(r"\n\nThe person's request, in their own words.*?(?=\n\nResult:|\Z)", re.S)
+
+
 def _classify(body: Dict[str, Any]) -> str:
     messages = body.get("messages") or []
-    users = [_text(m.get("content")) for m in messages if m.get("role") == "user"]
+    users = [PERSON_REQUEST_RE.sub("", _text(m.get("content")))
+             for m in messages if m.get("role") == "user"]
     if not body.get("tools"):
         return "aux"
     if any(_is_handback(u) for u in users) and any(ADMIN_MARKER in u for u in users):

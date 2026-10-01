@@ -265,6 +265,17 @@ def _same_name_vault_warning(path: str) -> str:
     )
 
 
+def _worktree_refusal(tool: str, ctx: dict, paths) -> Optional[dict]:
+    """Refuse a write into a folder a live worker (not this session) is working in.
+    See src/worktree_writers.py; fails open, so a broken lookup never blocks a write."""
+    try:
+        from src import worktree_writers
+        msg = worktree_writers.conflict((ctx or {}).get("session_id"), (ctx or {}).get("owner"), paths)
+    except Exception:
+        return None
+    return {"error": f"{tool}: {msg}", "exit_code": 1} if msg else None
+
+
 class EditFileTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.tool_execution import _resolve_tool_path, _resolve_search_root, _truncate
@@ -286,6 +297,8 @@ class EditFileTool:
             return {"error": f"edit_file: {e}", "exit_code": 1}
         except PermissionError as e:
             return {"error": f"edit_file: {e}", "exit_code": 1}
+        if (refused := _worktree_refusal("edit_file", ctx, [path])):
+            return refused
         if old == "":
             return {"error": "edit_file: old_string required (use write_file to create a file)", "exit_code": 1}
         if old == new:
@@ -378,9 +391,17 @@ class ReadFileTool:
                 pass
         try:
             try:
-                path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx))
+                # Reading is the one operation a chat's attachments (and its
+                # parents') are open to; the write tools never pass this.
+                path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx),
+                                          allow_attachment_read=True)
             except TypeError:
-                path = _resolve_tool_path(raw_path)
+                # A resolver that predates the attachment flag keeps its own
+                # private-grant handling.
+                try:
+                    path = _resolve_tool_path(raw_path, allow_private=context_allows_private(ctx))
+                except TypeError:
+                    path = _resolve_tool_path(raw_path)
         except ValueError as e:
             return {"error": f"read_file: {e}", "exit_code": 1}
         try:
@@ -448,6 +469,8 @@ class WriteFileTool:
             return {"error": f"write_file: {e}", "exit_code": 1}
         except PermissionError as e:
             return {"error": f"write_file: {e}", "exit_code": 1}
+        if (refused := _worktree_refusal("write_file", ctx, [path])):
+            return refused
         try:
             def _write():
                 old = ""
@@ -527,6 +550,10 @@ class ApplyPatchTool:
                         old = f.read()
                     new = _apply_patch_hunks(old, op["hunks"], op["path"])
                 prepared.append((kind, path, old, new))
+
+            # Every file the patch touches, before any is changed.
+            if (refused := _worktree_refusal("apply_patch", ctx, [p for _k, p, _o, _n in prepared])):
+                return refused
 
             diffs = []
             for kind, path, old, new in prepared:

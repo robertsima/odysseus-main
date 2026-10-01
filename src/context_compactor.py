@@ -1314,3 +1314,70 @@ def _ledger_collapse(body: str, session_id, resolved: set, store) -> tuple:
     entry = f"{framing}{ledger_entry(inner, refs)}\n{closing}" if guard else ledger_entry(inner, refs)
     # Don't churn the cache boundary for a result that was mostly facts already.
     return (entry, False) if len(entry) < len(body) else (None, False)
+
+
+# Images that tools returned (preview_file, Penpot render_preview, browser
+# screenshots) ride in follow-up user messages marked source "tool_images" (see
+# agent_loop._append_tool_results). Each is ~1-2k tokens and every later request
+# resends it, so only the newest few stay as pixels.
+TOOL_IMAGES_SOURCE = "tool_images"
+TOOL_IMAGES_KEEP = 2
+TOOL_IMAGES_SLACK = 2
+
+
+def _live_tool_image_messages(messages: List[Dict]) -> List[Dict]:
+    live = []
+    for msg in messages or []:
+        if (
+            isinstance(msg, dict)
+            and msg.get("role") == "user"
+            and (msg.get("metadata") or {}).get("source") == TOOL_IMAGES_SOURCE
+            and isinstance(msg.get("content"), list)
+            and any(isinstance(b, dict) and b.get("type") == "image_url" for b in msg["content"])
+        ):
+            live.append(msg)
+    return live
+
+
+def prune_tool_images(
+    messages: List[Dict],
+    *,
+    keep: int = TOOL_IMAGES_KEEP,
+    slack: int = TOOL_IMAGES_SLACK,
+) -> int:
+    """Replace older tool-image messages with a one-line text placeholder, in
+    batches. Mutates `messages` in place; returns how many it rewrote.
+
+    Batched for the same reason as the reasoning-item window and the execution
+    ledger: rewriting the oldest image message every round would move the
+    provider's cached-prefix boundary back to it every round. Nothing happens
+    until more than `keep + slack` image messages carry pixels; then every one
+    but the newest `keep` is rewritten at once. Each message is therefore
+    rewritten at most once (a placeholder has no image part, so it is never a
+    candidate again), the prefix breaks once per `slack + 1` image rounds, and
+    at most `keep + slack` image messages are in flight at the peak.
+    """
+    keep = max(1, int(keep))
+    live = _live_tool_image_messages(messages)
+    if len(live) <= keep + max(1, int(slack)):
+        return 0
+    rewritten = 0
+    for msg in live[:-keep]:
+        labels = []
+        for block in msg["content"]:
+            if isinstance(block, dict) and block.get("type") == "text":
+                labels.extend(
+                    line.strip() for line in str(block.get("text") or "").splitlines()
+                    if line.strip()[:2].rstrip(".").isdigit()
+                )
+        count = sum(1 for b in msg["content"] if isinstance(b, dict) and b.get("type") == "image_url")
+        detail = f" ({'; '.join(labels)})" if labels else ""
+        msg["content"] = [{
+            "type": "text",
+            "text": (
+                f"[Tool images — {count} image(s) from an earlier round{detail} were dropped "
+                "to save context. Call the tool again to look at it.]"
+            ),
+        }]
+        rewritten += 1
+    return rewritten

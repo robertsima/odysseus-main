@@ -391,6 +391,7 @@ _API_AGENT_RULES = """\
 - For reversible steps that follow from the request, go ahead without asking. Ask first only before something destructive, something that reaches outside this app (sending, publishing, paying), or work beyond what was asked.
 - If a tool you need is not attached, call `discover_tools` (when you have it) with what you need before telling the user it is unavailable: tools are attached per turn, so a missing one is usually one call away.
 - When a tool fails, read the error and fix the call or try another route; report the blocker only once those run out.
+- Make independent tool calls together in one round (several reads, searches or inspections at once); sequence calls only when one needs the result of an earlier one.
 - The request is the deliverable. Do not quietly narrow it or add work nobody asked for; offer extras as suggestions.
 - Before saying something is done, check it the way the user would find out: run the test or build, or read the result back, and say what you ran. If you could not check something, say that plainly.
 - Before ending your turn, read your last paragraph. If it is a plan or a promise ("I'll...", "Next I will...") for work you can do now, do that work with tool calls instead. When only someone else can unblock you, end with one line per need: `Needs user: <what>`.
@@ -485,7 +486,7 @@ _DOMAIN_TOOL_MAP = {
     "notes_calendar_tasks": {"manage_notes", "manage_calendar", "manage_tasks"},
     "ui": {"ui_control"},
     "sessions": {"create_session", "list_sessions", "manage_session", "send_to_session", "search_chats"},
-    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs"},
+    "files": {"bash", "python", "read_file", "write_file", "edit_file", "apply_patch", "todowrite", "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "preview_file"},
     "settings": {"manage_settings", "manage_endpoints", "manage_mcp", "manage_webhooks", "manage_tokens", "app_api"},
     "contacts": {"resolve_contact", "manage_contact"},
     "integrations": {"api_call"},
@@ -713,10 +714,21 @@ _DELEGATION_LAUNCH_TOOLS = frozenset({
 # in a fresh worktree (2026-09-29); Anthropic's research system and Codex both
 # name the same brief fields (goal, done-when, starting points, boundaries,
 # output), and a worker's own report is a claim until its evidence is read.
+#
+# 2026-10-01, the "Agamemnon" theme: the user asked for a layout change, not a
+# colour scheme. The orchestrator's briefs added limits the user never set
+# ("targeted repair only", "no heavy layout redesign"), cut the work into nine
+# slivers (five of them read-only reviewers), re-read and edited what the
+# workers were working on, started fresh workers when one handed back partial,
+# and judged the logo by a string test that accepted a headphones glyph.
 _DELEGATION_RULES = """\
 ## Delegating to workers
-- A worker starts with only the brief you write; it has not seen this chat. Give it the goal and why it matters, the done-when check (the test, command or visible result that proves it), the starting points (repository, branch or worktree, files, what you already found or ruled out), what is out of scope, and what to report back.
-- Delegate work that is long or separable; small sequential edits are faster done yourself. Keep one writer per repository or worktree at a time, and run parallel workers for independent reading, research or review.
+- A worker starts with only the brief you write; it has not seen this chat. Give it the goal and why it matters, the done-when check, the starting points (repository, branch or worktree, files, what you already found or ruled out), and what to report back.
+- The brief's scope is the person's whole request. Do not add limits they did not set ("targeted only", "no redesign", "minimal"); if you think one is needed, say why in the brief and tell the person.
+- Give one worker the whole user-visible outcome, a feature end to end, rather than slicing it into micro-tasks. Split only along parts that are truly independent, and keep one writer per repository or worktree.
+- Done-when is what the person would check. For visual or UI work that is the rendered result compared with the reference they gave, not only a string test.
+- While a worker runs, do not redo its investigation or edit the files or worktree it is working in. Wait for it (`manage_agent_loadout` status with `wait_seconds`) or do separate work.
+- When a worker hands back partial or blocked, resume that same worker (`send_to_session`, mode agent) with what it needs before starting a new one.
 - A worker's report is its claim: check the evidence it names (the diff, the test output, the pull request) before telling the user the work is done."""
 
 # Each tool section is keyed by tool name(s) it covers.
@@ -1098,6 +1110,9 @@ _ADMIN_SCHEMA_NAMES = frozenset([
     "ask_teacher", "list_models", "search_chats",
 ])
 _TOOL_SELECTION_TIMEOUT_SECONDS = 1.5
+# How many recent assistant rounds keep their encrypted Responses reasoning
+# items (re-ported from 8cca5a1e, lost in the 2026-09-18 upstream sync).
+_MAX_REASONING_REPLAY_ROUNDS = 3
 
 
 def _is_ollama_openai_compat_url(endpoint_url: str) -> bool:
@@ -1397,6 +1412,7 @@ def _steer_recheck_directive(steer_text: str) -> str:
 
 _CONTEXT_ENVELOPE_PREFIXES = (
     "UNTRUSTED SOURCE DATA", "[Context —", "[Tool execution results]", "[Harness directive —",
+    "[Tool images —",
 )
 
 
@@ -1441,8 +1457,10 @@ def _latest_user_message(messages: List[Dict]) -> Optional[Dict]:
 
 
 # User-role messages the harness writes into a chat on someone else's behalf:
-# a worker's hand-back, a publish decision. They are not the person's request.
-HARNESS_USER_SOURCES = frozenset({"worker", "publish_decision"})
+# a worker's hand-back, a publish decision, the images a tool returned (the
+# follow-up message `_append_tool_results` adds so the model can SEE them).
+# None of them is the person's request.
+HARNESS_USER_SOURCES = frozenset({"worker", "publish_decision", "tool_images"})
 
 
 def _latest_user_is_harness_note(messages: List[Dict]) -> bool:
@@ -1908,7 +1926,7 @@ def _workspace_coding_rules(workspace: Optional[str]) -> str:
         "- For code repair tasks, find the canonical helper, parser, validator, service, or boundary function responsible for the behavior and patch it there when possible. Hidden tests often call helpers directly.\n"
         "- If output is huge, use `rg`, `grep`, `head`, `tail`, focused `sed -n`, or scripts that summarize only relevant parts. Do not flood the context with full logs or full files.\n"
         "- If a command fails, use the failure output to choose the next diagnostic or patch. Do not silently stop or claim success.\n"
-        "- After code changes, run the smallest relevant verification command you can infer from the repo (for example a focused test, `py_compile`, `node --check`, lint, or build). If verification cannot run, say exactly why.\n"
+        "- After code changes, verify them the way the user would find out: run the relevant tests or build (a focused test, `py_compile`, `node --check`, lint, build). For visual changes (pages, styles, icons, SVG), also render what you changed with `preview_file` and compare it with the reference you were given; a passing string test does not show what it looks like. If verification cannot run, say exactly why.\n"
         "- Keep going until the requested change is actually made and checked, or state the concrete blocker."
         # From 2026-09-30: an app looked broken on the user's PC after an agent
         # PR bumped Expo; the agent checked the source on this server for an
@@ -4616,6 +4634,30 @@ _LEDGER_PRESSURE_RATIO = 0.6
 _LEDGER_REWIND_RATIO = 0.85
 
 
+_TOOL_IMAGE_MODEL_RE = re.compile(
+    r"(^|/)(gpt-[5-9]|o[3-9](-|$)|codex|chatgpt|grok-[4-9]|claude-|gemini)", re.IGNORECASE
+)
+
+
+def _model_takes_tool_images(model: str, endpoint_url: str = "") -> bool:
+    """Whether to send tool images to this model as pixels.
+
+    chat_helpers.model_supports_vision is the notion the attachment path uses,
+    but its name list stops at gpt-4.x, so gpt-5/gpt-6 (the ChatGPT/Codex route)
+    read as text-only. Those, o-series, Grok 4+, Claude and Gemini all accept
+    images; the same err-toward-True policy applies (a wrong "no" hides a render
+    from a model that could have used it).
+    """
+    if _TOOL_IMAGE_MODEL_RE.search(model or ""):
+        return True
+    try:
+        from src.chat_helpers import model_supports_vision
+
+        return bool(model_supports_vision(model or "", endpoint_url or ""))
+    except Exception:
+        return True
+
+
 def _ledger_budget_for_round(route_budget: Optional[int], context_length: Optional[int]) -> int:
     """The budget the ledger's pressure gate measures against: the route's
     effective input budget, else its context window, else 0 (no gate)."""
@@ -4641,6 +4683,10 @@ def _append_tool_results(
     tool_result_records: Optional[list] = None,
     ledger_budget: int = 0,
     session_id: Optional[str] = None,
+    responses_phase: str = "",
+    round_reasoning_items: Optional[list] = None,
+    reasoning_replay_rounds: int = 0,
+    accept_tool_images: bool = True,
 ):
     """Append tool execution results back into the message history for the next LLM round.
 
@@ -4678,6 +4724,12 @@ def _append_tool_results(
         assistant_msg["content"] = round_response if round_response.strip() else None
         if round_reasoning:
             assistant_msg["reasoning_content"] = round_reasoning
+        if responses_phase and assistant_msg["content"]:
+            # Responses `phase` of the prose that preceded these calls
+            # (commentary / final_answer); build_responses_input replays it.
+            assistant_msg["responses_phase"] = responses_phase
+        if round_reasoning_items:
+            assistant_msg["reasoning_items"] = list(round_reasoning_items)
         assistant_msg["tool_calls"] = [
             {
                 "id": tc.get("id", f"call_{round_num}_{j}"),
@@ -4737,6 +4789,8 @@ def _append_tool_results(
             msg = {"role": "assistant", "content": round_response}
             if round_reasoning:
                 msg["reasoning_content"] = round_reasoning
+            if round_reasoning_items:
+                msg["reasoning_items"] = list(round_reasoning_items)
             messages.append(msg)
         # Tool output (shell/python stdout, file reads, fetched pages, email
         # bodies, MCP results) is sourced from outside the server. Wrap it as
@@ -4759,6 +4813,54 @@ def _append_tool_results(
                 arm_tool_gate=arm_tool_gate,
             )
         )
+
+    # Images the tools returned. Every route's tool message is text-only, so a
+    # result's `images` (Penpot render_preview, browser screenshots, preview_file)
+    # reached the UI and never the model: on 2026-10-01 a designer told never to
+    # claim visual verification without viewing a render could not view one, and
+    # an engineer shipped a headphones glyph as a "helmet" logo. Like Codex CLI's
+    # view_image, they go in ONE user message after the round's tool messages. It
+    # is harness-sourced (HARNESS_USER_SOURCES, untrusted) and lives only in this
+    # in-turn list, which is never saved to chat history, so no base64 is
+    # persisted. Older ones are pruned in batches (prune_tool_images) so the
+    # cached prefix is rewritten once per few image rounds, not every round.
+    # This sits before the ledger's pressure gate below, which can `return`.
+    try:
+        from src.agent_tools.preview_tools import model_image_followup
+        from src.context_compactor import prune_tool_images
+
+        _image_records = []
+        for _j, _rec in enumerate(tool_result_records):
+            if not isinstance(_rec, dict):
+                continue
+            _rec = dict(_rec)
+            if used_native and _j < len(native_tool_calls) and native_tool_calls[_j].get("id"):
+                _rec["call_id"] = native_tool_calls[_j]["id"]
+            _image_records.append(_rec)
+        _image_msg = model_image_followup(_image_records, accept_images=accept_tool_images)
+        if _image_msg is not None:
+            messages.append(_image_msg)
+        prune_tool_images(messages)
+    except Exception as _image_exc:
+        logger.warning("[agent] tool images skipped: %s", _image_exc)
+
+    # Encrypted Responses reasoning is the thread that keeps a multi-round turn
+    # coherent (2026-10-01 logs: 37-142 output tokens per round, one call per
+    # round, because the loop dropped the items and the model re-planned from
+    # the transcript each time). Keep a sliding window of recent rounds, not
+    # every round of a 30-round run. Pruning is batched: popping one item per
+    # round edits an already-sent assistant turn mid-input and moves the
+    # provider's cache boundary every round (cached=16896 flat across 28 rounds
+    # on 2026-09-10). The window may overrun by a slack of the same size, then
+    # is cut back in one go, so the prefix breaks once per ~window rounds.
+    _reasoning_turns = [
+        _m for _m in messages
+        if _m.get("role") == "assistant" and _m.get("reasoning_items")
+    ]
+    _replay_window = max(1, int(reasoning_replay_rounds or _MAX_REASONING_REPLAY_ROUNDS))
+    if len(_reasoning_turns) > _replay_window + max(4, _replay_window):
+        for _m in _reasoning_turns[:-_replay_window]:
+            _m.pop("reasoning_items", None)
 
     # Execution ledger, re-ported from the fork (lost in the 2026-09-18 upstream
     # sync, which left `recall_tool_output` offered with nothing to recall).
@@ -7954,6 +8056,8 @@ async def stream_agent_loop(
     for round_num in itertools.count(1):
         round_response = ""
         round_reasoning = ""  # reasoning_content deltas (DeepSeek-thinking, vLLM --reasoning-parser)
+        round_responses_phase = ""  # Responses message `phase` riding on the tool_calls event
+        round_reasoning_items = []  # opaque Responses reasoning items, replayed next round
         native_tool_calls = []  # populated if model uses function calling
 
         # A steer lands here, between rounds, so a correction or a peer agent's
@@ -8318,6 +8422,11 @@ async def stream_agent_loop(
                         if _apply_candidate_compaction(candidate_index):
                             yield f'data: {json.dumps({"type": "compacted", "context_length": _last_route_context_length})}\n\n'
                         native_tool_calls = data.get("calls", [])
+                        round_responses_phase = str(data.get("phase") or "")
+                    elif data.get("type") == "reasoning_items":
+                        # Opaque encrypted thinking from the Responses API; carried
+                        # on the assistant turn so the next round can hand it back.
+                        round_reasoning_items = data.get("items") or []
                         logger.info(f"Agent round {round_num}: received {len(native_tool_calls)} native tool call(s)")
                     elif data.get("type") == "usage":
                         u = data.get("data", {})
@@ -9851,11 +9960,19 @@ async def stream_agent_loop(
         _append_tool_results(messages, round_response, converted_calls,
                              tool_results, tool_result_texts, used_native, round_num,
                              round_reasoning=round_reasoning,
+                             responses_phase=round_responses_phase,
+                             round_reasoning_items=round_reasoning_items,
                              tool_result_records=tool_result_records,
                              ledger_budget=_ledger_budget_for_round(
                                  _ledger_route.get("budget"), _last_route_context_length or context_length,
                              ),
-                             session_id=session_id)
+                             session_id=session_id,
+                             accept_tool_images=(
+                                 await asyncio.to_thread(_model_takes_tool_images, model, endpoint_url)
+                                 if any(isinstance(_r.get("result"), dict) and _r["result"].get("images")
+                                        for _r in tool_result_records)
+                                 else True
+                             ))
 
         # Duplicate-call correction, delivered after the round's tool results so
         # it reads as a reply to the repeat it is about. Capped by

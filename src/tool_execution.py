@@ -684,7 +684,67 @@ def _tool_path_roots() -> list[str]:
     return out
 
 
-def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
+def _resolve_tool_path(raw_path: str, allow_private: bool = False,
+                       allow_attachment_read: bool = False) -> str:
+    """Resolve and confine a model-supplied path (see _resolve_tool_path_unguarded).
+
+    ``allow_attachment_read`` is passed only by read paths (read_file, and
+    _resolve_search_root for grep/glob/ls). It lets a file attached to this
+    chat, or to a chat that started this worker, resolve from anywhere
+    (src/attachment_access.py). Write paths leave it False, and then a path that
+    IS one of those attachments is refused whichever root it came through: an
+    upload is the user's original and no tool may overwrite or delete it.
+    """
+    try:
+        resolved = _resolve_tool_path_unguarded(
+            raw_path, allow_private=allow_private, allow_attachment_read=allow_attachment_read)
+    except ValueError as err:
+        raise ValueError(_with_attachment_hint(raw_path, str(err))) from None
+    if not allow_attachment_read:
+        from src.attachment_access import is_lineage_attachment
+
+        if is_lineage_attachment(resolved):
+            raise ValueError(
+                f"path '{raw_path}' is an attachment of this chat and is read-only: "
+                "read it, or copy it into the workspace and edit the copy"
+            )
+    return resolved
+
+
+def _with_attachment_hint(raw_path: str, message: str) -> str:
+    """Make the refusal of an upload path say why, and what IS readable.
+
+    On 2026-10-01 a worker saw only "outside the workspace and outside the
+    personal documents directory" for the user's attached file and concluded
+    the file was unreachable. A path in the upload store that is not one of this
+    chat lineage's attachments gets a plain statement of that, and the lineage's
+    own attachments are named so it can use them. Other chats' uploads are never
+    listed.
+    """
+    if "is outside the" not in message:
+        return message
+    try:
+        from src.attachment_access import current_attachment_paths
+        from src.constants import UPLOAD_DIR
+
+        resolved = os.path.realpath(os.path.expanduser(str(raw_path).strip()))
+        if not _path_within(resolved, os.path.realpath(UPLOAD_DIR)):
+            return message
+        paths = sorted(current_attachment_paths())
+    except Exception:  # noqa: BLE001
+        return message
+    if any(os.path.normcase(p) == os.path.normcase(resolved) for p in paths):
+        # Reached through a write tool: the file is the chat's own attachment,
+        # so say it is read-only rather than that it is not an attachment.
+        return message + " [this is an attachment of this chat: attachments are read-only; read it with read_file]"
+    note = " [not an attachment of this chat or the chat that started it]"
+    if paths:
+        note += "; readable attachments: " + ", ".join(paths[:10])
+    return message + note
+
+
+def _resolve_tool_path_unguarded(raw_path: str, allow_private: bool = False,
+                                 allow_attachment_read: bool = False) -> str:
     """Resolve and confine a model-supplied path.
 
     Order of checks:
@@ -727,7 +787,14 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
             # turn revoked everything else. Keep it reachable in both modes.
             # The sensitive/private deny-list below still applies, so a
             # directory the user labelled private stays closed either way.
-            return _resolve_personal_docs_path(raw_path, allow_private=allow_private)
+            try:
+                return _resolve_personal_docs_path(raw_path, allow_private=allow_private)
+            except ValueError as docs_error:
+                if allow_attachment_read and "is outside the" in str(docs_error):
+                    attachment = _resolve_lineage_attachment_path(raw_path, allow_private=allow_private)
+                    if attachment is not None:
+                        return attachment
+                raise
     if raw_path is None or not str(raw_path).strip():
         raise ValueError("path is required")
     expanded = os.path.expanduser(str(raw_path).strip())
@@ -754,6 +821,12 @@ def _resolve_tool_path(raw_path: str, allow_private: bool = False) -> str:
             continue
         if common == root:
             return resolved
+    # A worker with no workspace (a Penpot designer, a reviewer) reads the
+    # chat's attachments the same way one bound to a worktree does.
+    if allow_attachment_read:
+        attachment = _resolve_lineage_attachment_path(raw_path, allow_private=allow_private)
+        if attachment is not None:
+            return attachment
     raise ValueError(
         f"path '{raw_path}' is outside the allowed roots" + _personal_docs_suggestion(raw_path)
     )
@@ -782,6 +855,38 @@ def _resolve_workspace_worktree_path(workspace: str, raw_path: str,
     except Exception:  # noqa: BLE001 - no ownership information: not reachable
         return None
     if worktree is None:
+        return None
+    if _is_sensitive_path(resolved, allow_private=allow_private):
+        raise ValueError(
+            f"path '{raw_path}' is inside a sensitive directory "
+            f"(e.g. .ssh, .gnupg) or matches a sensitive filename"
+        )
+    if _is_app_state_path(resolved):
+        raise ValueError(
+            f"path '{raw_path}' is inside the application state directory"
+        )
+    if _is_hardlinked_regular_file(resolved):
+        raise ValueError(f"path '{raw_path}' is a hard-linked file")
+    return resolved
+
+
+def _resolve_lineage_attachment_path(raw_path: str, allow_private: bool = False) -> Optional[str]:
+    """Resolve an absolute path that is exactly a file attached to this chat or
+    to a chat that started it (a worker's parents, any depth), else None.
+
+    Exact files only: never the upload directory around them, so a worker
+    cannot list or open another chat's upload. The same deny lists as every
+    other root apply; a denial raises rather than returning None.
+    """
+    if raw_path is None or not str(raw_path).strip():
+        return None
+    expanded = os.path.expanduser(str(raw_path).strip())
+    if not os.path.isabs(expanded):
+        return None
+    resolved = os.path.realpath(expanded)
+    from src.attachment_access import is_lineage_attachment
+
+    if not is_lineage_attachment(resolved):
         return None
     if _is_sensitive_path(resolved, allow_private=allow_private):
         raise ValueError(
@@ -988,14 +1093,14 @@ def _resolve_search_root(raw_path: str, allow_private: bool = False) -> str:
         # bare ls listed whatever the workspace was bound to.
         if not raw:
             return _resolve_tool_path_in_workspace(ws, ws, allow_private=allow_private)
-        return _resolve_tool_path(raw, allow_private=allow_private)
+        return _resolve_tool_path(raw, allow_private=allow_private, allow_attachment_read=True)
     if not raw:
         roots = _tool_path_roots()
         default_root = os.path.realpath(AGENT_WORKSPACE_DIR)
         if default_root in roots and not _is_denied_tool_path(default_root):
             return default_root
         raise ValueError("default agent workspace is not a safe readable data subdirectory")
-    return _resolve_tool_path(raw, allow_private=allow_private)
+    return _resolve_tool_path(raw, allow_private=allow_private, allow_attachment_read=True)
 
 logger = logging.getLogger(__name__)
 
@@ -1543,6 +1648,11 @@ async def execute_tool_block(
             )
 
     token = _active_workspace.set(workspace or None)
+    # Lets the path resolvers and the shell sandbox find this chat's attachments
+    # (and its parents') without every tool threading the session through.
+    from src import attachment_access
+
+    attachment_token = attachment_access.bind(session_id, owner)
     try:
         output = await _execute_tool_block_with_backstop(
             block,
@@ -1578,6 +1688,7 @@ async def execute_tool_block(
             )
         return output
     finally:
+        attachment_access.unbind(attachment_token)
         _active_workspace.reset(token)
 
 
@@ -2052,7 +2163,7 @@ async def _execute_tool_block_impl(
             owner=owner,
             allow_private=allow_private,
         )
-    elif tool in ("grep", "glob", "ls", "get_workspace"):
+    elif tool in ("grep", "glob", "ls", "get_workspace", "preview_file"):
         # Code-navigation tools — no MCP server; run the direct implementation.
         first_line = _command_preview(content)
         desc = f"{tool}: {first_line}"

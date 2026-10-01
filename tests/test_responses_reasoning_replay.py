@@ -18,9 +18,6 @@ from src.llm_core import (
     _sanitize_llm_messages,
 )
 
-_REPORT_BACKLOG = pytest.mark.skip(
-    reason="Re-port backlog: uses fork-only internals replaced by upstream's agent core (website/upstream-sync-2026-09-18.md)"
-)
 
 
 REASONING_ITEM = {
@@ -143,7 +140,6 @@ def _run_rounds(n):
     return messages
 
 
-@_REPORT_BACKLOG
 def test_replay_window_prunes_in_batches_not_every_round():
     """Every pop edits an already-sent assistant turn in the middle of the
     input, which moved the provider's cache boundary on every round
@@ -159,3 +155,44 @@ def test_replay_window_prunes_in_batches_not_every_round():
     kept = [m for m in _run_rounds(window + slack + 1) if m.get("reasoning_items")]
     assert len(kept) == window, "opaque payload must not accumulate for a whole 30-round turn"
     assert kept[-1]["reasoning_items"][0]["id"] == f"rs_{window + slack}"
+
+
+def test_loop_attaches_items_phase_and_replays_in_order():
+    """Re-ported 2026-10-01: stream -> round_reasoning_items -> assistant
+    message -> build_responses_input as reasoning, phase message, call."""
+    from src.agent_loop import _append_tool_results
+
+    messages = []
+    _append_tool_results(
+        messages, "checking", [{"id": "c1", "name": "ls", "arguments": "{}"}],
+        ["r"], ["r"], True, 1,
+        responses_phase="commentary", round_reasoning_items=[REASONING_ITEM],
+    )
+    assert messages[0]["reasoning_items"] == [REASONING_ITEM]
+    items = build_responses_input(messages)
+    assert [i.get("type") for i in items] == ["reasoning", "message", "function_call", "function_call_output"]
+    assert items[1]["phase"] == "commentary"
+
+
+def test_text_only_round_also_keeps_items():
+    from src.agent_loop import _append_tool_results
+
+    messages = []
+    _append_tool_results(messages, "note", [], ["out"], ["out"], False, 1,
+                         round_reasoning_items=[REASONING_ITEM])
+    assert messages[0]["reasoning_items"] == [REASONING_ITEM]
+
+
+async def test_stream_captures_encrypted_reasoning_items(monkeypatch):
+    from tests.test_chatgpt_responses_tools import _collect
+
+    item = {"type": "reasoning", "id": "rs_1", "encrypted_content": "abc"}
+    bare = {"type": "reasoning", "id": "rs_2"}
+    chunks = await _collect(monkeypatch, [
+        {"type": "response.output_item.done", "item": bare},
+        {"type": "response.output_item.done", "item": item},
+        {"type": "response.completed", "response": {}},
+    ])
+    events = [json.loads(c[6:]) for c in chunks if c.startswith("data: {")]
+    got = [e for e in events if e.get("type") == "reasoning_items"]
+    assert got and got[0]["items"] == [item]

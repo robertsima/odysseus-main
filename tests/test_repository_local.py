@@ -426,3 +426,86 @@ async def test_limits_and_unsupported_operations_are_rejected(repository):
         with pytest.raises(sync.RepositorySyncError) as exc:
             await local.execute_local(action, str(repository))
         assert exc.value.code == "unsupported_action"
+
+
+# 2026-10-01: the diff caps were charged for every tracked file before the
+# unchanged check, so a repo with large tracked media failed every diff.
+def _commit_files(path, files):
+    repo = Repo(str(path))
+    for name, data in files.items():
+        (path / name).write_bytes(data)
+    porcelain.add(repo, [str(path / name) for name in files])
+    porcelain.commit(
+        repo,
+        message=b"files",
+        author=b"Test <test@example.com>",
+        committer=b"Test <test@example.com>",
+    )
+    repo.close()
+
+
+@pytest.mark.asyncio
+async def test_diff_caps_apply_to_changed_files_not_the_whole_tree(repository, monkeypatch):
+    _commit_files(repository, {"big1.bin": b"a" * 600, "big2.bin": b"b" * 600, "small.txt": b"x\n"})
+    monkeypatch.setattr(local, "_MAX_FILE_BYTES", 1_000)
+    monkeypatch.setattr(local, "_MAX_TOTAL_BYTES", 1_000)
+    (repository / "small.txt").write_text("y\n", encoding="utf-8")
+    result = await local.execute_local("diff", str(repository))
+    assert result["changed_files"] == 1
+    assert "+y" in result["diff"] and "big1.bin" not in result["diff"]
+
+
+@pytest.mark.asyncio
+async def test_diff_changed_oversized_file_gets_placeholder(repository, monkeypatch):
+    _commit_files(repository, {"big.bin": b"a" * 600, "small.txt": b"x\n"})
+    monkeypatch.setattr(local, "_MAX_FILE_BYTES", 1_000)
+    (repository / "big.bin").write_bytes(b"c" * 2_000)
+    (repository / "small.txt").write_text("y\n", encoding="utf-8")
+    result = await local.execute_local("diff", str(repository))
+    assert result["changed_files"] == 2
+    assert "file too large to diff: 2000 bytes" in result["diff"]
+    assert "+y" in result["diff"]
+
+
+@pytest.mark.asyncio
+async def test_diff_oversized_unchanged_file_is_not_reported(repository, monkeypatch):
+    _commit_files(repository, {"big.bin": b"a" * 2_000})
+    monkeypatch.setattr(local, "_MAX_FILE_BYTES", 1_000)
+    # Force the hash path (stat can no longer vouch for the file).
+    monkeypatch.setattr(local, "_stat_clean", lambda *a: False)
+    result = await local.execute_local("diff", str(repository))
+    assert result["changed_files"] == 0 and result["diff"] == ""
+
+
+@pytest.mark.asyncio
+async def test_staged_diff_ignores_unchanged_large_files(repository, monkeypatch):
+    _commit_files(repository, {"big.bin": b"a" * 600, "small.txt": b"x\n"})
+    monkeypatch.setattr(local, "_MAX_FILE_BYTES", 1_000)
+    monkeypatch.setattr(local, "_MAX_TOTAL_BYTES", 1_000)
+    (repository / "small.txt").write_text("y\n", encoding="utf-8")
+    await local.execute_local("stage", str(repository), paths=["small.txt"])
+    result = await local.execute_local("diff", str(repository), staged=True)
+    assert result["changed_files"] == 1 and "+y" in result["diff"]
+
+
+@pytest.mark.asyncio
+async def test_diff_detects_same_size_edit_in_racy_timestamp_tick(repository):
+    """Same size, same mtime as the index entry AND as the index file: racy."""
+    _commit_files(repository, {"a.txt": b"one\n"})
+    target = repository / "a.txt"
+    await local.execute_local("stage", str(repository), paths=["a.txt"])
+    repo = Repo(str(repository))
+    index_file = repo.index_path()
+    tick = os.stat(index_file).st_mtime_ns
+    index = repo.open_index()
+    entry = index[b"a.txt"]
+    entry.mtime = (tick // 1_000_000_000, tick % 1_000_000_000)
+    index[b"a.txt"] = entry
+    index.write()
+    repo.close()
+    os.utime(index_file, ns=(tick, tick))
+    target.write_bytes(b"two\n")
+    os.utime(target, ns=(tick, tick))
+    assert target.stat().st_size == entry.size
+    result = await local.execute_local("diff", str(repository))
+    assert result["changed_files"] == 1 and "+two" in result["diff"]

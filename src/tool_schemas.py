@@ -283,6 +283,24 @@ FUNCTION_TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "preview_file",
+            "description": "Render an HTML, SVG, PNG, JPEG, WebP or GIF file from the workspace (or its worktree) and return a screenshot you can SEE. Use it to check what a page, icon, logo or SVG you changed actually looks like, and compare it with the reference image or the request BEFORE saying visual work is done: passing tests and plausible-looking markup do not show that the shape is right (an 'Agamemnon helmet' SVG once passed every string check and drew headphones). Read-only; remote network access is blocked, so pages that need the backend or CDN assets render partially. Same path rules as read_file.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File to render (relative to the workspace, or absolute inside it): .html, .svg, .png, .jpg, .webp, .gif"},
+                    "width": {"type": "integer", "description": "Viewport width in px (optional; default 1280, SVG 512, max 2560)"},
+                    "height": {"type": "integer", "description": "Viewport height in px (optional; default 800, SVG 512, max 2560)"},
+                    "color_scheme": {"type": "string", "enum": ["light", "dark"], "description": "prefers-color-scheme to emulate (optional; default light). Check both when the page has a dark theme."},
+                    "scale": {"type": "integer", "description": "Device pixel ratio 1-4 (optional; default 1). Use 2-4 to inspect small assets such as icons; with width/height 256 an SVG renders at 256 px."}
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "get_workspace",
             "description": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without a path, instead of asking them. Takes no arguments.",
             "parameters": {"type": "object", "properties": {}, "required": []}
@@ -2127,7 +2145,7 @@ def function_call_to_tool_block(name: str, arguments: str) -> Optional[ToolBlock
             content = json.dumps(args)
         else:
             content = args.get("path", "")
-    elif tool_type in ("grep", "glob", "ls"):
+    elif tool_type in ("grep", "glob", "ls", "preview_file"):
         content = json.dumps(args) if args else "{}"
     elif tool_type == "get_workspace":
         content = ""

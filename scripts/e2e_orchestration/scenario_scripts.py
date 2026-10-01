@@ -25,6 +25,9 @@ from typing import Any, Dict, List, Optional
 
 SCENARIO_RE = re.compile(r"\(ref E2E-S:([a-z_]+)\)")
 WORKER_RE = re.compile(r"\(scenario ([a-z_]+)(?: ([A-Za-z0-9_-]+))?\)")
+# The quoted request runs to the end of a worker's task, or, in a parent's
+# copy of the task inside a hand-back, up to the "\n\nResult:" that follows.
+PERSON_REQUEST_RE = re.compile(r"\n\nThe person's request, in their own words.*?(?=\n\nResult:|\Z)", re.S)
 
 LEAD = "Lead Engineer"
 
@@ -237,7 +240,12 @@ def scenario_turn(body: Dict[str, Any], env: Dict[str, str]) -> Optional[Dict[st
     {"text": ...}, "delay", "slow", "results"}.
     """
     messages = body.get("messages") or []
-    users = [_text_of(m.get("content")) for m in messages if m.get("role") == "user"]
+    # A worker's task ends with the person's request, quoted verbatim since
+    # 2026-10-01 (loadout_tools.person_request_for_worker). That quote carries
+    # the CHAT's marker, so route on the brief alone or every worker runs the
+    # chat's script.
+    users = [PERSON_REQUEST_RE.sub("", _text_of(m.get("content")))
+             for m in messages if m.get("role") == "user"]
     chat_marker = next((SCENARIO_RE.search(u) for u in users if SCENARIO_RE.search(u)), None)
     results = _results(messages)
     ctx = _context(messages, env)

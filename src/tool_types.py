@@ -22,7 +22,7 @@ TOOL_TAGS = {"bash", "python", "web_search", "web_fetch", "read_file", "write_fi
              # Isolated agent worktree + human-gated publishing, and read-only
              # access to the app's own logs for self-debugging.
              "manage_agent_worktree", "manage_git", "read_app_logs", "inspect_runtime",
-             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs",
+             "grep", "glob", "ls", "get_workspace", "manage_bg_jobs", "preview_file",
              "create_document", "update_document", "edit_document",
              "search_chats", "search_documents", "recall_tool_output", "recall_chat_history",
              "chat_with_model", "create_session", "list_sessions",

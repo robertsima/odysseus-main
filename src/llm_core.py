@@ -1642,11 +1642,17 @@ def _reasoning_replay_enabled(url: str, model: str) -> bool:
 
 # OpenAI's Codex guide says models from gpt-5.3-codex on label assistant
 # message items with `phase` (commentary / final_answer) and that a harness
-# dropping it on replay degrades them. build_responses_input does not replay
-# it yet; this records, once per model and phase, whether the backend in use
-# actually emits it, so the next step can be decided from logs
-# (website/harness-sweep-2026-09-30.md).
+# dropping it on replay degrades them: the model can no longer tell its own
+# interim commentary from a final answer on later rounds. 2026-10-01: the
+# `[responses-phase]` log confirmed gpt-6-luna emits both phases on the
+# ChatGPT-subscription lane, so the stream parse now carries the phase on the
+# tool_calls event and build_responses_input replays it. This still records,
+# once per model and phase, what the backend emits.
 _RESPONSES_PHASES_SEEN: set = set()
+
+# Hosts that 400'd an input message carrying `phase`; replay stops for them
+# (the same escape hatch as _RESPONSES_NO_ENCRYPTED_REASONING).
+_RESPONSES_NO_PHASE_REPLAY: set = set()
 
 
 def _note_responses_phase(model: str, phase) -> None:
@@ -1654,7 +1660,37 @@ def _note_responses_phase(model: str, phase) -> None:
     if key in _RESPONSES_PHASES_SEEN or len(_RESPONSES_PHASES_SEEN) > 64:
         return
     _RESPONSES_PHASES_SEEN.add(key)
-    logger.info("[responses-phase] model=%s emits message phase=%s (not replayed)", key[0], key[1])
+    logger.info("[responses-phase] model=%s emits message phase=%s (replayed on later rounds unless the host rejects it)", key[0], key[1])
+
+
+def _phase_replay_enabled(url: str, model: str) -> bool:
+    """Whether assistant messages go back to the backend with their `phase`."""
+    if _host_key(url or "") in _RESPONSES_NO_PHASE_REPLAY:
+        return False
+    try:
+        from src.context_profiles import resolve
+
+        return bool(resolve(url, model, get_context_length(url, model)).get("phase_replay", True))
+    except Exception:
+        return True
+
+
+def _mentions_phase_field(body: str) -> bool:
+    """True when a 400 body blames the `phase` we added to an input message."""
+    lowered = (body or "").lower()
+    return bool(re.search(r"(?<![a-z0-9_])phase(?![a-z0-9_])", lowered)) and any(
+        word in lowered for word in ("unknown", "unsupported", "unrecognized", "unexpected", "invalid", "extra")
+    )
+
+
+def _disable_phase_replay(url: str) -> None:
+    host = _host_key(url or "")
+    if host not in _RESPONSES_NO_PHASE_REPLAY:
+        _RESPONSES_NO_PHASE_REPLAY.add(host)
+        logger.warning(
+            "%s rejected `phase` on replayed assistant messages; sending them "
+            "without it from now on", host,
+        )
 
 
 def _disable_encrypted_reasoning(url: str) -> None:
@@ -1689,7 +1725,9 @@ def _build_chatgpt_responses_payload(
     payload: Dict = {
         "model": model,
         "instructions": _chatgpt_subscription_instructions(messages),
-        "input": build_responses_input(conversation),
+        "input": build_responses_input(
+            conversation, replay_phase=_phase_replay_enabled(target_url_hint, model)
+        ),
         "stream": stream,
         "store": False,
     }
@@ -1721,6 +1759,15 @@ def _build_chatgpt_responses_payload(
             payload["tool_choice"] = "none"
     if converted_tools:
         payload["tools"] = converted_tools
+        # 2026-10-01: 695 of 715 production rounds made exactly one tool call
+        # (orchestrator: one grep/read_file per ~6 s round) because the field
+        # was never sent. Codex CLI sends it explicitly. Not on a tool-free
+        # round (allowed_tools empty / tool_choice none), where it is moot, and
+        # not once this backend has refused it (_rejected_param_retry_chunk).
+        if payload.get("tool_choice") != "none" and not _param_rejected(
+            target_url_hint, model, "parallel_tool_calls"
+        ):
+            payload["parallel_tool_calls"] = True
     elif tool_choice_none:
         payload["tool_choice"] = "none"
     if not _restricts_temperature(model):
@@ -2738,7 +2785,7 @@ def _sanitize_llm_messages(messages: List[Dict], keep_keys: Sequence[str] = ()) 
     it leaves the tool result dangling and breaks the next round.
 
     `keep_keys` opts one provider into a field the others must not see —
-    `reasoning_items` is meaningful only to the Responses API, and a chat
+    `reasoning_items` and `responses_phase` are meaningful only to the Responses API, and a chat
     completions endpoint 400s on an unknown message key.
     """
     allowed = {"role", "content", "name", "tool_call_id", "tool_calls", "function_call", "reasoning_content"}
@@ -3838,7 +3885,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
     provider = _detect_provider(url)
     messages_copy = _sanitize_llm_messages(
         messages,
-        keep_keys=("reasoning_items",) if provider == "chatgpt-subscription" else (),
+        keep_keys=("reasoning_items", "responses_phase") if provider == "chatgpt-subscription" else (),
     )
 
     # Consolidate multiple system messages into one at the start.
@@ -3951,6 +3998,9 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
         # of thought across tool calls instead of re-planning from the
         # transcript every time.
         _resp_reasoning: List[Dict] = []
+        # `phase` of the last assistant message item this round (commentary /
+        # final_answer), handed to the loop on the tool_calls event.
+        _resp_phase = ""
 
         def _resp_slot(index) -> Dict[str, str]:
             try:
@@ -3972,7 +4022,10 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
             calls = [_resp_calls[i] for i in sorted(_resp_calls) if _resp_calls[i].get("name")]
             if not calls:
                 return None
-            return f'data: {json.dumps({"type": "tool_calls", "calls": calls})}\n\n'
+            event = {"type": "tool_calls", "calls": calls}
+            if _resp_phase:
+                event["phase"] = _resp_phase
+            return f'data: {json.dumps(event)}\n\n'
 
         _responses_actual_model = ""
         _responses_model_announced = False
@@ -3996,6 +4049,22 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                             "retryable": True,
                             "status": 400,
                             "text": "Retrying without reasoning replay",
+                        }) + '\n\n')
+                        return
+                    if (
+                        r.status_code == 400
+                        and _phase_replay_enabled(target_url, model)
+                        and _mentions_phase_field(raw)
+                        and any(
+                            isinstance(it, dict) and it.get("phase")
+                            for it in (payload.get("input") or [])
+                        )
+                    ):
+                        _disable_phase_replay(target_url)
+                        yield ('event: error\ndata: ' + json.dumps({
+                            "retryable": True,
+                            "status": 400,
+                            "text": "Retrying without message phase replay",
                         }) + '\n\n')
                         return
                     _retry_chunk = _rejected_param_retry_chunk(r.status_code, raw, payload, target_url, model)
@@ -4065,6 +4134,7 @@ async def _stream_llm_inner(url: str, model: str, messages: List[Dict], temperat
                         item = data.get("item") or {}
                         if item.get("type") == "message" and item.get("phase"):
                             _note_responses_phase(model, item.get("phase"))
+                            _resp_phase = str(item["phase"])
                         if item.get("type") == "reasoning":
                             # Only useful when it carries encrypted_content:
                             # with store=false a bare reasoning id refers to

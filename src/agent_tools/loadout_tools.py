@@ -408,6 +408,76 @@ def _assistant_text(message: Any) -> str:
     return " ".join(parts)
 
 
+# The brief a parent writes is its paraphrase of the request. On 2026-10-01 an
+# "Agamemnon" theme the user wanted to change the layout came back as a colour
+# scheme: the briefs added limits ("targeted repair only", "no heavy layout
+# redesign") the user never set, and none of the user's own words reached any
+# worker. The person's latest request goes to the worker verbatim, under the
+# brief, so the worker can see what was actually asked.
+_REQUEST_HEADER = "The person's request, in their own words (context for the brief above):"
+_REQUEST_CLIP = 2000
+_ROOT_WALK_LIMIT = 8
+
+
+def _root_session_id(session_id: Optional[str]) -> Optional[str]:
+    """The top-level chat above ``session_id``: a worker's worker still carries the person's request."""
+    sid = session_id
+    try:
+        from core.database import get_session_settings
+
+        for _ in range(_ROOT_WALK_LIMIT):
+            parent = str((get_session_settings(sid) or {}).get("parent_session") or "").strip() if sid else ""
+            if not parent or parent == sid:
+                break
+            sid = parent
+    except Exception:
+        pass
+    return sid
+
+
+def person_request_for_worker(session_id: Optional[str], owner: Optional[str]) -> str:
+    """The latest request a person wrote in the root chat, verbatim, with a line
+    per attachment; "" when there is none or the chat cannot be read."""
+    root = _root_session_id(session_id)
+    if not root:
+        return ""
+    try:
+        from src.agent_loop import HARNESS_USER_SOURCES, _is_context_envelope, _user_text
+        from src.ai_interaction import get_session_manager
+
+        manager = get_session_manager()
+        sess = manager.get_session(root) if manager else None
+        if sess is None or (owner and getattr(sess, "owner", None) != owner):
+            return ""
+        for message in reversed(list(getattr(sess, "history", None) or [])):
+            msg = {"role": _field(message, "role"), "content": _field(message, "content"),
+                   "metadata": _field(message, "metadata") or {}}
+            if (msg["role"] != "user" or _is_context_envelope(msg)
+                    or msg["metadata"].get("source") in HARNESS_USER_SOURCES):
+                continue
+            text = _user_text(msg).strip()
+            files = [a for a in (msg["metadata"].get("attachments") or []) if isinstance(a, dict)]
+            lines = [f"Attached: {a.get('name') or a.get('id')}"
+                     + (f" ({a['mime']})" if a.get("mime") else "")
+                     + (f" id={a['id']}" if a.get("id") else "") for a in files]
+            return "\n".join(part for part in (text, *lines) if part)
+    except Exception:
+        logger.debug("[agent-loadout] could not read the person's request", exc_info=True)
+    return ""
+
+
+def _with_person_request(task: str, session_id: Optional[str], owner: Optional[str]) -> str:
+    request = person_request_for_worker(session_id, owner)
+    if not request:
+        return task
+    squash = lambda value: re.sub(r"\s+", " ", value).strip()  # noqa: E731
+    if squash(request) in squash(task):
+        return task
+    if len(request) > _REQUEST_CLIP:
+        request = request[:_REQUEST_CLIP].rstrip() + f"\n[… clipped at {_REQUEST_CLIP} characters]"
+    return f"{task}\n\n{_REQUEST_HEADER}\n{request}"
+
+
 class _Authorization:
     """Whether the person in this chat asked for this widening, and if not, why."""
 
@@ -1526,6 +1596,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                 "exit_code": 1,
             }
 
+    task = _with_person_request(task, session_id, owner)
     requires = args.get("requires") or []
     if isinstance(requires, str):
         requires = [requires]

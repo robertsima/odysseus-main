@@ -699,7 +699,22 @@ def _message_text(content) -> str:
     return "" if content is None else str(content)
 
 
-def build_responses_input(messages: list[dict]) -> list[dict]:
+def _message_image_urls(content) -> list[str]:
+    """Image URLs (data URLs included) in an OpenAI-style multimodal content list."""
+    urls: list[str] = []
+    if not isinstance(content, list):
+        return urls
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") not in ("image_url", "input_image"):
+            continue
+        ref = part.get("image_url")
+        url = ref.get("url") if isinstance(ref, dict) else ref
+        if isinstance(url, str) and url:
+            urls.append(url)
+    return urls
+
+
+def build_responses_input(messages: list[dict], *, replay_phase: bool = True) -> list[dict]:
     """Convert OpenAI chat messages to Responses API input items.
 
     Tool calls and their results are first-class item types here, not messages:
@@ -708,6 +723,19 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
     ``call_id``. Flattening those into plain text (as this did originally) makes
     the model see its own tool call as prose with no result attached, so it
     re-plans the same call forever instead of continuing.
+
+    An assistant message that carries ``responses_phase`` (commentary /
+    final_answer, captured from the stream) goes back with ``phase`` and the
+    explicit ``type: message``, so a phase-emitting model can tell its interim
+    commentary from a final answer. Messages without one keep the original
+    shape exactly, so old history's prompt-cache prefix does not change.
+    Order within a round is reasoning, then the message, then its calls --
+    the order the model's ``output`` array produced them.
+
+    A user message whose content list has ``image_url`` parts (the images a tool
+    returned, or an attachment) goes out with ``input_image`` items beside its
+    ``input_text`` -- this used to flatten to text and drop the picture. A
+    message with no image keeps the exact shape above for the same cache reason.
     """
     input_items: list[dict] = []
     for msg in messages or []:
@@ -745,9 +773,24 @@ def build_responses_input(messages: list[dict]) -> list[dict]:
         tool_calls = msg.get("tool_calls") if role == "assistant" else None
 
         text = _message_text(content)
-        if text:
+        image_urls = _message_image_urls(content) if role == "user" else []
+        if image_urls:
+            text = text.strip()
+            blocks = ([{"type": "input_text", "text": text}] if text else [])
+            blocks += [{"type": "input_image", "image_url": url} for url in image_urls]
+            input_items.append({"role": role, "content": blocks})
+        elif text:
             input_type = "output_text" if role == "assistant" else "input_text"
-            input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
+            phase = msg.get("responses_phase") if role == "assistant" and replay_phase else None
+            if phase:
+                input_items.append({
+                    "type": "message",
+                    "role": role,
+                    "phase": str(phase),
+                    "content": [{"type": input_type, "text": text}],
+                })
+            else:
+                input_items.append({"role": role, "content": [{"type": input_type, "text": text}]})
 
         for call in tool_calls or []:
             if not isinstance(call, dict):

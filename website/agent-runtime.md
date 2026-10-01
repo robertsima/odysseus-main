@@ -397,8 +397,13 @@ The v1.0 rules (about 22k characters of ALL-CAPS rules and incident notes)
 were still in the file, overridden at import by the short ones; they were
 removed. `_DELEGATION_RULES` ("Delegating to workers") is added whenever a
 launch tool is offered: what a brief contains (goal and why, the done-when
-check, starting points, out of scope, what to report), when to delegate, one
-writer per worktree, and that a worker's report is a claim to check. It is
+check, starting points, what to report); that its scope is the person's whole
+request with no limits they did not set; one worker per user-visible outcome
+rather than micro-slices; done-when as the person would check it (rendered,
+for visual work); not redoing or editing a running worker's work; resuming the
+same worker when it hands back partial; and that a worker's report is a claim
+to check. The 2026-10-01 rewrite and its evidence are in
+[`harness-review-2026-10-01.md`](harness-review-2026-10-01.md). It is
 keyed on `_DELEGATION_LAUNCH_TOOLS`, not `_DOMAIN_TOOL_MAP`, because that map
 also seeds selection and sticky chunks, and launchers must only arrive through
 their gates.
@@ -455,6 +460,35 @@ callable tools next round, and printing them repeated up to 8,000 characters of
 JSON per call.
 
 ---
+
+### What carries over between rounds (Codex route)
+
+- **Encrypted reasoning.** The request asks for `reasoning.encrypted_content`;
+  the loop puts the items on the round's assistant message and
+  `build_responses_input` replays them ahead of the call they produced. The
+  2026-09-18 upstream sync had dropped this wiring, so from then until
+  2026-10-01 the model re-planned from the transcript after every tool result.
+  Items are kept for `_MAX_REASONING_REPLAY_ROUNDS` (3) rounds and pruned in
+  batches, so the cached prefix is rewritten about once per four rounds, not
+  every round.
+- **Message phase.** gpt-6-luna labels its prose `commentary` or
+  `final_answer`; the label rides on the assistant message
+  (`responses_phase`) and is replayed. A host that refuses it is remembered.
+- **Parallel calls.** `parallel_tool_calls: true` is sent whenever tools may be
+  called, and `_API_AGENT_RULES` asks for independent calls in one round. On
+  2026-10-01, 695 of 715 rounds had made exactly one call.
+- **Tool images.** A result's `images` (Penpot `render_preview`, browser
+  screenshots, `preview_file`) go to the model in one harness-sourced user
+  message after the round's tool messages, like Codex CLI's `view_image`.
+  Before that they reached only the UI. They live only in the turn's in-memory
+  list (never saved to history); `prune_tool_images` turns all but the newest
+  two into placeholders in batches. A model that does not take images gets a
+  text note instead.
+- **`preview_file`** renders an HTML/SVG/image file from the workspace in
+  headless Chromium, served by a short-lived loopback server confined to the
+  workspace through the read resolver, with every other origin blocked. It
+  exists so an agent can see a page or icon it changed before calling visual
+  work done.
 
 ## 4. Keeping context bounded
 
@@ -1029,6 +1063,27 @@ retrieval and peer-agent envelopes do not count as human turns or enter follow-u
 intent retrieval. Tail guidance preserves earlier unfinished requests unless the
 user changes or cancels them. `[agent-steer]` logs IDs, delivery state and added
 tool names without copying the instruction text.
+
+### The brief, the writer and the hand-back (2026-10-01)
+
+- **The person's words travel with the brief.** `manage_agent_loadout start`
+  appends the root chat's latest request verbatim (`person_request_for_worker`
+  in `loadout_tools.py`: hand-backs, publish notes and context envelopes
+  skipped, attachments named, clipped at 2,000 characters), so a worker sees
+  what was asked and not only the orchestrator's paraphrase.
+- **One writer per workspace, enforced.** `src/worktree_writers.py` records a
+  launched worker's workspace for the length of its run. Another session's
+  `write_file`/`edit_file`/`apply_patch` into it is refused with what to do
+  instead (wait with `status`/`wait_seconds`, `send_to_session`, or stop it).
+  The worker, its sub-workers and co-tenant workers may write; a lookup error
+  allows the write. A worker resumed with `send_to_session` is not recorded.
+- **A hand-back lands once.** `_hand_off` keys each hand-back message
+  (`handoff_key`) and skips an identical one already in the parent's history
+  since its last reply.
+- **Attachments reach the workers.** A chat and its workers (same owner, any
+  depth) may read the exact files attached in that lineage
+  (`src/attachment_access.py`), read-only, and bash/python see them as
+  read-only sandbox binds.
 
 ### A turn that is stopped, replaced or rejoined
 

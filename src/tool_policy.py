@@ -82,6 +82,7 @@ _COMMON_TOOL_NAMES = {
     "list_served_models",
     "list_sessions",
     "ls",
+    "preview_file",
     "manage_agent_loadout",
     "orchestrate_agents",
     "manage_calendar",

@@ -82,7 +82,7 @@ def test_proc_mount_failure_falls_back_to_an_empty_proc(monkeypatch, tmp_path):
 
 def test_degraded_is_still_usable_for_a_workspace(monkeypatch, tmp_path):
     _runner(monkeypatch, lambda argv: (1, PROC_ERROR) if "--proc" in argv else (0, ""))
-    monkeypatch.setattr(sb, "workspace_problem", lambda ws: None)
+    monkeypatch.setattr(sb, "workspace_problem", lambda ws, **_kw: None)
 
     assert sb.unavailable_reason(str(tmp_path)) == ""
     assert sb.usable_for(str(tmp_path)) is True
@@ -218,7 +218,7 @@ def worktree_layout(tmp_path, monkeypatch):
     root = (tmp_path / "agent_worktrees").resolve()
     root.mkdir()
     monkeypatch.setattr(ownership, "managed_worktree_root", lambda: root)
-    monkeypatch.setattr(sb, "workspace_problem", lambda ws: None)
+    monkeypatch.setattr(sb, "workspace_problem", lambda ws, **_kw: None)
     ws = _repo(tmp_path / "development" / "dog-trainer").resolve()
     other = _repo(tmp_path / "development" / "other").resolve()
     return root, ws, other
@@ -277,7 +277,7 @@ def test_worktree_failing_the_workspace_checks_is_not_bound(worktree_layout, mon
     root, ws, _other = worktree_layout
     tree = root / "_repos" / "dog-trainer-50d9" / "vaultish"
     _git("worktree", "add", "-q", "-b", "vaultish", str(tree), cwd=ws)
-    monkeypatch.setattr(sb, "workspace_problem", lambda path: "the workspace overlaps the document vault")
+    monkeypatch.setattr(sb, "workspace_problem", lambda path, **_kw: "the workspace overlaps the document vault")
 
     assert sb.workspace_worktrees(str(ws)) == []
 

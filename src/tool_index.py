@@ -307,6 +307,7 @@ BUILTIN_TOOL_DESCRIPTIONS: Dict[str, str] = {
     "grep": "Search file CONTENTS for a regex across a directory tree (ripgrep-backed, honours .gitignore). Returns file:line:match. Use to find where code/symbols/strings live — prefer over bash grep.",
     "glob": "Find FILES by glob pattern (e.g. '**/*.py'), newest first. Use to locate files by name/extension — prefer over bash find/ls.",
     "ls": "List a directory's entries (folders then files with sizes). Use to see what's in a folder — prefer over bash ls.",
+    "preview_file": "Render an HTML/SVG/image file from the workspace to a screenshot you can see. Use to check what a page, icon or SVG you changed actually looks like, and compare it with the reference before saying visual work is done.",
     "get_workspace": "Return the absolute path of the active workspace folder the user is working in. File tools are confined to it; the shell starts there but is not sandboxed. Call this first when the user refers to 'the project'/'the code'/'this folder' without giving a path, instead of asking them.",
     "discover_tools": "Search the already-permitted, already-connected tool catalog for a capability and load a bounded set of matching definitions for the next agent round. Discovery never grants permission, connects services, changes settings, or performs the requested action.",
     "write_file": "Write/create or fully rewrite a file ON DISK (source code, configs, project files). Use for new files or full rewrites — NOT create_document (editor panel) and NOT a bash heredoc.",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import re
@@ -265,6 +266,51 @@ class _BoundedDiff(io.BytesIO):
         return len(data)
 
 
+def _entry_mtime_ns(entry) -> int | None:
+    value = entry.mtime
+    if isinstance(value, tuple):
+        return value[0] * 1_000_000_000 + value[1]
+    if isinstance(value, (int, float)):
+        return int(value * 1_000_000_000) if isinstance(value, float) else value * 1_000_000_000
+    return None
+
+
+def _stat_clean(entry, st: os.stat_result, index_mtime_ns: int | None) -> bool:
+    """True when the working file provably matches its index entry by stat alone.
+
+    Git's own racy-clean rule: size and mtime equal, and the file was last
+    modified strictly before the index was written. A same-size edit made in
+    the same timestamp tick as the index write cannot be told apart by stat, so
+    that case (and any entry with no recorded stat, as `unstage` writes) falls
+    through to hashing -- a changed file is never skipped.
+    """
+    if index_mtime_ns is None or entry.size != st.st_size:
+        return False
+    if cleanup_mode(st.st_mode) != entry.mode:
+        return False
+    recorded = _entry_mtime_ns(entry)
+    if not recorded or recorded != st.st_mtime_ns:
+        return False
+    return st.st_mtime_ns < index_mtime_ns
+
+
+def _file_blob_id(target: Path, size: int) -> bytes:
+    """Git blob id of a file, streamed so a huge file is never held in memory."""
+    digest = hashlib.sha1(f"blob {size}\x00".encode())
+    with open(target, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest().encode()
+
+
+def _too_large_note(relative: str, size: int) -> bytes:
+    return (
+        f"diff --git a/{relative} b/{relative}\n"
+        f"Binary files a/{relative} and b/{relative} differ "
+        f"(file too large to diff: {size} bytes)\n"
+    ).encode("utf-8", "replace")
+
+
 def _diff(repo: Repo, staged: bool, maximum: int) -> dict[str, Any]:
     index = _index(repo)
     head = _commit(repo)
@@ -276,9 +322,19 @@ def _diff(repo: Repo, staged: bool, maximum: int) -> dict[str, Any]:
     names.update(
         entry.path for entry in iter_tree_contents(repo.object_store, head.tree)
     )
+    try:
+        index_mtime_ns = os.stat(repo.index_path()).st_mtime_ns
+    except OSError:
+        index_mtime_ns = None
     stream = _BoundedDiff(maximum)
     changed = 0
     total_bytes = 0
+    # 2026-10-01: both size caps used to be charged for every tracked path
+    # *before* the unchanged check, so they bounded the repository, not the
+    # diff. Every `manage_git diff` on a repo that tracks a few large videos
+    # failed with "diff input must be at most 64 MiB" (6 times in 4 hours) and
+    # workers reviewed blind. Caps now only count files that really changed, and
+    # an unchanged file is skipped from stat/ids without being read or hashed.
     for path in sorted(names):
         relative = os.fsdecode(path).replace("\\", "/")
         _paths([relative])
@@ -288,18 +344,42 @@ def _diff(repo: Repo, staged: bool, maximum: int) -> dict[str, Any]:
             if staged
             else ((index[path].mode, index[path].sha) if path in index else None)
         )
+        new_size: int | None = None
         if staged:
             new_entry = (index[path].mode, index[path].sha) if path in index else None
+            if new_entry == old_entry:
+                continue
         else:
             target = Path(repo.path) / os.fsdecode(path)
             if target.exists() and target.is_file() and not target.is_symlink():
                 st = target.stat()
+                if (
+                    path in index
+                    and not isinstance(index[path], ConflictedIndexEntry)
+                    and _stat_clean(index[path], st, index_mtime_ns)
+                ):
+                    continue
                 if st.st_size > _MAX_FILE_BYTES:
-                    _fail("file_too_large", "diff files must be at most 16 MiB")
+                    # Too big to diff: say so for this file and keep going
+                    # instead of failing the whole diff. Stat could not vouch
+                    # for it (e.g. checked out in the same tick as the index),
+                    # so stream-hash it to tell unchanged from changed.
+                    if path in index and _file_blob_id(target, st.st_size) == index[path].sha:
+                        continue
+                    changed += 1
+                    stream.write(_too_large_note(relative, st.st_size))
+                    if stream.truncated:
+                        break
+                    continue
                 blob = blob_from_path_and_stat(os.fsencode(target), st)
                 new_entry = (cleanup_mode(st.st_mode), blob.id, blob)
+                new_size = st.st_size
             else:
                 new_entry = None
+            if new_entry is not None and old_entry == new_entry[:2]:
+                continue
+        if new_entry is None and old_entry is None:
+            continue
         old_tuple = _blob_tuple(repo, path, old_entry)
         if new_entry is None:
             new_tuple = (path, None, None)
@@ -312,16 +392,19 @@ def _diff(repo: Repo, staged: bool, maximum: int) -> dict[str, Any]:
             for blob in (old_tuple[2], new_tuple[2])
             if blob is not None
         ]
-        if any(size > _MAX_FILE_BYTES for size in sizes):
-            _fail("file_too_large", "diff files must be at most 16 MiB")
-        total_bytes += sum(sizes)
-        if total_bytes > _MAX_TOTAL_BYTES:
-            _fail("diff_too_large", "diff input must be at most 64 MiB")
         old_id = old_tuple[2].id if old_tuple[2] else None
         new_id = new_tuple[2].id if new_tuple[2] else None
         if old_id == new_id and old_tuple[1] == new_tuple[1]:
             continue
         changed += 1
+        if any(size > _MAX_FILE_BYTES for size in sizes):
+            stream.write(_too_large_note(relative, max(sizes)))
+            if stream.truncated:
+                break
+            continue
+        total_bytes += sum(sizes)
+        if total_bytes > _MAX_TOTAL_BYTES:
+            _fail("diff_too_large", "diff input must be at most 64 MiB")
         write_blob_diff(stream, old_tuple, new_tuple)
         if stream.truncated:
             break

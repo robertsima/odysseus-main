@@ -42,7 +42,7 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Dict, List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -283,8 +283,11 @@ def build_argv(inner: List[str], *, workspace: str, env: Optional[Mapping[str, s
     args += _toolchain_mounts()
     if package_cache:
         args += package_cache_binds(ws)
-    for tree in (workspace_worktrees(ws) if worktrees else ()):
+    trees = workspace_worktrees(ws) if worktrees else []
+    for tree in trees:
         args += ["--bind", tree, tree]
+    for flag, path in linked_git_binds(ws, trees):
+        args += [flag, path, path]
     args += ["--chdir", ws]
     for host, inside in (extra_ro_binds or {}).items():
         args += ["--ro-bind", host, inside]
@@ -420,12 +423,14 @@ def _within(path: str, root: str) -> bool:
         return False
 
 
-def workspace_problem(workspace: Optional[str]) -> Optional[str]:
+def workspace_problem(workspace: Optional[str], *, extra_allowed: Optional[str] = None) -> Optional[str]:
     """Why ``workspace`` must not be handed to the sandbox, or None.
 
     The workspace is the one thing the sandbox exposes, read-write, so it must
     not be (or contain) what the sandbox exists to hide: the app's data
-    directory, the document vault, the Docker socket.
+    directory, the document vault, the Docker socket. ``extra_allowed`` names one
+    more work area inside the data directory (the managed worktree root) that
+    ``workspace_worktrees`` has already vetted by ownership.
     """
     if not workspace or not os.path.isdir(workspace):
         return "no workspace is set"
@@ -452,6 +457,8 @@ def workspace_problem(workspace: Optional[str]) -> Optional[str]:
             allowed = list(_repository_data_subdirs(data)) + [os.path.realpath(AGENT_WORKSPACE_DIR)]
         except Exception:
             allowed = [os.path.realpath(AGENT_WORKSPACE_DIR)]
+        if extra_allowed:
+            allowed.append(os.path.realpath(extra_allowed))
         if not any(_within(ws, root) for root in allowed):
             return "the workspace is inside the app's data directory"
     for socket_path in ("/var/run/docker.sock", "/run/docker.sock"):
@@ -483,8 +490,12 @@ def workspace_worktrees(workspace: str) -> List[str]:
     ``.git`` file). One is bound only when it is a directory reached without
     symlinks, sits under the managed worktree root, belongs to this
     workspace's repository (``ownership.belongs_to_workspace``) and passes the
-    same ``workspace_problem`` checks as the workspace. The main checkout's
-    ``.git`` is inside the workspace, so git works in a bound worktree.
+    same ``workspace_problem`` checks as the workspace (the worktree root itself
+    counts as a work area). The main checkout's ``.git`` is inside the
+    workspace, so git works in a bound worktree; when the workspace is itself a
+    linked worktree, ``linked_git_binds`` binds the shared git dir. A ``gitdir``
+    pointer that is relative (``worktree.useRelativePaths``) is resolved
+    against its admin dir rather than skipped.
     Worktrees of other repositories are never bound.
     """
     try:
@@ -508,8 +519,10 @@ def workspace_worktrees(workspace: str) -> List[str]:
             pointer = (entry / "gitdir").read_text(encoding="utf-8", errors="replace").strip()
         except OSError:
             continue
-        if not pointer or not os.path.isabs(pointer):
+        if not pointer:
             continue
+        if not os.path.isabs(pointer):
+            pointer = os.path.join(str(entry), pointer)
         tree = os.path.normpath(os.path.dirname(pointer))
         if tree in found or _within(tree, ws) or not _plain_directory(tree):
             continue
@@ -518,10 +531,95 @@ def workspace_worktrees(workspace: str) -> List[str]:
                 continue
         except (OSError, ValueError):
             continue
-        if workspace_problem(tree) is not None:
+        # The worktree root is a work area of the harness's own making, so a
+        # tree under it is admitted even when _repository_data_subdirs (cached,
+        # and empty when it cannot load) does not list it: 2026-10-01 a resumed
+        # worker's /app/data/agent_worktrees/<slug> was not bound at all.
+        if workspace_problem(tree, extra_allowed=str(root)) is not None:
             continue
         found.append(tree)
     return found
+
+
+# Entries of a repository's git dir that git EXECUTES or obeys on the host:
+# hooks run on commit/checkout, and config can name core.fsmonitor,
+# core.hooksPath or an alias. A sandboxed process must be able to commit but
+# not plant either for a later unsandboxed git (the app's, or Claude Code's)
+# to run.
+_GIT_GUARDED = ("hooks", "config", "config.worktree")
+
+
+def linked_git_binds(workspace: str, trees: Sequence[str] = ()) -> List[Tuple[str, str]]:
+    """``(flag, path)`` pairs that make git work when *workspace* is a linked worktree.
+
+    On 2026-10-01 every Lead Engineer worker whose workspace was
+    /app/data/agent_worktrees/<slug> got ``fatal: not a git repository:
+    /app/data/development/<repo>/.git/worktrees/<slug>`` from every git
+    command: the ``.git`` file of a linked worktree points at the main
+    checkout's ``.git/worktrees/<slug>``, which is outside the workspace and
+    was never bound (the old note "the main checkout's .git is inside the
+    workspace" holds only when the workspace is the main checkout). The shared
+    git dir is bound read-write, so add/commit can write objects and refs, and
+    only that dir, never the main checkout's sources. ``hooks`` and ``config``
+    (and the worktree's ``config.worktree``) are laid over it read-only: bwrap
+    applies binds in order, and only entries that exist are overlaid.
+
+    The git dir is bound only when it is the workspace's own repository (the
+    bound worktrees all share it), is not already under a bound path, and is a
+    real directory reached without a symlink that passes ``workspace_problem``.
+    """
+    from pathlib import Path
+
+    from src.agent_worktree import ownership
+
+    ws = os.path.realpath(workspace)
+    git_file = os.path.join(ws, ".git")
+    if not os.path.isfile(git_file):
+        return []  # a main checkout (its .git is inside the workspace) or no repo
+    try:
+        common = ownership.git_common_dir(Path(ws))
+        pointer = Path(git_file).read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return []
+    if common is None or not pointer.startswith("gitdir:"):
+        return []
+    admin = pointer.split(":", 1)[1].strip()
+    if not os.path.isabs(admin):
+        admin = os.path.join(ws, admin)
+    admin = os.path.normpath(admin)
+    shared = str(common)
+    bound = [ws, *trees]
+    if any(_within(shared, root) for root in bound):
+        return []
+    # The admin dir (<common>/worktrees/<name>) must be inside the shared dir,
+    # and neither may be reached through a symlink.
+    if (os.path.dirname(admin) != os.path.join(shared, "worktrees")
+            or not _plain_directory(admin) or not _plain_directory(shared)):
+        return []
+    # Git's own back-link: the admin dir's ``gitdir`` file names this worktree's
+    # ``.git``. A pointer someone forged at an arbitrary directory has none.
+    try:
+        back = Path(admin, "gitdir").read_text(encoding="utf-8", errors="replace").strip()
+        back = back if os.path.isabs(back) else os.path.join(admin, back)
+        if os.path.realpath(back) != os.path.realpath(git_file):
+            return []
+    except OSError:
+        return []
+    # Every bound worktree must share this git dir; one that does not is not
+    # this repository's.
+    for tree in trees:
+        other = ownership.git_common_dir(Path(tree))
+        if other is None or str(other) != shared:
+            return []
+    if workspace_problem(shared, extra_allowed=shared) is not None:
+        return []
+    out: List[Tuple[str, str]] = [("--bind", shared)]
+    for name in _GIT_GUARDED:
+        for base in (shared, admin):
+            guarded = os.path.join(base, name)
+            if os.path.exists(guarded) and not os.path.islink(guarded):
+                out.append(("--ro-bind", guarded))
+    return out
 
 
 def usable_for(workspace: Optional[str]) -> bool:

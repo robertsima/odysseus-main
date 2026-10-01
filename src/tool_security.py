@@ -61,6 +61,7 @@ NON_ADMIN_BLOCKED_TOOLS = BUILTIN_EMAIL_TOOLS | {
     "grep",
     "glob",
     "ls",
+    "preview_file",
     "get_workspace",
     "search_chats",
     "manage_memory",
@@ -114,6 +115,8 @@ PLAN_MODE_READONLY_TOOLS = {
     "grep",
     "glob",
     "ls",
+    # Renders a workspace file to an image in a throwaway browser; writes nothing.
+    "preview_file",
     "get_workspace",
     # Reading the app's own logs is inspection: it cannot mutate anything, and
     # plan mode is exactly when the agent is diagnosing a problem.

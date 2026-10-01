@@ -818,6 +818,17 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
               **(run_metadata or {})},
         detail=task[:1500],
     )
+    # One writer per worktree (src/worktree_writers.py): while this run lives,
+    # the file tools refuse writes into its workspace from any session that is
+    # not this worker or below it. Released as soon as the run's turn ends, and
+    # again in _cleanup_worker for a task cancelled before it started.
+    if checked and checked.workspace:
+        from src import worktree_writers
+        worktree_writers.register(
+            run_id, session_id=sess.id, parent_session=parent_session, owner=owner,
+            workspace=checked.workspace,
+            label=(profile.get("name") if profile and profile.get("name") not in (None, "worker") else None)
+            or sess.name or "A worker")
     if parent_session:
         # The worker chat's name already carries the loadout and the task
         # ("↳ Scout: Write a short poem…"); the full task is in `detail`.
@@ -858,6 +869,10 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             status, text = "failed", f"Worker failed: {exc}"
             error_detail = str(exc)[:2000]
             logger.warning("worker %s failed: %s", sess.id, exc, exc_info=True)
+        # The turn is over: release the workspace before the hand-off, whose
+        # continuation lets the parent write to it again.
+        from src import worktree_writers as _ww
+        _ww.unregister(run_id)
         try:
             meta: Dict[str, Any] = {"source": "worker", "model": sess.model, "run_id": run_id,
                                     "status": status, **(run_metadata or {})}
@@ -920,6 +935,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         # slot, and close a run that otherwise remains 'running' indefinitely.
         if _WORKERS.get(run_id) is done:
             _WORKERS.pop(run_id, None)
+        from src import worktree_writers as _ww
+        _ww.unregister(run_id)
         failure = None if done.cancelled() else done.exception()
         if not done.cancelled() and failure is None:
             return
@@ -1013,6 +1030,27 @@ _PENDING_HANDOFFS: set = set()
 _WAITING_PARENTS: set = set()
 
 
+def _handoff_key(worker, status: str, task: str, text: str) -> str:
+    import hashlib
+
+    raw = "".join((str(getattr(worker, "id", "")), str(status), str(task), str(text)))
+    return hashlib.sha1(raw.encode("utf-8", "replace")).hexdigest()
+
+
+def _already_handed_off(parent, key: str) -> bool:
+    """Whether this exact hand-back is already in the parent's history with
+    nothing since but other hand-backs. An assistant reply (or the person's
+    message) between the two means the chat has moved on, so a worker that is
+    sent back and answers identically again is a new delivery, not a double."""
+    for m in reversed(list(getattr(parent, "history", None) or [])):
+        meta = getattr(m, "metadata", None) or {}
+        if meta.get("handoff_key") == key:
+            return True
+        if getattr(m, "role", None) == "assistant" or meta.get("source") != "worker":
+            return False
+    return False
+
+
 async def _hand_off(manager, parent_id: str, worker, task: str, text: str, status: str,
                     owner: Optional[str]) -> None:
     """Deliver a finished worker's result to the chat it reports to.
@@ -1040,9 +1078,18 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     # built its context before the result existed, so its reply (saved after
     # this message) does not show it was read -- see _replied_after_worker_result.
     arrived_mid_turn = bool(agent_runs.is_busy(parent_id))
+    # Idempotent per result. 2026-10-01: one worker run that ended on ask_user
+    # reached the parent twice, 0.9s apart (the lead's own end-of-run hand-off
+    # and a hand-up from _hand_up_when_done raced). There is no await between
+    # this check and add_message, so on the event loop it is atomic.
+    key = _handoff_key(worker, status, task, text)
+    if _already_handed_off(parent, key):
+        logger.info("[worker-handoff] %s: result of %s already in the chat; duplicate hand-back skipped",
+                    parent_id, worker.id)
+        return
     inject_msg = ChatMessage("user", inject, {"source": "worker", "from_session": worker.id,
                                               "from_session_name": worker.name, "direction": "inbound",
-                                              "arrived_mid_turn": arrived_mid_turn})
+                                              "arrived_mid_turn": arrived_mid_turn, "handoff_key": key})
     parent.add_message(inject_msg)
     manager.save_sessions()
     if _running_workers(parent_id):
