@@ -39,7 +39,11 @@ def test_visual_spec_and_static_render_artifacts_cover_every_board():
     for page in ('chat', 'agents', 'workbench'):
         preview = ROOT / f'website/agamemnon-preview-{page}.html'
         assert preview.exists() and preview.stat().st_size > 1000
-        assert 'agamemnon-preview.css' in preview.read_text()
+        preview_html = preview.read_text()
+        assert 'agamemnon-preview.css' in preview_html
+        assert 'class="brand-crest"' in preview_html
+        assert 'aria-label="Agamemnon hoplite crest"' in preview_html
+        assert '<img' not in preview_html
 
 
 def test_responsive_fallback_and_odysseus_labels_remain():
