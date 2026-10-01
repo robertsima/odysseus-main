@@ -79,3 +79,48 @@ def test_seed_reconciles_legacy_owner_metadata_without_replacing_body(monkeypatc
     assert result.owner is None
     assert "Operator-customized delegation instructions." in result.body_extra
     assert "New bundled content." not in result.body_extra
+
+
+_COMMUNITY_SKILLS = {
+    "grilling": "general",
+    "writing-for-agents": "general",
+    "unslop": "general",
+    "diagnosing-bugs": "dev",
+    "codebase-design": "dev",
+    "domain-modeling": "dev",
+    "improve-codebase-architecture": "dev",
+    "triage": "dev",
+    "resolving-merge-conflicts": "dev",
+}
+
+
+def test_every_bundled_skill_has_a_source_directory():
+    app_root = Path(__file__).resolve().parents[1]
+    for category, name, *_rest in builtin_skills._BUNDLED_SKILLS:
+        source = builtin_skills._bundled_source(str(app_root), category, name)
+        assert (Path(source) / "SKILL.md").is_file(), f"{category}/{name} has no SKILL.md"
+
+
+def test_community_skills_parse_and_are_registered():
+    app_root = Path(__file__).resolve().parents[1]
+    registered = {(c, n) for c, n, *_ in builtin_skills._BUNDLED_SKILLS}
+    for name, category in _COMMUNITY_SKILLS.items():
+        assert (category, name) in registered
+        path = app_root / "skills" / category / name / "SKILL.md"
+        text = path.read_text(encoding="utf-8")
+        skill = Skill.from_markdown(text, path=str(path))
+        assert skill.name == name
+        assert skill.category == category
+        assert skill.status == "published"
+        assert skill.source == "bundled"
+        assert skill.description
+        # Verified skills must say where their text came from.
+        assert "## Provenance" in text and "- License: MIT" in text
+
+
+def test_community_skills_are_listed_in_acknowledgments():
+    app_root = Path(__file__).resolve().parents[1]
+    text = (app_root / "ACKNOWLEDGMENTS.md").read_text(encoding="utf-8")
+    assert "## Agent skills" in text
+    for name in _COMMUNITY_SKILLS:
+        assert f"`{name}" in text

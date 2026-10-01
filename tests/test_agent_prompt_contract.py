@@ -78,3 +78,32 @@ def test_draft_skills_are_not_called_authoritative():
     source = open(al.__file__, encoding="utf-8").read()
     assert "treat them as authoritative" not in source
     assert "proven to work. Follow them step by step" not in source
+
+
+def test_coding_rules_send_visual_work_to_real_artwork_and_the_user():
+    rules = al._workspace_coding_rules("/srv/project")
+    assert "visual-asset-sourcing" in rules and "hand-written SVG" in rules
+    assert "ask the user to pick" in rules
+
+
+def test_delegation_rules_say_run_tests_yourself_and_review_once_per_iteration():
+    assert "Run tests and builds yourself" in al._DELEGATION_RULES
+    assert "one independent review per iteration" in al._DELEGATION_RULES
+
+
+def test_visual_asset_sourcing_skill_parses_and_is_cross_linked():
+    from pathlib import Path
+    from services.memory.skill_format import Skill
+
+    root = Path(al.__file__).resolve().parents[1] / "skills" / "design"
+    text = (root / "visual-asset-sourcing" / "SKILL.md").read_text(encoding="utf-8")
+    skill = Skill.from_markdown(text)
+    # The portable schema nests category/status/source under `metadata:`; the
+    # seeder (src/builtin_skills.py) copies them onto the skill record.
+    assert skill.name == "visual-asset-sourcing" and skill.description
+    head = text.split("---")[1]
+    for line in ("  category: design", "  status: published", "  source: bundled"):
+        assert line in head
+    assert "Needs user:" in text and "api.iconify.design" in text
+    penpot = (root / "penpot-design-workflow" / "SKILL.md").read_text(encoding="utf-8")
+    assert "visual-asset-sourcing" in penpot and "error screen" in penpot

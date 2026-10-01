@@ -159,6 +159,96 @@ def task_needs_write(task: str) -> bool:
     return False
 
 
+# Tools that run a shell command. tmux is not a separate tool here: the
+# terminal sessions are bash's own (agent_tools.subprocess_tools).
+SHELL_TOOLS = ("bash", "python")
+# 2026-10-01: a Lead Engineer started the read-only "UI Design Critic" (no
+# bash/python) four times with "run the Agamemnon theme tests, plus node --check
+# static/js/theme.js ... and git diff --check". The critic could run none of it:
+# one run sat 15 minutes before it was cancelled, the others returned partial
+# results. Whether a task asks for COMMANDS is judged here, conservatively:
+# an explicit command, or "run the tests" wording. "Check that the tests cover
+# X" and "read the test file" are review, not execution, and never match.
+#
+# Distinctive on their own: no English sentence says "node --check" or "cargo test".
+_STRONG_COMMAND_RE = re.compile(
+    r"(?<![\w-])(?:"
+    r"python3?\s+-m\s+(?:pytest|unittest|ruff|mypy|pip|compileall)\b[^\n;`]*"
+    r"|node\s+--check\b[^\n;`]*"
+    r"|(?:npm|pnpm|yarn)\s+(?:run|test|ci|install|build|lint|exec)\b[^\n;`]*"
+    r"|npx\s+\w[^\n;`]*"
+    r"|cargo\s+(?:test|build|check|clippy|fmt)\b[^\n;`]*"
+    r"|go\s+(?:test|build|vet)\s[^\n;`]*"
+    r"|(?:mvn|gradlew?|\./gradlew|\./mvnw)\s+[\w:-]+[^\n;`]*"
+    r"|pytest\s+(?:-\w|--\w|[\w./-]+(?:/|\.py))[^\n;`]*"
+    r"|git\s+(?:diff|status|log|show|blame|commit|push|add|checkout|merge|rebase|stash|reset)\s+-{1,2}\w[^\n;`]*"
+    r")",
+    re.IGNORECASE,
+)
+# Words that are also commands ("make sure", "git diff" in "review the git diff",
+# a bare "pytest"): a command only right after "run"/"execute", a backtick, a
+# colon or semicolon, "&&", or at the start of a line.
+_WEAK_COMMAND_RE = re.compile(
+    r"(?:(?:\brun(?:ning)?|\bexecut(?:e|ing)|\binvoke)\s+`?|[`$;:]\s*|&&\s*|^\s*(?:\$\s*)?)"
+    r"(?P<cmd>(?:pytest|make(?!\s+(?:sure|it|them|this|that|the|a|an|your|any|no|changes?|"
+    r"decisions?|recommendations?|notes?|use)\b)|ruff|mypy|eslint|tsc|"
+    r"git\s+(?:diff|status|log|show|blame|commit|push|add|checkout|merge|rebase|stash|reset)|"
+    r"\./[\w./-]+\.sh|bash\s+[\w./-]+\.sh)\b[^\n;`]*)",
+    re.IGNORECASE | re.MULTILINE,
+)
+# "run the relevant Agamemnon theme tests", "run all unit tests", "run the linter".
+_RUN_PHRASE_RE = re.compile(
+    r"(?<!not )(?<!n't )(?<!never )(?<!without )\brun(?:ning)?\s+(?:[\w'-]+\s+){0,4}?"
+    r"(?:tests?|test suites?|test files?|pytest|linters?|lint|type[- ]?checks?|builds?|"
+    r"(?:shell |bash |terminal )?commands?)\b",
+    re.IGNORECASE,
+)
+# A fenced block labelled as shell. An unlabelled fence is as likely code to read.
+_SHELL_FENCE_RE = re.compile(
+    r"```[ \t]*(?:bash|sh|shell|zsh|console|powershell|ps1|cmd)[ \t]*\n(?P<body>.*?)(?:```|\Z)",
+    re.IGNORECASE | re.DOTALL,
+)
+_GIT_RE = re.compile(r"^git\b", re.IGNORECASE)
+
+
+def shell_commands_in(task: str) -> List[str]:
+    """The commands (or run-the-tests phrases) the task asks the worker to run,
+    in the order they appear."""
+    text = task or ""
+    found: List[tuple] = []
+    for m in _SHELL_FENCE_RE.finditer(text):
+        for line in m.group("body").splitlines():
+            line = line.strip().lstrip("$ ").strip()
+            if line and not line.startswith("#"):
+                found.append((m.start("body"), line))
+                break
+    for m in _STRONG_COMMAND_RE.finditer(text):
+        found.append((m.start(), m.group(0)))
+    for m in _WEAK_COMMAND_RE.finditer(text):
+        found.append((m.start("cmd"), m.group("cmd")))
+    for m in _RUN_PHRASE_RE.finditer(text):
+        found.append((m.start(), m.group(0)))
+    found.sort(key=lambda item: item[0])
+    out: List[str] = []
+    for _, cmd in found:
+        cmd = " ".join(cmd.split()).rstrip(" .,)")
+        if cmd and cmd not in out:
+            out.append(cmd)
+    return out
+
+
+def shell_gap(task: str, unavailable: Iterable[str]) -> Optional[str]:
+    """The first command the task asks for when the worker has no way to run
+    it, else None. ``manage_git`` covers a task that is only git."""
+    unavailable = set(unavailable or ())
+    if not set(SHELL_TOOLS) <= unavailable:
+        return None
+    commands = shell_commands_in(task)
+    if "manage_git" not in unavailable:
+        commands = [c for c in commands if not _GIT_RE.match(c)]
+    return commands[0][:80] if commands else None
+
+
 # Tools a worker can read a note or document with.
 DOCUMENT_READ_TOOLS = ("search_documents", "read_file", "manage_documents", "manage_notes",
                        "vault_search", "vault_get")
@@ -380,6 +470,7 @@ def run_preflight(
     inherited_workspace: Optional[str] = None,
     unavailable_tools: Iterable[str] = (),
     requires: Iterable[str] = (),
+    loadout_name: str = "",
 ) -> Preflight:
     """Decide the worker's workspace and file tools, or why it cannot start.
 
@@ -493,6 +584,20 @@ def run_preflight(
                                 "or": "restate the task as read-only (requires: ['read_only'])"},
             })
         pf.forced_tools.update(writable)
+    # Applies whatever "requires" says: no_workspace and read_only describe files,
+    # and a command needs a shell either way.
+    command = shell_gap(task, unavailable)
+    if command:
+        who = f"{loadout_name} " if loadout_name else "This loadout "
+        pf.problems.append({
+            "code": "SHELL_NOT_AVAILABLE",
+            "message": (f"{who}has no shell (bash/python), so it cannot run {command!r}. Run it yourself, "
+                        "or start a loadout with a shell (e.g. Lead Engineer)."),
+            "command": command,
+            # No enable_tools: a read-only loadout is not widened for one task.
+            "next_action": {"do": "run the command yourself, or start a loadout that has bash"},
+        })
+        return pf
     if not pf.workspace and not pf.needs_workspace:
         pf.warnings.append("no workspace is attached, so the worker cannot read or change files")
     return pf
@@ -514,9 +619,10 @@ def worker_unavailable_tools(owner: Optional[str], profile: Optional[Dict[str, A
         unavailable |= set(profile.get("disabled_tools") or ())
         if profile.get("tool_access") == "selected":
             allowed = set(profile.get("enabled_tools") or ())
-            unavailable |= {t for t in (*READ_TOOLS, *WRITE_TOOLS) if t not in allowed}
+            unavailable |= {t for t in (*READ_TOOLS, *WRITE_TOOLS, *SHELL_TOOLS, "manage_git")
+                            if t not in allowed}
         elif profile.get("tool_access") == "none":
-            unavailable |= set(READ_TOOLS) | set(WRITE_TOOLS)
+            unavailable |= set(READ_TOOLS) | set(WRITE_TOOLS) | set(SHELL_TOOLS) | {"manage_git"}
     return unavailable
 
 

@@ -19,6 +19,19 @@ _BUNDLED_SKILLS = (
         "mcp__penpot_studio__build_design", "mcp__penpot_studio__render_preview", "mcp__penpot_studio__inspect_design", "mcp__penpot_studio__search_icons",
     ]),
     ("dev", "claude-code-delegation", ["delegation", "claude-code", "coding", "multi-agent", "worktree"], ["linux", "windows", "macos"], ["delegate_to_claude_code"]),
+    # No toolset required: without Penpot's search_icons it fetches from the
+    # Iconify API directly.
+    ("design", "visual-asset-sourcing", ["design", "logo", "icons", "sprites", "illustration", "mascot", "licensing"], ["linux", "windows", "macos"], []),
+    # Community skills (see ACKNOWLEDGMENTS.md, "Agent skills"); none needs a toolset.
+    ("general", "grilling", ["grilling", "interview", "planning", "decision-making"], ["linux", "windows", "macos"], []),
+    ("general", "writing-for-agents", ["writing", "skills", "prompts", "context"], ["linux", "windows", "macos"], []),
+    ("general", "unslop", ["writing", "editing", "style"], ["linux", "windows", "macos"], []),
+    ("dev", "diagnosing-bugs", ["debugging", "diagnosis", "regression", "performance"], ["linux", "windows", "macos"], []),
+    ("dev", "codebase-design", ["architecture", "modules", "design"], ["linux", "windows", "macos"], []),
+    ("dev", "domain-modeling", ["glossary", "adr", "domain"], ["linux", "windows", "macos"], []),
+    ("dev", "improve-codebase-architecture", ["architecture", "refactoring", "testability"], ["linux", "windows", "macos"], []),
+    ("dev", "triage", ["triage", "issues", "pull-requests", "backlog"], ["linux", "windows", "macos"], []),
+    ("dev", "resolving-merge-conflicts", ["git", "merge", "rebase", "conflicts"], ["linux", "windows", "macos"], []),
 )
 
 

@@ -35,6 +35,8 @@ show you what you made.
    Icons are monotone vectors: set `color`; layer two icons or shapes for a
    two-tone sprite. If a set needs attribution, `build_design` returns the
    credit line: put it in a small text line on the board or in the handoff.
+   For logos, mascots and figures also follow `visual-asset-sourcing`: search
+   real artwork, show the user 4-6 rendered options and let them pick.
 5. **Build one board per call** with `build_design`. Coordinates are relative
    to the parent, so a card at `x:24,y:24` inside a board is always 24px in.
    Size every container first, then place children inside it with margins you
@@ -44,6 +46,8 @@ show you what you made.
    overlapping text, icons that do not read, low contrast, empty areas.
    `inspect_design` with the `page_id` reports OVERFLOW, OVERLAP and NO-RENDER
    problems; fix every one.
+   A render that shows Penpot's error screen is a failed render: report it,
+   and do not treat the design as seen.
 7. **Fix with one focused pass.** Delete the faulty shapes (`delete_shape`)
    and rebuild just that part with `build_design` (`parent_id` = the board), or
    rebuild the board on a fresh page. Render again. Two render-fix rounds are

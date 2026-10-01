@@ -24,6 +24,7 @@ import multiprocessing
 import os
 import queue
 import shutil
+import sys
 import time
 from contextlib import contextmanager, nullcontext
 
@@ -788,8 +789,11 @@ def test_grep_reports_invalid_regex_as_error(tmp_path, monkeypatch, use_rg):
     assert any(word in result["error"].lower() for word in ("pattern", "regex"))
 
 
-def test_no_rg_uses_top_level_spawn_worker(tmp_path, monkeypatch):
+def test_frozen_no_rg_uses_top_level_spawn_worker(tmp_path, monkeypatch):
+    # Frozen builds cannot relaunch sys.executable with a script, so they keep
+    # the multiprocessing path.
     import multiprocessing
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     import src.agent_tools.filesystem_tools as filesystem_tools
 
     data_dir = tmp_path / "data"
@@ -989,7 +993,8 @@ def test_no_rg_worker_is_terminated_at_deadline(tmp_path, monkeypatch):
     assert time.monotonic() - started < 3
 
 
-def test_no_rg_worker_exit_before_first_record_is_reported_promptly(tmp_path, monkeypatch):
+def test_frozen_no_rg_worker_exit_before_first_record_is_reported_promptly(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
     import src.agent_tools.filesystem_tools as filesystem_tools
 
     data_dir = tmp_path / "data"
@@ -1101,3 +1106,126 @@ def test_glob_over_a_parent_prunes_the_data_dir_to_readable_folders(tmp_path, mo
 
     assert "keep.txt" in out
     assert not any("chroma" in p for p in visited)
+
+
+def _no_rg_workspace(tmp_path, monkeypatch):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    readable = _configure_test_data_tree(monkeypatch, data_dir)
+    workspace = readable["AGENT_WORKSPACE_DIR"]
+    workspace.mkdir()
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    return workspace
+
+
+def _grep(tmp_path, args: str):
+    with current_workspace_at(tmp_path):
+        return asyncio.run(GrepTool().execute(args, {}))
+
+
+def test_no_rg_fallback_does_not_spawn_a_multiprocessing_child(tmp_path, monkeypatch):
+    """2026-10-01 production: every no-rg grep spawned a child that re-imported
+    the app (~12 s on the NAS). The fallback must be a lightweight script."""
+    workspace = _no_rg_workspace(tmp_path, monkeypatch)
+    (workspace / "a.txt").write_text("LIGHT_MARKER\n", encoding="utf-8")
+
+    def boom(method=None):
+        raise AssertionError("fallback grep must not use multiprocessing")
+
+    monkeypatch.setattr(multiprocessing, "get_context", boom)
+
+    result = _grep(tmp_path, '{"pattern": "LIGHT_MARKER", "path": ""}')
+
+    assert result["exit_code"] == 0, result
+    assert "a.txt:1:LIGHT_MARKER" in result["output"]
+
+
+def test_no_rg_fallback_applies_skip_sensitive_glob_case_and_cap(tmp_path, monkeypatch):
+    workspace = _no_rg_workspace(tmp_path, monkeypatch)
+    (workspace / "keep.py").write_text("Needle one\nneedle two\n", encoding="utf-8")
+    (workspace / "keep.md").write_text("needle in markdown\n", encoding="utf-8")
+    (workspace / "node_modules").mkdir()
+    (workspace / "node_modules" / "dep.py").write_text("needle skipped\n", encoding="utf-8")
+    (workspace / ".env").write_text("needle secret\n", encoding="utf-8")
+    (workspace / "many.txt").write_text("\n".join(["needle"] * 50), encoding="utf-8")
+
+    sensitive_and_skipped = _grep(tmp_path, '{"pattern": "needle", "path": ""}')
+    assert "dep.py" not in sensitive_and_skipped["output"]
+    assert ".env" not in sensitive_and_skipped["output"]
+    assert "keep.md" in sensitive_and_skipped["output"]
+
+    # Case-sensitive by default, insensitive on request.
+    exact = _grep(tmp_path, '{"pattern": "Needle", "path": "", "glob": "*.py"}')
+    assert "keep.py:1:Needle one" in exact["output"]
+    assert "needle two" not in exact["output"]
+    folded = _grep(
+        tmp_path,
+        '{"pattern": "NEEDLE", "path": "", "glob": "*.py", "ignore_case": true}',
+    )
+    assert "keep.py:1:Needle one" in folded["output"]
+    assert "keep.py:2:needle two" in folded["output"]
+    assert "keep.md" not in folded["output"]
+
+    capped = _grep(tmp_path, '{"pattern": "needle", "path": "", "max_results": 5}')
+    assert capped["output"].count(":needle") + capped["output"].count(":Needle") == 5
+    assert "capped at 5 matches" in capped["output"]
+
+
+def test_no_rg_fallback_worker_process_is_gone_after_a_timeout(tmp_path, monkeypatch):
+    import subprocess
+    import src.agent_tools.filesystem_tools as filesystem_tools
+
+    workspace = _no_rg_workspace(tmp_path, monkeypatch)
+    (workspace / "long.txt").write_text("a" * 250_000 + "!\n", encoding="utf-8")
+    monkeypatch.setattr(filesystem_tools, "_GREP_TIMEOUT_SECONDS", 0.5)
+    started_processes = []
+    real_popen = subprocess.Popen
+
+    def recording_popen(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        started_processes.append(process)
+        return process
+
+    monkeypatch.setattr(subprocess, "Popen", recording_popen)
+
+    result = _grep(tmp_path, '{"pattern": "(a+)+$", "path": ""}')
+
+    assert result == {"error": "grep: timed out", "exit_code": 1}
+    assert len(started_processes) == 1
+    assert started_processes[0].poll() is not None, "worker must be killed at the deadline"
+
+
+def test_no_rg_fallback_warns_once_per_process(tmp_path, monkeypatch, caplog):
+    import logging
+    import src.agent_tools.filesystem_tools as filesystem_tools
+
+    workspace = _no_rg_workspace(tmp_path, monkeypatch)
+    (workspace / "a.txt").write_text("WARN_MARKER\n", encoding="utf-8")
+    monkeypatch.setattr(filesystem_tools, "_RG_MISSING_WARNED", False)
+
+    with caplog.at_level(logging.WARNING, logger=filesystem_tools.__name__):
+        _grep(tmp_path, '{"pattern": "WARN_MARKER", "path": ""}')
+        _grep(tmp_path, '{"pattern": "WARN_MARKER", "path": ""}')
+
+    warnings = [r for r in caplog.records if "ripgrep" in r.getMessage()]
+    assert len(warnings) == 1
+    assert "slower" in warnings[0].getMessage()
+
+
+def test_grep_worker_script_imports_nothing_from_the_app():
+    """The whole point of the script: a stdlib-only start, not an app import."""
+    import subprocess
+    import sys
+    import src.agent_tools.filesystem_tools as filesystem_tools
+
+    code = (
+        "import runpy, sys; "
+        "sys.argv=['grep_worker.py']; "
+        f"ns = runpy.run_path({filesystem_tools._GREP_WORKER_SCRIPT!r}); "
+        "bad = [m for m in sys.modules if m == 'src' or m.startswith('src.')]; "
+        "print(bad)"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=30
+    )
+    assert done.stdout.strip() == "[]", done.stderr

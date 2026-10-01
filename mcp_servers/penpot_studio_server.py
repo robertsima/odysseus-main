@@ -53,7 +53,10 @@ TOOLS = [
             "Search open icon libraries (200k+ icons: game-icons has helmets, swords and soldiers; tabler, "
             "lucide, phosphor, material, etc.) for real vector artwork. Returns ids like "
             "'game-icons:spartan-helmet' and each set's licence; use an id as a build_design icon node. "
-            "Attribution is required for CC BY sets, and build_design reports the credit line to add."
+            "Attribution is required for CC BY sets, and build_design reports the credit line to add. "
+            "For a logo, emblem or illustration in code, a page or a file, DO NOT hand-draw SVG paths: search "
+            "here, then call again with ids=[...] (max 6) to get each icon's full standalone <svg> markup plus "
+            "its licence, author, source URL and an attribution line to paste into ACKNOWLEDGMENTS."
         ),
         inputSchema={
             "type": "object",
@@ -61,6 +64,8 @@ TOOLS = [
                 "query": {"type": "string", "description": "What the icon shows, e.g. 'helmet', 'sword', 'shield'."},
                 "set": {"type": "string", "description": "Optional icon-set prefix to search within, e.g. 'game-icons', 'tabler', 'lucide'."},
                 "limit": {"type": "integer", "description": "Max results (default 24, max 64)."},
+                "ids": {"type": "array", "items": {"type": "string"},
+                        "description": "Icon ids from a search (e.g. 'game-icons:spartan-helmet'). Returns their full SVG markup and licence/attribution instead of searching (query is still required but ignored then; repeat what you searched). Max 6 per call."},
             },
             "required": ["query"],
         },
@@ -130,7 +135,7 @@ TOOLS = [
         description=(
             "Render a board to an image so you can see it (Penpot's own renderer, real fonts). Use it after "
             "building and again after each fix; look for overlap, clipping, unreadable contrast, broken "
-            "icons. Returns the screenshot. Mints a short-lived view-only link that is deleted afterwards. "
+            "icons. Returns the screenshot, or an error if Penpot's viewer showed its error page (never an error image).Mints a short-lived view-only link that is deleted afterwards. "
             "The board must be a top-level frame."
         ),
         inputSchema={
@@ -176,6 +181,8 @@ async def call_tool(name: str, arguments: dict):
             return _text(f"Error: missing required argument(s): {', '.join(missing)}")
     try:
         if name == "search_icons":
+            if arguments.get("ids"):
+                return _text(await ps.icon_artwork(arguments["ids"]))
             return _text(await ps.search_icons(arguments["query"], arguments.get("set"), arguments.get("limit", 24)))
 
         if name == "build_design":

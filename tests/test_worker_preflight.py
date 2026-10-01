@@ -271,3 +271,82 @@ def test_no_workspace_requirement_overrides_the_repository_wording_heuristic(che
     assert not wp.run_preflight(task, requires=["no_workspace", "workspace"]).ok
     refusal = wp.run_preflight(task).blocked_payload()["error"]
     assert "no_workspace" in refusal
+
+
+# ── a task that runs commands needs a loadout with a shell ────────────────
+
+_CRITIC_TASKS = [
+    "Verification-only repository check. Run the relevant Agamemnon theme tests, plus node --check "
+    "static/js/theme.js and git diff --check, and report the results.",
+    "Run: python -m pytest tests/test_agamemnon_theme.py -q ; node --check static/js/theme.js; "
+    "git diff --check; git status --short",
+    "Run the relevant Agamemnon theme tests and report failures.",
+    "Check static/js/theme.js with node --check and report any syntax errors.",
+]
+_NO_SHELL = {"bash", "python", "manage_git"}
+
+
+@pytest.mark.parametrize("task", _CRITIC_TASKS)
+def test_a_loadout_without_a_shell_is_refused_a_task_that_runs_commands(checkouts, task):
+    pf = wp.run_preflight(task, explicit_workspace=checkouts[0], unavailable_tools=_NO_SHELL,
+                          loadout_name="UI Design Critic")
+    payload = pf.blocked_payload()
+    assert payload["code"] == "SHELL_NOT_AVAILABLE"
+    assert "UI Design Critic has no shell (bash/python), so it cannot run '" in payload["error"]
+    assert "Run it yourself, or start a loadout with a shell (e.g. Lead Engineer)." in payload["error"]
+
+
+def test_the_first_command_is_the_one_named():
+    task = _CRITIC_TASKS[1]
+    assert wp.shell_commands_in(task)[0].startswith("python -m pytest tests/test_agamemnon_theme.py")
+    assert wp.shell_gap(task, _NO_SHELL).startswith("python -m pytest")
+
+
+@pytest.mark.parametrize("task", _CRITIC_TASKS)
+def test_the_same_tasks_pass_for_a_loadout_with_a_shell(checkouts, task):
+    pf = wp.run_preflight(task, explicit_workspace=checkouts[0], unavailable_tools=set())
+    assert pf.ok
+
+
+@pytest.mark.parametrize("task", [
+    "Review whether the tests cover the new theme tokens.",
+    "Read the test file tests/test_agamemnon_theme.py and say what it asserts.",
+    "Check that the tests cover the empty-state path.",
+    "Make sure the contrast is readable; review the git diff and the pytest fixtures for gaps.",
+    "Do not run any tests; just read the code.",
+    "Summarise how npm packages are resolved in this design.",
+])
+def test_review_tasks_that_mention_tests_are_not_blocked(checkouts, task):
+    assert wp.shell_gap(task, _NO_SHELL) is None
+
+
+def test_a_fenced_shell_block_counts_as_a_command():
+    task = "Verify the change:\n```bash\nls -la static/js\n```\nThen report."
+    assert wp.shell_gap(task, _NO_SHELL) == "ls -la static/js"
+    # An unlabelled fence is code to read, not a command to run.
+    assert wp.shell_gap("Review this:\n```\nls -la\n```", _NO_SHELL) is None
+
+
+def test_manage_git_covers_a_git_only_task():
+    task = "Run: git status --short"
+    assert wp.shell_gap(task, {"bash", "python"}) is None
+    assert wp.shell_gap(task, _NO_SHELL) == "git status --short"
+
+
+def test_selected_loadout_without_bash_loses_the_shell_tools():
+    profile = {"tool_access": "selected", "enabled_tools": ["read_file", "grep", "ls", "glob"]}
+    assert {"bash", "python", "manage_git"} <= wp.worker_unavailable_tools(None, profile)
+    profile["enabled_tools"].append("bash")
+    assert "bash" not in wp.worker_unavailable_tools(None, profile)
+
+
+def test_a_shell_block_is_recorded_like_the_workspace_block(checkouts, monkeypatch):
+    pf = wp.run_preflight(_CRITIC_TASKS[0], explicit_workspace=checkouts[0], unavailable_tools=_NO_SHELL,
+                          loadout_name="UI Design Critic")
+    seen = []
+    import src.agent_activity as activity
+    monkeypatch.setattr(activity, "run_started", lambda *a, **k: "run1")
+    monkeypatch.setattr(activity, "run_finished", lambda *a, **k: seen.append((a, k)))
+    assert wp.record_blocked("sess", "owner", _CRITIC_TASKS[0], pf) == "run1"
+    assert seen[0][1]["status"] == "blocked"
+    assert "has no shell" in seen[0][0][3]

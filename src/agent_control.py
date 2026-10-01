@@ -763,6 +763,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
             inherited_workspace=_caller_workspace(parent_session),
             unavailable_tools=worker_preflight.worker_unavailable_tools(owner, profile),
             requires=requires or (),
+            loadout_name=str((profile or {}).get("name") or ""),
         )
         if not checked.ok:
             worker_preflight.record_blocked(parent_session, owner, task, checked)

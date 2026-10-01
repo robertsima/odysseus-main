@@ -57,6 +57,9 @@ ENV PATH="/opt/odysseus-skill-tools/node_modules/.bin:${PATH}"
 # bubblewrap confines the agent's bash/python to the chat's workspace when the
 # chat has no private-vault grant (src/shell_sandbox.py). It needs user
 # namespaces, which the compose files' security_opt allows.
+# ripgrep is what the agent's grep tool runs. Without it every grep falls back
+# to a Python worker, which cost ~12 s per call on the NAS (2026-10-01 logs:
+# 87 grep rounds, ~30 min in one run).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -67,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssh-client \
     gosu \
     bubblewrap \
+    ripgrep \
     fontconfig \
     libgl1 \
     libglib2.0-0t64 \

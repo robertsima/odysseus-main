@@ -53,110 +53,55 @@ def _glob_to_regex(pat: str) -> "re.Pattern":
 
 
 def _python_grep_worker(payload: dict, output_queue) -> None:
-    """Spawn-safe fallback grep worker used when ripgrep is unavailable.
+    """Multiprocessing-spawn entry for the fallback grep, frozen builds only.
 
     Keep this at module scope: a frozen Windows executable cannot safely be
-    relaunched as ``sys.executable -c ...``, while multiprocessing can invoke a
-    top-level target through its frozen-process bootstrap.
+    relaunched as ``sys.executable -c ...`` / ``sys.executable script.py`` (that
+    would start the app again), while multiprocessing can invoke a top-level
+    target through its frozen-process bootstrap. Every other install runs
+    ``grep_worker.py`` directly (see ``_grep_worker_command``), because a
+    spawned child here re-imports this module and with it most of the app:
+    ~12 s per grep on the NAS (2026-10-01 diagnostics). The walk itself lives
+    in ``grep_worker.run_grep`` so both transports run identical code.
     """
-    try:
-        flags = re.IGNORECASE if payload["ignore_case"] else 0
-        try:
-            regex = re.compile(payload["pattern"], flags)
-            glob_regex = (
-                _glob_to_regex(payload["glob"].replace("\\", "/"))
-                if payload["glob"]
-                else None
-            )
-        except re.error as exc:
-            output_queue.put(("error", f"grep: bad pattern: {exc}"))
-            return
+    from src.agent_tools.grep_worker import run_grep
 
-        requested_root = payload["root"]
-        skip_dirs = set(payload["skip_dirs"])
-        sensitive = {name.casefold() for name in payload["sensitive_names"]}
-        max_hits = payload["max_hits"]
-        hits = 0
+    run_grep(payload, output_queue.put)
 
-        def within(path: str, root: str) -> bool:
-            try:
-                return os.path.commonpath(
-                    [os.path.normcase(path), os.path.normcase(root)]
-                ) == os.path.normcase(root)
-            except ValueError:
-                return False
 
-        def safe_file(path: str, target: str) -> Optional[str]:
-            if os.path.islink(path):
-                return None
-            canonical = os.path.realpath(path)
-            if not within(canonical, requested_root) or not within(canonical, target):
-                return None
-            parts = [part.casefold() for part in canonical.split(os.sep)]
-            if any(part in sensitive for part in parts):
-                return None
-            try:
-                if not os.path.isfile(canonical) or os.stat(canonical).st_nlink > 1:
-                    return None
-            except OSError:
-                return None
-            return canonical
+_GREP_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grep_worker.py")
+_RG_MISSING_WARNED = False
 
-        for target in payload["targets"]:
-            if hits >= max_hits:
-                break
-            if os.path.isfile(target):
-                file_iter = iter((target,))
-            else:
-                def walk_files():
-                    for directory, dirnames, filenames in os.walk(
-                        target, followlinks=False
-                    ):
-                        dirnames[:] = [
-                            name
-                            for name in dirnames
-                            if name not in skip_dirs
-                            and name.casefold() not in sensitive
-                            and not os.path.islink(os.path.join(directory, name))
-                        ]
-                        for name in filenames:
-                            yield os.path.join(directory, name)
 
-                file_iter = walk_files()
+def _warn_rg_missing_once() -> None:
+    """Say once per process that grep runs without ripgrep.
 
-            for candidate in file_iter:
-                path = safe_file(candidate, target)
-                if path is None:
-                    continue
-                relative = os.path.relpath(path, requested_root).replace(os.sep, "/")
-                if glob_regex and not (
-                    glob_regex.fullmatch(relative)
-                    or glob_regex.fullmatch(os.path.basename(path))
-                ):
-                    continue
-                try:
-                    with open(path, "r", encoding="utf-8", errors="strict") as handle:
-                        for number, line in enumerate(handle, 1):
-                            if regex.search(line):
-                                output_queue.put((
-                                    "match",
-                                    path,
-                                    number,
-                                    line.rstrip()[:_CODENAV_MAX_LINE],
-                                ))
-                                hits += 1
-                                if hits >= max_hits:
-                                    break
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if hits >= max_hits:
-                    break
-        output_queue.put(("done",))
-    except BaseException as exc:
-        try:
-            output_queue.put(("error", f"grep: fallback worker failed: {exc}"))
-        except BaseException:
-            pass
+    The 2026-10-01 production image shipped without it and nobody noticed for
+    weeks because the fallback worked, only 12 s per call; a log line makes
+    the next missing install visible.
+    """
+    global _RG_MISSING_WARNED
+    if _RG_MISSING_WARNED:
+        return
+    _RG_MISSING_WARNED = True
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "ripgrep (rg) not found on PATH: the grep tool is using its slower "
+        "Python fallback. Install ripgrep for fast, bounded searches."
+    )
+
+
+def _grep_worker_command() -> Optional[list]:
+    """Command for the lightweight subprocess worker, or None when frozen."""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return None
+    # -I: isolated mode (no PYTHON* env, no user site, script dir not on
+    # sys.path), so the child imports nothing but the stdlib.
+    return [sys.executable, "-I", _GREP_WORKER_SCRIPT]
+
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
@@ -999,6 +944,8 @@ class GrepTool:
             from src.constants import DATA_DIR
 
             rg = shutil.which("rg")
+            if not rg:
+                _warn_rg_missing_once()
             real_root = os.path.realpath(root)
             data_dir = os.path.realpath(DATA_DIR)
             spans_state = _path_within(data_dir, real_root)
@@ -1179,6 +1126,133 @@ class GrepTool:
                     return f"grep: {detail or f'process exited {return_code}'}"
                 return None
 
+            def accept_record(record) -> Optional[str]:
+                """Apply the parent-side policy to one worker record; return a
+                terminal error string, or None to keep reading."""
+                if record[0] == "error":
+                    return record[1]
+                _, path, number, text_value = record
+                canonical = os.path.realpath(path)
+                if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical, allow_private=allow_private):
+                    return None
+                rendered = f"{path}:{number}:{text_value}"
+                if rendered not in lines:
+                    lines.append(rendered)
+                return None
+
+            def run_script_worker(cmd: list[str], payload: dict) -> Optional[str]:
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                except Exception as exc:
+                    return f"grep: could not start fallback worker: {exc}"
+                output: queue.Queue = queue.Queue(maxsize=max_hits + 2)
+                stderr_prefix: list[bytes] = []
+                stop_reader = threading.Event()
+
+                def put_output(value) -> bool:
+                    # Never leave a producer blocked on the bounded queue once
+                    # the consumer has stopped (cap, deadline, error).
+                    while not stop_reader.is_set():
+                        try:
+                            output.put(value, timeout=0.05)
+                            return True
+                        except queue.Full:
+                            continue
+                    return False
+
+                def feed_stdin() -> None:
+                    try:
+                        assert process.stdin is not None
+                        process.stdin.write(json.dumps(payload).encode("utf-8"))
+                        process.stdin.close()
+                    except (OSError, ValueError):
+                        pass
+
+                def read_stdout() -> None:
+                    assert process.stdout is not None
+                    try:
+                        for raw in process.stdout:
+                            try:
+                                record = json.loads(raw)
+                            except ValueError:
+                                continue
+                            if not put_output(record):
+                                return
+                    finally:
+                        put_output(None)
+
+                def read_stderr() -> None:
+                    assert process.stderr is not None
+                    size = 0
+                    while True:
+                        chunk = process.stderr.read(4096)
+                        if not chunk:
+                            break
+                        if size < _GREP_STDERR_PREFIX:
+                            kept = chunk[:_GREP_STDERR_PREFIX - size]
+                            stderr_prefix.append(kept)
+                            size += len(kept)
+
+                threads = [
+                    threading.Thread(target=target, daemon=True)
+                    for target in (feed_stdin, read_stdout, read_stderr)
+                ]
+                for thread in threads:
+                    thread.start()
+                error: Optional[str] = None
+                completed = False
+                try:
+                    while len(lines) < max_hits:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            error = "grep: timed out"
+                            break
+                        try:
+                            record = output.get(timeout=remaining)
+                        except queue.Empty:
+                            error = "grep: timed out"
+                            break
+                        if record is None:
+                            # Pipe closed without a "done": the worker died.
+                            try:
+                                process.wait(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                pass
+                            detail = b"".join(stderr_prefix).decode("utf-8", "replace").strip()
+                            error = f"grep: fallback worker exited {process.returncode}"
+                            if detail:
+                                error += f": {detail}"
+                            break
+                        if record[0] == "done":
+                            completed = True
+                            break
+                        error = accept_record(record)
+                        if error:
+                            break
+                finally:
+                    stop_reader.set()
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            if stream:
+                                stream.close()
+                        except (OSError, ValueError):
+                            pass
+                    for thread in threads:
+                        thread.join(timeout=1)
+                return None if completed or len(lines) >= max_hits else error
+
             if rg:
                 # Validate even when policy filtering leaves no search targets.
                 if not targets:
@@ -1208,9 +1282,11 @@ class GrepTool:
                         return None, error
                 return lines, None
 
-            # This runs inside asyncio.to_thread(), so forking would clone a
-            # multithreaded process and can deadlock. Spawn is platform-safe and
-            # PyInstaller-compatible via launcher's early freeze_support().
+            # No ripgrep. This runs inside asyncio.to_thread(), so forking would
+            # clone a multithreaded process and can deadlock; and the search
+            # must not run in this process either, since a catastrophic regex
+            # cannot be interrupted and holds the GIL (it would freeze the
+            # server past the deadline). So: a separate process.
             payload = {
                 "root": real_root,
                 "targets": targets,
@@ -1223,6 +1299,18 @@ class GrepTool:
                     set(_SENSITIVE_BASENAMES) | set(_SENSITIVE_FILE_PATTERNS)
                 ),
             }
+            worker_cmd = _grep_worker_command()
+            if worker_cmd is not None:
+                # Fast path (2026-10-01): a stdlib-only script, not a
+                # multiprocessing spawn that re-imports the app (~12 s/grep).
+                error = run_script_worker(worker_cmd, payload)
+                if error:
+                    return None, error
+                return lines, None
+
+            # Frozen builds cannot relaunch sys.executable with a script;
+            # multiprocessing's spawn is PyInstaller-compatible via launcher's
+            # early freeze_support().
             try:
                 context = multiprocessing.get_context("spawn")
                 output_queue = context.Queue(maxsize=max_hits + 2)

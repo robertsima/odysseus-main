@@ -134,3 +134,23 @@ hand-back" (§6).
   guarded).
 - The context profile's `reasoning_replay_rounds` is not read by the loop (the
   window is the constant 3).
+
+## Evening follow-up (bundle 16:18–20:18, build ce04004b)
+
+The fresh "Complete Agamemnon Theme Redesign" chat (gpt-5.6-sol) passed the
+request verbatim to one Lead Engineer, built the three layouts, ran 59 tests
+and opened PR #41. Rounds now batch 2–5 tool calls and write 300–1,100 output
+tokens (reasoning carries over). The user still found it slow, and judged the
+logo "extremely basic" and the sprites "the same image in different colors".
+
+| Finding | Change |
+|---|---|
+| No ripgrep in the image: every `grep` spawned a Python worker that re-imported the app, ~12 s each (87 rounds, ~30 min) | `ripgrep` in the Dockerfile; the fallback runs `src/agent_tools/grep_worker.py` (stdlib only, still killable at the deadline); a one-time warning when rg is missing |
+| Penpot advertises `penpotPublicURI = http://homelab.nas:9001`, which the container cannot resolve: every board render screenshotted Penpot's error toast and returned success, so no agent ever saw the mockup | `render_board` reads `/js/config.js`, opens the viewer at the public origin with `--host-resolver-rules` mapping it to the API host, and raises when the DOM shows Penpot's error page or error toast (checked against the NAS's real 2.17 DOM) |
+| The Lead hand-wrote SVG for the logo and sprites | `visual-asset-sourcing` skill and a coding rule: real licensed artwork (Iconify game-icons etc.), distinct figures per identity, and the user picks between rendered options; `search_icons` takes `ids` and returns SVG markup with license and attribution |
+| The Lead asked the read-only critic (no shell) to run tests: one run sat 15 min | `worker_preflight.shell_gap`: a task that runs commands is refused for a loadout without bash/python, with what to do instead; a delegation rule says run tests yourself and ask for one review per iteration |
+| The critic's browser tools needed exact approval (`ask_risky`) inside a worker: three 5-minute stalls | Loadout change (user data): the critic runs `auto` |
+| — | Community skills bundled (MIT, provenance in each SKILL.md and ACKNOWLEDGMENTS.md): grilling, writing-for-agents, unslop, diagnosing-bugs, improve-codebase-architecture (+ codebase-design, domain-modeling), triage, resolving-merge-conflicts |
+
+Still to check after deploy: a `render_preview` of a mockup board returns the
+board (not an error); grep rounds take well under a second.

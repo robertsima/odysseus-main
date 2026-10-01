@@ -729,7 +729,8 @@ _DELEGATION_RULES = """\
 - Done-when is what the person would check. For visual or UI work that is the rendered result compared with the reference they gave, not only a string test.
 - While a worker runs, do not redo its investigation or edit the files or worktree it is working in. Wait for it (`manage_agent_loadout` status with `wait_seconds`) or do separate work.
 - When a worker hands back partial or blocked, resume that same worker (`send_to_session`, mode agent) with what it needs before starting a new one.
-- A worker's report is its claim: check the evidence it names (the diff, the test output, the pull request) before telling the user the work is done."""
+- A worker's report is its claim: check the evidence it names (the diff, the test output, the pull request) before telling the user the work is done.
+- Run tests and builds yourself; a reviewer reads and judges, it does not run your commands. Ask for one independent review per iteration, after the work is done, not after every small fix."""
 
 # Each tool section is keyed by tool name(s) it covers.
 # Sections with multiple tools use a tuple key.
@@ -1927,6 +1928,7 @@ def _workspace_coding_rules(workspace: Optional[str]) -> str:
         "- If output is huge, use `rg`, `grep`, `head`, `tail`, focused `sed -n`, or scripts that summarize only relevant parts. Do not flood the context with full logs or full files.\n"
         "- If a command fails, use the failure output to choose the next diagnostic or patch. Do not silently stop or claim success.\n"
         "- After code changes, verify them the way the user would find out: run the relevant tests or build (a focused test, `py_compile`, `node --check`, lint, build). For visual changes (pages, styles, icons, SVG), also render what you changed with `preview_file` and compare it with the reference you were given; a passing string test does not show what it looks like. If verification cannot run, say exactly why.\n"
+        "- Logos, mascots, figures, sprites and illustrations come from real artwork (an Iconify set such as game-icons, the project's assets, or what the user supplies), not hand-written SVG paths; see the `visual-asset-sourcing` skill. When taste decides, render 4-6 options with `preview_file` and ask the user to pick instead of judging it yourself.\n"
         "- Keep going until the requested change is actually made and checked, or state the concrete blocker."
         # From 2026-09-30: an app looked broken on the user's PC after an agent
         # PR bumped Expo; the agent checked the source on this server for an

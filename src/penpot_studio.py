@@ -739,6 +739,81 @@ async def _search_once(query: str, prefix: Optional[str], limit: int) -> dict:
     return (await _get(f"{ICONIFY_API}/search", params=params)).json()
 
 
+ICON_ARTWORK_MAX_IDS = 6
+ICON_ARTWORK_MAX_SVG = 24_000      # bytes per icon; game-icons run ~1-6 KB, a few detailed ones 20 KB
+ICON_ARTWORK_MAX_TOTAL = 80_000    # bytes per call, so one reply cannot flood the model's context
+
+
+async def icon_artwork(ids: Iterable[str]) -> dict:
+    """Full standalone SVG for chosen icon ids, with licence and a pasteable credit.
+
+    2026-10-01: designers and engineers asked for logos/illustrations and
+    hand-drew SVG paths because search_icons only returned ids. This hands back
+    the real drawing (Iconify's ``/<prefix>/<name>.svg``) so it can be dropped
+    into a page, a file or build_design's ``svg`` node, plus what the licence
+    needs: author, source URL and an ACKNOWLEDGMENTS line.
+    """
+    wanted: List[str] = []
+    for raw in ids or []:
+        icon = str(raw).strip().lower()
+        if icon and icon not in wanted:
+            wanted.append(icon)
+    if not wanted:
+        raise PenpotError("pass at least one icon id like 'game-icons:spartan-helmet' (find ids with search_icons)")
+    skipped = wanted[ICON_ARTWORK_MAX_IDS:]
+    wanted = wanted[:ICON_ARTWORK_MAX_IDS]
+    results: List[dict] = []
+    sets: Dict[str, dict] = {}
+    total = 0
+    for icon in wanted:
+        m = re.fullmatch(r"([a-z0-9][a-z0-9-]*):([a-z0-9][a-z0-9-]*)", icon)
+        if not m:
+            results.append({"id": icon, "error": "ids look like 'game-icons:spartan-helmet'"})
+            continue
+        prefix, name = m.groups()
+        source = f"https://icon-sets.iconify.design/{prefix}/{name}/"
+        try:
+            svg = (await _get(f"{ICONIFY_API}/{prefix}/{name}.svg")).text
+        except PenpotError as exc:
+            hint = " Icon ids are exact; copy one from search_icons." if "404" in str(exc) else ""
+            results.append({"id": icon, "error": str(exc) + hint})
+            continue
+        if "<svg" not in svg:
+            results.append({"id": icon, "error": "Iconify returned no drawing for this id"})
+            continue
+        if len(svg) > ICON_ARTWORK_MAX_SVG or total + len(svg) > ICON_ARTWORK_MAX_TOTAL:
+            results.append({"id": icon, "source_url": source,
+                            "error": f"drawing is {len(svg)} bytes, over this call's size cap; "
+                                     "ask for fewer icons per call or pick a simpler one"})
+            continue
+        total += len(svg)
+        if prefix not in sets:
+            try:
+                sets[prefix] = (await _get(f"{ICONIFY_API}/collections",
+                                           params={"prefixes": prefix})).json().get(prefix) or {}
+            except PenpotError:
+                sets[prefix] = {}
+        info = sets[prefix]
+        lic = info.get("license") or {}
+        author = info.get("author") or {}
+        lic_name = lic.get("title") or lic.get("spdx") or "licence unknown (check the source page before shipping)"
+        credit = (f"{info.get('name', prefix)}: {name} by {author.get('name') or 'its authors'} "
+                  f"({lic_name}) {author.get('url') or lic.get('url') or source}")
+        results.append({
+            "id": icon, "svg": svg, "bytes": len(svg),
+            "license": {"title": lic.get("title"), "spdx": lic.get("spdx"), "url": lic.get("url")},
+            "author": {"name": author.get("name"), "url": author.get("url")},
+            "source_url": source,
+            "attribution_required": _needs_attribution(lic),
+            "attribution": credit,
+        })
+    out: Dict[str, Any] = {"artwork": results}
+    if skipped:
+        out["not_fetched"] = skipped
+        out["note"] = f"at most {ICON_ARTWORK_MAX_IDS} icons per call; ask again for the rest"
+    return out
+
+
 async def search_icons(query: str, prefix: Optional[str] = None, limit: int = 24) -> dict:
     """Search open icon sets. Returns ids like ``game-icons:spartan-helmet`` plus
     each set's licence so the designer can attribute correctly.
@@ -1000,9 +1075,106 @@ async def share_link(client: PenpotClient, file_id: str, page_id: str) -> str:
     return sid
 
 
-def viewer_url(cfg: PenpotConfig, file_id: str, page_id: str, frame_id: str, share_id: str) -> str:
-    return (f"{cfg.public_url}/#/view?file-id={file_id}&page-id={page_id}"
+def viewer_url(cfg: PenpotConfig, file_id: str, page_id: str, frame_id: str, share_id: str,
+               origin: Optional[str] = None) -> str:
+    return (f"{origin or cfg.public_url}/#/view?file-id={file_id}&page-id={page_id}"
             f"&section=interactions&frame-id={frame_id}&index=0&share-id={share_id}")
+
+
+_PUBLIC_URI_RE = re.compile(r"""penpotPublicURI\s*=\s*(["'])(.*?)\1""")
+_public_uri_cache: Dict[str, Optional[str]] = {}
+
+
+def parse_public_uri(config_js: str) -> Optional[str]:
+    """``penpotPublicURI`` from Penpot's ``/js/config.js`` as a bare origin, or None."""
+    m = _PUBLIC_URI_RE.search(config_js or "")
+    if not m:
+        return None
+    parsed = urlparse(m.group(2).strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+async def fetch_public_uri(base_url: str) -> Optional[str]:
+    """The origin Penpot's frontend calls its own API on (cached per base URL).
+
+    2026-10-01 (ZimaOS): Odysseus is configured with the NAS LAN IP, but that
+    frontend advertises ``penpotPublicURI = "http://homelab.nas:9001"``, a
+    Pi-hole name that does not resolve inside the container. The viewer then
+    failed every API/asset request and Penpot drew its error page, which we
+    screenshotted and called a success. A failed fetch is not cached, so a
+    later render retries.
+    """
+    if base_url in _public_uri_cache:
+        return _public_uri_cache[base_url]
+    try:
+        async with httpx.AsyncClient(timeout=4.0, follow_redirects=True) as http:
+            resp = await http.get(f"{base_url}/js/config.js")
+        if resp.status_code >= 400:
+            return None
+    except httpx.HTTPError:
+        return None
+    uri = parse_public_uri(resp.text)
+    _public_uri_cache[base_url] = uri
+    return uri
+
+
+def _hostport(url: str) -> Tuple[str, int]:
+    p = urlparse(url)
+    return (p.hostname or "").lower(), p.port or (443 if p.scheme == "https" else 80)
+
+
+def viewer_origin(cfg: PenpotConfig, public_uri: Optional[str]) -> Tuple[str, List[str]]:
+    """(origin to open the viewer at, extra Chromium flags).
+
+    ``PENPOT_PUBLIC_URL`` is an explicit operator choice and wins; otherwise the
+    frontend's own ``penpotPublicURI`` is used so the page is same-origin with
+    the API it calls. When that host:port is not the one Odysseus reaches
+    Penpot on, Chromium is told to resolve it to the configured host.
+    """
+    explicit = os.environ.get("PENPOT_PUBLIC_URL", "").strip().rstrip("/")
+    origin = explicit or public_uri or cfg.base_url
+    pub_host, pub_port = _hostport(origin)
+    api_host, api_port = _hostport(cfg.base_url)
+    if not pub_host or (pub_host, pub_port) == (api_host, api_port):
+        return origin, []
+    target = f"[{api_host}]" if ":" in api_host else api_host
+    return origin, [f"--host-resolver-rules=MAP {pub_host}:{pub_port} {target}:{api_port}"]
+
+
+# Markers of Penpot's static exception screen (frontend/src/app/main/ui/static.cljs
+# and translations/en.po, checked against Penpot develop 2026-10-01). The layout
+# class is the reliable one; the English strings only count when the viewer's own
+# markup is absent, because a mockup of an error screen can contain the same words.
+# Penpot 2.17 (the user's NAS, 2026-10-01) reports a viewer that cannot load its
+# data with an error-level toast instead ("Something wrong has happened.", class
+# main_ui_ds_notifications_toast__level-error), and the word "viewer" occurs in
+# its scripts, so the text rule alone missed it.
+_ERROR_CLASS_RE = re.compile(r"exception[-_](?:layout|content)|notifications_toast__level-error")
+_ERROR_TEXTS = ("Something wrong has happened", "Something bad happened", "Internal Error",
+                "This page doesn't exist", "Bad Gateway", "Service Unavailable", "Oops!")
+
+
+def penpot_error_page(dom: str) -> Optional[str]:
+    """What Penpot's error screen says if ``dom`` is that screen, else None."""
+    texts = [t for t in _ERROR_TEXTS if t in dom]
+    if not _ERROR_CLASS_RE.search(dom) and (not texts or "viewer" in dom.lower()):
+        return None
+    visible = re.sub(r"<(script|style)\b.*?</\1>", " ", dom, flags=re.S | re.I)
+    visible = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", visible)).strip()
+    return visible[:200] or (texts[0] if texts else "exception page")
+
+
+async def _run_browser(args: List[str], timeout: float) -> Tuple[bytes, bytes]:
+    proc = await asyncio.create_subprocess_exec(
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise PenpotError("rendering timed out; Penpot's viewer did not finish loading")
+    return out or b"", err or b""
 
 
 def find_boards(file: dict, page_id: str) -> List[dict]:
@@ -1040,7 +1212,8 @@ async def render_board(client: PenpotClient, file_id: str, page_id: str,
         raise PenpotError(f"{frame_id} is not a top-level board on that page. Boards: " +
                           ", ".join(f"{b['id']} ({b['name']})" for b in boards))
     sid = await share_link(client, file_id, page_id)
-    url = viewer_url(client.cfg, file_id, page_id, board["id"], sid)
+    origin, resolver_flags = viewer_origin(client.cfg, await fetch_public_uri(client.cfg.base_url))
+    url = viewer_url(client.cfg, file_id, page_id, board["id"], sid, origin)
     keep_link = False
     try:
         w = int(width or min(max(board["w"] + 80, 480), 2400))
@@ -1052,18 +1225,32 @@ async def render_board(client: PenpotClient, file_id: str, page_id: str,
                               f"browser tool and take a screenshot instead: {url}")
         if os.path.exists(out_png):
             os.remove(out_png)
-        with tempfile.TemporaryDirectory(prefix="penpot-render-profile-") as profile:
-            args = [exe, "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
-                    "--hide-scrollbars", "--force-device-scale-factor=1", f"--window-size={w},{h}",
-                    f"--user-data-dir={profile}", f"--virtual-time-budget={wait_ms}",
-                    f"--screenshot={out_png}", url]
-            proc = await asyncio.create_subprocess_exec(
-                *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
-            try:
-                _, err = await asyncio.wait_for(proc.communicate(), timeout=wait_ms / 1000 + 45)
-            except asyncio.TimeoutError:
-                proc.kill()
-                raise PenpotError("rendering timed out; Penpot's viewer did not finish loading")
+        timeout = wait_ms / 1000 + 45
+        with tempfile.TemporaryDirectory(prefix="penpot-render-profile-") as profile, \
+                tempfile.TemporaryDirectory(prefix="penpot-render-dom-") as dom_profile:
+            def argv(user_dir: str, mode: str) -> List[str]:
+                return [exe, "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
+                        "--hide-scrollbars", "--force-device-scale-factor=1", f"--window-size={w},{h}",
+                        f"--user-data-dir={user_dir}", f"--virtual-time-budget={wait_ms}",
+                        *resolver_flags, mode, url]
+            # A screenshot cannot tell Penpot's error screen from a design, so a
+            # second run dumps the DOM under the same budget. They run side by
+            # side (separate profiles) to keep the render time flat.
+            (_, err), (dom, _) = await asyncio.gather(
+                _run_browser(argv(profile, f"--screenshot={out_png}"), timeout),
+                _run_browser(argv(dom_profile, "--dump-dom"), timeout))
+        bad = penpot_error_page(dom.decode("utf-8", "replace"))
+        if bad:
+            if os.path.exists(out_png):
+                os.remove(out_png)
+            mismatch = (f" The viewer was opened at {origin} (penpotPublicURI / PENPOT_PUBLIC_URL) "
+                        f"while Odysseus reaches Penpot at {client.cfg.base_url}."
+                        if origin != client.cfg.base_url else "")
+            raise PenpotError(
+                f"Penpot's viewer could not load the board; it showed its error page ({bad!r}).{mismatch} "
+                "Usually the browser cannot reach the host the Penpot frontend calls (set PENPOT_PUBLIC_URL "
+                "to an address reachable from Odysseus) or the file/share link is gone. "
+                "No screenshot was returned; use inspect_design for the shape data meanwhile.")
         if not os.path.isfile(out_png) or os.path.getsize(out_png) < 1000:
             raise PenpotError("the browser produced no screenshot: " + (err or b"").decode("utf-8", "replace")[-300:])
     finally:
