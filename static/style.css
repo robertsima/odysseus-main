@@ -627,6 +627,19 @@ body.bg-pattern-sparkles {
       flex-shrink: 0;
       min-height: 24px;
     }
+    /* Permanent brand mark (Trojan helmet) — same shape in every theme;
+       only its color tracks the active palette. See index.html / login.html
+       for the markup and ACKNOWLEDGMENTS.md note: original line art, no
+       external asset. */
+    .brand-crest-icon {
+      flex-shrink: 0;
+      color: var(--brand-color, var(--red));
+    }
+    .sidebar-brand-icon {
+      width: 18px;
+      height: 18px;
+      margin-right: 6px;
+    }
     .sidebar-brand-title {
       font-size: 1rem;
       font-weight: 750;
@@ -672,6 +685,85 @@ body.bg-pattern-sparkles {
     .sidebar.right-side .sidebar-brand-title {
       margin-left: 10px;
     }
+
+    /* ── Agamemnon layout ──────────────────────────────────────────────
+       Agamemnon's sidebar reads as a crest banner (icon-over-wordmark,
+       centered, bordered) instead of Odysseus's compact inline brand row.
+       Scoped to the explicit root identity attribute (set by
+       applyThemeIdentity() in theme.js / the first-paint script in
+       index.html) rather than any palette variable, so a custom theme
+       built from Agamemnon's colors doesn't inherit its layout, and a
+       recolored Agamemnon keeps its own. Odysseus and every other theme
+       are completely unaffected — this block only ever matches
+       html[data-theme="dark"]. The extra `.sidebar` qualifier raises
+       specificity above `.sidebar.right-side .sidebar-header` / `.sidebar-brand`
+       above, so the banner composition applies regardless of which edge
+       the sidebar is docked to. */
+    html[data-theme="dark"] .sidebar .sidebar-header {
+      flex-direction: column;
+      justify-content: center;
+      padding: 18px 16px 14px;
+      min-height: 64px;
+      border-bottom: 1px solid color-mix(in srgb, var(--brand-color, var(--red)) 45%, var(--border)) !important;
+      box-shadow: 0 1px 0 color-mix(in srgb, var(--brand-color, var(--red)) 18%, transparent) !important;
+    }
+    html[data-theme="dark"] .sidebar .sidebar-brand {
+      flex-direction: column;
+      justify-content: center;
+      gap: 4px;
+      padding: 0;
+    }
+    html[data-theme="dark"] .sidebar-brand-icon {
+      width: 24px;
+      height: 24px;
+      margin-right: 0;
+    }
+    html[data-theme="dark"] .sidebar .sidebar-brand-title {
+      top: 0;
+      left: 0;
+      margin-left: 0;
+      font-size: 0.78rem;
+      letter-spacing: 0.24em;
+    }
+    /* Icon rail reads as a grouped command rail for Agamemnon — a thin
+       divider separates "content tools" from "agents/system" — instead of
+       Odysseus's single uninterrupted list of icons. Pure decoration (a
+       ::before rule + a little margin), so it can't desync from the rail's
+       fixed 48px width or the resize/collapse logic in sidebar-layout.js. */
+    html[data-theme="dark"] .icon-rail #rail-gallery,
+    html[data-theme="dark"] .icon-rail #rail-agents {
+      position: relative;
+      margin-top: 11px;
+    }
+    html[data-theme="dark"] .icon-rail #rail-gallery::before,
+    html[data-theme="dark"] .icon-rail #rail-agents::before {
+      content: '';
+      position: absolute;
+      top: -7px;
+      left: 6px;
+      right: 6px;
+      height: 1px;
+      background: color-mix(in srgb, var(--border) 70%, transparent);
+    }
+    /* Narrow phones: keep the compact inline brand row so the sidebar
+       header doesn't grow taller than it needs to on a small screen. */
+    @media (max-width: 480px) {
+      html[data-theme="dark"] .sidebar .sidebar-header {
+        flex-direction: row;
+        justify-content: flex-start;
+        padding: 18px 12px 8px 12px;
+        min-height: 44px;
+      }
+      html[data-theme="dark"] .sidebar .sidebar-brand {
+        flex-direction: row;
+        gap: 6px;
+      }
+      html[data-theme="dark"] .sidebar .sidebar-brand-title {
+        font-size: 1.1rem;
+        letter-spacing: 0.075em;
+      }
+    }
+
     /* Fixed hamburger — always visible, toggles sidebar */
     .hamburger-btn {
       position: fixed;

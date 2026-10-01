@@ -76,6 +76,16 @@ browser that supports `woff2`. The bundles are the published npm artifacts,
 unmodified — `.gitattributes` turns the whitespace check off for `static/lib/`
 so they can stay byte-identical to upstream.
 
+## Original artwork
+
+The app's brand mark (a Trojan helmet, `.brand-crest-icon` in
+`static/index.html`, `static/login.html`, `static/style.css`, and the
+favicon paths in `static/js/theme.js`) and the Agamemnon seal icons used for
+agents in `static/js/agentsDashboard.js` (`.ag-seal-*` in `static/style.css`)
+are original line-art drawn directly as inline SVG for this project. No
+external icon set or asset was used; they're licensed the same as the rest
+of this repository's own code.
+
 ## Front-end libraries loaded at runtime (CDN)
 
 Referenced from `cdn.jsdelivr.net` / `cdnjs.cloudflare.com` at runtime — not vendored:
