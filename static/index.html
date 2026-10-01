@@ -323,11 +323,11 @@
       </div>
       <div class="modal-body workbench-modal-body">
         <div class="ag-run-control" aria-label="Run control summary">
-          <section class="ag-run-summary"><h3>RUN SUMMARY</h3><p><strong id="ag-run-state">ACTIVITY READY</strong></p><p>Inspect durable run events, artifacts, and delivery state.</p></section>
-          <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol><li>Task received</li><li>Agent activity recorded</li><li>Evidence and delivery state</li></ol></section>
-          <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><p>Actual run output and source links appear in the activity stream.</p></section>
+          <section class="ag-run-summary"><h3 id="ag-run-title">RUN SUMMARY</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
+          <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
+          <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
         </div>
-        <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd>Selected agent</dd></div><div><dt>Status</dt><dd>See activity</dd></div></dl></section><section><h3>ACTIVITY</h3><p>Per-run event history remains available in the Activity view.</p></section><section><h3>CUSTOMIZE</h3><p>Evidence layout · density · filters</p></section></aside>
+        <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section><section><h3>CUSTOMIZE</h3><p>Use the secondary views below for changes, commits, pull requests, evidence density, and filters.</p></section></aside>
         <div class="memory-tabs wb-tabs" role="tablist">
           <button class="memory-tab active" data-wb-tab="activity" role="tab">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
           <button class="memory-tab" data-wb-tab="changes" role="tab">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>

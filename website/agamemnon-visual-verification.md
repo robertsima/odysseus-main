@@ -9,9 +9,9 @@ Compared at 1440 × 920 against Penpot file `77fbae64-173c-81f5-8008-b823d468d03
 | Chat / Strategy Room | `agamemnon-preview-chat.html`, rendered 1440 × 920 after final fixes. 240/790/306 composition, 590 px transcript, 254 px raised answer, 104 px composer. | Match |
 | Agents / Phalanx | `agamemnon-preview-agents.html`, rendered 1440 × 920 after final fixes. Four 510 × 300 cards at Penpot coordinates; gold/slate/coral states and four vector role marks. Production card class/geometry uses the same composition. | Match |
 | Workbench / Run Control | `agamemnon-preview-workbench.html`, rendered 1440 × 920 after final fixes. Semantic production summary/timeline/console/detail structures at 790 × 110/330/200 and 306 × 699. | Match |
-| Artwork integrity | `agamemnon-hoplitic-crest.svg` and `agamemnon-agent-marks.svg` rendered locally; crest and four shared marks are paths, not CSS shapes. | Match |
+| Artwork integrity | `agamemnon-hoplitic-crest.svg` and `agamemnon-agent-marks.svg` rendered locally. `agamemnon-role-marks-preview.svg` embeds the same four canonical paths and visibly renders Commander, Engineer, Scout, and Reviewer without external-reference failures. The crest and marks are vectors, not CSS shapes. | Match |
 | Responsive behavior | Production CSS puts context/run details below the main column at ≤1050 px and cards in one column; ≤700 px reduces title sizing. | Match by CSS contract |
-| No regressions | 26 focused theme/layout/select tests pass; JavaScript syntax and `git diff --check` pass. | Match |
+| No regressions | 59 focused theme/layout/Agents tests pass; JavaScript syntax checks for theme, Agents, and Workbench plus `git diff --check` pass. | Match |
 
 ## Independent critic and fixes
 

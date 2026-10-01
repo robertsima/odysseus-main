@@ -48,11 +48,12 @@ def test_agents_is_a_dockable_tool_window_not_a_full_page_overlay():
     assert "applyEdgeDock(root, 'right')" in AGENTS
 
 
-def test_agent_fleet_uses_animated_robot_personification_with_reduced_motion():
+def test_agent_fleet_uses_shared_vector_role_personification():
     assert "function robotHtml(agent, size = '')" in AGENTS
-    assert 'class="ag-row ag-bot-card' in AGENTS
+    assert 'class="ag-row ag-card ag-bot-card' in AGENTS
     assert 'class="ag-card-crew"' in AGENTS
     assert 'class="ag-console-hero"' in AGENTS
+    assert 'href="${agentMarksUrl()}#${emblem}"' in AGENTS
     assert ".ag-bot-running" in STYLE
     assert "@keyframes ag-bot-work" in STYLE
     assert ".ag-bot, .ag-bot-antenna i, .ag-card-beacon, .ag-bot-card::after { animation: none !important; }" in STYLE
@@ -61,16 +62,14 @@ def test_agent_fleet_uses_animated_robot_personification_with_reduced_motion():
 def test_agent_seals_encode_role_separately_from_status():
     assert "ag-seal-${role}" in AGENTS
     assert "identity === 'agamemnon'" in AGENTS
-    assert "? 'worker' : 'specialist'" in AGENTS
+    assert "/scout|research|recon/" in AGENTS
+    assert "/review|critic|audit|quality/" in AGENTS
     assert 'aria-hidden="true">\n    <svg class="ag-seal-mark"' in AGENTS
     assert "focusable=\"false\"" in AGENTS
-    assert "role === 'worker' ? '<path class=\"ag-seal-glyph\"" in AGENTS
-    assert "role === 'specialist' ? '<circle class=\"ag-seal-glyph\"" in AGENTS
+    for emblem in ("command", "scout", "review", "implement"):
+        assert f"'{emblem}'" in AGENTS
     assert ".ag-seal-primary .ag-seal-glyph" in STYLE
-    assert ".ag-seal-specialist .ag-seal-helm" in STYLE
-    assert ".ag-seal-worker .ag-seal-brow" in STYLE
-    for status in ("waiting_approval", "failed", "finished"):
-        assert f".ag-bot-{status} .ag-seal-shield" in STYLE
+    assert "agamemnon-agent-marks.svg" in AGENTS
 
 
 def test_steering_messages_show_their_state_and_age():
@@ -222,8 +221,10 @@ def test_body_header_does_not_restate_the_window_title():
     assert "ag-title" not in STYLE
     markup = AGENTS.split("surface.innerHTML = `", 1)[1].split("  if (!state.configOpen) renderDetail();", 1)[0]
     assert "Mission floor" not in markup
-    # The window's own title bar is the one place the window is named.
-    assert '<h3 id="ag-window-title">Agent Control Room</h3>' in INDEX
+    # One semantic heading switches copy with the active identity; DOM order is not the contract.
+    assert '<h3 id="ag-window-title">' in INDEX
+    assert '<span class="ody-agents-title">Agent Control Room</span>' in INDEX
+    assert '<span class="ag-phalanx-title">AGENT SPACE / PHALANX</span>' in INDEX
 
 
 def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():

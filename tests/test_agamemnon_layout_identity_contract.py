@@ -97,11 +97,13 @@ def test_permanent_helmet_logo_is_unconditional_across_every_palette():
     assert "M16 4L16 22L6 22Z" not in LOGIN
 
 
-def test_agent_role_marks_are_distinct_hoplite_shields():
+def test_agent_role_marks_use_the_shared_four_role_artwork():
     dashboard = (ROOT / "static/js/agentsDashboard.js").read_text()
-    for role in ("command", "implement", "review"):
+    marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text()
+    for role in ("command", "implement", "scout", "review"):
         assert f"'{role}'" in dashboard
-    assert "ag-seal-shield" in dashboard and "ag-seal-helm" in dashboard
+        assert f'id="{role}"' in marks
+    assert "agamemnon-agent-marks.svg" in dashboard
     assert "ag-seal-glyph-${emblem}" in dashboard
     assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()
     assert "icons/icon-192.png" in (ROOT / "static/manifest.json").read_text()

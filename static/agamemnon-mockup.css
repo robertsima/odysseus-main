@@ -1,64 +1,119 @@
-/* Agamemnon composition — exact Penpot geometry/tokens, isolated by identity. */
-.ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title{display:none}
-html[data-theme="dark"] body{font-family:'Space Grotesk',system-ui,sans-serif;background:#111417;color:#f7f8fa}
-html[data-theme="dark"] .sidebar{width:240px!important;min-width:240px!important;background:#171c21!important;border-right:2px solid #343d45}
-html[data-theme="dark"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px;align-items:flex-start;border-bottom:0!important;box-shadow:none!important}
+/* Agamemnon composition — Penpot geometry and tokens, isolated by theme identity. */
+:root {
+  --ag-bg:#111417;
+  --ag-rail:#171c21;
+  --ag-panel:#1b2127;
+  --ag-raised:#20262c;
+  --ag-console:#0c0f11;
+  --ag-border:#343d45;
+  --ag-border-strong:#59636d;
+  --ag-gold:#d7b35a;
+  --ag-coral:#e07b5a;
+  --ag-text:#f7f8fa;
+  --ag-muted:#aeb6bd;
+}
+.ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
+html[data-theme="dark"] body{font-family:'Space Grotesk',system-ui,sans-serif;background:var(--ag-bg);color:var(--ag-text)}
+html[data-theme="dark"] .ody-brand-name,html[data-theme="dark"] .ody-page-title{display:none!important}
+html[data-theme="dark"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
+html[data-theme="dark"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
 html[data-theme="dark"] .sidebar .sidebar-brand{height:100%;flex-direction:row;gap:13px}
-html[data-theme="dark"] .sidebar-brand-icon{width:39.375px;height:29.53125px;margin:0;color:#d7b35a}
-html[data-theme="dark"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:#d7b35a}
+html[data-theme="dark"] .sidebar-brand-icon{width:39.375px;height:29.53125px;margin:0;color:var(--ag-gold)}
+html[data-theme="dark"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:var(--ag-gold);text-transform:uppercase}
 html[data-theme="dark"] .sidebar-inner{padding:20px 24px}
-html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:#d7b35a;font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
+html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
 html[data-theme="dark"] .sidebar .list-item,html[data-theme="dark"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
-html[data-theme="dark"] .sidebar .list-item:hover{background:#20262c;color:#d7b35a}
+html[data-theme="dark"] .sidebar .list-item:hover{background:var(--ag-raised);color:var(--ag-gold)}
 
-html[data-theme="dark"] .chat-container{position:relative;background:#111417;padding:132px 370px 60px 40px}
+/* Chat / Strategy Room — x=280 main, x=1098 rail, y=140 content at 1440×920. */
+html[data-theme="dark"] .chat-container{position:relative;background:var(--ag-bg);padding:140px 370px 138px 40px}
 html[data-theme="dark"] .ag-page-heading{display:block;position:absolute;top:26px;left:40px;right:346px;height:76px}
-html[data-theme="dark"] .ag-page-heading h2{margin:0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.025em}
-html[data-theme="dark"] .ag-page-heading p{margin:13px 0 0;color:#aeb6bd;font-size:15px;letter-spacing:.03em}
-html[data-theme="dark"] .ag-page-heading b{padding:0 8px;color:#59636d}html[data-theme="dark"] .ag-page-heading strong{color:#d7b35a;font-weight:700}
-html[data-theme="dark"] .ag-context-rail{display:block;position:absolute;z-index:4;right:36px;top:140px;bottom:60px;width:306px;box-sizing:border-box;padding:26px 24px;background:#171c21;border:2px solid #343d45;overflow:auto}
-html[data-theme="dark"] .ag-context-rail section+section{margin-top:31px;padding-top:25px;border-top:1px solid #343d45}
-html[data-theme="dark"] .ag-context-rail h3{margin:0 0 14px;color:#d7b35a;font:700 12px/1 'Space Grotesk';letter-spacing:.16em}
-html[data-theme="dark"] .ag-context-rail p,html[data-theme="dark"] .ag-context-rail dl{margin:0;color:#aeb6bd;font-size:14px;line-height:1.55}
-html[data-theme="dark"] .ag-context-rail dl div{display:flex;justify-content:space-between;margin:8px 0}html[data-theme="dark"] .ag-context-rail dd{margin:0;color:#f7f8fa}
-html[data-theme="dark"] .ag-context-rail i{display:inline-block;width:7px;height:7px;border-radius:50%;background:#d7b35a;margin-right:6px}
-html[data-theme="dark"] .ag-context-rail button{display:block;width:100%;margin:8px 0;padding:9px 11px;text-align:left;color:#f7f8fa;background:#20262c;border:1px solid #59636d;border-radius:0;font:500 13px 'Space Grotesk';cursor:pointer}
+html[data-theme="dark"] .ag-page-heading h1{margin:0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.025em}
+html[data-theme="dark"] .ag-page-heading p{margin:13px 0 0;color:var(--ag-muted);font-size:15px;letter-spacing:.03em}
+html[data-theme="dark"] .ag-page-heading b{padding:0 8px;color:var(--ag-border-strong)}
+html[data-theme="dark"] .ag-page-heading strong{color:var(--ag-gold);font-weight:700}
+html[data-theme="dark"] .ag-context-rail{display:block;position:absolute;z-index:4;right:36px;top:140px;height:720px;width:306px;box-sizing:border-box;padding:26px 24px;background:var(--ag-rail);border:2px solid var(--ag-border);overflow:auto}
+html[data-theme="dark"] .ag-context-rail section+section,html[data-theme="dark"] .ag-run-detail section+section{margin-top:31px;padding-top:25px;border-top:1px solid var(--ag-border)}
+html[data-theme="dark"] .ag-context-rail h3,html[data-theme="dark"] .ag-run-detail h3{margin:0 0 14px;color:var(--ag-gold);font:700 12px/1 'Space Grotesk';letter-spacing:.16em}
+html[data-theme="dark"] .ag-context-rail p,html[data-theme="dark"] .ag-context-rail dl,html[data-theme="dark"] .ag-run-detail p,html[data-theme="dark"] .ag-run-detail dl{margin:0;color:var(--ag-muted);font-size:14px;line-height:1.55}
+html[data-theme="dark"] .ag-context-rail dl div,html[data-theme="dark"] .ag-run-detail dl div{display:flex;justify-content:space-between;margin:8px 0}
+html[data-theme="dark"] .ag-context-rail dd,html[data-theme="dark"] .ag-run-detail dd{margin:0;color:var(--ag-text)}
+html[data-theme="dark"] .ag-context-rail i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--ag-gold);margin-right:6px}
+html[data-theme="dark"] .ag-context-rail button{display:block;width:100%;margin:8px 0;padding:9px 11px;text-align:left;color:var(--ag-text);background:var(--ag-raised);border:1px solid var(--ag-border-strong);border-radius:0;font:500 13px 'Space Grotesk';cursor:pointer}
 html[data-theme="dark"] .chat-top-bar{top:103px;left:40px;right:370px;border:0;background:transparent}
-html[data-theme="dark"] #chat-history{width:100%;max-width:none;box-sizing:border-box;background:#1b2127;border:2px solid #d7b35a;padding:26px 30px;min-height:calc(100vh - 330px)}
-html[data-theme="dark"] #welcome-screen{right:370px;top:110px}
+html[data-theme="dark"] #chat-history{width:100%;max-width:none;box-sizing:border-box;background:var(--ag-panel);border:2px solid var(--ag-gold);padding:26px 30px;min-height:590px}
+html[data-theme="dark"] #welcome-screen{right:370px;top:140px}
 html[data-theme="dark"] .welcome-name{font-family:'Space Grotesk';font-weight:700;letter-spacing:.08em;text-transform:uppercase}
-html[data-theme="dark"] .chat-input-bar{left:40px!important;right:370px!important;bottom:34px!important;width:auto!important;max-width:none!important;border:2px solid #d7b35a!important;border-radius:0!important;background:#20262c!important;box-shadow:none!important}
+html[data-theme="dark"] #chat-history .msg-ai{box-sizing:border-box;width:calc(100% - 32px);max-width:710px;margin:28px 0 28px 32px;padding:22px 24px;background:var(--ag-raised);border:2px solid var(--ag-border-strong);border-radius:0}
+html[data-theme="dark"] #chat-history .msg-ai .body{max-width:none;color:var(--ag-text)}
+html[data-theme="dark"] #chat-history .msg-ai pre,html[data-theme="dark"] #chat-history .msg-ai .tool-result{max-width:100%;overflow:auto}
+html[data-theme="dark"] .chat-input-bar{left:40px!important;right:370px!important;bottom:60px!important;height:104px;box-sizing:border-box;width:auto!important;max-width:none!important;border:2px solid var(--ag-gold)!important;border-radius:0!important;background:var(--ag-raised)!important;box-shadow:none!important}
 
+/* Agents / Phalanx — the production fleet is the board; details remain below as an explicit selection. */
 html:not([data-theme="dark"]) .ag-phalanx-title,html:not([data-theme="dark"]) .ag-phalanx-summary,html:not([data-theme="dark"]) .ag-workbench-title{display:none}
 html[data-theme="dark"] .ody-agents-title,html[data-theme="dark"] .ody-agents-summary,html[data-theme="dark"] .ody-workbench-title{display:none}
 html[data-theme="dark"] .ag-phalanx-title,html[data-theme="dark"] .ag-phalanx-summary,html[data-theme="dark"] .ag-workbench-title{display:inline}
-html[data-theme="dark"] #agents-dashboard,html[data-theme="dark"] #workbench-modal{inset:0 0 0 240px!important;background:#111417!important;align-items:stretch!important;justify-content:stretch!important;padding:0!important}
-html[data-theme="dark"] .agents-modal-content,html[data-theme="dark"] .workbench-modal-content{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0!important;padding:26px 36px!important;border:0!important;border-radius:0!important;background:#111417!important;box-sizing:border-box;box-shadow:none!important;font-family:'Space Grotesk'}
-html[data-theme="dark"] .agents-window-header,html[data-theme="dark"] .workbench-modal-content>.modal-header{min-height:88px;border:0!important;align-items:flex-start}
+html[data-theme="dark"] #agents-dashboard,html[data-theme="dark"] #workbench-modal{inset:0 0 0 240px!important;background:var(--ag-bg)!important;align-items:stretch!important;justify-content:stretch!important;padding:0!important}
+html[data-theme="dark"] .agents-modal-content,html[data-theme="dark"] .workbench-modal-content{width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;margin:0!important;padding:26px 36px 30px 40px!important;border:0!important;border-radius:0!important;background:var(--ag-bg)!important;box-sizing:border-box;box-shadow:none!important;font-family:'Space Grotesk';overflow:auto}
+html[data-theme="dark"] .agents-window-header,html[data-theme="dark"] .workbench-modal-content>.modal-header{height:124px;min-height:124px;border:0!important;align-items:flex-start;padding:0!important}
+html[data-theme="dark"] .workbench-modal-content>.modal-header{height:119px;min-height:119px}
 html[data-theme="dark"] .ag-window-mark,html[data-theme="dark"] .agents-window-header .doc-action-icon-btn,html[data-theme="dark"] #wb-dock-right{display:none}
 html[data-theme="dark"] .ag-window-title h3,html[data-theme="dark"] .workbench-modal-content>.modal-header h4{font:700 30px/1.2 'Space Grotesk';letter-spacing:.02em;margin:0}
-html[data-theme="dark"] .ag-window-title>span{font:400 15px/1.5 'Space Grotesk';color:#aeb6bd;margin-top:10px}
-html[data-theme="dark"] .agents-dashboard-body{padding:0;gap:16px}
-html[data-theme="dark"] .ag-head{border:0;background:transparent;padding:0 0 10px}
-html[data-theme="dark"] .ag-body{grid-template-columns:minmax(0,1fr) 306px!important;gap:28px!important}
-html[data-theme="dark"] .ag-pane-splitter{display:none}
-html[data-theme="dark"] .ag-fleet,html[data-theme="dark"] .ag-detail,html[data-theme="dark"] .ag-launch{border:2px solid #59636d!important;border-radius:0!important;background:#1b2127!important}
-html[data-theme="dark"] .ag-fleet{width:auto!important}
-html[data-theme="dark"] .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(2,minmax(260px,1fr));gap:28px}
-html[data-theme="dark"] .ag-card{min-height:190px;border:2px solid #59636d!important;border-radius:0!important;background:#1b2127!important;padding:20px!important}
-html[data-theme="dark"] .ag-group:first-child .ag-card:first-child{border-color:#d7b35a!important}
-html[data-theme="dark"] .ag-group-attn .ag-card{border-color:#e07b5a!important}
-html[data-theme="dark"] .ag-seal-mark{width:52px;height:52px}html[data-theme="dark"] .ag-seal-shield{stroke:#d7b35a}
+html[data-theme="dark"] .ag-window-title>span{font:400 15px/1.5 'Space Grotesk';color:var(--ag-muted);margin-top:10px}
+html[data-theme="dark"] .agents-dashboard-body{padding:0;gap:0;overflow:visible}
+html[data-theme="dark"] .ag-head{border:0;background:transparent;padding:0 0 16px;min-height:0}
+html[data-theme="dark"] .ag-body{display:block!important}
+html[data-theme="dark"] .ag-pane-splitter{display:none!important}
+html[data-theme="dark"] .ag-fleet{width:100%!important;border:0!important;border-radius:0!important;background:transparent!important;overflow:visible!important}
+html[data-theme="dark"] .ag-fleet-tools{margin-bottom:16px}
+html[data-theme="dark"] .ag-fleet-list{overflow:visible!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(2,minmax(0,510px));gap:28px 30px}
+html[data-theme="dark"] .ag-card-workers{display:contents}
+html[data-theme="dark"] .ag-card{box-sizing:border-box;min-height:300px;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important;padding:26px!important}
+html[data-theme="dark"] .ag-group:first-child .ag-card:first-child{border-color:var(--ag-gold)!important}
+html[data-theme="dark"] .ag-group-attn .ag-card,html[data-theme="dark"] .ag-card.attn,html[data-theme="dark"] .ag-card-failed{border-color:var(--ag-coral)!important}
+html[data-theme="dark"] .ag-card-avatar{align-self:start}
+html[data-theme="dark"] .ag-seal-mark{width:58px;height:58px;stroke:var(--ag-gold);fill:none;stroke-width:1.7}
+html[data-theme="dark"] .ag-seal-unit{color:var(--ag-muted)}
+html[data-theme="dark"] .ag-row-name{font:700 17px/1.25 'Space Grotesk';text-transform:uppercase;letter-spacing:.05em}
+html[data-theme="dark"] .ag-detail,html[data-theme="dark"] .ag-launch{box-sizing:border-box;width:100%;margin-top:28px;min-height:240px;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important}
+html[data-theme="dark"] .ag-launch{display:block}
 
-html[data-theme="dark"] .workbench-modal-body{display:grid;grid-template-columns:minmax(0,790px) 306px;grid-template-rows:auto 1fr;gap:28px;justify-content:space-between}
-html[data-theme="dark"] .wb-tabs{grid-column:1/-1;border:0}
-html[data-theme="dark"] .wb-panel{grid-column:1;border:2px solid #d7b35a;background:#1b2127;padding:20px;border-radius:0}
-html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{content:'RUN DETAILS\A Agent  •  Commander\A Status  •  Active\A\A ACTIVITY\A Inspect per-run event history\A\A CUSTOMIZE\A Layout and evidence view';white-space:pre-wrap;position:absolute;right:36px;top:140px;bottom:36px;width:306px;box-sizing:border-box;padding:26px 24px;background:#171c21;border:2px solid #343d45;color:#aeb6bd;font:400 15px/1.8 'Space Grotesk'}
-html[data-theme="dark"] .wb-activity{background:#0c0f11;border:2px solid #59636d;border-radius:0}
+/* Workbench / Run Control — semantic, dynamic summary first; existing tools follow below. */
+html[data-theme="dark"] .workbench-modal-body{display:grid;grid-template-columns:minmax(0,790px) 306px;gap:28px;align-content:start;padding:0!important;overflow:visible}
+html[data-theme="dark"] .ag-run-control{display:grid;grid-column:1;gap:28px}
+html[data-theme="dark"] .ag-run-control>section{box-sizing:border-box;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
+html[data-theme="dark"] .ag-run-control>section h3{margin:0 0 12px;font:700 17px/1.2 'Space Grotesk';letter-spacing:.04em}
+html[data-theme="dark"] .ag-run-control>section p,html[data-theme="dark"] .ag-run-control>section ol{margin:0;color:var(--ag-muted);font-size:15px;line-height:1.65}
+html[data-theme="dark"] .ag-run-summary{height:110px;border-color:var(--ag-gold)!important}
+html[data-theme="dark"] .ag-run-summary h3{color:var(--ag-gold)}
+html[data-theme="dark"] .ag-run-timeline{height:330px;overflow:auto}
+html[data-theme="dark"] .ag-run-timeline ol{padding-left:22px}
+html[data-theme="dark"] .ag-run-timeline li{padding:5px 0;border-bottom:1px solid var(--ag-border)}
+html[data-theme="dark"] .ag-run-console{height:200px;background:var(--ag-console)!important;overflow:auto}
+html[data-theme="dark"] .ag-run-console-output{white-space:pre-wrap;font:400 13px/1.55 'Fira Code',monospace;color:var(--ag-muted)}
+html[data-theme="dark"] .ag-run-detail{display:block;grid-column:2;grid-row:1;height:699px;box-sizing:border-box;margin:0;padding:27px 24px;background:var(--ag-rail);border:2px solid var(--ag-border);overflow:auto}
+html[data-theme="dark"] .wb-tabs{grid-column:1/-1;margin-top:4px;border:0}
+html[data-theme="dark"] .wb-panel{grid-column:1/-1;position:relative;border:2px solid var(--ag-border-strong);background:var(--ag-panel);padding:20px;border-radius:0}
+html[data-theme="dark"] .wb-activity{background:var(--ag-console);border:2px solid var(--ag-border-strong);border-radius:0}
 html[data-theme="dark"] .wb-btn,html[data-theme="dark"] .wb-select,html[data-theme="dark"] .wb-input{border-radius:0;font-family:'Space Grotesk'}
 
 @media(max-width:1050px){
- html[data-theme="dark"] .chat-container{padding-right:40px}.ag-context-rail{display:none!important}html[data-theme="dark"] .chat-input-bar{right:40px!important}html[data-theme="dark"] .chat-top-bar{right:40px}html[data-theme="dark"] #agents-dashboard,html[data-theme="dark"] #workbench-modal{left:0!important}
- html[data-theme="dark"] .ag-body{grid-template-columns:1fr!important}html[data-theme="dark"] .ag-detail{min-height:220px}html[data-theme="dark"] .workbench-modal-body{grid-template-columns:1fr}html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{display:none}
+ html[data-theme="dark"] .chat-container{padding-right:40px;padding-bottom:138px;overflow:auto}
+ html[data-theme="dark"] .ag-context-rail{position:relative;inset:auto;width:100%;height:auto;margin:28px 0 0;display:block!important}
+ html[data-theme="dark"] .chat-input-bar{right:40px!important}
+ html[data-theme="dark"] .chat-top-bar{right:40px}
+ html[data-theme="dark"] #agents-dashboard,html[data-theme="dark"] #workbench-modal{left:0!important}
+ html[data-theme="dark"] .ag-fleet-list .ag-card-grid{grid-template-columns:1fr}
+ html[data-theme="dark"] .workbench-modal-body{grid-template-columns:1fr}
+ html[data-theme="dark"] .ag-run-control,html[data-theme="dark"] .ag-run-detail{grid-column:1;grid-row:auto;width:100%}
+ html[data-theme="dark"] .ag-run-detail{height:auto}
 }
-@media(max-width:700px){html[data-theme="dark"] .ag-fleet-list .ag-card-grid{grid-template-columns:1fr}html[data-theme="dark"] .ag-page-heading{left:18px}html[data-theme="dark"] .chat-container{padding-left:18px;padding-right:18px}html[data-theme="dark"] .chat-input-bar{left:18px!important;right:18px!important}}
+@media(max-width:700px){
+ html[data-theme="dark"] .agents-modal-content,html[data-theme="dark"] .workbench-modal-content{padding-left:18px!important;padding-right:18px!important}
+ html[data-theme="dark"] .ag-page-heading{left:18px;right:18px}
+ html[data-theme="dark"] .chat-container{padding-left:18px;padding-right:18px}
+ html[data-theme="dark"] .chat-input-bar{left:18px!important;right:18px!important}
+ html[data-theme="dark"] #chat-history .msg-ai{width:100%;margin-left:0}
+ html[data-theme="dark"] .ag-card{min-height:0}
+}

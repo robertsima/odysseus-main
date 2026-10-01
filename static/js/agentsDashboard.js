@@ -147,19 +147,20 @@ function robotHtml(agent, size = '') {
   // Runtime sources map to primary/worker; named loadouts remain specialists.
   const source = String(agent?.source || agent?.kind || '').toLowerCase();
   const identity = String(agent?.name || '').toLowerCase();
+  const profile = String(agent?.profile || agent?.role || '').toLowerCase();
+  const roleText = `${identity} ${profile} ${source}`;
   const role = source === 'odysseus' || identity === 'odysseus' || identity === 'agamemnon' || identity === 'primary'
     ? 'primary'
-    : source === 'claude_code' || source === 'session' || source === 'pipeline' || source === 'bg_job' || source === 'worktree'
-      ? 'worker' : 'specialist';
+    : /scout|research|recon/.test(roleText) ? 'scout'
+      : /review|critic|audit|quality/.test(roleText) ? 'reviewer'
+        : source === 'claude_code' || source === 'session' || source === 'pipeline' || source === 'bg_job' || source === 'worktree'
+          ? 'worker' : 'specialist';
   const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
   const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
-  const emblem = role === 'primary' ? 'command' : role === 'worker' ? 'implement' : 'review';
+  const emblem = role === 'primary' ? 'command' : role === 'scout' ? 'scout' : role === 'reviewer' || role === 'specialist' ? 'review' : 'implement';
   return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" aria-hidden="true">
     <svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
-      <path class="ag-seal-shield" d="M16 2.5 28 7v8.2c0 7-4.8 11.8-12 14.3C8.8 27 4 22.2 4 15.2V7z"/>
-      <path class="ag-seal-helm" d="M8.5 16.8a7.5 7.5 0 0 1 15 0v2h-15z"/>
-      <path class="ag-seal-brow" d="M7.5 17.8h17M16 9v8.8"/>
-      <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}" x="4" y="4" width="24" height="24" transform="scale(0.75) translate(5.33 5.33)"/>
+      <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"/>
     </svg><span class="ag-seal-unit">${unit}</span>
   </span>`;
 }
