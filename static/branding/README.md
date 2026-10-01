@@ -1,12 +1,10 @@
 # Agamemnon identity assets
 
-`agamemnon-hoplitic-crest.svg` uses the exact Hoplite crest path and muted-gold fill from the supplied Penpot mockup (`77fbae64-173c-81f5-8008-b823d468d03d`, Chat frame `51e8f401-6310-4ca6-a1e1-a25037d25953`). It is a custom product mark, not a third-party icon.
+The Agamemnon application mark and its Agents control-room representation are deliberately different assets.
 
-Agamemnon agent cards use one coherent Trojan-soldier sprite built around the
-exact Penpot crest silhouette. The form deliberately stays generic; names and
-roles remain text rather than becoming an incomplete set of job pictograms.
-Color identifies the model family (default gold, Anthropic coral, OpenAI mint,
-Google blue, Mistral amber, local purple). Live status remains text and card
-treatment, never icon color. Odysseus retains its existing role-seal treatment.
+- `agamemnon-trojan-helmet.svg` is the product mark: a polished Trojan/Greek helmet in unmistakable side profile. It is used for the Agamemnon favicon, login, sidebar, welcome state, and the shared navigation in Chat, Agents, and Workbench. Source: `game-icons:spartan-helmet` by Delapouite, CC BY 3.0, selected from the high-quality vector family shown in the supplied Penpot identity review.
+- `agamemnon-agent-marks.svg` is the Phalanx/control-room sprite sheet. It contains five genuinely different silhouettes: `#soldier-primary` (mounted commander), `#soldier-worker` (armoured standing guard), `#soldier-scout` (mobile sword-and-shield fighter), `#soldier-reviewer` (charging shield-bash pose), and `#soldier-specialist` (paired guards). The runtime chooses geometry from the operational role and independently applies model identity through `currentColor` (default gold, Anthropic coral, OpenAI mint, Google blue, Mistral amber, local purple). Color is therefore an accent, not the only distinction. Status, role, model, and unit number remain explicit text.
 
-The Agamemnon web theme uses this crest for the favicon. The global PWA manifest and Apple touch icon intentionally retain the original Odysseus raster marks; theme selection never changes app-install identity.
+The soldier is used only by generated agent representations in the Agents control room. Chat and Workbench retain the helmet branding in their shared navigation but do not repeat a soldier sprite in contextual identity rows. Odysseus retains its prior role seals, layout, installed-app raster marks, and manifest identity.
+
+Attribution: Icons made by Delapouite and Lorc, from [Game Icons](https://game-icons.net/), licensed [CC BY 3.0](https://creativecommons.org/licenses/by/3.0/).

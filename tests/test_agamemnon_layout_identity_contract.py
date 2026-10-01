@@ -17,7 +17,7 @@ MOCKUP_STYLE = (ROOT / "static/agamemnon-mockup.css").read_text()
 
 HELMET_DOME = "M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5"
 HELMET_CREST = "M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z"
-BRAND_CREST = (ROOT / "static/branding/agamemnon-hoplitic-crest.svg").read_text()
+BRAND_CREST = (ROOT / "static/branding/agamemnon-trojan-helmet.svg").read_text()
 
 
 def test_explicit_root_theme_identity_attribute_exists_and_defaults_to_agamemnon():
@@ -73,37 +73,39 @@ def test_permanent_helmet_logo_is_unconditional_across_every_palette():
         # Static markup and favicon use the shared crest asset; inline brand
         # marks remain Agamemnon helmet vectors, never headphone/mic imagery.
         if doc is HTML:
-            assert '/static/branding/agamemnon-hoplitic-crest.svg' in doc
+            assert '/static/branding/agamemnon-trojan-helmet.svg' in doc
             assert 'href="/static/icons/icon-192.png"' in doc
         assert 'stroke="currentColor"' not in doc or 'brand-crest-icon' in doc
-    crest_path = BRAND_CREST.split(' d="', 1)[1].split('"', 1)[0]
-    assert crest_path in HTML
-    # Inline data SVG has the same silhouette path, with an explicit theme fill.
-    assert "M53.0,634.234375C42.12675857543945" in HTML
-    login_logo = LOGIN.split('class="logo-boat brand-crest-icon"', 1)[1].split('</svg>', 1)[0]
-    assert "M53.0,634.234375C42.12675857543945" in login_logo
-    assert 'transform="translate(-33.3125,-634.234375)"' in login_logo
-    assert "Agamemnon hoplite crest" in BRAND_CREST and '#d7b35a' in BRAND_CREST
+    assert "side-profile Trojan helmet" in BRAND_CREST and '#d7b35a' in BRAND_CREST
+    assert 'game-icons:spartan-helmet by Delapouite' in BRAND_CREST
     assert HELMET_DOME not in HTML and HELMET_DOME not in LOGIN
     assert "headphone" not in HTML.lower() and "headphone" not in LOGIN.lower()
 
     # Per-route favicons use the exact crest shape, rather than route glyphs
     # or the former headset silhouette.
-    assert BRAND_CREST.split(' d="', 1)[1].split('"', 1)[0] in HTML
     assert HELMET_DOME not in HTML.split("var SHAPES", 1)[1].split("var inner", 1)[0]
     assert "icons: [" in HTML and "'/static/icons/icon-192.png'" in HTML
+    assert "var isAgamemnon = !theme || !theme.name || theme.name === 'dark'" in HTML
+    assert "agFav.href = '/static/branding/agamemnon-trojan-helmet.svg'" in HTML
+    assert "agApple.href = '/static/branding/agamemnon-trojan-helmet.svg'" in HTML
+    assert "name:'Agamemnon',short_name:'Agamemnon'" in HTML
+    assert "'/calendar': 'Calendar — Odysseus'" in HTML
+    assert "name: (titles[path] || 'Odysseus')" in HTML
+    assert "document.title = titles[path] || 'Odysseus'" in HTML
     assert HELMET_DOME in THEME
     assert "M16 4L16 22L6 22Z" not in THEME
     assert "M16 4L16 22L6 22Z" not in HTML
     assert "M16 4L16 22L6 22Z" not in LOGIN
 
 
-def test_agamemnon_agents_use_one_model_colored_trojan_artwork_family():
+def test_agamemnon_agents_use_distinct_model_colored_soldier_artworks():
     dashboard = (ROOT / "static/js/agentsDashboard.js").read_text()
     marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text()
-    assert 'id="trojan"' in marks
+    for variant in ("primary", "worker", "scout", "reviewer", "specialist"):
+        assert f'id="soldier-{variant}"' in marks
     assert 'fill="currentColor"' in marks
-    assert 'href="${agentMarksUrl()}#trojan"' in dashboard
+    assert 'href="${agentMarksUrl()}#soldier-${soldierVariant}"' in dashboard
+    assert 'data-soldier-variant="${soldierVariant}"' in dashboard
     identity = (ROOT / "static/js/agamemnonIdentity.js").read_text()
     assert "resolveAgamemnonModelIdentity" in dashboard
     assert "matchIdentity(model) || matchIdentity(source)" in identity
@@ -114,10 +116,10 @@ def test_agamemnon_agents_use_one_model_colored_trojan_artwork_family():
     # The legacy role symbols remain available only for the unchanged
     # Odysseus presentation; Agamemnon CSS selects the generic Trojan mark.
     assert 'html[data-theme="dark"] .ag-seal-mark{display:none}' in MOCKUP_STYLE
-    assert 'html[data-theme="dark"] .ag-trojan-mark{display:block' in MOCKUP_STYLE
+    assert 'html[data-theme="dark"] .ag-soldier-sprite{display:block' in MOCKUP_STYLE
     assert "agamemnon-agent-marks.svg" in dashboard
-    assert 'id="ag-chat-agent-mark"' in HTML
-    assert 'id="ag-run-agent-mark"' in HTML
+    assert 'ag-chat-agent-mark' not in HTML
+    assert 'ag-run-agent-mark' not in HTML
     assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()
     assert "icons/icon-192.png" in (ROOT / "static/manifest.json").read_text()
     assert '"background_color": "#111417"' in (ROOT / "static/manifest.json").read_text()

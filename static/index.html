@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
   <title>Agamemnon</title>
-  <link rel="icon" type="image/svg+xml" href="/static/branding/agamemnon-hoplitic-crest.svg">
+  <link rel="icon" type="image/svg+xml" href="/static/branding/agamemnon-trojan-helmet.svg">
   <link rel="manifest" href="/static/manifest.json">
   <meta name="theme-color" content="#111417">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -134,8 +134,33 @@
     try {
       var path = (window.location.pathname || '').toLowerCase();
       var theme = (function(){ try { return JSON.parse(localStorage.getItem('odysseus-theme')); } catch(_) { return null; } })();
+      var isAgamemnon = !theme || !theme.name || theme.name === 'dark';
       var ac = (theme && (theme.red || theme.colors && theme.colors.red)) || '#e06c75';
       var brandGold = '#d7b35a';
+      // Agamemnon uses one canonical product mark everywhere. Do not redraw
+      // it here: the shared licensed side-profile helmet must remain the
+      // favicon and install identity, while saved non-Agamemnon themes keep
+      // the existing Odysseus route/PWA behavior below.
+      if (isAgamemnon) {
+        var agFav = document.querySelector("link[rel='icon']");
+        if (!agFav) { agFav = document.createElement('link'); agFav.rel = 'icon'; agFav.type = 'image/svg+xml'; document.head.appendChild(agFav); }
+        agFav.href = '/static/branding/agamemnon-trojan-helmet.svg';
+        var agApple = document.querySelector("link[rel='apple-touch-icon']");
+        if (!agApple) { agApple = document.createElement('link'); agApple.rel = 'apple-touch-icon'; document.head.appendChild(agApple); }
+        agApple.href = '/static/branding/agamemnon-trojan-helmet.svg';
+        var agNames = {'/calendar':'Calendar','/notes':'Notes','/cookbook':'Cookbook','/email':'Email','/memory':'Memory','/gallery':'Gallery','/tasks':'Tasks','/library':'Library'};
+        document.title = (agNames[path] ? agNames[path] + ' — ' : '') + 'Agamemnon';
+        try {
+          if (typeof Blob !== 'undefined') {
+            var agPwa = {name:'Agamemnon',short_name:'Agamemnon',start_url:path,scope:'/',display:'standalone',background_color:'#111417',theme_color:brandGold,icons:[{src:'/static/branding/agamemnon-trojan-helmet.svg',sizes:'any',type:'image/svg+xml',purpose:'any'}]};
+            var agUrl = URL.createObjectURL(new Blob([JSON.stringify(agPwa)], {type:'application/manifest+json'}));
+            var agManifest = document.querySelector("link[rel='manifest']");
+            if (!agManifest) { agManifest = document.createElement('link'); agManifest.rel = 'manifest'; document.head.appendChild(agManifest); }
+            agManifest.href = agUrl;
+          }
+        } catch(_) {}
+        return;
+      }
       // Kept for existing route metadata compatibility. The app identity is
       // always the same Penpot-derived crest; route glyphs never replace it.
       var SHAPES = {
@@ -186,16 +211,16 @@
       apple.href = '/static/icons/icon-192.png';
       // Also customize the page title so the bookmark inherits a useful name.
       var titles = {
-        '/calendar': 'Calendar — Agamemnon',
-        '/notes': 'Notes — Agamemnon',
-        '/cookbook': 'Cookbook — Agamemnon',
-        '/email': 'Email — Agamemnon',
-        '/memory': 'Memory — Agamemnon',
-        '/gallery': 'Gallery — Agamemnon',
-        '/tasks': 'Tasks — Agamemnon',
-        '/library': 'Library — Agamemnon',
+        '/calendar': 'Calendar — Odysseus',
+        '/notes': 'Notes — Odysseus',
+        '/cookbook': 'Cookbook — Odysseus',
+        '/email': 'Email — Odysseus',
+        '/memory': 'Memory — Odysseus',
+        '/gallery': 'Gallery — Odysseus',
+        '/tasks': 'Tasks — Odysseus',
+        '/library': 'Library — Odysseus',
       };
-      if (titles[path]) document.title = titles[path];
+      document.title = titles[path] || 'Odysseus';
       // Per-route Android home-screen icon. We swap the <link rel="manifest">
       // to a per-page Blob URL with this route's SVG icon — that way "Add to
       // Home Screen" picks up the route-specific glyph instead of the shared
@@ -203,8 +228,8 @@
       try {
         if (typeof Blob !== 'undefined') {
           var pwa = {
-            name: (titles[path] || 'Agamemnon'),
-            short_name: (titles[path] || 'Agamemnon').split('—')[0].trim(),
+            name: (titles[path] || 'Odysseus'),
+            short_name: (titles[path] || 'Odysseus').split('—')[0].trim(),
             start_url: path,
             scope: '/',
             display: 'standalone',
@@ -327,7 +352,7 @@
           <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
           <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
         </div>
-        <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><div class="ag-agent-identity"><svg id="ag-run-agent-mark" class="ag-trojan-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="/static/branding/agamemnon-agent-marks.svg#trojan"/></svg><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></div></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section><section><h3>CUSTOMIZE</h3><p>Use the secondary views below for changes, commits, pull requests, evidence density, and filters.</p></section></aside>
+        <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section><section><h3>CUSTOMIZE</h3><p>Use the secondary views below for changes, commits, pull requests, evidence density, and filters.</p></section></aside>
         <div class="memory-tabs wb-tabs" role="tablist">
           <button class="memory-tab active" data-wb-tab="activity" role="tab">Activity<span class="wb-tab-badge" data-wb-badge="activity" hidden></span></button>
           <button class="memory-tab" data-wb-tab="changes" role="tab">Changes<span class="wb-tab-badge" data-wb-badge="changes" hidden></span></button>
@@ -840,10 +865,8 @@
     <div class="sidebar-header">
       <button class="sidebar-hamburger" id="sidebar-toggle-btn" title="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="New chat">
-        <!-- Agamemnon's exact Penpot crest. It is hidden for Odysseus below. -->
-        <svg class="brand-crest-icon sidebar-brand-icon" viewBox="0 0 39.375 29.53125" aria-hidden="true" focusable="false">
-          <path d="M53.0,634.234375C42.12675857543945,634.234375,33.3125,643.0487670898438,33.3125,653.921875C33.3125,657.5079345703125,34.25200271606445,660.8697509765625,35.92724609375,663.765625L48.078125,663.765625L50.69287109375,658.4591674804688C47.73917007446289,657.4940185546875,45.6171875,654.7371215820312,45.6171875,651.4609375C45.6171875,647.3834838867188,48.92255401611328,644.078125,53.0,644.078125C57.07744598388672,644.078125,60.3828125,647.3834838867188,60.3828125,651.4609375L60.3828125,653.921875L72.6875,653.921875C72.6875,643.0487670898438,63.87324142456055,634.234375,53.0,634.234375M52.65399169921875,646.5390625C50.07169723510742,646.7210693359375,48.071720123291016,648.8722534179688,48.078125,651.4609375C48.078125,654.17919921875,50.28172302246094,656.3828125,53.0,656.3828125C55.71827697753906,656.3828125,57.921875,654.17919921875,57.921875,651.4609375C57.92525863647461,650.0933227539062,57.35948181152344,648.7860107421875,56.360191345214844,647.8523559570312C55.36090087890625,646.918701171875,54.01819610595703,646.4429321289062,52.65399169921875,646.5390625Z" fill="currentColor" transform="translate(-33.3125,-634.234375) scale(1.625)"/>
-        </svg>
+        <!-- Agamemnon's side-profile Trojan helmet. It is hidden for Odysseus below. -->
+        <img class="brand-crest-icon sidebar-brand-icon" src="/static/branding/agamemnon-trojan-helmet.svg" alt="">
         <span class="sidebar-brand-title ag-brand-name">AGAMEMNON</span>
         <span class="sidebar-brand-title ody-brand-name">Odysseus</span>
       </div>
@@ -1095,7 +1118,7 @@
       <p><span id="ag-session-number">SESSION</span> <b>·</b> <span id="ag-session-label">New operation</span> <b>·</b> <strong>READY</strong></p>
     </header>
     <aside class="ag-context-rail" aria-label="Session context">
-      <section><h3>SESSION CONTEXT</h3><div class="ag-agent-identity"><svg id="ag-chat-agent-mark" class="ag-trojan-mark" viewBox="0 0 64 64" aria-hidden="true"><use href="/static/branding/agamemnon-agent-marks.svg#trojan"/></svg><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd><i></i> Ready</dd></div></dl></div></section>
+      <section><h3>SESSION CONTEXT</h3><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd><i></i> Ready</dd></div></dl></section>
       <section><h3>RUN CONTROLS</h3><button type="button" id="ag-open-agents">Open phalanx</button><button type="button" id="ag-open-workbench">Inspect activity</button></section>
       <section><h3>EVIDENCE</h3><p>Sources and artifacts attach to answers when available.</p></section>
       <section><h3>CUSTOMIZE</h3><p>Palette · density · command layout</p><button type="button" id="ag-open-theme">Appearance</button></section>
@@ -1117,7 +1140,7 @@
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
       <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
     <div id="welcome-screen">
-      <div class="welcome-name"><svg class="welcome-boat brand-crest-icon" viewBox="0 0 39.375 29.53125" aria-hidden="true"><path d="M53.0,634.234375C42.12675857543945,634.234375,33.3125,643.0487670898438,33.3125,653.921875C33.3125,657.5079345703125,34.25200271606445,660.8697509765625,35.92724609375,663.765625L48.078125,663.765625L50.69287109375,658.4591674804688C47.73917007446289,657.4940185546875,45.6171875,654.7371215820312,45.6171875,651.4609375C45.6171875,647.3834838867188,48.92255401611328,644.078125,53.0,644.078125C57.07744598388672,644.078125,60.3828125,647.3834838867188,60.3828125,651.4609375L60.3828125,653.921875L72.6875,653.921875C72.6875,643.0487670898438,63.87324142456055,634.234375,53.0,634.234375M52.65399169921875,646.5390625C50.07169723510742,646.7210693359375,48.071720123291016,648.8722534179688,48.078125,651.4609375C48.078125,654.17919921875,50.28172302246094,656.3828125,53.0,656.3828125C55.71827697753906,656.3828125,57.921875,654.17919921875,57.921875,651.4609375C57.92525863647461,650.0933227539062,57.35948181152344,648.7860107421875,56.360191345214844,647.8523559570312C55.36090087890625,646.918701171875,54.01819610595703,646.4429321289062,52.65399169921875,646.5390625Z" fill="currentColor" transform="translate(-33.3125,-634.234375) scale(1.625)"/></svg>Agamemnon</div>
+      <div class="welcome-name"><img class="welcome-boat brand-crest-icon" src="/static/branding/agamemnon-trojan-helmet.svg" alt="">Agamemnon</div>
       <div class="welcome-sub" id="welcome-sub">New chat ready.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">

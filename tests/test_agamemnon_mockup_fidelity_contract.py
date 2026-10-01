@@ -42,12 +42,24 @@ def test_visual_spec_and_static_render_artifacts_cover_every_board():
         preview_html = preview.read_text()
         assert 'agamemnon-preview.css' in preview_html
         assert 'class="brand-crest"' in preview_html
-        assert 'aria-label="Agamemnon hoplite crest"' in preview_html
-        assert '<img' not in preview_html
+        assert 'agamemnon-trojan-helmet.svg' in preview_html
+    agents = (ROOT / 'website/agamemnon-preview-agents.html').read_text()
+    chat = (ROOT / 'website/agamemnon-preview-chat.html').read_text()
+    workbench = (ROOT / 'website/agamemnon-preview-workbench.html').read_text()
+    for variant in ('primary', 'worker', 'scout', 'reviewer'):
+        assert f'agamemnon-agent-marks.svg#soldier-{variant}' in agents
+    assert '#soldier-' not in chat and '#soldier-' not in workbench
 
 
 def test_responsive_fallback_and_odysseus_labels_remain():
-    assert '@media(max-width:1050px)' in CSS
+    assert '@media(max-width:1400px)' in (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
     assert '@media(max-width:700px)' in CSS
     assert 'ody-agents-title' in HTML and 'ody-workbench-title' in HTML
     assert 'html:not([data-theme="dark"])' in CSS
+
+
+def test_workbench_secondary_operational_views_remain_reachable():
+    fixes = (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
+    assert '.workbench-modal-body>.wb-tabs{display:flex!important}' in fixes
+    assert '.workbench-modal-body>.wb-panel{display:block!important' in fixes
+    assert '.workbench-modal-body>.wb-statusbar{display:flex!important}' in fixes

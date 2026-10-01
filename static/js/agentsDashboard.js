@@ -160,10 +160,14 @@ function robotHtml(agent, size = '') {
   const status = agent?.status === 'completed' ? 'finished' : (agent?.status || 'idle');
   const unit = String((hashUnit(key) % 99) + 1).padStart(2, '0');
   const emblem = role === 'primary' ? 'command' : role === 'scout' ? 'scout' : role === 'reviewer' || role === 'specialist' ? 'review' : 'implement';
+  // Each operational archetype has genuinely different licensed soldier
+  // geometry; model identity remains a semantic colour accent, never the
+  // only way one Phalanx unit differs from another.
+  const soldierVariant = role;
   const modelIdentity = resolveAgamemnonModelIdentity(agent?.model || agent?.config?.model, agent?.source || agent?.kind);
-  return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" data-model-family="${modelIdentity.family}" style="--agent-model-color:${modelIdentity.color}" aria-hidden="true">
-    <svg class="ag-trojan-mark" viewBox="0 0 64 64" focusable="false">
-      <use href="${agentMarksUrl()}#trojan"/>
+  return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" data-model-family="${modelIdentity.family}" data-soldier-variant="${soldierVariant}" style="--agent-model-color:${modelIdentity.color}" aria-hidden="true">
+    <svg class="ag-soldier-sprite" viewBox="0 0 512 512" focusable="false">
+      <use href="${agentMarksUrl()}#soldier-${soldierVariant}"/>
     </svg><svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
       <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"/>
     </svg><span class="ag-seal-unit">${unit}</span>
@@ -956,7 +960,7 @@ function renderDetail() {
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
       <div class="ag-console-identity">
-        <span class="ag-detail-name" title="${esc(r.name)}">${esc(r.name)}</span>
+        <span class="ag-detail-name" tabindex="-1" title="${esc(r.name)}">${esc(r.name)}</span>
         <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
       </div>
       <div class="ag-console-status">
@@ -1350,7 +1354,9 @@ async function onClick(e) {
       state.selected = b.dataset.sid;
       state.detailTab = 'overview';
       renderFleetOnly(); renderDetail();
-      $('agents-dashboard')?.querySelector(`.ag-card-select[data-sid="${CSS.escape(state.selected)}"]`)?.focus({ preventScroll: true });
+      const detail = $('ag-detail');
+      detail?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      (detail?.querySelector('.ag-detail-name') || detail)?.focus?.({ preventScroll: true });
     }
     else if (act === 'close') close();
     else if (act === 'workbench') {

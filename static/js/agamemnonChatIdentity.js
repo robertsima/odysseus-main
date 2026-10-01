@@ -1,12 +1,9 @@
-import { applyAgamemnonModelIdentity } from './agamemnonIdentity.js';
-
 function currentModel() {
   return window.sessionModule?.getCurrentModel?.() || '';
 }
 
 export function syncAgamemnonChatIdentity() {
   const model = currentModel();
-  applyAgamemnonModelIdentity(document.getElementById('ag-chat-agent-mark'), model);
   const label = document.getElementById('ag-chat-model');
   if (label) label.textContent = model ? String(model).split('/').pop() : 'Default';
 }

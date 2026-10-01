@@ -64,7 +64,7 @@ def test_agent_seals_encode_role_separately_from_status():
     assert "identity === 'agamemnon'" in AGENTS
     assert "/scout|research|recon/" in AGENTS
     assert "/review|critic|audit|quality/" in AGENTS
-    assert 'aria-hidden="true">\n    <svg class="ag-trojan-mark"' in AGENTS
+    assert 'aria-hidden="true">\n    <svg class="ag-soldier-sprite"' in AGENTS
     assert '</svg><svg class="ag-seal-mark"' in AGENTS
     assert "focusable=\"false\"" in AGENTS
     # Since PR #40 the role glyph is a symbol of the Agamemnon agent-marks
@@ -79,16 +79,18 @@ def test_agent_seals_encode_role_separately_from_status():
     assert "agamemnon-agent-marks.svg" in AGENTS
 
 
-def test_agamemnon_trojan_mark_is_generic_and_model_colored():
+def test_agamemnon_control_room_soldier_is_model_colored():
     marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text(encoding="utf-8")
-    assert 'id="trojan"' in marks
+    for variant in ("primary", "worker", "scout", "reviewer", "specialist"):
+        assert f'id="soldier-{variant}"' in marks
     assert 'fill="currentColor"' in marks
     assert "resolveAgamemnonModelIdentity" in AGENTS
-    assert 'class="ag-trojan-mark"' in AGENTS
-    assert 'href="${agentMarksUrl()}#trojan"' in AGENTS
+    assert 'class="ag-soldier-sprite"' in AGENTS
+    assert 'href="${agentMarksUrl()}#soldier-${soldierVariant}"' in AGENTS
+    assert 'data-soldier-variant="${soldierVariant}"' in AGENTS
     assert 'data-model-family="${modelIdentity.family}"' in AGENTS
     assert "--agent-model-color:${modelIdentity.color}" in AGENTS
-    assert ".ag-trojan-mark { display: none;" in STYLE
+    assert ".ag-soldier-sprite { display: none;" in STYLE
 
 
 def test_steering_messages_show_their_state_and_age():
