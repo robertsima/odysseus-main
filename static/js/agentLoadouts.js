@@ -17,6 +17,7 @@
  * propagate_profile_edits). Export/Import use /api/agents/profiles/*.
  */
 import uiModule from './ui.js';
+import { invalidateSettings } from './appConfig.js';
 
 const LIST_KEYS = ['disabled_tools', 'enabled_tools', 'skill_names', 'allowed_mcp_servers', 'allowed_models', 'model_fallbacks'];
 const NUMBER_KEYS = ['max_rounds', 'max_parallel_workers', 'temperature', 'max_tokens'];
@@ -299,6 +300,7 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
         say((body && body.detail) || `Not saved (${r.status})`, true);
         return;
       }
+      invalidateSettings();
       replaceProfiles((body && body.agent_profiles) || profiles);
       say('Saved');
     } catch (_) { say('Failed to save', true); }
