@@ -12,6 +12,7 @@ Compared at 1440 × 920 against Penpot file `77fbae64-173c-81f5-8008-b823d468d03
 | Workbench restraint | `agamemnon-preview-workbench.html` and production Workbench use the helmet only in shared branding; Run Details remains textual and contains no soldier sprite. | Match |
 | Browser/install identity | Agamemnon favicon, Apple touch mark, page title, and generated PWA manifest use the canonical helmet and Agamemnon name. Saved non-Agamemnon themes retain Odysseus titles, route identity, raster install icons, and manifest name. | Match |
 | Actual-size legibility | Production cards render at 64 px. `agamemnon-role-marks-preview.svg` additionally includes 32, 42, and 64 px checks; visible text remains the authoritative identity at every size. | Match |
+| Artwork delivery | Five source-derived symbols are embedded once in production HTML and each role fixture; all soldier `<use>` references target same-document IDs. This fixes the prior blank-card and blank-size-sheet renders caused by external SVG references. Portable HTML fixtures embed the exact helmet SVG as a data URI, fixing their broken image while production serves the original same-origin SVG. Odysseus's legacy marks remain unchanged. `python website/sync_agamemnon_artwork.py` regenerates paths and helmet fixture data from the CC BY source. | Match |
 | Responsive behavior | Two-column Chat/Agents/Workbench compositions collapse at 1400 px before their fixed Penpot-width columns overflow; compact/mobile refinements remain at 1050/700 px. Dynamic summary/detail surfaces use minimum rather than fixed heights. | Match by CSS and render contract |
 
 ## Independent critic and applied fixes
@@ -21,7 +22,7 @@ The first clarification review returned **PASS WITH CHANGES** and drove the earl
 ## Rendered evidence
 
 - `static/branding/agamemnon-trojan-helmet.svg` — separate 512 × 512 brand render.
-- `website/agamemnon-role-marks-preview.svg` — model colors and 32/42/64 px size render.
+- `website/agamemnon-role-marks-preview.svg` — self-contained model colors and 32/42/64 px size render; the artwork must be visible in standalone SVG preview, without external SVG references.
 - `website/agamemnon-preview-agents.html` — 1440 × 920 Phalanx render.
 - `website/agamemnon-preview-chat.html` — 1440 × 920 Strategy Room render with no contextual soldier.
 - `website/agamemnon-preview-workbench.html` — 1440 × 920 Run Control render with no contextual soldier.

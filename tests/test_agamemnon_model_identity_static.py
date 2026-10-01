@@ -16,7 +16,7 @@ def test_model_color_is_applied_only_to_agents_control_room_soldiers():
     workbench = (ROOT / "static/js/workbench.js").read_text()
     chat_identity = (ROOT / "static/js/agamemnonChatIdentity.js").read_text()
     assert 'class="ag-soldier-sprite"' in agents
-    assert 'href="${agentMarksUrl()}#soldier-${soldierVariant}"' in agents
+    assert 'href="#soldier-${soldierVariant}"' in agents
     assert 'data-soldier-variant="${soldierVariant}"' in agents
     assert "resolveAgamemnonModelIdentity" in agents
     assert "--agent-model-color:${modelIdentity.color}" in agents

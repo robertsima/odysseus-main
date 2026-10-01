@@ -104,7 +104,8 @@ def test_agamemnon_agents_use_distinct_model_colored_soldier_artworks():
     for variant in ("primary", "worker", "scout", "reviewer", "specialist"):
         assert f'id="soldier-{variant}"' in marks
     assert 'fill="currentColor"' in marks
-    assert 'href="${agentMarksUrl()}#soldier-${soldierVariant}"' in dashboard
+    assert 'href="#soldier-${soldierVariant}"' in dashboard
+    assert '<!-- AGAMEMNON SOLDIER SYMBOLS START (generated) -->' in HTML
     assert 'data-soldier-variant="${soldierVariant}"' in dashboard
     identity = (ROOT / "static/js/agamemnonIdentity.js").read_text()
     assert "resolveAgamemnonModelIdentity" in dashboard
@@ -117,7 +118,8 @@ def test_agamemnon_agents_use_distinct_model_colored_soldier_artworks():
     # Odysseus presentation; Agamemnon CSS selects the generic Trojan mark.
     assert 'html[data-theme="dark"] .ag-seal-mark{display:none}' in MOCKUP_STYLE
     assert 'html[data-theme="dark"] .ag-soldier-sprite{display:block' in MOCKUP_STYLE
-    assert "agamemnon-agent-marks.svg" in dashboard
+    assert 'id="soldier-primary"' in HTML
+    assert 'id="command"' in HTML
     assert 'ag-chat-agent-mark' not in HTML
     assert 'ag-run-agent-mark' not in HTML
     assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()

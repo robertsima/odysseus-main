@@ -47,7 +47,7 @@ def test_visual_spec_and_static_render_artifacts_cover_every_board():
     chat = (ROOT / 'website/agamemnon-preview-chat.html').read_text()
     workbench = (ROOT / 'website/agamemnon-preview-workbench.html').read_text()
     for variant in ('primary', 'worker', 'scout', 'reviewer'):
-        assert f'agamemnon-agent-marks.svg#soldier-{variant}' in agents
+        assert f'href="#soldier-{variant}"' in agents
     assert '#soldier-' not in chat and '#soldier-' not in workbench
 
 

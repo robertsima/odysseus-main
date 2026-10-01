@@ -136,13 +136,6 @@ function hashUnit(value) {
   for (const ch of String(value || 'agent')) { hash ^= ch.charCodeAt(0); hash = Math.imul(hash, 16777619); }
   return Math.abs(hash >>> 0);
 }
-function agentMarksUrl() {
-  // Resolve beside this script so deployments mounted below a URL prefix keep
-  // using the same-origin static assets instead of escaping to the domain root.
-  const script = Array.from(document.scripts).find(item => item.src.includes('agentsDashboard.js'));
-  return new URL('../branding/agamemnon-agent-marks.svg', script?.src || document.baseURI).href;
-}
-
 function robotHtml(agent, size = '') {
   const key = agent?.session_id || agent?.run_id || agent?.name || agent?.title || 'agent';
   // Role describes the stable identity archetype, not the live status class.
@@ -167,9 +160,9 @@ function robotHtml(agent, size = '') {
   const modelIdentity = resolveAgamemnonModelIdentity(agent?.model || agent?.config?.model, agent?.source || agent?.kind);
   return `<span class="ag-bot ag-seal ag-seal-${role} ag-bot-${esc(status)}${size ? ` ag-bot-${esc(size)}` : ''}" data-model-family="${modelIdentity.family}" data-soldier-variant="${soldierVariant}" style="--agent-model-color:${modelIdentity.color}" aria-hidden="true">
     <svg class="ag-soldier-sprite" viewBox="0 0 512 512" focusable="false">
-      <use href="${agentMarksUrl()}#soldier-${soldierVariant}"/>
+      <use href="#soldier-${soldierVariant}"/>
     </svg><svg class="ag-seal-mark" viewBox="0 0 32 32" focusable="false">
-      <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"/>
+      <use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="#${emblem}"/>
     </svg><span class="ag-seal-unit">${unit}</span>
   </span>`;
 }

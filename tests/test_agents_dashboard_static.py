@@ -53,7 +53,7 @@ def test_agent_fleet_uses_shared_vector_role_personification():
     assert 'class="ag-row ag-card ag-bot-card' in AGENTS
     assert 'class="ag-card-crew"' in AGENTS
     assert 'class="ag-console-hero"' in AGENTS
-    assert 'href="${agentMarksUrl()}#${emblem}"' in AGENTS
+    assert 'href="#${emblem}"' in AGENTS
     assert ".ag-bot-running" in STYLE
     assert "@keyframes ag-bot-work" in STYLE
     assert ".ag-bot, .ag-bot-antenna i, .ag-card-beacon, .ag-bot-card::after { animation: none !important; }" in STYLE
@@ -71,12 +71,12 @@ def test_agent_seals_encode_role_separately_from_status():
     # sprite (from the Penpot mockup), picked by role and never by status.
     assert "role === 'primary' ? 'command' : role === 'scout' ? 'scout'" in AGENTS
     assert "role === 'reviewer' || role === 'specialist' ? 'review' : 'implement'" in AGENTS
-    assert '<use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="${agentMarksUrl()}#${emblem}"' in AGENTS
+    assert '<use class="ag-seal-glyph ag-seal-glyph-${emblem}" href="#${emblem}"' in AGENTS
     marks = (ROOT / "static/branding/agamemnon-agent-marks.svg").read_text(encoding="utf-8")
     for emblem in ("command", "scout", "implement", "review"):
         assert f'id="{emblem}"' in marks
     assert ".ag-seal-primary .ag-seal-glyph" in STYLE
-    assert "agamemnon-agent-marks.svg" in AGENTS
+    assert 'id="command"' in (ROOT / "static/index.html").read_text()
 
 
 def test_agamemnon_control_room_soldier_is_model_colored():
@@ -86,7 +86,7 @@ def test_agamemnon_control_room_soldier_is_model_colored():
     assert 'fill="currentColor"' in marks
     assert "resolveAgamemnonModelIdentity" in AGENTS
     assert 'class="ag-soldier-sprite"' in AGENTS
-    assert 'href="${agentMarksUrl()}#soldier-${soldierVariant}"' in AGENTS
+    assert 'href="#soldier-${soldierVariant}"' in AGENTS
     assert 'data-soldier-variant="${soldierVariant}"' in AGENTS
     assert 'data-model-family="${modelIdentity.family}"' in AGENTS
     assert "--agent-model-color:${modelIdentity.color}" in AGENTS
