@@ -881,7 +881,7 @@ function rowHtml(r, nest = {}) {
   const children = (r.children || []).slice(0, 5);
   const crew = children.length ? `<div class="ag-card-crew" title="${r.children?.length || 0} attached workers"><span class="ag-crew-line"></span>${children.map(c => robotHtml(c, 'micro')).join('')}${r.children.length > children.length ? `<b>+${r.children.length - children.length}</b>` : ''}</div>` : '';
   const status = r.status || 'idle';
-  return `<div class="ag-row ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${needsYou(r) ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
+  return `<div class="ag-row ag-card ag-bot-card ag-card-${esc(status)}${sel ? ' active' : ''}${needsYou(r) ? ' attn' : ''}" style="--ag-card-h:${hashUnit(r.session_id) % 360}" data-sid="${esc(r.session_id)}" role="group" aria-label="${esc(r.name)}">
     <div class="ag-card-beacon" aria-hidden="true"></div>
     <div class="ag-card-avatar">${robotHtml(r)}</div>
     <div class="ag-card-copy">

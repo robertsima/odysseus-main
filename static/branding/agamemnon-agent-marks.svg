@@ -5,6 +5,9 @@
   <symbol id="implement" viewBox="0 0 32 32">
     <path d="M11 10 6 16l5 6M21 10l5 6-5 6M18 8l-4 16"/>
   </symbol>
+  <symbol id="scout" viewBox="0 0 32 32">
+    <path d="M8 23 16 8l8 15M11 18h10"/>
+  </symbol>
   <symbol id="review" viewBox="0 0 32 32">
     <circle cx="14" cy="14" r="7"/><path d="m19 19 6 6M11 14l2 2 4-5"/>
   </symbol>
