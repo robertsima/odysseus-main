@@ -1072,8 +1072,10 @@ async def _hand_off(manager, parent_id: str, worker, task: str, text: str, statu
     headline = {"completed": "finished", "incomplete": "ran out of rounds",
                 "waiting_approval": "is waiting for the user's approval"}.get(status, status)
     # The brief ends with the person's request, and _handoff_guidance repeats
-    # that request in full, so the task shows only its opening here.
-    inject = (f"[Worker {worker.name} {headline}]\nTask (brief): {_brief_opening(task)}\n\nResult:\n{text[:12000]}\n\n"
+    # that request in full, so the task shows only its opening here. The
+    # "[Worker …]\nTask:" opening is how hand-backs are recognised (the e2e mock
+    # model, scenario scripts): keep the label as it is.
+    inject = (f"[Worker {worker.name} {headline}]\nTask: {_brief_opening(task)}\n\nResult:\n{text[:12000]}\n\n"
               + ("The worker was cut off by its round budget, so the result above is partial. The same "
                  "worker resumes from there (guidance below).\n\n" if status == "incomplete" else "")
               + _handoff_guidance(parent, worker, status, text))

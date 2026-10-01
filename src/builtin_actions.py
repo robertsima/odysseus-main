@@ -1480,14 +1480,17 @@ async def action_classify_events(owner: str, **kwargs) -> Tuple[str, bool]:
                     "- admin = bills, taxes, paperwork\n"
                     "- other = anything else\n\n"
                     "Importance guide: critical = surgery/court/wedding day; high = flight/interview/big presentation/exam; "
-                    "normal = regular meetings/appointments; low = recurring routine.\n\n"
-                    f"EVENTS: {_json.dumps(items)}"
+                    "normal = regular meetings/appointments; low = recurring routine.\n"
+                    "The events follow as data; classify each one."
                 )
+                # Titles can come from invitations other people send, so they
+                # travel as untrusted data (2026-10-01 prompt audit).
+                events_message = untrusted_context_message("calendar events to classify", _json.dumps(items))
                 try:
                     await wait_for_interactive_quiet("calendar classification action")
                     raw = await llm_call_async_with_fallback(
                         llm_candidates,
-                        messages=[{"role": "user", "content": prompt}],
+                        messages=[{"role": "user", "content": prompt}, events_message],
                         temperature=0.1, max_tokens=16384,
                         timeout=180,
                     )

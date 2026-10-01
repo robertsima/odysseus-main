@@ -1428,7 +1428,7 @@ FUNCTION_TOOL_SCHEMAS = [
                     "name": {"type": "string", "description": "Loadout name (1-40 chars). Required for get/create/update/delete; optional for start."},
                     "task": {"type": "string", "description": "Required for start: the whole assignment. The worker has not seen this conversation."},
                     "description": {"type": "string", "description": "One line explaining when to use this loadout."},
-                    "instructions": {"type": "string", "description": "System instructions the worker starts with: its personality and way of working."},
+                    "instructions": {"type": "string", "description": "System instructions the worker starts with. Narrowing a loadout or rewording it needs no approval; widening its access does."},
                     "persona_name": {"type": "string", "description": "Name the worker answers as."},
                     "temperature": {"type": "number", "description": "0-2 sampling temperature for this loadout. Omit for the app default."},
                     "max_tokens": {"type": "integer", "description": "Reply length cap for this loadout (0 = server decides). Omit for the app default."},
