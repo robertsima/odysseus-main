@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content, viewport-fit=cover" />
   <title>Agamemnon</title>
-  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5' fill='none' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5' fill='none' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M13.3 18.5V27M18.7 18.5V27' stroke='%23e06c75' stroke-width='2.4' stroke-linecap='round'/%3E%3Cpath d='M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z' fill='%23e06c75'/%3E%3C/svg%3E">
+  <link rel="icon" type="image/svg+xml" href="/static/branding/agamemnon-hoplitic-crest.svg">
   <link rel="manifest" href="/static/manifest.json">
   <meta name="theme-color" content="#111417">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -135,8 +135,9 @@
       var path = (window.location.pathname || '').toLowerCase();
       var theme = (function(){ try { return JSON.parse(localStorage.getItem('odysseus-theme')); } catch(_) { return null; } })();
       var ac = (theme && (theme.red || theme.colors && theme.colors.red)) || '#e06c75';
-      // Shapes are line-stroke SVGs (no emoji glyphs). Each entry returns
-      // the inner SVG markup rendered against currentColor=`ac`.
+      var brandGold = '#d7b35a';
+      // Kept for existing route metadata compatibility. The app identity is
+      // always the same Penpot-derived crest; route glyphs never replace it.
       var SHAPES = {
         '/calendar':
           "<rect x='4' y='6' width='24' height='22' rx='2' fill='none' stroke='" + ac + "' stroke-width='2.5'/>" +
@@ -172,25 +173,27 @@
           "<rect x='21' y='8' width='6' height='19' rx='1' fill='none' stroke='" + ac + "' stroke-width='2.5' transform='rotate(8 24 17)'/>",
       };
       var inner = SHAPES[path];
-      if (!inner) return; // Root path keeps the default boat icon.
-      var svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'>" + inner + "</svg>";
+      // Keep route titles/PWA launch points without replacing the brand crest.
+      // The exact crest geometry is served from the shared SVG asset.
+      var svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 39.375 29.53125'><path fill='" + brandGold + "' d='M19.6875 0C8.81425857543945 0 0 8.8143920898438 0 19.6875c0 3.5860595703125.93950271606445 6.9478759765625 2.61474609375 9.84375H14.765625l2.61474609375-5.3064575195312C14.42667007446289 23.2596435546875 12.3046875 20.5027465820312 12.3046875 17.2265625c0-4.0774536132812 3.30536651611328-7.3828125 7.3828125-7.3828125s7.3828125 3.3053588867188 7.3828125 7.3828125V19.6875H39.375C39.375 8.8143920898438 30.56074142456055 0 19.6875 0ZM19.34149169921875 12.3046875c-2.582294464111328.1820068359375-4.582271575927734 2.33319091796875-4.57586669921875 4.921875 0 2.71826171875 2.20359802246094 4.921875 4.921875 4.921875s4.921875-2.20361328125 4.921875-4.921875c.00338363647461-1.3676147460938-.56239318847656-2.6749267578125-1.56168365478516-3.6085815429688-.999290466308594-.9336547851562-2.34199523925781-1.409423828125-3.70619964599609-1.3132934570312Z'/></svg>";
+      if (inner && path !== '/calendar' && path !== '/notes' && path !== '/cookbook' && path !== '/email' && path !== '/memory' && path !== '/gallery' && path !== '/tasks' && path !== '/library') svg = svg.replace("</svg>", "<g>" + inner + "</g></svg>");
       var href = 'data:image/svg+xml,' + encodeURIComponent(svg);
       var fav = document.querySelector("link[rel='icon']");
       if (!fav) { fav = document.createElement('link'); fav.rel = 'icon'; fav.type = 'image/svg+xml'; document.head.appendChild(fav); }
       fav.href = href;
       var apple = document.querySelector("link[rel='apple-touch-icon']");
       if (!apple) { apple = document.createElement('link'); apple.rel = 'apple-touch-icon'; document.head.appendChild(apple); }
-      apple.href = href;
+      apple.href = '/static/icons/icon-192.png';
       // Also customize the page title so the bookmark inherits a useful name.
       var titles = {
-        '/calendar': 'Calendar — Odysseus',
-        '/notes': 'Notes — Odysseus',
-        '/cookbook': 'Cookbook — Odysseus',
-        '/email': 'Email — Odysseus',
-        '/memory': 'Memory — Odysseus',
-        '/gallery': 'Gallery — Odysseus',
-        '/tasks': 'Tasks — Odysseus',
-        '/library': 'Library — Odysseus',
+        '/calendar': 'Calendar — Agamemnon',
+        '/notes': 'Notes — Agamemnon',
+        '/cookbook': 'Cookbook — Agamemnon',
+        '/email': 'Email — Agamemnon',
+        '/memory': 'Memory — Agamemnon',
+        '/gallery': 'Gallery — Agamemnon',
+        '/tasks': 'Tasks — Agamemnon',
+        '/library': 'Library — Agamemnon',
       };
       if (titles[path]) document.title = titles[path];
       // Per-route Android home-screen icon. We swap the <link rel="manifest">
@@ -198,18 +201,18 @@
       // Home Screen" picks up the route-specific glyph instead of the shared
       // boat logo. Falls back silently on browsers without Blob URL support.
       try {
-        if (inner && typeof Blob !== 'undefined') {
+        if (typeof Blob !== 'undefined') {
           var pwa = {
-            name: (titles[path] || 'Odysseus'),
-            short_name: (titles[path] || 'Odysseus').split('—')[0].trim(),
+            name: (titles[path] || 'Agamemnon'),
+            short_name: (titles[path] || 'Agamemnon').split('—')[0].trim(),
             start_url: path,
             scope: '/',
             display: 'standalone',
-            background_color: '#0e0e10',
+            background_color: '#111417',
             theme_color: ac,
             icons: [
-              { src: href, sizes: '192x192', type: 'image/svg+xml', purpose: 'any maskable' },
-              { src: href, sizes: '512x512', type: 'image/svg+xml', purpose: 'any maskable' },
+              { src: '/static/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
+              { src: '/static/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
             ],
           };
           var blob = new Blob([JSON.stringify(pwa)], { type: 'application/manifest+json' });
@@ -832,11 +835,8 @@
         <!-- Permanent brand mark — a Trojan helmet. Shape never changes with
              the active palette (only `currentColor` does), so it stays the
              app's identity across every theme, including custom ones. -->
-        <svg class="brand-crest-icon sidebar-brand-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-          <path d="M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-          <path d="M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-          <path d="M13.3 18.5V27M18.7 18.5V27" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-          <path d="M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z" fill="currentColor"/>
+        <svg class="brand-crest-icon sidebar-brand-icon" viewBox="0 0 39.375 29.53125" aria-hidden="true" focusable="false">
+          <path d="M53.0,634.234375C42.12675857543945,634.234375,33.3125,643.0487670898438,33.3125,653.921875C33.3125,657.5079345703125,34.25200271606445,660.8697509765625,35.92724609375,663.765625L48.078125,663.765625L50.69287109375,658.4591674804688C47.73917007446289,657.4940185546875,45.6171875,654.7371215820312,45.6171875,651.4609375C45.6171875,647.3834838867188,48.92255401611328,644.078125,53.0,644.078125C57.07744598388672,644.078125,60.3828125,647.3834838867188,60.3828125,651.4609375L60.3828125,653.921875L72.6875,653.921875C72.6875,643.0487670898438,63.87324142456055,634.234375,53.0,634.234375M52.65399169921875,646.5390625C50.07169723510742,646.7210693359375,48.071720123291016,648.8722534179688,48.078125,651.4609375C48.078125,654.17919921875,50.28172302246094,656.3828125,53.0,656.3828125C55.71827697753906,656.3828125,57.921875,654.17919921875,57.921875,651.4609375C57.92525863647461,650.0933227539062,57.35948181152344,648.7860107421875,56.360191345214844,647.8523559570312C55.36090087890625,646.918701171875,54.01819610595703,646.4429321289062,52.65399169921875,646.5390625Z" fill="currentColor" transform="translate(-33.3125,-634.234375) scale(1.625)"/>
         </svg>
         <span class="sidebar-brand-title">Agamemnon</span>
       </div>
@@ -1092,7 +1092,7 @@
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
       <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
     <div id="welcome-screen">
-      <div class="welcome-name"><svg class="welcome-boat brand-crest-icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M6 18.5v3.3a2.2 2.2 0 0 0 2.2 2.2H10v-5.5M26 18.5v3.3a2.2 2.2 0 0 1-2.2 2.2H22v-5.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.3 18.5V27M18.7 18.5V27" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z" fill="currentColor"/></svg>Agamemnon</div>
+      <div class="welcome-name"><svg class="welcome-boat brand-crest-icon" viewBox="0 0 39.375 29.53125" aria-hidden="true"><path d="M53.0,634.234375C42.12675857543945,634.234375,33.3125,643.0487670898438,33.3125,653.921875C33.3125,657.5079345703125,34.25200271606445,660.8697509765625,35.92724609375,663.765625L48.078125,663.765625L50.69287109375,658.4591674804688C47.73917007446289,657.4940185546875,45.6171875,654.7371215820312,45.6171875,651.4609375C45.6171875,647.3834838867188,48.92255401611328,644.078125,53.0,644.078125C57.07744598388672,644.078125,60.3828125,647.3834838867188,60.3828125,651.4609375L60.3828125,653.921875L72.6875,653.921875C72.6875,643.0487670898438,63.87324142456055,634.234375,53.0,634.234375M52.65399169921875,646.5390625C50.07169723510742,646.7210693359375,48.071720123291016,648.8722534179688,48.078125,651.4609375C48.078125,654.17919921875,50.28172302246094,656.3828125,53.0,656.3828125C55.71827697753906,656.3828125,57.921875,654.17919921875,57.921875,651.4609375C57.92525863647461,650.0933227539062,57.35948181152344,648.7860107421875,56.360191345214844,647.8523559570312C55.36090087890625,646.918701171875,54.01819610595703,646.4429321289062,52.65399169921875,646.5390625Z" fill="currentColor" transform="translate(-33.3125,-634.234375) scale(1.625)"/></svg>Agamemnon</div>
       <div class="welcome-sub" id="welcome-sub">New chat ready.</div>
       <div class="welcome-tip" id="welcome-tip"></div>
       <button type="button" class="incognito-btn" id="incognito-btn" title="Enable Nobody mode — no memory, no history saved">

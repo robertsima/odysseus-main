@@ -16,6 +16,7 @@ STYLE = (ROOT / "static/style.css").read_text()
 
 HELMET_DOME = "M6 18.5C6 10.7 10.3 5 16 5s10 5.7 10 13.5"
 HELMET_CREST = "M16 3c-2.4 1.9-3.7 3.4-3.7 5 0 1 .6 1.8 1.6 2l2.1.4 2.1-.4c1-.2 1.6-1 1.6-2 0-1.6-1.3-3.1-3.7-5Z"
+BRAND_CREST = (ROOT / "static/branding/agamemnon-hoplitic-crest.svg").read_text()
 
 
 def test_explicit_root_theme_identity_attribute_exists_and_defaults_to_agamemnon():
@@ -68,19 +69,44 @@ def test_permanent_helmet_logo_is_unconditional_across_every_palette():
     assert "color: var(--brand-color, var(--red));" in STYLE.split(".brand-crest-icon {", 1)[1][:200]
 
     for doc in (HTML, LOGIN):
-        # The shape appears at least twice: once in the static favicon <link>
-        # (a fixed accent color, same as before this slice) and once in an
-        # inline brand SVG, which recolors with the theme via currentColor.
-        assert doc.count(HELMET_DOME) >= 2
-        assert doc.count(HELMET_CREST) >= 2
-        assert 'stroke="currentColor"' in doc
+        # Static markup and favicon use the shared crest asset; inline brand
+        # marks remain Agamemnon helmet vectors, never headphone/mic imagery.
+        if doc is HTML:
+            assert '/static/branding/agamemnon-hoplitic-crest.svg' in doc
+            assert 'href="/static/icons/icon-192.png"' in doc
+        assert 'stroke="currentColor"' not in doc or 'brand-crest-icon' in doc
+    crest_path = BRAND_CREST.split(' d="', 1)[1].split('"', 1)[0]
+    assert crest_path in HTML
+    # Inline data SVG has the same silhouette path, with an explicit theme fill.
+    assert "M53.0,634.234375C42.12675857543945" in HTML
+    login_logo = LOGIN.split('class="logo-boat brand-crest-icon"', 1)[1].split('</svg>', 1)[0]
+    assert "M53.0,634.234375C42.12675857543945" in login_logo
+    assert 'transform="translate(-33.3125,-634.234375)"' in login_logo
+    assert "Agamemnon hoplite crest" in BRAND_CREST and '#d7b35a' in BRAND_CREST
+    assert HELMET_DOME not in HTML and HELMET_DOME not in LOGIN
+    assert "headphone" not in HTML.lower() and "headphone" not in LOGIN.lower()
 
-    # The dynamic favicon fallback (non-route pages) draws the same shape,
-    # recolored with the current `fg`, never the old boat glyph.
+    # Per-route favicons use the exact crest shape, rather than route glyphs
+    # or the former headset silhouette.
+    assert BRAND_CREST.split(' d="', 1)[1].split('"', 1)[0] in HTML
+    assert HELMET_DOME not in HTML.split("var SHAPES", 1)[1].split("var inner", 1)[0]
+    assert "icons: [" in HTML and "'/static/icons/icon-192.png'" in HTML
     assert HELMET_DOME in THEME
     assert "M16 4L16 22L6 22Z" not in THEME
     assert "M16 4L16 22L6 22Z" not in HTML
     assert "M16 4L16 22L6 22Z" not in LOGIN
+
+
+def test_agent_role_marks_are_distinct_hoplite_shields():
+    dashboard = (ROOT / "static/js/agentsDashboard.js").read_text()
+    for role in ("command", "implement", "review"):
+        assert f"'{role}'" in dashboard
+    assert "ag-seal-shield" in dashboard and "ag-seal-helm" in dashboard
+    assert "ag-seal-glyph-${emblem}" in dashboard
+    assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()
+    assert "icons/icon-192.png" in (ROOT / "static/manifest.json").read_text()
+    assert '"background_color": "#111417"' in (ROOT / "static/manifest.json").read_text()
+    assert '"theme_color": "#111417"' in (ROOT / "static/manifest.json").read_text()
 
 
 def test_live_color_edit_fallback_to_custom_slot_preserves_prior_identity():

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <symbol id="command" viewBox="0 0 32 32">
+    <path d="M16 7v18M10 13l6-6 6 6M10 19l6 6 6-6"/>
+  </symbol>
+  <symbol id="implement" viewBox="0 0 32 32">
+    <path d="M11 10 6 16l5 6M21 10l5 6-5 6M18 8l-4 16"/>
+  </symbol>
+  <symbol id="review" viewBox="0 0 32 32">
+    <circle cx="14" cy="14" r="7"/><path d="m19 19 6 6M11 14l2 2 4-5"/>
+  </symbol>
+</svg>
