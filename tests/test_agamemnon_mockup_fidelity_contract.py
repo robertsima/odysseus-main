@@ -28,10 +28,13 @@ def test_exact_penpot_geometry_palette_and_typography_are_present():
 def test_three_mockup_surface_titles_and_context_composition_exist():
     for label in ('Scribe', 'Phalanx', 'Command center', 'Workbench'):
         assert label in HTML
-    for id_ in ('ag-open-agents', 'ag-open-workbench', 'sidebar-agents-shortcut', 'sidebar-workbench-shortcut'):
+    # Page shortcuts were duplicates of permanent navigation and are gone.
+    for id_ in ('sidebar-agents-shortcut', 'sidebar-workbench-shortcut'):
         assert id_ in HTML
+    assert 'id="ag-open-agents"' not in HTML and 'id="ag-open-workbench"' not in HTML
     assert 'id="ag-open-theme"' not in HTML
-    assert 'SESSION CONTEXT' in HTML and 'RUN CONTROLS' in HTML and 'EVIDENCE' in HTML
+    assert 'id="chat-history"' in HTML and 'class="chat-progress-shelf"' in HTML
+    assert 'id="workbench-modal"' in HTML and 'id="agents-dashboard"' in HTML
 
 
 def test_visual_spec_and_static_render_artifacts_cover_every_board():
@@ -53,8 +56,9 @@ def test_visual_spec_and_static_render_artifacts_cover_every_board():
 
 
 def test_responsive_fallback_and_odysseus_labels_remain():
-    # Wide boards get the context column; narrower ones fold it into a strip.
-    assert '@media(min-width:1180px)' in CSS
+    # Full and dock-narrowed chats use the actual container width for the shelf.
+    assert '@container (min-width: 900px)' in CSS
+    assert '@container (max-width: 899px)' in CSS
     assert '@media(max-width:1179px)' in CSS
     assert '@media(max-width:768px)' in CSS
     assert '@media(max-width:700px)' in CSS
