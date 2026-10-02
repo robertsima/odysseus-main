@@ -91,6 +91,8 @@ class StubState:
 
 
 def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple[int, object]:
+    if method == "PUT" and path == "/api/workbench/repo/file":
+        return 200, {"file": body.get("file"), "version": "b" * 64}
     if method == "POST" and path.startswith("/api/agents/sessions/") and path.endswith("/appearance"):
         sid = unquote(path.split("/")[4])
         state.appearance[sid] = body.get("appearance")
@@ -173,7 +175,7 @@ def make_handler(state: StubState):
                     body = json.loads(raw or b"{}")
                 except ValueError:
                     body = {}
-                if self.command == "POST":
+                if self.command in ("POST", "PUT"):
                     state.posts.append((path, body if isinstance(body, dict) else {}))
                 status, payload = _api_response(state, self.command, path, body if isinstance(body, dict) else {})
                 self._send(status, json.dumps(payload).encode(), "application/json")

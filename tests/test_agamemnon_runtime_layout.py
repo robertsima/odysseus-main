@@ -143,6 +143,7 @@ def test_chat_strip_with_half_width_docked_workbench(open_app):
     open_workbench(page)
     page.click('#wb-dock-right')
     page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    assert page.probe('#wb-tab-prs')['visible'] and page.probe('#wb-tab-prs')['right'] <= page.width
     page.wait_for("document.getElementById('sidebar').classList.contains('hidden')")
     shot(page, 'strip-half-workbench')
     strip, chat = page.probe('.agent-strip'), page.probe('.chat-container')
@@ -665,6 +666,9 @@ def test_workbench_defaults_to_branch_and_can_edit_its_changed_file(open_app, wi
     assert page.eval("document.querySelectorAll('#wb-changes .wb-file').length") == 2
     shot(page, 'branch-review')
     assert_no_sideways_scroll(page, '.workbench-modal-content')
+    mode = 'unified' if width < 720 else 'split'
+    assert page.eval("document.querySelector('#wb-diffpane table.wb-diff').className.includes(%s)" % json.dumps(mode)), mode
+    assert page.eval("document.querySelector('#wb-diffpane td.wb-no[role=button]').tabIndex") == 0
     page.click('#wb-diffpane [data-wb-act="edit-file"]')
     page.wait_for("document.getElementById('wb-editor-text')")
     assert page.eval("document.activeElement.id") == 'wb-editor-text'
@@ -681,6 +685,20 @@ def test_workbench_defaults_to_branch_and_can_edit_its_changed_file(open_app, wi
     assert page.eval("document.querySelector('.wb-repo-select').value") == '/repo/workbench'
 
 
+def test_workbench_editor_save_and_review_flow(open_app, server):
+    page = open_app(1440)
+    open_workbench(page, activity=False)
+    page.wait_for("document.querySelector('#wb-diffpane .wb-diff')")
+    page.click('#wb-diffpane [data-wb-act="edit-file"]')
+    page.wait_for("document.getElementById('wb-editor-text')")
+    page.eval("(() => {const input=document.getElementById('wb-editor-text'); input.value += '\\n# reviewed'; input.dispatchEvent(new Event('input',{bubbles:true}));})()")
+    assert page.eval("document.getElementById('wb-editor-status').textContent") == 'Unsaved changes'
+    page.click('#wb-diffpane [data-wb-act="save-file"]')
+    page.wait_for("!document.getElementById('wb-editor-text')")
+    assert any(path == '/api/workbench/repo/file' and '# reviewed' in body.get('content', '')
+               for path, body in server.state.posts)
+
+
 @pytest.mark.parametrize('theme', [None, ODYSSEUS_THEME])
 def test_navigation_and_background_effect_survive_customization(open_app, theme):
     page = open_app(1440, theme)
@@ -693,6 +711,7 @@ def test_navigation_and_background_effect_survive_customization(open_app, theme)
     assert page.probe('#sidebar-new-chat-btn')['visible'] == (style == 'classic')
     page.eval("document.getElementById('theme-modal').classList.remove('hidden')")
     page.click('#theme-tabs [data-tab="theme-tab-customize"]')
+    assert page.eval("(() => { const c=document.querySelector('#theme-modal .admin-card:has(#theme-font-select)'); return c.scrollWidth <= c.clientWidth + 1 })()")
     page.eval("(() => {const sel=document.getElementById('theme-bg-pattern-select'); sel.value='dots'; sel.dispatchEvent(new Event('change',{bubbles:true}));})()")
     assert 'bg-pattern-dots' in page.eval('document.body.className')
     assert 'radial-gradient' in page.eval('getComputedStyle(document.body).backgroundImage')

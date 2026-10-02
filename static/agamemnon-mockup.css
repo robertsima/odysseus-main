@@ -342,6 +342,7 @@ html[data-style="agamemnon"] .sidebar .sidebar-header{padding-left:48px;padding-
 html[data-style="classic"] .sidebar .sidebar-brand{gap:13px}
 html[data-style="classic"] .sidebar-brand-icon{width:40px;height:40px;margin:0}
 html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:20px;line-height:1;letter-spacing:.04em;top:0;left:0;margin:0}
+html[data-style="classic"] .sidebar .sidebar-brand-title,html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font-size:18px}
 html[data-style="classic"] .sidebar.right-side .sidebar-header{padding-left:32px;padding-right:24px}
 @media(max-width:480px){html[data-style="classic"] .sidebar .sidebar-header{height:64px;min-height:64px;padding:0 16px}html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:17px}}
 /* The app's resizing/docking controller owns tool window geometry. */
@@ -354,6 +355,15 @@ html[data-style="classic"] .sidebar.right-side .sidebar-header{padding-left:32px
 #workbench-modal .wb-editor-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
 #workbench-modal #wb-editor-status{flex:1;min-width:120px;overflow-wrap:anywhere;color:var(--wb-muted)}
 @container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
+/* Let all four views remain reachable even in a hand-resized dock. */
+#workbench-modal .workbench-modal-content{container:wbwindow / inline-size}
+@container wbwindow (max-width:660px){html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs,#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
+@container wbpane (max-width:460px){#workbench-modal .wb-diff-body:after{content:'↔ Scroll for long lines';display:block;position:sticky;left:0;width:max-content;padding:4px 8px;background:var(--panel);color:var(--wb-muted);font-size:11px}}
+/* Font/Layout previously required horizontal scrolling even at 1440px. */
+#theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+#theme-modal .admin-card:has(#theme-font-select) .theme-fd-group{min-width:0}
+#theme-modal .admin-card:has(#theme-font-select) select{width:100%;min-width:0;max-width:100%}
+@media(max-width:480px){#theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{grid-template-columns:1fr}}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar{min-height:0;padding:2px 0 0}

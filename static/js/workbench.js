@@ -55,7 +55,7 @@ const state = {
   inited: false,
   enabled: true,
   autoOpen: true,
-  prefs: { tab: 'changes', mode: 'split', repo: '', recentRepos: [], scope: 'session', filter: '' },
+  prefs: { tab: 'changes', mode: 'auto', repo: '', recentRepos: [], scope: 'session', filter: '' },
   sessionId: null,
   es: null,
   esKey: null,
@@ -208,7 +208,11 @@ function segHtml(act, attr, current, options) {
     `<button type="button" class="${current === value ? 'on' : ''}" data-wb-act="${act}" data-${attr}="${esc(value)}" aria-pressed="${current === value}">${esc(label)}</button>`).join('')}</span>`;
 }
 function modeSegHtml() {
-  return segHtml('mode', 'mode', state.prefs.mode, [['split', 'Split'], ['unified', 'Unified']]);
+  return segHtml('mode', 'mode', state.prefs.mode, [['auto', 'Auto'], ['split', 'Split'], ['unified', 'Unified']]);
+}
+function effectiveDiffMode() {
+  if (state.prefs.mode !== 'auto') return state.prefs.mode;
+  return ($('workbench-modal')?.querySelector('.workbench-modal-content')?.clientWidth || window.innerWidth) < 720 ? 'unified' : 'split';
 }
 async function api(path, opts = {}) {
   const r = await fetch(path, Object.assign({ credentials: 'same-origin' }, opts));
@@ -915,8 +919,8 @@ function diffPaneHtml() {
     `${!state.repoCtx.taskId ? '<button type="button" class="wb-btn wb-btn-sm" data-wb-act="edit-file" title="Edit this file in the selected checkout">Edit file</button>' : ''}<button type="button" class="wb-btn wb-btn-sm" data-wb-act="send-file" title="Paste this diff into the chat composer">Send to agent</button><button type="button" class="wb-btn wb-btn-sm" data-wb-act="popout" title="Open in a separate window">Pop out</button>`);
   if (state.editor?.path === state.selectedFile) return head + `<div class="wb-editor"><div class="wb-hint">Editing the working copy on ${esc(state.repoCtx.path)}. Save updates the file, not a commit. Review the diff after saving.</div><textarea id="wb-editor-text" class="wb-editor-text" aria-label="Edit ${esc(state.selectedFile)}" spellcheck="false"></textarea><div class="wb-editor-actions"><span id="wb-editor-status" role="status">${state.editor.dirty ? 'Unsaved changes' : 'No unsaved changes'}</span><button type="button" class="wb-btn" data-wb-act="cancel-edit">Cancel</button><button type="button" class="wb-btn wb-btn-primary" data-wb-act="save-file">Save file</button></div></div>`;
   if (!state.diffText.trim()) return head + emptyHtml('No textual diff (binary or unchanged).');
-  return head + `<div class="wb-diff-body">${renderDiffText(state.diffText, { mode: state.prefs.mode, path: state.selectedFile })}</div>`
-    + '<div class="wb-hint">Click a line number to quote that line in the composer.</div>';
+  return head + `<div class="wb-diff-body" role="region" aria-label="Scrollable file diff" tabindex="0">${renderDiffText(state.diffText, { mode: effectiveDiffMode(), path: state.selectedFile })}</div>`
+    + '<div class="wb-hint">Select a line number or Send to agent to review.</div>';
 }
 function renderCommits() {
   const box = $('wb-commits');
@@ -1538,6 +1542,12 @@ function wireWindow() {
   });
   const dm = $('workbench-diff-modal');
   if (dm) makeWindowDraggable(dm, { content: dm.querySelector('.modal-content'), header: dm.querySelector('.modal-header'), resizeStorageKey: 'odysseus-workbench-diff-size' });
+  let narrow = null;
+  new ResizeObserver(() => {
+    const next = effectiveDiffMode() === 'unified';
+    if (narrow !== null && narrow !== next && state.prefs.mode === 'auto' && !state.editor && state.prefs.tab === 'changes') renderChanges();
+    narrow = next;
+  }).observe(modal.querySelector('.workbench-modal-content'));
 
   modal.querySelectorAll('[data-wb-tab]').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.wbTab)));
   modal.querySelector('.wb-tabs')?.addEventListener('keydown', handleTabKeys);
@@ -1566,6 +1576,7 @@ function wireWindow() {
     }
   });
   modal.addEventListener('keydown', (e) => {
+    if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('td.wb-no[role="button"]')) { e.preventDefault(); e.target.click(); return; }
     if (e.key === 'Enter' && e.target.id === 'wb-file-search') { e.preventDefault(); searchFiles(); return; }
     if (e.key === 'Enter' && e.target.id === 'wb-base') { e.preventDefault(); state.selectedFile = null; refreshChanges(); refreshCommits(); return; }
     if ((e.key === 'Enter' || e.key === ' ') && e.target.matches('.wb-row[role="button"], .wb-run[role="button"]')) { e.preventDefault(); e.target.click(); }
