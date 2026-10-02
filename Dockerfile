@@ -41,7 +41,8 @@ FROM node-runtime AS app
 ENV DISABLE_TELEMETRY=1 PROMPTSCRIPT_TELEMETRY=false \
     ODYSSEUS_SKILL_TOOLS_ROOT=/opt/odysseus-skill-tools
 COPY package.json package-lock.json /opt/odysseus-skill-tools/
-RUN cd /opt/odysseus-skill-tools && npm ci --omit=dev --ignore-scripts \
+WORKDIR /opt/odysseus-skill-tools
+RUN npm ci --omit=dev --ignore-scripts \
     && ./node_modules/.bin/prs --version && ./node_modules/.bin/skills --version
 ENV PATH="/opt/odysseus-skill-tools/node_modules/.bin:${PATH}"
 
@@ -133,6 +134,9 @@ RUN ARCH="$(dpkg --print-architecture)" \
 # Docker-in-Docker, no extra Compose service. Pinned + checksum-verified so a
 # rebuild can't silently pull a different binary.
 ARG GITHUB_MCP_SERVER_VERSION=1.9.0
+# Checksum verification runs in /tmp so sha256sum can check the release's
+# relative tarball name. The scoped subshell does not change later WORKDIR.
+# hadolint ignore=DL3003,DL4006
 RUN ARCH="$(dpkg --print-architecture)" \
     && case "$ARCH" in \
          amd64) GARCH=x86_64 ;; \
@@ -149,8 +153,10 @@ RUN ARCH="$(dpkg --print-architecture)" \
     && install -m 0755 /tmp/github-mcp-server /usr/local/bin/github-mcp-server \
     && rm -f "/tmp/${TARBALL}" "/tmp/${SUMS}" /tmp/github-mcp-server
 
-# Official Todoist CLI used by the built-in Todoist MCP wrapper.
-RUN npm install -g @doist/todoist-cli
+# Official Todoist CLI used by the built-in Todoist MCP wrapper. v2 is the
+# last major line compatible with the app's default Node 22 runtime; v3+
+# requires Node 24. Keep the image build reproducible.
+RUN npm install -g @doist/todoist-cli@2.0.0
 
 WORKDIR /app
 
