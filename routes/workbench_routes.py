@@ -266,6 +266,14 @@ def setup_workbench_routes() -> APIRouter:
             pass
         return {"roots": repo_inspect.allowed_roots(), "repositories": repos, "workspace": workspace}
 
+    @router.get("/repo/files")
+    async def repo_files(request: Request, path: str = Query(...), query: str = ""):
+        _admin(request)
+        try:
+            return await repo_inspect.tracked_files(path, query)
+        except repo_inspect.RepoError as exc:
+            raise _repo_error(exc)
+
     @router.get("/repo/status")
     async def repo_status(request: Request, path: str = Query(...)):
         _admin(request)
@@ -297,6 +305,15 @@ def setup_workbench_routes() -> APIRouter:
         _admin(request)
         try:
             return await repo_inspect.file_at(path, file, ref=ref)
+        except repo_inspect.RepoError as exc:
+            raise _repo_error(exc)
+
+    @router.put("/repo/file")
+    async def repo_save_file(request: Request, payload: Dict[str, Any] = Body(...)):
+        _admin(request)
+        try:
+            return repo_inspect.save_worktree_file(payload.get("path"), payload.get("file"),
+                                                   payload.get("content"), payload.get("version"))
         except repo_inspect.RepoError as exc:
             raise _repo_error(exc)
 

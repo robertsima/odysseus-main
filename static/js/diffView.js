@@ -138,7 +138,7 @@ export function renderDiffCard(d) {
 }
 
 function _cell(no) {
-  return `<td class="wb-no">${no == null ? '' : no}</td>`;
+  return no == null ? '<td class="wb-no"></td>' : `<td class="wb-no" role="button" tabindex="0" aria-label="Quote or comment on line ${no}">${no}</td>`;
 }
 
 function _code(text) {

@@ -27,7 +27,7 @@
   --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 58%,var(--bg,#111417));
 }
 .ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
-html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background:var(--ag-bg);color:var(--ag-text)}
+html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background-color:var(--ag-bg);color:var(--ag-text)}
 html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
 html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
 html[data-style="agamemnon"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
@@ -328,6 +328,42 @@ html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!impo
 .theme-style-card label{display:flex;justify-content:space-between;align-items:center;gap:20px;cursor:pointer;min-height:48px}
 .theme-style-card small{display:block;margin-top:5px;line-height:1.45;opacity:.8}
 .theme-style-card input{width:22px;height:22px;flex:none;accent-color:var(--red)}
+/* Classic restores its original direct navigation. The Command list exists
+   only in Agamemnon; do not show the same destinations twice in either style. */
+html[data-style="classic"] .command-nav{display:none}
+html[data-style="classic"] #rail-command{display:none}
+html[data-style="agamemnon"] body:has(#sidebar:not(.hidden)) #rail-command{display:none}
+html[data-style="agamemnon"] .sidebar :is(#sidebar-new-chat-btn,#sidebar-search-btn){display:none}
+/* Both styles share the 240px sidebar and 40px crest; the fixed hamburger
+   sits in the icon rail, not in the branding row. */
+html[data-style="classic"] .sidebar{width:240px!important;min-width:240px!important}
+html[data-style="classic"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 8px 0 48px;justify-content:flex-start;align-items:center}
+html[data-style="agamemnon"] .sidebar .sidebar-header{padding-left:48px;padding-right:8px}
+html[data-style="classic"] .sidebar .sidebar-brand{gap:13px}
+html[data-style="classic"] .sidebar-brand-icon{width:40px;height:40px;margin:0}
+html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:20px;line-height:1;letter-spacing:.04em;top:0;left:0;margin:0}
+html[data-style="classic"] .sidebar .sidebar-brand-title,html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font-size:18px}
+html[data-style="classic"] .sidebar.right-side .sidebar-header{padding-left:32px;padding-right:24px}
+@media(max-width:480px){html[data-style="classic"] .sidebar .sidebar-header{height:64px;min-height:64px;padding:0 16px}html[data-style="classic"] .sidebar .sidebar-brand-title{font-size:17px}}
+/* The app's resizing/docking controller owns tool window geometry. */
+#workbench-modal .wb-branch-picker{display:flex;align-items:center;gap:8px;min-width:0;font-size:11px;color:var(--wb-muted)}
+#workbench-modal .wb-repo-select{max-width:min(390px,48vw)}
+#workbench-modal .wb-editor{display:flex;flex-direction:column;gap:8px;min-height:0;height:calc(100% - 92px);padding:8px;box-sizing:border-box}
+#workbench-modal .wb-editor .wb-hint{padding:0;overflow-wrap:anywhere}
+#workbench-modal .wb-editor-text{flex:1;min-height:80px;width:100%;box-sizing:border-box;resize:vertical;background:var(--bg);border:1px solid var(--border);color:var(--fg);padding:12px;font:12px/1.55 ui-monospace,monospace;tab-size:2}
+#workbench-modal .wb-editor-text:focus-visible{outline:2px solid var(--red);outline-offset:-2px}
+#workbench-modal .wb-editor-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+#workbench-modal #wb-editor-status{flex:1;min-width:120px;overflow-wrap:anywhere;color:var(--wb-muted)}
+@container wbpanel (max-width:610px){#workbench-modal .wb-branch-picker{width:100%}#workbench-modal .wb-repo-select{flex:1;max-width:100%}}
+/* Let all four views remain reachable even in a hand-resized dock. */
+#workbench-modal .workbench-modal-content{container:wbwindow / inline-size}
+@container wbwindow (max-width:660px){html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs,#workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}#workbench-modal .wb-tabs .memory-tab{justify-content:center;min-width:0}}
+@container wbpane (max-width:460px){#workbench-modal .wb-diff-body:after{content:'↔ Scroll for long lines';display:block;position:sticky;left:0;width:max-content;padding:4px 8px;background:var(--panel);color:var(--wb-muted);font-size:11px}}
+/* Font/Layout previously required horizontal scrolling even at 1440px. */
+#theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+#theme-modal .admin-card:has(#theme-font-select) .theme-fd-group{min-width:0}
+#theme-modal .admin-card:has(#theme-font-select) select{width:100%;min-width:0;max-width:100%}
+@media(max-width:480px){#theme-modal .admin-card:has(#theme-font-select) .theme-fd-row{grid-template-columns:1fr}}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-fleet-list .ag-bot-card,
 html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto;gap:8px;min-height:0;padding:9px 12px}
 html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-avatar{min-height:0;padding:2px 0 0}

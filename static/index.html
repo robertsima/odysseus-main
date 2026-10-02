@@ -916,8 +916,8 @@
           <button type="button" data-command-target="rail-search-btn">Search</button>
         </div>
       </div>
-      <div class="list-item" id="sidebar-new-chat-btn" title="New chat" hidden>New chat</div>
-      <div class="list-item" id="sidebar-search-btn" title="Search conversations" hidden>Search</div>
+      <div class="list-item" id="sidebar-new-chat-btn" title="New chat" role="button" tabindex="0">New chat</div>
+      <div class="list-item" id="sidebar-search-btn" title="Search conversations" role="button" tabindex="0">Search</div>
       <!-- Assistant sidebar entry removed — its log + settings live inside
            the Tasks modal (Activity + Settings tabs). The backend
            assistant session is still maintained for log_to_assistant()
@@ -1158,6 +1158,11 @@
     <script nonce="{{CSP_NONCE}}">
     (() => {
       const relay = (source, target) => document.getElementById(source)?.addEventListener('click', () => document.getElementById(target)?.click());
+      for (const id of ['sidebar-new-chat-btn', 'sidebar-search-btn']) {
+        document.getElementById(id)?.addEventListener('keydown', e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); }
+        });
+      }
       const toggle = document.getElementById('sidebar-command-toggle');
       const menu = document.getElementById('sidebar-command-menu');
       const rail = document.getElementById('rail-command');

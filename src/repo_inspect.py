@@ -27,6 +27,9 @@ from __future__ import annotations
 import os
 import posixpath
 import re
+import hashlib
+import stat
+import tempfile
 from typing import Any, Dict, List, Optional
 
 from src.agent_worktree.gitcmd import GitError, run_git
@@ -141,6 +144,16 @@ def _cap(text: str, limit: int) -> tuple:
     if len(text) <= limit:
         return text, False
     return text[:limit] + "\n…[truncated]\n", True
+
+
+async def tracked_files(path: str, query: str = "", *, roots: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Search tracked paths in a checkout without exposing arbitrary disk files."""
+    repo = resolve_repo(path, roots=roots)
+    if not isinstance(query, str) or len(query) > 120:
+        raise RepoError("File search must be at most 120 characters")
+    names = (await _git(repo, "ls-files", "-z", "--cached")).split("\x00")
+    matches = [name for name in names if name and query.lower() in name.lower()]
+    return {"files": matches[:100], "truncated": len(matches) > 100}
 
 
 def _parse_numstat(text: str) -> Dict[str, Dict[str, Any]]:
@@ -297,15 +310,68 @@ async def file_at(path: str, file: str, *, ref: Optional[str] = "HEAD",
                 data = fh.read(MAX_FILE_CHARS + 1)
         except OSError:
             return {"file": rel, "ref": "worktree", "content": None, "missing": True, "truncated": False}
+        if b"\x00" in data or data[:MAX_FILE_CHARS].decode("utf-8", errors="replace").encode("utf-8") != data[:MAX_FILE_CHARS]:
+            raise RepoError("Only UTF-8 text files can be opened in the editor")
         text = data.decode("utf-8", errors="replace")
         text, truncated = _cap(text, MAX_FILE_CHARS)
-        return {"file": rel, "ref": "worktree", "content": text, "missing": False, "truncated": truncated}
+        return {"file": rel, "ref": "worktree", "content": text, "missing": False, "truncated": truncated,
+                "version": hashlib.sha256(data).hexdigest() if not truncated else None}
     sha = validate_ref(ref, "HEAD")
     res = await run_git(["show", f"{sha}:{rel}"], cwd=repo, timeout_s=60, check=False)
     if res.code != 0:
         return {"file": rel, "ref": sha, "content": None, "missing": True, "truncated": False}
     text, truncated = _cap(res.stdout, MAX_FILE_CHARS)
     return {"file": rel, "ref": sha, "content": text, "missing": False, "truncated": truncated}
+
+
+def save_worktree_file(path: str, file: str, content: str, version: str,
+                       *, roots: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Replace an existing regular UTF-8 file only when its disk version matches."""
+    repo = resolve_repo(path, roots=roots)
+    rel = relative_file(repo, file)
+    full = os.path.join(repo, *rel.split("/"))
+    if ".git" in rel.split("/"):
+        raise RepoError("Repository metadata cannot be edited")
+    current = repo
+    for part in rel.split("/")[:-1]:
+        current = os.path.join(current, part)
+        if os.path.islink(current):
+            raise RepoError("Symlinked directories cannot be edited")
+    if not isinstance(content, str) or not isinstance(version, str) or not re.fullmatch(r"[a-f0-9]{64}", version):
+        raise RepoError("Content and a valid file version are required")
+    data = content.encode("utf-8")
+    if len(data) > MAX_FILE_CHARS or b"\x00" in data:
+        raise RepoError("Only UTF-8 text files up to 400 KB can be saved")
+    try:
+        fd = os.open(full, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_FILE_CHARS:
+                raise RepoError("Only existing text files up to 400 KB can be edited")
+            old = handle.read(MAX_FILE_CHARS + 1)
+        if b"\x00" in old or old.decode("utf-8").encode("utf-8") != old:
+            raise RepoError("Binary files cannot be edited")
+    except (OSError, UnicodeError) as exc:
+        raise RepoError(f"Could not safely open text file: {exc}") from exc
+    if hashlib.sha256(old).hexdigest() != version:
+        raise RepoError("File changed on disk. Copy your draft before reloading; nothing was overwritten.")
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=os.path.dirname(full), prefix=".wb-", delete=False) as dest:
+            temporary = dest.name
+            dest.write(data)
+            dest.flush()
+            os.fsync(dest.fileno())
+        os.chmod(temporary, stat.S_IMODE(info.st_mode))
+        now = os.lstat(full)
+        if (now.st_dev, now.st_ino, now.st_size, now.st_mtime_ns) != (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns):
+            raise RepoError("File changed on disk. Nothing was overwritten.")
+        os.replace(temporary, full)
+        temporary = None
+    finally:
+        if temporary and os.path.exists(temporary):
+            os.unlink(temporary)
+    return {"file": rel, "version": hashlib.sha256(data).hexdigest()}
 
 
 _LOG_FORMAT = "%H%x1f%h%x1f%an%x1f%aI%x1f%s"

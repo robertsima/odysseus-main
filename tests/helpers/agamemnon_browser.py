@@ -91,6 +91,8 @@ class StubState:
 
 
 def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple[int, object]:
+    if method == "PUT" and path == "/api/workbench/repo/file":
+        return 200, {"file": body.get("file"), "version": "b" * 64}
     if method == "POST" and path.startswith("/api/agents/sessions/") and path.endswith("/appearance"):
         sid = unquote(path.split("/")[4])
         state.appearance[sid] = body.get("appearance")
@@ -123,9 +125,20 @@ def _api_response(state: StubState, method: str, path: str, body: dict) -> tuple
                                 "status": "running", "title": "Claude Code · migrate orders",
                                 "started_at": NOW - 60, "detail": "Checking migration safety"}]}
     if path == "/api/workbench/repo/roots":
-        return 200, {"roots": [{"path": "/repo", "label": "repo"}]}
-    if path in ("/api/workbench/repo/changes", "/api/workbench/repo/commits"):
-        return 200, {"files": [], "commits": [], "branch": "main"}
+        return 200, {"roots": ["/repo"], "workspace": "/repo/workbench",
+                     "repositories": [{"path": "/repo/workbench", "branch": "agent/review", "kind": "worktree"},
+                                      {"path": "/repo/main", "branch": "dev", "kind": "checkout"}]}
+    if path == "/api/workbench/repo/changes":
+        return 200, {"files": [{"path": "src/orders.py", "status": "modified", "additions": 2, "deletions": 1},
+                               {"path": "tests/test_orders.py", "status": "added", "additions": 18, "deletions": 0}]}
+    if path == "/api/workbench/repo/files":
+        return 200, {"files": ["src/orders.py", "src/clean.py", "tests/test_orders.py"], "truncated": False}
+    if path == "/api/workbench/repo/diff":
+        return 200, {"diff": "diff --git a/src/orders.py b/src/orders.py\n--- a/src/orders.py\n+++ b/src/orders.py\n@@ -1,2 +1,3 @@\n-def migrate():\n+def migrate(dry_run=False):\n+    assert dry_run or ready()\n     pass\n"}
+    if path == "/api/workbench/repo/file":
+        return 200, {"file": "src/orders.py", "ref": "worktree", "content": "def migrate(dry_run=False):\n    assert dry_run or ready()\n    pass\n", "version": "a" * 64, "truncated": False}
+    if path == "/api/workbench/repo/commits":
+        return 200, {"commits": [{"sha": "cafebabecafebabecafebabecafebabecafebabe", "subject": "Validate migration before rollout", "author": "Alex"}]}
     if path == "/api/workbench/prs/config":
         return 200, {"configured": False, "reason": "No GitHub token in this test"}
     if path == "/api/notes":
@@ -162,7 +175,7 @@ def make_handler(state: StubState):
                     body = json.loads(raw or b"{}")
                 except ValueError:
                     body = {}
-                if self.command == "POST":
+                if self.command in ("POST", "PUT"):
                     state.posts.append((path, body if isinstance(body, dict) else {}))
                 status, payload = _api_response(state, self.command, path, body if isinstance(body, dict) else {})
                 self._send(status, json.dumps(payload).encode(), "application/json")
