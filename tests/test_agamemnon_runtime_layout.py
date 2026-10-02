@@ -777,6 +777,7 @@ def test_classic_phalanx_header_shows_the_product_helmet(open_app, theme):
     page = open_app(1440, theme)
     assert page.eval("document.documentElement.dataset.style") == "classic"
     open_agents(page)
+    shot(page, 'classic-phalanx-light' if theme == LIGHT_THEME else 'classic-phalanx-odysseus')
     assert page.eval("document.querySelector('#agents-dashboard .ag-window-antenna')") is None
     mark = page.probe('#agents-dashboard .ag-window-mark')
     title = page.probe('#agents-dashboard .ag-window-title')
@@ -848,9 +849,44 @@ def test_classic_phalanx_toolbar_actions_wrap_on_phones(open_app, width):
     page = open_app(width, LIGHT_THEME)
     assert page.eval("document.documentElement.dataset.style") == "classic"
     open_agents(page)
+    shot(page, 'classic-phalanx-phone')
     assert page.eval("(() => { const h = document.querySelector('#agents-dashboard .ag-head'); return h.scrollWidth <= h.clientWidth + 1; })()")
     buttons = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-head-actions button')].map(b => {"
                         " const r = b.getBoundingClientRect(); return {text: b.textContent.trim(), left: r.left, right: r.right}; })")
     assert buttons
     for button in buttons:
         assert button['left'] >= 0 and button['right'] <= width + 1, button
+
+
+def test_large_phalanx_card_actions_do_not_break_words(open_app):
+    page = open_app(1440)
+    open_agents(page)
+    page.click('[data-ag="fleet-density"]')
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-expanded')")
+    buttons = page.eval("[...document.querySelectorAll('.ag-fleet-expanded .ag-card-actions .wb-icon-btn')]"
+                        ".filter(b => b.offsetParent).map(b => { const r = b.getBoundingClientRect();"
+                        " const s = getComputedStyle(b); return {text:b.textContent.trim(), width:r.width,"
+                        " height:r.height, whiteSpace:s.whiteSpace, right:r.right}; })")
+    assert buttons
+    for button in buttons:
+        assert button['whiteSpace'] == 'nowrap' and button['width'] >= 44, button
+        assert button['height'] <= 48 and button['right'] <= page.width + 1, button
+    shot(page, 'phalanx-actions-legible')
+
+
+@pytest.mark.parametrize('width', [1440, 390])
+def test_classic_soldier_picker_options_fit_the_detail_pane(open_app, width):
+    page = open_app(width, LIGHT_THEME)
+    open_agents(page)
+    page.click(f'.ag-card-select[data-sid="{PARENT_ID}"]')
+    page.wait_for("!!document.querySelector('#ag-detail .ag-appearance-options svg')")
+    choices = page.eval("[...document.querySelectorAll('#ag-detail .ag-appearance-option svg')]"
+                        ".map(svg => {const r=svg.getBoundingClientRect(), c=svg.closest('label').getBoundingClientRect();"
+                        "return {width:r.width,height:r.height,left:r.left,right:r.right,"
+                        "containerLeft:c.left,containerRight:c.right};})")
+    assert len(choices) >= 5
+    for choice in choices:
+        assert 25 <= choice['width'] <= 52 and choice['height'] <= 52, choice
+        assert choice['left'] >= choice['containerLeft'] - 1, choice
+        assert choice['right'] <= choice['containerRight'] + 1, choice
+    shot(page, 'classic-soldier-picker')
