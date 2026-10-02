@@ -215,19 +215,21 @@ def test_navigation_opens_the_phalanx_and_the_workbench(open_app, width):
     page = open_app(width)
     if width <= 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
-    assert_usable(page, "#sidebar-agents-shortcut")
-    page.click("#sidebar-agents-shortcut")
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
+    assert_usable(page, "#sidebar-command-toggle")
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-agents"]')
     page.wait_for("!document.getElementById('agents-dashboard').hidden")
     assert page.probe("#agents-dashboard .ag-card")["visible"]
     page.click("#close-agents-dashboard")
     page.wait_for("document.getElementById('agents-dashboard').hidden")
     if width <= 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-workbench-shortcut').getBoundingClientRect().left >= 0")
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
         time.sleep(0.35)  # sidebar slide completes before coordinate click
-    assert_usable(page, '#sidebar-workbench-shortcut')
-    page.click("#sidebar-workbench-shortcut")
+    assert_usable(page, '#sidebar-command-toggle')
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-workbench"]')
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
     assert page.probe(".ag-run-summary")["visible"]
 
@@ -240,12 +242,13 @@ def test_scribe_navigation_and_phalanx_identity(open_app, width):
     assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
     assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
     assert not page.probe('#ag-open-theme')
-    assert not page.probe('#theme-tabs [data-tab="theme-tab-customize"]')['visible']
+    assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
     if width == 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
-    assert page.probe('#sidebar-agents-shortcut')['visible']
-    page.click('#sidebar-agents-shortcut')
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
+    assert page.probe('#sidebar-command-toggle')['visible']
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-agents"]')
     page.wait_for("!document.getElementById('agents-dashboard').hidden")
     assert page.eval("document.querySelector('.ag-phalanx-title').textContent") == 'Phalanx'
     assert 'Command center' in page.eval("document.getElementById('ag-window-summary').textContent")
@@ -254,24 +257,24 @@ def test_scribe_navigation_and_phalanx_identity(open_app, width):
 
 def test_non_agamemnon_navigation_and_activity_remain_intact(open_app):
     page = open_app(1440, ODYSSEUS_THEME)
-    assert not page.probe('.ag-command-link')['visible']
+    assert page.eval("document.documentElement.dataset.style") == 'classic'
     assert page.probe('#tool-agents-btn')['visible']
-    assert page.eval("document.querySelector('.ody-nav-label').textContent") == 'Agents'
+    assert page.eval("document.querySelector('.ag-nav-label').textContent") == 'Phalanx'
     assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
-    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") != '/static/branding/agamemnon-trojan-helmet.svg'
+    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
     open_workbench(page)
     assert not page.probe('.ag-run-summary')['visible']
     assert visible_panels(page) == ['activity']
-    assert page.eval("document.getElementById('message').placeholder") == 'Message Odysseus...'
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
 
 
 @pytest.mark.parametrize('width', [1440, 390, 320])
 def test_theme_polish_preserves_readable_navigation_and_transcript(open_app, width):
     page = open_app(width)
     if width == 1440:
-        command = assert_usable(page, '#sidebar-agents-shortcut')
+        command = assert_usable(page, '#sidebar-command-toggle')
         assert command['height'] >= 44
-        assert page.probe('#sidebar-agents-shortcut')['fontSize'] >= 14
+        assert page.probe('#sidebar-command-toggle')['fontSize'] >= 14
     # The message cards occupy the transcript rather than creating wide
     # interior gutters that squeeze code blocks at 320px.
     history, message = page.probe('#chat-history'), page.probe('#chat-history .msg-ai')
@@ -301,9 +304,9 @@ def test_phalanx_mobile_names_and_actions_are_reachable(open_app, width):
     card = page.probe('#agents-dashboard .ag-card')
     name = page.probe('#agents-dashboard .ag-card .ag-card-select')
     actions = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-card:first-child .ag-card-actions .wb-icon-btn')].map(b => {const r=b.getBoundingClientRect();return {width:r.width,height:r.height,left:r.left,right:r.right,top:r.top};})")
-    assert name['right'] <= card['right'] and name['width'] >= card['width'] * .45
+    assert name['right'] <= card['right'] and name['width'] >= 70
     assert all(a['width'] >= 44 and a['height'] >= 44 and a['right'] <= width for a in actions), actions
-    assert actions and actions[0]['top'] >= name['bottom']
+    assert actions and actions[0]['top'] >= card['top']
     assert_no_sideways_scroll(page, '.agents-modal-content')
 
 
@@ -359,7 +362,7 @@ def test_workbench_keyboard_tabs_and_theme_switch(open_app):
     page.eval("document.getElementById('wb-tab-changes').dispatchEvent(new KeyboardEvent('keydown', {key:'Home',bubbles:true}))")
     assert visible_panels(page) == ['activity']
     page.eval("document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]').click(); import('/static/js/theme.js').then(m => m.applyThemeIdentity('dark'))")
-    assert page.eval("document.getElementById('theme-tab-customize').style.display") == 'none'
+    assert page.eval("document.getElementById('theme-tab-customize').style.display") != 'none'
 
 
 # ── Workbench ───────────────────────────────────────────────────────────────

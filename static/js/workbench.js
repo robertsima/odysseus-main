@@ -651,9 +651,7 @@ function setLive(mode) {
   if (!el) return;
   const m = state.paused ? 'paused' : mode;
   el.dataset.state = m;
-  const labels = document.documentElement.dataset.theme === 'dark'
-    ? { live: 'Activity live', reconnecting: 'Activity reconnecting…', paused: 'Activity paused', off: 'Activity offline' }
-    : { live: 'Live', reconnecting: 'Reconnecting…', paused: 'Paused', off: 'Offline' };
+  const labels = { live: 'Activity live', reconnecting: 'Activity reconnecting…', paused: 'Activity paused', off: 'Activity offline' };
   el.textContent = labels[m] || m;
 }
 

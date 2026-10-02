@@ -13,297 +13,327 @@
  * controller, resize handle, chat beside it) and only takes the palette.
  */
 :root {
-  --ag-bg:#111417;
-  --ag-rail:#171c21;
-  --ag-panel:#1b2127;
-  --ag-raised:#20262c;
+  --ag-bg:var(--bg,#111417);
+  --ag-rail:var(--sidebar-bg,#171c21);
+  --ag-panel:var(--panel,#1b2127);
+  --ag-raised:var(--input-bg,#20262c);
   --ag-console:#0c0f11;
-  --ag-border:#343d45;
-  --ag-border-strong:#59636d;
-  --ag-gold:#d7b35a;
+  --ag-border:var(--border,#343d45);
+  --ag-border-strong:var(--border,#59636d);
+  --ag-gold:var(--red,#d7b35a);
   --ag-coral:#e07b5a;
-  --ag-text:#f7f8fa;
-  --ag-muted:#aeb6bd;
-  --ag-faint:#98a1a9;
+  --ag-text:var(--fg,#f7f8fa);
+  --ag-muted:color-mix(in srgb,var(--fg,#f7f8fa) 72%,var(--bg,#111417));
+  --ag-faint:color-mix(in srgb,var(--fg,#f7f8fa) 58%,var(--bg,#111417));
 }
 .ag-page-heading,.ag-context-rail,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title,.ag-run-control,.ag-run-detail{display:none}
-html[data-theme="dark"] body{font-family:'Space Grotesk',system-ui,sans-serif;background:var(--ag-bg);color:var(--ag-text)}
-html[data-theme="dark"] .ody-brand-name,html[data-theme="dark"] .ody-page-title{display:none!important}
-html[data-theme="dark"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
-html[data-theme="dark"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
-html[data-theme="dark"] .sidebar .sidebar-brand{height:100%;flex-direction:row;gap:13px}
-html[data-theme="dark"] .sidebar-brand-icon{width:40px;height:40px;margin:0;color:var(--ag-gold)}
-html[data-theme="dark"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:var(--ag-gold);text-transform:uppercase}
-html[data-theme="dark"] .sidebar-inner{padding:20px 24px}
-html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
-html[data-theme="dark"] .sidebar .list-item,html[data-theme="dark"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
-html[data-theme="dark"] .sidebar .list-item:hover{background:var(--ag-raised);color:var(--ag-gold)}
+html[data-style="agamemnon"] body{font-family:'Space Grotesk',system-ui,sans-serif;background:var(--ag-bg);color:var(--ag-text)}
+html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none!important}
+html[data-style="agamemnon"] .sidebar{width:240px!important;min-width:240px!important;background:var(--ag-rail)!important;border-right:2px solid var(--ag-border)}
+html[data-style="agamemnon"] .sidebar .sidebar-header{height:88px;min-height:88px;padding:0 24px 0 32px;align-items:flex-start;border:0!important;box-shadow:none!important}
+html[data-style="agamemnon"] .sidebar .sidebar-brand{height:100%;flex-direction:row;gap:13px}
+html[data-style="agamemnon"] .sidebar-brand-icon{width:40px;height:40px;margin:0;color:var(--ag-gold)}
+html[data-style="agamemnon"] .sidebar .sidebar-brand-title{font:700 20px/1 'Space Grotesk',sans-serif;letter-spacing:.04em;color:var(--ag-gold);text-transform:uppercase}
+html[data-style="agamemnon"] .sidebar-inner{padding:20px 24px}
+html[data-style="agamemnon"] .sidebar-inner::before{content:'COMMAND';display:block;margin:0 0 10px;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.18em}
+html[data-style="agamemnon"] .sidebar .list-item,html[data-style="agamemnon"] .sidebar .section-title{font-family:'Space Grotesk',sans-serif;border-radius:0}
+html[data-style="agamemnon"] .sidebar .list-item:hover{background:var(--ag-raised);color:var(--ag-gold)}
 /* Command links belong in the same scrollable navigation as the existing
    session list. The rail and mobile off-canvas modes remain owned by the app. */
 .ag-command-link,.ag-nav-label{display:none}
-html[data-theme="dark"] .ody-nav-label{display:none}
-html[data-theme="dark"] .ag-nav-label{display:inline}
-html[data-theme="dark"] .sidebar-inner::before{content:'COMMAND /';padding-bottom:4px}
-html[data-theme="dark"] .sidebar .ag-command-link{display:flex;align-items:center;gap:12px;min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;cursor:pointer;font-size:15px;color:var(--ag-text)}
+html[data-style="agamemnon"] .ody-nav-label{display:none}
+html[data-style="agamemnon"] .ag-nav-label{display:inline}
+html[data-style="agamemnon"] .sidebar-inner::before{content:none}
+html[data-style="agamemnon"] .sidebar .ag-command-link{display:flex;align-items:center;gap:12px;min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;cursor:pointer;font-size:15px;color:var(--ag-text)}
 /* The general sidebar typography was tuned for a narrow icon rail. Command
    destinations should remain readable when the full 240px rail is open. */
-html[data-theme="dark"] .sidebar .ag-command-link{font-size:14px;line-height:1.35}
-html[data-theme="dark"] .sidebar .ag-command-link:hover,html[data-theme="dark"] .sidebar .ag-command-link:focus-visible{border-left-color:var(--ag-gold);background:var(--ag-raised);color:var(--ag-gold);outline:none}
-html[data-theme="dark"] .ag-command-icon{width:18px;flex:none;text-align:center;color:var(--ag-gold);font-size:18px}
-html[data-theme="dark"] .sidebar #sidebar-new-chat-btn,html[data-theme="dark"] .sidebar #sidebar-search-btn{min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;font-size:15px}
-html[data-theme="dark"] .sidebar #sidebar-new-chat-btn,html[data-theme="dark"] .sidebar #sidebar-search-btn{font-size:14px}
-html[data-theme="dark"] #theme-tabs [data-tab="theme-tab-customize"],html[data-theme="dark"] #theme-tab-customize{display:none!important}
-html[data-theme="dark"] .sidebar #sessions-section,html[data-theme="dark"] .sidebar #tools-section{margin-top:18px;padding-top:16px;border-top:1px solid var(--ag-border)}
-html[data-theme="dark"] .sidebar .section-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ag-gold)}
-html[data-theme="dark"] .sidebar #sessions-section .section-title-label{font-size:0}
-html[data-theme="dark"] .sidebar #sessions-section .section-title-label::after{content:'SCRIBE / RECENT';font-size:11px}
-html[data-theme="dark"] .sidebar #tools-section .section-title{font-size:0}
-html[data-theme="dark"] .sidebar #tools-section .section-title::after{content:'SYSTEM /';font-size:11px}
-html[data-theme="dark"] .sidebar #tool-agents-btn,html[data-theme="dark"] .sidebar #tool-workbench-btn{display:none!important}
+html[data-style="agamemnon"] .sidebar .ag-command-link{font-size:14px;line-height:1.35}
+html[data-style="agamemnon"] .sidebar .ag-command-link:hover,html[data-style="agamemnon"] .sidebar .ag-command-link:focus-visible{border-left-color:var(--ag-gold);background:var(--ag-raised);color:var(--ag-gold);outline:none}
+html[data-style="agamemnon"] .ag-command-icon{width:18px;flex:none;text-align:center;color:var(--ag-gold);font-size:18px}
+html[data-style="agamemnon"] .sidebar #sidebar-new-chat-btn,html[data-style="agamemnon"] .sidebar #sidebar-search-btn{min-height:44px;padding:10px 12px;margin:3px 0;border-left:2px solid transparent;font-size:15px}
+html[data-style="agamemnon"] .sidebar #sidebar-new-chat-btn,html[data-style="agamemnon"] .sidebar #sidebar-search-btn{font-size:14px}
+
+html[data-style="agamemnon"] .sidebar #sessions-section,html[data-style="agamemnon"] .sidebar #tools-section{margin-top:18px;padding-top:16px;border-top:1px solid var(--ag-border)}
+html[data-style="agamemnon"] .sidebar .section-title{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--ag-gold)}
+html[data-style="agamemnon"] .sidebar #sessions-section .section-title-label{font-size:0}
+html[data-style="agamemnon"] .sidebar #sessions-section .section-title-label::after{content:'RECENT CHATS';font-size:11px}
+html[data-style="agamemnon"] .sidebar #tools-section .section-title{font-size:11px}
 
 /* ── Scribe chat ──────────────────────────────────────────────────────────
  * One compact identity row, one scrolling transcript and the composer. The
  * model picker, Phalanx and Workbench already have permanent entry points. */
 /* Only the top margin: the side margins are how a docked panel makes room. */
-html[data-theme="dark"] .chat-container{background:var(--ag-bg);margin-top:0;margin-bottom:0;padding:18px clamp(14px,2.5vw,36px) 18px;gap:0}
-html[data-theme="dark"] .ag-page-heading{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:18px;flex:0 0 auto;box-sizing:border-box;margin:0 0 10px;min-width:0}
-html[data-theme="dark"] .ag-page-heading h1{margin:0;font:700 26px/1.2 'Space Grotesk';letter-spacing:.025em}
-html[data-theme="dark"] .ag-page-heading p{margin:0;color:var(--ag-muted);font-size:13px;letter-spacing:.03em;overflow-wrap:anywhere}
-html[data-theme="dark"] .ag-page-heading b{padding:0 8px;color:var(--ag-border-strong)}
-html[data-theme="dark"] .ag-page-heading strong{color:var(--ag-gold);font-weight:700}
-html[data-theme="dark"] .chat-top-bar{flex:0 0 auto;min-height:30px;margin:0;padding:0;border:0;background:transparent;justify-content:flex-start}
-html[data-theme="dark"] .chat-top-bar .chat-meta-overlay{left:0;right:0;max-width:100%;justify-content:flex-start;transform:translateY(-50%);font-size:12px}
-html[data-theme="dark"] .chat-top-bar #current-meta{display:none}
-html[data-theme="dark"] .chat-top-bar:has(.incognito-indicator:not([style*="none"])) .chat-meta-overlay{left:40px}
-html[data-theme="dark"] #chat-history{flex:1 1 auto;min-height:0;width:100%;max-width:none;box-sizing:border-box;margin:0;background:var(--ag-panel);border:1px solid var(--ag-border);border-top:2px solid var(--ag-gold);padding:22px clamp(14px,2.5vw,36px)}
-html[data-theme="dark"] #chat-history .msg-ai pre,html[data-theme="dark"] #chat-history .msg-ai .tool-result{max-width:100%;overflow:auto}
-html[data-theme="dark"] .chat-container .chat-input-bar,
-html[data-theme="dark"] .chat-container.welcome-active .chat-input-bar{position:relative;inset:auto;flex:0 0 auto;box-sizing:border-box;width:100%;max-width:none;min-height:104px;height:auto;margin:10px 0 0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);box-shadow:none}
-html[data-theme="dark"] #welcome-screen{top:50%;left:50%}
-html[data-theme="dark"] .welcome-name{font-family:'Space Grotesk';font-weight:700;letter-spacing:.08em;text-transform:uppercase}
+html[data-style="agamemnon"] .chat-container{background:var(--ag-bg);margin-top:0;margin-bottom:0;padding:18px clamp(14px,2.5vw,36px) 18px;gap:0}
+html[data-style="agamemnon"] .ag-page-heading{display:flex;align-items:baseline;flex-wrap:wrap;column-gap:18px;flex:0 0 auto;box-sizing:border-box;margin:0 0 10px;min-width:0}
+html[data-style="agamemnon"] .ag-page-heading h1{margin:0;font:700 26px/1.2 'Space Grotesk';letter-spacing:.025em}
+html[data-style="agamemnon"] .ag-page-heading p{margin:0;color:var(--ag-muted);font-size:13px;letter-spacing:.03em;overflow-wrap:anywhere}
+html[data-style="agamemnon"] .ag-page-heading b{padding:0 8px;color:var(--ag-border-strong)}
+html[data-style="agamemnon"] .ag-page-heading strong{color:var(--ag-gold);font-weight:700}
+html[data-style="agamemnon"] .chat-top-bar{flex:0 0 auto;min-height:30px;margin:0;padding:0;border:0;background:transparent;justify-content:flex-start}
+html[data-style="agamemnon"] .chat-top-bar .chat-meta-overlay{left:0;right:0;max-width:100%;justify-content:flex-start;transform:translateY(-50%);font-size:12px}
+html[data-style="agamemnon"] .chat-top-bar #current-meta{display:none}
+html[data-style="agamemnon"] .chat-top-bar:has(.incognito-indicator:not([style*="none"])) .chat-meta-overlay{left:40px}
+html[data-style="agamemnon"] #chat-history{flex:1 1 auto;min-height:0;width:100%;max-width:none;box-sizing:border-box;margin:0;background:var(--ag-panel);border:1px solid var(--ag-border);border-top:2px solid var(--ag-gold);padding:22px clamp(14px,2.5vw,36px)}
+html[data-style="agamemnon"] #chat-history .msg-ai pre,html[data-style="agamemnon"] #chat-history .msg-ai .tool-result{max-width:100%;overflow:auto}
+html[data-style="agamemnon"] .chat-container .chat-input-bar,
+html[data-style="agamemnon"] .chat-container.welcome-active .chat-input-bar{position:relative;inset:auto;flex:0 0 auto;box-sizing:border-box;width:100%;max-width:none;min-height:104px;height:auto;margin:10px 0 0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);box-shadow:none}
+html[data-style="agamemnon"] #welcome-screen{top:50%;left:50%}
+html[data-style="agamemnon"] .welcome-name{font-family:'Space Grotesk';font-weight:700;letter-spacing:.08em;text-transform:uppercase}
 
 /* No session-context column: the transcript expands with the viewport. */
-html[data-theme="dark"] .ag-run-detail h3{margin:0;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.16em}
+html[data-style="agamemnon"] .ag-run-detail h3{margin:0;color:var(--ag-gold);font:700 11px/1 'Space Grotesk';letter-spacing:.16em}
 /* Live progress sits above the composer without taking the conversation away.
    Each disclosure has its own scroll area; no control or checklist step is
    discarded. This matters when both panels and a dock are open together. */
-html[data-theme="dark"] :is(.task-checklist,.agent-strip){box-sizing:border-box;width:100%;max-width:none;min-width:0;margin:6px 0 0;padding:0;font-size:12px}
+html[data-style="agamemnon"] :is(.task-checklist,.agent-strip){box-sizing:border-box;width:100%;max-width:none;min-width:0;margin:6px 0 0;padding:0;font-size:12px}
 /* The progress shelf gets only the space it needs, not two full-width
    vertically stacked popups. Query the actual chat column, not the browser:
    a dock can halve the chat while the viewport remains desktop-sized. */
-html[data-theme="dark"] .chat-container{container-type:inline-size}
-html[data-theme="dark"] .chat-progress-shelf{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;flex:none;min-width:0;margin-top:6px}
-html[data-theme="dark"] .chat-progress-shelf :is(.task-checklist,.agent-strip){margin:0}
-html[data-theme="dark"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
-html[data-theme="dark"] .chat-progress-shelf .publish-approvals{grid-column:1/-1}
+html[data-style="agamemnon"] .chat-container{container-type:inline-size}
+html[data-style="agamemnon"] .chat-progress-shelf{display:grid;grid-template-columns:minmax(0,1fr);gap:6px;flex:none;min-width:0;margin-top:6px}
+html[data-style="agamemnon"] .chat-progress-shelf :is(.task-checklist,.agent-strip){margin:0}
+html[data-style="agamemnon"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
+html[data-style="agamemnon"] .chat-progress-shelf .publish-approvals{grid-column:1/-1}
 @container (min-width: 900px){
- html[data-theme="dark"] .chat-progress-shelf{grid-template-columns:repeat(2,minmax(0,1fr))}
+ html[data-style="agamemnon"] .chat-progress-shelf{grid-template-columns:repeat(2,minmax(0,1fr))}
 }
-html[data-theme="dark"] :is(.tc-head,.agent-strip-head){background:var(--ag-rail);border-color:var(--ag-border-strong);border-radius:0;min-height:32px}
-html[data-theme="dark"] :is(.tc-toggle,.agent-strip-toggle){min-height:30px;height:auto;color:var(--ag-text)}
-html[data-theme="dark"] :is(.tc-list,.agent-strip-rows){box-sizing:border-box;max-height:clamp(64px,13vh,112px);overflow:auto;background:var(--ag-panel);border-color:var(--ag-border-strong);border-radius:0}
-html[data-theme="dark"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
-html[data-theme="dark"] .agent-strip-row{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto;gap:6px}
-html[data-theme="dark"] .agent-strip-activity{display:none}
-html[data-theme="dark"] .agent-strip-progress{grid-column:3/-1}
-html[data-theme="dark"] :is(.tc-toggle,.agent-strip-toggle,.agent-strip-head button):focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
+html[data-style="agamemnon"] :is(.tc-head,.agent-strip-head){background:var(--ag-rail);border-color:var(--ag-border-strong);border-radius:0;min-height:32px}
+html[data-style="agamemnon"] :is(.tc-toggle,.agent-strip-toggle){min-height:30px;height:auto;color:var(--ag-text)}
+html[data-style="agamemnon"] :is(.tc-list,.agent-strip-rows){box-sizing:border-box;max-height:clamp(64px,13vh,112px);overflow:auto;background:var(--ag-panel);border-color:var(--ag-border-strong);border-radius:0}
+html[data-style="agamemnon"] .chat-progress-shelf :is(.tc-list,.agent-strip-rows){max-height:clamp(54px,9vh,76px)}
+html[data-style="agamemnon"] .agent-strip-row{grid-template-columns:auto auto minmax(0,1fr) auto auto auto auto;gap:6px}
+html[data-style="agamemnon"] .agent-strip-activity{display:none}
+html[data-style="agamemnon"] .agent-strip-progress{grid-column:3/-1}
+html[data-style="agamemnon"] :is(.tc-toggle,.agent-strip-toggle,.agent-strip-head button):focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
 /* Once a dock narrows the conversation, the job name owns a complete line.
    Actions wrap underneath instead of pushing the title to an ellipsis. */
 @container (max-width: 899px){
- html[data-theme="dark"] .agent-strip-row{display:flex;flex-wrap:wrap;gap:5px 8px;padding:7px 8px}
- html[data-theme="dark"] .agent-strip-title{order:-1;flex:0 0 100%;white-space:normal;overflow-wrap:anywhere;font-size:13px}
- html[data-theme="dark"] .agent-strip-progress{flex:0 0 100%;white-space:normal}
- html[data-theme="dark"] .agent-strip-row .wb-btn{min-height:32px}
- html[data-theme="dark"] .chat-progress-shelf .tc-list{max-height:48px}
- html[data-theme="dark"] .chat-progress-shelf .agent-strip-rows{max-height:88px}
+ html[data-style="agamemnon"] .agent-strip-row{display:flex;flex-wrap:wrap;gap:5px 8px;padding:7px 8px}
+ html[data-style="agamemnon"] .agent-strip-title{order:-1;flex:0 0 100%;white-space:normal;overflow-wrap:anywhere;font-size:13px}
+ html[data-style="agamemnon"] .agent-strip-progress{flex:0 0 100%;white-space:normal}
+ html[data-style="agamemnon"] .agent-strip-row .wb-btn{min-height:32px}
+ html[data-style="agamemnon"] .chat-progress-shelf .tc-list{max-height:48px}
+ html[data-style="agamemnon"] .chat-progress-shelf .agent-strip-rows{max-height:88px}
 }
 @media(max-width:700px){
- html[data-theme="dark"] .agent-strip-row .wb-chip{display:none}
+ html[data-style="agamemnon"] .agent-strip-row .wb-chip{display:none}
 }
 
 /* ── Shared tool-window skin (docked or page) ─────────────────────────── */
-html:not([data-theme="dark"]) .ag-phalanx-title,html:not([data-theme="dark"]) .ag-phalanx-summary,html:not([data-theme="dark"]) .ag-workbench-title{display:none}
-html[data-theme="dark"] .ody-agents-title,html[data-theme="dark"] .ody-agents-summary,html[data-theme="dark"] .ody-workbench-title{display:none}
-html[data-theme="dark"] .ag-phalanx-title,html[data-theme="dark"] .ag-phalanx-summary,html[data-theme="dark"] .ag-workbench-title{display:inline}
-html[data-theme="dark"] .agents-dashboard,html[data-theme="dark"] #workbench-modal{--wb-muted:var(--ag-muted);--wb-faint:var(--ag-faint);--wb-line:var(--ag-border)}
-html[data-theme="dark"] .agents-modal-content,html[data-theme="dark"] .workbench-modal-content{font-family:'Space Grotesk';background:var(--ag-bg)!important;border-radius:0}
-html[data-theme="dark"] .ag-window-mark{display:none}
-html[data-theme="dark"] .ag-window-title h3 span{font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit}
-html[data-theme="dark"] .ag-window-actions .doc-action-icon-btn,html[data-theme="dark"] #wb-dock-right,html[data-theme="dark"] #close-workbench-modal,html[data-theme="dark"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0;padding:0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);color:var(--ag-text);opacity:1}
-html[data-theme="dark"] .ag-window-actions .doc-action-icon-btn:hover,html[data-theme="dark"] #wb-dock-right:hover,html[data-theme="dark"] #close-workbench-modal:hover,html[data-theme="dark"] #close-agents-dashboard:hover{border-color:var(--ag-gold);color:var(--ag-gold)}
-html[data-theme="dark"] .ag-window-actions,html[data-theme="dark"] .workbench-modal-content>.modal-header{gap:8px}
-html[data-theme="dark"] .ag-head{border:0;background:transparent;min-height:0}
-html[data-theme="dark"] .ag-card{box-sizing:border-box;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important;box-shadow:none!important}
-html[data-theme="dark"] .ag-card.active{border-color:var(--ag-gold)!important}
-html[data-theme="dark"] .ag-card.attn,html[data-theme="dark"] .ag-card-failed{border-color:var(--ag-coral)!important}
-html[data-theme="dark"] .ag-card-actions{opacity:1}
-html[data-theme="dark"] .ag-card-avatar{align-self:start}
-html[data-theme="dark"] .ag-seal-mark{display:none}
-html[data-theme="dark"] .ag-soldier-sprite{display:block;width:64px;height:64px;color:var(--agent-model-color,var(--ag-gold));filter:drop-shadow(0 0 8px color-mix(in srgb,var(--agent-model-color,var(--ag-gold)) 22%,transparent))}
-html[data-theme="dark"] .ag-seal-unit{color:var(--ag-muted)}
-html[data-theme="dark"] .ag-agent-identity{display:flex;align-items:flex-start;gap:14px}
-html[data-theme="dark"] .ag-agent-identity>dl{flex:1;min-width:0}
-html[data-theme="dark"] .ag-row-name{font:700 17px/1.25 'Space Grotesk';text-transform:uppercase;letter-spacing:.05em}
-html[data-theme="dark"] .ag-row-latest,html[data-theme="dark"] .ag-row-meta-inline{font-size:12.5px}
-html[data-theme="dark"] .ag-detail,html[data-theme="dark"] .ag-launch,html[data-theme="dark"] .ag-history,html[data-theme="dark"] .ag-loadouts-view,html[data-theme="dark"] .ag-loadout-workspace{border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important;box-shadow:none!important}
-html[data-theme="dark"] .ag-console-hero{border-radius:0;border-color:var(--ag-border);background:var(--ag-raised)}
-html[data-theme="dark"] .ag-detail-name{font:700 19px/1.3 'Space Grotesk';letter-spacing:.03em}
-html[data-theme="dark"] .ag-detail-tab{border-radius:0;font-size:12.5px}
-html[data-theme="dark"] .ag-detail-tab.active{box-shadow:inset 0 -2px 0 var(--ag-gold)}
-html[data-theme="dark"] .wb-tabs .memory-tab{border-radius:0;font-family:'Space Grotesk'}
-html[data-theme="dark"] .wb-tabs .memory-tab.active{color:var(--ag-gold);box-shadow:inset 0 -2px 0 var(--ag-gold)}
-html[data-theme="dark"] #workbench-modal .wb-tabs .memory-tab{min-height:44px;padding:10px 12px;white-space:normal;text-align:center;line-height:1.25}
-html[data-theme="dark"] #workbench-modal .wb-tabs .memory-tab:focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
-html[data-theme="dark"] .wb-activity{background:var(--ag-console);border:2px solid var(--ag-border-strong);border-radius:0}
-html[data-theme="dark"] .wb-btn,html[data-theme="dark"] .wb-select,html[data-theme="dark"] .wb-input{border-radius:0;font-family:'Space Grotesk'}
+html .ag-phalanx-title,html .ag-phalanx-summary,html .ag-workbench-title{display:inline}
+html[data-style="agamemnon"] .ody-agents-title,html[data-style="agamemnon"] .ody-agents-summary,html[data-style="agamemnon"] .ody-workbench-title{display:none}
+html[data-style="agamemnon"] .ag-phalanx-title,html[data-style="agamemnon"] .ag-phalanx-summary,html[data-style="agamemnon"] .ag-workbench-title{display:inline}
+html[data-style="agamemnon"] .agents-dashboard,html[data-style="agamemnon"] #workbench-modal{--wb-muted:var(--ag-muted);--wb-faint:var(--ag-faint);--wb-line:var(--ag-border)}
+html[data-style="agamemnon"] .agents-modal-content,html[data-style="agamemnon"] .workbench-modal-content{font-family:'Space Grotesk';background:var(--ag-bg)!important;border-radius:0}
+html[data-style="agamemnon"] .ag-window-mark{display:none}
+html[data-style="agamemnon"] .ag-window-title h3 span{font:inherit;color:inherit;letter-spacing:inherit;text-transform:inherit}
+html[data-style="agamemnon"] .ag-window-actions .doc-action-icon-btn,html[data-style="agamemnon"] #wb-dock-right,html[data-style="agamemnon"] #close-workbench-modal,html[data-style="agamemnon"] #close-agents-dashboard{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;margin:0;padding:0;border:1px solid var(--ag-border-strong);border-radius:0;background:var(--ag-raised);color:var(--ag-text);opacity:1}
+html[data-style="agamemnon"] .ag-window-actions .doc-action-icon-btn:hover,html[data-style="agamemnon"] #wb-dock-right:hover,html[data-style="agamemnon"] #close-workbench-modal:hover,html[data-style="agamemnon"] #close-agents-dashboard:hover{border-color:var(--ag-gold);color:var(--ag-gold)}
+html[data-style="agamemnon"] .ag-window-actions,html[data-style="agamemnon"] .workbench-modal-content>.modal-header{gap:8px}
+html[data-style="agamemnon"] .ag-head{border:0;background:transparent;min-height:0}
+html[data-style="agamemnon"] .ag-card{box-sizing:border-box;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important;box-shadow:none!important}
+html[data-style="agamemnon"] .ag-card.active{border-color:var(--ag-gold)!important}
+html[data-style="agamemnon"] .ag-card.attn,html[data-style="agamemnon"] .ag-card-failed{border-color:var(--ag-coral)!important}
+html[data-style="agamemnon"] .ag-card-actions{opacity:1}
+html[data-style="agamemnon"] .ag-card-avatar{align-self:start}
+html[data-style="agamemnon"] .ag-seal-mark{display:none}
+html[data-style="agamemnon"] .ag-soldier-sprite{display:block;width:64px;height:64px;color:var(--agent-model-color,var(--ag-gold));filter:drop-shadow(0 0 8px color-mix(in srgb,var(--agent-model-color,var(--ag-gold)) 22%,transparent))}
+html[data-style="agamemnon"] .ag-seal-unit{color:var(--ag-muted)}
+html[data-style="agamemnon"] .ag-agent-identity{display:flex;align-items:flex-start;gap:14px}
+html[data-style="agamemnon"] .ag-agent-identity>dl{flex:1;min-width:0}
+html[data-style="agamemnon"] .ag-row-name{font:700 17px/1.25 'Space Grotesk';text-transform:uppercase;letter-spacing:.05em}
+html[data-style="agamemnon"] .ag-row-latest,html[data-style="agamemnon"] .ag-row-meta-inline{font-size:12.5px}
+html[data-style="agamemnon"] .ag-detail,html[data-style="agamemnon"] .ag-launch,html[data-style="agamemnon"] .ag-history,html[data-style="agamemnon"] .ag-loadouts-view,html[data-style="agamemnon"] .ag-loadout-workspace{border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:var(--ag-panel)!important;box-shadow:none!important}
+html[data-style="agamemnon"] .ag-console-hero{border-radius:0;border-color:var(--ag-border);background:var(--ag-raised)}
+html[data-style="agamemnon"] .ag-detail-name{font:700 19px/1.3 'Space Grotesk';letter-spacing:.03em}
+html[data-style="agamemnon"] .ag-detail-tab{border-radius:0;font-size:12.5px}
+html[data-style="agamemnon"] .ag-detail-tab.active{box-shadow:inset 0 -2px 0 var(--ag-gold)}
+html[data-style="agamemnon"] .wb-tabs .memory-tab{border-radius:0;font-family:'Space Grotesk'}
+html[data-style="agamemnon"] .wb-tabs .memory-tab.active{color:var(--ag-gold);box-shadow:inset 0 -2px 0 var(--ag-gold)}
+html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{min-height:44px;padding:10px 12px;white-space:normal;text-align:center;line-height:1.25}
+html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab:focus-visible{outline:2px solid var(--ag-gold);outline-offset:-2px}
+html[data-style="agamemnon"] .wb-activity{background:var(--ag-console);border:2px solid var(--ag-border-strong);border-radius:0}
+html[data-style="agamemnon"] .wb-btn,html[data-style="agamemnon"] .wb-select,html[data-style="agamemnon"] .wb-input{border-radius:0;font-family:'Space Grotesk'}
 
 /* ── Agents / Phalanx page (undocked) ─────────────────────────────────────
  * The fleet is the board, two columns of cards; the selected agent's detail
  * follows it (select-agent scrolls it into view and focuses its name), and
  * the launch form opens above the fleet where the button that asked for it
  * is. The page scrolls as one. */
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0 var(--ws-dock-right,0px) 0 calc(var(--icon-rail-w,0px) + var(--sidebar-w,240px) + var(--ws-dock-left,0px))!important;width:auto!important;height:auto!important;background:var(--ag-bg)!important;align-items:stretch!important;justify-content:stretch!important;padding:0!important}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{display:block;position:relative!important;inset:auto!important;transform:none!important;box-sizing:border-box;width:100%!important;height:100%!important;min-width:0;max-width:none!important;max-height:none!important;margin:0!important;padding:26px 36px 30px 40px!important;border:0!important;border-radius:0!important;box-shadow:none!important;overflow:auto;animation:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::before,
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content::before,
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::after{content:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{display:flex;align-items:flex-start;gap:16px;height:auto;min-height:0;margin:-26px 0 0;padding:26px 0 24px!important;border:0!important;background:var(--ag-bg);cursor:default}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0 var(--ws-dock-right,0px) 0 calc(var(--icon-rail-w,0px) + var(--sidebar-w,240px) + var(--ws-dock-left,0px))!important;width:auto!important;height:auto!important;background:var(--ag-bg)!important;align-items:stretch!important;justify-content:stretch!important;padding:0!important}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{display:block;position:relative!important;inset:auto!important;transform:none!important;box-sizing:border-box;width:100%!important;height:100%!important;min-width:0;max-width:none!important;max-height:none!important;margin:0!important;padding:26px 36px 30px 40px!important;border:0!important;border-radius:0!important;box-shadow:none!important;overflow:auto;animation:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::before,
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content::before,
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content::after{content:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{display:flex;align-items:flex-start;gap:16px;height:auto;min-height:0;margin:-26px 0 0;padding:26px 0 24px!important;border:0!important;background:var(--ag-bg);cursor:default}
 /* The base modal's sticky header used to overlap the first row of Workbench
    tabs after the page treatment shifted it upward. Keep header in flow. */
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{position:sticky;top:-26px;z-index:5;margin:0;padding:0 0 20px!important}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{margin:0 auto 0 0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.02em;text-transform:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title>span{display:block;margin-top:10px;font:400 15px/1.5 'Space Grotesk';color:var(--ag-muted)}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) #ag-maximize{display:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-dashboard-body{display:flex;flex-direction:column;flex:none;gap:16px;min-height:0;padding:0;overflow:visible}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head{padding:0}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-body{display:flex;flex-direction:column;gap:28px;min-height:0}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-pane-splitter{display:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-launch{order:-1;position:static;inset:auto;max-height:none}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet{width:auto;border:0!important;border-radius:0;background:transparent!important;box-shadow:none;overflow:visible}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-tools{margin:0 0 16px;padding:0;border:0}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list{overflow:visible;padding:0;background:none}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{position:sticky;top:-26px;z-index:5;margin:0;padding:0 0 20px!important}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{margin:0 auto 0 0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.02em;text-transform:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title>span{display:block;margin-top:10px;font:400 15px/1.5 'Space Grotesk';color:var(--ag-muted)}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) #ag-maximize{display:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-dashboard-body{display:flex;flex-direction:column;flex:none;gap:16px;min-height:0;padding:0;overflow:visible}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-head{padding:0}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-body{display:flex;flex-direction:column;gap:28px;min-height:0}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-pane-splitter{display:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-launch{order:-1;position:static;inset:auto;max-height:none}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet{width:auto;border:0!important;border-radius:0;background:transparent!important;box-shadow:none;overflow:visible}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-tools{margin:0 0 16px;padding:0;border:0}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list{overflow:visible;padding:0;background:none}
 /* Two columns while each card keeps 360px (room for a name, its status and
    two actions), one below that; never three. The board stops at the Penpot
    2×510px + 30px width on very wide screens. */
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,max(360px,calc((100% - 30px) / 2))),1fr));gap:28px 30px;max-width:1050px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-workers{display:contents}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto;gap:16px;min-height:152px;margin:0;padding:22px 24px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-compact .ag-fleet-list .ag-card{grid-template-columns:44px minmax(0,1fr) auto;gap:12px;min-height:96px;padding:14px 16px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{flex-direction:row;align-self:start;gap:6px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:32px;height:32px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{display:flex;min-height:320px;overflow:visible;padding:24px 26px;scroll-margin-top:24px}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-top,
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-tab-panel{max-height:none;overflow:visible}
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-history,
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadouts-view,
-html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadout-workspace{min-height:420px;overflow:visible}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,max(360px,calc((100% - 30px) / 2))),1fr));gap:28px 30px;max-width:1050px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-workers{display:contents}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:64px minmax(0,1fr) auto;gap:16px;min-height:152px;margin:0;padding:22px 24px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-compact .ag-fleet-list .ag-card{grid-template-columns:44px minmax(0,1fr) auto;gap:12px;min-height:96px;padding:14px 16px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{flex-direction:row;align-self:start;gap:6px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:32px;height:32px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{display:flex;min-height:320px;overflow:visible;padding:24px 26px;scroll-margin-top:24px}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-top,
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail-tab-panel{max-height:none;overflow:visible}
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-history,
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadouts-view,
+html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-loadout-workspace{min-height:420px;overflow:visible}
 
 /* ── Workbench / Run Control page (undocked) ──────────────────────────────
  * Summary, timeline and output in the primary column, run details beside
  * them, then the working tabs. Only the selected tab's panel is drawn: the
  * panels are hidden with the base `.wb-panel.hidden` rule, which nothing in
  * the Agamemnon layer overrides. */
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:18px;min-width:0;padding:0;overflow:visible}
-html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,790px) minmax(240px,306px);gap:20px 28px;align-content:start;justify-content:start}
-html[data-theme="dark"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto auto auto;gap:16px;min-width:0;align-self:start}
-html[data-theme="dark"] .ag-run-control>section{box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body{display:flex;flex-direction:column;gap:18px;min-width:0;padding:0;overflow:visible}
+html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]{display:grid;grid-template-columns:minmax(0,790px) minmax(240px,306px);gap:20px 28px;align-content:start;justify-content:start}
+html[data-style="agamemnon"] .ag-run-control{display:grid;grid-column:1;grid-row:1;grid-template-rows:auto auto auto;gap:16px;min-width:0;align-self:start}
+html[data-style="agamemnon"] .ag-run-control>section{box-sizing:border-box;min-width:0;padding:22px 26px;background:var(--ag-panel);border:2px solid var(--ag-border-strong)}
 /* One boundary for each information block, not a panel inside a second
    equally prominent panel. The active tab's feed is still its own region. */
-html[data-theme="dark"] #workbench-modal .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-theme="dark"] .ag-run-control>section{border-width:1px}
-html[data-theme="dark"] .ag-run-control>.ag-run-summary{border-width:2px}
-html[data-theme="dark"] .ag-run-summary{border-color:var(--ag-gold)!important}
+html[data-style="agamemnon"] #workbench-modal .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
+html[data-style="agamemnon"] .ag-run-control>section{border-width:1px}
+html[data-style="agamemnon"] .ag-run-control>.ag-run-summary{border-width:2px}
+html[data-style="agamemnon"] .ag-run-summary{border-color:var(--ag-gold)!important}
 /* Sparse runs shrink to their contents; long runs scroll within bounded
    cards instead of making the entire Workbench several screens tall. */
-html[data-theme="dark"] .ag-run-timeline{max-height:260px;overflow:auto}
-html[data-theme="dark"] .ag-run-console{max-height:160px;overflow:auto}
-html[data-theme="dark"] .ag-run-console{background:var(--ag-console)!important}
-html[data-theme="dark"] .ag-run-detail{display:block;grid-column:2;grid-row:1;box-sizing:border-box;min-width:0;margin:0;padding:27px 24px;background:var(--ag-rail);border:2px solid var(--ag-border);overflow:auto;align-self:start}
-html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]>.wb-toolbar,html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1/-1;min-width:0}
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 0;border:0;border-bottom:2px solid var(--ag-border)}
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-panel{position:relative;box-sizing:border-box;padding:20px;background:var(--ag-panel);border:2px solid var(--ag-border-strong);border-radius:0}
-html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:380px}
-html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:180px;max-height:500px;overflow:auto}
-html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
+html[data-style="agamemnon"] .ag-run-timeline{max-height:260px;overflow:auto}
+html[data-style="agamemnon"] .ag-run-console{max-height:160px;overflow:auto}
+html[data-style="agamemnon"] .ag-run-console{background:var(--ag-console)!important}
+html[data-style="agamemnon"] .ag-run-detail{display:block;grid-column:2;grid-row:1;box-sizing:border-box;min-width:0;margin:0;padding:27px 24px;background:var(--ag-rail);border:2px solid var(--ag-border);overflow:auto;align-self:start}
+html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]>.wb-toolbar,html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-column:1/-1;min-width:0}
+html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:flex;flex-wrap:wrap;gap:4px;margin:4px 0 0;border:0;border-bottom:2px solid var(--ag-border)}
+html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel{position:relative;box-sizing:border-box;padding:20px;background:var(--ag-panel);border:2px solid var(--ag-border-strong);border-radius:0}
+html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:380px}
+html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-activity{min-height:180px;max-height:500px;overflow:auto}
+html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
 /* Docking rearranges the same Activity panel without turning every readout
    into its own scroll container. The dock content provides primary scrolling. */
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:grid;grid-template-rows:auto auto auto;gap:8px}
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control>section{padding:12px 14px}
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{display:block;padding:12px 14px}
-html[data-theme="dark"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
-html[data-theme="dark"] #workbench-modal .wb-panel.hidden{display:none!important}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control{display:grid;grid-template-rows:auto auto auto;gap:8px}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{padding:0;background:transparent;border:0}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-control>section{padding:12px 14px}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .ag-run-detail{display:block;padding:12px 14px}
+html[data-style="agamemnon"] #workbench-modal:is(.modal-right-docked,.modal-left-docked) .wb-panel[data-wb-panel="activity"]{display:flex;flex-direction:column}
+html[data-style="agamemnon"] #workbench-modal .wb-panel.hidden{display:none!important}
 
 /* ── Narrower boards ──────────────────────────────────────────────────── */
 @media(max-width:1179px){
- html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr)}
- html[data-theme="dark"] .ag-run-control{grid-template-rows:auto auto auto}
- html[data-theme="dark"] .ag-run-control,html[data-theme="dark"] .ag-run-detail{grid-column:1;grid-row:auto}
- html[data-theme="dark"] .ag-run-detail{padding:20px 22px}
+ html[data-style="agamemnon"] .wb-panel[data-wb-panel="activity"]{grid-template-columns:minmax(0,1fr)}
+ html[data-style="agamemnon"] .ag-run-control{grid-template-rows:auto auto auto}
+ html[data-style="agamemnon"] .ag-run-control,html[data-style="agamemnon"] .ag-run-detail{grid-column:1;grid-row:auto}
+ html[data-style="agamemnon"] .ag-run-detail{padding:20px 22px}
 }
 @media(max-width:900px){
  /* No docking on a phone-sized board: the room tucks into the dock chip instead. */
- html[data-theme="dark"] #ag-dock-left,html[data-theme="dark"] #ag-dock-right,html[data-theme="dark"] #wb-dock-right{display:none}
+ html[data-style="agamemnon"] #ag-dock-left,html[data-style="agamemnon"] #ag-dock-right,html[data-style="agamemnon"] #wb-dock-right{display:none}
 }
 @media(max-width:768px){
  /* Sparse runs should not put the live feed a full viewport below the fold. */
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control{grid-template-rows:auto auto auto;gap:10px}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control>section{padding:14px;min-height:0}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{padding:14px}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control{grid-template-rows:auto auto auto;gap:10px}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-control>section{padding:14px;min-height:0}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) :is(.ag-run-timeline,.ag-run-console,.ag-run-detail){overflow:visible;max-height:none}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{padding:14px}
  /* Activity is the selected tab's working area. Put its live controls and
     feed before secondary run metadata on phones, without hiding details. */
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-row:2}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-row:3}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{grid-row:4}
- html[data-theme="dark"] .chat-container{padding:14px 12px calc(12px + env(safe-area-inset-bottom,0px))}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-toolbar{grid-row:2}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .wb-panel[data-wb-panel="activity"]>.wb-activity{grid-row:3}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .ag-run-detail{grid-row:4}
+ html[data-style="agamemnon"] .chat-container{padding:14px 12px calc(12px + env(safe-area-inset-bottom,0px))}
  /* Leave the top-right corner to the sidebar's hamburger. */
- html[data-theme="dark"] .ag-page-heading{padding-right:48px;margin-bottom:8px}
- html[data-theme="dark"] .ag-page-heading p{margin-top:6px;font-size:13px}
+ html[data-style="agamemnon"] .ag-page-heading{padding-right:48px;margin-bottom:8px}
+ html[data-style="agamemnon"] .ag-page-heading p{margin-top:6px;font-size:13px}
 
- html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{flex-wrap:wrap!important;overflow:visible!important}
- html[data-theme="dark"] .ag-console-hero{grid-template-columns:64px minmax(0,1fr);row-gap:8px}
- html[data-theme="dark"] .ag-console-robot-bay{width:64px;height:64px}
- html[data-theme="dark"] .ag-console-status{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between}
- html[data-theme="dark"] .ag-detail-name{white-space:normal}
- html[data-theme="dark"] .chat-top-bar{min-height:24px}
- html[data-theme="dark"] #chat-history{padding:14px 12px}
- html[data-theme="dark"] .chat-container .chat-input-bar,html[data-theme="dark"] .chat-container.welcome-active .chat-input-bar{min-height:0;margin-top:10px}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0!important}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{padding:16px 14px 24px!important}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{top:-16px;margin-top:0;padding-top:0!important;padding-bottom:16px!important}
+ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{flex-wrap:wrap!important;overflow:visible!important}
+ html[data-style="agamemnon"] .ag-console-hero{grid-template-columns:64px minmax(0,1fr);row-gap:8px}
+ html[data-style="agamemnon"] .ag-console-robot-bay{width:64px;height:64px}
+ html[data-style="agamemnon"] .ag-console-status{grid-column:1/-1;flex-direction:row;flex-wrap:wrap;align-items:center;justify-content:space-between}
+ html[data-style="agamemnon"] .ag-detail-name{white-space:normal}
+ html[data-style="agamemnon"] .chat-top-bar{min-height:24px}
+ html[data-style="agamemnon"] #chat-history{padding:14px 12px}
+ html[data-style="agamemnon"] .chat-container .chat-input-bar,html[data-style="agamemnon"] .chat-container.welcome-active .chat-input-bar{min-height:0;margin-top:10px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked),
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked){inset:0!important}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-modal-content,
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content{padding:16px 14px 24px!important}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .agents-window-header,
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header{top:-16px;margin-top:0;padding-top:0!important;padding-bottom:16px!important}
  /* The shared sheet hides close buttons for swipe-to-dismiss; these pages
     fill the screen, so keep an explicit way out. */
- html[data-theme="dark"] #agents-dashboard #close-agents-dashboard,html[data-theme="dark"] #workbench-modal #close-workbench-modal{display:inline-flex!important;width:44px;height:44px}
- html[data-theme="dark"] .ag-head-actions{flex-wrap:wrap;margin-left:0}
+ html[data-style="agamemnon"] #agents-dashboard #close-agents-dashboard,html[data-style="agamemnon"] #workbench-modal #close-workbench-modal{display:inline-flex!important;width:44px;height:44px}
+ html[data-style="agamemnon"] .ag-head-actions{flex-wrap:wrap;margin-left:0}
  /* At phone width, actions must not steal the only line available to the
     unit name. Put actions under the copy, with 44px hit areas. */
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-name{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-dur{font-size:11px}
- html[data-theme="dark"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
- html[data-theme="dark"] #workbench-modal .wb-tabs .memory-tab{width:100%;justify-content:center}
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{padding:16px}
- html[data-theme="dark"] .ag-run-control>section{padding:16px 18px}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:420px;padding:12px}
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-fleet-list .ag-card{grid-template-columns:48px minmax(0,1fr);column-gap:12px;row-gap:4px;min-height:0;padding:16px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions{grid-column:2;grid-row:2;justify-content:flex-start;align-self:center}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-card-actions .wb-icon-btn{width:44px;height:44px}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-name{white-space:normal;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;line-height:1.3}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-row-dur{font-size:11px}
+ html[data-style="agamemnon"] #workbench-modal .workbench-modal-body>.wb-tabs{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0}
+ html[data-style="agamemnon"] #workbench-modal .wb-tabs .memory-tab{width:100%;justify-content:center}
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-detail{padding:16px}
+ html[data-style="agamemnon"] .ag-run-control>section{padding:16px 18px}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel{height:auto;min-height:420px;padding:12px}
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-body>.wb-panel[data-wb-panel="activity"]{padding:0}
 }
 @media(max-width:700px){
- html[data-theme="dark"] .ag-child{flex-wrap:wrap}
- html[data-theme="dark"] .ag-child-title{flex-basis:100%;order:2}
- html[data-theme="dark"] .ag-page-heading h1,
- html[data-theme="dark"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
- html[data-theme="dark"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{font-size:22px}
- html[data-theme="dark"] .ag-row-name{font-size:15px}
+ html[data-style="agamemnon"] .ag-child{flex-wrap:wrap}
+ html[data-style="agamemnon"] .ag-child-title{flex-basis:100%;order:2}
+ html[data-style="agamemnon"] .ag-page-heading h1,
+ html[data-style="agamemnon"] #agents-dashboard:not(.modal-right-docked):not(.modal-left-docked) .ag-window-title h3,
+ html[data-style="agamemnon"] #workbench-modal:not(.modal-right-docked):not(.modal-left-docked) .workbench-modal-content>.modal-header h4{font-size:22px}
+ html[data-style="agamemnon"] .ag-row-name{font-size:15px}
+}
+
+/* Identity and palette belong to the application; only geometry belongs to
+   the selected page style. Keep the compact tool usable at docked widths. */
+.ag-brand-name,.ag-nav-label,.ag-phalanx-title,.ag-phalanx-summary,.ag-workbench-title{display:inline}
+.ody-brand-name,.ody-nav-label,.ody-agents-title,.ody-agents-summary,.ody-workbench-title{display:none!important}
+.sidebar-inner::before{content:none!important}
+.sidebar #sidebar-new-chat-btn[hidden],.sidebar #sidebar-search-btn[hidden]{display:none!important}
+.command-nav{margin:4px 0 12px;position:relative}
+.command-nav button{font:inherit;cursor:pointer;color:var(--fg);background:var(--panel);border:1px solid var(--border)}
+#sidebar-command-toggle{display:flex;align-items:center;justify-content:space-between;width:100%;min-height:44px;padding:8px 12px;text-align:left;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+#sidebar-command-menu[hidden]{display:none!important}
+#sidebar-command-menu{display:grid;gap:2px;padding:5px;border:1px solid var(--border);background:var(--panel);box-shadow:0 10px 22px #0005;position:relative;z-index:5}
+#sidebar-command-menu button{min-height:44px;padding:9px 12px;text-align:left;border:0;background:transparent}
+#sidebar-command-menu button:hover,#sidebar-command-menu button:focus-visible,#sidebar-command-toggle:focus-visible{outline:2px solid var(--red);outline-offset:-2px;background:var(--bg)}
+.theme-style-card label{display:flex;justify-content:space-between;align-items:center;gap:20px;cursor:pointer;min-height:48px}
+.theme-style-card small{display:block;margin-top:5px;line-height:1.45;opacity:.8}
+.theme-style-card input{width:22px;height:22px;flex:none;accent-color:var(--red)}
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card,
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto!important;gap:8px;min-height:76px;padding:8px!important}
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-card-actions,
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions{grid-column:3;grid-row:1;display:flex;flex-flow:column wrap;gap:4px;align-items:center;justify-content:center;opacity:1}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-actions button{min-width:44px;min-height:44px;width:auto;padding:4px 6px;font-size:11px}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-card-copy{min-height:0;min-width:0}
+html[data-style="agamemnon"] #agents-dashboard .ag-fleet-compact .ag-row-latest{white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+html[data-style="agamemnon"] #agents-dashboard:is(.modal-right-docked,.modal-left-docked) .ag-fleet-tools{display:flex;flex-wrap:wrap;gap:8px}
+html[data-style="agamemnon"] #agents-dashboard :is(.ag-card,.ag-detail,.ag-launch){overflow-wrap:anywhere;min-width:0}
+@media(max-width:600px){
+ html[data-style="agamemnon"] #agents-dashboard .ag-head{display:flex;flex-wrap:wrap;gap:8px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-head-actions{width:100%;display:flex;flex-wrap:wrap;gap:6px}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-list .ag-bot-card{grid-template-columns:34px minmax(0,1fr) auto!important;padding:8px!important}
+ html[data-style="agamemnon"] #agents-dashboard .ag-fleet-list .ag-bot-card .ag-card-actions{grid-column:3!important;grid-row:1!important}
 }

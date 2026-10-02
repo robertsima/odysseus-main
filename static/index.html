@@ -27,6 +27,8 @@
     try {
       var t = JSON.parse(localStorage.getItem('odysseus-theme'));
       if (t && t.name) document.documentElement.setAttribute('data-theme', t.name);
+      var style = JSON.parse(localStorage.getItem('odysseus-page-style-v1') || 'null');
+      document.documentElement.setAttribute('data-style', style && (style.value === 'classic' || style.value === 'agamemnon') ? style.value : (t && t.name && t.name !== 'dark' ? 'classic' : 'agamemnon'));
       // An absent local preference gets the Agamemnon first-paint palette;
       // explicit saved/server themes continue through the existing sync path.
       if (!t || !t.colors) {
@@ -135,7 +137,7 @@
     try {
       var path = (window.location.pathname || '').toLowerCase();
       var theme = (function(){ try { return JSON.parse(localStorage.getItem('odysseus-theme')); } catch(_) { return null; } })();
-      var isAgamemnon = !theme || !theme.name || theme.name === 'dark';
+      var isAgamemnon = true;
       var ac = (theme && (theme.red || theme.colors && theme.colors.red)) || '#e06c75';
       var brandGold = '#d7b35a';
       // Agamemnon uses one canonical product mark everywhere. Do not redraw
@@ -212,16 +214,16 @@
       apple.href = '/static/icons/icon-192.png';
       // Also customize the page title so the bookmark inherits a useful name.
       var titles = {
-        '/calendar': 'Calendar — Odysseus',
-        '/notes': 'Notes — Odysseus',
-        '/cookbook': 'Cookbook — Odysseus',
-        '/email': 'Email — Odysseus',
-        '/memory': 'Memory — Odysseus',
-        '/gallery': 'Gallery — Odysseus',
-        '/tasks': 'Tasks — Odysseus',
-        '/library': 'Library — Odysseus',
+        '/calendar': 'Calendar — Agamemnon',
+        '/notes': 'Notes — Agamemnon',
+        '/cookbook': 'Cookbook — Agamemnon',
+        '/email': 'Email — Agamemnon',
+        '/memory': 'Memory — Agamemnon',
+        '/gallery': 'Gallery — Agamemnon',
+        '/tasks': 'Tasks — Agamemnon',
+        '/library': 'Library — Agamemnon',
       };
-      document.title = titles[path] || 'Odysseus';
+      document.title = titles[path] || 'Agamemnon';
       // Per-route Android home-screen icon. We swap the <link rel="manifest">
       // to a per-page Blob URL with this route's SVG icon — that way "Add to
       // Home Screen" picks up the route-specific glyph instead of the shared
@@ -229,8 +231,8 @@
       try {
         if (typeof Blob !== 'undefined') {
           var pwa = {
-            name: (titles[path] || 'Odysseus'),
-            short_name: (titles[path] || 'Odysseus').split('—')[0].trim(),
+            name: (titles[path] || 'Agamemnon'),
+            short_name: (titles[path] || 'Agamemnon').split('—')[0].trim(),
             start_url: path,
             scope: '/',
             display: 'standalone',
@@ -386,7 +388,7 @@
           <div class="ag-run-control" aria-label="Run control summary">
             <section class="ag-run-summary"><h3 id="ag-run-title">RUN SUMMARY</h3><p id="ag-run-summary-meta">No run selected · activity ready</p></section>
             <section class="ag-run-timeline"><h3>RUN TIMELINE</h3><ol id="ag-run-timeline-list"><li>Run events will appear here as they are recorded.</li></ol></section>
-            <section class="ag-run-console"><h3>OUTPUT / ARTIFACTS</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
+            <section class="ag-run-console"><h3>Output and artifacts</h3><div class="ag-run-console-output" id="ag-run-console-output">Actual run output and source links appear here when available.</div></section>
           </div>
           <aside class="ag-run-detail" aria-label="Run details"><section><h3>RUN DETAILS</h3><dl><div><dt>Agent</dt><dd id="ag-run-agent">—</dd></div><div><dt>Started</dt><dd id="ag-run-started">—</dd></div><div><dt>Status</dt><dd id="ag-run-status">Ready</dd></div></dl></section><section><h3>ACTIVITY</h3><p id="ag-run-activity-note">Inspect the recorded per-run event history below.</p></section></aside>
           <div class="wb-toolbar">
@@ -659,6 +661,9 @@
 
     <!-- Tab: Browse themes -->
     <div id="theme-tab-browse" class="theme-tab-panel">
+      <div class="admin-card theme-style-card">
+        <label for="theme-style-toggle"><span><strong>Agamemnon page style</strong><small>Angular panels and strong borders. Turn off for the softer classic layout; your colorway stays the same.</small></span><input id="theme-style-toggle" type="checkbox" checked></label>
+      </div>
       <div class="admin-card">
         <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><circle cx="12" cy="12" r="10"/><path d="M12 2a7 7 0 0 0 0 20 4 4 0 0 1 0-8 4 4 0 0 0 0-8"/></svg>Default Themes</h2>
         <div class="theme-grid" id="themeGrid"></div>
@@ -697,12 +702,12 @@
         <div class="theme-adv-group">
           <div class="theme-adv-group-label">Sidebar</div>
           <div class="theme-custom">
-            <div class="color-row"><label>Odysseus Logo</label><input type="color" id="adv-brandColor"><button class="color-reset-btn" data-reset-adv="brandColor" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
+            <div class="color-row"><label>Agamemnon crest</label><input type="color" id="adv-brandColor"><button class="color-reset-btn" data-reset-adv="brandColor" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
             <div class="color-row"><label title="Hamburger menu"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" style="vertical-align:-2px;"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></label><input type="color" id="adv-hamburgerColor"><button class="color-reset-btn" data-reset-adv="hamburgerColor" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
           </div>
         </div>
         <div class="theme-adv-group">
-          <div class="theme-adv-group-label">Chat Input / Prompt Area</div>
+          <div class="theme-adv-group-label">Prompt area</div>
           <div class="theme-custom">
             <div class="color-row"><label>Input Bg</label><input type="color" id="adv-inputBg"><button class="color-reset-btn" data-reset-adv="inputBg" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
             <div class="color-row"><label>Input Border</label><input type="color" id="adv-inputBorder"><button class="color-reset-btn" data-reset-adv="inputBorder" title="Reset this color" aria-label="Reset color">&#x21BA;</button></div>
@@ -801,7 +806,7 @@
         </div>
         <div class="theme-fd-row">
           <div class="theme-fd-group" style="flex:1 1 0;">
-            <label class="theme-fd-label">Background / Effect</label>
+            <label class="theme-fd-label">Background effect</label>
             <select id="theme-bg-pattern-select" class="theme-fd-select">
               <option value="none">Solid</option>
               <option value="dots">Dots</option>
@@ -834,7 +839,7 @@
         </div>
       </div>
       <div class="admin-card" style="margin-top:8px;">
-        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save / Share</h2>
+        <h2><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px;opacity:0.6"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>Save and share</h2>
         <div class="theme-save-row" id="theme-save-row">
           <input type="text" id="theme-save-name" placeholder="Theme name..." maxlength="32">
           <button id="theme-save-go">Save</button>
@@ -867,6 +872,7 @@
     <button class="icon-rail-btn rail-new-chat" id="rail-new-session" title="New chat"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
     <button class="icon-rail-btn" id="rail-delete-session" title="Delete session">&#x2715;</button>
     <div class="rail-separator"></div>
+    <button class="icon-rail-btn" id="rail-command" title="Command menu" aria-label="Open Command menu" aria-controls="sidebar-command-menu" aria-expanded="false">⌘</button>
     <!-- Dynamic contextual indicators (shown only while active) -->
     <button class="icon-rail-btn rail-dynamic" id="rail-chats" title="Chat ready" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="icon-rail-btn rail-dynamic" id="rail-documents" title="Documents" style="display:none"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/></svg></button>
@@ -894,27 +900,24 @@
     <div class="sidebar-header">
       <button class="sidebar-hamburger" id="sidebar-toggle-btn" title="Toggle sidebar"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></button>
       <div class="sidebar-brand" id="sidebar-brand-btn" style="cursor:pointer;" title="New chat">
-        <!-- Agamemnon's side-profile Trojan helmet. It is hidden for Odysseus below. -->
+        <!-- Shared product crest in both page styles. -->
         <img class="brand-crest-icon sidebar-brand-icon" src="/static/branding/agamemnon-trojan-helmet.svg" alt="">
         <span class="sidebar-brand-title ag-brand-name">AGAMEMNON</span>
-        <span class="sidebar-brand-title ody-brand-name">Odysseus</span>
       </div>
     </div>
     <div class="sidebar-inner">
-      <div class="list-item" id="sidebar-new-chat-btn" title="New chat">
-        <svg class="sidebar-action-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="position:relative;left:-2px;"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-        <span class="grow" style="position:relative;left:-3px;">New Chat</span>
+      <div class="command-nav">
+        <button type="button" id="sidebar-command-toggle" aria-expanded="false" aria-controls="sidebar-command-menu">Command <span aria-hidden="true">⌄</span></button>
+        <div id="sidebar-command-menu" hidden>
+          <button type="button" data-command-target="rail-email">Email</button>
+          <button type="button" data-command-target="rail-agents">Phalanx</button>
+          <button type="button" data-command-target="rail-workbench">Workbench</button>
+          <button type="button" data-command-target="rail-new-session">New chat</button>
+          <button type="button" data-command-target="rail-search-btn">Search</button>
+        </div>
       </div>
-      <div class="list-item" id="sidebar-search-btn" title="Search conversations (Ctrl+K)">
-        <svg class="sidebar-action-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="10" cy="10" r="7"/><path d="M21 21l-4.35-4.35"/></svg>
-        <span class="grow" style="position:relative;left:-1px;">Search</span>
-      </div>
-      <div class="list-item ag-command-link" id="sidebar-agents-shortcut" role="button" tabindex="0" title="Open agents">
-        <span class="ag-command-icon" aria-hidden="true">◈</span><span class="grow">Phalanx</span>
-      </div>
-      <div class="list-item ag-command-link" id="sidebar-workbench-shortcut" role="button" tabindex="0" title="Open workbench">
-        <span class="ag-command-icon" aria-hidden="true">▤</span><span class="grow">Workbench</span>
-      </div>
+      <div class="list-item" id="sidebar-new-chat-btn" title="New chat" hidden>New chat</div>
+      <div class="list-item" id="sidebar-search-btn" title="Search conversations" hidden>Search</div>
       <!-- Assistant sidebar entry removed — its log + settings live inside
            the Tasks modal (Activity + Settings tabs). The backend
            assistant session is still maintained for log_to_assistant()
@@ -1155,23 +1158,42 @@
     <script nonce="{{CSP_NONCE}}">
     (() => {
       const relay = (source, target) => document.getElementById(source)?.addEventListener('click', () => document.getElementById(target)?.click());
-      relay('sidebar-agents-shortcut', 'rail-agents');
-      relay('sidebar-workbench-shortcut', 'rail-workbench');
-      for (const id of ['sidebar-agents-shortcut', 'sidebar-workbench-shortcut']) {
-        document.getElementById(id)?.addEventListener('keydown', e => {
-          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.currentTarget.click(); }
-        });
-      }
+      const toggle = document.getElementById('sidebar-command-toggle');
+      const menu = document.getElementById('sidebar-command-menu');
+      const rail = document.getElementById('rail-command');
+      const setOpen = open => {
+        menu.hidden = !open;
+        toggle.setAttribute('aria-expanded', String(open));
+        rail.setAttribute('aria-expanded', String(open));
+        if (open) menu.querySelector('button')?.focus();
+      };
+      toggle.addEventListener('click', () => setOpen(menu.hidden));
+      rail.addEventListener('click', () => {
+        if (document.getElementById('sidebar').classList.contains('hidden')) document.getElementById('hamburger-btn')?.click();
+        setOpen(true);
+      });
+      menu.addEventListener('click', e => {
+        const action = e.target.closest('[data-command-target]');
+        if (!action) return;
+        setOpen(false);
+        document.getElementById(action.dataset.commandTarget)?.click();
+      });
+      document.addEventListener('keydown', e => {
+        if (e.key === 'Escape' && !menu.hidden) { setOpen(false); toggle.focus(); }
+      });
+      document.addEventListener('pointerdown', e => {
+        if (!menu.hidden && !e.target.closest('.command-nav, #rail-command')) setOpen(false);
+      });
     })();
     </script>
     <!-- Persistent page heading for assistive tech. Visually hidden so it
          never affects layout, but always present inside the main landmark
          (the sidebar that shows the visible brand is hidden off-canvas on
          mobile) so the page always exposes a single level-1 heading. -->
-    <h1 class="a11y-visually-hidden ody-page-title">Odysseus</h1>
+    <h1 class="a11y-visually-hidden ody-page-title">Agamemnon</h1>
     <div class="chat-top-bar">
       <button type="button" class="incognito-indicator" id="incognito-indicator" title="Nobody mode active — click to deactivate" style="display:none;"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><line x1="8" y1="16" x2="16" y2="8"/><line x1="8" y1="8" x2="16" y2="16"/></svg></button>
-      <div class="chat-meta-overlay"><span id="current-meta">Odysseus Chat</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
+      <div class="chat-meta-overlay"><span id="current-meta">Scribe</span><span id="current-meta-count" class="chat-meta-count" aria-hidden="true"></span><span id="session-cost-display" class="session-cost-display" style="display:none;"></span><button type="button" class="chat-context-pill" id="chat-context-pill" title="Chat context" hidden><span class="chat-context-dot"></span><span id="chat-context-pill-label">0%</span></button><span class="export-dropdown-wrap" id="export-dropdown-wrap"><button type="button" class="export-dl-btn" id="export-dl-btn" title="More"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg></button><div class="export-dropdown-menu" id="export-dropdown-menu"><div class="export-dropdown-item" id="export-rename-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></span><span>Rename</span></div><div class="export-dropdown-item" id="export-compact-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16"/><path d="M7 12h10"/><path d="M10 17h4"/></svg></span><span class="export-compact-pill">Compact</span></div><div class="export-dropdown-item" id="export-copy-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></span><span>Copy Chat</span></div><div class="export-dropdown-item" id="export-pdf-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 15v-2h2a1.5 1.5 0 0 1 0 3H9z"/></svg></span><span>PDF</span></div><div class="export-dropdown-item" id="export-doc-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg></span><span>Save to Documents</span></div><div class="export-dropdown-item dropdown-item-danger" id="export-delete-btn"><span class="dropdown-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg></span><span>Delete Chat</span></div></div></span></div>    </div>
     <div id="welcome-screen">
       <div class="welcome-name"><img class="welcome-boat brand-crest-icon" src="/static/branding/agamemnon-trojan-helmet.svg" alt="">Agamemnon</div>
       <div class="welcome-sub" id="welcome-sub">New chat ready.</div>
@@ -1462,7 +1484,7 @@
               </div>
               <input type="range" class="preset-range" id="custom-temperature" min="0" max="2" step="0.1" value="1.0">
               <div class="preset-temp-hints">
-                <span>Precise / Code</span>
+                <span>Precise code</span>
                 <span>Balanced</span>
                 <span>Creative</span>
               </div>
@@ -2416,7 +2438,7 @@
             <div class="vis-toggles">
               <label class="vis-row">
                 <span class="vis-icon"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M8 12l2.5 2.5L16 9"/></svg></span>
-                <span class="vis-label">Odysseus <span class="vis-hint">Brand name</span></span>
+                <span class="vis-label">Agamemnon <span class="vis-hint">Brand name</span></span>
                 <input type="checkbox" checked data-ui-key="sidebar-brand"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">
@@ -2571,7 +2593,7 @@
               </label>
               <label class="vis-row">
                 <span class="vis-icon vis-icon-text">A|C</span>
-                <span class="vis-label">Agent / Chat <span class="vis-hint">Mode switcher</span></span>
+                <span class="vis-label">Conversation mode <span class="vis-hint">Mode switcher</span></span>
                 <input type="checkbox" checked data-ui-key="mode-toggle"><span class="vis-switch"></span>
               </label>
               <label class="vis-row">

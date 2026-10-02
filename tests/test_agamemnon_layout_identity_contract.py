@@ -45,10 +45,10 @@ def test_theme_identity_is_synced_on_every_commit_path_not_just_swatch_clicks():
 
 def test_agamemnon_layout_is_scoped_to_the_identity_attribute_not_a_palette_color():
     block = STYLE.split("Agamemnon layout", 1)[1].split("Fixed hamburger", 1)[0]
-    assert 'html[data-theme="dark"] .sidebar .sidebar-header' in block
-    assert 'html[data-theme="dark"] .sidebar .sidebar-brand' in block
-    assert 'html[data-theme="dark"] .icon-rail #rail-gallery' in block
-    assert 'html[data-theme="dark"] .icon-rail #rail-agents' in block
+    assert 'html[data-style="agamemnon"] .sidebar .sidebar-header' in block
+    assert 'html[data-style="agamemnon"] .sidebar .sidebar-brand' in block
+    assert 'html[data-style="agamemnon"] .icon-rail #rail-gallery' in block
+    assert 'html[data-style="agamemnon"] .icon-rail #rail-agents' in block
     for selector_line in ("flex-direction: column;", "margin-top: 11px;"):
         assert selector_line in block
 
@@ -86,13 +86,13 @@ def test_permanent_helmet_logo_is_unconditional_across_every_palette():
     # or the former headset silhouette.
     assert HELMET_DOME not in HTML.split("var SHAPES", 1)[1].split("var inner", 1)[0]
     assert "icons: [" in HTML and "'/static/icons/icon-192.png'" in HTML
-    assert "var isAgamemnon = !theme || !theme.name || theme.name === 'dark'" in HTML
+    assert "var isAgamemnon = true" in HTML
     assert "agFav.href = '/static/branding/agamemnon-trojan-helmet.svg'" in HTML
     assert "agApple.href = '/static/branding/agamemnon-trojan-helmet.svg'" in HTML
     assert "name:'Agamemnon',short_name:'Agamemnon'" in HTML
-    assert "'/calendar': 'Calendar — Odysseus'" in HTML
-    assert "name: (titles[path] || 'Odysseus')" in HTML
-    assert "document.title = titles[path] || 'Odysseus'" in HTML
+    assert "'/calendar': 'Calendar — Agamemnon'" in HTML
+    assert "name: (titles[path] || 'Agamemnon')" in HTML
+    assert "document.title = titles[path] || 'Agamemnon'" in HTML
     assert HELMET_DOME in THEME
     assert "M16 4L16 22L6 22Z" not in THEME
     assert "M16 4L16 22L6 22Z" not in HTML
@@ -117,14 +117,14 @@ def test_agamemnon_agents_use_distinct_model_colored_soldier_artworks():
     assert 'data-model-family="${modelIdentity.family}"' in dashboard
     # The legacy role symbols remain available only for the unchanged
     # Odysseus presentation; Agamemnon CSS selects the generic Trojan mark.
-    assert 'html[data-theme="dark"] .ag-seal-mark{display:none}' in MOCKUP_STYLE
-    assert 'html[data-theme="dark"] .ag-soldier-sprite{display:block' in MOCKUP_STYLE
+    assert 'html[data-style="agamemnon"] .ag-seal-mark{display:none}' in MOCKUP_STYLE
+    assert 'html[data-style="agamemnon"] .ag-soldier-sprite{display:block' in MOCKUP_STYLE
     assert 'id="soldier-primary"' in HTML
     assert 'id="command"' in HTML
     assert 'ag-chat-agent-mark' not in HTML
     assert 'ag-run-agent-mark' not in HTML
-    assert '"name": "Odysseus"' in (ROOT / "static/manifest.json").read_text()
-    assert "icons/icon-192.png" in (ROOT / "static/manifest.json").read_text()
+    assert '"name": "Agamemnon"' in (ROOT / "static/manifest.json").read_text()
+    assert "branding/agamemnon-trojan-helmet.svg" in (ROOT / "static/manifest.json").read_text()
     assert '"background_color": "#111417"' in (ROOT / "static/manifest.json").read_text()
     assert '"theme_color": "#111417"' in (ROOT / "static/manifest.json").read_text()
 

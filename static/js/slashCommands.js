@@ -3072,7 +3072,7 @@ async function _cmdTourCookbook(args, ctx) {
       text: 'Paste a HuggingFace URL or <code>org/model-name</code> to download. Quantizations like <code>org/model:Q4_K_M</code> work too.',
       before: () => _clickTab('Search') },
     { sel: '#cookbook-modal .admin-card:has(> #hwfit-list)',
-      text: '<b>Scan / Download</b> — reads your hardware and lists every model that\'ll run on it.',
+      text: '<b>Find models</b> — reads your hardware and lists every model that\'ll run on it.',
       before: () => _clickTab('Search') },
     { sel: '#hwfit-hw-manual-btn',
       text: 'Your detected hardware appears here. You can also manually edit it to see what would fit on other setups.',

@@ -15,9 +15,12 @@ import { reconcile, writePref } from './serverPrefs.js';
 export const NAV_ORDER_KEY = 'odysseus-nav-order-v1';
 export const NAV_ORDER_PREF = 'nav-order';
 
-// Core controls, dynamic indicators, and Settings stay fixed. One-sided tools
+// Dynamic indicators and Settings stay fixed. One-sided tools
 // (Email on the rail, Lotus in the sidebar) still participate where present.
 export const NAV_ITEMS = Object.freeze([
+  Object.freeze({ key: 'search', rail: 'rail-search-btn', sidebar: null }),
+  Object.freeze({ key: 'new-chat', rail: 'rail-new-session', sidebar: null }),
+  Object.freeze({ key: 'command', rail: 'rail-command', sidebar: null }),
   Object.freeze({ key: 'calendar', rail: 'rail-calendar', sidebar: 'tool-calendar-btn' }),
   Object.freeze({ key: 'compare', rail: 'rail-compare', sidebar: 'tool-compare-btn' }),
   Object.freeze({ key: 'cookbook', rail: 'rail-cookbook', sidebar: 'tool-cookbook-btn' }),

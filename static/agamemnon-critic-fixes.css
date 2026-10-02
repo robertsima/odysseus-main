@@ -2,49 +2,50 @@
  * picker and Run Control typography. Layout (display, position and size of
  * the Chat / Agents / Workbench containers) lives only in
  * agamemnon-mockup.css; keep it out of this file so the two never compete. */
-.ody-brand-name{display:inline}.ag-brand-name{display:none}
-html[data-theme="dark"]{--ag-gold:#d7b35a;--ag-border-strong:#59636d;--ag-border-structural:#343d45}
-html[data-theme="dark"] .ody-brand-name,html[data-theme="dark"] .ody-page-title{display:none}
-html[data-theme="dark"] .ag-brand-name{display:inline;text-transform:uppercase}
-html:not([data-theme="dark"]) .brand-crest-icon{display:none}
+.ody-brand-name{display:none}.ag-brand-name{display:inline}
+html[data-style="agamemnon"]{--ag-border-structural:var(--border)}
+html[data-style="agamemnon"] .ody-brand-name,html[data-style="agamemnon"] .ody-page-title{display:none}
+html[data-style="agamemnon"] .ag-brand-name{display:inline;text-transform:uppercase}
+.brand-crest-icon{display:inline-block}
+.ag-appearance{display:block}
 
 /* Transcript */
-html[data-theme="dark"] #chat-history .msg-ai{box-sizing:border-box;width:calc(100% - 32px);max-width:none;margin:18px 16px;padding:18px 20px;background:#20262c;border:1px solid var(--ag-border-strong);border-radius:0}
-html[data-theme="dark"] #chat-history .msg-ai .body{max-width:none;color:#f7f8fa}
-html[data-theme="dark"] #chat-history .msg-user{margin:0 0 18px;max-width:none;background:transparent;border:0;border-radius:0}
+html[data-style="agamemnon"] #chat-history .msg-ai{box-sizing:border-box;width:calc(100% - 32px);max-width:none;margin:18px 16px;padding:18px 20px;background:var(--ag-raised);border:1px solid var(--ag-border-strong);border-radius:0}
+html[data-style="agamemnon"] #chat-history .msg-ai .body{max-width:none;color:var(--ag-text)}
+html[data-style="agamemnon"] #chat-history .msg-user{margin:0 0 18px;max-width:none;background:transparent;border:0;border-radius:0}
 /* Keep the code actions in a reserved row at every size. A long first line
    must be readable by scrolling the code, not obscured by hover actions. */
-html[data-theme="dark"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code){padding-top:58px}
+html[data-style="agamemnon"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code){padding-top:58px}
 /* The shared transcript can flip actions to the bottom of a code block near
    the viewport edge. The themed toolbar always belongs in its reserved row. */
-html[data-theme="dark"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code) :is(.copy-code,.edit-code,.run-code).bottom{top:6px;bottom:auto}
-html[data-theme="dark"] #chat-history .msg-ai .role,html[data-theme="dark"] #chat-history .msg-user .role{color:var(--ag-gold);font:700 11px/1.2 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase}
-@media(max-width:768px){html[data-theme="dark"] #chat-history .msg-ai{width:100%;margin:12px 0;padding:14px}}
+html[data-style="agamemnon"] #chat-history pre:has(> .copy-code,> .edit-code,> .run-code) :is(.copy-code,.edit-code,.run-code).bottom{top:6px;bottom:auto}
+html[data-style="agamemnon"] #chat-history .msg-ai .role,html[data-style="agamemnon"] #chat-history .msg-user .role{color:var(--ag-gold);font:700 11px/1.2 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase}
+@media(max-width:768px){html[data-style="agamemnon"] #chat-history .msg-ai{width:100%;margin:12px 0;padding:14px}}
 
 /* Per-parent soldier picker (Agents detail, Overview tab) */
-.ag-appearance{display:none}
-html[data-theme="dark"] .ag-appearance{display:block;min-width:0;margin:20px 0;padding:18px;border:1px solid var(--ag-border-strong);color:#f7f8fa}
-html[data-theme="dark"] .ag-appearance legend{padding:0 8px;color:var(--ag-gold);font:700 14px 'Space Grotesk',sans-serif}
-html[data-theme="dark"] .ag-appearance p{margin:0 0 14px;color:#b9c1c8;line-height:1.5}
-html[data-theme="dark"] .ag-appearance-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
-html[data-theme="dark"] .ag-appearance-option{display:flex;min-width:0;min-height:108px;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:8px;border:1px solid #59636d;background:#20262c;text-align:center;cursor:pointer}
-html[data-theme="dark"] .ag-appearance-option:has(input:checked){border:2px solid var(--ag-gold);background:#2c302e}
-html[data-theme="dark"] .ag-appearance-option:focus-within{outline:3px solid #f7f8fa;outline-offset:2px}
-html[data-theme="dark"] .ag-appearance-option input{align-self:flex-start;accent-color:var(--ag-gold)}
-html[data-theme="dark"] .ag-appearance-option svg{width:52px;height:52px;flex:0 0 52px;color:var(--agent-model-color,var(--ag-gold))}
-html[data-theme="dark"] .ag-appearance-option .ag-bot{height:52px;width:52px;zoom:1}
-html[data-theme="dark"] .ag-appearance-option span{font-size:12.5px;line-height:1.25}
-html[data-theme="dark"] .ag-appearance-option small{display:block;color:#b9c1c8}
-html[data-theme="dark"] #ag-appearance-status{display:block;min-height:20px;padding-top:5px}
+.ag-appearance{display:block}
+html[data-style="agamemnon"] .ag-appearance{display:block;min-width:0;margin:20px 0;padding:18px;border:1px solid var(--ag-border-strong);color:var(--ag-text)}
+html[data-style="agamemnon"] .ag-appearance legend{padding:0 8px;color:var(--ag-gold);font:700 14px 'Space Grotesk',sans-serif}
+html[data-style="agamemnon"] .ag-appearance p{margin:0 0 14px;color:var(--ag-muted);line-height:1.5}
+html[data-style="agamemnon"] .ag-appearance-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+html[data-style="agamemnon"] .ag-appearance-option{display:flex;min-width:0;min-height:108px;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:8px;border:1px solid var(--ag-border-strong);background:var(--ag-raised);text-align:center;cursor:pointer}
+html[data-style="agamemnon"] .ag-appearance-option:has(input:checked){border:2px solid var(--ag-gold);background:var(--ag-panel)}
+html[data-style="agamemnon"] .ag-appearance-option:focus-within{outline:3px solid var(--ag-text);outline-offset:2px}
+html[data-style="agamemnon"] .ag-appearance-option input{align-self:flex-start;accent-color:var(--ag-gold)}
+html[data-style="agamemnon"] .ag-appearance-option svg{width:52px;height:52px;flex:0 0 52px;color:var(--agent-model-color,var(--ag-gold))}
+html[data-style="agamemnon"] .ag-appearance-option .ag-bot{height:52px;width:52px;zoom:1}
+html[data-style="agamemnon"] .ag-appearance-option span{font-size:12.5px;line-height:1.25}
+html[data-style="agamemnon"] .ag-appearance-option small{display:block;color:var(--ag-muted)}
+html[data-style="agamemnon"] #ag-appearance-status{display:block;min-height:20px;padding-top:5px}
 
 /* Run Control text */
-html[data-theme="dark"] .ag-run-control h3,html[data-theme="dark"] .ag-run-detail h3{margin:0 0 13px;color:var(--ag-gold);font:700 12px 'Space Grotesk';letter-spacing:.14em}
-html[data-theme="dark"] .ag-run-summary h3{font-size:17px;letter-spacing:.04em}
-html[data-theme="dark"] .ag-run-control p,html[data-theme="dark"] .ag-run-control li,html[data-theme="dark"] .ag-run-detail{color:#aeb6bd;font-size:15px;line-height:1.6}
-html[data-theme="dark"] .ag-run-control ol{margin:0;padding-left:22px}
-html[data-theme="dark"] .ag-run-timeline li{padding:5px 0;border-bottom:1px solid var(--ag-border-structural)}
-html[data-theme="dark"] .ag-run-console-output{white-space:pre-wrap;overflow-wrap:anywhere;font:400 13px/1.55 'Fira Code',monospace;color:#aeb6bd}
-html[data-theme="dark"] .ag-run-detail section+section{margin-top:28px;padding-top:24px;border-top:1px solid var(--ag-border-structural)}
-html[data-theme="dark"] .ag-run-detail p,html[data-theme="dark"] .ag-run-detail dl{margin:0;font-size:14px;line-height:1.55}
-html[data-theme="dark"] .ag-run-detail dl div{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
-html[data-theme="dark"] .ag-run-detail dd{margin:0;color:#f7f8fa;text-align:right;overflow-wrap:anywhere}
+html[data-style="agamemnon"] .ag-run-control h3,html[data-style="agamemnon"] .ag-run-detail h3{margin:0 0 13px;color:var(--ag-gold);font:700 12px 'Space Grotesk';letter-spacing:.14em}
+html[data-style="agamemnon"] .ag-run-summary h3{font-size:17px;letter-spacing:.04em}
+html[data-style="agamemnon"] .ag-run-control p,html[data-style="agamemnon"] .ag-run-control li,html[data-style="agamemnon"] .ag-run-detail{color:var(--ag-muted);font-size:15px;line-height:1.6}
+html[data-style="agamemnon"] .ag-run-control ol{margin:0;padding-left:22px}
+html[data-style="agamemnon"] .ag-run-timeline li{padding:5px 0;border-bottom:1px solid var(--ag-border-structural)}
+html[data-style="agamemnon"] .ag-run-console-output{white-space:pre-wrap;overflow-wrap:anywhere;font:400 13px/1.55 'Fira Code',monospace;color:var(--ag-muted)}
+html[data-style="agamemnon"] .ag-run-detail section+section{margin-top:28px;padding-top:24px;border-top:1px solid var(--ag-border-structural)}
+html[data-style="agamemnon"] .ag-run-detail p,html[data-style="agamemnon"] .ag-run-detail dl{margin:0;font-size:14px;line-height:1.55}
+html[data-style="agamemnon"] .ag-run-detail dl div{display:flex;justify-content:space-between;gap:12px;margin:8px 0}
+html[data-style="agamemnon"] .ag-run-detail dd{margin:0;color:var(--ag-text);text-align:right;overflow-wrap:anywhere}
