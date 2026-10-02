@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import src.agent_loop as agent_loop
+from src import skill_toolsets
 from src.workflow_claims import incomplete_execution_notice, record_execution
 
 _REPORT_BACKLOG = pytest.mark.skip(
@@ -501,7 +502,7 @@ def test_skill_toolsets_resolve_mcp_server_names_and_flag_only_real_prose():
     ])
     skill = {"requires_toolsets": ["bsky-mcp", "web search or retrieval", "vibes and good intentions"]}
 
-    tools, unknown = agent_loop._skill_declared_tools([skill], set(), mcp)
+    tools, unknown = skill_toolsets.skill_declared_tools([skill], set(), mcp)
 
     assert {"mcp__4dd5076c__search_posts", "mcp__4dd5076c__get_timeline"} <= tools
     assert "web_search" in tools
@@ -512,7 +513,7 @@ def test_skill_toolsets_resolve_mcp_server_names_and_flag_only_real_prose():
 def test_a_resolvable_toolset_switched_off_is_not_reported_as_bad_metadata():
     skill = {"requires_toolsets": ["web research"]}
 
-    tools, unknown = agent_loop._skill_declared_tools([skill], {"web_search", "web_fetch"}, None)
+    tools, unknown = skill_toolsets.skill_declared_tools([skill], {"web_search", "web_fetch"}, None)
 
     assert not tools and not unknown
 

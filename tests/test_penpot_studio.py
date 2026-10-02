@@ -177,6 +177,7 @@ def test_private_svg_urls_are_refused():
 
 
 def test_config_comes_from_the_environment(monkeypatch):
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
     monkeypatch.setenv("PENPOT_API_URL", "http://192.168.1.122:9001/api/")
     monkeypatch.setenv("PENPOT_ACCESS_TOKEN", "tok")
     cfg = ps.load_config()
@@ -188,8 +189,33 @@ def test_missing_config_says_how_to_fix(monkeypatch):
     monkeypatch.delenv("PENPOT_BASE_URL", raising=False)
     monkeypatch.delenv("PENPOT_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(ps, "_saved_penpot_env", lambda: None)
-    with pytest.raises(ps.PenpotError, match="Settings > MCP"):
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
+    with pytest.raises(ps.PenpotError, match="Settings > Penpot"):
         ps.load_config()
+
+
+def test_settings_win_over_environment_and_borrowed_row(monkeypatch):
+    monkeypatch.setenv("PENPOT_API_URL", "http://env:1")
+    monkeypatch.setenv("PENPOT_ACCESS_TOKEN", "env-tok")
+    monkeypatch.setattr(ps, "_saved_penpot_env", lambda: ({"PENPOT_API_URL": "http://row:1", "PENPOT_ACCESS_TOKEN": "row"}, "row"))
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("http://set:9001/api", "set-tok", "https://design.example/"))
+    cfg = ps.load_config()
+    assert (cfg.base_url, cfg.token, cfg.source) == ("http://set:9001", "set-tok", "settings")
+    assert cfg.public_url == "https://design.example"
+
+
+def test_borrowed_row_is_last_and_logs_once(monkeypatch, caplog):
+    import logging
+
+    for var in ("PENPOT_API_URL", "PENPOT_BASE_URL", "PENPOT_ACCESS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
+    monkeypatch.setattr(ps, "_borrowed_logged", False)
+    monkeypatch.setattr(ps, "_saved_penpot_env", lambda: ({"PENPOT_API_URL": "http://row:1", "PENPOT_ACCESS_TOKEN": "row"}, "MCP server 'Penpot'"))
+    with caplog.at_level(logging.INFO, logger="src.penpot_studio"):
+        assert ps.load_config().token == "row"
+        ps.load_config()
+    assert sum("deprecated" in r.message for r in caplog.records) == 1
 
 
 def test_font_identifiers_follow_penpots_google_font_scheme():
@@ -232,6 +258,7 @@ def test_saved_penpot_mcp_server_supplies_url_and_token(monkeypatch, tmp_path):
         db.commit()
     for var in ("PENPOT_API_URL", "PENPOT_BASE_URL", "PENPOT_ACCESS_TOKEN"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
 
     cfg = ps.load_config()
 

@@ -198,8 +198,10 @@ def test_tools_resolve_to_their_integration():
 
 
 def test_skill_and_loadout_lookups_tolerate_empty_and_unknown():
-    assert reg.skill_dirs("penpot") == []
-    assert reg.loadout_templates("penpot") == []
+    assert reg.skill_dirs("browser") == [] and reg.loadout_templates("browser") == []
+    # Penpot ships a skill package and a loadout template (2026-10-01).
+    assert [p.name for p in reg.skill_dirs("penpot")] == ["skills"]
+    assert [p.name for p in reg.loadout_templates("penpot")] == ["penpot-product-designer.json"]
     assert reg.skill_dirs("nope") == [] and reg.loadout_templates("nope") == []
 
 

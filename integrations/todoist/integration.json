@@ -24,8 +24,10 @@
   "settings": [],
   "tools": "from_server",
   "function_calling": true,
-  "prompt": "",
-  "skills": [],
+  "prompt": "Actionable work (tasks, due dates, projects) belongs in Todoist; fixed appointments and reservations belong in Calendar.",
+  "skills": [
+    "skills"
+  ],
   "loadouts": [],
   "health": {
     "type": "mcp_connected"

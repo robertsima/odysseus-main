@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import json
+import logging
 import os
 import re
 import socket
@@ -38,6 +39,8 @@ from urllib.parse import urlparse
 import httpx
 
 from src import penpot_svg, penpot_text
+
+logger = logging.getLogger(__name__)
 
 ROOT_ID = "00000000-0000-0000-0000-000000000000"
 ICONIFY_API = os.environ.get("ODYSSEUS_ICONIFY_API", "https://api.iconify.design").rstrip("/")
@@ -58,10 +61,13 @@ class PenpotConfig:
     base_url: str
     token: str
     source: str
+    public_base: str = ""
 
     @property
     def public_url(self) -> str:
-        return os.environ.get("PENPOT_PUBLIC_URL", "").strip().rstrip("/") or self.base_url
+        # PENPOT_PUBLIC_URL stays a fallback after the penpot_public_url setting
+        # (load_config fills public_base from the setting).
+        return (self.public_base or os.environ.get("PENPOT_PUBLIC_URL", "")).strip().rstrip("/") or self.base_url
 
 
 def _clean_base(url: str) -> str:
@@ -102,22 +108,54 @@ def _saved_penpot_env() -> Optional[Tuple[Dict[str, str], str]]:
     return None
 
 
+_borrowed_logged = False
+
+
+def _settings_config() -> Tuple[str, str, str]:
+    """(url, token, public url) from the Penpot settings; blanks when unreadable."""
+    try:
+        from src.settings import get_setting
+
+        return (str(get_setting("penpot_api_url", "") or "").strip(),
+                str(get_setting("penpot_access_token", "") or "").strip(),
+                str(get_setting("penpot_public_url", "") or "").strip())
+    except Exception:  # pragma: no cover - settings unimportable at boot
+        return "", "", ""
+
+
 def load_config() -> PenpotConfig:
-    url = os.environ.get("PENPOT_API_URL") or os.environ.get("PENPOT_BASE_URL") or ""
-    token = os.environ.get("PENPOT_ACCESS_TOKEN") or ""
-    source = "environment"
+    """Penpot URL and token: settings first, then environment, then the borrowed
+    MCP row.
+
+    Borrowing the credentials of a saved MCP server whose name contains "penpot"
+    is deprecated (2026-10-01: an integration owns its credentials). It still
+    works because the owner's server relies on it; it logs once so the move to
+    the settings is visible.
+    """
+    global _borrowed_logged
+    s_url, s_token, s_public = _settings_config()
+    url, token, source = s_url, s_token, "settings"
+    if not (url and token):
+        url = os.environ.get("PENPOT_API_URL") or os.environ.get("PENPOT_BASE_URL") or s_url
+        token = os.environ.get("PENPOT_ACCESS_TOKEN") or s_token
+        source = "environment"
     if not (url and token):
         saved = _saved_penpot_env()
         if saved:
             env, source = saved
             url = env.get("PENPOT_API_URL") or env.get("PENPOT_BASE_URL") or ""
             token = env.get("PENPOT_ACCESS_TOKEN") or ""
+            if url and token and not _borrowed_logged:
+                _borrowed_logged = True
+                logger.info(
+                    "Penpot Studio is using the URL and token of %s. That fallback is deprecated; "
+                    "set penpot_api_url and penpot_access_token in Settings to stop depending on it.", source)
     if not (url and token):
         raise PenpotError(
-            "Penpot is not configured for the studio tools. Add the Penpot MCP server under "
-            "Settings > MCP with PENPOT_API_URL and PENPOT_ACCESS_TOKEN, or set both in the "
+            "Penpot is not configured for the studio tools. Set the Penpot URL and access token "
+            "under Settings > Penpot, or set PENPOT_API_URL and PENPOT_ACCESS_TOKEN in the "
             "container environment.")
-    return PenpotConfig(_clean_base(url), token, source)
+    return PenpotConfig(_clean_base(url), token, source, public_base=_clean_base(s_public))
 
 
 class PenpotClient:

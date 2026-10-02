@@ -18,8 +18,7 @@ Use the named tool for the request. A generic API call, shell or directory walk 
 - "What did I write?" or vault knowledge: semantic document search.
 - Repository, source, logs or configuration: workspace file tools.
 - Running Odysseus failure: application-log reader, then the relevant named service or tool.
-- Fixed appointment or reservation: Calendar. Actionable work: Todoist.
-- Planning effort or capacity: Lotus aggregate patterns, when enabled.
+- Fixed appointment or reservation: Calendar.
 
 ## Path preflight
 

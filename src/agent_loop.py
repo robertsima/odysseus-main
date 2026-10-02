@@ -77,6 +77,7 @@ from src.intent_assessment import (
     proposal_reply_anchor,
 )
 from src import objective_guard
+from src import skill_toolsets
 from src import stable_tools
 from src import task_checklist
 from src.agent_tools import (
@@ -465,7 +466,7 @@ _DOMAIN_RULES = {
 - Use `manage_contact` to list, add, update, or delete contacts in the address book.""",
     "integrations": """\
 ## Integration/API rules
-- To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, Jellyfin, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
+- To query or control a configured service integration (Home Assistant, Miniflux, Gitea, Linkding, or any other registered service), use `api_call` with the integration name, HTTP method, path, and optional JSON body.
 - Do not use shell, curl, or `app_api` to reach a user's connected integration when `api_call` is available.""",
 }
 
@@ -1307,70 +1308,6 @@ from src import delegation_intent  # noqa: E402  (after the keyword table it doc
 
 _orchestration_requested = delegation_intent.orchestration_requested
 
-# Restored with the fork's selection pipeline, which the 2026-09-18 upstream
-# sync removed: a skill's `requires_toolsets` is operator-authored prose and
-# must not reach the selected set as a tool name that can never resolve.
-def _skill_declared_tools(skills, disabled_tools) -> Tuple[Set[str], Set[str]]:
-    """Split a skill's ``requires_toolsets`` into real tools and prose.
-
-    The field is operator-authored free text in SKILL.md. A skill declaring
-    prose ("email", "file search and edit", "todoist") used to put those
-    strings straight into the selected tool set, where they can never resolve
-    to a schema — the 2026-09-10 logs show nine of them in
-    `selected_without_schema` on every round. The system prompt is built from
-    the same set, so the model was also told it had tools that do not exist.
-
-    Returns ``(tools, unknown)``; ``unknown`` is worth logging so the operator
-    can fix the skill's front matter.
-    """
-    try:
-        from src.tool_policy import known_tool_names
-
-        known = known_tool_names()
-    except Exception:
-        known = set()
-    tools: Set[str] = set()
-    unknown: Set[str] = set()
-    disabled = disabled_tools or set()
-    for skill in skills or []:
-        for name in (skill.get("requires_toolsets") or []):
-            if not name or name in disabled:
-                continue
-            if known and name not in known:
-                # Agent-authored skills describe toolsets in prose; resolve
-                # the common ones instead of dropping the dependency.
-                alias = _SKILL_TOOLSET_ALIASES.get(str(name).strip().casefold())
-                resolved = {tool for tool in (alias or ()) if tool in known and tool not in disabled}
-                if resolved:
-                    tools |= resolved
-                else:
-                    unknown.add(name)
-                continue
-            tools.add(name)
-    return tools, unknown
-
-
-_FILE_READ_TOOLS = ("read_file", "grep", "glob", "ls")
-_FILE_EDIT_TOOLS = ("edit_file", "write_file", "apply_patch")
-_SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
-    "email": ("list_email_accounts", "list_emails", "read_email"),
-    "calendar": ("manage_calendar",),
-    "notes": ("manage_notes",),
-    "todoist": ("mcp__todoist__todoist",),
-    "memory": ("manage_memory",),
-    "memory management": ("manage_memory",),
-    "skills": ("manage_skills",),
-    "skill management": ("manage_skills",),
-    "git": ("bash",),
-    "shell": ("bash",),
-    "file editing": _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
-    "file search and edit": _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
-    "workspace file tools": ("get_workspace",) + _FILE_READ_TOOLS + _FILE_EDIT_TOOLS,
-    "application-log access": ("read_app_logs",),
-    "logs": ("read_app_logs",),
-}
-
-
 def _harness_directive(text: str) -> Dict:
     """A mid-turn instruction from the runtime, delivered at the TAIL of the
     conversation.
@@ -2206,7 +2143,7 @@ def _classify_agent_request(messages: List[Dict], last_user: str) -> Dict[str, o
     # "integrations" domain seeds api_call deterministically (see
     # _DOMAIN_TOOL_MAP), independent of embedding retrieval.
     if has(r"\bapi[ _]call\b", r"\bintegrations?\b",
-           r"\b(?:home ?assistant|miniflux|gitea|linkding|jellyfin)\b"):
+           r"\b(?:home ?assistant|miniflux|gitea|linkding)\b"):
         domains.add("integrations")
 
     low_signal = not continuation and not domains
@@ -3750,26 +3687,25 @@ def _scoped_agent_customization(instructions: Optional[str], *, compact: bool = 
     )
 
 
-def _skill_scope_from_settings(settings: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
-    """The skills a chat may use: None for all, else casefolded names.
+# The scope and visibility rules live in `src.skill_toolsets` so the chat route
+# and this loop filter skills the same way.
+_skill_scope_from_settings = skill_toolsets.skill_scope_from_settings
+_scope_skills = skill_toolsets.scope_skills
 
-    ``skill_access``/``skill_names`` are what a profile or loadout saves. The
-    executor already refuses loading any other skill, so the prompt's skill
-    index and matched procedures follow the same scope instead of advertising
-    skills the agent is not allowed to open.
+
+class _SkillIndexBlock(str):
+    """The skills-index text, carrying the names of the skills it lists.
+
+    The tool gate needs to know which skills this turn actually shows, and the
+    text alone cannot say without parsing it.
     """
-    access = str((settings or {}).get("skill_access") or "all")
-    if access == "none":
-        return set()
-    if access == "selected":
-        return {str(n).casefold() for n in ((settings or {}).get("skill_names") or []) if n}
-    return None
 
+    names: frozenset = frozenset()
 
-def _scope_skills(skills, scope: Optional[Set[str]]):
-    if scope is None:
-        return list(skills or [])
-    return [sk for sk in (skills or []) if str(sk.get("name") or "").casefold() in scope]
+    def __new__(cls, text: str = "", names: Iterable[str] = ()):
+        obj = super().__new__(cls, text)
+        obj.names = frozenset(names)
+        return obj
 
 
 def _build_system_prompt(
@@ -3806,7 +3742,10 @@ def _build_system_prompt(
         _ov_sig = _hl.sha256(_json.dumps(get_builtin_overrides() or {}, sort_keys=True).encode()).hexdigest()
     except Exception:
         _ov_sig = ""
-    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills)
+    # The integration routing text is part of the cached prompt, so it is part
+    # of the key: connecting an integration must not keep serving the old prompt.
+    _routing_sig = _integration_routing_text(disabled_tools, mcp_mgr, mcp_disabled_map)
+    cache_key = (frozenset(disabled_tools or []), bool(mcp_mgr), needs_admin, _rt_key, compact, _ov_sig, owner, suppress_local_context, suppress_skills, _routing_sig)
     if _cached_base_prompt and _cached_base_prompt_key == cache_key and not active_document:
         agent_prompt = _cached_base_prompt
         # Skill index is user-editable (name + description), so it must never
@@ -4165,9 +4104,12 @@ def _build_system_prompt(
                 except (TypeError, ValueError):
                     _skill_max_injected = 3
                 _skill_max_injected = max(0, min(12, _skill_max_injected))
+                _vis = skill_toolsets.skill_visibility(disabled_tools, mcp_mgr, mcp_disabled_map)
                 relevant_skills = sm.get_relevant_skills(
                     last_user,
-                    skills=_scope_skills(sm.load(owner=owner), skill_scope),
+                    skills=skill_toolsets.visible_skills(
+                        _scope_skills(sm.load(owner=owner), skill_scope), _vis
+                    ),
                     threshold=0.25,
                     max_items=_skill_max_injected,
                     min_confidence=_skill_min_conf,
@@ -4238,7 +4180,21 @@ def _build_system_prompt(
                     try:
                         from src.builtin_skills import is_shipped_skill
 
-                        _shown_skills = sm.load(owner=owner) if _skill_index_block else relevant_skills
+                        # Only what this turn's blocks show. The index lists a
+                        # subset of the owner's skills (scope, integrations,
+                        # toolsets), and one learned skill the index leaves out
+                        # must not arm the gate on every turn.
+                        _index_names = getattr(_skill_index_block, "names", None)
+                        if _skill_index_block and _index_names is None:
+                            _shown_skills = sm.load(owner=owner)
+                        else:
+                            _by_name = {
+                                str(_s.get("name")): _s
+                                for _s in (sm.load(owner=owner) if _index_names else ())
+                            }
+                            _shown_skills = [
+                                _by_name[n] for n in (_index_names or ()) if n in _by_name
+                            ] + list(relevant_skills or [])
                         _skills_arm_gate = not all(is_shipped_skill(_s) for _s in _shown_skills or ())
                     except Exception:
                         _skills_arm_gate = True
@@ -4403,6 +4359,14 @@ _ADMIN_TOOLS = {
     "send_to_session", "pipeline", "ask_teacher", "list_models",
 }
 
+def _integration_routing_text(disabled_tools, mcp_mgr, mcp_disabled_map=None) -> str:
+    try:
+        vis = skill_toolsets.skill_visibility(disabled_tools, mcp_mgr, mcp_disabled_map)
+        return skill_toolsets.integration_routing_text(vis.available_integrations)
+    except Exception:
+        return ""
+
+
 def _build_base_prompt(
     disabled_tools,
     mcp_mgr,
@@ -4453,6 +4417,12 @@ def _build_base_prompt(
         elif compact:
             agent_prompt = _assemble_prompt(set(TOOL_SECTIONS.keys()), disabled, compact=True)
 
+    # Routing text the available integrations ship. Repo-shipped, so it is safe
+    # in the system role; it changes only when the set of integrations does.
+    _routing = _integration_routing_text(disabled, mcp_mgr, mcp_disabled_map)
+    if _routing:
+        agent_prompt += "\n\n" + _routing
+
     # Inject the Level-0 skill index — one line per skill so the agent
     # knows what canonical procedures exist. Includes published skills
     # plus teacher-escalation drafts (auto-written when the student
@@ -4471,8 +4441,15 @@ def _build_base_prompt(
             from services.memory.skills import SkillsManager
             from src.constants import DATA_DIR
             _sm = SkillsManager(DATA_DIR)
-            active_tools = list(set(TOOL_SECTIONS.keys()) - set(disabled or []))
-            skill_idx = _scope_skills(_sm.index_for(owner=owner, active_toolsets=active_tools), skill_scope)
+            _vis = skill_toolsets.skill_visibility(disabled, mcp_mgr, mcp_disabled_map)
+            skill_idx = _scope_skills(
+                _sm.index_for(
+                    owner=owner,
+                    active_toolsets=None if _vis.active_toolsets is None else list(_vis.active_toolsets),
+                    available_integrations=_vis.available_integrations,
+                ),
+                skill_scope,
+            )
             if skill_idx:
                 lines = ["## Available skills",
                          "Saved procedures by category; `(draft)` marks an unconfirmed one."]
@@ -4484,7 +4461,9 @@ def _build_base_prompt(
                     for s in by_cat[cat]:
                         badge = " *(draft)*" if s.get("status") == "draft" else ""
                         lines.append(f"- `{s['name']}` — {s['description']}{badge}")
-                skill_index_block = "\n\n" + "\n".join(lines)
+                skill_index_block = _SkillIndexBlock(
+                    "\n\n" + "\n".join(lines), (s["name"] for s in skill_idx)
+                )
         except Exception as _e:
             # Skill index is a soft enhancement — never fail prompt assembly on it.
             logger.debug(f"Skill-index injection skipped: {_e}")

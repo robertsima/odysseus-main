@@ -9,7 +9,10 @@ it to load the tools a skill declares.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Set, Tuple
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -136,3 +139,256 @@ _SKILL_TOOLSET_ALIASES: Dict[str, Tuple[str, ...]] = {
     "agent launcher": ("orchestrate_agents", "manage_agent_loadout"),
     "agent orchestration": ("orchestrate_agents", "manage_agent_loadout"),
 }
+
+
+# ---------------------------------------------------------------------------
+# What a skill needs versus what this turn can call
+#
+# A skill reaches the model by three paths: the agent loop's skills index, the
+# chat route's skills index, and the keyword-matched "Relevant skills" block.
+# Each filtered differently (2026-10-01 review, website/architecture-
+# integrations-2026-10-01.md): the loop compared `requires_toolsets` with
+# native tool names only, so a skill that needs a connected Penpot or Pi worker
+# was hidden from it, while the chat route and the keyword block showed
+# everything. One computation feeds all three.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SkillVisibility:
+    """What this turn can call. ``None`` means unknown: nothing is hidden."""
+
+    active_toolsets: Optional[frozenset] = None
+    available_integrations: Optional[frozenset] = None
+
+
+OPEN = SkillVisibility()
+
+# Probing integrations runs requirement checks (binary lookups, env reads), and
+# the three paths ask within one turn. A short lifetime keeps that to one probe
+# per turn without holding a stale answer after Settings changes a connection.
+_CACHE_TTL_SECONDS = 5.0
+_cache: Dict[Any, Tuple[float, Any]] = {}
+_cache_lock = threading.Lock()
+
+
+def reset_cache() -> None:
+    with _cache_lock:
+        _cache.clear()
+
+
+def _cached(key: Any, compute: Callable[[], Any]) -> Any:
+    now = time.monotonic()
+    with _cache_lock:
+        hit = _cache.get(key)
+        if hit and now - hit[0] < _CACHE_TTL_SECONDS:
+            return hit[1]
+    value = compute()
+    with _cache_lock:
+        if len(_cache) > 64:
+            _cache.clear()
+        _cache[key] = (now, value)
+    return value
+
+
+def _resolve_manager(mcp_mgr):
+    if mcp_mgr is not None:
+        return mcp_mgr
+    try:
+        from src.tool_utils import get_mcp_manager
+
+        return get_mcp_manager()
+    except Exception:
+        return None
+
+
+def _native_callable(disabled: frozenset) -> frozenset:
+    from src import capabilities, capabilities_builtin  # noqa: F401 - registers
+    from src.tool_policy import known_tool_names
+
+    names = set(known_tool_names()) - set(disabled)
+    # The same rule the loop applies when it builds the schema list: a tool
+    # whose capability is off on this host (Claude Code without the binary)
+    # is not callable, so a skill that needs it is not worth showing.
+    names -= set(capabilities.unavailable_tools())
+    try:
+        from src.settings import get_setting
+
+        if not get_setting("image_gen_enabled", False):
+            names.discard("generate_image")
+    except Exception:
+        pass
+    return frozenset(names)
+
+
+def _mcp_callable(mcp_mgr, mcp_disabled_map, disabled: frozenset) -> Tuple[Set[str], Set[str]]:
+    """Qualified tool names callable now, and the server names skills may use."""
+    tools: Set[str] = set()
+    servers: Set[str] = set()
+    if mcp_mgr is None:
+        return tools, servers
+    try:
+        catalog = mcp_mgr.get_all_tools(mcp_disabled_map) or []
+    except TypeError:
+        catalog = mcp_mgr.get_all_tools() or []
+    for tool in catalog:
+        qualified = str(tool.get("qualified_name") or "")
+        if not qualified or tool.get("is_disabled") or qualified in disabled:
+            continue
+        tools.add(qualified)
+        for key in (tool.get("server_id"), tool.get("server_name")):
+            if key:
+                servers.add(str(key))
+                servers.add(str(key).strip().casefold())
+    return tools, servers
+
+
+def _status_signature(mcp_mgr) -> Any:
+    try:
+        return tuple(sorted(
+            (str(k), str((v or {}).get("status"))) for k, v in mcp_mgr.get_all_statuses().items()
+        ))
+    except Exception:
+        return None
+
+
+def _available_integrations(mcp_mgr) -> frozenset:
+    from src import integration_registry
+
+    probe = integration_registry.available_ids
+    key = ("integrations", id(mcp_mgr), id(probe), _status_signature(mcp_mgr))
+    return _cached(key, lambda: frozenset(probe(mcp_mgr)))
+
+
+def skill_visibility(
+    disabled_tools: Optional[Iterable[str]] = None,
+    mcp_mgr=None,
+    mcp_disabled_map: Optional[Dict[str, set]] = None,
+) -> SkillVisibility:
+    """The tools callable this turn and the integrations that are up.
+
+    ``active_toolsets`` holds native tools left after policy and capabilities,
+    connected MCP tools by qualified name (``mcp__<server>__<tool>``), their
+    server ids and names (what an operator writes in ``requires_toolsets``),
+    and every prose alias whose tools are all callable. ``available_integrations``
+    is ``integration_registry.available_ids()``.
+
+    Fails open: if either set cannot be computed it is ``None``, which
+    ``SkillsManager.index_for`` reads as "hide nothing", the behaviour before
+    this existed.
+    """
+    disabled = frozenset(str(n) for n in (disabled_tools or ()))
+    mgr = _resolve_manager(mcp_mgr)
+    active: Optional[frozenset]
+    try:
+        native = _cached(("native", disabled), lambda: _native_callable(disabled))
+        mcp_tools, servers = _mcp_callable(mgr, mcp_disabled_map, disabled)
+        callable_tools = set(native) | mcp_tools
+        names = set(callable_tools) | servers
+        for alias, tools in _SKILL_TOOLSET_ALIASES.items():
+            if all(t in callable_tools for t in tools):
+                names.add(alias)
+        active = frozenset(names)
+    except Exception:
+        logger.debug("active toolsets unavailable for skill filtering", exc_info=True)
+        active = None
+    try:
+        integrations: Optional[frozenset] = _available_integrations(mgr)
+    except Exception:
+        logger.debug("available integrations unavailable for skill filtering", exc_info=True)
+        integrations = None
+    return SkillVisibility(active, integrations)
+
+
+def visible_skills(skills: Iterable[Dict], visibility: SkillVisibility) -> List[Dict]:
+    """``skills`` minus those this turn cannot use.
+
+    The same rules ``SkillsManager.index_for`` applies, for a caller that
+    already holds the skill dicts (the keyword match). Keep the two in step.
+    """
+    out = []
+    active = visibility.active_toolsets
+    integrations = visibility.available_integrations
+    for skill in skills or ():
+        need = skill.get("requires_integration")
+        if integrations is not None and need and need not in integrations:
+            continue
+        req = skill.get("requires_toolsets") or []
+        if req and active is not None and not all(t in active for t in req):
+            continue
+        fallback = skill.get("fallback_for_toolsets") or []
+        if fallback and active and any(t in active for t in fallback):
+            continue
+        out.append(skill)
+    return out
+
+
+def skill_scope_from_settings(settings: Optional[Dict[str, Any]]) -> Optional[Set[str]]:
+    """The skills a chat may use: None for all, else casefolded names.
+
+    ``skill_access``/``skill_names`` are what a profile or loadout saves. The
+    executor already refuses loading any other skill, so every prompt path
+    follows the same scope instead of advertising skills the agent may not open.
+    """
+    access = str((settings or {}).get("skill_access") or "all")
+    if access == "none":
+        return set()
+    if access == "selected":
+        return {str(n).casefold() for n in ((settings or {}).get("skill_names") or []) if n}
+    return None
+
+
+def scope_skills(skills, scope: Optional[Set[str]]):
+    if scope is None:
+        return list(skills or [])
+    return [sk for sk in (skills or []) if str(sk.get("name") or "").casefold() in scope]
+
+
+def session_skill_context(session_id: Optional[str], mcp_mgr=None) -> Tuple[SkillVisibility, Optional[Set[str]]]:
+    """Visibility and loadout scope for a chat that is not inside the agent loop.
+
+    The chat route builds its skills index before the loop runs, so it applies
+    the chat's saved tool policy itself. Fails open to ``(OPEN, None)``.
+    """
+    try:
+        settings: Dict[str, Any] = {}
+        if session_id:
+            from core.database import get_session_settings
+
+            settings = get_session_settings(session_id) or {}
+        mgr = _resolve_manager(mcp_mgr)
+        mcp_tools = mgr.get_all_tools() if mgr is not None else ()
+        from src.tool_security import session_policy_disabled_tools
+
+        disabled = session_policy_disabled_tools(settings, mcp_tools)
+        return skill_visibility(disabled, mgr), skill_scope_from_settings(settings)
+    except Exception:
+        logger.debug("session skill context unavailable", exc_info=True)
+        return OPEN, None
+
+
+def integration_routing_text(available: Optional[Iterable[str]]) -> str:
+    """Routing rules the available integrations ship, joined for the system prompt.
+
+    The text is repo-shipped (an integration manifest's ``prompt``), so it may
+    sit in the trusted system role. It depends only on which integrations are
+    available, which keeps the cached prompt prefix stable between turns.
+    ``from_server_instructions`` is a marker, not text: server instructions are
+    external content and travel with the MCP tool descriptions instead.
+    """
+    if not available:
+        return ""
+    try:
+        from src import integration_registry
+    except Exception:
+        return ""
+    parts: List[str] = []
+    for integration_id in sorted(available):
+        try:
+            integration = integration_registry.get(integration_id)
+            text = str(getattr(integration, "prompt", "") or "").strip()
+        except Exception:
+            continue
+        if text and text != "from_server_instructions":
+            parts.append(text)
+    return "\n\n".join(parts)

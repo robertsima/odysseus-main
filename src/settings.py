@@ -127,6 +127,11 @@ DEFAULT_SETTINGS = {
     "gallery_sam_model": "facebook/sam-vit-base",
     "gallery_grounding_model": "google/owlvit-base-patch32",
     "browser_isolated": True,
+    # Penpot Studio's own connection (2026-10-01): the integration used to borrow the
+    # URL and token from whichever saved MCP server had "penpot" in its name.
+    "penpot_api_url": "",
+    "penpot_access_token": "",
+    "penpot_public_url": "",
     "agent_approval_ttl_seconds": 900,
     "agent_base_branch": "dev",
     "search_provider": "searxng",

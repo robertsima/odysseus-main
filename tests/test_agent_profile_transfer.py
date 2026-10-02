@@ -386,3 +386,131 @@ def test_deleting_a_loadout_asks_first():
     assert "await ask(" in remove and "danger: true" in remove
     assert remove.index("await ask(") < remove.index("profiles.splice(")
     assert "if (!ok) return;" in remove
+
+
+# ── templates: {server:<name>} references (2026-10-01) ─────────────────────────
+
+class _FakeManager:
+    def __init__(self, connected=None):
+        self._configs = {sid: {"name": name} for sid, name in (connected or {}).items()}
+        self._statuses = {sid: {"status": "connected"} for sid in (connected or {})}
+
+    def get_all_statuses(self):
+        return dict(self._statuses)
+
+    def get_server_status(self, sid):
+        return self._statuses.get(sid, {"status": "disconnected"})
+
+
+@pytest.fixture
+def no_saved_servers(monkeypatch):
+    # Saved MCP rows live in the app database; keep the resolver off it.
+    import core.database as database
+
+    class _Q:
+        def all(self):
+            return []
+
+    class _S:
+        def query(self, *_a):
+            return _Q()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(database, "SessionLocal", lambda: _S())
+
+
+def _template(*entries, servers=("{server:penpot}",)):
+    return _doc({"name": "Designer", "tool_access": "selected", "enabled_tools": list(entries),
+                 "mcp_access": "selected", "allowed_mcp_servers": list(servers)})
+
+
+def test_server_references_resolve_to_the_matching_servers_id(no_saved_servers):
+    doc = _template("grep", "mcp__{server:penpot}__create_frame", "mcp__{server:Penpot}__*")
+    resolved, notes = agent_profile_transfer.resolve_template(doc, _FakeManager({"c5ec6d7a": "Penpot"}))
+    profile = resolved["profiles"][0]
+    assert profile["enabled_tools"] == ["grep", "mcp__c5ec6d7a__create_frame", "mcp__c5ec6d7a__*"]
+    assert profile["allowed_mcp_servers"] == ["c5ec6d7a"]
+    assert notes == []
+    # The input is left alone.
+    assert doc["profiles"][0]["allowed_mcp_servers"] == ["{server:penpot}"]
+
+
+def test_builtin_ids_and_unique_partial_names_resolve(no_saved_servers):
+    doc = _template("mcp__{server:penpot_studio}__*", "mcp__{server:Penpot}__x",
+                    servers=("{server:penpot_studio}", "{server:penpot}"))
+    resolved, notes = agent_profile_transfer.resolve_template(doc, _FakeManager({"abc123": "Penpot MCP"}))
+    profile = resolved["profiles"][0]
+    assert profile["enabled_tools"] == ["mcp__penpot_studio__*", "mcp__abc123__x"]
+    assert profile["allowed_mcp_servers"] == ["penpot_studio", "abc123"]
+    assert notes == []
+
+
+def test_unresolvable_references_are_dropped_with_a_note(no_saved_servers):
+    doc = _template("grep", "mcp__{server:nothing}__a", "mcp__{server:nothing}__b", servers=("{server:nothing}",))
+    resolved, notes = agent_profile_transfer.resolve_template(doc, _FakeManager())
+    profile = resolved["profiles"][0]
+    assert profile["enabled_tools"] == ["grep"] and profile["allowed_mcp_servers"] == []
+    assert len(notes) == 1 and "'nothing'" in notes[0] and "3 entries" in notes[0]
+
+
+def test_import_applies_templates_and_reports_what_was_dropped(store, no_saved_servers):
+    doc = _template("mcp__{server:penpot}__create_frame", "mcp__{server:gone}__x",
+                    servers=("{server:penpot}", "{server:gone}"))
+    report = agent_profile_transfer.import_profiles(doc, manager=_FakeManager({"c5ec6d7a": "Penpot"}))
+    assert report["written"] and not report["errors"]
+    stored = store["profiles"][0]
+    assert stored["enabled_tools"] == ["mcp__c5ec6d7a__create_frame"]
+    assert stored["allowed_mcp_servers"] == ["c5ec6d7a"]
+    assert any("'gone'" in w for w in report["warnings"])
+
+
+def test_shipped_penpot_template_has_no_install_specific_ids():
+    path = ROOT / "integrations/penpot/loadouts/penpot-product-designer.json"
+    text = path.read_text(encoding="utf-8")
+    assert "c5ec6d7a" not in text and "{server:penpot}" in text
+    doc = json.loads(text)
+    assert doc["profiles"][0]["allowed_mcp_servers"] == ["{server:penpot}", "penpot_studio"]
+
+
+def test_templates_are_listed_and_installed_for_available_integrations(store, no_saved_servers, monkeypatch):
+    from src import integration_registry
+
+    monkeypatch.setattr(integration_registry, "available_ids", lambda manager=None: {"penpot"})
+    rows = agent_profile_transfer.list_templates()
+    assert [(r["integration"], r["template"], r["installed"]) for r in rows] == [
+        ("penpot", "penpot-product-designer", False)]
+    manager = _FakeManager({"c5ec6d7a": "Penpot"})
+    report = agent_profile_transfer.install_template("penpot", "penpot-product-designer", manager=manager)
+    assert report["added"] == ["Penpot Product Designer"]
+    assert "mcp__c5ec6d7a__create_frame" in store["profiles"][0]["enabled_tools"]
+    assert agent_profile_transfer.list_templates()[0]["installed"] is True
+    with pytest.raises(ValueError, match="already exists"):
+        agent_profile_transfer.install_template("penpot", "penpot-product-designer", manager=manager)
+    agent_profile_transfer.install_template("penpot", "penpot-product-designer", manager=manager, overwrite=True)
+    with pytest.raises(ValueError, match="no loadout template"):
+        agent_profile_transfer.install_template("penpot", "../../etc/passwd", manager=manager)
+    monkeypatch.setattr(integration_registry, "available_ids", lambda manager=None: set())
+    assert agent_profile_transfer.list_templates() == []
+
+
+def test_template_routes_use_the_import_gate(client, store, no_saved_servers, monkeypatch):
+    from src import integration_registry
+
+    monkeypatch.setattr(integration_registry, "available_ids", lambda manager=None: {"penpot"})
+    res = client.get("/api/agents/profiles/templates")
+    assert res.status_code == 200 and res.json()["templates"][0]["template"] == "penpot-product-designer"
+    body = {"integration": "penpot", "template": "penpot-product-designer"}
+    assert client.post("/api/agents/profiles/templates/install", json=body).status_code == 200
+    assert client.post("/api/agents/profiles/templates/install", json=body).status_code == 409
+    assert client.post("/api/agents/profiles/templates/install",
+                       json={**body, "template": "nope"}).status_code == 404
+    client.gate["admin"] = False
+    assert client.get("/api/agents/profiles/templates").status_code == 403
+    assert client.post("/api/agents/profiles/templates/install", json=body).status_code == 403
+
+
+def test_loadout_editor_lists_templates_with_install_buttons():
+    js = (ROOT / "static/js/agentLoadouts.js").read_text(encoding="utf-8")
+    assert "'/api/agents/profiles/templates'" in js and "'/api/agents/profiles/templates/install'" in js

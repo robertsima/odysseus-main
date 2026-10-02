@@ -19,7 +19,9 @@
   "tools": "from_capability",
   "function_calling": false,
   "prompt": "",
-  "skills": [],
+  "skills": [
+    "skills"
+  ],
   "loadouts": [],
   "health": {
     "type": "capability",

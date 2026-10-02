@@ -105,7 +105,7 @@ def test_visual_asset_sourcing_skill_parses_and_is_cross_linked():
     for line in ("  category: design", "  status: published", "  source: bundled"):
         assert line in head
     assert "Needs user:" in text and "api.iconify.design" in text
-    penpot = (root / "penpot-design-workflow" / "SKILL.md").read_text(encoding="utf-8")
+    penpot = (root.parents[1] / "integrations" / "penpot" / "skills" / "penpot-design-workflow" / "SKILL.md").read_text(encoding="utf-8")
     assert "visual-asset-sourcing" in penpot and "error screen" in penpot
 
 

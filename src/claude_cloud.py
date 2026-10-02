@@ -9,7 +9,7 @@ allowlisted repository. Anthropic's official Claude Code GitHub Action runs
 there with the operator's own credential from that repository's secrets (set
 up with Anthropic's own ``claude setup-token`` or ``/install-github-app``).
 Odysseus never sees, stores or forwards it; see
-skills/dev/claude-code-delegation/references/terms-and-boundaries.md.
+integrations/claude-code/skills/claude-code-delegation/references/terms-and-boundaries.md.
 
 Hub mode (``claude_cloud_hub_repository``) serves every repository from one
 workflow: Odysseus dispatches it in the hub with ``repository`` set to the

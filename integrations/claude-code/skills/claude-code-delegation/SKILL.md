@@ -46,7 +46,7 @@ You decide scope, risk and acceptance. Claude Code implements inside one checkou
 5. Verify independently: inspect the diff with the workspace file tools and run the smallest relevant test.
 6. Allow one narrow repair pass. After two unsuccessful passes, take the work over in the primary harness or escalate.
 7. Publishing is a separate, human-gated step: `manage_agent_worktree` (`request_publish`, operator approval, `publish`). Claude Code cannot push, so never ask it to.
-8. After acceptance, record the outcome in `AI Mind` as [documentation-policy.md](references/documentation-policy.md) says. Skip the record when the user calls the work throwaway.
+8. After acceptance, if the owner keeps a delegation log (a knowledge-base folder such as `AI Mind`; `search_documents` for "Claude Code Delegation" shows whether the note exists), record the outcome as [documentation-policy.md](references/documentation-policy.md) says. Skip the record when there is no log or the user calls the work throwaway.
 
 ## Acceptance
 

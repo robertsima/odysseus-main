@@ -177,3 +177,26 @@ inside the module.
 Phase 1 is independent and fixes visible bugs. Phases 2 and 3 can go one
 integration at a time, starting with Penpot, which has the most self-contained
 code.
+
+## Status (2026-10-02)
+
+Phases 1 to 4 are implemented; phase 5 (image slimming) is not.
+
+- Skill tiers: `skills/catalog.json` lists core skills (installed on every
+  deployment: harness-context-and-tool-routing, visual-asset-sourcing) and
+  curated ones (installed from Recommended skills in the skills panel).
+  Integration skills live in `integrations/<id>/skills/`, are registered at
+  start-up and are visible only while `integration_registry.available_ids()`
+  includes their integration. Existing installs were re-stamped, not deleted.
+- `src/integration_registry.py` reads `integrations/<id>/integration.json` and
+  generates the built-in server lists; unmet requirements report
+  `not_configured`.
+- `src/skill_toolsets.skill_visibility()` is the one filter for the three skill
+  paths, built from the turn's callable tools and available integrations.
+- Loadout templates use `mcp__{server:<name>}__<tool>`; `resolve_template`
+  maps names to the install's server ids on import. Penpot reads its own
+  settings first.
+- Plugins schema v2 packages a user-added integration (MCP server spec, env
+  names, instructions, skills, loadout templates) with an explicit admin
+  install and an exact uninstall. MCP server instructions now reach the model
+  as untrusted text.

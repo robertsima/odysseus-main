@@ -309,3 +309,59 @@ def test_catalog_install_and_uninstall_are_admin_only_but_listing_is_not(client)
     assert client.get("/api/skills/catalog").status_code == 200
     assert client.post("/api/skills/catalog/cur-one/install").status_code == 403
     assert client.delete("/api/skills/catalog/cur-one").status_code == 403
+
+
+# ── integration packages carry their own skills (2026-10-01) ───────────────────
+
+_PACKAGE_SKILLS = {
+    "penpot": {"penpot-design-workflow"},
+    "claude-code": {"claude-code-delegation"},
+    "pi-worker": {"local-pi-delegation"},
+    "todoist": {"todoist-planning", "todoist-retrospective"},
+}
+
+
+def test_manifests_ship_their_skills_and_the_seeder_finds_them():
+    from src import builtin_skills, integration_registry
+
+    root = Path(__file__).resolve().parents[1]
+    builtin_skills._integration_skill_dirs.clear()
+    try:
+        for integration in integration_registry.all():
+            builtin_skills.register_integration_skills(integration.id, integration_registry.skill_dirs(integration.id))
+        specs = {s["name"]: s for s in builtin_skills._integration_specs(str(root))}
+    finally:
+        builtin_skills._integration_skill_dirs.clear()
+    for integration_id, names in _PACKAGE_SKILLS.items():
+        assert {n for n, s in specs.items() if s["integration"] == integration_id and s["install"]} == names
+        for name in names:
+            assert Path(specs[name]["source_dir"]).parts[-4:-2] == ("integrations", integration_id)
+    # The old locations are gone: one copy per skill.
+    for name in ("penpot-design-workflow", "claude-code-delegation", "local-pi-delegation",
+                 "todoist-planning", "todoist-retrospective"):
+        assert not list((root / "skills").glob(f"**/{name}/SKILL.md"))
+
+
+def test_package_skills_hold_no_personal_paths():
+    root = Path(__file__).resolve().parents[1] / "integrations"
+    for path in root.glob("*/skills/*/SKILL.md"):
+        text = path.read_text(encoding="utf-8")
+        assert "D:/" not in text and "D:\\" not in text, path
+    for name in ("pi-worker/skills/local-pi-delegation", "claude-code/skills/claude-code-delegation"):
+        text = (root / name / "SKILL.md").read_text(encoding="utf-8")
+        assert "if the owner keeps a delegation log" in text or "when one is kept" in text
+
+
+def test_startup_registers_every_integration_before_seeding():
+    source = (Path(__file__).resolve().parents[1] / "src" / "app_initializer.py").read_text(encoding="utf-8")
+    assert source.index("register_integration_skills(") < source.index("seed_bundled_skills(skills_manager)")
+
+
+def test_harness_skill_no_longer_names_todoist_or_lotus():
+    path = Path(__file__).resolve().parents[1] / "skills" / "general" / "harness-context-and-tool-routing" / "SKILL.md"
+    text = path.read_text(encoding="utf-8")
+    assert "Todoist" not in text and "Lotus" not in text
+    from src import integration_registry
+
+    assert "Todoist" in integration_registry.get("todoist").prompt
+    assert "Lotus" in integration_registry.get("lotus").prompt

@@ -1,6 +1,6 @@
 ---
 name: local-pi-delegation
-description: Delegating bounded coding work to the local Windows Pi/Qwen worker (cheap implementation, 32K context), then verifying it and recording acceptance in AI Mind.
+description: Delegating bounded coding work to the local Windows Pi/Qwen worker (cheap implementation, 32K context), then verifying it and recording acceptance in the owner's delegation log when one is kept.
 metadata:
   version: 1.0.0
   category: dev
@@ -22,7 +22,7 @@ Keep work in the primary harness when it needs broad multi-repository context, a
 
 1. Decide the desired change, risks and acceptance criteria.
 2. Build a payload under about 6K tokens (the worker's context ceiling is 32K) with:
-   - the absolute project path from workspace discovery (the worker may need a Windows `D:/Development/...` path, which you take as returned and never translate), inside the worker's configured root and confirmed accessible to the worker;
+   - the absolute project path from workspace discovery (the worker may need a Windows drive path, which you take as returned and never translate), inside the worker's configured root (`ODYSSEUS_PI_WORKER_ROOT`) and confirmed accessible to the worker;
    - one objective;
    - likely files, symbols or failing tests, as paths and names rather than whole files or conversation history;
    - constraints and exact verification commands;
@@ -35,4 +35,4 @@ Keep work in the primary harness when it needs broad multi-repository context, a
    - the diff matches the requested scope, with no unexpected files changed;
    - the stated tests, linters, builds or manual checks passed, and failures and limitations are stated honestly;
    - the result does not depend on hidden session context.
-7. After acceptance, call `mcp__pi_worker__record_pi_task` with a concise outcome, changed files, verification and limitations, following [documentation-policy.md](references/documentation-policy.md). Vault documentation is written by that record tool, never by the worker.
+7. After acceptance, call `mcp__pi_worker__record_pi_task` with a concise outcome, changed files, verification and limitations, following [documentation-policy.md](references/documentation-policy.md). If the tool reports that no documentation root is configured, the owner keeps no delegation log: skip the record. Vault documentation is written by that record tool, never by the worker.

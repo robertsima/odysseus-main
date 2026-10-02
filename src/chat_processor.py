@@ -730,7 +730,20 @@ class ChatProcessor:
         # call the tool anyway, so the index would be noise.
         if agent_mode and not incognito and use_skills and self.skills_manager:
             try:
-                idx = self.skills_manager.index_for(owner=owner)
+                # The same filter and loadout scope the agent loop applies, so
+                # this index and the loop's never disagree about a skill. It
+                # fails open: an error here shows what was shown before.
+                from src import skill_toolsets
+
+                _vis, _scope = skill_toolsets.session_skill_context(getattr(session, "id", None))
+                idx = skill_toolsets.scope_skills(
+                    self.skills_manager.index_for(
+                        owner=owner,
+                        active_toolsets=None if _vis.active_toolsets is None else list(_vis.active_toolsets),
+                        available_integrations=_vis.available_integrations,
+                    ),
+                    _scope,
+                )
             except Exception as e:
                 logger.debug(f"Skills index unavailable: {e}")
                 idx = []

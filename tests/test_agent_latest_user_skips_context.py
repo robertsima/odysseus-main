@@ -13,7 +13,8 @@ pytest.skip(
     allow_module_level=True,
 )
 
-from src.agent_loop import _explicitly_named_skills, _extract_last_user_message, _skill_declared_tools
+from src.agent_loop import _explicitly_named_skills, _extract_last_user_message
+from src.skill_toolsets import skill_declared_tools as _skill_declared_tools
 from src.prompt_security import untrusted_context_message
 
 REQUEST = "It's done - continue"

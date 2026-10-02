@@ -211,7 +211,7 @@ Claude.ai credentials. Odysseus therefore:
   with Claude models directly, add an Anthropic **API key** as a model
   endpoint (billed per token under the Commercial Terms).
 
-`skills/dev/claude-code-delegation/references/terms-and-boundaries.md` keeps
+`integrations/claude-code/skills/claude-code-delegation/references/terms-and-boundaries.md` keeps
 the working summary; the linked Anthropic pages are the authority.
 
 ### Testing the integration

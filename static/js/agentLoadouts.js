@@ -87,7 +87,11 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
   reportBox.style.marginTop = '6px';
   reportBox.hidden = true;
   actions.append(addBtn, saveBtn, exportBtn, importBtn, modeSel, fileInput, note);
-  container.append(list, actions, reportBox);
+  // Loadouts shipped by integrations that are available here (2026-10-01).
+  const templatesBox = node('div', 'agent-profile-templates');
+  templatesBox.style.marginTop = '10px';
+  templatesBox.hidden = true;
+  container.append(list, actions, reportBox, templatesBox);
 
   if (!canEdit) {
     [addBtn, saveBtn, importBtn, modeSel].forEach((el) => { el.disabled = true; });
@@ -380,7 +384,58 @@ export function mountLoadoutsEditor(container, { profiles: initial = [], canEdit
     } catch (_) { say('Import failed', true); }
   });
 
+  async function installTemplate(t, overwrite) {
+    if (dirty && !(await ask('Installing reloads the loadouts from the server. Discard unsaved changes?', { confirmText: 'Discard' }))) return;
+    say('Installing…');
+    try {
+      const r = await fetch('/api/agents/profiles/templates/install', {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ integration: t.integration, template: t.template, overwrite: !!overwrite }),
+      });
+      let body = null;
+      try { body = await r.json(); } catch (_) {}
+      if (r.status === 409 && !overwrite && await ask(`${(body && body.detail) || 'That loadout already exists.'} Replace it?`,
+        { title: 'Replace loadout', confirmText: 'Replace', danger: true })) {
+        return installTemplate(t, true);
+      }
+      if (!r.ok || !body) {
+        say((body && body.detail) || `Install failed (${r.status})`, true);
+        return;
+      }
+      if (Array.isArray(body.profiles)) replaceProfiles(body.profiles);
+      showReport(body.report || {});
+      say(body.message || 'Installed', !body.ok);
+      loadTemplates();
+    } catch (_) { say('Install failed', true); }
+  }
+
+  async function loadTemplates() {
+    if (!canEdit) return;
+    let rows = [];
+    try {
+      const r = await fetch('/api/agents/profiles/templates', { credentials: 'same-origin' });
+      if (r.ok) rows = ((await r.json()) || {}).templates || [];
+    } catch (_) { /* the list is a convenience; the editor works without it */ }
+    templatesBox.textContent = '';
+    templatesBox.hidden = !rows.length;
+    if (!rows.length) return;
+    templatesBox.appendChild(node('div', 'admin-toggle-sub', 'Templates from your integrations'));
+    rows.forEach((t) => {
+      const row = node('div', 'agent-profile-template');
+      row.style.cssText = 'display:flex;gap:8px;align-items:center;margin-top:4px';
+      const names = t.profiles.map((p) => p.name).join(', ') || t.template;
+      const text = node('span', '', `${names} (${t.integration_name})`);
+      text.title = t.profiles.map((p) => p.description).filter(Boolean).join('\n');
+      const btn = button(t.installed ? 'Installed' : 'Install', t.installed ? 'Already in your loadouts; click to reinstall' : 'Add this loadout');
+      btn.addEventListener('click', () => installTemplate(t, false));
+      row.append(text, btn);
+      templatesBox.appendChild(row);
+    });
+  }
+
   render();
+  loadTemplates();
   if (!canEdit) say('Only an admin can change loadouts.');
   return { isDirty: () => dirty };
 }

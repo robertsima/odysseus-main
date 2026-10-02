@@ -106,9 +106,12 @@ Use the first URL that prints `HTTP 401` as `PENPOT_API_URL`.
 The stdio Penpot MCP above can only create rectangles, circles, text and
 frames, and every shape lands on the page's root frame (nothing nests). The
 built-in **Penpot Studio** server (`mcp_servers/penpot_studio_server.py`,
-Settings > Built-in) adds what a designer agent needs. It reuses the Penpot
-URL and access token saved for the Penpot MCP server, so nothing is
-configured twice.
+Settings > Built-in) adds what a designer agent needs. It reads the Penpot
+URL and access token from Settings > Penpot (`penpot_api_url`,
+`penpot_access_token`, optionally `penpot_public_url`), then from
+`PENPOT_API_URL` / `PENPOT_ACCESS_TOKEN` in the container environment. A saved
+Penpot MCP server with both is still used as a deprecated last resort and
+logs a line once.
 
 | Tool | What it does |
 | --- | --- |
@@ -124,11 +127,16 @@ must be an address the container can reach (the NAS LAN IP, not localhost).
 The exporter is not used: it only accepts a browser login session, not the
 access token the MCP uses.
 
-To give the **Penpot Product Designer** loadout these tools, import
-`penpot-product-designer.loadout.json` in the Control Room (Loadouts >
-Import, mode *merge*/*replace*). It grants `mcp__penpot_studio__*`, swaps the
-old instructions for a read-build-look-fix workflow and adds the bundled
-`penpot-design-workflow` skill. A worker cannot widen its own loadout, so this
+To give the **Penpot Product Designer** loadout these tools, click Install
+under *Templates from your integrations* in the Control Room (Loadouts). The
+template lives at `integrations/penpot/loadouts/penpot-product-designer.json`;
+you can also import that file (Loadouts > Import). It names the stock Penpot MCP
+server as `{server:penpot}`, which import turns into the id of your server
+whose name matches (a server saved as "Penpot" or "Penpot MCP"); with no such
+server the stock-tool grants are dropped and the import report says so. It grants
+`mcp__penpot_studio__*`, swaps the old instructions for a read-build-look-fix
+workflow and adds the `penpot-design-workflow` skill (shipped in
+`integrations/penpot/skills/`). A worker cannot widen its own loadout, so this
 one step is done by you.
 
 Licences: CC BY icon sets (e.g. `game-icons`) need an attribution line;

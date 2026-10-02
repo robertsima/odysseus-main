@@ -192,7 +192,11 @@ def _integration_specs(app_root: str) -> list[dict]:
     for name, integration_id in _LEGACY_INTEGRATION_SKILLS.items():
         if name in seen:
             continue
+        # The package copy first (2026-10-01: these skills moved from skills/ into
+        # integrations/<id>/skills/); the old skills/ locations stay for a
+        # checkout that still has them.
         for candidate in (
+            os.path.join(app_root, "integrations", integration_id, "skills", name),
             *(os.path.join(app_root, "skills", c, name) for c in ("dev", "design", "general")),
             os.path.join(app_root, "skills", name),
         ):

@@ -6,7 +6,7 @@
 - Coding harness: Pi in JSONL RPC mode, launched per project through SSH.
 - Model: `byteshape/Qwen3.6-35B-A3B-MTP-GGUF`, IQ3 3.06-bit variant.
 - Host: RTX 4070 Ti Super 16 GB, Ryzen 7 7800X3D, 64 GB DDR5.
-- Working root: `D:/Development` only.
+- Working root: the directory `ODYSSEUS_PI_WORKER_ROOT` names; the owner's setup uses `D:/Development`. Nothing outside it is reachable.
 - Context ceiling: 32K tokens.
 - KV cache: TurboQuant `q8_K` keys and `turbo3` values.
 - CPU offload: disabled in the current performance profile.
@@ -30,4 +30,4 @@ Escalate to the primary harness when the work needs long-range architectural con
 
 `run_pi_task` accepts an absolute `project_path`, a self-contained `task`, an optional thinking level, a timeout and a session-persistence choice. Start at `medium` thinking and use `high` only for a bounded task that needs deeper reasoning, since extra thinking costs context and time.
 
-Pi runs on Windows, which is where the worker's filesystem access comes from. The SSH/MCP bridge exposes no arbitrary host commands and rejects projects outside `D:/Development`.
+Pi runs on Windows, which is where the worker's filesystem access comes from. The SSH/MCP bridge exposes no arbitrary host commands and rejects projects outside the configured working root.

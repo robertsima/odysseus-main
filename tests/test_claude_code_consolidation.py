@@ -601,7 +601,7 @@ def test_claude_code_delegation_skill_is_shipped_and_parseable():
 
     # 2026-10-01: owned by the claude-code integration, not seeded as core.
     assert builtin_skills._LEGACY_INTEGRATION_SKILLS["claude-code-delegation"] == "claude-code"
-    path = Path(get_app_root()) / "skills" / "dev" / "claude-code-delegation" / "SKILL.md"
+    path = Path(get_app_root()) / "integrations" / "claude-code" / "skills" / "claude-code-delegation" / "SKILL.md"
     skill = Skill.from_markdown(path.read_text(encoding="utf-8"), path=str(path))
     assert skill.name == "claude-code-delegation"
     assert "delegate_to_claude_code" in path.read_text(encoding="utf-8")

@@ -70,6 +70,11 @@ Interface (everything a caller needs):
     skill_dirs(id) -> list[Path]
     loadout_templates(id) -> list[Path]
     startable(server_id) -> bool
+
+Plugin-installed integrations (kind "plugin", from src.plugin_catalog install
+records) are separate from all(): plugin_integrations(), plugin_instructions(),
+plugin_integration_for_server(). available_ids() and integration_for_tool()
+include them; is_builtin() and the pinned lists never do.
 """
 
 from __future__ import annotations
@@ -578,6 +583,12 @@ def available_ids(manager=None) -> set:
         st = status(integration.id, manager)
         if st["enabled"] and st["configured"] and st["connected"]:
             out.add(integration.id)
+    # Plugin-installed integrations: healthy means their MCP server is connected.
+    if _mcp_enabled():
+        mgr = _manager(manager)
+        for item in plugin_integrations():
+            if _connected(mgr, item.server_id):
+                out.add(item.id)
     return out
 
 
@@ -614,7 +625,9 @@ def integration_for_tool(tool_name: str) -> Optional[str]:
     """
     if tool_name.startswith("mcp__"):
         parts = tool_name.split("__", 2)
-        return integration_for_server(parts[1]) if len(parts) == 3 else None
+        if len(parts) != 3:
+            return None
+        return integration_for_server(parts[1]) or plugin_integration_for_server(parts[1])
     for integration in all():
         names = integration.tools
         if names == "from_capability":
@@ -641,3 +654,75 @@ def loadout_templates(integration_id: str) -> List[Path]:
     if integration is None:
         return []
     return [p for p in ((integration.directory / rel).resolve() for rel in integration.loadouts) if p.is_file()]
+
+
+# ── plugin-installed integrations (kind "plugin") ────────────────────────
+#
+# 2026-10-01 (plugin catalog v2). A v2 plugin an administrator installed is an
+# integration too, but it lives in the data dir, not in integrations/*/. It is
+# deliberately NOT part of all(): the built-in lists (is_builtin, the pinned
+# function-calling set, Settings > Built-in rows) must not change because a
+# user installed a package. Plugin integrations are read from the install
+# records src.plugin_catalog writes and exposed through the functions below;
+# available_ids() and integration_for_tool() consult them after the built-ins.
+
+
+@dataclass(frozen=True)
+class PluginIntegration:
+    id: str  # the plugin id
+    name: str
+    server_id: str
+    version: str = ""
+    instructions: str = ""
+    kind: str = "plugin"
+
+
+def _plugin_records() -> list:
+    try:
+        from src import plugin_catalog
+
+        return plugin_catalog.list_install_records()
+    except Exception:  # a bad record must never take prompt building down
+        logger.warning("plugin install records unreadable", exc_info=True)
+        return []
+
+
+def plugin_integrations() -> Tuple[PluginIntegration, ...]:
+    """Installed plugins that created an MCP server, in plugin-id order."""
+    out = []
+    for rec in _plugin_records():
+        server_id = rec.get("server_id")
+        plugin_id = rec.get("plugin_id")
+        if isinstance(server_id, str) and server_id and isinstance(plugin_id, str) and plugin_id:
+            out.append(PluginIntegration(
+                id=plugin_id,
+                name=str(rec.get("name") or plugin_id),
+                server_id=server_id,
+                version=str(rec.get("version") or ""),
+                instructions=str(rec.get("instructions") or ""),
+            ))
+    return tuple(out)
+
+
+def plugin_integration_for_server(server_id: str) -> Optional[str]:
+    for item in plugin_integrations():
+        if item.server_id == server_id:
+            return item.id
+    return None
+
+
+def plugin_instructions(server_id: str) -> str:
+    """The prompt text an installed plugin attached to its server ('' if none).
+
+    Untrusted like every server description; mcp_manager shows it inside the
+    server's tool block only while those tools are offered.
+    """
+    for item in plugin_integrations():
+        if item.server_id == server_id:
+            return item.instructions
+    return ""
+
+
+def plugin_instructions_key() -> tuple:
+    """A cheap value that changes when plugin instructions change (cache key)."""
+    return tuple((p.server_id, p.instructions) for p in plugin_integrations() if p.instructions)

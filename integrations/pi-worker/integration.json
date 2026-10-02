@@ -26,7 +26,9 @@
   "tools": "from_server",
   "function_calling": true,
   "prompt": "",
-  "skills": [],
+  "skills": [
+    "skills"
+  ],
   "loadouts": [],
   "health": {
     "type": "mcp_connected"
