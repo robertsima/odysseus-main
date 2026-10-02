@@ -651,7 +651,10 @@ function setLive(mode) {
   if (!el) return;
   const m = state.paused ? 'paused' : mode;
   el.dataset.state = m;
-  el.textContent = { live: 'Live', reconnecting: 'Reconnecting…', paused: 'Paused', off: 'Offline' }[m] || m;
+  const labels = document.documentElement.dataset.theme === 'dark'
+    ? { live: 'Activity live', reconnecting: 'Activity reconnecting…', paused: 'Activity paused', off: 'Activity offline' }
+    : { live: 'Live', reconnecting: 'Reconnecting…', paused: 'Paused', off: 'Offline' };
+  el.textContent = labels[m] || m;
 }
 
 // Follow the chat's current session. There is no session-change event, so a
