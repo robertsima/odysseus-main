@@ -289,8 +289,8 @@
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-Regular.woff2">
   <link rel="preload" as="font" type="font/woff2" crossorigin href="/static/fonts/FiraCode-SemiBold.woff2">
   <link rel="stylesheet" href="/static/style.css?v=20260930agentroom1">
-  <link rel="stylesheet" href="/static/agamemnon-mockup.css?v=20261001fidelity1">
-  <link rel="stylesheet" href="/static/agamemnon-critic-fixes.css?v=20261001critic1">
+  <link rel="stylesheet" href="/static/agamemnon-mockup.css?v=20261002layout1">
+  <link rel="stylesheet" href="/static/agamemnon-critic-fixes.css?v=20261002layout1">
   <link rel="stylesheet" href="/static/skill-import-review.css">
   <link rel="modulepreload" href="/static/app.js?v=20260928settingsux1">
   <link rel="modulepreload" href="/static/js/chat.js?v=20260929resumerun1">
@@ -1144,10 +1144,10 @@
   <main class="chat-container welcome-active" id="chat-container" aria-label="Chat area" aria-busy="false">
     <header class="ag-page-heading">
       <h1>CHAT / STRATEGY ROOM</h1>
-      <p><span id="ag-session-number">SESSION</span> <b>·</b> <span id="ag-session-label">New operation</span> <b>·</b> <strong>READY</strong></p>
+      <p><span id="ag-session-number">NEW CHAT</span> <b>·</b> <span id="ag-session-label">New operation</span> <b>·</b> <strong id="ag-chat-status" aria-live="polite">Ready to send</strong></p>
     </header>
     <aside class="ag-context-rail" aria-label="Session context">
-      <section><h3>SESSION CONTEXT</h3><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd><i></i> Ready</dd></div></dl></section>
+      <section><h3>SESSION CONTEXT</h3><dl><div><dt>Agent</dt><dd>Agamemnon</dd></div><div><dt>Model</dt><dd id="ag-chat-model">Default</dd></div><div><dt>Status</dt><dd id="ag-context-status">Ready to send</dd></div></dl></section>
       <section><h3>RUN CONTROLS</h3><button type="button" id="ag-open-agents">Open phalanx</button><button type="button" id="ag-open-workbench">Inspect activity</button></section>
       <section><h3>EVIDENCE</h3><p>Sources and artifacts attach to answers when available.</p></section>
       <section><h3>CUSTOMIZE</h3><p>Palette · density · command layout</p><button type="button" id="ag-open-theme">Appearance</button></section>

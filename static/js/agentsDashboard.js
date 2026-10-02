@@ -980,7 +980,7 @@ function renderDetail() {
     <div class="ag-console-hero">
       <div class="ag-console-robot-bay">${robotHtml(r, 'hero')}</div>
       <div class="ag-console-identity">
-        <span class="ag-detail-name" tabindex="-1" title="${esc(r.name)}">${esc(r.name)}</span>
+        <span class="ag-detail-name" id="ag-detail-name" tabindex="-1" title="${esc(r.name)}">${esc(r.name)}</span>
         <div class="ag-detail-meta">${r.model ? `<span class="wb-meta-item">${esc(r.model)}</span>` : ''}${r.started_at ? `<span class="wb-meta-item">started ${esc(fmtTime(r.started_at))}</span>` : ''}${r.is_current ? '<span class="wb-meta-item">open chat</span>' : ''}</div>
       </div>
       <div class="ag-console-status">
