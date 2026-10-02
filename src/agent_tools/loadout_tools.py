@@ -1476,6 +1476,44 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                              if refused_extra else ""))
     effective = one_off or started_profile
 
+    # What the child will really hold: the loadout (or, with none named, the
+    # starter's own policy) cut down to the chat starting it. A worker's child
+    # is never wider than the worker -- 2026-10-02, a Lead Engineer's nameless
+    # start came up with tool_access "all". Only a worker's start is capped
+    # unless the call narrowed the tools itself; a person's chat is not.
+    anonymous = started_profile is None
+    anon_request: Dict[str, Any] = {}
+    explicit_access = str(args.get("tool_access") or "").strip().lower()
+    if anonymous and (explicit_access or args.get("enabled_tools") or args.get("disabled_tools")):
+        picked = args.get("enabled_tools") or []
+        if isinstance(picked, str):
+            picked = [picked]
+        if not isinstance(picked, list):
+            return {"error": "start: enabled_tools must be a list of exact tool names", "exit_code": 1}
+        if explicit_access not in ("", "all", "selected", "none"):
+            return {"error": "start: tool_access must be 'all', 'selected' or 'none'", "exit_code": 1}
+        anon_request = {"name": agent_loadouts.ANONYMOUS_NAME,
+                        "tool_access": explicit_access or ("selected" if picked else "all"),
+                        "enabled_tools": [str(t).strip() for t in picked if str(t).strip()],
+                        "disabled_tools": [str(t).strip() for t in (args.get("disabled_tools") or [])
+                                           if str(t).strip()] if isinstance(args.get("disabled_tools"), list) else []}
+    # Read-only wording earns the read-only subset of the starter's tools. It
+    # only ever narrows (so it cannot be an escalation), a command in the task
+    # defeats it, and tool_access: "all" in the call opts out.
+    from src.worker_preflight import task_is_read_only
+
+    read_only_subset = bool(anonymous and not explicit_access and not anon_request and task_is_read_only(task))
+    try:
+        capped, cap_notes = agent_loadouts.cap_to_starter(
+            effective if effective is not None else (anon_request or None), session_id, owner,
+            force=bool(anon_request), read_only=read_only_subset, policy=policy)
+    except ValueError as exc:
+        return {"error": f"start: {exc}", "blocked": True, "blocked_reason": "tools_beyond_starter",
+                "exit_code": 1}
+    if capped is not None:
+        effective = capped
+    subject = started_profile["name"] if started_profile else "this sub-agent"
+
     # A worker that cannot read, search or run anything will spend its whole
     # round budget explaining that. Refuse at launch rather than produce one.
     unusable = agent_loadouts.unusable_reason(effective) if effective else None
@@ -1490,7 +1528,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
             ),
             "blocked": True,
             "blocked_reason": "loadout_has_no_tools",
-            "loadout": agent_loadouts.summarize(started_profile),
+            **({"loadout": agent_loadouts.summarize(started_profile)} if started_profile else {}),
             "exit_code": 1,
         }
 
@@ -1539,7 +1577,7 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                      + " although the loadout lists " + ("them" if len(withheld) > 1 else "it") + ": "
                      + "; ".join(sorted(set(withheld.values()))) + ".")
     if missing_repo:
-        gap_note += (f" The task is repository work but loadout {started_profile['name']!r} does not grant "
+        gap_note += (f" The task is repository work but {subject!r} does not grant "
                      f"{' or '.join(missing_repo)}, so the worker cannot see git status, diffs or history"
                      + (" or commit on a branch" if "manage_agent_worktree" in missing_repo else "")
                      + ". If the task needs that, stop it and start it again with extra_tools="
@@ -1622,6 +1660,12 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
         # The saved loadout plus this run's extra tools, carried as the
         # worker's own policy; launch_worker persists it on the worker chat.
         launch["inline_profile"] = {**one_off, **({"model": start_model} if start_model else {})}
+    elif anonymous and capped is not None:
+        # No loadout, but a policy: the starter's own, narrowed. Persisted on
+        # the child by launch_worker, which caps it once more against the
+        # chat it reports to.
+        launch["inline_profile"] = {**capped, **({"model": start_model} if start_model else {}),
+                                    "anonymous": True}
     else:
         launch.update(profile_name=name or None, model=start_model or None)
     try:
@@ -1650,14 +1694,26 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
                (effective["tool_access"] if effective else "all"))
     # The full inventory stays out of both the log and the model's context: a
     # preview and a count say what was granted; `get` has the whole list.
+    if anonymous and effective is not None:
+        scope = ("the read-only subset of your own tools (pass tool_access: \"all\" for the whole set)"
+                 if read_only_subset else
+                 "your own tools narrowed by the tool_access/enabled_tools you passed" if anon_request else
+                 "your own tools and limits")
+        policy_line = f"no loadout named, so it got {scope}; it never has more than you"
+    elif anonymous:
+        policy_line = "no loadout named: the default chat policy (the starting chat is a person's)"
+    else:
+        policy_line = f"loadout {started_profile['name']!r}"
+    if cap_notes:
+        policy_line += ". Cut down to what this chat may use: " + "; ".join(cap_notes[:4])
     preflight = {
         "loadout": started_profile["name"] if started_profile else "ad-hoc worker",
         "model": result.get("model") or "inherit",
         "max_rounds": result.get("max_rounds"),
         "tools": granted if isinstance(granted, str) else list(granted[:_TOOL_LIST_PREVIEW]),
         "tool_count": None if isinstance(granted, str) else len(granted),
-        "skills": started_profile["skill_names"] if started_profile else [],
-        "allowed_mcp_servers": started_profile["allowed_mcp_servers"] if started_profile else [],
+        "skills": (effective or {}).get("skill_names", []) if effective else [],
+        "allowed_mcp_servers": (effective or {}).get("allowed_mcp_servers", []) if effective else [],
         **({"withheld_from_worker": withheld} if withheld else {}),
         **({"missing_repository_tools": missing_repo} if missing_repo else {}),
         **({"extra_tools": extra_report} if extra_report else {}),
@@ -1681,13 +1737,14 @@ async def manage_agent_loadout(content: str, session_id: Optional[str] = None,
     return {
         "response": (
             f"Started {name or 'worker'} in chat {result.get('session_name')} on {preflight['model']} "
-            f"with these tools: {tool_note}. It runs detached; progress shows on this chat's activity feed "
+            f"with these tools: {tool_note}. Policy: {policy_line}. It runs detached; progress shows on this chat's activity feed "
             f"and in action='status'.{wrap_note} If these tools cannot do the task, stop it and fix the "
             "loadout." + extra_note + stale_note + gap_note
             + " Its result returns to this chat when it finishes: end your turn, or use action='status' "
             "with wait_seconds to block until it is done."
         ),
         "preflight": preflight,
+        "policy": policy_line,
         **{key: value for key, value in result.items() if key != "preflight"},
         "exit_code": 0,
     }

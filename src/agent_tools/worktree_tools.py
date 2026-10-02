@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Dict
 
 from src.tool_utils import _parse_tool_args
@@ -26,8 +27,68 @@ _ACTIONS = ("status", "start", "commit", "diff", "request_publish",
 # Refused by policy rather than merely unknown: `remove` runs
 # `git worktree remove --force` and then prunes, which discards uncommitted
 # work. `cleanup` is the loss-free alternative: it refuses a dirty worktree
-# and deletes the branch only while another ref still holds its commits.
+# and deletes the branch only while another ref still holds its commits. Only
+# `cleanup discard_uncommitted=true` discards, and only on the person's own
+# words in a top-level chat; it saves a recovery snapshot ref first.
 _FORBIDDEN_ACTIONS = ("remove",)
+
+
+# 2026-10-02: the person wrote "clean up any other worktrees or branches ...
+# Even if they have existing uncommitted data." Cleanup refused three dirty
+# ones and the admin agent told them it had not discarded the work. The
+# person's own words now unlock a recoverable discard. A worker, a hand-back
+# or a harness note never does.
+_DISCARD_OK_RE = re.compile(
+    r"\b(?:discard\w*|throw(?:ing)?\s+(?:(?:it|them|that|those)\s+)?away)\b[^.\n]{0,60}"
+    r"\b(?:uncommitted|unsaved|untracked|changes|data|work)\b"
+    r"|\b(?:uncommitted|unsaved|untracked)\b[^.\n]{0,60}"
+    r"\b(?:discard\w*|throw\w*|delet\w+|wipe\w*|drop\w*|remov\w+|los[et]|lose)\b"
+    r"|\beven\s+(?:if|though|when|with)\b[^.\n]{0,60}\b(?:uncommitted|unsaved|untracked)\b"
+    r"|\beven\s+if\s+(?:they|it|those)\s+(?:has|have|had|contain\w*)\b[^.\n]{0,40}"
+    r"\b(?:changes|data|work)\b",
+    re.IGNORECASE,
+)
+_DISCARD_DENIED_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|never|without|not)\s+(?:\w+\s+){0,2}"
+    r"(?:discard\w*|throw\w*|delet\w+|wipe\w*|los[ei]\w*)\b",
+    re.IGNORECASE,
+)
+_HUMAN_SOURCES = frozenset({"", "user", "steer"})
+
+
+def _discard_authorised(ctx: dict) -> tuple[bool, str]:
+    """Whether this chat's person allowed discarding uncommitted work.
+
+    Needs a top-level chat (a worker has no person of its own) whose latest
+    real message, skipping harness notes, hand-backs and context envelopes,
+    says so. Returns ``(allowed, reason_when_not)``.
+    """
+    session_id = str(ctx.get("session_id") or "")
+    if not session_id:
+        return False, "this call is not tied to a chat with a person"
+    try:
+        from src.agent_tools.loadout_tools import _chat_history
+
+        is_worker, history = _chat_history(session_id, str(ctx.get("owner") or "") or None)
+    except Exception:  # noqa: BLE001 - unverifiable means not allowed
+        logger.debug("discard authorisation lookup failed", exc_info=True)
+        return False, "the chat could not be read to check"
+    if is_worker:
+        return False, "workers cannot discard work; only a top-level chat the person writes in can"
+    for message in reversed(history or []):
+        get = message.get if isinstance(message, dict) else (lambda k, d=None, m=message: getattr(m, k, d))
+        if get("role") != "user":
+            continue
+        meta = get("metadata") or {}
+        text = str(get("content") or "")
+        if (meta.get("trusted") is False or meta.get("kind") == "peer"
+                or str(meta.get("source") or "") not in _HUMAN_SOURCES
+                or text.lstrip().startswith("[Harness note")):
+            continue
+        if _DISCARD_OK_RE.search(text) and not _DISCARD_DENIED_RE.search(text):
+            return True, ""
+        return False, "the person's latest message does not say to discard uncommitted work"
+    return False, "no message from the person was found in this chat"
 
 
 def _err(message: str, **extra: Any) -> Dict[str, Any]:
@@ -101,7 +162,8 @@ def _similar_request_hint(request_id: str, cfg, ctx: Dict[str, Any] | None = Non
 _BRANCH_ACTIONS = ("commit", "diff", "request_publish", "checks", "cleanup")
 
 
-def _next_step(code: str, action: str, branch: str, repository: str = "") -> Dict[str, Any]:
+def _next_step(code: str, action: str, branch: str, repository: str = "",
+               can_discard: bool = False) -> Dict[str, Any]:
     """The call that fixes a failure the agent caused, so it doesn't spend
     rounds guessing the publish sequence (start → edit → commit →
     request_publish)."""
@@ -120,7 +182,10 @@ def _next_step(code: str, action: str, branch: str, repository: str = "") -> Dic
                          "main checkout; a linked worktree resolves to it).")}
     if code == "WORKTREE_DIRTY":
         return {"code": code, "next_action": {"action": "diff", "name": branch, **where},
-                "hint": "Commit the work (or ask the user what to do with it); cleanup never discards changes."}
+                "hint": ("Commit the work, or ask the user what to do with it. cleanup never discards "
+                         "changes unless the person's own words in this chat allow it"
+                         + ("; they do here: retry cleanup with discard_uncommitted=true, which saves "
+                            "a recovery snapshot ref first." if can_discard else "."))}
     if code == "MISSING_BRANCH":
         return {"code": code, "required_fields": ["name"],
                 "next_action": {"action": "status"},
@@ -330,8 +395,24 @@ class AgentWorktreeTool:
                 return await self._checks(args, ctx, cfg, branch, repository)
 
             if action == "cleanup":
-                return {"exit_code": 0, "cleanup": await service.cleanup(
-                    branch, cfg=cfg, repository=repository or None)}
+                discard = args.get("discard_uncommitted") in (True, "true", "True", 1)
+                if discard:
+                    allowed, why = _discard_authorised(ctx)
+                    if not allowed:
+                        return _err(
+                            "manage_agent_worktree cleanup: discard_uncommitted refused: " + why
+                            + ". The person has to say so in their own words in this chat (for "
+                            "example \"discard the uncommitted work\"). Nothing was removed.",
+                            code="DISCARD_NOT_AUTHORISED")
+                result = await service.cleanup(
+                    branch, cfg=cfg, repository=repository or None, discard_uncommitted=discard)
+                snap = result.get("discarded_snapshot")
+                if snap:
+                    logger.warning(
+                        "manage_agent_worktree: person-authorised discard session=%s branch=%s "
+                        "paths=%s snapshot=%s", ctx.get("session_id"), result.get("branch"),
+                        snap.get("paths"), snap.get("ref"))
+                return {"exit_code": 0, "cleanup": result}
 
             if action == "request_publish":
                 view = await service.request_publish(
@@ -391,8 +472,9 @@ class AgentWorktreeTool:
             code = getattr(exc, "code", None)
             hint = (_similar_request_hint(str(args.get("request_id") or ""), cfg, ctx)
                     if action in ("publish", "show_request") and "no approval request" in str(exc) else "")
+            can_discard = (code == "WORKTREE_DIRTY" and _discard_authorised(ctx)[0])
             return _err(f"manage_agent_worktree {action}: {exc}{hint}",
-                        **(_next_step(code, action, branch, repository) if code else {}))
+                        **(_next_step(code, action, branch, repository, can_discard) if code else {}))
 
         return _err("manage_agent_worktree: unreachable action")
 

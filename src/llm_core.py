@@ -713,9 +713,17 @@ def _is_retryable_connect_chunk(chunk: str) -> bool:
     return False
 
 
-# Jittered pause before the one replay of a 502/503 that arrived before any
-# output. Tests zero it.
+# Jittered pause before replaying an edge/gateway error that arrived before any
+# output; later replays wait longer (x _STREAM_STATUS_RETRY_BACKOFF per try).
+# Tests zero it.
 _STREAM_STATUS_RETRY_DELAY = (0.5, 1.5)
+_STREAM_STATUS_RETRY_BACKOFF = 5.0
+# 2026-10-02: one HTTP 520 ("ChatGPT Subscription is having an outage") failed
+# a Lead Engineer mid-run; the admin resumed it by hand 80 s later. 520-524 are
+# the Cloudflare edge failing to reach or hear from the origin, 529 is
+# "overloaded": like 502/503, nothing was produced, so a replay is safe.
+_STREAM_RETRY_STATUSES = frozenset({502, 503, 504, 520, 521, 522, 523, 524, 529})
+_STREAM_STATUS_RETRIES = 3
 
 
 def _is_retryable_upstream_status_chunk(chunk: str) -> bool:
@@ -747,7 +755,7 @@ def _is_retryable_upstream_status_chunk(chunk: str) -> bool:
             status = int(data.get("status") or 0)
         except (TypeError, ValueError):
             return False
-        if status not in (502, 503):
+        if status not in _STREAM_RETRY_STATUSES:
             return False
         text = f"{data.get('error') or ''} {data.get('text') or ''}".lower()
         return "cooldown active" not in text
@@ -784,7 +792,7 @@ def is_transient_upstream_error(err: BaseException) -> bool:
     if isinstance(err, socket.gaierror):
         return True
     status = getattr(err, "status_code", None)
-    if isinstance(status, int) and status in (502, 503, 504):
+    if isinstance(status, int) and status in _STREAM_RETRY_STATUSES:
         return True
     text = str(getattr(err, "detail", "") or err).lower()
     return any(marker in text for marker in _TRANSIENT_UPSTREAM_MARKERS)
@@ -3884,7 +3892,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
         tools = [t for t in (tools or []) if ((t.get("function") or t).get("name") in keep)] or None
         allowed_tools = None
     auth_retry_used = False
-    status_retry_used = False
+    status_retries = 0
     if chatgpt_subscription:
         headers, presend_error = await _chatgpt_presend_headers(headers, session_id)
         if presend_error:
@@ -3940,7 +3948,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     break
                 elif (
                     not emitted
-                    and not status_retry_used
+                    and status_retries < _STREAM_STATUS_RETRIES
                     and _is_retryable_upstream_status_chunk(chunk)
                     and not _is_host_dead(target_url)
                 ):
@@ -3948,7 +3956,7 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                     # disconnect/reset before headers") is the edge proxy
                     # failing to reach its backend, not the request being
                     # wrong: replay it once, after a jittered pause.
-                    status_retry_used = True
+                    status_retries += 1
                     status_retry = (_sse_error_data(chunk) or {}).get("status")
                     await inner.aclose()
                     break
@@ -3990,10 +3998,13 @@ async def stream_llm(url: str, model: str, messages: List[Dict], temperature: fl
                 continue
             if status_retry is not None:
                 lo, hi = _STREAM_STATUS_RETRY_DELAY
-                pause = random.uniform(lo, hi) if hi > 0 else 0.0
+                scale = _STREAM_STATUS_RETRY_BACKOFF ** (status_retries - 1)
+                pause = random.uniform(lo, hi) * scale if hi > 0 else 0.0
                 logger.warning(
-                    "[agent-timing] HTTP %s from %s model=%s before any output; retrying once in %.2fs",
-                    status_retry, _host_key(target_url), model, pause,
+                    "[agent-timing] HTTP %s from %s model=%s before any output; retrying "
+                    "(%d/%d) in %.2fs",
+                    status_retry, _host_key(target_url), model, status_retries,
+                    _STREAM_STATUS_RETRIES, pause,
                 )
                 if pause > 0:
                     await asyncio.sleep(pause)

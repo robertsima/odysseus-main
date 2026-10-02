@@ -785,6 +785,106 @@ def clamp(requested: Dict[str, Any], policy: Dict[str, Any]) -> Tuple[Dict[str, 
     return agent_profiles.validate_profiles([prof])[0], notes
 
 
+# A sub-agent started with no loadout. The title ("↳ Sub-agent: ...") and the
+# round budget are the only things it has of its own.
+ANONYMOUS_NAME = "Sub-agent"
+_CLAMP_MODEL_NOTES = ("models: cleared", "model: cleared")
+
+
+def starter_is_worker(session_id: Optional[str]) -> bool:
+    """Whether the chat is a worker another chat started (it has a parent)."""
+    if not session_id:
+        return False
+    from core.database import get_session_settings
+
+    try:
+        settings = get_session_settings(session_id) or {}
+    except Exception:
+        # Not strict: a store that cannot be read cannot persist the child's
+        # settings either (that save fails the start), and the start path has
+        # already read the starter's policy strictly in caller_policy.
+        logger.debug("loadout: could not read settings of %s", session_id, exc_info=True)
+        return False
+    return bool(settings.get("parent_session"))
+
+
+def cap_to_starter(profile: Optional[Dict[str, Any]], starter_session: Optional[str],
+                   owner: Optional[str], *, force: bool = False, read_only: bool = False,
+                   policy: Optional[Dict[str, Any]] = None) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    """The policy a worker gets: its loadout (or nothing) cut down to its starter's.
+
+    ``(profile, notes)``. A worker started by another worker never holds more
+    than that worker: tools (including every delegation launcher and MCP
+    server), memory, skills, model access, private vault, shell, delegation and
+    approval mode all go through :func:`clamp`, with the starter's own disabled
+    tools and owner baseline subtracted. With no loadout the child starts from
+    the starter's own policy rather than from "all".
+
+    2026-10-02: a Lead Engineer worker (52 selected tools, no delegation
+    launchers) called manage_agent_loadout start with an empty name. Nothing
+    was persisted for a nameless child, so its chat fell back to
+    ``tool_access: all`` -- bash, apply_patch, bulk_email, delegate_to_agent --
+    twice in one day. The named path was uncapped too: only authoring was.
+
+    A named loadout started from a person's chat (no parent) is returned
+    untouched: its loadouts are the person's own. A nameless child is capped
+    from any chat, since it has no loadout of its own to stand on: a chat the
+    person limited to selected tools would otherwise start an unlimited one.
+    ``force`` caps a named one too, for a start whose call narrowed the tools. ``read_only`` offers the read-only subset
+    of the starter's tools to a nameless child that did not pick its own.
+
+    Raises ValueError when nothing the profile asked for is left to grant.
+    """
+    if not starter_session or not (force or not profile or starter_is_worker(starter_session)):
+        return profile, []
+    if profile and profile.get("capped_for") == starter_session:
+        return profile, []
+    policy = policy or caller_policy(starter_session, owner)
+    anonymous = not profile
+    requested = {
+        # Today's defaults for a chat nobody configured; the clamp brings each
+        # down to the starter. The private vault stays off: a nameless child
+        # never had it, and the starter's grant is not the child's to inherit.
+        "name": ANONYMOUS_NAME, "tool_access": "all", "mcp_access": "all",
+        "memory_access": "write", "skill_access": "all", "model_access": "all",
+        "delegation_policy": "explicit", "max_parallel_workers": 1,
+        "approval_mode": policy["approval_mode"],
+        **(profile or {}),
+    }
+    if requested.get("approval_mode") in (None, "", "inherit"):
+        # "inherit" resolves on the child chat to the app default, which can be
+        # looser than the starter's own mode.
+        requested["approval_mode"] = policy["approval_mode"]
+    if read_only and anonymous and requested["tool_access"] == "all":
+        requested["tool_access"] = "selected"
+        requested["enabled_tools"] = sorted(read_only_tools())
+    stored_models = {k: requested.get(k) for k in ("model", "model_fallbacks", "allowed_models")}
+    capped, notes = clamp(requested, policy)
+    if tool_starved(notes):
+        raise ValueError(
+            "none of the tools this worker was given are available to the chat starting it, so it would "
+            "have no tools. " + "; ".join(n for n in notes if n.startswith(STARVED_NOTE)))
+    # The model a stored loadout names is its author's choice, and model_access
+    # is the switch for changing it later; clearing the choice here made every
+    # worker-started loadout run on its starter's model.
+    for key, value in stored_models.items():
+        if value:
+            capped[key] = value
+    notes = [n for n in notes if not n.startswith(_CLAMP_MODEL_NOTES)]
+    if policy.get("tool_access") == "all" and requested["tool_access"] == "all":
+        # "All the tools I have" when the starter has them all: keep the live
+        # "all" (new builtins and MCP tools included) minus what the starter is
+        # denied, instead of a snapshot of today's inventory.
+        capped["tool_access"] = "all"
+        capped["enabled_tools"] = []
+        capped["disabled_tools"] = sorted(set(requested.get("disabled_tools") or [])
+                                          | set(policy.get("denied_tools") or ()))
+    capped["capped_for"] = starter_session  # so a second pass on the same start is a no-op
+    if anonymous:
+        capped["anonymous"] = True
+    return capped, notes
+
+
 def _effective_tools(profile: Dict[str, Any]) -> Optional[Set[str]]:
     """The tool names a stored loadout grants, or None for ``tool_access: all``."""
     access = profile.get("tool_access") or "all"

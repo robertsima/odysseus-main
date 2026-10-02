@@ -184,3 +184,29 @@ def test_other_routes_are_unchanged(monkeypatch):
                       session_id="chat-other")
     assert other["top"]["allowed_tools"] is None and other["candidate"]["allowed_tools"] is None
     assert not any("Tools you can call this turn" in str(m.get("content")) for m in other["messages"])
+
+
+def test_a_new_mcp_tool_brings_its_server_group_in_the_same_change():
+    """2026-10-02: one file server's tools arrived in three requests within a
+    minute, each a full uncached re-read of the prompt."""
+    files = [_schema(f"mcp__files__{n}") for n in ("list_files", "get_file", "get_file_libraries")]
+
+    def group(new_names):
+        return files if any(n.startswith("mcp__files__") for n in new_names) else []
+
+    stable_tools.declare("s1", [_schema("read_file")], group=group)
+    declared, allowed = stable_tools.declare("s1", [_schema("read_file"), files[0]], group=group)
+    names = [s["function"]["name"] for s in declared]
+    assert names == ["read_file", "mcp__files__list_files", "mcp__files__get_file", "mcp__files__get_file_libraries"]
+    assert allowed == ["read_file", "mcp__files__list_files"]
+
+    again, _ = stable_tools.declare("s1", [_schema("read_file"), files[2]], group=group)
+    assert again == declared  # nothing new: the tool block stays byte-identical
+
+
+def test_a_group_that_raises_is_ignored():
+    def boom(_names):
+        raise RuntimeError("x")
+
+    declared, _ = stable_tools.declare("s2", [_schema("mcp__x__a")], group=boom)
+    assert [s["function"]["name"] for s in declared] == ["mcp__x__a"]
