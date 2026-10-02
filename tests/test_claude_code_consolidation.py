@@ -594,14 +594,14 @@ def test_bundled_source_prefers_category_directory(tmp_path):
     assert _bundled_source(str(tmp_path), "dev", "flat").endswith("skills/flat")
 
 
-def test_claude_code_delegation_skill_is_bundled_and_parseable():
+def test_claude_code_delegation_skill_is_shipped_and_parseable():
     from services.memory.skill_format import Skill
     from src import builtin_skills
     from src.runtime_paths import get_app_root
 
-    names = [entry[1] for entry in builtin_skills._BUNDLED_SKILLS]
-    assert "claude-code-delegation" in names
-    path = Path(get_app_root()) / "skills" / "dev" / "claude-code-delegation" / "SKILL.md"
+    # 2026-10-01: owned by the claude-code integration, not seeded as core.
+    assert builtin_skills._LEGACY_INTEGRATION_SKILLS["claude-code-delegation"] == "claude-code"
+    path = Path(get_app_root()) / "integrations" / "claude-code" / "skills" / "claude-code-delegation" / "SKILL.md"
     skill = Skill.from_markdown(path.read_text(encoding="utf-8"), path=str(path))
     assert skill.name == "claude-code-delegation"
     assert "delegate_to_claude_code" in path.read_text(encoding="utf-8")

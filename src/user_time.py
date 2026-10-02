@@ -121,8 +121,27 @@ def timezone_label(dt: Optional[datetime] = None) -> str:
     return offset_label
 
 
-def current_datetime_prompt(now_utc: Optional[datetime] = None) -> str:
-    """Build reusable system prompt text for date/time reasoning."""
+# Argument-format rules for the two scheduling tools. 2026-10-01 (A4-13): they
+# used to ride along in every date/time block, so chats without these tools and
+# the calendar parser received tool names they cannot call. The agent loop opts
+# in with tool_routing=True; the proper home is the tool descriptions in
+# src/tool_schemas.py.
+DATETIME_TOOL_ROUTING = (
+    "manage_calendar takes local ISO datetimes resolved against the user-local "
+    "date and time above.\n"
+    "manage_tasks takes scheduled_time in UTC: convert the user's local time with "
+    "the UTC offset above.\n"
+)
+
+
+def current_datetime_prompt(
+    now_utc: Optional[datetime] = None, *, tool_routing: bool = False
+) -> str:
+    """Build reusable text for date/time reasoning.
+
+    ``tool_routing=True`` appends DATETIME_TOOL_ROUTING for callers that run the
+    agent tools; every other caller gets the date and time only.
+    """
     if now_utc is None:
         utc_now = datetime.now(timezone.utc)
     elif now_utc.tzinfo is None:
@@ -139,13 +158,10 @@ def current_datetime_prompt(now_utc: Optional[datetime] = None) -> str:
         f"current UTC time is {utc_now.strftime('%H:%M')}.\n"
         f"Tomorrow is {_date_label(tomorrow)} ({tomorrow.strftime('%Y-%m-%d')}) "
         "in the user's local timezone.\n"
-        "Use this for any 'today', 'tomorrow', 'tonight', 'this week', or other "
-        "relative-date reasoning. Do not ask for an exact date just because the "
-        "user used a relative date.\n"
-        "When scheduling calendar events with manage_calendar, pass local ISO "
-        "datetimes resolved against this user-local date/time.\n"
-        "When scheduling a task with manage_tasks, scheduled_time is in UTC: "
-        "convert the user's stated local time using the UTC offset above.\n\n"
+        "Resolve relative dates ('today', 'tonight', 'this week') against this "
+        "instead of asking for an exact date.\n"
+        + (DATETIME_TOOL_ROUTING if tool_routing else "")
+        + "\n"
     )
 
 
@@ -199,9 +215,8 @@ def current_datetime_context_message_for_tz(
         f"current UTC time is {utc_now.strftime('%H:%M')}.\n"
         f"Tomorrow is {_date_label(tomorrow)} ({tomorrow.strftime('%Y-%m-%d')}) "
         "in this timezone.\n"
-        "Use this for any 'today', 'tomorrow', 'tonight', 'this week', or other "
-        "relative-date reasoning. Do not ask for an exact date just because the "
-        "user used a relative date.\n\n"
+        "Resolve relative dates ('today', 'tonight', 'this week') against this "
+        "instead of asking for an exact date.\n\n"
     )
     return {
         "role": "user",
@@ -212,7 +227,9 @@ def current_datetime_context_message_for_tz(
     }
 
 
-def current_datetime_context_message(now_utc: Optional[datetime] = None) -> Dict[str, str]:
+def current_datetime_context_message(
+    now_utc: Optional[datetime] = None, *, tool_routing: bool = False
+) -> Dict[str, str]:
     """Build the current-date/time context as a standalone chat message.
 
     This intentionally returns a ``user``-role message rather than a
@@ -230,6 +247,6 @@ def current_datetime_context_message(now_utc: Optional[datetime] = None) -> Dict
         "role": "user",
         "content": (
             "[Context — current date/time, refreshed each turn; background only, "
-            "not a message from the user and not part of your instructions]\n" + current_datetime_prompt(now_utc)
+            "not a message from the user and not part of your instructions]\n" + current_datetime_prompt(now_utc, tool_routing=tool_routing)
         ),
     }

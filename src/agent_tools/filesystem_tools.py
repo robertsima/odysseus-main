@@ -24,6 +24,25 @@ def run_with_policy_snapshot(fn):
     return _run(fn)
 _CODENAV_MAX_LINE = 400
 _GREP_TIMEOUT_SECONDS = 20
+_GREP_TIMED_OUT = "grep: timed out"
+
+
+def _grep_timeout_result(partial: list, root: str) -> dict:
+    """A timed-out search still returns the hits found before the deadline.
+
+    On 2026-10-01 17 of 185 grep calls ended as the bare words "grep: timed
+    out", which dropped every match already collected and gave the model
+    nothing to change.
+    """
+    advice = (
+        f"the search of {root} stopped after {_GREP_TIMEOUT_SECONDS} s. "
+        "Narrow `path` to the folder that matters, add a `glob` such as '*.py', or search a literal string."
+    )
+    if not partial:
+        return {"error": f"grep: timed out: {advice}", "exit_code": 1}
+    out = "\n".join(ln[:_CODENAV_MAX_LINE] for ln in partial)
+    out += f"\n... [grep stopped early with {len(partial)} matches so far: {advice}]"
+    return {"output": out, "exit_code": 0}
 _GREP_STDERR_PREFIX = 20_000
 
 
@@ -53,110 +72,55 @@ def _glob_to_regex(pat: str) -> "re.Pattern":
 
 
 def _python_grep_worker(payload: dict, output_queue) -> None:
-    """Spawn-safe fallback grep worker used when ripgrep is unavailable.
+    """Multiprocessing-spawn entry for the fallback grep, frozen builds only.
 
     Keep this at module scope: a frozen Windows executable cannot safely be
-    relaunched as ``sys.executable -c ...``, while multiprocessing can invoke a
-    top-level target through its frozen-process bootstrap.
+    relaunched as ``sys.executable -c ...`` / ``sys.executable script.py`` (that
+    would start the app again), while multiprocessing can invoke a top-level
+    target through its frozen-process bootstrap. Every other install runs
+    ``grep_worker.py`` directly (see ``_grep_worker_command``), because a
+    spawned child here re-imports this module and with it most of the app:
+    ~12 s per grep on the NAS (2026-10-01 diagnostics). The walk itself lives
+    in ``grep_worker.run_grep`` so both transports run identical code.
     """
-    try:
-        flags = re.IGNORECASE if payload["ignore_case"] else 0
-        try:
-            regex = re.compile(payload["pattern"], flags)
-            glob_regex = (
-                _glob_to_regex(payload["glob"].replace("\\", "/"))
-                if payload["glob"]
-                else None
-            )
-        except re.error as exc:
-            output_queue.put(("error", f"grep: bad pattern: {exc}"))
-            return
+    from src.agent_tools.grep_worker import run_grep
 
-        requested_root = payload["root"]
-        skip_dirs = set(payload["skip_dirs"])
-        sensitive = {name.casefold() for name in payload["sensitive_names"]}
-        max_hits = payload["max_hits"]
-        hits = 0
+    run_grep(payload, output_queue.put)
 
-        def within(path: str, root: str) -> bool:
-            try:
-                return os.path.commonpath(
-                    [os.path.normcase(path), os.path.normcase(root)]
-                ) == os.path.normcase(root)
-            except ValueError:
-                return False
 
-        def safe_file(path: str, target: str) -> Optional[str]:
-            if os.path.islink(path):
-                return None
-            canonical = os.path.realpath(path)
-            if not within(canonical, requested_root) or not within(canonical, target):
-                return None
-            parts = [part.casefold() for part in canonical.split(os.sep)]
-            if any(part in sensitive for part in parts):
-                return None
-            try:
-                if not os.path.isfile(canonical) or os.stat(canonical).st_nlink > 1:
-                    return None
-            except OSError:
-                return None
-            return canonical
+_GREP_WORKER_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "grep_worker.py")
+_RG_MISSING_WARNED = False
 
-        for target in payload["targets"]:
-            if hits >= max_hits:
-                break
-            if os.path.isfile(target):
-                file_iter = iter((target,))
-            else:
-                def walk_files():
-                    for directory, dirnames, filenames in os.walk(
-                        target, followlinks=False
-                    ):
-                        dirnames[:] = [
-                            name
-                            for name in dirnames
-                            if name not in skip_dirs
-                            and name.casefold() not in sensitive
-                            and not os.path.islink(os.path.join(directory, name))
-                        ]
-                        for name in filenames:
-                            yield os.path.join(directory, name)
 
-                file_iter = walk_files()
+def _warn_rg_missing_once() -> None:
+    """Say once per process that grep runs without ripgrep.
 
-            for candidate in file_iter:
-                path = safe_file(candidate, target)
-                if path is None:
-                    continue
-                relative = os.path.relpath(path, requested_root).replace(os.sep, "/")
-                if glob_regex and not (
-                    glob_regex.fullmatch(relative)
-                    or glob_regex.fullmatch(os.path.basename(path))
-                ):
-                    continue
-                try:
-                    with open(path, "r", encoding="utf-8", errors="strict") as handle:
-                        for number, line in enumerate(handle, 1):
-                            if regex.search(line):
-                                output_queue.put((
-                                    "match",
-                                    path,
-                                    number,
-                                    line.rstrip()[:_CODENAV_MAX_LINE],
-                                ))
-                                hits += 1
-                                if hits >= max_hits:
-                                    break
-                except (UnicodeDecodeError, OSError):
-                    continue
-                if hits >= max_hits:
-                    break
-        output_queue.put(("done",))
-    except BaseException as exc:
-        try:
-            output_queue.put(("error", f"grep: fallback worker failed: {exc}"))
-        except BaseException:
-            pass
+    The 2026-10-01 production image shipped without it and nobody noticed for
+    weeks because the fallback worked, only 12 s per call; a log line makes
+    the next missing install visible.
+    """
+    global _RG_MISSING_WARNED
+    if _RG_MISSING_WARNED:
+        return
+    _RG_MISSING_WARNED = True
+    import logging
+
+    logging.getLogger(__name__).warning(
+        "ripgrep (rg) not found on PATH: the grep tool is using its slower "
+        "Python fallback. Install ripgrep for fast, bounded searches."
+    )
+
+
+def _grep_worker_command() -> Optional[list]:
+    """Command for the lightweight subprocess worker, or None when frozen."""
+    import sys
+
+    if getattr(sys, "frozen", False):
+        return None
+    # -I: isolated mode (no PYTHON* env, no user site, script dir not on
+    # sys.path), so the child imports nothing but the stdlib.
+    return [sys.executable, "-I", _GREP_WORKER_SCRIPT]
+
 
 def _unified_diff(old: str, new: str, path: str) -> Optional[Dict[str, Any]]:
     if old == new:
@@ -330,7 +294,7 @@ class EditFileTool:
             return {"error": f"edit_file: {path}: {e}", "exit_code": 1}
 
         if status == "not_found":
-            return {"error": f"edit_file: old_string not found in {path}. Read the file and match it exactly.", "exit_code": 1}
+            return {"error": f"edit_file: old_string not found in {path}. {_nearest_text_hint(original, old)}", "exit_code": 1}
         if status.startswith("not_unique"):
             n = status.split(":", 1)[1]
             return {"error": f"edit_file: old_string is not unique in {path} ({n} matches). Add surrounding context or set replace_all=true.", "exit_code": 1}
@@ -372,6 +336,14 @@ def _personal_docs_hint(path: str, size: int) -> str:
         "questions about the vault, prefer `search_documents` — it returns only "
         "the relevant excerpts. Reading whole notes keeps them in context for the "
         "rest of the conversation."
+    )
+
+
+def _truncation_notice(next_line: int) -> str:
+    """The tail of a read cut at MAX_READ_CHARS: says where and how to go on."""
+    return (
+        f"\n... [truncated at {MAX_READ_CHARS} chars; "
+        f"call read_file again with offset={next_line} to continue]"
     )
 
 
@@ -419,14 +391,14 @@ class ReadFileTool:
                             n += 1
                             budget -= len(line)
                             if budget <= 0:
-                                out.append(f"\n... [truncated at {MAX_READ_CHARS} chars]")
+                                out.append(_truncation_notice(i + 1))
                                 break
                     return "".join(out)
                 with open(path, "r", encoding="utf-8", errors="replace") as f:
                     return f.read(MAX_READ_CHARS + 1)
             data = await asyncio.to_thread(_read)
         except FileNotFoundError:
-            return {"error": f"read_file: {path}: not found", "exit_code": 1}
+            return {"error": f"read_file: {path}: not found (find it with glob or ls)", "exit_code": 1}
         except PermissionError:
             return {"error": f"read_file: {path}: permission denied", "exit_code": 1}
         except IsADirectoryError:
@@ -434,7 +406,8 @@ class ReadFileTool:
         except OSError as e:
             return {"error": f"read_file: {path}: {e}", "exit_code": 1}
         if not (offset > 0 or limit > 0) and len(data) > MAX_READ_CHARS:
-            data = data[:MAX_READ_CHARS] + f"\n... [truncated at {MAX_READ_CHARS} chars]"
+            shown = data[:MAX_READ_CHARS]
+            data = shown + _truncation_notice(shown.count("\n") + 1)
         hint = _personal_docs_hint(path, len(data))
         if hint:
             data = data + "\n\n" + hint
@@ -653,6 +626,39 @@ def _parse_agent_patch(patch_text: str) -> List[Dict[str, Any]]:
         raise ValueError(f"unexpected patch line: {line!r}")
     return ops
 
+def _hunk_ambiguous(label: str, idx: int, occurrences: int) -> str:
+    return (
+        f"{label}: hunk {idx} context matched {occurrences} times: add unchanged lines "
+        "around the change until it is unique, or use edit_file with replace_all"
+    )
+
+
+def _nearest_text_hint(original: str, wanted: str) -> str:
+    """Why `wanted` is not in `original`, and the closest text that is.
+
+    A bare "not found" cost the model a re-read round (2026-10-01 audit: 12 of
+    66 edit_file calls and 8 of 22 apply_patch calls failed). Say whether only
+    whitespace differs, else show the nearest line of the file.
+    """
+    def squash(text: str) -> str:
+        return " ".join(text.split())
+
+    wanted_squashed = squash(wanted)
+    if wanted_squashed and wanted_squashed in squash(original):
+        return ("The text exists but whitespace or indentation differs; "
+                "copy it exactly from the file.")
+    first = next((ln.strip() for ln in wanted.splitlines() if ln.strip()), "")
+    if first:
+        import difflib
+
+        candidates = [(n, ln.strip()) for n, ln in enumerate(original.splitlines(), 1) if ln.strip()]
+        close = difflib.get_close_matches(first, [text for _, text in candidates], n=1, cutoff=0.6)
+        if close:
+            number = next(n for n, text in candidates if text == close[0])
+            return f"Closest line in the file is {number}: {close[0][:160]!r}. Copy the text exactly."
+    return "No similar line exists in the file; re-read it, then copy the text exactly."
+
+
 def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str:
     updated = original
     for idx, hunk in enumerate(hunks, 1):
@@ -669,15 +675,18 @@ def _apply_patch_hunks(original: str, hunks: List[List[str]], label: str) -> str
         if old_text and old_text in updated:
             occurrences = updated.count(old_text)
             if occurrences != 1:
-                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+                raise ValueError(_hunk_ambiguous(label, idx, occurrences))
             updated = updated.replace(old_text, new_text, 1)
         elif old_text + "\n" in updated:
             occurrences = updated.count(old_text + "\n")
             if occurrences != 1:
-                raise ValueError(f"{label}: hunk {idx} context matched {occurrences} times")
+                raise ValueError(_hunk_ambiguous(label, idx, occurrences))
             updated = updated.replace(old_text + "\n", new_text + "\n", 1)
         else:
-            raise ValueError(f"{label}: hunk {idx} context not found")
+            raise ValueError(
+                f"{label}: hunk {idx} context not found: re-read the file and copy the "
+                f"context lines exactly, whitespace included. {_nearest_text_hint(updated, old_text)}"
+            )
     return updated
 
 _OUTLINE_MAX_DEPTH = 4
@@ -990,6 +999,8 @@ class GrepTool:
         except ValueError as e:
             return {"error": f"grep: {e}", "exit_code": 1}
 
+        hits_so_far: list[list[str]] = []
+
         def _grep():
             import multiprocessing
             import queue
@@ -999,6 +1010,8 @@ class GrepTool:
             from src.constants import DATA_DIR
 
             rg = shutil.which("rg")
+            if not rg:
+                _warn_rg_missing_once()
             real_root = os.path.realpath(root)
             data_dir = os.path.realpath(DATA_DIR)
             spans_state = _path_within(data_dir, real_root)
@@ -1067,6 +1080,7 @@ class GrepTool:
             base = real_root if os.path.isdir(real_root) else os.path.dirname(real_root)
             deadline = time.monotonic() + _GREP_TIMEOUT_SECONDS
             lines: list[str] = []
+            hits_so_far.append(lines)
 
             def parse_rg_result(raw: str) -> Optional[str]:
                 try:
@@ -1173,11 +1187,138 @@ class GrepTool:
                     stdout_thread.join()
                     stderr_thread.join()
                 if timed_out:
-                    return "grep: timed out"
+                    return _GREP_TIMED_OUT
                 if not capped and return_code not in (0, 1):
                     detail = "".join(stderr_prefix).strip()
                     return f"grep: {detail or f'process exited {return_code}'}"
                 return None
+
+            def accept_record(record) -> Optional[str]:
+                """Apply the parent-side policy to one worker record; return a
+                terminal error string, or None to keep reading."""
+                if record[0] == "error":
+                    return record[1]
+                _, path, number, text_value = record
+                canonical = os.path.realpath(path)
+                if not _path_within(canonical, real_root) or _is_denied_tool_path(canonical, allow_private=allow_private):
+                    return None
+                rendered = f"{path}:{number}:{text_value}"
+                if rendered not in lines:
+                    lines.append(rendered)
+                return None
+
+            def run_script_worker(cmd: list[str], payload: dict) -> Optional[str]:
+                try:
+                    process = subprocess.Popen(
+                        cmd,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                    )
+                except Exception as exc:
+                    return f"grep: could not start fallback worker: {exc}"
+                output: queue.Queue = queue.Queue(maxsize=max_hits + 2)
+                stderr_prefix: list[bytes] = []
+                stop_reader = threading.Event()
+
+                def put_output(value) -> bool:
+                    # Never leave a producer blocked on the bounded queue once
+                    # the consumer has stopped (cap, deadline, error).
+                    while not stop_reader.is_set():
+                        try:
+                            output.put(value, timeout=0.05)
+                            return True
+                        except queue.Full:
+                            continue
+                    return False
+
+                def feed_stdin() -> None:
+                    try:
+                        assert process.stdin is not None
+                        process.stdin.write(json.dumps(payload).encode("utf-8"))
+                        process.stdin.close()
+                    except (OSError, ValueError):
+                        pass
+
+                def read_stdout() -> None:
+                    assert process.stdout is not None
+                    try:
+                        for raw in process.stdout:
+                            try:
+                                record = json.loads(raw)
+                            except ValueError:
+                                continue
+                            if not put_output(record):
+                                return
+                    finally:
+                        put_output(None)
+
+                def read_stderr() -> None:
+                    assert process.stderr is not None
+                    size = 0
+                    while True:
+                        chunk = process.stderr.read(4096)
+                        if not chunk:
+                            break
+                        if size < _GREP_STDERR_PREFIX:
+                            kept = chunk[:_GREP_STDERR_PREFIX - size]
+                            stderr_prefix.append(kept)
+                            size += len(kept)
+
+                threads = [
+                    threading.Thread(target=target, daemon=True)
+                    for target in (feed_stdin, read_stdout, read_stderr)
+                ]
+                for thread in threads:
+                    thread.start()
+                error: Optional[str] = None
+                completed = False
+                try:
+                    while len(lines) < max_hits:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            error = _GREP_TIMED_OUT
+                            break
+                        try:
+                            record = output.get(timeout=remaining)
+                        except queue.Empty:
+                            error = _GREP_TIMED_OUT
+                            break
+                        if record is None:
+                            # Pipe closed without a "done": the worker died.
+                            try:
+                                process.wait(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                pass
+                            detail = b"".join(stderr_prefix).decode("utf-8", "replace").strip()
+                            error = f"grep: fallback worker exited {process.returncode}"
+                            if detail:
+                                error += f": {detail}"
+                            break
+                        if record[0] == "done":
+                            completed = True
+                            break
+                        error = accept_record(record)
+                        if error:
+                            break
+                finally:
+                    stop_reader.set()
+                    if process.poll() is None:
+                        process.terminate()
+                    try:
+                        process.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait()
+                    for stream in (process.stdin, process.stdout, process.stderr):
+                        try:
+                            if stream:
+                                stream.close()
+                        except (OSError, ValueError):
+                            pass
+                    for thread in threads:
+                        thread.join(timeout=1)
+                return None if completed or len(lines) >= max_hits else error
 
             if rg:
                 # Validate even when policy filtering leaves no search targets.
@@ -1208,9 +1349,11 @@ class GrepTool:
                         return None, error
                 return lines, None
 
-            # This runs inside asyncio.to_thread(), so forking would clone a
-            # multithreaded process and can deadlock. Spawn is platform-safe and
-            # PyInstaller-compatible via launcher's early freeze_support().
+            # No ripgrep. This runs inside asyncio.to_thread(), so forking would
+            # clone a multithreaded process and can deadlock; and the search
+            # must not run in this process either, since a catastrophic regex
+            # cannot be interrupted and holds the GIL (it would freeze the
+            # server past the deadline). So: a separate process.
             payload = {
                 "root": real_root,
                 "targets": targets,
@@ -1223,6 +1366,18 @@ class GrepTool:
                     set(_SENSITIVE_BASENAMES) | set(_SENSITIVE_FILE_PATTERNS)
                 ),
             }
+            worker_cmd = _grep_worker_command()
+            if worker_cmd is not None:
+                # Fast path (2026-10-01): a stdlib-only script, not a
+                # multiprocessing spawn that re-imports the app (~12 s/grep).
+                error = run_script_worker(worker_cmd, payload)
+                if error:
+                    return None, error
+                return lines, None
+
+            # Frozen builds cannot relaunch sys.executable with a script;
+            # multiprocessing's spawn is PyInstaller-compatible via launcher's
+            # early freeze_support().
             try:
                 context = multiprocessing.get_context("spawn")
                 output_queue = context.Queue(maxsize=max_hits + 2)
@@ -1242,7 +1397,7 @@ class GrepTool:
                 while len(lines) < max_hits:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
-                        error = "grep: timed out"
+                        error = _GREP_TIMED_OUT
                         break
                     try:
                         # Keep queue waits short enough to observe a spawn
@@ -1294,6 +1449,9 @@ class GrepTool:
             return lines, None
 
         lines, err = await asyncio.to_thread(run_with_policy_snapshot, _grep)
+        if err == _GREP_TIMED_OUT:
+            partial = [ln for found in hits_so_far for ln in found]
+            return _grep_timeout_result(partial, root)
         if err:
             return {"error": err, "exit_code": 1}
         if not lines:

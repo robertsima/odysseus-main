@@ -213,6 +213,37 @@ def _content_tokens(text: str) -> list:
     return [w for w in words if len(w) >= 3 and w not in _STOPWORDS]
 
 
+def _recent_turns_for_query(session: Any, message: str, max_turns: int = 4, max_chars: int = 300) -> str:
+    """The last two exchanges of the chat, for the web-search query writer.
+
+    Human messages and assistant replies only: injected context blocks and
+    harness directives are user-role messages too and are skipped. The turn
+    being answered is already the last user message in the history, so it is
+    dropped.
+    """
+    history = getattr(session, "history", None)
+    if not isinstance(history, list):
+        return ""
+    turns: List[str] = []
+    for msg in reversed(history):
+        if not isinstance(msg, dict) or msg.get("role") not in ("user", "assistant"):
+            continue
+        if (msg.get("metadata") or {}).get("trusted") is False:
+            continue
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = " ".join(b.get("text", "") for b in content if isinstance(b, dict))
+        text = " ".join(str(content or "").split())
+        if not text or text.startswith(("UNTRUSTED SOURCE DATA", "[Context", "[Harness directive", "[Tool")):
+            continue
+        if not turns and msg.get("role") == "user" and text == " ".join(str(message or "").split()):
+            continue
+        turns.append(f"{msg['role']}: {text[:max_chars]}")
+        if len(turns) >= max_turns:
+            break
+    return "\n".join(reversed(turns))
+
+
 class ChatProcessor:
     def __init__(self, memory_manager, personal_docs_manager, memory_vector=None, skills_manager=None):
         self.memory_manager = memory_manager
@@ -576,24 +607,42 @@ class ChatProcessor:
                 search_query = fallback_query
 
                 try:
-                    generated_query = llm_call(
+                    # The extractor used to see the bare message with no date, so
+                    # "latest" resolved to the training year and a follow-up like
+                    # "what about the price?" searched for nothing (audit A4-14,
+                    # 2026-10-01). 50 tokens also came back empty from reasoning
+                    # models, which spend them thinking.
+                    from src.deep_research import current_date_context
+                    from src.text_helpers import strip_think
+
+                    _recent = _recent_turns_for_query(session, message)
+                    _query_input = f"Latest message:\n{message}"
+                    if _recent:
+                        _query_input = f"Recent messages:\n{_recent}\n\n{_query_input}"
+                    generated_query = strip_think(llm_call(
                         t_url,
                         t_model,
                         [
                             {
                                 "role": "system",
                                 "content": (
-                                    "Extract a concise search query from the user's message. "
-                                    "Reply ONLY with the query."
+                                    current_date_context()
+                                    + "Write one web search query for the user's latest message. "
+                                    "Resolve pronouns and \"that\" from the recent messages. For "
+                                    "\"latest\" or \"current\" use the date above. Reply with the "
+                                    "query only."
                                 ),
                             },
-                            {"role": "user", "content": message},
+                            {"role": "user", "content": _query_input},
                         ],
                         headers=t_headers,
                         temperature=0.1,
-                        max_tokens=50,
+                        max_tokens=256,
                         timeout=15,
-                    ).strip()
+                    )).strip()
+                    generated_query = next(
+                        (ln.strip() for ln in generated_query.splitlines() if ln.strip()), ""
+                    )
 
                     if generated_query:
                         # LLM successfully generated a non-empty query -> use the generated query
@@ -681,7 +730,20 @@ class ChatProcessor:
         # call the tool anyway, so the index would be noise.
         if agent_mode and not incognito and use_skills and self.skills_manager:
             try:
-                idx = self.skills_manager.index_for(owner=owner)
+                # The same filter and loadout scope the agent loop applies, so
+                # this index and the loop's never disagree about a skill. It
+                # fails open: an error here shows what was shown before.
+                from src import skill_toolsets
+
+                _vis, _scope = skill_toolsets.session_skill_context(getattr(session, "id", None))
+                idx = skill_toolsets.scope_skills(
+                    self.skills_manager.index_for(
+                        owner=owner,
+                        active_toolsets=None if _vis.active_toolsets is None else list(_vis.active_toolsets),
+                        available_integrations=_vis.available_integrations,
+                    ),
+                    _scope,
+                )
             except Exception as e:
                 logger.debug(f"Skills index unavailable: {e}")
                 idx = []

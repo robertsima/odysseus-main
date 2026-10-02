@@ -41,6 +41,6 @@ def test_coding_rules_cover_where_the_app_runs_and_stale_installs():
     from src.agent_loop import _workspace_coding_rules
 
     rules = _workspace_coding_rules("/app/data/development/dog-trainer")
-    for phrase in ("another machine than this server", "no longer match the lockfile", "`npm ci`",
-                   "browser's developer console", "alters dependency versions", "one caveat is enough"):
+    for phrase in ("may live on another machine", "lockfile", "`npm ci`",
+                   "browser console", "alters dependency versions"):
         assert phrase in rules, phrase

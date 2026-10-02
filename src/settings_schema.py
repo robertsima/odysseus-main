@@ -1192,6 +1192,21 @@ register_all([
         group="Tools", env_override="ODYSSEUS_BROWSER_ISOLATED",
     ),
     SettingSpec(
+        key="penpot_api_url", type="string", label="Penpot URL",
+        help="Base URL of your Penpot instance as this server reaches it, for example http://penpot-frontend:8080. Used by the Penpot Studio tools.",
+        group="Penpot", placeholder="http://penpot-frontend:8080",
+    ),
+    SettingSpec(
+        key="penpot_access_token", type="secret", label="Penpot access token",
+        help="A Penpot access token (Penpot > Profile > Access tokens). Stored here and never shown again.",
+        group="Penpot", sensitive=True,
+    ),
+    SettingSpec(
+        key="penpot_public_url", type="string", label="Penpot public URL",
+        help="Address you open Penpot at in a browser, when it differs from the URL above. Used for links the agent shows you.",
+        group="Penpot", placeholder="https://penpot.example.com",
+    ),
+    SettingSpec(
         key="startup_warmups_enabled", type="bool", label="Warm services at startup",
         help="Prepare the tool index and model endpoints during startup for a faster first request, at the cost of a slower boot.",
         group="System", env_override="ODYSSEUS_STARTUP_WARMUPS",

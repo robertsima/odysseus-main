@@ -14,6 +14,7 @@ Frontmatter shape (YAML):
     tags: [git, github]
     platforms: [linux, macos]            # optional
     requires_toolsets: []                # optional
+    requires_integration: penpot         # optional; hidden unless that integration is available
     fallback_for_toolsets: []            # optional
     status: published                    # draft | published
     confidence: 0.8                      # 0..1
@@ -55,6 +56,18 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+# `source` values that mark a skill the app itself ships: ownerless, readable
+# by every user, upgraded by the seeder, never edited through manage_skills.
+# `bundled` is core (auto-installed); `curated` is installed from the
+# "Recommended skills" catalog; `integration` belongs to an integration package
+# (see requires_integration). Added 2026-10-01 when bundled split into tiers.
+APP_SHIPPED_SOURCES = ("bundled", "curated", "integration")
+
+
+def is_app_shipped_source(source) -> bool:
+    return source in APP_SHIPPED_SOURCES
+
+
 # ---------------------------------------------------------------------------
 # Slugify
 # ---------------------------------------------------------------------------
@@ -82,6 +95,9 @@ def slugify(text: str, fallback: str = "skill") -> str:
 
 _FM_KEY_RE = re.compile(r"^([a-z_][a-z0-9_]*):\s*(.*)$", re.IGNORECASE)
 _FM_BLOCK_LIST_RE = re.compile(r"^\s*-\s*(.*)$")
+# An indented `key: value` line: a child of the open top-level key (the
+# agentskills layout nests version/category/status/... under `metadata:`).
+_FM_NESTED_KEY_RE = re.compile(r"^[ \t]+([a-z_][a-z0-9_-]*):\s*(.*)$", re.IGNORECASE)
 
 
 def _parse_scalar(raw: str) -> Any:
@@ -161,18 +177,41 @@ def parse_frontmatter(text: str) -> tuple[Dict[str, Any], str]:
     body = text[end + 4:].lstrip("\n")
     fm: Dict[str, Any] = {}
     pending_key: Optional[str] = None
+    nested_key: Optional[str] = None
     for line in fm_text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         m = _FM_KEY_RE.match(line)
         if m:
             key, val = m.group(1), m.group(2)
+            nested_key = None
             if val.strip() == "":
                 pending_key = key
                 fm[key] = []
             else:
                 fm[key] = _parse_scalar(val)
                 pending_key = None
+            continue
+        mn = _FM_NESTED_KEY_RE.match(line)
+        if mn and pending_key and isinstance(fm.get(pending_key), (list, dict)):
+            # 2026-10-01: indented children were dropped, so every skill that
+            # keeps version/category/status/source under `metadata:` (the
+            # agentskills layout) parsed with defaults for all of them.
+            if isinstance(fm[pending_key], list):
+                if fm[pending_key]:
+                    continue  # a block list; an indented "a: b" item is not a child
+                fm[pending_key] = {}
+            nkey, nval = mn.group(1), mn.group(2)
+            if nval.strip() == "":
+                fm[pending_key][nkey] = []
+                nested_key = nkey
+            else:
+                fm[pending_key][nkey] = _parse_scalar(nval)
+                nested_key = None
+            continue
+        m2 = _FM_BLOCK_LIST_RE.match(line)
+        if m2 and pending_key and nested_key and isinstance(fm.get(pending_key), dict):
+            fm[pending_key].setdefault(nested_key, []).append(_parse_scalar(m2.group(1)))
             continue
         m2 = _FM_BLOCK_LIST_RE.match(line)
         if m2 and pending_key:
@@ -364,6 +403,9 @@ class Skill:
     tags: List[str] = field(default_factory=list)
     platforms: List[str] = field(default_factory=list)
     requires_toolsets: List[str] = field(default_factory=list)
+    # Integration id (e.g. "penpot") whose presence this skill depends on. Used
+    # only to hide the skill from the model; never shown in the prompt.
+    requires_integration: Optional[str] = None
     fallback_for_toolsets: List[str] = field(default_factory=list)
     status: str = "draft"                              # draft | published
     confidence: float = 0.8
@@ -396,6 +438,7 @@ class Skill:
         if self.tags:                  fm["tags"] = list(self.tags)
         if self.platforms:             fm["platforms"] = list(self.platforms)
         if self.requires_toolsets:     fm["requires_toolsets"] = list(self.requires_toolsets)
+        if self.requires_integration:  fm["requires_integration"] = self.requires_integration
         if self.fallback_for_toolsets: fm["fallback_for_toolsets"] = list(self.fallback_for_toolsets)
         fm["status"] = self.status
         fm["confidence"] = round(float(self.confidence), 3)
@@ -415,6 +458,7 @@ class Skill:
             "tags": list(self.tags),
             "platforms": list(self.platforms),
             "requires_toolsets": list(self.requires_toolsets),
+            "requires_integration": self.requires_integration,
             "fallback_for_toolsets": list(self.fallback_for_toolsets),
             "status": self.status,
             "confidence": round(float(self.confidence), 3),
@@ -442,23 +486,33 @@ class Skill:
     def from_markdown(cls, text: str, *, path: Optional[str] = None) -> "Skill":
         fm, body = parse_frontmatter(text)
         sections = parse_body(body)
+        meta = fm.get("metadata") if isinstance(fm.get("metadata"), dict) else {}
+
+        def get(key: str, default: Any = None) -> Any:
+            # A top-level key wins; the nested `metadata:` block fills gaps.
+            if key in fm:
+                return fm[key]
+            return meta.get(key, default)
+
         raw_name = fm.get("name")
         name = slugify(raw_name if raw_name not in (None, "") else fm.get("description", ""), fallback="skill")
+        requires_integration = get("requires_integration")
         return cls(
             name=name,
             description=str(fm.get("description", "") or ""),
-            version=str(fm.get("version", "1.0.0") or "1.0.0"),
-            category=str(fm.get("category", "general") or "general"),
-            tags=_as_list(fm.get("tags")),
-            platforms=_as_list(fm.get("platforms")),
-            requires_toolsets=_as_list(fm.get("requires_toolsets")),
-            fallback_for_toolsets=_as_list(fm.get("fallback_for_toolsets")),
-            status=str(fm.get("status", "draft") or "draft"),
-            confidence=_as_float(fm.get("confidence", 0.8), 0.8),
-            source=str(fm.get("source", "learned") or "learned"),
-            teacher_model=str(fm.get("teacher_model")) if fm.get("teacher_model") else None,
-            owner=str(fm.get("owner")) if fm.get("owner") else None,
-            created=str(fm.get("created") or _now_iso()),
+            version=str(get("version", "1.0.0") or "1.0.0"),
+            category=str(get("category", "general") or "general"),
+            tags=_as_list(get("tags")),
+            platforms=_as_list(get("platforms")),
+            requires_toolsets=_as_list(get("requires_toolsets")),
+            requires_integration=str(requires_integration).strip() if requires_integration else None,
+            fallback_for_toolsets=_as_list(get("fallback_for_toolsets")),
+            status=str(get("status", "draft") or "draft"),
+            confidence=_as_float(get("confidence", 0.8), 0.8),
+            source=str(get("source", "learned") or "learned"),
+            teacher_model=str(get("teacher_model")) if get("teacher_model") else None,
+            owner=str(get("owner")) if get("owner") else None,
+            created=str(get("created") or _now_iso()),
             when_to_use=sections["when_to_use"],
             procedure=list(sections["procedure"]),
             pitfalls=list(sections["pitfalls"]),

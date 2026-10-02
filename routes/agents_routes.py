@@ -19,6 +19,11 @@ stop and launch their agents.
   (``?names=a,b`` for some of them).
 * ``POST /profiles/import``     — admin: store loadouts from such a file
   (merge or replace), validated exactly like a Settings save.
+* ``GET  /profiles/templates``  — admin: loadout templates shipped by the
+  integrations that are available here.
+* ``POST /profiles/templates/install`` — admin: import one of them
+  (``{"integration", "template", "overwrite"}``); ``{server:<name>}`` references
+  resolve to this install's MCP server ids.
 * ``POST /sessions/{id}/loadout`` — run an existing chat under a loadout, or
   (``profile: null``) return it to the default setup.
 * ``POST /sessions/{id}/archive`` — safely hide an idle chat without deleting
@@ -874,6 +879,37 @@ def setup_agents_routes(session_manager) -> APIRouter:
         if saved is None:
             raise HTTPException(500, "Could not save appearance")
         return {"appearance": appearance}
+
+    @router.get("/profiles/templates")
+    async def list_profile_templates(request: Request):
+        """Loadout templates of the integrations that are available now."""
+        _require_profile_admin(request)
+        from src import agent_profile_transfer
+        return {"templates": agent_profile_transfer.list_templates()}
+
+    @router.post("/profiles/templates/install")
+    async def install_profile_template(request: Request):
+        """Import one shipped template. Same auth and validation as ``/profiles/import``."""
+        user = _require_profile_admin(request)
+        from src import agent_profile_transfer, agent_profiles
+        from src.agent_tools.loadout_tools import _model_problem
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(400, "Expected a JSON body")
+        if not isinstance(body, dict):
+            raise HTTPException(400, "Expected a JSON object")
+        try:
+            report = agent_profile_transfer.install_template(
+                str(body.get("integration") or "").strip(), str(body.get("template") or "").strip(),
+                overwrite=bool(body.get("overwrite")),
+                check_model=lambda spec: _model_problem(spec, user or None))
+        except ValueError as exc:
+            message = str(exc)
+            raise HTTPException(409 if "already exists" in message else 404, message)
+        return {"ok": report["written"] or not report["errors"],
+                "message": agent_profile_transfer.summary_line(report),
+                "report": report, "profiles": agent_profiles.load_profiles()}
 
     @router.post("/sessions/{session_id}/loadout")
     async def apply_loadout(request: Request, session_id: str):

@@ -627,6 +627,25 @@ def _note_scheduler_event(task, *, title: str, reason: str, data: dict) -> None:
         logger.debug("scheduler activity note failed", exc_info=True)
 
 
+# 2026-10-01 audit A4-15: the old default ("You are a helpful assistant
+# executing a scheduled task. Use available tools...") never said that nobody
+# is present, so unattended runs ended by asking the user a question, and it
+# said nothing about what the reply is for (it is delivered as written through
+# the task's output target).
+DEFAULT_TASK_SYSTEM_PROMPT = (
+    "You run a scheduled task unattended; no user is available to answer questions. "
+    "Complete the task, then reply with the result the task asks for, ready to "
+    "deliver as written. When a step fails, say which step and why in the reply."
+)
+# The direct fallback has no tools; the default above would send the model
+# looking for them.
+NO_TOOLS_TASK_SYSTEM_PROMPT = (
+    "You run a scheduled task unattended; no user is available to answer questions. "
+    "You have no tools in this run; answer from the task text. Reply with the "
+    "result the task asks for, ready to deliver as written."
+)
+
+
 class TaskScheduler:
     def __init__(self, session_manager):
         self._session_manager = session_manager
@@ -2774,17 +2793,23 @@ class TaskScheduler:
         for key, val in raw.items():
             data_dump += f"--- {key} ---\n{val}\n\n"
 
+        # 2026-10-01 audit A4-2: calendar invites, note bodies, RSS titles and
+        # MCP snapshots are written by other people, and this run has tools
+        # (mail, notes). The dump rides in its own guarded message; the user
+        # turn carries only the standing task prompt and the writing brief.
+        from src.prompt_security import untrusted_context_message
+
+        data_message = untrusted_context_message("check-in data", data_dump)
         context = (
-            data_dump +
-            f"---\n\n{task.prompt}\n\n"
-            "Write the check-in. YOU decide what matters, what to skip, how to format. "
-            "Only show future events. Calendar events are pre-tagged with importance: "
-            "[!!] critical, [!] high, plain = normal, ' ·' = low. "
-            "GROUP your output by importance — lead with critical/high, then normal, "
-            "skip low entirely unless explicitly relevant. Mention event type (work/health/travel/etc) "
-            "where it adds context (e.g. 'leave 1h early for travel'). "
-            "Flag anything coming up that needs prep (birthdays, deadlines, holidays). "
-            "Use tools to take action if needed. Keep it concise — no raw data dumps."
+            f"{task.prompt}\n\n"
+            "Write the check-in from the data above. Calendar events carry an importance "
+            "tag: [!!] critical, [!] high, no mark normal, ' ·' low. Lead with critical "
+            "and high events, then normal ones; leave out low ones unless they need prep. "
+            "Show only events after the current time. Add the event type where it changes "
+            "what the user should do, for example leaving early for travel. Name anything "
+            "that needs prep: birthdays, deadlines, holidays. The reply is a short message "
+            "with no raw data. Use tools only for an action the standing task prompt above "
+            "asks for."
         )
 
         from src import crew_profile
@@ -2796,6 +2821,7 @@ class TaskScheduler:
             system_prompt=crew_profile.role_system_prompt(crew) or None,
             disabled_tools=None, relevant_tools=None,
             override_user_message=context,
+            context_messages=[data_message],
         )
 
     async def _execute_llm_task(self, task, db) -> str:
@@ -2896,17 +2922,18 @@ class TaskScheduler:
         # character's tone.
         from src import crew_profile
 
-        system_prompt = (
-            crew_profile.role_system_prompt(crew)
-            or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
-        )
+        base_system_prompt = crew_profile.role_system_prompt(crew) or DEFAULT_TASK_SYSTEM_PROMPT
+        system_prompt = base_system_prompt
         char_id = (getattr(task, "character_id", None) or "").strip()
         if char_id:
             try:
-                from src.reminder_personas import PERSONAS as _PERSONAS
-                char_prompt = _PERSONAS.get(char_id.lower())
-                if char_prompt:
-                    system_prompt = f"{char_prompt}\n\n{system_prompt}"
+                from src.reminder_personas import VOICES as _VOICES
+                char_voice = _VOICES.get(char_id.lower())
+                if char_voice:
+                    # The persona colours the final message only. Its full chat
+                    # text ("never answer directly, only questions") made
+                    # unattended tasks return questions instead of results.
+                    system_prompt = f"{system_prompt}\n\nVoice for the final message: {char_voice}"
             except Exception:
                 pass
         # Provide current date/time as a user-role message so the system prompt
@@ -3006,7 +3033,13 @@ class TaskScheduler:
             except Exception as e:
                 logger.warning(f"Agent loop failed for task '{task.name}', falling back to simple call: {e}")
                 from src.task_endpoint import task_llm_call_async
-                messages: list = [{"role": "system", "content": system_prompt}]
+                # No tools on this path, so the system text must not promise any.
+                _fallback_system = (
+                    NO_TOOLS_TASK_SYSTEM_PROMPT
+                    if base_system_prompt == DEFAULT_TASK_SYSTEM_PROMPT
+                    else f"{system_prompt}\n\nYou have no tools in this run; answer from the task text."
+                )
+                messages: list = [{"role": "system", "content": _fallback_system}]
                 if _dt_msg:
                     messages.append(_dt_msg)
                 messages.append({"role": "user", "content": task.prompt})
@@ -3280,9 +3313,10 @@ class TaskScheduler:
                               disabled_tools: set | None = None,
                               relevant_tools: set | None = None,
                               override_user_message: str | None = None,
-                              datetime_context_msg: dict | None = None) -> str:
+                              datetime_context_msg: dict | None = None,
+                              context_messages: list | None = None) -> str:
         """Run the full agent loop with tool access, collecting the final text."""
-        system_content = system_prompt or "You are a helpful assistant executing a scheduled task. Use available tools to complete the task thoroughly."
+        system_content = system_prompt or DEFAULT_TASK_SYSTEM_PROMPT
         user_content = override_user_message or task.prompt
         # Tool calls of this run, kept for its retry if it is cancelled (see
         # _interrupted_progress). A retry starts from the calls its interrupted
@@ -3296,6 +3330,7 @@ class TaskScheduler:
             return await self._run_agent_loop_inner(
                 endpoint_url, model, task, session_id, system_content, user_content,
                 disabled_tools, relevant_tools, datetime_context_msg, _calls_log,
+                context_messages=context_messages,
             )
         except asyncio.CancelledError:
             if _task_key and _calls_log:
@@ -3310,7 +3345,8 @@ class TaskScheduler:
     async def _run_agent_loop_inner(self, endpoint_url, model, task, session_id,
                                     system_content, user_content, disabled_tools,
                                     relevant_tools, datetime_context_msg,
-                                    calls_log: list) -> str:
+                                    calls_log: list,
+                                    context_messages: list | None = None) -> str:
         from src.agent_loop import stream_agent_loop
         # Build the message list. The datetime context message (user-role) is
         # inserted immediately before the task prompt so the system prefix stays
@@ -3318,6 +3354,9 @@ class TaskScheduler:
         messages: list = [{"role": "system", "content": system_content}]
         if datetime_context_msg:
             messages.append(datetime_context_msg)
+        # Guarded data messages (A4-2) sit between the clock and the task
+        # prompt, so the instruction is the last thing the model reads.
+        messages.extend(context_messages or [])
         messages.append({"role": "user", "content": user_content})
         # The prompt as SENT, which is not the prompt as stored: the system
         # half is composed from the crew member's personality plus its linked
@@ -3468,17 +3507,24 @@ class TaskScheduler:
         if not full_text.strip():
             try:
                 from src.task_endpoint import task_llm_call_async
-                grace_context = "You ran out of steps. "
+                # Tool output is data, not instructions: it goes in a guarded
+                # message and the instruction stays in its own user turn.
+                from src.prompt_security import untrusted_context_message
+                grace_messages = [{"role": "system", "content": system_content}]
                 if tool_results:
-                    grace_context += "Here's what your tools returned:\n" + "\n".join(tool_results[-5:])
-                else:
-                    grace_context += "No tool results were captured."
-                grace_context += "\n\nSummarize what you accomplished and what's still pending. Be concise."
+                    grace_messages.append(untrusted_context_message(
+                        "tool results", "\n".join(tool_results[-5:]),
+                    ))
+                grace_note = "You ran out of steps before writing the result. "
+                if not tool_results:
+                    grace_note += "No tool results were captured. "
+                grace_messages.append({"role": "user", "content": (
+                    grace_note
+                    + "Write the result the task asked for, using the tool results above. "
+                    "List anything unfinished in one closing line."
+                )})
                 full_text = await task_llm_call_async(
-                    messages=[
-                        {"role": "system", "content": system_content},
-                        {"role": "user", "content": grace_context},
-                    ],
+                    messages=grace_messages,
                     fallback_url=endpoint_url,
                     fallback_model=model,
                     fallback_headers=headers,

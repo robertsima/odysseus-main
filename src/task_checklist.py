@@ -130,23 +130,33 @@ def turn_note(record: Dict[str, Any]) -> str:
     )
 
 
-def continue_directive(plan: str, *, has_parent: bool = False) -> str:
-    """Asked of a turn about to end while the checklist it updated has open items.
+def needs_clause(has_parent: bool = False) -> str:
+    """The `Needs user:` / `Needs parent:` contract, written once.
 
-    ``has_parent``: a worker's open item may need what the chat that started it
-    can grant, so it is offered `Needs parent:` as the self-unblock check does.
+    A fragment that continues a sentence ("..., end with one line per need:
+    ..."). Four places used to spell it out (the base rules, the self-unblock
+    check, the checklist nudge, the worker's parent-chat note) and drifted
+    (2026-10-01). The base rules keep their own short `Needs user:` form.
+
+    ``has_parent``: a worker's need may be one the chat that started it can
+    grant, so it is offered `Needs parent:` too.
     """
+    if has_parent:
+        return (
+            "end with one line per need: `Needs parent: <what>` for a tool, permission, workspace "
+            "or branch the chat that started you can grant, or `Needs user: <what>` for what only "
+            "a person can give (an approval, a credential, a real decision)"
+        )
+    return "end with one line per need: `Needs user: <what>`"
+
+
+def continue_directive(plan: str, *, has_parent: bool = False) -> str:
+    """Asked of a turn about to end while the checklist it updated has open items."""
     remaining = open_items(plan)
     shown = "\n".join(f"- [ ] {text}" for text in remaining[:12])
-    needs = (
-        "If an item needs something, end with one line per need: `Needs parent: <what>` for a "
-        "tool, permission or workspace the chat that started you can grant, or `Needs user: "
-        "<what>` for what only a person can give."
-        if has_parent
-        else "If an item needs the user, end with one line per need: `Needs user: <what>`."
-    )
     return (
         "Your task checklist still has open items:\n" + shown + "\n\n"
         "Carry on with the next one now. If they are already done, tick them with `update_plan`; "
-        "if they no longer apply, rewrite or clear the checklist. " + needs
+        "if they no longer apply, rewrite or clear the checklist. If an item needs something "
+        "only someone else can give, " + needs_clause(has_parent) + "."
     )

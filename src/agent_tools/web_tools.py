@@ -21,6 +21,35 @@ def _fetch_error_hint(err: str) -> str:
     return ""
 
 
+def _svg_body(url: str, max_bytes: int) -> str:
+    """The markup of an SVG URL, or "" when the response is not SVG text.
+
+    The shared page fetcher parses every non-text type as HTML, which leaves an
+    SVG with no text: on 2026-10-01 all 3 web_fetch calls (icons from
+    api.iconify.design) failed that way. An SVG is XML the model can read, so
+    fetch it as plain text here.
+    """
+    from services.search.content import _get_public_url
+    from src.constants import WEB_FETCH_USER_AGENT
+
+    response = _get_public_url(
+        url,
+        headers={
+            "User-Agent": WEB_FETCH_USER_AGENT,
+            "Accept": "image/svg+xml,text/*;q=0.9,*/*;q=0.5",
+            "Accept-Encoding": "identity",
+        },
+        timeout=10,
+        max_bytes=max_bytes,
+    )
+    response.raise_for_status()
+    body = (response.text or "").strip()
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "svg" in content_type or body.lower().startswith(("<svg", "<?xml")):
+        return body
+    return ""
+
+
 class WebSearchTool:
     async def execute(self, content: str, ctx: dict) -> dict:
         from src.search import comprehensive_web_search
@@ -182,11 +211,26 @@ class WebFetchTool:
                     + (f"\nDescription: {meta}\n" if meta else "")
                 )
                 return {"output": output, "exit_code": 0, "untrusted_content": True}
+            if url.lower().split("?", 1)[0].split("#", 1)[0].endswith(".svg"):
+                try:
+                    from src.constants import WEB_FETCH_SOFT_MAX_BYTES
+
+                    markup = await asyncio.wait_for(
+                        loop.run_in_executor(None, _svg_body, url, max_bytes or WEB_FETCH_SOFT_MAX_BYTES),
+                        timeout=30,
+                    )
+                except Exception:  # noqa: BLE001 - fall through to the plain failure below
+                    markup = ""
+                if markup:
+                    clipped = markup[:MAX_OUTPUT_CHARS]
+                    if len(markup) > MAX_OUTPUT_CHARS:
+                        clipped += "\n\n[...truncated]"
+                    return {"output": f"Source: {url}\n\n{clipped}", "exit_code": 0, "untrusted_content": True}
             return {
                 "error": (
-                    f"web_fetch: {url}: no readable text content (not HTML, or the page needs "
-                    "JS/login). Open it with the browser tool if one is enabled, or use "
-                    "web_search to find the content elsewhere."
+                    f"web_fetch: {url}: no readable text content (empty, binary, or a page "
+                    "that needs JS or a login). Use web_search to find the content elsewhere, or "
+                    "the browser tool if one is enabled."
                 ),
                 "exit_code": 1,
             }

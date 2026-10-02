@@ -335,7 +335,7 @@ async def test_audit_syncs_instead_of_rebuilding(monkeypatch):
             calls["saved"] = entries
 
     async def fake_llm(*args, **kwargs):
-        return '[{"id": "1", "text": "User likes tea", "category": "preference"}]'
+        return '{"merge": [{"keep_id": "1", "drop_ids": ["2"], "text": "User likes tea"}], "drop": []}'
 
     monkeypatch.setattr("src.llm_core.llm_call_async", fake_llm)
     monkeypatch.setattr(me, "_load_tidy_state", lambda m: {})
@@ -382,7 +382,7 @@ def test_skill_requires_toolsets_keeps_only_real_tool_names():
     appeared in `selected_without_schema` on every round of the 2026-09-10
     logs — and the system prompt, built from the same set, told the model it
     had tools that do not exist."""
-    from src.agent_loop import _skill_declared_tools
+    from src.skill_toolsets import skill_declared_tools as _skill_declared_tools
 
     skills = [
         {"name": "jarvis", "requires_toolsets": [
@@ -405,7 +405,7 @@ def test_skill_requires_toolsets_keeps_only_real_tool_names():
 
 
 def test_skill_requires_toolsets_still_respects_disabled_tools():
-    from src.agent_loop import _skill_declared_tools
+    from src.skill_toolsets import skill_declared_tools as _skill_declared_tools
 
     tools, unknown = _skill_declared_tools(
         [{"requires_toolsets": ["read_file", "bash"]}], disabled_tools={"bash"}
@@ -415,7 +415,7 @@ def test_skill_requires_toolsets_still_respects_disabled_tools():
 
 
 def test_skill_requires_toolsets_handles_empty_input():
-    from src.agent_loop import _skill_declared_tools
+    from src.skill_toolsets import skill_declared_tools as _skill_declared_tools
 
     assert _skill_declared_tools([], set()) == (set(), set())
     assert _skill_declared_tools([{"name": "x"}], set()) == (set(), set())

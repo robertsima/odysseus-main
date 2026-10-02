@@ -1,0 +1,113 @@
+{
+  "id": "github",
+  "name": "GitHub",
+  "description": "Reads repositories, issues, pull requests and Actions runs; with the write flag, comments, reviews and edits issues and pull requests (never pushes code).",
+  "kind": "mcp-binary",
+  "servers": [
+    {
+      "id": "github_read",
+      "name": "Built-in: GitHub Read",
+      "title": "GitHub (read)",
+      "description": "Reads repositories, issues, pull requests and Actions runs.",
+      "command": {
+        "callable": "src.builtin_mcp:find_github_mcp_binary"
+      },
+      "args": [
+        "stdio",
+        "--read-only",
+        "--tools={tools}"
+      ],
+      "tools": [
+        "get_file_contents",
+        "get_commit",
+        "list_branches",
+        "list_commits",
+        "search_code",
+        "issue_read",
+        "search_issues",
+        "list_pull_requests",
+        "pull_request_read",
+        "actions_list",
+        "actions_get",
+        "get_job_logs",
+        "get_me",
+        "list_issues",
+        "search_pull_requests"
+      ],
+      "env_profile": "github",
+      "requirements": [
+        {
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "check": {
+            "type": "env",
+            "var": "GITHUB_PERSONAL_ACCESS_TOKEN"
+          },
+          "hint": "Set GITHUB_PERSONAL_ACCESS_TOKEN (a GitHub PAT, ghp_/github_pat_) in the container environment, then restart.",
+          "gates_start": true
+        }
+      ]
+    },
+    {
+      "id": "github_write",
+      "name": "Built-in: GitHub Write",
+      "title": "GitHub (write)",
+      "description": "Comments, reviews and edits issues and pull requests (never pushes code).",
+      "command": {
+        "callable": "src.builtin_mcp:find_github_mcp_binary"
+      },
+      "args": [
+        "stdio",
+        "--tools={tools}"
+      ],
+      "tools": [
+        "create_pull_request",
+        "add_issue_comment",
+        "pull_request_review_write",
+        "add_comment_to_pending_review"
+      ],
+      "env_profile": "github",
+      "requirements": [
+        {
+          "name": "GITHUB_PERSONAL_ACCESS_TOKEN",
+          "check": {
+            "type": "env",
+            "var": "GITHUB_PERSONAL_ACCESS_TOKEN"
+          },
+          "hint": "Set GITHUB_PERSONAL_ACCESS_TOKEN (a GitHub PAT, ghp_/github_pat_) in the container environment, then restart.",
+          "gates_start": true
+        },
+        {
+          "name": "ODYSSEUS_GITHUB_MCP_WRITE",
+          "check": {
+            "type": "env_flag",
+            "var": "ODYSSEUS_GITHUB_MCP_WRITE"
+          },
+          "hint": "Set ODYSSEUS_GITHUB_MCP_WRITE=1 as well as the GitHub token, then restart.",
+          "gates_start": true
+        }
+      ]
+    }
+  ],
+  "requirements": [
+    {
+      "name": "github-mcp-server binary",
+      "check": {
+        "type": "callable",
+        "ref": "src.builtin_mcp:find_github_mcp_binary"
+      },
+      "hint": "Install github-mcp-server on PATH, or set ODYSSEUS_GITHUB_MCP_BINARY.",
+      "gates_start": true
+    }
+  ],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 10
+}

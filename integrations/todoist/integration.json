@@ -1,0 +1,37 @@
+{
+  "id": "todoist",
+  "name": "Todoist",
+  "description": "Reads and updates your Todoist tasks.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "todoist",
+      "name": "Built-in: Todoist",
+      "script": "mcp_servers/todoist_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [
+    {
+      "name": "TODOIST_API_TOKEN",
+      "check": {
+        "type": "env",
+        "var": "TODOIST_API_TOKEN"
+      },
+      "hint": "Set TODOIST_API_TOKEN in the container environment (compose), then restart."
+    }
+  ],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "Actionable work (tasks, due dates, projects) belongs in Todoist; fixed appointments and reservations belong in Calendar.",
+  "skills": [
+    "skills"
+  ],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 6
+}

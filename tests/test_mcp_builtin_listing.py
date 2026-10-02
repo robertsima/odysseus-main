@@ -43,8 +43,24 @@ def test_lists_every_built_in_with_its_state(monkeypatch):
 
 
 def test_github_write_needs_both_the_flag_and_the_token(monkeypatch):
+    # The binary is a requirement too (2026-10-01); this host may not have it.
+    monkeypatch.setattr(builtin_mcp, "find_github_mcp_binary", lambda: "/usr/local/bin/github-mcp-server")
     monkeypatch.setenv("ODYSSEUS_GITHUB_MCP_WRITE", "1")
     monkeypatch.delenv("GITHUB_PERSONAL_ACCESS_TOKEN", raising=False)
     assert {r["id"]: r for r in builtin_mcp.builtin_catalog()}["github_write"]["configured"] is False
     monkeypatch.setenv("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_x")
     assert {r["id"]: r for r in builtin_mcp.builtin_catalog()}["github_write"]["configured"] is True
+
+
+def test_connected_without_credentials_reports_not_configured_with_what_is_missing(monkeypatch):
+    # 2026-10-01: Todoist connects with no token and the tab said "Running".
+    monkeypatch.delenv("TODOIST_API_TOKEN", raising=False)
+    list_builtin = _builtin_endpoint(monkeypatch, {"todoist": {"status": "connected", "tool_count": 9}})
+    rows = {row["id"]: row for row in list_builtin(request=None)["integrations"]}
+    assert rows["todoist"]["status"] == "not_configured"
+    assert rows["todoist"]["tool_count"] == 0
+    assert [m["requirement"] for m in rows["todoist"]["missing"]] == ["TODOIST_API_TOKEN"]
+    assert "TODOIST_API_TOKEN" in rows["todoist"]["enable"]
+    monkeypatch.setenv("TODOIST_API_TOKEN", "t")
+    rows = {row["id"]: row for row in list_builtin(request=None)["integrations"]}
+    assert rows["todoist"]["status"] == "connected" and rows["todoist"]["missing"] == []

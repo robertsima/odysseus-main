@@ -77,6 +77,18 @@ def initialize_managers(base_dir: str, rag_manager=None) -> Dict[str, Any]:
     # Initialize core managers
     memory_manager = MemoryManager(DATA_DIR)
     skills_manager = SkillsManager(DATA_DIR)
+    # Every manifest, enabled or not: the skill gate (requires_integration) hides
+    # a skill whose integration is unavailable, so installing is not the filter.
+    try:
+        from src import integration_registry
+        from src.builtin_skills import register_integration_skills
+        for _integration in integration_registry.all():
+            try:
+                register_integration_skills(_integration.id, integration_registry.skill_dirs(_integration.id))
+            except Exception as e:  # one broken package must not hide the others
+                logger.warning(f"Integration skills for {_integration.id!r} not registered: {e}")
+    except Exception as e:
+        logger.warning(f"Integration skill registration failed: {e}")
     try:
         seed_bundled_skills(skills_manager)
     except Exception as e:  # never let a bundled skill block startup

@@ -71,6 +71,11 @@ def _save_tidy_state(memory_manager, owner: Optional[str], fingerprint: str) -> 
     except OSError as e:
         logger.warning(f"Could not persist tidy fingerprint: {e}")
 
+# One category list for every extraction prompt (auto, manual, import), so a
+# fact does not get a different label depending on which button produced it.
+MEMORY_CATEGORIES = ("identity", "preference", "fact", "contact", "project", "goal")
+_CATEGORY_LINE = "Categories: " + ", ".join(f"'{c}'" for c in MEMORY_CATEGORIES)
+
 EXTRACT_SYSTEM_PROMPT = (
     "You are a memory extraction assistant. Analyze the conversation and extract ONLY "
     "durable personal facts about the user that would be useful across many future conversations.\n\n"
@@ -78,37 +83,76 @@ EXTRACT_SYSTEM_PROMPT = (
     "Bad examples: what they asked about today, temporary moods, generic statements, "
     "things the assistant said, one-off tasks, opinions on the current topic.\n\n"
     "Rules:\n"
-    "- MAX 2 facts per conversation — only the most important\n"
+    "- At most 2 facts per conversation, the most important ones\n"
     "- Only extract facts the USER stated or clearly implied\n"
-    "- Each fact must be a single short sentence (under 15 words)\n"
-    "- If a fact is similar to something likely already known, skip it\n"
+    "- Each fact is a single short sentence (under 15 words)\n"
     "- If nothing durable was revealed, return []\n\n"
     "Return a JSON array of objects with 'text' and 'category' fields.\n"
-    "Categories: 'identity', 'preference', 'fact', 'contact', 'project', 'goal'\n\n"
+    f"{_CATEGORY_LINE}\n\n"
     "Return ONLY valid JSON, no markdown fences."
 )
+
+# The manual "extract from this chat" button. Same transcript framing as the
+# auto extractor (see build_extraction_messages), a wider net: the user asked.
+MANUAL_EXTRACT_SYSTEM_PROMPT = (
+    "You are a memory extraction assistant. Extract facts the user stated that "
+    "will matter in future conversations: contacts, addresses, long-term projects, "
+    "preferences.\n\n"
+    "Return a JSON array of objects with 'text' and 'category' fields. "
+    "Return [] when there are none.\n"
+    f"{_CATEGORY_LINE}\n\n"
+    "Return ONLY valid JSON, no markdown fences."
+)
+
+# Messages the manual extract reads. The auto extractor looks at CONTEXT_WINDOW
+# (the last turn or two); the button is a request for the whole chat, bounded so
+# a long session cannot blow the context window.
+MANUAL_CONTEXT_WINDOW = 40
 
 # How many recent messages to include for extraction
 CONTEXT_WINDOW = 6
 
+
+def build_extraction_messages(window: list, system_prompt: str) -> list:
+    """Frame a message window as one transcript to analyze, not a chat to continue.
+
+    Passed as raw alternating chat turns, the model treats the window as a
+    conversation to CONTINUE and reliably extracts nothing (0/6 trials against
+    6/6 with this shape; this was the cause of auto-memory logging "0
+    candidates" on every run). The manual extract used raw turns until
+    2026-10-01 (audit A4-10) and silently returned nothing on reasoning models.
+    """
+    def _text(m):
+        c = m.get("content", "")
+        if isinstance(c, list):
+            c = " ".join(
+                b.get("text", "") for b in c
+                if isinstance(b, dict) and b.get("type") == "text"
+            )
+        return f"{m.get('role', '?')}: {c}"
+
+    transcript = "\n\n".join(_text(m) for m in window)
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": (
+            "Conversation to analyze:\n\n" + transcript
+            + "\n\nReturn the JSON array of durable facts now (or [] if none)."
+        )},
+    ]
+
+# 2026-10-01 audit A4-11: the audit used to return the whole cleaned list, so
+# output grew with the store and a truncated reply risked losing entries. It now
+# returns only the changes; an entry the model does not mention is untouched.
 AUDIT_SYSTEM_PROMPT = (
-    "You are a memory database curator. Be CONSERVATIVE: remove only TRUE "
-    "duplicates and clearly useless entries. Every distinct fact must survive. "
-    "When in doubt, KEEP the entry. Return the cleaned list.\n\n"
-    "Rules:\n"
-    "1. MERGE only entries that state the SAME fact in different words. If you "
-    "are not sure two entries are the same fact, KEEP BOTH.\n"
-    "   Merge: 'User's name is Sam' + 'The user is called Sam' -> one.\n"
-    "   Do NOT merge related-but-distinct facts: 'Likes Python' and 'Uses "
-    "Python at work' are DIFFERENT — keep both.\n"
-    "2. REMOVE only entries that are genuinely worthless: about what the AI did "
-    "(not the user), empty, or meaningless. Do NOT drop a real fact just "
-    "because it seems minor or niche.\n"
-    "3. Keep the original wording. Only lightly trim obvious redundancy — do "
-    "NOT aggressively rewrite or shorten.\n"
-    "4. Preserve the 'id' of the entry you keep when merging.\n"
-    "5. Never invent facts. When unsure, KEEP.\n\n"
-    "Return a JSON array of objects with fields: id, text, category.\n"
+    "Review the saved memories. Return a JSON object "
+    '{"merge": [{"keep_id": "...", "drop_ids": ["..."], "text": "merged wording"}], '
+    '"drop": [{"id": "...", "reason": "..."}]}.\n'
+    "Merge only entries that state the same fact in different words ('Name is Sam' "
+    "and 'Called Sam'); 'Likes Python' and 'Uses Python at work' stay separate. "
+    "Keep the original wording when merging. "
+    "Drop entries that describe what the assistant did, or that have no content. "
+    "Use only ids from the list. When unsure, leave the entry alone. "
+    "Return {\"merge\": [], \"drop\": []} when nothing needs to change.\n\n"
     "Return ONLY valid JSON, no markdown fences."
 )
 
@@ -328,34 +372,9 @@ async def extract_and_store(
         fallback_facts = _fallback_memory_candidates(stripped_recent)
         llm_ran = False
 
-        # Flatten the window into a SINGLE user message instead of appending the
-        # raw alternating role messages. Passed as raw chat messages, the model
-        # treats the window as a conversation to CONTINUE rather than a transcript
-        # to ANALYZE, so it reliably extracts nothing — typically returning `[]`
-        # (and, depending on the input, sometimes an empty or <think>-only
-        # completion when the window ends on an assistant turn). This was the real
-        # cause of auto-memory logging "0 candidates" on every run. Reframing it as
-        # one "analyze this transcript, return the JSON array" user message makes
-        # the model actually extract. Controlled repro on this model: 0/6 trials
-        # with the old structure vs 6/6 with this one. The skill extractor flattens
-        # for the same reason.
-        def _flatten_msg(m):
-            c = m.get("content", "")
-            if isinstance(c, list):
-                c = " ".join(
-                    b.get("text", "") for b in c
-                    if isinstance(b, dict) and b.get("type") == "text"
-                )
-            return f"{m.get('role', '?')}: {c}"
-
-        transcript = "\n\n".join(_flatten_msg(m) for m in stripped_recent)
-        extraction_messages = [
-            {"role": "system", "content": EXTRACT_SYSTEM_PROMPT},
-            {"role": "user", "content": (
-                "Conversation to analyze:\n\n" + transcript
-                + "\n\nReturn the JSON array of durable facts now (or [] if none)."
-            )},
-        ]
+        # One transcript-to-analyze message, not raw chat turns (see
+        # build_extraction_messages for why).
+        extraction_messages = build_extraction_messages(stripped_recent, EXTRACT_SYSTEM_PROMPT)
 
         facts = []
         try:
@@ -516,6 +535,78 @@ async def extract_and_store(
         logger.error(f"Memory extraction failed: {e}")
 
 
+def _parse_audit_changes(raw: str) -> Optional[dict]:
+    """Parse the audit reply into {"merge": [...], "drop": [...]}, or None.
+
+    Accepts the first JSON object in the reply. A bare list is the old
+    return-everything format and is refused: applying it as changes would read
+    every entry as a request.
+    """
+    text = re.sub(r"<think(?:ing)?>[\s\S]*?</think(?:ing)?>", "", raw or "", flags=re.I).strip()
+    decoder = json.JSONDecoder()
+    pos = text.find("{")
+    while pos != -1:
+        for candidate in (text[pos:], re.sub(r",(\s*[}\]])", r"\1", text[pos:])):
+            try:
+                value, _ = decoder.raw_decode(candidate)
+            except ValueError:
+                continue
+            if isinstance(value, dict) and ("merge" in value or "drop" in value):
+                merge = value.get("merge") or []
+                drop = value.get("drop") or []
+                if isinstance(merge, list) and isinstance(drop, list):
+                    return {"merge": merge, "drop": drop}
+            break
+        pos = text.find("{", pos + 1)
+    return None
+
+
+def _apply_audit_changes(existing: list, changes: dict) -> list:
+    """Apply merge/drop changes to an owner's entries and return the survivors.
+
+    Only ids that exist are acted on, an entry named in "merge" as keep_id is
+    never dropped, and pinned entries are never removed (a pinned identity fact
+    is core context). Anything malformed is skipped, which leaves the entry as
+    it was.
+    """
+    by_id = {m["id"]: m for m in _memory_dicts(existing)}
+    texts: dict = {}
+    removed: set = set()
+    keepers: set = set()
+
+    for item in changes.get("merge", []):
+        if not isinstance(item, dict):
+            continue
+        keep_id = item.get("keep_id")
+        if keep_id not in by_id:
+            continue
+        keepers.add(keep_id)
+        new_text = item.get("text")
+        if isinstance(new_text, str) and new_text.strip():
+            texts[keep_id] = new_text.strip()
+        for drop_id in item.get("drop_ids") or []:
+            if isinstance(drop_id, str) and drop_id in by_id and drop_id != keep_id:
+                removed.add(drop_id)
+
+    for item in changes.get("drop", []):
+        drop_id = item.get("id") if isinstance(item, dict) else None
+        if isinstance(drop_id, str) and drop_id in by_id:
+            removed.add(drop_id)
+
+    removed -= keepers
+    removed = {i for i in removed if not by_id[i].get("pinned")}
+
+    final = []
+    for m in _memory_dicts(existing):
+        if m["id"] in removed:
+            continue
+        entry = m.copy()
+        if m["id"] in texts:
+            entry["text"] = texts[m["id"]]
+        final.append(entry)
+    return final
+
+
 async def audit_memories(
     memory_manager,
     memory_vector,
@@ -586,62 +677,14 @@ async def audit_memories(
             timeout=120,
         )
 
-        # Parse the JSON list, tolerating reasoning-model noise: <think> blocks,
-        # markdown fences, leading prose, and trailing commas.
-        import re as _re
-        text = (raw or "").strip()
-        text = _re.sub(r'<think(?:ing)?>[\s\S]*?</think(?:ing)?>', '', text, flags=_re.I).strip()
-
-        def _loads_list(s):
-            if not s:
-                return None
-            for cand in (s, _re.sub(r',(\s*[}\]])', r'\1', s)):
-                try:
-                    v = json.loads(cand)
-                    if isinstance(v, list):
-                        return v
-                except Exception:
-                    continue
-            return None
-
-        cleaned = _loads_list(text)
-        if cleaned is None:
-            _m = _re.search(r'```(?:json)?\s*\n?([\s\S]*?)```', text)
-            if _m:
-                cleaned = _loads_list(_m.group(1).strip())
-        if cleaned is None:
-            _a, _b = text.find('['), text.rfind(']')
-            if _a >= 0 and _b > _a:
-                cleaned = _loads_list(text[_a:_b + 1])
-        if cleaned is None:
-            logger.error(f"Memory audit returned non-JSON: {text[:300]}")
+        # Parse the JSON object, tolerating reasoning-model noise: <think>
+        # blocks, markdown fences, leading prose, and trailing commas.
+        changes = _parse_audit_changes(raw)
+        if changes is None:
+            logger.error(f"Memory audit returned an unusable reply: {(raw or '')[:300]}")
             return {"before": before_count, "after": before_count, "error": "bad_json"}
 
-        # Build lookup of original entries by ID so we can preserve metadata
-        originals = {m["id"]: m for m in existing}
-
-        final_entries = []
-        for item in cleaned:
-            if not isinstance(item, dict):
-                continue
-            mid = item.get("id", "")
-            new_text = item.get("text", "").strip()
-            if not new_text:
-                continue
-
-            if mid in originals:
-                # Preserve original metadata, update text + category
-                entry = originals[mid].copy()
-                entry["text"] = new_text
-                if item.get("category"):
-                    entry["category"] = item["category"]
-            else:
-                # ID not found — skip to avoid inventing entries
-                logger.debug(f"Audit returned unknown id {mid}, skipping")
-                continue
-
-            final_entries.append(entry)
-
+        final_entries = _apply_audit_changes(existing, changes)
         after_count = len(final_entries)
 
         # Safety net against catastrophic over-deletion. A conservative tidy
@@ -655,6 +698,11 @@ async def audit_memories(
                 f"(>50% removed) — refusing as unsafe, keeping originals"
             )
             return {"before": before_count, "after": before_count, "error": "unsafe_removal"}
+
+        if final_entries == list(existing):
+            # Nothing the model proposed was applicable: no save, no re-embed.
+            _save_tidy_state(memory_manager, owner, current_fp)
+            return {"before": before_count, "after": before_count}
 
         # Merge audited entries back with other users' entries
         if owner:

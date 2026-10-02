@@ -1,0 +1,75 @@
+{
+  "id": "penpot",
+  "name": "Penpot Studio",
+  "description": "Builds nested Penpot designs with real vector icons, reads designs back with a layout check, and renders boards to an image. Uses the Penpot URL and access token from Settings > Penpot.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "penpot_studio",
+      "name": "Built-in: Penpot Studio",
+      "script": "mcp_servers/penpot_studio_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [
+    {
+      "name": "Penpot URL and access token",
+      "check": {
+        "type": "any_of",
+        "checks": [
+          {
+            "type": "all_of",
+            "checks": [
+              {
+                "type": "setting",
+                "key": "penpot_api_url"
+              },
+              {
+                "type": "setting",
+                "key": "penpot_access_token"
+              }
+            ]
+          },
+          {
+            "type": "env_all",
+            "vars": [
+              "PENPOT_API_URL",
+              "PENPOT_ACCESS_TOKEN"
+            ]
+          },
+          {
+            "type": "env_all",
+            "vars": [
+              "PENPOT_BASE_URL",
+              "PENPOT_ACCESS_TOKEN"
+            ]
+          },
+          {
+            "type": "callable",
+            "ref": "src.penpot_studio:load_config"
+          }
+        ]
+      },
+      "hint": "Set the Penpot URL and access token under Settings > Penpot (or PENPOT_API_URL and PENPOT_ACCESS_TOKEN in the container environment). A saved Penpot MCP server with both still works as a deprecated fallback."
+    }
+  ],
+  "settings": [
+    "penpot_api_url",
+    "penpot_access_token",
+    "penpot_public_url"
+  ],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "",
+  "skills": [
+    "skills"
+  ],
+  "loadouts": [
+    "loadouts/penpot-product-designer.json"
+  ],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 8
+}

@@ -1,0 +1,32 @@
+{
+  "id": "claude-code",
+  "name": "Claude Code",
+  "description": "Hands a coding task to Claude Code or another delegation provider in a real checkout.",
+  "kind": "native",
+  "capability": "code_delegation",
+  "servers": [],
+  "requirements": [
+    {
+      "name": "code delegation capability",
+      "check": {
+        "type": "capability",
+        "name": "code_delegation"
+      },
+      "hint": "See Settings > Agents for a usable provider."
+    }
+  ],
+  "settings": "from_capability",
+  "tools": "from_capability",
+  "function_calling": false,
+  "prompt": "",
+  "skills": [
+    "skills"
+  ],
+  "loadouts": [],
+  "health": {
+    "type": "capability",
+    "name": "code_delegation"
+  },
+  "docs": "",
+  "order": 11
+}

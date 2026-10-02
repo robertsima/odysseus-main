@@ -128,8 +128,8 @@ def _system(tools):
 
 async def test_the_rules_reach_a_chat_that_can_launch_workers():
     text = _system({"manage_agent_loadout", "ask_user"})
-    assert "scope is the person's whole request" in text
+    assert "Carry the person's whole request into the brief unchanged" in text
     assert "whole user-visible outcome" in text
-    assert "rendered result compared with the reference" in text
-    assert "resume that same worker" in text and "send_to_session" in text
-    assert "independent tool calls together in one round" in text
+    assert "rendered result next to their reference" in text
+    assert "resume that worker" in text and "send_to_session" in text
+    assert "Batch." in text and "in the same round" in text

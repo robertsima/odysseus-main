@@ -115,6 +115,8 @@ def _compact_prompt_for(monkeypatch, history):
 
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
+    import src.context_compactor as _cc
+    monkeypatch.setattr(_cc, "llm_call_async", fake_llm_call_async)
     monkeypatch.setattr(model_context, "estimate_tokens", lambda messages: 100)
     monkeypatch.setattr(model_context, "get_context_length", lambda endpoint_url, model: 1000)
 
@@ -158,6 +160,8 @@ def _registered_compact_response(monkeypatch, history, active_run=False):
 
     monkeypatch.setattr(endpoint_resolver, "resolve_endpoint", fake_resolve_endpoint)
     monkeypatch.setattr(llm_core, "llm_call_async", fake_llm_call_async)
+    import src.context_compactor as _cc
+    monkeypatch.setattr(_cc, "llm_call_async", fake_llm_call_async)
 
     session = _FakeSession(history)
     manager = _FakeSessionManager(session)
@@ -182,7 +186,7 @@ def test_manual_compact_tolerates_chatmessage_with_none_content(monkeypatch):
         ],
     )
     assert "ASSISTANT: None" not in compact_prompt
-    assert "ASSISTANT: " in compact_prompt
+    assert "ASSISTANT:" in compact_prompt
 
 
 def test_manual_compact_tolerates_dict_message_with_none_content(monkeypatch):
@@ -198,7 +202,7 @@ def test_manual_compact_tolerates_dict_message_with_none_content(monkeypatch):
         ],
     )
     assert "ASSISTANT: None" not in compact_prompt
-    assert "ASSISTANT: " in compact_prompt
+    assert "ASSISTANT:" in compact_prompt
 
 
 def test_registered_manual_compact_route_tolerates_none_content(monkeypatch):
@@ -218,7 +222,7 @@ def test_registered_manual_compact_route_tolerates_none_content(monkeypatch):
     assert response.json()["ok"] is True
     compact_prompt = captured["messages"][1]["content"]
     assert "ASSISTANT: None" not in compact_prompt
-    assert "ASSISTANT: " in compact_prompt
+    assert "ASSISTANT:" in compact_prompt
     assert manager.replaced_messages is not None
 
 

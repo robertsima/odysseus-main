@@ -266,13 +266,20 @@ async def dispatch_reminder(
                 # prompt prefixes. Both are safe here because this is a
                 # one-sentence LLM-only output, not user-pasted content.
                 synthesis = _strip_think(raw or "", prose=True, prompt_echo=True)
+                # The prompt asks for the reminder between markers (audit
+                # A4-16, 2026-10-01). A marked reply needs no guessing; the
+                # line filters below stay for models that ignore the markers.
+                from src.reminder_personas import extract_marked_reminder
+                _marked = extract_marked_reminder(raw or "") or extract_marked_reminder(synthesis or "")
+                if _marked:
+                    synthesis = _marked
                 # Reminder synthesis is supposed to be ONE sentence. Strip-think's
                 # paragraph-based heuristic misses cases where the model puts
                 # reasoning + answer on consecutive lines inside one paragraph
                 # (e.g. "I should write... [\n] You have one task waiting...").
                 # Walk lines, drop reasoning/prompt-echo lines, then keep the
                 # last surviving line — that's the actual warm sentence.
-                if synthesis:
+                if synthesis and not _marked:
                     import re as _re
                     # Tightened: target ACTUAL self-talk (model narrating what
                     # it'll do) rather than any first-person sentence. The old

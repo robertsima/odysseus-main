@@ -197,7 +197,7 @@ def test_the_workflow_never_interpolates_dispatch_inputs_into_shell():
     script injection. They must reach shell steps only via env."""
     import yaml
 
-    wf = yaml.safe_load((ROOT / "integrations/claude/github/odysseus-claude.yml").read_text(encoding="utf-8"))
+    wf = yaml.safe_load((ROOT / "clients/claude/github/odysseus-claude.yml").read_text(encoding="utf-8"))
     steps = wf["jobs"]["claude"]["steps"]
     for step in steps:
         assert "${{" not in str(step.get("run") or ""), step.get("name")

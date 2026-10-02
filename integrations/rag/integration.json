@@ -1,0 +1,26 @@
+{
+  "id": "rag",
+  "name": "Knowledge (RAG)",
+  "description": "Searches your indexed vault and documents for context.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "rag",
+      "name": "Built-in: RAG",
+      "script": "mcp_servers/rag_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": false,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 2
+}

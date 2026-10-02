@@ -1,0 +1,26 @@
+{
+  "id": "image_gen",
+  "name": "Image generation",
+  "description": "Generates and edits images with an Image-type model endpoint.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "image_gen",
+      "name": "Built-in: Image Generation",
+      "script": "mcp_servers/image_gen_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": false,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 4
+}

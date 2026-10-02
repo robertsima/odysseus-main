@@ -131,7 +131,7 @@ def test_consecutive_turns_share_the_prefix_through_prior_history(monkeypatch):
         assert "ACTIVE PLAN" in tail and marker in tail
         assert "Shell setting is Off" in tail
     # The trusted email rules stay in the system prompt, on both turns.
-    assert "Hard identity rule" in first["instructions"]
+    assert "Email identity rule" in first["instructions"]
     # The admin tool the first turn named stays offered, and the system prompt
     # lists only tools the schema list carries.
     offered = {tool.get("name") for tool in second["tools"]}

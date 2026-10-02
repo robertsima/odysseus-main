@@ -14,34 +14,26 @@ from services.memory.extraction_context import conversation_for_extraction
 
 logger = logging.getLogger(__name__)
 
+# 2026-10-01 audit A4-6: the old prompt asked for "a sequence of shell commands,
+# code, file edits, API calls", but the model only sees shortened user and
+# assistant prose plus tool names, so it could only paraphrase or invent steps.
+# The prompt now states what the model sees. Launch-only and failed runs are
+# filtered in code (_has_procedure_evidence) before this call. The output
+# format (a JSON object, or the bare word null) is what maybe_extract_skill parses.
 SKILL_EXTRACT_PROMPT = (
-    "You are analyzing an AI agent's work session. The agent took {rounds} rounds "
-    "and {tool_count} tool calls. These counts do not prove the task succeeded.\n\n"
-    "Extract a reusable 'skill' ONLY IF the session contains a concrete, "
-    "repeatable procedure the agent could follow to solve a similar problem "
-    "ON THE COMPUTER next time (e.g. a sequence of shell commands, code, file "
-    "edits, API calls, or tool usage).\n\n"
-    "Return null (the bare word, no JSON) when the session is NOT a reusable "
-    "computer procedure, including:\n"
-    "- The real work happened OUTSIDE the computer (the user did something "
-    "physically, in person, on another device, or by hand) and the agent only "
-    "discussed or advised it.\n"
-    "- A one-off, personal, or context-specific task that won't recur "
-    "(personal errands, a specific person/place/date, casual conversation).\n"
-    "- A pure question/answer or explanation with no transferable method.\n"
-    "- The agent failed, gave up, or the approach is not worth repeating.\n"
-    "- The agent only launched or polled workers, listed capabilities, or promised work; "
-    "no completed, reusable procedure is demonstrated. A queued task is not a result.\n\n"
-    "When (and only when) a genuine reusable procedure exists, return a JSON "
-    "object with:\n"
-    '- "title": short name (under 10 words)\n'
-    '- "problem": what was the challenge (1-2 sentences)\n'
-    '- "solution": what worked (1-2 sentences)\n'
-    '- "steps": array of step-by-step instructions (3-7 short steps)\n'
-    '- "tags": array of relevant keywords (3-5 tags)\n'
-    '- "confidence": 0.0-1.0 how reliable AND reusable this procedure is\n\n'
-    "Be conservative: if in doubt, return null.\n"
-    "Return ONLY valid JSON (or the bare word null), no markdown fences."
+    "You see the end of an agent session: user and assistant messages (shortened) "
+    "and the ordered list of tools used, with outcome flags. Extract a skill only "
+    "when the messages show how the work was done and the tool list confirms it ran.\n\n"
+    "Output a JSON object with:\n"
+    '- "title": under 10 words\n'
+    '- "problem": 1-2 sentences\n'
+    '- "solution": 1-2 sentences\n'
+    '- "steps": 3-7 short steps, each naming the tool it uses\n'
+    '- "tags": 3-5 keywords\n'
+    '- "confidence": 0.0-1.0, lower when a step is inferred rather than shown\n\n'
+    "Output the bare word null (no JSON, no fences) when the session was advice, "
+    "a one-off or personal errand, a failure, work done outside the computer, "
+    "or a launch with no result."
 )
 
 # Skills the model is unsure about (or that read as one-offs) add clutter —
@@ -104,6 +96,20 @@ def _execution_evidence_metadata(tool_events: list) -> list:
         }
         for event in tool_events[-12:] if isinstance(event, dict)
     ]
+
+
+def _tool_sequence_line(tool_events: list) -> str:
+    """Ordered tool names with outcome flags, never arguments or output.
+
+    The extractor prompt asks for steps that name their tool, so the model needs
+    the order. Same privacy bound as _execution_evidence_metadata: a different
+    provider may run this call, so no private file, mailbox or MCP content.
+    """
+    parts = []
+    for i, item in enumerate(_execution_evidence_metadata(tool_events), 1):
+        flag = "failed" if item["failed"] else "blocked" if item["blocked"] else "ok"
+        parts.append(f"{i}. {item['tool']} ({flag})")
+    return "; ".join(parts)
 
 
 def _skill_dicts(skills):
@@ -271,10 +277,9 @@ async def maybe_extract_skill(
 
         conversation = "\n".join(conv_lines)
         if tool_events:
-            evidence = _execution_evidence_metadata(tool_events)
-            conversation += "\nExecution outcome metadata (not proof of task completion):\n" + json.dumps(evidence, ensure_ascii=False)
+            conversation += "\nTools used, in order:\n" + _tool_sequence_line(tool_events)
 
-        prompt = SKILL_EXTRACT_PROMPT.format(rounds=round_count, tool_count=tool_count)
+        prompt = SKILL_EXTRACT_PROMPT
 
         import time as _time
         _t0 = _time.monotonic()

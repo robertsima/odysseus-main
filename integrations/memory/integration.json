@@ -1,0 +1,26 @@
+{
+  "id": "memory",
+  "name": "Memory",
+  "description": "Long-term facts and preferences the assistant remembers about you.",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "memory",
+      "name": "Built-in: Memory",
+      "script": "mcp_servers/memory_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": false,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 1
+}

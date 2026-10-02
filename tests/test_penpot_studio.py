@@ -177,6 +177,7 @@ def test_private_svg_urls_are_refused():
 
 
 def test_config_comes_from_the_environment(monkeypatch):
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
     monkeypatch.setenv("PENPOT_API_URL", "http://192.168.1.122:9001/api/")
     monkeypatch.setenv("PENPOT_ACCESS_TOKEN", "tok")
     cfg = ps.load_config()
@@ -188,8 +189,33 @@ def test_missing_config_says_how_to_fix(monkeypatch):
     monkeypatch.delenv("PENPOT_BASE_URL", raising=False)
     monkeypatch.delenv("PENPOT_ACCESS_TOKEN", raising=False)
     monkeypatch.setattr(ps, "_saved_penpot_env", lambda: None)
-    with pytest.raises(ps.PenpotError, match="Settings > MCP"):
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
+    with pytest.raises(ps.PenpotError, match="Settings > Penpot"):
         ps.load_config()
+
+
+def test_settings_win_over_environment_and_borrowed_row(monkeypatch):
+    monkeypatch.setenv("PENPOT_API_URL", "http://env:1")
+    monkeypatch.setenv("PENPOT_ACCESS_TOKEN", "env-tok")
+    monkeypatch.setattr(ps, "_saved_penpot_env", lambda: ({"PENPOT_API_URL": "http://row:1", "PENPOT_ACCESS_TOKEN": "row"}, "row"))
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("http://set:9001/api", "set-tok", "https://design.example/"))
+    cfg = ps.load_config()
+    assert (cfg.base_url, cfg.token, cfg.source) == ("http://set:9001", "set-tok", "settings")
+    assert cfg.public_url == "https://design.example"
+
+
+def test_borrowed_row_is_last_and_logs_once(monkeypatch, caplog):
+    import logging
+
+    for var in ("PENPOT_API_URL", "PENPOT_BASE_URL", "PENPOT_ACCESS_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
+    monkeypatch.setattr(ps, "_borrowed_logged", False)
+    monkeypatch.setattr(ps, "_saved_penpot_env", lambda: ({"PENPOT_API_URL": "http://row:1", "PENPOT_ACCESS_TOKEN": "row"}, "MCP server 'Penpot'"))
+    with caplog.at_level(logging.INFO, logger="src.penpot_studio"):
+        assert ps.load_config().token == "row"
+        ps.load_config()
+    assert sum("deprecated" in r.message for r in caplog.records) == 1
 
 
 def test_font_identifiers_follow_penpots_google_font_scheme():
@@ -232,6 +258,7 @@ def test_saved_penpot_mcp_server_supplies_url_and_token(monkeypatch, tmp_path):
         db.commit()
     for var in ("PENPOT_API_URL", "PENPOT_BASE_URL", "PENPOT_ACCESS_TOKEN"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(ps, "_settings_config", lambda: ("", "", ""))
 
     cfg = ps.load_config()
 
@@ -295,3 +322,166 @@ def test_missing_icon_error_says_to_search(monkeypatch):
     monkeypatch.setattr(ps, "_get", gone)
     with pytest.raises(ps.PenpotError, match="search_icons"):
         run(ps.fetch_icon("game-icons:centurion-helmet"))
+
+
+# --- render: public URI mismatch and error-page detection (2026-10-01) -------
+
+CONFIG_JS = 'var penpotPublicURI = "http://homelab.nas:9001";\nvar penpotFlags = "x";'
+
+
+def test_public_uri_is_parsed_from_config_js():
+    assert ps.parse_public_uri(CONFIG_JS) == "http://homelab.nas:9001"
+    assert ps.parse_public_uri("var penpotPublicURI = 'https://d.example.com/pp/';") == "https://d.example.com"
+    assert ps.parse_public_uri("var penpotFlags = 'x';") is None
+    assert ps.parse_public_uri('var penpotPublicURI = "not a url";') is None
+    assert ps.parse_public_uri("") is None
+
+
+def _cfg(base="http://192.168.1.122:9001"):
+    return ps.PenpotConfig(base, "tok", "test")
+
+
+def test_resolver_rule_only_when_hosts_differ(monkeypatch):
+    monkeypatch.delenv("PENPOT_PUBLIC_URL", raising=False)
+    origin, flags = ps.viewer_origin(_cfg(), "http://homelab.nas:9001")
+    assert origin == "http://homelab.nas:9001"
+    assert flags == ["--host-resolver-rules=MAP homelab.nas:9001 192.168.1.122:9001"]
+    assert ps.viewer_origin(_cfg(), "http://192.168.1.122:9001") == ("http://192.168.1.122:9001", [])
+    assert ps.viewer_origin(_cfg(), None) == ("http://192.168.1.122:9001", [])
+    # same host, different port still needs the rule (port-specific map)
+    assert ps.viewer_origin(_cfg(), "http://192.168.1.122:8080")[1]
+    url = ps.viewer_url(_cfg(), "f", "p", "b", "s", origin)
+    assert url.startswith("http://homelab.nas:9001/#/view?")
+
+
+def test_public_uri_fetch_is_cached_and_tolerates_failure(monkeypatch):
+    import httpx
+    ps._public_uri_cache.clear()
+    calls = []
+
+    class Resp:
+        status_code = 200
+        text = CONFIG_JS
+
+    class Http:
+        def __init__(self, *a, **k): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, url):
+            calls.append(url)
+            if "down" in url:
+                raise httpx.ConnectError("nope")
+            return Resp()
+
+    monkeypatch.setattr(ps.httpx, "AsyncClient", Http)
+    assert run(ps.fetch_public_uri("http://nas:9001")) == "http://homelab.nas:9001"
+    assert run(ps.fetch_public_uri("http://nas:9001")) == "http://homelab.nas:9001"
+    assert calls == ["http://nas:9001/js/config.js"]
+    assert run(ps.fetch_public_uri("http://down:9001")) is None
+    assert "http://down:9001" not in ps._public_uri_cache
+    ps._public_uri_cache.clear()
+
+
+ERROR_DOM = ('<html><body><section class="main_ui_static__exception-layout"><div>Internal Error</div>'
+             '<div>Something bad happened.</div></section></body></html>')
+GOOD_DOM = '<html><body><div class="main_ui_viewer__viewer-layout"><svg></svg></div></body></html>'
+
+
+def _render_setup(monkeypatch, tmp_path, dom, public_uri="http://homelab.nas:9001"):
+    class RenderClient(FakeClient):
+        cfg = _cfg()
+
+        def __init__(self):
+            super().__init__({"b1": {"id": "b1", "type": "frame", "x": 0, "y": 0, "width": 100, "height": 100,
+                                     "parentId": ROOT, "frameId": ROOT}})
+            self.file["data"]["pagesIndex"][PAGE]["objects"][ROOT]["shapes"] = ["b1"]
+            self.deleted = []
+
+        async def rpc(self, cmd, params):
+            if cmd == "delete-share-link":
+                self.deleted.append(params["id"])
+                return None
+            return {"id": "share1"}
+
+    runs = []
+
+    async def fake_public(base):
+        return public_uri
+
+    async def fake_browser(args, timeout):
+        runs.append(args)
+        for a in args:
+            if a.startswith("--screenshot="):
+                with open(a.split("=", 1)[1], "wb") as fh:
+                    fh.write(b"\x89PNG" + b"0" * 2000)
+        return (dom.encode() if "--dump-dom" in args else b""), b""
+
+    monkeypatch.delenv("PENPOT_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(ps, "fetch_public_uri", fake_public)
+    monkeypatch.setattr(ps, "_run_browser", fake_browser)
+    monkeypatch.setattr(ps, "browser_executable", lambda: "chromium")
+    return RenderClient(), runs, str(tmp_path / "b.png")
+
+
+def test_error_page_is_an_error_not_a_screenshot(monkeypatch, tmp_path):
+    client, runs, out = _render_setup(monkeypatch, tmp_path, ERROR_DOM)
+    with pytest.raises(ps.PenpotError, match="error page.*Internal Error"):
+        run(ps.render_board(client, "f1", PAGE, None, out))
+    import os
+    assert not os.path.exists(out)
+    assert client.deleted == ["share1"]
+
+
+def test_healthy_viewer_returns_the_screenshot_with_public_origin(monkeypatch, tmp_path):
+    client, runs, out = _render_setup(monkeypatch, tmp_path, GOOD_DOM)
+    result = run(ps.render_board(client, "f1", PAGE, None, out))
+    assert result["path"] == out and result["viewer_url"].startswith("http://homelab.nas:9001/#/view")
+    assert len(runs) == 2
+    for argv in runs:
+        assert "--host-resolver-rules=MAP homelab.nas:9001 192.168.1.122:9001" in argv
+        assert argv[-1] == result["viewer_url"]
+
+
+def test_no_resolver_rule_when_public_uri_matches(monkeypatch, tmp_path):
+    client, runs, out = _render_setup(monkeypatch, tmp_path, GOOD_DOM, public_uri=None)
+    run(ps.render_board(client, "f1", PAGE, None, out))
+    assert not any(a.startswith("--host-resolver-rules") for argv in runs for a in argv)
+
+
+def test_error_words_inside_a_real_viewer_are_not_an_error():
+    dom = '<div class="main_ui_viewer__x"><text>Oops! Internal Error</text></div>'
+    assert ps.penpot_error_page(dom) is None
+    assert ps.penpot_error_page(GOOD_DOM) is None
+    assert ps.penpot_error_page("<body>Oops! This page doesn't exist</body>")
+
+
+def test_penpot_217_error_toast_is_an_error_even_with_viewer_in_scripts():
+    # Trimmed from the DOM Penpot 2.17 on the user's NAS served for a viewer that
+    # could not load (2026-10-01): an error-level toast, and "viewer" in a script.
+    dom = ('<script src="js/viewer.js"></script><div id="app"><aside class=" main_ui_ds_notifications_toast__toast" '
+           'role="alert"><div class="main_ui_ds_notifications_shared_notification_pill__level-error">'
+           '<svg></svg>Something wrong has happened.</div></div><button aria-label="Close" '
+           'class="main_ui_ds_notifications_toast__close-button main_ui_ds_notifications_toast__level-error">'
+           '</button></aside></div>')
+    assert "Something wrong has happened" in (ps.penpot_error_page(dom) or "")
+
+
+def test_icon_artwork_returns_svg_licence_and_credit(monkeypatch):
+    async def fake_get(url, **kw):
+        class R:
+            text = HELMET
+            def json(self):
+                return {"game-icons": {"name": "Game Icons", "author": {"name": "GameIcons", "url": "https://game-icons.net"},
+                                       "license": {"title": "CC BY 3.0", "spdx": "CC-BY-3.0", "url": "https://x/l"}}}
+        return R()
+
+    monkeypatch.undo()
+    monkeypatch.setattr(ps, "_get", fake_get)
+    out = run(ps.icon_artwork(["game-icons:spartan-helmet", "bad id"] + [f"a:b{i}" for i in range(8)]))
+    first = out["artwork"][0]
+    assert first["svg"] == HELMET and first["license"]["spdx"] == "CC-BY-3.0"
+    assert first["author"]["name"] == "GameIcons" and first["attribution_required"] is True
+    assert "spartan-helmet" in first["attribution"] and "CC BY 3.0" in first["attribution"]
+    assert first["source_url"].endswith("/game-icons/spartan-helmet/")
+    assert "error" in out["artwork"][1]
+    assert len(out["artwork"]) == ps.ICON_ARTWORK_MAX_IDS and out["not_fetched"]

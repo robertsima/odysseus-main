@@ -7,7 +7,7 @@ Last updated: dev@e71f8ce | 2026-08-25
 This spec covers external integration surfaces in:
 
 - `routes/codex_routes.py`;
-- `integrations/codex/*` and `integrations/claude/*`;
+- `clients/codex/*` and `clients/claude/*`;
 - `routes/api_token_routes.py` and bearer-token handling in `app.py`;
 - `routes/auth_routes.py` integration CRUD/test routes;
 - `src/integrations.py` and `data/integrations.json`;
@@ -49,7 +49,7 @@ The local integration skill/helper files require `ODYSSEUS_URL` and `ODYSSEUS_AP
 
 ## Bundle Distribution
 
-`/api/codex/plugin.zip` ships the Codex plugin tree from `integrations/codex/`. `/api/claude/plugin.zip` ships only the Claude `skills/` subtree from `integrations/claude/skills/`. These routes require an authenticated browser/user request and do not embed an API token.
+`/api/codex/plugin.zip` ships the Codex plugin tree from `clients/codex/`. `/api/claude/plugin.zip` ships only the Claude `skills/` subtree from `clients/claude/skills/`. These routes require an authenticated browser/user request and do not embed an API token.
 
 Setup instructions are duplicated in integration READMEs and `static/js/settings.js`; they need to stay aligned with live route surfaces and `/api/codex/capabilities`.
 

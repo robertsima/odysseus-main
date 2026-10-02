@@ -1,23 +1,23 @@
 # src/goal_based_extractor.py
 """
-Goal-based content extraction prompt inspired by Alibaba Tongyi DeepResearch.
+Goal-based page extraction prompt for deep research.
+
+2026-10-01 (prompt audit A4-4): the first version, copied from Alibaba Tongyi
+DeepResearch, asked for "rational", "evidence" and "summary". The pipeline
+reads only "summary" (`DeepResearcher._format_findings` falls back to
+"evidence" when the summary is empty), so "rational" was never read and
+"evidence" cost three or more paragraphs of output per page. Meanwhile the
+final report was told to quote numbers and statistics that the one-paragraph
+summaries had dropped. The prompt now asks for the two fields the code uses and
+tells the model to keep figures, so they reach the final report.
 """
 
-EXTRACTOR_SYSTEM = """Extract relevant information from a webpage for a given research goal.
+EXTRACTOR_SYSTEM = """Goal: {goal}
 
-Goal: {goal}
-
-Task guidelines:
-1. Locate the specific sections directly related to the goal within the provided webpage content.
-2. Identify and extract the most relevant information; output full original context where possible, up to three or more paragraphs.
-3. Organize into a concise paragraph with logical flow, judging each piece of information's contribution to the goal.
-
-Respond in JSON with exactly these fields: "rational", "evidence", "summary".
+Read the page content in the next message and extract what bears on the goal. Return a JSON object with:
+- "relevant": true when the page contains information on the goal, otherwise false.
+- "summary": 3 to 8 sentences with the facts, figures, dates, names, and prices that answer the goal, as the page states them. Empty when relevant is false.
 
 Example:
-{{
-    "rational": "This section discusses X which directly relates to the goal of understanding Y",
-    "evidence": "Full quotes and context from the page...",
-    "summary": "Concise summary of how this information answers the goal"
-}}
+{{"relevant": true, "summary": "<the page's facts, figures, dates, names, and prices that answer the goal>"}}
 """

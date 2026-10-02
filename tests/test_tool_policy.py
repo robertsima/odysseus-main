@@ -202,7 +202,7 @@ def test_executor_policy_backstop_blocks_tools():
     )
     assert desc == "bash: BLOCKED"
     assert result["exit_code"] == 1
-    assert "forbade" in result["error"]
+    assert "forbidden by the active guide-only policy" in result["error"]
 
 
 def test_agent_loop_blocks_guide_only_fenced_tool_before_start(monkeypatch):
@@ -447,8 +447,12 @@ def test_document_my_style_does_not_infer_public_persona(monkeypatch):
     )
     payload = "\n\n".join(str(msg.get("content", "")) for msg in messages)
 
-    assert "There is no saved document writing style" in payload
-    assert "do NOT infer that style from memories, identity, public persona" in payload
+    assert "No document writing style is saved" in payload
+    assert "ask for a sample or a description first" in payload
+    # Handling rules ride in a harness directive, not inside the untrusted envelope.
+    assert "ask for a sample" not in next(
+        str(m.get("content")) for m in messages if "ACTIVE DOCUMENT" in str(m.get("content"))
+    )
 
 
 def test_guide_only_skips_teacher_escalation(monkeypatch):

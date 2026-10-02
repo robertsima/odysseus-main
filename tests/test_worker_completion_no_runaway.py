@@ -100,8 +100,8 @@ async def test_with_follow_ups_disabled_a_completion_can_never_launch_a_worker(f
     assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= followups[0]["disabled_tools"]
     # The result is recorded, then summarised once.
     assert [m.metadata.get("source") for m in parent.history] == [None, "worker", "worker_followup"]
-    # And the model is told not to go looking for more work either.
-    assert "do not start new workers" in parent.history[1].content
+    # And the model is told to report, with the worker's session to continue from.
+    assert "the user decides whether to continue" in parent.history[1].content
 
 
 async def test_a_follow_up_may_send_the_same_worker_back_while_the_request_has_budget(followups, monkeypatch):
@@ -145,7 +145,7 @@ async def test_each_launch_spends_one_follow_up_until_none_are_left(monkeypatch)
     assert not agent_control._CONTINUE_LAUNCH_TOOLS & calls[1]
     # The third hand-back finds the request's follow-ups spent: report only.
     assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= calls[2]
-    assert "follow-ups for this request are used up" in parent.history[-2].content
+    assert "This request has used its automatic follow-ups" in parent.history[-2].content
 
 
 async def test_the_persons_next_message_starts_a_fresh_count(monkeypatch):
@@ -170,7 +170,7 @@ async def test_a_stopped_worker_never_continues(followups, monkeypatch):
     await agent_control._hand_off(_Manager(parent), "parent", _Worker(), "fix it",
                                   "(stopped from the chat's Stop button before finishing)", "cancelled", "alice")
     assert headless_agent.SUBAGENT_BLOCKED_TOOLS <= followups[0]["disabled_tools"]
-    assert "Do not start or resume workers" in parent.history[1].content
+    assert "The user stopped this worker" in parent.history[1].content
 
 
 async def test_a_failed_launch_spends_nothing(monkeypatch):

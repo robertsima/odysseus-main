@@ -603,11 +603,10 @@ async def test_start_reports_the_model_and_tools_it_actually_launched(monkeypatc
         "tools": ["grep", "read_file"], "tool_count": 2, "skills": [], "allowed_mcp_servers": [],
     }
     assert "grep, read_file" in result["response"]
-    # A round count never ends a run, so the response must not imply one will.
-    assert "round budget" not in result["response"]
-    assert "runs until the task is done" in result["response"]
-    # The loadout's explicit budget is a wrap-up point, and the caller is told.
-    assert "at round 4 it is asked to wrap up" in result["response"]
+    # The loadout's explicit budget is a hand-back point, and the caller is told
+    # that the same worker resumes from there.
+    assert "stops at round 4 and hands back what is left" in result["response"]
+    assert "resume the same worker" in result["response"]
 
 
 async def test_an_unknown_loadout_name_is_not_an_invitation_to_pick_a_near_miss(store):
@@ -643,7 +642,8 @@ async def test_status_reports_what_the_workers_did_without_reading_log_files(mon
     row = result["runs"][0]
     assert row["status"] == "incomplete" and row["ran_out_of_rounds"] is True
     assert row["loadout"] == "Runner" and row["max_rounds"] == 6 and row["tool_calls"] == 24
-    assert "did NOT finish their task" in result["response"]
+    assert "The task is not done. Resume the same worker" in result["response"]
+    assert "narrower" not in result["response"]
     agent_activity._reset_for_tests()
 
 

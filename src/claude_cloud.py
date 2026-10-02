@@ -4,12 +4,12 @@ The local runner (``claude_code_tools``) starts the ``claude`` binary inside
 this container, which then has to be signed in inside the container, and any
 credential placed in the container environment is within reach of the agent's
 own shell whenever the shell sandbox is unavailable. This runner avoids both.
-Odysseus dispatches ``integrations/claude/github/odysseus-claude.yml`` in an
+Odysseus dispatches ``clients/claude/github/odysseus-claude.yml`` in an
 allowlisted repository. Anthropic's official Claude Code GitHub Action runs
 there with the operator's own credential from that repository's secrets (set
 up with Anthropic's own ``claude setup-token`` or ``/install-github-app``).
 Odysseus never sees, stores or forwards it; see
-skills/dev/claude-code-delegation/references/terms-and-boundaries.md.
+integrations/claude-code/skills/claude-code-delegation/references/terms-and-boundaries.md.
 
 Hub mode (``claude_cloud_hub_repository``) serves every repository from one
 workflow: Odysseus dispatches it in the hub with ``repository`` set to the

@@ -189,3 +189,69 @@ The project would not exist without them — credit where credit is due:
 - **Claude** (Anthropic)
 - **Codex** (OpenAI)
 - Friends, for helping me debug.
+
+---
+
+## Agent skills
+
+These skills ship under `skills/` and are listed in `skills/catalog.json`; they are installed on request from the Recommended skills catalog (`src/builtin_skills.py`). The text is taken from the upstream projects below and lightly adapted for Odysseus tools; each `SKILL.md` ends with a Provenance block giving the exact source file and commit.
+
+| Skill | Source | Author | License |
+|---|---|---|---|
+| `grilling` | mattpocock/skills, skills/productivity/grilling | Matt Pocock | MIT |
+| `writing-for-agents` | mattpocock/skills, skills/productivity/writing-for-agents | Matt Pocock | MIT |
+| `diagnosing-bugs` | mattpocock/skills, skills/engineering/diagnosing-bugs | Matt Pocock | MIT |
+| `improve-codebase-architecture` | mattpocock/skills, skills/engineering/improve-codebase-architecture | Matt Pocock | MIT |
+| `codebase-design (dependency)` | mattpocock/skills, skills/engineering/codebase-design | Matt Pocock | MIT |
+| `domain-modeling (dependency)` | mattpocock/skills, skills/engineering/domain-modeling | Matt Pocock | MIT |
+| `triage` | mattpocock/skills, skills/engineering/triage | Matt Pocock | MIT |
+| `resolving-merge-conflicts` | mattpocock/skills at 153fc1b9 (since removed upstream), skills/engineering/resolving-merge-conflicts | Matt Pocock | MIT |
+| `unslop` | cursor/plugins, pstack/skills/unslop | Lauren Tan | MIT |
+
+License notice for the `mattpocock/skills` skills (https://github.com/mattpocock/skills):
+
+> MIT License
+> 
+> Copyright (c) 2026 Matt Pocock
+> 
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+> 
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+> 
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.
+
+License notice for `unslop` (https://github.com/cursor/plugins, `pstack/LICENSE`):
+
+> MIT License
+> 
+> Copyright (c) 2026 Lauren Tan
+> 
+> Permission is hereby granted, free of charge, to any person obtaining a copy
+> of this software and associated documentation files (the "Software"), to deal
+> in the Software without restriction, including without limitation the rights
+> to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+> copies of the Software, and to permit persons to whom the Software is
+> furnished to do so, subject to the following conditions:
+> 
+> The above copyright notice and this permission notice shall be included in all
+> copies or substantial portions of the Software.
+> 
+> THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+> IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+> FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+> AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+> LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+> OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+> SOFTWARE.

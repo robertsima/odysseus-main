@@ -410,7 +410,9 @@ async def test_shell_tools_are_hidden_when_the_shell_is_off(monkeypatch):
     assert "read_file" in sent["tools"]
     note = next(str(m.get("content")) for m in sent["messages"]
                 if "Shell setting is Off" in str(m.get("content")))
-    assert "Sandboxed" in note and "does not give access to their private vault" in note
+    # It names the Shell setting only; the 2026-09-26 vault sentence was dropped
+    # from the note on 2026-10-01 (prompt audit A1-28).
+    assert "Sandboxed" in note and "vault" not in note
 
 
 async def test_a_full_shell_is_offered_without_the_vault_grant(monkeypatch):

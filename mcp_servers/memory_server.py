@@ -21,6 +21,13 @@ from src.memory import MemoryStoreUnreadable
 
 server = Server("memory")
 
+MANAGE_MEMORY_DESCRIPTION = (
+    "Memory: durable facts, events, contacts and preferences that outlive this chat. "
+    "add when the user states something to remember or a lasting preference; "
+    "search before asking the user for something they may already have told you; "
+    "edit or delete by memory_id from list or search."
+)
+
 # Late-initialized managers (set during first tool call)
 _memory_manager = None
 _memory_vector = None
@@ -117,7 +124,10 @@ async def list_tools() -> list[Tool]:
     return [
         Tool(
             name="manage_memory",
-            description="Manage the user's memory system: list, add, edit, delete, or search memories.",
+            # Same text as the native manage_memory schema in src/tool_schemas.py
+            # (that file is read statically, so it cannot import this constant);
+            # tests/test_tool_schema_budget.py asserts the two stay equal.
+            description=MANAGE_MEMORY_DESCRIPTION,
             inputSchema={
                 "type": "object",
                 "properties": {

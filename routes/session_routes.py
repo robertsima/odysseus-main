@@ -1101,7 +1101,7 @@ def setup_session_routes(
         if len(history) < 6:
             raise HTTPException(400, "Not enough messages to compact")
 
-        from src.context_compactor import SELF_SUMMARY_SYSTEM_PROMPT, _is_compaction_summary, archive_note
+        from src.context_compactor import _is_compaction_summary, archive_note, summarize_for_compaction
 
         # Keep a small recent tail verbatim. The prior half-chat/20-message
         # tail made manual compaction look like it did nothing on normal chats.
@@ -1135,23 +1135,10 @@ def setup_session_routes(
             1 for m in history
             if _message_metadata(m).get("compacted") or "[Conversation summary" in _message_text(m)
         )
-        prompt = SELF_SUMMARY_SYSTEM_PROMPT.replace(
-            "{count}", str(len(older))
-        ).replace(
-            "{n}", str(prior_compactions + 1)
-        )
-        convo_text = "\n".join(
-            f"{_message_role(m).upper()}: {_message_text(m)[:2000]}"
-            for m in older
-        )
         try:
-            summary = await llm_call_async(
-                url,
-                model,
-                [{"role": "system", "content": prompt}, {"role": "user", "content": convo_text}],
-                temperature=0.2,
-                max_tokens=1024,
-                headers=headers,
+            summary = await summarize_for_compaction(
+                url, model, headers, older,
+                generation=prior_compactions + 1,
                 timeout=60,
             )
         except Exception as e:
@@ -1345,18 +1332,9 @@ def setup_session_routes(
             raise HTTPException(503, "No available model endpoint for auto-sort")
 
         # Build prompt
-        names_text = "\n".join(f'  "{s["id"][:8]}": "{s["name"]}"' for s in session_list)
-        prompt = (
-            "You are a session organizer. Group these chat sessions into folders by topic.\n\n"
-            "Rules:\n"
-            "- Be aggressive about grouping — put EVERY session in a folder\n"
-            "- Use short folder names (2-4 words max)\n"
-            "- Use the 8-char ID prefixes exactly as given\n"
-            "- Output ONLY raw JSON, no markdown fences, no explanation\n\n"
-            "Required JSON format:\n"
-            '{"folders": {"Folder Name": ["id_prefix1", "id_prefix2"], "Other Folder": ["id_prefix3"]}}\n\n'
-            f"Sessions (id_prefix: name):\n{{\n{names_text}\n}}"
-        )
+        from src.session_actions import build_auto_sort_prompt
+        existing_folders = sorted({f for f in folder_map.values() if f})
+        prompt = build_auto_sort_prompt(session_list, existing_folders)
 
         try:
             logger.info(f"Auto-sort: using model={model} at {url}")

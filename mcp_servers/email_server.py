@@ -2327,8 +2327,8 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
 
     try:
         from routes.email_helpers import (
-            _EMAIL_REPLY_SYS_PROMPT_BASE,
             _apply_email_style_mechanics,
+            _build_email_reply_messages,
             _extract_reply,
             _load_settings,
         )
@@ -2340,15 +2340,12 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
     except Exception as exc:
         return {"error": f"AI reply helpers unavailable: {exc}"}
 
-    style = _load_email_writing_style(account)
-    system_prompt = _EMAIL_REPLY_SYS_PROMPT_BASE
-    if style:
-        system_prompt += f"\n\nWRITING STYLE TO MATCH:\n{style}"
-
-    user_msg = (
-        f"Recipient: {to_addr}\nSubject: {reply_subject}\n\n"
-        f"Original email and any current draft:\n{original_body[:6000]}\n\n"
-        "Draft a reply. Return only the reply body text."
+    # The email reaches the model as untrusted data through the same builder
+    # the reply route and poller use; this agent-facing path still put it in a
+    # plain user message after the 2026-10-01 audit (A4-1).
+    messages = _build_email_reply_messages(
+        email_text=f"From: {to_addr}\nSubject: {subject}\n\n{original_body[:6000]}",
+        style=_load_email_writing_style(account) or "",
     )
 
     candidates = []
@@ -2381,10 +2378,7 @@ async def _ai_draft_reply_to_email(uid, folder="INBOX", reply_all=False, account
     try:
         raw_reply = await llm_call_async_with_fallback(
             candidates,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_msg},
-            ],
+            messages=messages,
             temperature=0.7,
             max_tokens=1024,
             timeout=60,

@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 from core.platform_compat import IS_WINDOWS, which_tool
+from src import integration_registry
 from src.runtime_paths import get_app_root
 
 logger = logging.getLogger(__name__)
@@ -60,87 +61,48 @@ def _find_npx() -> str:
             return npx_candidate
     return "npx"  # fallback, will fail with a clear error
 
-# Server definitions: id -> (script path relative to project root, display name)
+# Server definitions come from integrations/<id>/integration.json (see
+# src/integration_registry.py). On 2026-10-01 the hand-kept tables that lived
+# here (_BUILTIN_SERVERS, _BUILTIN_NPX_SERVERS, BUILTIN_CATALOG, the optional-env
+# gate) moved into those manifests: adding an integration meant editing four
+# lists in two files, and the catalog could say "Running" for an integration
+# whose credentials were missing. The names below stay as derived aliases.
 #
 # bash / python / filesystem / web_search were folded into native in-process
 # execution (src/tool_execution.py:_direct_fallback). Those trivial subprocess
 # wrappers are gone.
 #
-# image_gen / memory / rag / email still run as stdio MCP servers — each
+# image_gen / memory / rag / email still run as stdio MCP servers -- each
 # carries hundreds of LOC of unique IMAP / HTTP / manager logic not worth
 # duplicating into the native path right now.
+# id -> (script path relative to project root, display name)
 _BUILTIN_SERVERS = {
-    "image_gen":  ("mcp_servers/image_gen_server.py",  "Built-in: Image Generation"),
-    "memory":     ("mcp_servers/memory_server.py",     "Built-in: Memory"),
-    "rag":        ("mcp_servers/rag_server.py",        "Built-in: RAG"),
-    "email":      ("mcp_servers/email_server.py",      "Built-in: Email"),
-    "todoist":    ("mcp_servers/todoist_server.py",    "Built-in: Todoist"),
-    "lotus":      ("mcp_servers/lotus_server.py",      "Built-in: Lotus"),
-    "pi_worker":  ("mcp_servers/pi_worker_server.py",  "Built-in: Windows Pi Worker"),
-    "penpot_studio": ("mcp_servers/penpot_studio_server.py", "Built-in: Penpot Studio"),
+    spec["id"]: (spec["script"], spec["name"])
+    for spec in integration_registry.builtin_mcp_specs().values()
+    if spec["kind"] == "mcp-python"
 }
 
-_OPTIONAL_BUILTIN_ENV = {
-    "pi_worker": "ODYSSEUS_PI_WORKER_HOST",
-}
-
-# What each built-in integration is, for Settings › Built-in (2026-09-28: the
-# built-ins run in memory, not in the MCP servers table, so no Settings page
-# showed them at all). `needs` is the container environment variable the
-# integration cannot work without; `enable` says how to turn an optional one on.
-BUILTIN_CATALOG = (
-    {"id": "memory", "name": "Memory", "kind": "tool server",
-     "description": "Long-term facts and preferences the assistant remembers about you."},
-    {"id": "rag", "name": "Knowledge (RAG)", "kind": "tool server",
-     "description": "Searches your indexed vault and documents for context."},
-    {"id": "email", "name": "Email", "kind": "tool server",
-     "description": "Reads, drafts and sends mail through the accounts under Connections."},
-    {"id": "image_gen", "name": "Image generation", "kind": "tool server",
-     "description": "Generates and edits images with an Image-type model endpoint."},
-    {"id": "lotus", "name": "Lotus", "kind": "tool server",
-     "description": "Wellbeing journal: mood summaries and low-energy patterns (access set under Privacy & data)."},
-    {"id": "todoist", "name": "Todoist", "kind": "tool server", "needs": "TODOIST_API_TOKEN",
-     "description": "Reads and updates your Todoist tasks.",
-     "enable": "Set TODOIST_API_TOKEN in the container environment (compose), then restart."},
-    {"id": "pi_worker", "name": "Windows Pi worker", "kind": "tool server", "needs": "ODYSSEUS_PI_WORKER_HOST",
-     "description": "Runs coding tasks on your Windows machine over SSH.",
-     "enable": "Set ODYSSEUS_PI_WORKER_HOST and ODYSSEUS_PI_WORKER_IDENTITY_FILE in the container environment, then restart."},
-    {"id": "penpot_studio", "name": "Penpot Studio", "kind": "tool server",
-     "description": "Builds nested Penpot designs with real vector icons, reads designs back with a layout check, "
-                    "and renders boards to an image. Uses the Penpot MCP server's URL and access token."},
-    {"id": "builtin_browser", "name": "Browser", "kind": "tool server",
-     "description": "Headless Chromium the agent drives to read and use web pages."},
-    {"id": "github_read", "name": "GitHub (read)", "kind": "tool server", "needs": "GITHUB_PERSONAL_ACCESS_TOKEN",
-     "description": "Reads repositories, issues, pull requests and Actions runs.",
-     "enable": "Set GITHUB_PERSONAL_ACCESS_TOKEN (a GitHub PAT, ghp_/github_pat_) in the container environment, then restart."},
-    {"id": "github_write", "name": "GitHub (write)", "kind": "tool server", "needs": "ODYSSEUS_GITHUB_MCP_WRITE",
-     "description": "Comments, reviews and edits issues and pull requests (never pushes code).",
-     "enable": "Set ODYSSEUS_GITHUB_MCP_WRITE=1 as well as the GitHub token, then restart."},
+# Settings > Built-in rows are computed per request (they carry live
+# requirement checks); the static part is kept for callers that only need ids.
+BUILTIN_CATALOG = tuple(
+    {"id": row["id"], "name": row["name"], "kind": row["kind"], "description": row["description"]}
+    for row in integration_registry.catalog_rows()
 )
 
 
 def builtin_catalog() -> list[dict]:
-    """The built-in integrations with whether their required setting is present."""
-    rows = []
-    for entry in BUILTIN_CATALOG:
-        row = dict(entry)
-        needed = row.get("needs")
-        value = os.environ.get(needed, "").strip() if needed else ""
-        if needed == GITHUB_MCP_WRITE_ENV:
-            configured = value.lower() in ("1", "true", "yes") and bool(os.environ.get(GITHUB_MCP_TOKEN_ENV, "").strip())
-        else:
-            configured = bool(value) if needed else True
-        row["configured"] = configured
-        rows.append(row)
-    return rows
+    """The built-in integrations with whether their requirements are met.
+
+    Each row carries ``configured`` and ``missing`` (the unmet requirements,
+    each with a hint saying what to set).
+    """
+    return integration_registry.catalog_rows()
 
 # NPX-based built-in servers (run via npx, not Python)
 _BUILTIN_NPX_SERVERS = {
-    "builtin_browser": {
-        "name": "Built-in: Browser",
-        "command": "npx",
-        "args": ["-y", "@playwright/mcp@latest", "--headless", "--caps", "vision"],
-    }
+    spec["id"]: {"name": spec["name"], "command": spec["command"], "args": list(spec["args"])}
+    for spec in integration_registry.builtin_mcp_specs().values()
+    if spec["kind"] == "mcp-npx"
 }
 
 # Native-binary built-in servers.
@@ -163,35 +125,15 @@ _BUILTIN_NPX_SERVERS = {
 # hundred.
 GITHUB_MCP_TOKEN_ENV = "GITHUB_PERSONAL_ACCESS_TOKEN"
 
-GITHUB_MCP_READ_TOOLS = (
-    "get_file_contents",
-    "get_commit",
-    "list_branches",
-    "list_commits",
-    "search_code",
-    "issue_read",
-    "search_issues",
-    "list_pull_requests",
-    "pull_request_read",
-    "actions_list",
-    "actions_get",
-    "get_job_logs",
-    # The server's own instructions tell the model to call get_me first, and
-    # list_issues / search_pull_requests are the plain ways to browse; all read-only.
-    "get_me",
-    "list_issues",
-    "search_pull_requests",
-)
+# The lists themselves live in integrations/github/integration.json. get_me is
+# in the read list because the server's own instructions tell the model to call
+# it first; list_issues / search_pull_requests are the plain ways to browse.
+GITHUB_MCP_READ_TOOLS = integration_registry.server_tools("github_read")
 
 # add_comment_to_pending_review is the other half of pull_request_review_write:
 # without it a review can be created and submitted but can carry no line
 # comments, which is most of the point of reviewing from here.
-GITHUB_MCP_WRITE_TOOLS = (
-    "create_pull_request",
-    "add_issue_comment",
-    "pull_request_review_write",
-    "add_comment_to_pending_review",
-)
+GITHUB_MCP_WRITE_TOOLS = integration_registry.server_tools("github_write")
 
 GITHUB_MCP_WRITE_ENV = "ODYSSEUS_GITHUB_MCP_WRITE"
 
@@ -267,22 +209,18 @@ def github_mcp_servers() -> dict[str, dict]:
     if not binary:
         return {}
 
-    servers = {
-        "github_read": {
-            "name": "Built-in: GitHub Read",
-            "command": binary,
-            "args": ["stdio", "--read-only", "--tools=" + ",".join(GITHUB_MCP_READ_TOOLS)],
-        }
-    }
+    specs = integration_registry.builtin_mcp_specs()
+
+    def _entry(server_id: str) -> dict:
+        spec = specs[server_id]
+        return {"name": spec["name"], "command": binary, "args": list(spec["args"])}
+
+    servers = {"github_read": _entry("github_read")}
     if os.environ.get(GITHUB_MCP_WRITE_ENV, "").lower() in ("1", "true", "yes"):
-        servers["github_write"] = {
-            "name": "Built-in: GitHub Write",
-            "command": binary,
-            # No --read-only here (it would drop every tool in the list), and
-            # still no --toolsets: the explicit --tools list is the whole
-            # surface this server can reach.
-            "args": ["stdio", "--tools=" + ",".join(GITHUB_MCP_WRITE_TOOLS)],
-        }
+        # No --read-only on the write server (it would drop every tool in the
+        # list), and still no --toolsets: the explicit --tools list is the whole
+        # surface this server can reach.
+        servers["github_write"] = _entry("github_write")
     return servers
 
 
@@ -394,9 +332,9 @@ async def register_builtin_servers(mcp_manager):
             logger.warning(f"Built-in MCP server {name} error: {type(e).__name__}: {e}")
 
     for server_id, (script, name) in _BUILTIN_SERVERS.items():
-        required_env = _OPTIONAL_BUILTIN_ENV.get(server_id)
-        if required_env and not os.environ.get(required_env, "").strip():
-            logger.info("Optional built-in MCP server %s disabled: %s is not configured", name, required_env)
+        if not integration_registry.startable(server_id):
+            missing = ", ".join(m["requirement"] for m in integration_registry.server_status(server_id)["missing"])
+            logger.info("Optional built-in MCP server %s disabled: %s is not configured", name, missing)
             continue
         script_path = os.path.join(base_dir, script)
         if not os.path.exists(script_path):

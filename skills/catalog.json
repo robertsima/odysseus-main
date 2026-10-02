@@ -1,0 +1,236 @@
+{
+  "version": 1,
+  "skills": [
+    {
+      "name": "harness-context-and-tool-routing",
+      "category": "general",
+      "tier": "core",
+      "tags": [
+        "harness",
+        "tool-routing",
+        "context",
+        "paths",
+        "reliability"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": []
+    },
+    {
+      "name": "visual-asset-sourcing",
+      "category": "design",
+      "tier": "core",
+      "tags": [
+        "design",
+        "logo",
+        "icons",
+        "sprites",
+        "illustration",
+        "mascot",
+        "licensing"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": []
+    },
+    {
+      "name": "grilling",
+      "category": "general",
+      "tier": "curated",
+      "tags": [
+        "grilling",
+        "interview",
+        "planning",
+        "decision-making"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Stress-test a plan or decision with rounds of numbered questions, each with a recommended answer.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/productivity/grilling (Matt Pocock)"
+    },
+    {
+      "name": "writing-for-agents",
+      "category": "general",
+      "tier": "curated",
+      "tags": [
+        "writing",
+        "skills",
+        "prompts",
+        "context"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Rules for writing skills, AGENTS.md and other documents an agent reads.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/productivity/writing-for-agents (Matt Pocock)"
+    },
+    {
+      "name": "unslop",
+      "category": "general",
+      "tier": "curated",
+      "tags": [
+        "writing",
+        "editing",
+        "style"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Cut filler, AI vocabulary and other tells from prose before it goes out.",
+      "license": "MIT",
+      "source": "cursor/plugins, pstack/skills/unslop (Lauren Tan)"
+    },
+    {
+      "name": "diagnosing-bugs",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "debugging",
+        "diagnosis",
+        "regression",
+        "performance"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "A diagnosis loop for hard bugs and performance regressions: reproduce, rank hypotheses, test them.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/engineering/diagnosing-bugs (Matt Pocock)"
+    },
+    {
+      "name": "codebase-design",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "architecture",
+        "modules",
+        "design"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Vocabulary for deep modules, interfaces and seams, used by the design skills.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/engineering/codebase-design (Matt Pocock)"
+    },
+    {
+      "name": "domain-modeling",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "glossary",
+        "adr",
+        "domain"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Sharpen a project's terms in a GLOSSARY.md and record decisions as ADRs.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/engineering/domain-modeling (Matt Pocock)"
+    },
+    {
+      "name": "improve-codebase-architecture",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "architecture",
+        "refactoring",
+        "testability"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Scan a codebase for shallow modules and leaky seams, then report deepening opportunities.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/engineering/improve-codebase-architecture (Matt Pocock)"
+    },
+    {
+      "name": "triage",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "triage",
+        "issues",
+        "pull-requests",
+        "backlog"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Move issues and external pull requests through a state machine of triage roles.",
+      "license": "MIT",
+      "source": "mattpocock/skills, skills/engineering/triage (Matt Pocock)"
+    },
+    {
+      "name": "resolving-merge-conflicts",
+      "category": "dev",
+      "tier": "curated",
+      "tags": [
+        "git",
+        "merge",
+        "rebase",
+        "conflicts"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Resolve an in-progress merge or rebase by reading each side's intent from history.",
+      "license": "MIT",
+      "source": "mattpocock/skills at 153fc1b9 (since removed upstream), skills/engineering/resolving-merge-conflicts (Matt Pocock)"
+    },
+    {
+      "name": "learning-coach",
+      "category": "general",
+      "tier": "curated",
+      "tags": [
+        "learning",
+        "coaching",
+        "study"
+      ],
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "requires_toolsets": [],
+      "summary": "Coach a learner through a topic with questions, learner-made maps and transfer drills instead of explanations."
+    }
+  ]
+}

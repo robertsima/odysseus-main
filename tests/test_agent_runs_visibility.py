@@ -387,7 +387,7 @@ async def test_the_parent_is_told_the_worker_was_cut_off(monkeypatch):
 
     inject = parent.messages[-1].content
     assert "[Worker Runner ran out of rounds]" in inject
-    assert "partial" in inject and "tell the user where it stopped" in inject
+    assert "partial" in inject and "The same worker resumes from there" in inject
 
 
 async def test_a_finished_worker_hand_off_is_unchanged(monkeypatch):

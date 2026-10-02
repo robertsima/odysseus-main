@@ -1,0 +1,30 @@
+{
+  "id": "cookbook",
+  "name": "Cookbook",
+  "description": "Starts and supervises local or remote model servers and downloads.",
+  "kind": "native",
+  "capability": "model_serving",
+  "servers": [],
+  "requirements": [
+    {
+      "name": "model serving capability",
+      "check": {
+        "type": "capability",
+        "name": "model_serving"
+      },
+      "hint": "Install a serving runtime or add a server under Cookbook > Servers."
+    }
+  ],
+  "settings": "from_capability",
+  "tools": "from_capability",
+  "function_calling": false,
+  "prompt": "",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "capability",
+    "name": "model_serving"
+  },
+  "docs": "",
+  "order": 12
+}

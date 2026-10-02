@@ -1,0 +1,26 @@
+{
+  "id": "lotus",
+  "name": "Lotus",
+  "description": "Wellbeing journal: mood summaries and low-energy patterns (access set under Privacy & data).",
+  "kind": "mcp-python",
+  "servers": [
+    {
+      "id": "lotus",
+      "name": "Built-in: Lotus",
+      "script": "mcp_servers/lotus_server.py",
+      "env_profile": "python_path"
+    }
+  ],
+  "requirements": [],
+  "settings": [],
+  "tools": "from_server",
+  "function_calling": true,
+  "prompt": "For planning effort or capacity, read Lotus aggregate patterns (mood summaries, low-energy patterns) rather than guessing; what it may share is set under Privacy & data.",
+  "skills": [],
+  "loadouts": [],
+  "health": {
+    "type": "mcp_connected"
+  },
+  "docs": "",
+  "order": 5
+}

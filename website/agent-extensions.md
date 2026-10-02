@@ -131,6 +131,100 @@ This first version deliberately accepts no executable entrypoints, install
 commands, hooks or arbitrary remote packages. It is an Odysseus capability-bundle
 format, not a claim of compatibility with every vendor's plugin format.
 
+## Plugins as integration packages (schema v2)
+
+Schema v2 keeps everything above and adds an optional `integration` block, so a
+plugin can package a user-added integration: an MCP server, a few lines of prompt
+text, skills and loadout templates. v1 manifests load unchanged.
+
+```json
+{
+  "schema_version": 2,
+  "id": "demo",
+  "name": "Demo pack",
+  "version": "1.0",
+  "capabilities": {},
+  "integration": {
+    "name": "Demo",
+    "mcp_server": {
+      "name": "Demo Server",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "demo-mcp"],
+      "env": [{"name": "DEMO_TOKEN", "description": "API token", "required": true}]
+    },
+    "instructions": "Call demo_list before demo_get.",
+    "skills": [{"name": "demo-howto", "content": "---
+name: demo-howto
+description: ...
+---
+..."}],
+    "loadout_templates": [{"format": "odysseus-agent-profiles", "version": 1,
+      "profiles": [{"name": "Demo agent", "instructions": "...", "allowed_mcp_servers": ["{server:Demo Server}"]}]}]
+  }
+}
+```
+
+- `mcp_server.transport` is `stdio` (command and args), `http` or `sse` (a URL
+  without credentials). `env` is a list of variable names with descriptions.
+  A manifest never contains values: a `env` given as an object, or an entry with
+  a value, is rejected, and so are loader variables such as `PATH` or `LD_PRELOAD`.
+- `instructions` is at most 4 KB. `skills` are SKILL.md bodies (up to 10, 32 KB
+  each). `loadout_templates` are `odysseus-agent-profiles` v1 documents; a
+  `{server:<name>}` reference in `allowed_mcp_servers`, `enabled_tools` or
+  `disabled_tools` resolves to the server this install created.
+- A v2 manifest can be up to 256 KB (v1 stays at 64 KB).
+
+### Install and uninstall
+
+Only an administrator installs, and nothing runs until they do. The Plugins panel
+shows the command (or URL), the environment names, the skills and the templates,
+then asks for the values.
+
+`POST /api/plugins/{id}/install` takes `{"env": {NAME: value}, "approved":
+"<command line or URL>", "publish_skills": false}`. `approved` must equal the line
+the admin was shown, so a manifest replaced after the page rendered cannot run
+something unread. The call:
+
+1. creates the MCP server through the same handler as `POST /api/mcp/servers`
+   (env values go only into that server row, never the manifest, the install
+   record or the response);
+2. imports each skill as the admin's own skill with `source: imported`, status
+   `draft` unless `publish_skills` is true, gated on the server being connected;
+3. imports the templates through profile import, after resolving `{server:<name>}`,
+   renaming a loadout that would overwrite an existing one;
+4. records what it created in `data/plugins/installed/<id>.json` and returns the
+   server status, the skills, the loadouts and any unresolved references.
+
+A failure in step 2 or 3 removes what steps 1 to 3 had already made.
+`DELETE /api/plugins/{id}/install` removes exactly the recorded server, skills and
+loadouts, and nothing the admin created by hand. Deleting the manifest of an
+installed plugin is refused until it is uninstalled. Enabling the plugin for a
+chat grants its installed server in the chat's MCP allowlist, subject to the same
+selected-allowlist rules as a v1 server reference.
+
+### Safety stance
+
+No code runs in-process and nothing installs packages. An `stdio` command is
+whatever the administrator approves after reading it verbatim; Odysseus spawns
+it as it would any hand-added server. Skill, template and instruction text from
+a package is untrusted: skills land as drafts, and instructions are shown only
+as labelled context (below).
+
+### Server instructions
+
+An MCP server can send `instructions` when it initialises. Odysseus keeps up to
+4 KB of it per server and prints it, with a plugin's `instructions`, directly
+under that server's name in the MCP tool block of the prompt, labelled as
+untrusted text and only while the server's tools are offered that turn. A server
+whose tools are all switched off, or whose connection is gone, contributes
+nothing. The text is background on the tools, not commands; the model still
+follows the chat's own instructions and approval rules.
+
+The registry treats an installed plugin with a server as an integration of kind
+`plugin`: it counts as available while its server is connected, and its tools
+map back to it (`requires_integration: <plugin id>` on its skills).
+
 Sources: [PromptScript CLI](https://getpromptscript.dev/latest/reference/cli/),
 [portable skill directories](https://getpromptscript.dev/latest/guides/npx-skills/),
 [skills CLI](https://www.skills.sh/docs/cli).

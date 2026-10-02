@@ -106,8 +106,23 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
         requested_names.extend(n.strip() for n in re.split(r"[,\n]+", name) if n.strip())
     requested_names = list(dict.fromkeys(requested_names))
 
+    # A skill whose integration is not connected is not offered by the index or
+    # the keyword match, so list and search leave it out too. Toolsets are not
+    # checked here: this call has no turn policy, and an author listing skills
+    # should still see everything the integration check lets through.
+    def _usable(skills):
+        try:
+            from src import skill_toolsets
+
+            integrations = skill_toolsets.skill_visibility().available_integrations
+            return skill_toolsets.visible_skills(
+                skills, skill_toolsets.SkillVisibility(None, integrations)
+            )
+        except Exception:
+            return list(skills or [])
+
     if action in ("list", "index"):
-        all_skills = sm.load(owner=owner)
+        all_skills = _usable(sm.load(owner=owner))
         if not all_skills:
             return {"results": "No skills yet. Create one with action='add'."}
         published = [s for s in all_skills if s.get("status") == "published"]
@@ -304,7 +319,7 @@ async def do_manage_skills(content: str, owner: Optional[str] = None) -> Dict:
             return {"error": "query is required for search", "exit_code": 1}
         # An explicit search is a request to look harder than the per-turn
         # injection does, so the bar is lower than the 0.3 default.
-        results = sm.get_relevant_skills(query, sm.load(owner=owner), threshold=0.2, max_items=5)
+        results = sm.get_relevant_skills(query, _usable(sm.load(owner=owner)), threshold=0.2, max_items=5)
         if not results:
             return {"results": ("No matching skills found. The skills index in your context lists "
                                 "every skill by name; use action='view' with names=[...] to read "

@@ -97,7 +97,7 @@ _SAFE_TEST_RUNNERS = (r"pytest|python -m pytest|npm test|pnpm test|yarn test"
                       r"|npx tsc --noEmit"
                       r"|(?:\./gradlew|gradle) (?:test|check|build)"
                       r"|(?:\./mvnw|mvn) (?:test|verify|compile)")
-# The bundled Odysseus skill helper (integrations/claude/skills/odysseus/
+# The bundled Odysseus skill helper (clients/claude/skills/odysseus/
 # scripts/odysseus_api.py). Allowing it lets a delegated Claude session call
 # back into Odysseus through the scope-gated /api/codex/* API — the only
 # way the "bidirectional" half of the integration can work inside one job.
@@ -1497,7 +1497,7 @@ async def update_binary(target: Optional[str] = None, *, timeout: int = UPDATE_T
     if not binary.is_file() or not os.access(binary, os.X_OK):
         return {"error": _tool_error(
             f"binary unavailable at {binary}, so there is nothing to update. Install Claude Code there first "
-            "(see integrations/claude/README.md) or set Settings › Claude Code › Advanced › Binary."), "exit_code": 1}
+            "(see clients/claude/README.md) or set Settings › Claude Code › Advanced › Binary."), "exit_code": 1}
     if _UPDATE_STATE["running"]:
         return {"error": _tool_error("an update is already running; call action=status in a minute"),
                 "update_in_progress": True, "exit_code": 1}
