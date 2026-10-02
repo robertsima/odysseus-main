@@ -9,6 +9,7 @@ theme module now depends on.
 """
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -279,7 +280,10 @@ nav.resetNavOrder(doc);
 await settled(); report({});
 """)
     assert out["puts"], "reset must reach the account"
-    assert out["puts"][0][1]["value"][0] == "calendar"  # the default order's first item
+    # The default order's first item, read from navOrder.js so a redesign of the
+    # rail (PR #49 put search first) does not have to edit this test.
+    first_default = re.search(r"NAV_ITEMS = Object\.freeze\(\[\s*Object\.freeze\(\{ key: '([\w-]+)'", NAV_ORDER).group(1)
+    assert out["puts"][0][1]["value"][0] == first_default
 
 
 # ── theme boot ───────────────────────────────────────────────────────────────

@@ -939,6 +939,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
     if inline_profile is not None and (profile_name or model):
         raise ValueError("inline_profile cannot be combined with profile_name or model")
     profile = agent_profiles.validate_profiles([inline_profile])[0] if inline_profile is not None else None
+    if profile is not None and inline_profile.get("anonymous"):
+        profile["anonymous"] = True  # validation drops keys it does not know
     if profile_name:
         profile = agent_profiles.get_profile(profile_name)
         if profile is None:
@@ -947,6 +949,16 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         profile = dict(profile or {"name": "worker", "instructions": "", "disabled_tools": [],
                                    "max_rounds": agent_profiles.DEFAULT_ROUNDS})
         profile["model"] = model
+    # A worker's child never holds more than the worker that starts it, whatever
+    # the start call said (2026-10-02: a nameless child came up with
+    # tool_access "all" under a 52-tool worker). Before preflight, so the
+    # shell/file checks judge the tools the child will really have. A person's
+    # chat is untouched.
+    capped_notes: List[str] = []
+    if parent_session:
+        from src import agent_loadouts
+
+        profile, capped_notes = agent_loadouts.cap_to_starter(profile, parent_session, owner)
     checked = None
     if preflight:
         from src import worker_preflight
@@ -973,6 +985,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         # is best-effort, which must not turn a failed save into elevated access.
         from core.database import update_session_settings
         patch = {**agent_profiles.session_patch(profile), **(runtime_settings or {})}
+        if profile.get("anonymous"):
+            patch["agent_profile"] = None  # a capped sub-agent, not "a loadout"
         if parent_session:
             patch["parent_session"] = parent_session
         if update_session_settings(sess.id, patch) is None:
@@ -994,7 +1008,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         manager.save_sessions()
     except Exception:
         logger.debug("worker task persist failed", exc_info=True)
-    label = f"{profile['name']} · " if profile and profile.get("name") not in (None, "worker") else ""
+    label = (f"{profile['name']} · "
+             if profile and not profile.get("anonymous") and profile.get("name") not in (None, "worker") else "")
     # The loadout's own round budget, or 0 for no ceiling (the default). It is
     # recorded on the run and returned to the caller because it is the number a
     # "ran out of rounds" result has to be read against — otherwise a cap that
@@ -1009,7 +1024,7 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
         sess.id, "session", f"Worker · {label}{task[:80]}", owner=owner,
         data={"target_session": sess.id, "target_session_name": sess.name, "model": sess.model,
               "mode": "agent", "launched_from": "dashboard", "max_rounds": rounds,
-              **({"profile": profile["name"]} if profile and profile.get("name") else {}),
+              **({"profile": profile["name"]} if profile and profile.get("name") and not profile.get("anonymous") else {}),
               **({"parent_session": parent_session} if parent_session else {}),
               **(run_metadata or {})},
         detail=task[:1500],
@@ -1172,7 +1187,8 @@ async def launch_worker(*, owner: Optional[str], task: str, profile_name: Option
 
     worker_task.add_done_callback(_cleanup_worker)
     return {"session_id": sess.id, "session_name": sess.name, "run_id": run_id, "model": sess.model,
-            "max_rounds": rounds, **({"preflight": checked.summary()} if checked else {})}
+            "max_rounds": rounds, **({"preflight": checked.summary()} if checked else {}),
+            **({"capped_by_starter": capped_notes} if capped_notes else {})}
 
 
 def collect_worker_result(run_id: str, *, owner: Optional[str], session_id: Optional[str] = None) -> dict:

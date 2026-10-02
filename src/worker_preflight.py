@@ -145,6 +145,16 @@ def task_needs_workspace(task: str) -> bool:
     return _local_repo_signal(task or "")
 
 
+def task_is_read_only(task: str) -> bool:
+    """The task says it is read-only and asks for no command.
+
+    Used to hand a nameless sub-agent the read-only subset of its starter's
+    tools. Conservative on purpose: any command in the task means it is not.
+    """
+    text = task or ""
+    return bool(_READ_ONLY_RE.search(text)) and not task_needs_write(text) and not shell_commands_in(text)
+
+
 def task_needs_write(task: str) -> bool:
     text = task or ""
     if _READ_ONLY_RE.search(text):
@@ -211,9 +221,38 @@ _SHELL_FENCE_RE = re.compile(
 _GIT_RE = re.compile(r"^git\b", re.IGNORECASE)
 
 
+# 2026-10-02: the read-only "UI Design Critic" was refused for a worktree and a
+# review task with "has no shell ... cannot run 'run builds'". The task text of
+# that refusal was not kept; the match came from _RUN_PHRASE_RE, whose
+# lookbehinds see only the word right before "run", so a forbidding clause such
+# as "do not edit files or run builds" (the word before is "or") was read as a
+# request. A command is not asked for when a negation governs it, so look back
+# over the same clause (a comma, colon, semicolon, full stop or line break ends
+# it) for one.
+_NEGATION_BEFORE_RE = re.compile(
+    r"(?:\bnot|\bnever|\bwithout|\bavoid(?:ing)?|\bnor|\bneither|\bno need to|n't)\b"
+    r"(?:\s+[\w'/-]+){0,10}\s*$",
+    re.IGNORECASE,
+)
+_CLAUSE_END = ".;:!?,\n"
+_NEGATION_AFTER_RE = re.compile(
+    r"^[\s)\]\"'`]*(?:is|are|will be|should be|must be)?\s*(?:not|never)\s+"
+    r"(?:needed|required|allowed|permitted|wanted|necessary)\b",
+    re.IGNORECASE,
+)
+
+
+def _negated(text: str, start: int, end: int) -> bool:
+    """Whether a negation governs the words at ``text[start:end]``."""
+    clause_start = max((text.rfind(ch, 0, start) for ch in _CLAUSE_END), default=-1) + 1
+    before = text[max(clause_start, start - 160):start]
+    return bool(_NEGATION_BEFORE_RE.search(before) or _NEGATION_AFTER_RE.match(text[end:end + 60]))
+
+
 def shell_commands_in(task: str) -> List[str]:
     """The commands (or run-the-tests phrases) the task asks the worker to run,
-    in the order they appear."""
+    in the order they appear. A command the task forbids ("do not run builds")
+    is not one it asks for."""
     text = task or ""
     found: List[tuple] = []
     for m in _SHELL_FENCE_RE.finditer(text):
@@ -223,11 +262,14 @@ def shell_commands_in(task: str) -> List[str]:
                 found.append((m.start("body"), line))
                 break
     for m in _STRONG_COMMAND_RE.finditer(text):
-        found.append((m.start(), m.group(0)))
+        if not _negated(text, m.start(), m.end()):
+            found.append((m.start(), m.group(0)))
     for m in _WEAK_COMMAND_RE.finditer(text):
-        found.append((m.start("cmd"), m.group("cmd")))
+        if not _negated(text, m.start(), m.end()):
+            found.append((m.start("cmd"), m.group("cmd")))
     for m in _RUN_PHRASE_RE.finditer(text):
-        found.append((m.start(), m.group(0)))
+        if not _negated(text, m.start(), m.end()):
+            found.append((m.start(), m.group(0)))
     found.sort(key=lambda item: item[0])
     out: List[str] = []
     for _, cmd in found:

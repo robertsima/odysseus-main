@@ -615,8 +615,8 @@ def no_status_delay(monkeypatch):
     monkeypatch.setattr(llm_core, "_STREAM_STATUS_RETRY_DELAY", (0, 0))
 
 
-@pytest.mark.parametrize("status", [502, 503])
-async def test_gateway_error_before_output_is_replayed_once(store, codex, no_status_delay, caplog, status):
+@pytest.mark.parametrize("status", [502, 503, 520, 524, 529])
+async def test_gateway_error_before_output_is_replayed(store, codex, no_status_delay, caplog, status):
     caplog.set_level(logging.WARNING)
     fake = codex(FlakyGateway(failures=1, status=status))
 
@@ -625,16 +625,26 @@ async def test_gateway_error_before_output_is_replayed_once(store, codex, no_sta
     assert _errors(chunks) == []
     assert any('"delta": "hello"' in c for c in chunks)
     assert len(fake.bearers) == 2
-    assert f"HTTP {status} from" in caplog.text and "retrying once" in caplog.text
+    assert f"HTTP {status} from" in caplog.text and "retrying (1/3)" in caplog.text
 
 
-async def test_second_gateway_error_is_reported_not_replayed_again(store, codex, no_status_delay):
+async def test_an_edge_outage_lasting_three_tries_still_recovers(store, codex, no_status_delay):
+    """2026-10-02: one HTTP 520 failed a worker mid-run."""
+    fake = codex(FlakyGateway(failures=3, status=520))
+
+    chunks = await _stream(store.initial_access)
+
+    assert _errors(chunks) == []
+    assert len(fake.bearers) == 4
+
+
+async def test_gateway_error_after_three_replays_is_reported(store, codex, no_status_delay):
     fake = codex(FlakyGateway(failures=5))
 
     [error] = _errors(await _stream(store.initial_access))
 
     assert error["status"] == 503 and "upstream connect error" in error["raw"]
-    assert len(fake.bearers) == 2
+    assert len(fake.bearers) == 4
 
 
 def test_status_retry_classification():
@@ -651,6 +661,7 @@ def test_status_retry_classification():
     # Local transport failures the stream code already chose not to replay.
     assert not llm_core._is_retryable_upstream_status_chunk(
         chunk(status=502, error="Network error", fallback_eligible=False))
+    assert llm_core._is_retryable_upstream_status_chunk(chunk(status=520, text="outage"))
     for status in (400, 401, 429, 500, 504):
         assert not llm_core._is_retryable_upstream_status_chunk(chunk(status=status, text="x"))
     assert not llm_core._is_retryable_upstream_status_chunk('data: {"delta": "503"}\n\n')

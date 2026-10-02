@@ -7516,11 +7516,66 @@ async def stream_agent_loop(
         _bounded_memo.append(result)
         return result
 
+    _mcp_group_memo: Dict[str, List[Dict]] = {}
+
+    def _mcp_server_group(new_names: List[str]) -> List[Dict]:
+        """The other permitted tools of each MCP server a round newly declares.
+
+        2026-10-02: one chat declared a file server's tools in three requests
+        within a minute (list_files, then get_file, then get_file_libraries),
+        and the admin chat added tools singly four times in four hours; each
+        change re-read the whole prompt uncached (~550k tokens in the bundle).
+        A server's tools come in together, capped so a large server stays
+        grow-as-needed.
+        """
+        servers = sorted({n.split("__")[1] for n in new_names if n.startswith("mcp__") and n.count("__") >= 2})
+        if not servers or _turn_discovery is None or not mcp_mgr:
+            return []
+        out: List[Dict] = []
+        for server in servers:
+            if server not in _mcp_group_memo:
+                group: List[Dict] = []
+                try:
+                    permitted = _turn_discovery.permitted_names(
+                        _rearm_policy_settings(session_id, disabled_tools, allow_private)
+                    ) - set(disabled_tools)
+                    prefix = f"mcp__{server}__"
+                    names = {n for n in permitted if n.startswith(prefix)}
+                    if names:
+                        group = _filter_route_tool_schemas(_tool_schemas_for_round(
+                            force_answer=False,
+                            is_api_model=True,
+                            relevant_tools=names,
+                            needs_admin=True,
+                            admin_tools=set(),
+                            mcp_schemas=mcp_mgr.get_all_openai_schemas(_mcp_disabled_map or {}),
+                            disabled_tools=disabled_tools,
+                            ody_qwen_finetune_model=False,
+                            last_user=_last_user,
+                            mcp_gated_names=set(),
+                            context_length=context_length,
+                        ))
+                        group = [
+                            s for s in group
+                            if str((s.get("function") or s).get("name") or "").startswith(prefix)
+                        ]
+                        if (
+                            len(group) > stable_tools.GROUP_MAX_TOOLS
+                            or stable_tools.schema_tokens(group) > stable_tools.GROUP_MAX_TOKENS
+                        ):
+                            group = []
+                except Exception:
+                    logger.debug("[stable-tools] MCP group for %s skipped", server, exc_info=True)
+                    group = []
+                _mcp_group_memo[server] = group
+            out.extend(_mcp_group_memo[server])
+        return out
+
     def _tool_request_kwargs(url, mdl, schemas, route_state) -> Dict[str, Any]:
         """``tools``/``allowed_tools`` for one request on one route."""
         if route_state.get("is_api_model") and _stable_tools_route(url, mdl, route_state.get("relevant_tools")):
             declared, callable_names = stable_tools.declare(
-                session_id, schemas or [], full=_bounded_declared_schemas())
+                session_id, schemas or [], full=_bounded_declared_schemas(), group=_mcp_server_group)
             return {"tools": declared or None, "allowed_tools": callable_names}
         return {"tools": schemas or None, "allowed_tools": None}
 

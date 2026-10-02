@@ -49,7 +49,7 @@ import logging
 import os
 import re
 import threading
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,10 @@ _MAX_SESSIONS = 256
 # misses they prevent, and the session keeps the grow-as-needed behaviour.
 BOUNDED_MAX_TOOLS = 64
 BOUNDED_MAX_TOKENS = 20000
+# An MCP server's tools are declared together when the first one is needed,
+# unless the server is this large (then they come as needed).
+GROUP_MAX_TOOLS = 24
+GROUP_MAX_TOKENS = 8000
 _MODEL_RE = re.compile(r"^gpt-(?:5\.(?:[6-9]|[1-9]\d)|(?:[6-9]|[1-9]\d)(?:\.\d+)?)(?:[-.]|$)", re.I)
 
 _lock = threading.Lock()
@@ -208,7 +212,8 @@ def bounded_fits(schemas: List[dict]) -> bool:
 
 
 def declare(session_id: Optional[str], schemas: List[dict],
-            full: Optional[List[dict]] = None) -> Tuple[List[dict], List[str]]:
+            full: Optional[List[dict]] = None,
+            group: Optional[Callable[[List[str]], List[dict]]] = None) -> Tuple[List[dict], List[str]]:
     """``(tools to send, names callable this round)`` for one request.
 
     The tools to send are the chat's declared list with this round's schemas
@@ -226,6 +231,12 @@ def declare(session_id: Optional[str], schemas: List[dict],
     declared before this round's schemas, so a later round that offers any tool
     of it only changes what is callable. The same applies to the cap below,
     which starts over from ``full`` plus the round, never from the round alone.
+
+    ``group`` maps the names this round would add to schemas declared with them
+    (the rest of a new tool's MCP server), so one change covers what the next
+    rounds would otherwise add one or two at a time. 2026-10-02: a chat added
+    tools of the same file server in three requests within a minute, each a
+    full uncached re-read of the prompt.
     """
     active = [s for s in schemas or [] if _name(s)]
     allowed = [_name(s) for s in active]
@@ -235,10 +246,23 @@ def declare(session_id: Optional[str], schemas: List[dict],
     with _lock:
         entry = _load(session_id)
         before = list(entry.items())
+        if group is not None:
+            new_names = [_name(s) for s in active if _name(s) not in entry]
+            if new_names:
+                try:
+                    extra = [s for s in group(new_names) or [] if _name(s)]
+                except Exception:
+                    logger.debug("[stable-tools] group expansion skipped", exc_info=True)
+                    extra = []
+                # Before this round's schemas, so the round's own copy wins a tie.
+                base = base + [s for s in extra if _name(s) not in entry]
+        replaced = []
         for schema in base + active:
             name = _name(schema)
             current = entry.get(name)
             if current is None or _callable_shape(current) != _callable_shape(schema):
+                if current is not None:
+                    replaced.append(name)
                 entry[name] = schema
         if len(entry) > MAX_DECLARED:
             logger.info("[stable-tools] session=%s declared %d tools (cap %d); starting over from this round's %d",
@@ -250,8 +274,11 @@ def declare(session_id: Optional[str], schemas: List[dict],
         if changed:
             added = [n for n in entry if n not in dict(before)]
             if before:
-                logger.info("[stable-tools] session=%s declared %d tools (+%d: %s)", session_id, len(entry),
-                            len(added), ",".join(added[:8]) + ("…" if len(added) > 8 else ""))
+                logger.info("[stable-tools] session=%s declared %d tools (+%d: %s)%s", session_id, len(entry),
+                            len(added), ",".join(added[:8]) + ("…" if len(added) > 8 else ""),
+                            # A parameter change rewrites the entry in place and breaks the
+                            # cache; name it so a bundle shows which schema moved.
+                            f" replaced={','.join(replaced[:8])}" if replaced else "")
             _save(session_id, entry)
         return list(entry.values()), allowed
 

@@ -1438,14 +1438,93 @@ async def approve_and_publish(
 
 # ── cleanup ──────────────────────────────────────────────────────────────────
 
+DISCARD_REF_PREFIX = "refs/odysseus/discarded/"
+# Above this a file is left out of the recovery snapshot (and named in the
+# result): a build artefact or model weight would bloat the object store.
+DISCARD_FILE_CAP_BYTES = 5_000_000
+
+
+def _snapshot_ref_name(branch: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", branch).strip("-._") or "worktree"
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    return f"{DISCARD_REF_PREFIX}{safe[:80]}-{stamp}"
+
+
+async def _snapshot_worktree(
+    cfg: WorktreeConfig, worktree: str, branch: str, dirty: List[str]
+) -> Dict[str, Any]:
+    """Commit everything in a dirty worktree to a ref nothing else points at.
+
+    2026-10-02: the person told the admin agent to clean up worktrees "even if
+    they have existing uncommitted data"; cleanup refused three of them and
+    the old force path discards for good. A snapshot keeps the discard
+    recoverable: it is built in a temporary index, so no branch, no stash and
+    no index of the worktree is touched. ``add -A`` honours .gitignore, and
+    oversized files are named, not stored.
+    """
+    tmp_dir = os.path.join(cfg.state_dir, "tmp")
+    os.makedirs(tmp_dir, exist_ok=True)
+    index_file = os.path.join(tmp_dir, f"discard-{os.getpid()}-{time.time_ns()}.index")
+    ident = {"GIT_AUTHOR_NAME": "Odysseus", "GIT_AUTHOR_EMAIL": "odysseus@localhost",
+             "GIT_COMMITTER_NAME": "Odysseus", "GIT_COMMITTER_EMAIL": "odysseus@localhost"}
+    env = {"GIT_INDEX_FILE": index_file}
+    try:
+        head = await _head_sha(cfg, worktree)
+        await _git(cfg, ["read-tree", head], cwd=worktree, extra_env=env)
+        await _git(cfg, ["add", "-A", "--", "."], cwd=worktree, extra_env=env, timeout_s=300)
+        # Paths the status lists that are too large; for a rename or conflict
+        # the last path is the one on disk.
+        oversized: List[str] = []
+        for line in dirty:
+            name = line[3:].split(" -> ")[-1].strip().strip('"')
+            full = os.path.join(worktree, name)
+            try:
+                if os.path.isfile(full) and os.path.getsize(full) > DISCARD_FILE_CAP_BYTES:
+                    oversized.append(name)
+            except OSError:
+                continue
+        for i in range(0, len(oversized), 100):
+            # reset in the temporary index puts the HEAD entry back (or drops a new file).
+            await _git(cfg, ["reset", "-q", head, "--", *oversized[i:i + 100]],
+                       cwd=worktree, extra_env=env, check=False)
+        tree = (await _git(cfg, ["write-tree"], cwd=worktree, extra_env=env)).stdout.strip()
+        stamp = time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime())
+        message = (f"Discarded worktree snapshot\n\nbranch: {branch}\npath: {worktree}\n"
+                   f"time: {stamp}\n")
+        commit = (await _git(cfg, ["commit-tree", tree, "-p", head, "-m", message],
+                             cwd=worktree, extra_env={**env, **ident})).stdout.strip()
+        if not is_valid_sha(commit):
+            raise WorktreeError("could not write the recovery snapshot; nothing was removed")
+        ref = _snapshot_ref_name(branch)
+        exists = await _git(cfg, ["rev-parse", "--verify", "--quiet", ref],
+                            cwd=cfg.source_repo, check=False)
+        if exists.ok:
+            ref = f"{ref}-{commit[:7]}"
+        await _git(cfg, ["update-ref", ref, commit], cwd=cfg.source_repo)
+        changed = (await _git(cfg, ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z",
+                                    head, commit], cwd=worktree)).stdout
+        return {"ref": ref, "commit": commit,
+                "paths": len([p for p in changed.split("\0") if p]),
+                "skipped_oversized": oversized}
+    finally:
+        try:
+            os.unlink(index_file)
+        except OSError:
+            pass
+
 
 async def cleanup(
     branch: str,
     *,
     cfg: Optional[WorktreeConfig] = None,
     repository: Optional[str] = None,
+    discard_uncommitted: bool = False,
 ) -> Dict[str, Any]:
     """Detach a worktree and drop its branch, only when nothing would be lost.
+
+    With ``discard_uncommitted`` a dirty worktree is snapshotted to
+    refs/odysseus/discarded/* first, then force-removed. The caller must have
+    checked that the person allowed it (worktree_tools does).
 
     Unlike the removed ``remove`` action (``git worktree remove --force``),
     this refuses a worktree with any modified or untracked file, runs a plain
@@ -1475,16 +1554,32 @@ async def cleanup(
                 if current and current != resolved:
                     raise WorktreeError(f"worktree is on {current}, expected {resolved}")
                 dirty = await _dirty_entries(rcfg, path)
-                if dirty:
+                if dirty and discard_uncommitted:
+                    snap = await _snapshot_worktree(rcfg, path, resolved, dirty)
+                    result["discarded_snapshot"] = {
+                        "ref": snap["ref"], "commit": snap["commit"], "paths": snap["paths"]}
+                    if snap["skipped_oversized"]:
+                        result["discarded_snapshot"]["skipped_oversized"] = snap["skipped_oversized"][:50]
+                    result["recovery_hint"] = (
+                        f"git checkout -b <name> {snap['ref']} (in the repository) restores "
+                        "the discarded changes")
+                    await _git(rcfg, ["worktree", "remove", "--force", path],
+                               cwd=rcfg.source_repo, timeout_s=120)
+                    logger.warning(
+                        "agent worktree: discarded uncommitted work repo=%s branch=%s paths=%d snapshot=%s",
+                        rcfg.source_repo, resolved, snap["paths"], snap["ref"])
+                    result["worktree_removed"] = not os.path.lexists(path)
+                elif dirty:
                     shown = "; ".join(dirty[:20]) + (" ..." if len(dirty) > 20 else "")
                     raise WorktreeError(
                         f"worktree {path} has {len(dirty)} uncommitted or untracked path(s) "
                         f"({shown}); commit them or ask the user. Nothing was removed.",
                         code="WORKTREE_DIRTY",
                     )
-                # No --force: git itself refuses a dirty or locked worktree too.
-                await _git(rcfg, ["worktree", "remove", path], cwd=rcfg.source_repo, timeout_s=120)
-                result["worktree_removed"] = not os.path.lexists(path)
+                else:
+                    # No --force: git itself refuses a dirty or locked worktree too.
+                    await _git(rcfg, ["worktree", "remove", path], cwd=rcfg.source_repo, timeout_s=120)
+                    result["worktree_removed"] = not os.path.lexists(path)
             else:
                 listing = await _git(rcfg, ["worktree", "list", "--porcelain"],
                                      cwd=rcfg.source_repo, check=False)
@@ -1507,7 +1602,10 @@ async def cleanup(
                     rcfg, ["for-each-ref", "--format=%(refname)", "--contains", tip],
                     cwd=rcfg.source_repo, check=False,
                 )).stdout.split()
-                holders = [h for h in holders if h != ref and h != "refs/stash"]
+                # The snapshot commit's parent is this tip, so its ref would make
+                # every discarded branch look safely held elsewhere.
+                holders = [h for h in holders if h != ref and h != "refs/stash"
+                           and not h.startswith(DISCARD_REF_PREFIX)]
                 if f"branch {ref}" in checked_out.stdout.splitlines():
                     result["branch_kept"] = "the branch is still checked out in another worktree"
                 elif not holders:

@@ -258,6 +258,15 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
     parent chat's model; it remembers its parent so the UI can link back.
     """
     parent = _find_session(manager, parent_id)
+    # A worker's child is never wider than the worker (2026-10-02: a nameless
+    # sub-agent came up with every tool). launch_worker has already done this
+    # for its starts; send_to_session(new) reaches here uncapped.
+    try:
+        from src import agent_loadouts
+
+        profile, _cap_notes = agent_loadouts.cap_to_starter(profile, parent_id, owner)
+    except ValueError as exc:
+        return None, str(exc)
     if profile and profile.get("model"):
         resolved = None
         failures = []
@@ -291,6 +300,9 @@ def _new_child_session(manager, parent_id: Optional[str], owner: Optional[str], 
         if profile:
             from src.agent_profiles import session_patch
             patch.update(session_patch(profile))
+            if profile.get("anonymous"):
+                # No loadout was named: the chat is capped, not "a loadout".
+                patch["agent_profile"] = None
         if patch:
             saved = update_session_settings(sid, patch)
             if profile and saved is None:

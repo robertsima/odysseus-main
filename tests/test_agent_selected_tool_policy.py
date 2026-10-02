@@ -312,13 +312,21 @@ def test_profile_child_does_not_start_without_persisted_policy(monkeypatch, fail
 
 
 @pytest.mark.parametrize("profile", [None, {}])
-def test_unprofiled_child_keeps_best_effort_parent_metadata(monkeypatch, profile):
+def test_unprofiled_child_starts_with_its_starters_limits(monkeypatch, profile):
+    """Since 2026-10-02 a nameless child is capped at the chat that starts it
+    (it came up with every tool), so its scoped policy has to be saved like a
+    profiled child's; a save that fails keeps it from starting."""
     from src.agent_tools.session_tools import _new_child_session
 
-    monkeypatch.setattr("core.database.update_session_settings", lambda sid, patch: None)
+    saved = {}
+    monkeypatch.setattr("core.database.update_session_settings",
+                        lambda sid, patch: saved.setdefault(sid, {}).update(patch) or True)
     manager, expected = _child_manager()
     child, error = _new_child_session(manager, "parent", None, "Research", profile)
     assert child is expected and error is None
+    [stored] = saved.values()
+    assert stored["parent_session"] == "parent"
+    assert stored.get("tool_access") in ("all", "selected")
 
 
 def test_named_profile_for_existing_chat_refuses_without_starting_or_mutating(monkeypatch):
