@@ -14,9 +14,9 @@ def test_builtin_visual_theme_options_and_legacy_identifier():
     assert "const THEME_PREF = 'theme'" in THEME
 
 
-def test_builtins_have_distinct_visible_brand_labels():
-    assert "name === 'dark' ? 'Agamemnon'" in THEME
-    assert "name === 'odysseus' ? 'Odysseus'" in THEME
+def test_builtins_have_distinct_colorway_labels_without_changing_brand():
+    assert "name === 'dark' ? 'Obsidian'" in THEME
+    assert "name === 'odysseus' ? 'Bronze'" in THEME
     assert "Object.entries(THEMES).map(([name, c])" in THEME
 
 

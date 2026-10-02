@@ -926,7 +926,7 @@ function rowHtml(r, nest = {}) {
       ${crew}
       ${nest.folded ? `<button type="button" class="ag-workers-toggle" data-ag="toggle-workers" data-sid="${esc(r.session_id)}" aria-expanded="${nest.open ? 'true' : 'false'}" title="${nest.open ? 'Hide finished workers' : 'Show finished workers'}">${nest.open ? '▾' : '▸'} ${nest.folded} finished worker${nest.folded === 1 ? '' : 's'}</button>` : ''}
     </div>
-    <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">↗</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">■</button>` : ''}</div>
+    <div class="ag-card-actions">${isCurrentChat(r.session_id) ? '' : `<button type="button" class="wb-icon-btn" data-ag="open-chat" data-sid="${esc(r.session_id)}" title="Open chat" aria-label="Open ${esc(r.name)} chat">Open</button>`}${status === 'running' ? `<button type="button" class="wb-icon-btn" data-ag="stop-chat" data-sid="${esc(r.session_id)}" title="Stop agent" aria-label="Stop ${esc(r.name)}">Stop</button>` : ''}</div>
   </div>`;
 }
 function renderDetail() {

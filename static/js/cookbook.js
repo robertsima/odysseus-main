@@ -3084,7 +3084,7 @@ function _renderRecipes() {
   html += '<div class="cookbook-group" data-backend-group="Search">';
   html += '<div class="admin-card" style="flex:1;display:flex;flex-direction:column;overflow:hidden;">';
   html += '<div style="display:flex;align-items:baseline;gap:8px;margin-bottom:2px;">';
-  html += '<h2 style="margin:0;padding:0;line-height:1;">Scan / Download</h2>';
+  html += '<h2 style="margin:0;padding:0;line-height:1;">Find models</h2>';
   html += '</div>';
   html += '<p class="memory-desc doclib-desc" style="margin-top:6px;">Scans your hardware for what models you can run. Hardware is cached; hit the scan button to re-probe after changing GPUs.</p>';
   html += '<div class="hwfit-toolbar" style="margin-top:9px;">';

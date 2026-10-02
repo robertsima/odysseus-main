@@ -9,7 +9,7 @@
 
 import Storage from './storage.js';
 import uiModule from './ui.js';
-import { readPref, writePref, envelope, localCopyBelongsToAccount } from './serverPrefs.js';
+import { readPref, writePref, envelope, localCopyBelongsToAccount, reconcile } from './serverPrefs.js';
 import { initColorPickers, attachColorPicker } from './colorPicker.js';
 import { hexToRgb } from './color/hex.js';
 import { makeWindowDraggable } from './windowDrag.js';
@@ -44,6 +44,8 @@ const DEFAULT_THEME = 'dark';
 const LS_KEY = 'odysseus-theme';
 const CUSTOM_THEMES_KEY = 'odysseus-custom-themes';
 const THEME_PREF = 'theme';
+const STYLE_KEY = 'odysseus-page-style-v1';
+const STYLE_PREF = 'page-style';
 const CUSTOM_THEMES_PREF = 'custom-themes';
 // The custom-theme map is a plain object on disk for backward compatibility,
 // so its write time is kept beside it rather than inside it.
@@ -274,15 +276,45 @@ export function applyThemeIdentity(name) {
   const identity = name || DEFAULT_THEME;
   document.documentElement.setAttribute('data-theme', identity);
   const message = document.getElementById('message');
-  if (message) message.placeholder = identity === 'dark' ? 'Message Scribe…' : 'Message Odysseus...';
-  // A theme switch may leave Customize selected. Return to the available tab
-  // without removing the functional controls from the regular theme.
-  if (identity === 'dark') {
-    const customize = document.getElementById('theme-tab-customize');
-    if (customize?.style.display !== 'none') {
-      document.querySelector('#theme-tabs [data-tab="theme-tab-browse"]')?.click();
-    }
+  if (message) message.placeholder = 'Message Scribe…';
+}
+
+// Style is a separate account preference. Legacy installations had no style
+// field: preserve their explicitly chosen palette's former page composition.
+export function readPageStyle() {
+  try {
+    const entry = JSON.parse(localStorage.getItem(STYLE_KEY) || 'null');
+    if (entry?.value === 'agamemnon' || entry?.value === 'classic') return entry.value;
+  } catch (_) {}
+  const saved = getSaved();
+  return !saved || saved.name === 'dark' ? 'agamemnon' : 'classic';
+}
+export function applyPageStyle(style) {
+  document.documentElement.setAttribute('data-style', style === 'classic' ? 'classic' : 'agamemnon');
+  const toggle = document.getElementById('theme-style-toggle');
+  if (toggle) toggle.checked = style !== 'classic';
+}
+export function savePageStyle(style) {
+  const value = style === 'classic' ? 'classic' : 'agamemnon';
+  const updated_at = Date.now();
+  try { localStorage.setItem(STYLE_KEY, JSON.stringify({ value, updated_at })); } catch (_) {}
+  applyPageStyle(value);
+  writePref(STYLE_PREF, value, updated_at);
+}
+async function syncPageStyle() {
+  let local = null;
+  try { local = JSON.parse(localStorage.getItem(STYLE_KEY) || 'null'); } catch (_) {}
+  if (!await localCopyBelongsToAccount()) {
+    local = null;
+    // A style left by a different signed-in user must not become this
+    // account's fallback if the new account has no stored style yet.
+    try { localStorage.removeItem(STYLE_KEY); } catch (_) {}
   }
+  const { source, entry } = await reconcile(STYLE_PREF, local);
+  if (source === 'remote' && ['classic', 'agamemnon'].includes(entry?.value)) {
+    localStorage.setItem(STYLE_KEY, JSON.stringify(entry));
+  }
+  applyPageStyle(readPageStyle());
 }
 
 export function applyColors(colors) {
@@ -548,6 +580,12 @@ function syncAdvancedPickers(colors) {
 }
 
 export function initThemeUI() {
+  applyPageStyle(readPageStyle());
+  const styleToggle = document.getElementById('theme-style-toggle');
+  if (styleToggle && !styleToggle.dataset.bound) {
+    styleToggle.dataset.bound = '1';
+    styleToggle.addEventListener('change', () => savePageStyle(styleToggle.checked ? 'agamemnon' : 'classic'));
+  }
   const themePopup = document.getElementById('theme-popup');
   const themeHeader = document.getElementById('theme-popup-header');
   if (themePopup && themeHeader && !themePopup.dataset.dragWired) {
@@ -674,7 +712,7 @@ export function initThemeUI() {
         <span style="background:${c.fg}"></span>
         <span style="background:${c.red}"></span>
       </div>
-      <span class="theme-swatch-name">${name === 'dark' ? 'Agamemnon' : (name === 'odysseus' ? 'Odysseus' : (name === 'gpt' ? 'GPT' : name))}</span>
+      <span class="theme-swatch-name">${name === 'dark' ? 'Obsidian' : (name === 'odysseus' ? 'Bronze' : (name === 'gpt' ? 'GPT' : name))}</span>
     </div>
   `).join('');
 
@@ -2203,6 +2241,7 @@ async function _initWithSync() {
   let changed = false;
   try { changed = await _syncCustomThemesWithAccount(); } catch (e) { console.warn('Custom theme sync failed:', e); }
   try { changed = await _syncThemeWithAccount() || changed; } catch (e) { console.warn('Theme sync failed:', e); }
+  try { await syncPageStyle(); } catch (e) { console.warn('Page style sync failed:', e); }
   // Re-run only when the account actually had something different to say.
   // initThemeUI() re-reads localStorage and re-applies every part of the theme.
   if (!hadLocal || changed) initThemeUI();

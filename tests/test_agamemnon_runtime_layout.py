@@ -28,7 +28,7 @@ from tests.helpers.agamemnon_browser import (
 EXE = chromium_path()
 pytestmark = pytest.mark.skipif(not EXE, reason="needs a Chromium binary (ODYSSEUS_TEST_CHROMIUM)")
 
-VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 390: 844, 320: 740}
+VIEWPORTS = {1440: 920, 1280: 800, 1024: 768, 700: 844, 390: 844, 320: 740}
 SHOTS = os.environ.get("AGAMEMNON_SCREENSHOT_DIR")
 ODYSSEUS_THEME = json.dumps({"name": "odysseus", "colors": {
     "bg": "#211f1c", "fg": "#f2eee5", "panel": "#171614", "border": "#554b36", "red": "#c99a45"}})
@@ -110,6 +110,80 @@ def open_agents(page) -> None:
     time.sleep(0.3)
 
 
+@pytest.mark.parametrize('width', [320, 390, 700])
+def test_compact_phalanx_and_chat_strip_are_distinct_and_readable(open_app, width):
+    page = open_app(width)
+    assert page.eval("document.getElementById('sidebar-command-menu').hidden") is True
+    page.wait_for("!document.getElementById('agent-strip').hidden")
+    page.eval("document.querySelector('.agent-strip-toggle').click()")
+    page.wait_for("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded') === 'false'")
+    shot(page, 'strip-collapsed')
+    assert_usable(page, '.agent-strip-toggle')
+    assert page.probe('.agent-strip-head')['height'] < 55
+    page.eval("document.querySelector('.agent-strip-toggle').click()")
+    shot(page, 'strip-expanded')
+    assert page.probe('.agent-strip-row')['height'] <= 130
+    assert_no_sideways_scroll(page)
+
+    open_agents(page)
+    page.wait_for("document.querySelector('.ag-fleet').classList.contains('ag-fleet-compact')")
+    shot(page, 'compact-phalanx')
+    for card in page.eval("[...document.querySelectorAll('.ag-fleet-compact .ag-bot-card')].map(c => {const b=c.getBoundingClientRect();return {height:b.height,left:b.left,right:b.right};})"):
+        assert card['height'] <= (155 if width <= 390 else 110), card
+        assert card['left'] >= 0 and card['right'] <= width + 1, card
+    for action in page.eval("[...document.querySelectorAll('.ag-fleet-compact .ag-card-actions button')].map(c => {const b=c.getBoundingClientRect();return {height:b.height,width:b.width,right:b.right};})"):
+        assert action['height'] >= 44 and action['width'] >= 44 and action['right'] <= width + 1, action
+    assert_no_sideways_scroll(page, '.agents-modal-content')
+
+
+def test_chat_strip_with_half_width_docked_workbench(open_app):
+    page = open_app(1024)
+    open_workbench(page)
+    page.click('#wb-dock-right')
+    page.wait_for("document.getElementById('workbench-modal').classList.contains('modal-right-docked')")
+    page.wait_for("document.getElementById('sidebar').classList.contains('hidden')")
+    shot(page, 'strip-half-workbench')
+    strip, chat = page.probe('.agent-strip'), page.probe('.chat-container')
+    assert strip['width'] <= chat['width'] and strip['height'] <= 155
+    assert chat['width'] >= 520
+    assert page.probe('#chat-history')['height'] >= 200
+    assert page.probe('.chat-progress-shelf')['height'] <= 205
+    assert page.eval("getComputedStyle(document.querySelector('.agent-strip-head [data-strip-act=workbench]')).display") == 'none'
+    assert_usable(page, '.agent-strip-row [data-strip-act="stop"]')
+    scroll = page.probe('#scroll-bottom-btn')
+    if scroll['visible']:
+        assert scroll['bottom'] <= page.probe('#chat-history')['bottom'], scroll
+    assert_usable(page, '.agent-strip-toggle')
+    assert_usable(page, '#message')
+    assert_no_sideways_scroll(page)
+    page.click('.agent-strip-toggle')
+    page.wait_for("document.querySelector('.agent-strip-toggle').getAttribute('aria-expanded') === 'false'")
+    shot(page, 'strip-half-workbench-collapsed')
+    assert page.probe('.agent-strip-head')['height'] < 55
+    assert_usable(page, '#message')
+    assert page.probe('#chat-history')['height'] >= 250
+
+
+@pytest.mark.parametrize('width', [700, 390])
+def test_narrow_scribe_progress_and_workbench_do_not_cover_controls(open_app, width):
+    page = open_app(width)
+    page.wait_for("!document.getElementById('agent-strip').hidden")
+    if width == 700:
+        open_workbench(page)
+        # At 700px Workbench takes the available workspace as a page;
+        # docking is deliberately disabled rather than squeezing chat.
+        assert not page.probe('#wb-dock-right')['visible']
+        shot(page, 'combined-workbench-page')
+        page.click('#close-workbench-modal')
+        page.wait_for("document.getElementById('workbench-modal').classList.contains('hidden')")
+    shot(page, 'combined-progress-workbench' if width == 700 else 'combined-progress-mobile')
+    assert_usable(page, '.agent-strip-row [data-strip-act="stop"]')
+    assert_usable(page, '#message')
+    assert page.probe('.chat-progress-shelf')['height'] <= 210
+    assert page.probe('#chat-history')['height'] >= 175
+    assert_no_sideways_scroll(page)
+
+
 # ── Chat ────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("width", list(VIEWPORTS))
@@ -127,7 +201,9 @@ def test_chat_transcript_and_composer_fill_the_available_screen(open_app, width)
     assert bar["width"] >= history["width"] - 2
     assert message["width"] >= bar["width"] * 0.6
     # The transcript is the part that grows, and it scrolls on its own.
-    assert history["height"] >= (220 if width <= 390 else 330)
+    # At 1024px a live checklist may use ~80px; 300px still leaves a real
+    # scrolling transcript without forcing the progress off screen.
+    assert history["height"] >= (220 if width <= 390 else 300 if width == 1024 else 330)
     assert history["overflowY"] == "auto" and history["scrollHeight"] > history["clientHeight"]
     assert heading["visible"] and heading["bottom"] <= history["top"]
     assert page.probe('.ag-context-rail') is None
@@ -215,19 +291,21 @@ def test_navigation_opens_the_phalanx_and_the_workbench(open_app, width):
     page = open_app(width)
     if width <= 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
-    assert_usable(page, "#sidebar-agents-shortcut")
-    page.click("#sidebar-agents-shortcut")
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
+    assert_usable(page, "#sidebar-command-toggle")
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-agents"]')
     page.wait_for("!document.getElementById('agents-dashboard').hidden")
     assert page.probe("#agents-dashboard .ag-card")["visible"]
     page.click("#close-agents-dashboard")
     page.wait_for("document.getElementById('agents-dashboard').hidden")
     if width <= 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-workbench-shortcut').getBoundingClientRect().left >= 0")
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
         time.sleep(0.35)  # sidebar slide completes before coordinate click
-    assert_usable(page, '#sidebar-workbench-shortcut')
-    page.click("#sidebar-workbench-shortcut")
+    assert_usable(page, '#sidebar-command-toggle')
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-workbench"]')
     page.wait_for("!document.getElementById('workbench-modal').classList.contains('hidden')")
     assert page.probe(".ag-run-summary")["visible"]
 
@@ -240,12 +318,13 @@ def test_scribe_navigation_and_phalanx_identity(open_app, width):
     assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
     assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
     assert not page.probe('#ag-open-theme')
-    assert not page.probe('#theme-tabs [data-tab="theme-tab-customize"]')['visible']
+    assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
     if width == 390:
         page.eval("window._odyOpenSidebar('left')")
-        page.wait_for("document.getElementById('sidebar-agents-shortcut').getBoundingClientRect().left >= 0")
-    assert page.probe('#sidebar-agents-shortcut')['visible']
-    page.click('#sidebar-agents-shortcut')
+        page.wait_for("document.getElementById('sidebar-command-toggle').getBoundingClientRect().left >= 0")
+    assert page.probe('#sidebar-command-toggle')['visible']
+    page.click('#sidebar-command-toggle')
+    page.click('#sidebar-command-menu [data-command-target="rail-agents"]')
     page.wait_for("!document.getElementById('agents-dashboard').hidden")
     assert page.eval("document.querySelector('.ag-phalanx-title').textContent") == 'Phalanx'
     assert 'Command center' in page.eval("document.getElementById('ag-window-summary').textContent")
@@ -254,24 +333,24 @@ def test_scribe_navigation_and_phalanx_identity(open_app, width):
 
 def test_non_agamemnon_navigation_and_activity_remain_intact(open_app):
     page = open_app(1440, ODYSSEUS_THEME)
-    assert not page.probe('.ag-command-link')['visible']
+    assert page.eval("document.documentElement.dataset.style") == 'classic'
     assert page.probe('#tool-agents-btn')['visible']
-    assert page.eval("document.querySelector('.ody-nav-label').textContent") == 'Agents'
+    assert page.eval("document.querySelector('.ag-nav-label').textContent") == 'Phalanx'
     assert page.eval("getComputedStyle(document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]')).display") != 'none'
-    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") != '/static/branding/agamemnon-trojan-helmet.svg'
+    assert page.eval("document.querySelector('link[rel=icon]').getAttribute('href')") == '/static/branding/agamemnon-trojan-helmet.svg'
     open_workbench(page)
     assert not page.probe('.ag-run-summary')['visible']
     assert visible_panels(page) == ['activity']
-    assert page.eval("document.getElementById('message').placeholder") == 'Message Odysseus...'
+    assert page.eval("document.getElementById('message').placeholder") == 'Message Scribe…'
 
 
 @pytest.mark.parametrize('width', [1440, 390, 320])
 def test_theme_polish_preserves_readable_navigation_and_transcript(open_app, width):
     page = open_app(width)
     if width == 1440:
-        command = assert_usable(page, '#sidebar-agents-shortcut')
+        command = assert_usable(page, '#sidebar-command-toggle')
         assert command['height'] >= 44
-        assert page.probe('#sidebar-agents-shortcut')['fontSize'] >= 14
+        assert page.probe('#sidebar-command-toggle')['fontSize'] >= 14
     # The message cards occupy the transcript rather than creating wide
     # interior gutters that squeeze code blocks at 320px.
     history, message = page.probe('#chat-history'), page.probe('#chat-history .msg-ai')
@@ -301,9 +380,9 @@ def test_phalanx_mobile_names_and_actions_are_reachable(open_app, width):
     card = page.probe('#agents-dashboard .ag-card')
     name = page.probe('#agents-dashboard .ag-card .ag-card-select')
     actions = page.eval("[...document.querySelectorAll('#agents-dashboard .ag-card:first-child .ag-card-actions .wb-icon-btn')].map(b => {const r=b.getBoundingClientRect();return {width:r.width,height:r.height,left:r.left,right:r.right,top:r.top};})")
-    assert name['right'] <= card['right'] and name['width'] >= card['width'] * .45
+    assert name['right'] <= card['right'] and name['width'] >= 70
     assert all(a['width'] >= 44 and a['height'] >= 44 and a['right'] <= width for a in actions), actions
-    assert actions and actions[0]['top'] >= name['bottom']
+    assert actions and actions[0]['top'] >= card['top']
     assert_no_sideways_scroll(page, '.agents-modal-content')
 
 
@@ -359,7 +438,7 @@ def test_workbench_keyboard_tabs_and_theme_switch(open_app):
     page.eval("document.getElementById('wb-tab-changes').dispatchEvent(new KeyboardEvent('keydown', {key:'Home',bubbles:true}))")
     assert visible_panels(page) == ['activity']
     page.eval("document.querySelector('#theme-tabs [data-tab=\"theme-tab-customize\"]').click(); import('/static/js/theme.js').then(m => m.applyThemeIdentity('dark'))")
-    assert page.eval("document.getElementById('theme-tab-customize').style.display") == 'none'
+    assert page.eval("document.getElementById('theme-tab-customize').style.display") != 'none'
 
 
 # ── Workbench ───────────────────────────────────────────────────────────────

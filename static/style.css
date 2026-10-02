@@ -697,11 +697,11 @@ body.bg-pattern-sparkles {
        built from Agamemnon's colors doesn't inherit its layout, and a
        recolored Agamemnon keeps its own. Odysseus and every other theme
        are completely unaffected — this block only ever matches
-       html[data-theme="dark"]. The extra `.sidebar` qualifier raises
+       html[data-style="agamemnon"]. The extra `.sidebar` qualifier raises
        specificity above `.sidebar.right-side .sidebar-header` / `.sidebar-brand`
        above, so the banner composition applies regardless of which edge
        the sidebar is docked to. */
-    html[data-theme="dark"] .sidebar .sidebar-header {
+    html[data-style="agamemnon"] .sidebar .sidebar-header {
       flex-direction: column;
       justify-content: center;
       padding: 18px 16px 14px;
@@ -709,18 +709,18 @@ body.bg-pattern-sparkles {
       border-bottom: 1px solid color-mix(in srgb, var(--brand-color, var(--red)) 45%, var(--border)) !important;
       box-shadow: 0 1px 0 color-mix(in srgb, var(--brand-color, var(--red)) 18%, transparent) !important;
     }
-    html[data-theme="dark"] .sidebar .sidebar-brand {
+    html[data-style="agamemnon"] .sidebar .sidebar-brand {
       flex-direction: column;
       justify-content: center;
       gap: 4px;
       padding: 0;
     }
-    html[data-theme="dark"] .sidebar-brand-icon {
+    html[data-style="agamemnon"] .sidebar-brand-icon {
       width: 24px;
       height: 24px;
       margin-right: 0;
     }
-    html[data-theme="dark"] .sidebar .sidebar-brand-title {
+    html[data-style="agamemnon"] .sidebar .sidebar-brand-title {
       top: 0;
       left: 0;
       margin-left: 0;
@@ -732,13 +732,13 @@ body.bg-pattern-sparkles {
        Odysseus's single uninterrupted list of icons. Pure decoration (a
        ::before rule + a little margin), so it can't desync from the rail's
        fixed 48px width or the resize/collapse logic in sidebar-layout.js. */
-    html[data-theme="dark"] .icon-rail #rail-gallery,
-    html[data-theme="dark"] .icon-rail #rail-agents {
+    html[data-style="agamemnon"] .icon-rail #rail-gallery,
+    html[data-style="agamemnon"] .icon-rail #rail-agents {
       position: relative;
       margin-top: 11px;
     }
-    html[data-theme="dark"] .icon-rail #rail-gallery::before,
-    html[data-theme="dark"] .icon-rail #rail-agents::before {
+    html[data-style="agamemnon"] .icon-rail #rail-gallery::before,
+    html[data-style="agamemnon"] .icon-rail #rail-agents::before {
       content: '';
       position: absolute;
       top: -7px;
@@ -750,17 +750,17 @@ body.bg-pattern-sparkles {
     /* Narrow phones: keep the compact inline brand row so the sidebar
        header doesn't grow taller than it needs to on a small screen. */
     @media (max-width: 480px) {
-      html[data-theme="dark"] .sidebar .sidebar-header {
+      html[data-style="agamemnon"] .sidebar .sidebar-header {
         flex-direction: row;
         justify-content: flex-start;
         padding: 18px 12px 8px 12px;
         min-height: 44px;
       }
-      html[data-theme="dark"] .sidebar .sidebar-brand {
+      html[data-style="agamemnon"] .sidebar .sidebar-brand {
         flex-direction: row;
         gap: 6px;
       }
-      html[data-theme="dark"] .sidebar .sidebar-brand-title {
+      html[data-style="agamemnon"] .sidebar .sidebar-brand-title {
         font-size: 1.1rem;
         letter-spacing: 0.075em;
       }

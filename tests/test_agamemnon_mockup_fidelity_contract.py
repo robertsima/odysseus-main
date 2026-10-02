@@ -10,7 +10,7 @@ SPEC = (ROOT / "website/agamemnon-visual-difference-spec.md").read_text()
 def test_mockup_styles_are_identity_scoped_and_loaded_after_base_styles():
     assert '/static/agamemnon-mockup.css' in HTML
     assert HTML.index('/static/style.css') < HTML.index('/static/agamemnon-mockup.css')
-    assert 'html[data-theme="dark"]' in CSS
+    assert 'html[data-style="agamemnon"]' in CSS
     assert 'html[data-theme="odysseus"]' not in CSS
     assert '.ag-page-heading,.ag-context-rail' in CSS
 
@@ -28,9 +28,11 @@ def test_exact_penpot_geometry_palette_and_typography_are_present():
 def test_three_mockup_surface_titles_and_context_composition_exist():
     for label in ('Scribe', 'Phalanx', 'Command center', 'Workbench'):
         assert label in HTML
-    # Page shortcuts were duplicates of permanent navigation and are gone.
-    for id_ in ('sidebar-agents-shortcut', 'sidebar-workbench-shortcut'):
+    # Command consolidates the former duplicate shortcuts and the rail actions.
+    for id_ in ('sidebar-command-toggle', 'sidebar-command-menu', 'rail-command'):
         assert id_ in HTML
+    for id_ in ('sidebar-agents-shortcut', 'sidebar-workbench-shortcut'):
+        assert id_ not in HTML
     assert 'id="ag-open-agents"' not in HTML and 'id="ag-open-workbench"' not in HTML
     assert 'id="ag-open-theme"' not in HTML
     assert 'id="chat-history"' in HTML and 'class="chat-progress-shelf"' in HTML
@@ -62,8 +64,8 @@ def test_responsive_fallback_and_odysseus_labels_remain():
     assert '@media(max-width:1179px)' in CSS
     assert '@media(max-width:768px)' in CSS
     assert '@media(max-width:700px)' in CSS
-    assert 'ody-agents-title' in HTML and 'ody-workbench-title' in HTML
-    assert 'html:not([data-theme="dark"])' in CSS
+    assert 'ag-phalanx-title' in HTML and 'ag-workbench-title' in HTML
+    assert '.ody-agents-title,.ody-agents-summary,.ody-workbench-title{display:none!important}' in CSS
 
 
 def test_layout_lives_in_one_agamemnon_file():
@@ -86,7 +88,7 @@ def test_full_page_tool_windows_yield_to_docking():
     # The page treatment applies only while undocked, so the dock controller's
     # geometry (and the chat beside a docked panel) still works.
     for window in ('#agents-dashboard', '#workbench-modal'):
-        assert f'html[data-theme="dark"] {window}:not(.modal-right-docked):not(.modal-left-docked){{' in CSS \
-            or f'html[data-theme="dark"] {window}:not(.modal-right-docked):not(.modal-left-docked),' in CSS
-    assert 'html[data-theme="dark"] #ag-dock-left,html[data-theme="dark"] #ag-dock-right,html[data-theme="dark"] #wb-dock-right{display:none}' in CSS
-    assert CSS.index('@media(max-width:900px)') < CSS.index('#ag-dock-left,html[data-theme="dark"] #ag-dock-right')
+        assert f'html[data-style="agamemnon"] {window}:not(.modal-right-docked):not(.modal-left-docked){{' in CSS \
+            or f'html[data-style="agamemnon"] {window}:not(.modal-right-docked):not(.modal-left-docked),' in CSS
+    assert 'html[data-style="agamemnon"] #ag-dock-left,html[data-style="agamemnon"] #ag-dock-right,html[data-style="agamemnon"] #wb-dock-right{display:none}' in CSS
+    assert CSS.index('@media(max-width:900px)') < CSS.index('#ag-dock-left,html[data-style="agamemnon"] #ag-dock-right')

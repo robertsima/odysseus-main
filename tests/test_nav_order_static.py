@@ -33,7 +33,7 @@ def test_tool_items_are_movable_and_core_controls_are_excluded():
         "tool-notes-btn", "tool-tasks-btn", "tool-theme-btn", "tool-lotus-btn",
     ):
         assert item in text
-    for excluded in ("rail-new-session", "rail-delete-session", "rail-chats", "rail-documents", "rail-settings"):
+    for excluded in ("rail-delete-session", "rail-chats", "rail-documents", "rail-settings"):
         # Excluded controls may be mentioned in comments or event selectors,
         # but must not be part of NAV_ITEMS.
         nav_items = text.split("const KEYS", 1)[0]
