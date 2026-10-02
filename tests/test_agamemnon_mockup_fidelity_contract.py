@@ -52,14 +52,36 @@ def test_visual_spec_and_static_render_artifacts_cover_every_board():
 
 
 def test_responsive_fallback_and_odysseus_labels_remain():
-    assert '@media(max-width:1400px)' in (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
+    # Wide boards get the context column; narrower ones fold it into a strip.
+    assert '@media(min-width:1180px)' in CSS
+    assert '@media(max-width:1179px)' in CSS
+    assert '@media(max-width:768px)' in CSS
     assert '@media(max-width:700px)' in CSS
     assert 'ody-agents-title' in HTML and 'ody-workbench-title' in HTML
     assert 'html:not([data-theme="dark"])' in CSS
 
 
-def test_workbench_secondary_operational_views_remain_reachable():
+def test_layout_lives_in_one_agamemnon_file():
+    # The skin file used to restate container layout with !important and won
+    # every conflict: `.wb-panel{display:block!important}` beat `.wb-panel.hidden`
+    # and drew every Workbench tab at once, and a 1400px breakpoint made the
+    # composer static under a fixed-height transcript. Behaviour is covered in
+    # a real browser by tests/test_agamemnon_runtime_layout.py.
     fixes = (ROOT / 'static/agamemnon-critic-fixes.css').read_text()
-    assert '.workbench-modal-body>.wb-tabs{display:flex!important}' in fixes
-    assert '.workbench-modal-body>.wb-panel{display:block!important' in fixes
-    assert '.workbench-modal-body>.wb-statusbar{display:flex!important}' in fixes
+    for container in ('.workbench-modal-body', '.wb-panel', '.wb-tabs', '.chat-input-bar', '.chat-container',
+                      '.ag-body', '.ag-fleet', '.ag-card-grid', '.ag-context-rail', '#agents-dashboard', '#workbench-modal'):
+        assert container not in fixes, container
+    assert 'max-width:1400px' not in fixes
+    # Nothing in the Agamemnon layer may force a Workbench panel visible.
+    assert 'wb-panel{display' not in CSS and 'wb-panel{display' not in fixes
+    assert '.wb-panel.hidden{' not in CSS + fixes
+
+
+def test_full_page_tool_windows_yield_to_docking():
+    # The page treatment applies only while undocked, so the dock controller's
+    # geometry (and the chat beside a docked panel) still works.
+    for window in ('#agents-dashboard', '#workbench-modal'):
+        assert f'html[data-theme="dark"] {window}:not(.modal-right-docked):not(.modal-left-docked){{' in CSS \
+            or f'html[data-theme="dark"] {window}:not(.modal-right-docked):not(.modal-left-docked),' in CSS
+    assert 'html[data-theme="dark"] #ag-dock-left,html[data-theme="dark"] #ag-dock-right,html[data-theme="dark"] #wb-dock-right{display:none}' in CSS
+    assert CSS.index('@media(max-width:900px)') < CSS.index('#ag-dock-left,html[data-theme="dark"] #ag-dock-right')
