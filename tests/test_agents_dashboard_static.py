@@ -245,7 +245,7 @@ def test_body_header_does_not_restate_the_window_title():
     # One semantic heading switches copy with the active identity; DOM order is not the contract.
     assert '<h3 id="ag-window-title">' in INDEX
     assert '<span class="ody-agents-title">Agent Control Room</span>' in INDEX
-    assert '<span class="ag-phalanx-title">AGENT SPACE / PHALANX</span>' in INDEX
+    assert '<span class="ag-phalanx-title">Phalanx</span>' in INDEX
 
 
 def test_workbench_shortcut_is_hidden_when_the_caller_cannot_use_it():
