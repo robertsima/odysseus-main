@@ -1,0 +1,63 @@
+/* Independent design-critic fixes: production structures, isolation and reflow. */
+.ody-brand-name{display:inline}.ag-brand-name{display:none}.ag-run-control,.ag-run-detail{display:none}
+html[data-theme="dark"]{--ag-gold:#d7b35a;--ag-border-strong:#59636d;--ag-border-structural:#343d45}
+html[data-theme="dark"] .ody-brand-name,html[data-theme="dark"] .ody-page-title{display:none}
+html[data-theme="dark"] .ag-brand-name{display:inline;text-transform:uppercase}
+html:not([data-theme="dark"]) .brand-crest-icon{display:none}
+html[data-theme="dark"] .ag-page-heading h1{margin:0;font:700 30px/1.2 'Space Grotesk';letter-spacing:.025em}
+html[data-theme="dark"] #chat-history .msg-ai{box-sizing:border-box;width:calc(100% - 64px);margin:28px 32px;padding:22px;background:#20262c;border:2px solid var(--ag-border-strong);border-radius:0}
+html[data-theme="dark"] #chat-history .msg-user{margin:0 0 28px;max-width:none;background:transparent;border:0;border-radius:0}
+html[data-theme="dark"] #chat-history .msg-ai .role,html[data-theme="dark"] #chat-history .msg-user .role{color:var(--ag-gold);font:700 11px/1.2 'Space Grotesk';letter-spacing:.14em;text-transform:uppercase}
+
+/* Phalanx uses the real generated fleet cards and preserves data/actions. */
+html[data-theme="dark"] .ag-body{display:block!important}
+html[data-theme="dark"] .ag-fleet{width:100%!important;border:0!important;background:transparent!important;overflow:auto}
+html[data-theme="dark"] .ag-pane-splitter{display:none!important}
+html[data-theme="dark"] .ag-detail{display:flex!important;margin-top:28px;min-height:320px}
+.ag-appearance{display:none}
+html[data-theme="dark"] .ag-appearance{display:block;min-width:0;margin:20px 0;padding:18px;border:1px solid var(--ag-border-strong);color:#f7f8fa}
+html[data-theme="dark"] .ag-appearance legend{padding:0 8px;color:var(--ag-gold);font:700 14px 'Space Grotesk',sans-serif}
+html[data-theme="dark"] .ag-appearance p{margin:0 0 14px;color:#b9c1c8;line-height:1.5}
+html[data-theme="dark"] .ag-appearance-options{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:10px}
+html[data-theme="dark"] .ag-appearance-option{display:flex;min-width:0;min-height:108px;flex-direction:column;align-items:center;justify-content:center;gap:5px;padding:8px;border:1px solid #59636d;background:#20262c;text-align:center;cursor:pointer}
+html[data-theme="dark"] .ag-appearance-option:has(input:checked){border:2px solid var(--ag-gold);background:#2c302e}
+html[data-theme="dark"] .ag-appearance-option:focus-within{outline:3px solid #f7f8fa;outline-offset:2px}
+html[data-theme="dark"] .ag-appearance-option input{align-self:flex-start;accent-color:var(--ag-gold)}
+html[data-theme="dark"] .ag-appearance-option svg{width:52px;height:52px;flex:0 0 52px;color:var(--agent-model-color,var(--ag-gold))}
+html[data-theme="dark"] .ag-appearance-option .ag-bot{height:52px;width:52px;zoom:1}
+html[data-theme="dark"] .ag-appearance-option span{font-size:12px;line-height:1.2}
+html[data-theme="dark"] .ag-appearance-option small{display:block;color:#b9c1c8}
+html[data-theme="dark"] #ag-appearance-status{display:block;min-height:20px;padding-top:5px}
+html[data-theme="dark"] .ag-fleet-list{padding:0!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card-grid{display:grid!important;grid-template-columns:repeat(2,minmax(0,510px))!important;gap:28px 30px!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card{box-sizing:border-box;min-height:300px!important;margin:0!important;padding:26px!important;border:2px solid var(--ag-border-strong)!important;border-radius:0!important;background:#1b2127!important;box-shadow:none!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card.active{border-color:var(--ag-gold)!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card.attn{border-color:#e07b5a!important}
+html[data-theme="dark"] .ag-fleet-list .ag-card-copy{min-width:0}html[data-theme="dark"] .ag-fleet-list .ag-row-name{text-transform:uppercase;font:700 17px 'Space Grotesk'}
+
+/* Run Control is semantic DOM; the legacy operational view remains reachable in Odysseus. */
+html[data-theme="dark"] .workbench-modal-body{position:relative;display:grid!important;grid-template-columns:minmax(0,790px) 306px!important;grid-template-rows:auto!important;gap:28px!important}
+html[data-theme="dark"] .ag-run-control{display:grid;grid-template-rows:auto 330px 200px;gap:28px;grid-column:1}
+html[data-theme="dark"] .ag-run-control section{box-sizing:border-box;padding:22px 26px;background:#1b2127;border:2px solid var(--ag-border-strong)}
+html[data-theme="dark"] .ag-run-control .ag-run-summary{border-color:var(--ag-gold)}html[data-theme="dark"] .ag-run-console{background:#0c0f11!important}
+html[data-theme="dark"] .ag-run-control h3,html[data-theme="dark"] .ag-run-detail h3{margin:0 0 13px;color:var(--ag-gold);font:700 12px 'Space Grotesk';letter-spacing:.14em}
+html[data-theme="dark"] .ag-run-control p,html[data-theme="dark"] .ag-run-control li,html[data-theme="dark"] .ag-run-detail{color:#aeb6bd;line-height:1.6}
+html[data-theme="dark"] .ag-run-detail{display:block;grid-column:2;box-sizing:border-box;padding:26px 24px;background:#171c21;border:2px solid var(--ag-border-structural)}
+html[data-theme="dark"] .ag-run-detail section+section{margin-top:28px;padding-top:24px;border-top:1px solid var(--ag-border-structural)}
+html[data-theme="dark"] .ag-run-detail dl div{display:flex;justify-content:space-between;margin:8px 0}html[data-theme="dark"] .ag-run-detail dd{margin:0;color:#f7f8fa}
+html[data-theme="dark"] .workbench-modal-body>.wb-tabs,html[data-theme="dark"] .workbench-modal-body>.wb-panel,html[data-theme="dark"] .workbench-modal-body>.wb-statusbar{grid-column:1/-1}
+html[data-theme="dark"] .workbench-modal-body>.wb-tabs{display:flex!important}
+html[data-theme="dark"] .workbench-modal-body>.wb-panel{display:block!important;min-height:320px}
+html[data-theme="dark"] .workbench-modal-body>.wb-statusbar{display:flex!important}
+html[data-theme="dark"] .wb-panel[data-wb-panel="activity"]::after{content:none!important}
+
+@media(max-width:1400px){
+ html[data-theme="dark"] .chat-container{display:flex;flex-direction:column;padding-top:132px}
+ html[data-theme="dark"] .ag-context-rail{display:block!important;position:static;order:4;width:100%;margin-top:26px;overflow:visible}
+ html[data-theme="dark"] #chat-history{min-height:440px}
+ html[data-theme="dark"] .chat-input-bar{position:static!important;order:3;margin-top:24px}
+ html[data-theme="dark"] .ag-fleet-list .ag-card-grid{grid-template-columns:1fr!important}
+ html[data-theme="dark"] .workbench-modal-body{display:flex!important;flex-direction:column!important;overflow:auto}
+ html[data-theme="dark"] .ag-run-control{flex:0 0 auto}html[data-theme="dark"] .ag-run-detail{display:block!important;width:100%;flex:0 0 auto}
+}
+@media(max-width:700px){html[data-theme="dark"] .ag-page-heading h1,html[data-theme="dark"] .ag-window-title h3,html[data-theme="dark"] .workbench-modal-content>.modal-header h4{font-size:22px}}

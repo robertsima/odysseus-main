@@ -17,7 +17,7 @@ import { snapModalToZone } from './tileManager.js';
 
 export const THEMES = {
   // `dark` is the stable legacy theme ID; its visual palette is Agamemnon.
-  dark:       { bg:'#111417', fg:'#f7f8fa', panel:'#1b2127', border:'#647180', red:'#f0c45a', advanced: { sidebarBg:'#171c21', brandColor:'#f0c45a', brandMixTo:'#f0c45a', userBubbleBg:'#202931', inputBg:'#202931', inputBorder:'#647180', sendBtnBg:'#f0c45a', sendBtnHover:'#d9ad44', toggleActive:'#f0c45a' } },
+  dark:       { bg:'#111417', fg:'#f7f8fa', panel:'#1b2127', border:'#59636d', red:'#d7b35a', advanced: { sidebarBg:'#171c21', brandColor:'#d7b35a', brandMixTo:'#d7b35a', userBubbleBg:'#20262c', inputBg:'#20262c', inputBorder:'#59636d', sendBtnBg:'#d7b35a', sendBtnHover:'#c5a34f', toggleActive:'#d7b35a' } },
   odysseus:   { bg:'#211f1c', fg:'#f2eee5', panel:'#171614', border:'#554b36', red:'#c99a45' },
   light:      { bg:'#f0ebe3', fg:'#5a5248', panel:'#faf6f0', border:'#d4cdc2', red:'#c47d5a' },
   midnight:   { bg:'#0d1117', fg:'#c9d1d9', panel:'#161b22', border:'#30363d', red:'#f85149' },

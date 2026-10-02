@@ -33,6 +33,7 @@ import { applyRightDock } from './modalSnap.js';
 import { renderDiffText, renderFileTable, parseUnifiedDiff, diffStats } from './diffView.js';
 import { isCardOpen, setCardOpen } from './cardState.js?v=20260928subagentui1';
 
+
 const PREFS_KEY = 'odysseus-workbench-prefs';
 const MAX_EVENTS = 1500;
 const CHAT_CARD_SOURCES = new Set(['claude_code', 'session', 'pipeline', 'bg_job', 'worktree']);
@@ -774,6 +775,34 @@ function eventRowHtml(ev, { showSource = true } = {}) {
     <div class="wb-ev-body"><span class="wb-ev-title">${esc(ev.title || '')}</span>${extra.join('')}</div>
   </div>`;
 }
+function renderAgamemnonRunControl(runs) {
+  const title = $('ag-run-title');
+  if (!title) return;
+  const run = (state.focusRun && state.runs.get(state.focusRun)) || runs[0] || null;
+  const set = (id, value) => { const el = $(id); if (el) el.textContent = value; };
+  if (!run) {
+    title.textContent = 'RUN SUMMARY';
+    set('ag-run-summary-meta', 'No run selected · activity ready');
+    set('ag-run-agent', '—'); set('ag-run-started', '—'); set('ag-run-status', 'Ready');
+    set('ag-run-activity-note', 'Inspect the recorded per-run event history below.');
+    const list = $('ag-run-timeline-list'); if (list) list.innerHTML = '<li>Run events will appear here as they are recorded.</li>';
+    set('ag-run-console-output', 'Actual run output and source links appear here when available.');
+    return;
+  }
+  const events = (run.events || []).slice(-8);
+  const data = run.data || {};
+  title.textContent = `RUN ${String(run.run_id || '').slice(0, 8).toUpperCase()} / ${String(run.status || 'running').replaceAll('_', ' ').toUpperCase()}`;
+  set('ag-run-summary-meta', `${plural(events.length, 'recorded event')} · ${plural(run.tools || 0, 'tool')} · last update ${fmtTime((events.at(-1) || {}).ts || run.started_at)}`);
+  set('ag-run-agent', SOURCE_LABEL[run.source] || run.source || 'Agent');
+
+  set('ag-run-started', fmtTime(run.started_at) || '—');
+  set('ag-run-status', String(run.status || 'running').replaceAll('_', ' '));
+  set('ag-run-activity-note', isLive(run.status) ? 'Live activity is being recorded.' : 'This durable activity remains inspectable; interrupted activity is not shown as resumable.');
+  const list = $('ag-run-timeline-list');
+  if (list) list.innerHTML = events.length ? events.map((event) => `<li><strong>${esc(KIND_ICON[event.kind] || '·')} ${esc(event.title || event.kind)}</strong> <span>${esc(fmtTime(event.ts))}</span></li>`).join('') : '<li>No recorded events for this run.</li>';
+  const output = events.filter((event) => ['tool_result', 'file_change', 'commit', 'note', 'error'].includes(event.kind)).map((event) => `${fmtTime(event.ts)}  ${event.title || event.kind}${event.detail ? `\n${event.detail}` : ''}`).join('\n\n');
+  set('ag-run-console-output', output || data.result_excerpt || data.error || 'No output or artifacts recorded yet.');
+}
 function renderActivity() {
   const box = $('wb-activity');
   if (!box) return;
@@ -785,6 +814,7 @@ function renderActivity() {
   const focusRun = state.focusRun ? state.runs.get(state.focusRun) : null;
   const shown = focusRun ? focusRun.events : state.events.filter((e) => !filter || e.source === filter).slice(-300);
   const noSession = !state.sessionId && state.prefs.scope !== 'all';
+  renderAgamemnonRunControl(runs);
   const streamHead = focusRun
     ? `<span class="wb-group-title">Events · <em title="${esc(focusRun.title)}">${esc(focusRun.title)}</em></span><button type="button" class="wb-btn wb-btn-sm" data-wb-act="unfocus">Show all</button>`
     : '<span class="wb-group-title">Event stream</span>';

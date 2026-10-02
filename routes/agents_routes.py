@@ -64,6 +64,7 @@ def _run_from_activity(rec: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     return {"status": status, "started_at": rec.get("started_at"), "finished_at": rec.get("finished_at"),
             "source": rec.get("source")}
 _LIVE_SOURCES = {"session", "claude_code", "bg_job", "pipeline", "worktree"}
+SOLDIER_APPEARANCES = frozenset({"primary", "worker", "scout", "reviewer", "specialist", "sword", "helmet"})
 
 
 def _loadout_basis(settings: Dict[str, Any], profiles_by_name: Dict[str, Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -360,6 +361,10 @@ def setup_agents_routes(session_manager) -> APIRouter:
                 "steer_queued": len(agent_control.pending_steer(sid)),
                 "steer": agent_control.steer_status(sid, limit=5),
                 "profile": settings.get("agent_profile"),
+                # An unset preference preserves the existing role-derived silhouette.
+                "soldier_appearance": settings.get("agamemnon_soldier_appearance")
+                    if isinstance(settings.get("agamemnon_soldier_appearance"), str)
+                    and settings["agamemnon_soldier_appearance"] in SOLDIER_APPEARANCES else None,
                 # The crew member this chat *is*, when it is one, and the agent
                 # profile that crew member names. This is the durable role link
                 # (crew_members.agent_profile) — unlike `config`, which is this
@@ -855,6 +860,25 @@ def setup_agents_routes(session_manager) -> APIRouter:
         return {"ok": report["written"] or not report["errors"],
                 "message": agent_profile_transfer.summary_line(report),
                 "report": report, "profiles": agent_profiles.load_profiles()}
+
+    @router.post("/sessions/{session_id}/appearance")
+    async def set_appearance(request: Request, session_id: str):
+        """Persist a root agent chat's Agamemnon-only visual preference."""
+        _require_owned(request, session_id)
+        from core.database import get_session_settings, update_session_settings
+        if (get_session_settings(session_id) or {}).get("parent_session"):
+            raise HTTPException(400, "Appearance can only be set on a parent agent")
+        try:
+            body = await request.json()
+        except (ValueError, TypeError):
+            raise HTTPException(400, "Expected an appearance")
+        appearance = body.get("appearance") if isinstance(body, dict) else None
+        if appearance is not None and (not isinstance(appearance, str) or appearance not in SOLDIER_APPEARANCES):
+            raise HTTPException(400, "Unknown soldier appearance")
+        saved = update_session_settings(session_id, {"agamemnon_soldier_appearance": appearance})
+        if saved is None:
+            raise HTTPException(500, "Could not save appearance")
+        return {"appearance": appearance}
 
     @router.get("/profiles/templates")
     async def list_profile_templates(request: Request):
